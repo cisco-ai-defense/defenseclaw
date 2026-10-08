@@ -155,6 +155,46 @@ type TetragonUserReadiness struct {
 	// absent while measuring, without agent use, and once ready.
 	ETAHours *float64            `json:"eta_hours,omitempty"`
 	Hits     []TetragonHitDetail `json:"hits"`
+	// Phase is the one word a fleet summary counts the user by: enforcing,
+	// ready, burn_in, reset, monitor_only, no_agent or held (finished
+	// burn-in or limited, and not denied: a deny-anchor limit, a pause, an
+	// operator's change). Counting by state, ready, reset and monitor_only
+	// called a user without an agent, or one held by the one-deny-anchor
+	// rule, "in burn-in" (GAP-0056).
+	Phase string `json:"phase"`
+}
+
+// Fleet phases of a user (TetragonUserReadiness.Phase).
+const (
+	phaseEnforcing   = "enforcing"
+	phaseReady       = "ready"
+	phaseBurnIn      = "burn_in"
+	phaseReset       = "reset"
+	phaseMonitorOnly = "monitor_only"
+	phaseNoAgent     = "no_agent"
+	phaseHeld        = "held"
+)
+
+// userPhase is a user's fleet phase. runsEnforce: the host runs enforce, so a
+// ready user that is not enforcing is held, not waiting to be.
+func userPhase(user TetragonUserReadiness, runsEnforce bool) string {
+	switch {
+	case user.State == kernelpolicy.UIDEnforcing:
+		return phaseEnforcing
+	case user.MonitorOnly:
+		return phaseMonitorOnly
+	case user.Ready && runsEnforce:
+		return phaseHeld
+	case user.Ready:
+		return phaseReady
+	case user.State == kernelpolicy.UIDInactive && user.Reason == kernelpolicy.ReasonNoAnchors:
+		return phaseNoAgent
+	case user.Reset:
+		return phaseReset
+	case user.State == kernelpolicy.UIDBurnIn || (user.State == kernelpolicy.UIDMonitor && user.Reason == "observe mode"):
+		return phaseBurnIn
+	}
+	return phaseHeld
 }
 
 // TetragonHitDetail is one control's would-block hits for a user: the most
@@ -853,6 +893,7 @@ func readinessUsers(in tetragonInputs, now time.Time) []TetragonUserReadiness {
 			hours := roundHours(p.ETA)
 			view.ETAHours = &hours
 		}
+		view.Phase = userPhase(view, in.Intent.helperMode() == config.TetragonModeEnforce)
 		out = append(out, view)
 	}
 	return out
@@ -1347,7 +1388,9 @@ func progressOf(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, now
 	default:
 		p.Percent = int(math.Floor(100 * float64(p.Covered) / float64(p.Needed)))
 	}
-	if record != nil {
+	if record != nil && p.Needed > 0 {
+		// With burn_in 0 there is no window for a hit to restart: an
+		// enforcing user read "reset" (GAP-0056).
 		for _, hit := range record.WouldBlock {
 			if hit != nil && !hit.Last.IsZero() && !hit.Last.Before(record.WindowStart.Add(-time.Second)) {
 				p.Reset = true

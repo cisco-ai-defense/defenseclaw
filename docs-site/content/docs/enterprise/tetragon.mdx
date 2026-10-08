@@ -710,8 +710,9 @@ needed.
 
 **The fleet play.** `fleet-readiness.yml` runs `tetragon verify --json` on
 every computer and prints one summary: computers ready and not ready (with the
-failing checks); users enforcing, ready for enforce, in burn-in, reset by a hit
-and monitor-only (from each user's burn-in toward enforce, which `verify`
+failing checks); users enforcing, ready for enforce, in burn-in, reset by a hit,
+monitor-only, with no agent installed, and held in monitor by a deny-anchor
+limit, a pause or an operator change (each user's `phase`, which `verify`
 reports for `observe` and `enforce`); and whether the computers run different
 builds (more than one digest).
 
@@ -721,8 +722,8 @@ builds (more than one digest).
 #   ansible-playbook -i inventory fleet-readiness.yml -e defenseclaw_tetragon_mode=enforce
 #
 # It changes nothing. Each host runs `tetragon verify --json` (exit 0 ready,
-# 1 not ready); one summary follows. The user counts are each user's burn-in
-# toward enforce, which verify reports for observe and enforce. The
+# 1 not ready); one summary follows. The user counts are each user's phase
+# toward enforce (verify's phase field, for observe and enforce). The
 # plain-shell twin is fleet-readiness.sh.
 - name: Fleet readiness for the DefenseClaw Tetragon integration
   hosts: defenseclaw_linux
@@ -760,11 +761,13 @@ builds (more than one digest).
           - "Mode checked: {{ defenseclaw_tetragon_mode }}"
           - "Hosts ready: {{ fleet_ready_hosts | length }} of {{ fleet_vars | length }}"
           - "Hosts not ready: {{ fleet_not_ready_hosts | join(', ') | default('none', true) }}"
-          - "Users enforcing: {{ fleet_users_all | selectattr('state', 'equalto', 'enforcing') | list | length }}"
-          - "Users ready for enforce: {{ fleet_users_all | selectattr('ready') | rejectattr('state', 'equalto', 'enforcing') | list | length }}"
-          - "Users in burn-in: {{ fleet_users_all | rejectattr('ready') | rejectattr('reset') | rejectattr('monitor_only') | list | length }}"
-          - "Users reset by a hit: {{ fleet_users_all | rejectattr('ready') | selectattr('reset') | rejectattr('monitor_only') | list | length }}"
-          - "Users monitor-only (connector in observe mode): {{ fleet_users_all | selectattr('monitor_only') | list | length }}"
+          - "Users enforcing: {{ fleet_users_all | selectattr('phase', 'equalto', 'enforcing') | list | length }}"
+          - "Users ready for enforce: {{ fleet_users_all | selectattr('phase', 'equalto', 'ready') | list | length }}"
+          - "Users in burn-in: {{ fleet_users_all | selectattr('phase', 'equalto', 'burn_in') | list | length }}"
+          - "Users reset by a hit: {{ fleet_users_all | selectattr('phase', 'equalto', 'reset') | list | length }}"
+          - "Users monitor-only (connector in observe mode): {{ fleet_users_all | selectattr('phase', 'equalto', 'monitor_only') | list | length }}"
+          - "Users with no agent installed: {{ fleet_users_all | selectattr('phase', 'equalto', 'no_agent') | list | length }}"
+          - "Users held in monitor (a deny-anchor limit, a pause or an operator change): {{ fleet_users_all | selectattr('phase', 'equalto', 'held') | list | length }}"
           - "Kernel controls digests: {{ fleet_vars | map(attribute='fleet_digest') | unique | list }} (more than one means hosts run different builds)"
       run_once: true
       vars:
@@ -833,7 +836,7 @@ while IFS= read -r host; do
 		"sudo $GW enterprise linux tetragon verify --ready-for $mode --json" >"$work/$n.verify" 2>/dev/null
 	vrc=$?
 	jq -c . "$work/$n.verify" >"$work/$n.verify.json" 2>/dev/null || echo null >"$work/$n.verify.json"
-	# The users are each user's burn-in toward enforce (verify reports them
+	# The users are each user's phase toward enforce (verify reports them
 	# for observe and enforce).
 	jq -n -c --arg host "$host" --argjson rc "$vrc" --slurpfile verify "$work/$n.verify.json" '
 		{
@@ -841,7 +844,7 @@ while IFS= read -r host; do
 		  rc: $rc,
 		  failing: [($verify[0].checks // [])[] | select(.status == "fail") | .id],
 		  digest: ($verify[0].kernel_policy // ""),
-		  users: [($verify[0].users // [])[] | {state: .state, ready: (.ready // false), reset: (.reset // false), monitor_only: (.monitor_only // false)}]
+		  users: [($verify[0].users // [])[] | {phase: (.phase // "held")}]
 		}' >>"$work/rows.jsonl"
 done <"$hosts"
 
@@ -866,11 +869,13 @@ jq -s -r --arg mode "$mode" '
 	    "Hosts ready: \(map(select(ready)) | length) of \(length)",
 	    "Hosts not ready: \(if ($notready | length) > 0 then ($notready | map(.host) | join(", ")) else "none" end)",
 	    "Hosts not checked: \(if ($unchecked | length) > 0 then ($unchecked | join(", ")) else "none" end)",
-	    "Users enforcing: \($users | map(select(.state == "enforcing")) | length)",
-	    "Users ready for enforce: \($users | map(select(.ready and .state != "enforcing")) | length)",
-	    "Users in burn-in: \($users | map(select((.ready or .reset or .monitor_only) | not)) | length)",
-	    "Users reset by a hit: \($users | map(select(.reset and (.ready | not) and (.monitor_only | not))) | length)",
-	    "Users monitor-only (connector in observe mode): \($users | map(select(.monitor_only)) | length)",
+	    "Users enforcing: \($users | map(select(.phase == "enforcing")) | length)",
+	    "Users ready for enforce: \($users | map(select(.phase == "ready")) | length)",
+	    "Users in burn-in: \($users | map(select(.phase == "burn_in")) | length)",
+	    "Users reset by a hit: \($users | map(select(.phase == "reset")) | length)",
+	    "Users monitor-only (connector in observe mode): \($users | map(select(.phase == "monitor_only")) | length)",
+	    "Users with no agent installed: \($users | map(select(.phase == "no_agent")) | length)",
+	    "Users held in monitor (a deny-anchor limit, a pause or an operator change): \($users | map(select(.phase == "held")) | length)",
 	    "Kernel controls digests: \(if ($digests | length) > 0 then ($digests | join(", ")) else "none" end)\(if ($digests | length) > 1 then " (more than one means hosts run different builds)" else "" end)"
 	  )
 ' "$work/rows.jsonl"

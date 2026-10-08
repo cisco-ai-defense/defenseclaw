@@ -15,6 +15,7 @@ package enterpriseunix
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/kernelpolicy"
 )
@@ -71,6 +72,51 @@ func TestEnforceCountsOnlyUsersTheHelperEnforces(t *testing.T) {
 	// Ready for enforce (from observe) still counts who would be enforced.
 	if got := enforceCounts(users, true); !strings.HasPrefix(got, "2 of 3 users finished burn-in") {
 		t.Fatalf("would: %s", got)
+	}
+}
+
+// GAP-0056: the fleet summary counted a user without an agent and one held by
+// the one-deny-anchor rule as "in burn-in", and an enforcing user with
+// burn_in 0 read "reset". Each user now carries the phase the summary
+// counts by.
+func TestReadinessUsersCarryTheirFleetPhase(t *testing.T) {
+	stubTetragonAccounts(t)
+	in := readyInputs("enforce")
+	in.Intent.BurnIn = "0"
+	hit := readinessNow.Add(-time.Hour)
+	in.State.UIDs = []kernelpolicy.UIDStatus{
+		{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"}, State: kernelpolicy.UIDEnforcing},
+		{UID: 1002, User: "dcr-std2", Connectors: []string{"claudecode"}, State: kernelpolicy.UIDMonitor, Reason: kernelpolicy.WarnBinaryScopeLimited},
+		{UID: 1003, User: "dcr-std3", Connectors: []string{"claudecode"}, State: kernelpolicy.UIDInactive, Reason: kernelpolicy.ReasonNoAnchors},
+	}
+	in.State.BurnIn.UIDs = map[string]*kernelpolicy.UIDRecord{"1001": {WindowStart: hit.Add(-time.Minute), WouldBlock: map[string]*kernelpolicy.HitStats{
+		"kernel.ssh_private_key_read": {Count: 1, First: hit, Last: hit}}}}
+	users := readinessUsers(in, readinessNow)
+	want := []string{phaseEnforcing, phaseHeld, phaseNoAgent}
+	for i, user := range users {
+		if user.Phase != want[i] {
+			t.Errorf("%s phase %q, want %q (%+v)", user.User, user.Phase, want[i], user)
+		}
+	}
+	if users[0].Reset {
+		t.Errorf("an enforcing user with burn_in 0 reads reset: %+v", users[0])
+	}
+	// In observe the users accrue burn-in; a ready one is ready, not held.
+	for name, tc := range map[string]struct {
+		user TetragonUserReadiness
+		want string
+	}{
+		"observe burn-in": {TetragonUserReadiness{State: kernelpolicy.UIDMonitor, Reason: "observe mode"}, phaseBurnIn},
+		"observe ready":   {TetragonUserReadiness{State: kernelpolicy.UIDMonitor, Reason: "observe mode", Ready: true}, phaseReady},
+		"observe reset":   {TetragonUserReadiness{State: kernelpolicy.UIDMonitor, Reason: "observe mode", Reset: true}, phaseReset},
+		"monitor only":    {TetragonUserReadiness{State: kernelpolicy.UIDMonitor, MonitorOnly: true}, phaseMonitorOnly},
+	} {
+		if got := userPhase(tc.user, false); got != tc.want {
+			t.Errorf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+	if got := userPhase(TetragonUserReadiness{State: kernelpolicy.UIDMonitor, Reason: kernelpolicy.WarnEnforcePaused, Ready: true}, true); got != phaseHeld {
+		t.Errorf("a paused ready user in enforce: %q, want held", got)
 	}
 }
 

@@ -3,8 +3,8 @@
 #   ansible-playbook -i inventory fleet-readiness.yml -e defenseclaw_tetragon_mode=enforce
 #
 # It changes nothing. Each host runs `tetragon verify --json` (exit 0 ready,
-# 1 not ready); one summary follows. The user counts are each user's burn-in
-# toward enforce, which verify reports for observe and enforce. The
+# 1 not ready); one summary follows. The user counts are each user's phase
+# toward enforce (verify's phase field, for observe and enforce). The
 # plain-shell twin is fleet-readiness.sh.
 - name: Fleet readiness for the DefenseClaw Tetragon integration
   hosts: defenseclaw_linux
@@ -42,11 +42,13 @@
           - "Mode checked: {{ defenseclaw_tetragon_mode }}"
           - "Hosts ready: {{ fleet_ready_hosts | length }} of {{ fleet_vars | length }}"
           - "Hosts not ready: {{ fleet_not_ready_hosts | join(', ') | default('none', true) }}"
-          - "Users enforcing: {{ fleet_users_all | selectattr('state', 'equalto', 'enforcing') | list | length }}"
-          - "Users ready for enforce: {{ fleet_users_all | selectattr('ready') | rejectattr('state', 'equalto', 'enforcing') | list | length }}"
-          - "Users in burn-in: {{ fleet_users_all | rejectattr('ready') | rejectattr('reset') | rejectattr('monitor_only') | list | length }}"
-          - "Users reset by a hit: {{ fleet_users_all | rejectattr('ready') | selectattr('reset') | rejectattr('monitor_only') | list | length }}"
-          - "Users monitor-only (connector in observe mode): {{ fleet_users_all | selectattr('monitor_only') | list | length }}"
+          - "Users enforcing: {{ fleet_users_all | selectattr('phase', 'equalto', 'enforcing') | list | length }}"
+          - "Users ready for enforce: {{ fleet_users_all | selectattr('phase', 'equalto', 'ready') | list | length }}"
+          - "Users in burn-in: {{ fleet_users_all | selectattr('phase', 'equalto', 'burn_in') | list | length }}"
+          - "Users reset by a hit: {{ fleet_users_all | selectattr('phase', 'equalto', 'reset') | list | length }}"
+          - "Users monitor-only (connector in observe mode): {{ fleet_users_all | selectattr('phase', 'equalto', 'monitor_only') | list | length }}"
+          - "Users with no agent installed: {{ fleet_users_all | selectattr('phase', 'equalto', 'no_agent') | list | length }}"
+          - "Users held in monitor (a deny-anchor limit, a pause or an operator change): {{ fleet_users_all | selectattr('phase', 'equalto', 'held') | list | length }}"
           - "Kernel controls digests: {{ fleet_vars | map(attribute='fleet_digest') | unique | list }} (more than one means hosts run different builds)"
       run_once: true
       vars:

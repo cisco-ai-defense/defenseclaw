@@ -43,7 +43,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["uid", "state", "covered_hours", "needed_hours", "percent", "ready", "reset", "measuring", "monitor_only", "hits"],
+        "required": ["uid", "state", "covered_hours", "needed_hours", "percent", "ready", "reset", "measuring", "monitor_only", "hits", "phase"],
         "properties": {
           "uid": { "type": "integer" },
           "user": { "type": "string" },
@@ -57,6 +57,7 @@
           "measuring": { "type": "boolean", "description": "The window is younger than 24h, so there is no ETA yet." },
           "monitor_only": { "type": "boolean", "description": "No connector of the user is in action mode: enforce never denies for it (guardrail_observe), whatever the burn-in says." },
           "eta_hours": { "type": "number", "description": "Calendar hours until ready at the user's rate of agent use so far." },
+          "phase": { "enum": ["enforcing", "ready", "burn_in", "reset", "monitor_only", "no_agent", "held"], "description": "The one word a fleet summary counts the user by. held: finished burn-in or limited, and not denied (a deny-anchor limit, a pause, an operator's change); ready is held while the host runs enforce." },
           "hits": {
             "type": "array",
             "items": {

@@ -253,15 +253,21 @@ def test_the_guide_shows_exactly_what_the_example_files_contain() -> None:
 
 
 # Per-user burn-in toward enforce as `tetragon verify --json` reports it: the
-# state the helper published, and verify's own ready, reset and monitor-only.
+# state the helper published, verify's own ready, reset and monitor-only, and
+# the phase the fleet summary counts by.
 _USERS = {
-    "enforcing": {"state": "enforcing", "ready": True, "reset": False, "monitor_only": False},
-    "ready": {"state": "monitor", "ready": True, "reset": False, "monitor_only": False},
-    "burn_in": {"state": "burn_in", "ready": False, "reset": False, "monitor_only": False},
+    "enforcing": {"state": "enforcing", "ready": True, "reset": False, "monitor_only": False, "phase": "enforcing"},
+    "ready": {"state": "monitor", "ready": True, "reset": False, "monitor_only": False, "phase": "ready"},
+    "burn_in": {"state": "burn_in", "ready": False, "reset": False, "monitor_only": False, "phase": "burn_in"},
     # In observe every user is "monitor": verify still says where its burn-in is.
-    "monitor": {"state": "monitor", "ready": False, "reset": False, "monitor_only": False},
-    "reset": {"state": "monitor", "ready": False, "reset": True, "monitor_only": False},
-    "monitor_only": {"state": "monitor", "ready": False, "reset": False, "monitor_only": True},
+    "monitor": {"state": "monitor", "reason": "observe mode", "ready": False, "reset": False, "monitor_only": False, "phase": "burn_in"},
+    "reset": {"state": "monitor", "ready": False, "reset": True, "monitor_only": False, "phase": "reset"},
+    "monitor_only": {"state": "monitor", "ready": False, "reset": False, "monitor_only": True, "phase": "monitor_only"},
+    # GAP-0056: neither of these is in burn-in.
+    "no_agent": {"state": "inactive", "reason": "kernel_enforce_inactive: no anchors", "ready": False, "reset": False,
+                 "monitor_only": False, "phase": "no_agent"},
+    "held": {"state": "monitor", "reason": "kernel_binary_anchor_scope_limited", "ready": False, "reset": False,
+             "monitor_only": False, "phase": "held"},
 }
 
 
@@ -275,13 +281,15 @@ def _verify(ready: bool, digest: str, users: list[str], failing: tuple[str, ...]
     }
 
 
-_FLEET_USERS = ["enforcing", "ready", "burn_in", "monitor", "reset", "monitor_only"]
+_FLEET_USERS = ["enforcing", "ready", "burn_in", "monitor", "reset", "monitor_only", "no_agent", "held", "held"]
 _FLEET_COUNTS = [
     "Users enforcing: 1",
     "Users ready for enforce: 1",
     "Users in burn-in: 2",
     "Users reset by a hit: 1",
     "Users monitor-only (connector in observe mode): 1",
+    "Users with no agent installed: 1",
+    "Users held in monitor (a deny-anchor limit, a pause or an operator change): 2",
 ]
 
 
