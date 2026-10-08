@@ -240,6 +240,17 @@ func TestCopyKeepsAnUninitializedSubmodule(t *testing.T) {
 	}
 }
 
+// GAP-0353: a folder that ignores its own content (.venv, .pytest_cache)
+// is named once, without the folders git lists inside it.
+func TestLeftOutWarningFoldsNestedFolders(t *testing.T) {
+	got := leftOutWarning(map[string]bool{".venv/": true, ".venv/bin/": true, ".venv/lib/python3.12/": true,
+		".pytest_cache/": true, ".pytest_cache/v/": true, "build/": true, "build-notes.txt": true})
+	want := "not copied (git ignores them, or they are package caches): .pytest_cache/, .venv/, build/, build-notes.txt; install the dependencies inside the sandbox"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
 // GAP-0248: --unmask on a copy was silent both ways: a shared secret-looking
 // file got no line, and a pattern that matched only a git-ignored file
 // (never copied) said nothing. The record names both.

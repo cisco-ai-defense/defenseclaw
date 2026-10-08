@@ -993,14 +993,19 @@ func heavyDirOf(rel string) string {
 	return ""
 }
 
-// leftOutWarning names what a git copy leaves out, directories first.
+// leftOutWarning names what a git copy leaves out, directories first. A
+// path inside a folder it names already is left to that folder: git lists
+// .venv/bin/ next to .venv/ when the folder ignores its own content, and the
+// line named one folder five times (GAP-0353).
 func leftOutWarning(paths map[string]bool) string {
 	if len(paths) == 0 {
 		return ""
 	}
 	names := make([]string, 0, len(paths))
 	for p := range paths {
-		names = append(names, p)
+		if !insideListed(paths, p) {
+			names = append(names, p)
+		}
 	}
 	sort.Slice(names, func(i, j int) bool {
 		if di, dj := strings.HasSuffix(names[i], "/"), strings.HasSuffix(names[j], "/"); di != dj {
@@ -1010,6 +1015,16 @@ func leftOutWarning(paths map[string]bool) string {
 	})
 	return "not copied (git ignores them, or they are package caches): " + strings.Join(firstN(names, 5), ", ") +
 		"; install the dependencies inside the sandbox"
+}
+
+// insideListed reports whether a folder above p ("dir/") is in paths.
+func insideListed(paths map[string]bool, p string) bool {
+	for dir := path.Dir(strings.TrimSuffix(p, "/")); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if paths[dir+"/"] {
+			return true
+		}
+	}
+	return false
 }
 
 // heavyExcludePathspecs keeps package caches out of forced captures of
