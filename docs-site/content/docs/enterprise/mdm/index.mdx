@@ -422,6 +422,39 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | `1603` / — | The PowerShell 7 wrapper refused its host. The lifecycle applies the same checks. |
 
+## Stage a custom macOS rule pack
+
+If your config selects a custom pack, deliver it **before** the pkg and config
+are applied. Add a root MDM script that copies a trusted pack directory from
+your MDM payload into the administrator policy folder. Replace `PACK_SOURCE`
+with the staged payload path:
+
+```sh
+PACK_SOURCE=/path/to/mdm-payload/acme
+PACK_DEST=/opt/cisco/defenseclaw/etc/policies/guardrail/acme
+install -d -o root -g wheel -m 0755 "$PACK_DEST"
+cp -R "$PACK_SOURCE/." "$PACK_DEST/"
+chown -R root:wheel "$PACK_DEST"
+find "$PACK_DEST" -type d -exec chmod 0755 {} +
+find "$PACK_DEST" -type f -exec chmod 0644 {} +
+```
+
+Validate the pack on a reference Mac with
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir "$PACK_DEST"`
+after that binary is installed, and put its `custom_packs pin` value in the
+config. For the first installation, validate an identical copy on a reference
+Mac before assigning the new device. The pin covers the pack's own files.
+
+```yaml
+guardrail:
+  rule_pack: acme
+  custom_packs:
+    acme: {path: /opt/cisco/defenseclaw/etc/policies/guardrail/acme, digest: "sha256:<digest>"}
+```
+
+Re-run the stage script and update the pin before applying an edited pack. An
+uninstall removes the policy folder; re-stage the pack before a reinstall.
+
 ## Detection
 
 MDMs ask two different questions. Answer each with the mechanism that fits.
