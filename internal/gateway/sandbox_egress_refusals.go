@@ -58,6 +58,9 @@ type SandboxEgressRefusal struct {
 	// peer").
 	Cut  bool
 	Sent int64
+	// SSH marks OpenShell's refusal of an SSH connection: no SSH leaves a
+	// sandbox, and Remedy names the HTTPS way instead.
+	SSH bool
 }
 
 const (
@@ -155,6 +158,13 @@ func (a *APIServer) addSandboxEgressRefusals(
 
 // sandboxEgressRefusalNotice is the agent's note of refused destinations.
 func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
+	if len(refusals) == 1 && refusals[0].SSH {
+		// Not a destination to leave alone: the same remote over HTTPS
+		// works (GAP-0216).
+		r := refusals[0]
+		return "This sandbox's SSH connection to " + sandboxEgressTarget(r) + " was refused: SSH does not leave a DefenseClaw sandbox, " +
+			"and a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) + " Tell the user if the task needs SSH itself."
+	}
 	if len(refusals) == 1 {
 		r := refusals[0]
 		if r.Cut {
@@ -186,6 +196,10 @@ func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 	}
 	if more := len(refusals) - len(shown); more > 0 {
 		fmt.Fprintf(&b, "\n- and %d more", more)
+	}
+	if slices.ContainsFunc(refusals, func(r SandboxEgressRefusal) bool { return r.SSH }) {
+		b.WriteString("\nTell the user if the task needs them; use HTTPS where it says so, and do not try to reach the others another way.")
+		return b.String()
 	}
 	b.WriteString("\nTell the user if the task needs them, and do not try to reach them another way.")
 	return b.String()

@@ -198,6 +198,17 @@ func TestSandboxPostToolHookTellsTheAgentOfEgressRefusals(t *testing.T) {
 // A block keeps its own answer and leaves the refusals for the next call;
 // several refusals are listed, the rest counted; the audit row names what
 // the agent was told.
+// GAP-0216: an SSH refusal's note gives the agent the HTTPS way, and does
+// not tell it to leave the destination alone.
+func TestSandboxEgressRefusalNoticeOfSSH(t *testing.T) {
+	got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{{Host: "github.com", Port: 22, Category: "ssh", SSH: true,
+		What: "SSH, which does not leave a sandbox", Remedy: "use HTTPS instead: a git remote https://github.com/OWNER/REPO.git"}})
+	if !strings.Contains(got, "SSH connection to github.com:22 was refused: SSH does not leave a DefenseClaw sandbox") ||
+		!strings.Contains(got, "Use HTTPS instead: a git remote https://github.com/OWNER/REPO.git.") || strings.Contains(got, "another way") {
+		t.Fatalf("note = %q", got)
+	}
+}
+
 func TestSandboxEgressRefusalNotice(t *testing.T) {
 	refusals := &fakeRefusals{}
 	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) { c.EgressRefusals = refusals.take })

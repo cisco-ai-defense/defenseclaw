@@ -64,6 +64,9 @@ type EgressRefusal struct {
 	// up; later refusals of the host within the window are told with it.
 	Cut  bool
 	Sent int64
+	// SSH marks OpenShell's refusal of an SSH connection, whose remedy is
+	// HTTPS (no unblock opens SSH).
+	SSH bool
 }
 
 // refusalMemory is the recent CONNECT refusals of every sandbox binding.
@@ -93,6 +96,8 @@ type refusedHost struct {
 	// (EgressRefusal.Cut).
 	cut  bool
 	sent int64
+	// ssh marks OpenShell's refusal of an SSH connection (noteSSH).
+	ssh bool
 }
 
 func newRefusalMemory() *refusalMemory {
@@ -148,6 +153,43 @@ func (r *refusalMemory) note(e egress.Event, now time.Time) {
 				// A refusal after the cut: the cut is what to tell.
 				next.cut, next.sent = true, h.sent
 			}
+		default:
+			kept = append(kept, h)
+		}
+	}
+	if len(kept) >= maxRefusedHosts {
+		kept = append(kept[:0], kept[len(kept)-maxRefusedHosts+1:]...)
+	}
+	b.hosts = append(kept, next)
+}
+
+// noteSSH keeps OpenShell's refusal of a sandbox binding's SSH connection
+// to host: no SSH leaves a sandbox, and the agent saw only "Permission
+// denied" and tried the same again (GAP-0216). Its post-tool hook says to
+// use HTTPS.
+func (r *refusalMemory) noteSSH(bindingID, sandbox, host string, port int, now time.Time) {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if bindingID == "" || !refusalHost(host) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b := r.byBinding[bindingID]
+	if b == nil {
+		if len(r.byBinding) >= maxRefusalBindings {
+			r.evictStalest()
+		}
+		b = &bindingRefusals{}
+		r.byBinding[bindingID] = b
+	}
+	b.sandbox, b.last = sandbox, now
+	next := refusedHost{host: host, port: port, ssh: true, at: now}
+	kept := b.hosts[:0]
+	for _, h := range b.hosts {
+		switch {
+		case now.Sub(h.at) > egressRefusalWindow:
+		case h.host == host && h.port == port:
+			next.told = h.told
 		default:
 			kept = append(kept, h)
 		}
@@ -245,6 +287,12 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 	}
 	var out []EgressRefusal
 	for _, h := range m.refusals.take(bindingID, name, m.now()) {
+		if h.ssh {
+			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: "ssh", SSH: true,
+				What: "SSH, which does not leave a sandbox", Remedy: "use HTTPS instead: a git remote https://" + h.host + "/OWNER/REPO.git" +
+					" (an npm github: or git+ssh dependency: git+https://" + h.host + "/OWNER/REPO.git)"})
+			continue
+		}
 		if _, lifted := m.EgressUnblock(bindingID, name, h.host); lifted {
 			continue
 		}
