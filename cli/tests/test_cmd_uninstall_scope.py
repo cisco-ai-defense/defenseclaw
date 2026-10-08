@@ -430,6 +430,47 @@ def test_remove_created_dirs_keeps_folders_with_content(tmp_path: Path) -> None:
     assert json.loads(record.read_text(encoding="utf-8"))["dirs"] == sorted([str(used), "/etc/elsewhere"])
 
 
+@posix_only
+def test_probes_run_only_the_set_up_connectors_and_uninstall_removes_their_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0901: init --connector X ran every agent CLI, whose --version wrote
+    # ~/.codex, ~/.cache/amp, ... into the home; uninstall left them.
+    from defenseclaw.inventory import agent_discovery as ad
+
+    home = tmp_path.resolve()
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir()
+    for var in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    creates = {"codex": home / ".codex" / "tmp" / "arg0", "amp": home / ".cache" / "amp" / "logs"}
+    probed: list[str] = []
+
+    def probe(name, _path, _args, **_kwargs):
+        probed.append(name)
+        if name in creates:
+            creates[name].mkdir(parents=True, exist_ok=True)
+        return f"{name} 1.0", ""
+
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (f"/opt/bin/{name}",))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    token = ad.restrict_probes(["codex", "amp"])
+    try:
+        disc = ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+    finally:
+        ad.end_probe_restriction(token)
+    assert sorted(probed) == ["amp", "codex"]
+    assert disc.agents["copilot"].error == ad.VERSION_NOT_PROBED and disc.agents["copilot"].installed
+
+    (creates["amp"] / "session.log").write_text("used since", encoding="utf-8")
+    cmd_uninstall._remove_probe_created_state(str(data_dir))
+
+    assert not (home / ".codex").exists()
+    assert (creates["amp"] / "session.log").is_file()
+    assert not (data_dir / ad.PROBE_STATE_RECORD).exists()
+
+
 def test_reset_keeps_the_installer_uv() -> None:
     assert ".uv" in cmd_uninstall._RESET_PRESERVED_ENTRIES
 

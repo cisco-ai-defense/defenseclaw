@@ -263,6 +263,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
     requested_connectors.extend(_parse_connector_list(action_connectors))
+    if connector:
+        # Run only the CLIs of the connectors being set up (GAP-0901).
+        token = agent_discovery.restrict_probes([c for c in requested_connectors if c != "none"])
+        click.get_current_context().call_on_close(lambda: agent_discovery.end_probe_restriction(token))
     installer_copilot = native_setup_copilot and _native_setup_copilot_invocation_allowed(
         connector=connector,
         requested_connectors=requested_connectors,

@@ -1337,6 +1337,54 @@ def _remove_created_dirs(data_dir: str) -> None:
         ux.ok(f"removed the empty folders DefenseClaw created: {', '.join(sorted(removed))}")
 
 
+def _remove_probe_created_state(data_dir: str) -> None:
+    """Remove what agent version probes created in the home folder (GAP-0901).
+
+    Discovery runs each installed agent CLI with ``--version``, and some CLIs
+    create their config and cache folders on the way. Discovery records those
+    with a fingerprint (agent_discovery.PROBE_STATE_RECORD); each entry still
+    exactly as the probe left it, so never used since, is removed, then the
+    parent folders the probes created while they are empty.
+    """
+    from defenseclaw.inventory import agent_discovery
+
+    record = os.path.join(data_dir, agent_discovery.PROBE_STATE_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CREATED_DIRS_RECORD_MAX_BYTES:
+            return
+        with open(record, encoding="utf-8") as stream:
+            payload = json.load(stream)
+        paths, dirs = payload.get("paths"), payload.get("dirs")
+    except (OSError, ValueError, AttributeError):
+        return
+    home = os.path.abspath(os.path.expanduser("~"))
+    removed: list[str] = []
+    for path, fingerprint in sorted((paths or {}).items() if isinstance(paths, dict) else (), reverse=True):
+        if not isinstance(path, str) or not os.path.isabs(path) or not _below(home, path):
+            continue
+        if not _real_dir_chain(home, os.path.dirname(path)) or os.path.islink(path):
+            continue
+        if agent_discovery.probe_state_fingerprint(path) != fingerprint:
+            continue  # used since: the agent's own state now
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError:
+            continue
+        removed.append(path)
+    for path in sorted((d for d in dirs or [] if isinstance(d, str)), key=len, reverse=True):
+        if os.path.isabs(path) and _below(home, path) and _real_dir_chain(home, path):
+            with contextlib.suppress(OSError):
+                os.rmdir(path)
+    with contextlib.suppress(OSError):
+        os.unlink(record)
+    if removed:
+        ux.ok(f"removed what agent version probes created: {', '.join(sorted(removed))}")
+
+
 def _below(root: str, path: str) -> bool:
     root = _normalized(root)
     candidate = _normalized(path)
@@ -1735,6 +1783,7 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         if not plan.remove_data_dir:
             _turn_guardrail_off(plan.data_dir)
     if plan.stop_gateway and plan.data_dir:
+        _remove_probe_created_state(plan.data_dir)
         # The gateway is stopped, so its watcher no longer uses them.
         _remove_created_dirs(plan.data_dir)
     if "copilot" in plan.connectors or plan.remove_data_dir:
