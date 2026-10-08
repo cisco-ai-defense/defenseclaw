@@ -491,6 +491,21 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
 
     users = collect_users(client, report, args)
     directory_users = client.get_all("/api/v1/users?limit=200")
+    uid_owners: dict[int, list[str]] = {}
+    for other in directory_users:
+        value = other.get("profile", {}).get("uidNumber")
+        if value is not None:
+            uid_owners.setdefault(int(value), []).append(other["id"])
+    for user in users:
+        value = user.get("profile", {}).get("uidNumber")
+        if value is not None and len(uid_owners.get(int(value), [])) > 1:
+            report.problem(
+                f"{user.get('profile', {}).get('login', user['id'])}: uidNumber {value} is shared; "
+                "clear uidNumber on one affected user in Okta Admin Console > Directory > People > Profile, "
+                "then rerun assign-posix for that user"
+            )
+    if report.problems:
+        return report.finish()
     names: dict[str, str] = {}
     for other in directory_users:
         existing = other.get("profile", {}).get("unixUsername")
@@ -651,6 +666,9 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
             report.problem(f"role '{args.role_label}' has permissions {', '.join(sorted(labels))}; "
                            f"it must have only {', '.join(BIND_PERMISSIONS)}")
             role = None  # Never assign a role with unexpected permissions.
+    if report.problems:
+        report.note(f"{args.bind_login}: role not assigned")
+        return report.finish()
 
     sets = client.get_all("/api/v1/iam/resource-sets", key="resource-sets")
     rset = next((s for s in sets if s.get("label") == args.resource_set_label), None)
@@ -685,11 +703,16 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
         for a in assigned
     ):
         report.ok(f"{args.bind_login} already has the role")
-    else:
+    elif report.problems:
+        report.note(f"{args.bind_login}: role not assigned because the role or resource set was refused")
+    elif report.dry_run:
         report.change(f"assign the role to {args.bind_login}")
-        if not report.dry_run and role and rset:
-            client.must("POST", f"/api/v1/users/{user['id']}/roles",
-                        {"type": "CUSTOM", "role": role["id"], "resource-set": rset["id"]})
+    elif role and rset:
+        client.must("POST", f"/api/v1/users/{user['id']}/roles",
+                    {"type": "CUSTOM", "role": role["id"], "resource-set": rset["id"]})
+        report.change(f"assign the role to {args.bind_login}")
+    else:
+        report.problem(f"{args.bind_login}: role was not assigned; rerun after the role and resource set exist")
     return report.finish()
 
 
@@ -876,10 +899,15 @@ def read_credentials() -> tuple[str, str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "assign-posix" and not args.user and not args.users_from:
+        print("okta-ldap-setup.py: error: name --user LOGIN or --users-from OKTA_GROUP", file=sys.stderr)
+        return 2
     try:
         org_url, token = read_credentials()
-        if hasattr(args, "apply") and not args.apply:
-            print("Plan only: nothing will be changed. Add --apply to make the changes.")
+    except OktaError as err:
+        print(f"okta-ldap-setup.py: error: {err}", file=sys.stderr)
+        return 2
+    try:
         return args.func(Okta(org_url, token), args)
     except OktaError as err:
         print(f"okta-ldap-setup.py: error: {err}", file=sys.stderr)

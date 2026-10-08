@@ -41,11 +41,11 @@ Active Directory are covered by the identity docs, not by this kit).
 | --- | --- |
 | `okta-ldap-setup.py` | Okta side, through the Okta API: `check`, `posix-schema`, `assign-posix`, `bind-role`, `signon-policy`. Needs `OKTA_ORG_URL` and `OKTA_API_TOKEN`. Commands that write print a plan and change nothing until you add `--apply`. |
 | `sssd-okta.conf.tmpl` | The SSSD config that was run against Okta, with placeholders. |
-| `install-sssd-okta.sh` | Host side: renders the template, checks it, installs `sssd.conf`, selects the authselect profile, writes the sshd drop-in, restarts SSSD. `--dry-run`, `--render-only`. |
+| `install-sssd-okta.sh` | Host side: renders the template, checks it, installs `sssd.conf`, selects the authselect profile, writes the sshd drop-in, restarts SSSD. `--dry-run` exits 4 when changes are planned, 0 when unchanged; successful apply ends with `changed: 0` or `changed: 1` for configuration management. Also supports `--render-only`. |
 | `verify-okta-identity.sh` | Read-only check of SSSD, `getent`, `id`, the InfoPipe UPN, and the profile DefenseClaw picks for each user. |
 | `admin-config.example.yaml` | Machine config for the standalone enterprise profile with profiles by Okta group. |
 | `user-config.example.yaml` | The same idea for a per-user install. |
-| `build-sssd-ppolicy-backport.sh`, `backport-ppolicy.py` | Builds RHEL 9's SSSD 2.9.8 with the `ldap_use_ppolicy` option. Pinned to `sssd-2.9.8-4.el9_8.1`. Builds the SSSD packages, but first installs build tools and build dependencies with `sudo dnf`; it does not install the rebuilt SSSD packages. |
+| `build-sssd-ppolicy-backport.sh`, `backport-ppolicy.py` | Builds RHEL 9's SSSD 2.9.8 with the `ldap_use_ppolicy` option. Pinned to `sssd-2.9.8-4.el9_8.1`. First installs build tools (`rpm-build`, `gcc`) and build dependencies with `sudo dnf` (roughly 370 packages on a stock RHEL 9.8 host). It does not install the rebuilt SSSD packages. Build on a separate host or container and copy the RPMs to the target if build dependencies must stay off it. |
 
 ## Quick start
 

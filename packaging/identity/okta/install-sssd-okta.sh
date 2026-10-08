@@ -21,9 +21,8 @@
 # never prints the bind password. The password comes from a file, from
 # OKTA_BIND_PASSWORD or from a prompt, never from the command line.
 #
-# Exit codes: 0 done or nothing to do, 1 a step failed, 2 bad arguments,
-# 3 the host cannot be configured (not RHEL family, missing packages, or an
-# SSSD that cannot bind to Okta).
+# Exit codes: 0 done or unchanged dry-run, 1 a step failed, 2 bad arguments,
+# 3 the host cannot be configured, 4 dry-run would change the host.
 
 set -euo pipefail
 
@@ -42,6 +41,7 @@ MAP_UPN=0 NO_SSHD=0 NO_PAM=0 INSTALL_PACKAGES=0 SKIP_BIND_TEST=0 FORCE=0 DRY_RUN
 RENDER_ONLY=""
 PASSWORD=""
 WORK=""
+CHANGED=0
 
 usage() {
   cat <<USAGE
@@ -83,7 +83,8 @@ Options:
   -h, --help                Show this help
 
 Exit codes: 0 done or nothing to do, 1 a step failed, 2 bad arguments,
-3 the host cannot be configured.
+3 the host cannot be configured, 4 dry-run would change the host.
+The final "changed: 0|1" line is stable for configuration-management tools.
 USAGE
 }
 
@@ -106,6 +107,7 @@ trap cleanup EXIT
 
 # act runs a command, or only says it would in --dry-run.
 act() {
+  CHANGED=1
   if ((DRY_RUN)); then
     log "  [dry-run] would run: $*"
   else
@@ -382,6 +384,7 @@ install_conf() {
       fail 3 "$CONF was not written by this script (it has no '$MARKER' line). Nothing was changed. Rerun with --force to replace it; the old file is kept as a backup."
     fi
     if ((DRY_RUN)); then
+      CHANGED=1
       log "  would replace $CONF; changes (password hidden):"
       diff -u <(mask "$CONF") <(mask "$rendered") | sed 's/^/    /' || true
       CONF_CHANGED=1
@@ -393,6 +396,7 @@ install_conf() {
     log "  backup: $backup (restore this exact file to undo this run)"
     PREVIOUS_SSSD_CONF=$backup
   elif ((DRY_RUN)); then
+    CHANGED=1
     log "  would create $CONF (mode 0600, root); undo by removing this file"
     CONF_CHANGED=1
     return 0
@@ -401,6 +405,7 @@ install_conf() {
   install -m 0600 -o root -g root "$rendered" "$CONF"
   restorecon "$CONF" > /dev/null 2>&1 || true
   CONF_CHANGED=1
+  CHANGED=1
   log "  installed: $CONF"
 }
 
@@ -458,6 +463,7 @@ DROPIN
     return 0
   fi
   if ((DRY_RUN)); then
+    CHANGED=1
     log "  would write $SSHD_DROPIN:"
     sed 's/^/    /' "$want"
     return 0
@@ -479,6 +485,7 @@ DROPIN
     fail 1 "sshd -t rejected a configuration file: $rejected. The new drop-in was rolled back; $CONF was already replaced (previous: ${PREVIOUS_SSSD_CONF:-none, this was a first install})."
   fi
   systemctl reload sshd
+  CHANGED=1
   log "  installed: $SSHD_DROPIN (sshd reloaded; open sessions stay)"
 }
 
@@ -521,13 +528,21 @@ restart_sssd() {
   if ((DRY_RUN)); then
     if ((${CONF_CHANGED:-0})) || sssd_config_stale; then
       log "  would restart sssd and wait for the $DOMAIN domain to be Online"
+      CHANGED=1
     fi
-    log "  would enable sssd at boot"
+    if ! systemctl is-enabled sssd > /dev/null 2>&1; then
+      log "  would enable sssd at boot"
+      CHANGED=1
+    fi
     return 0
   fi
-  systemctl enable sssd > /dev/null 2>&1
+  if ! systemctl is-enabled sssd > /dev/null 2>&1; then
+    systemctl enable sssd > /dev/null 2>&1
+    CHANGED=1
+  fi
   if ((CONF_CHANGED)) || sssd_config_stale; then
     systemctl restart sssd
+    CHANGED=1
     sss_cache -E > /dev/null 2>&1 || true
     if wait_online; then
       log "  ok: sssd restarted, domain $DOMAIN is Online"
@@ -593,6 +608,8 @@ main() {
   else
     log "Done. Check the result with: $HERE/verify-okta-identity.sh --user <posix name> --expect-group <group>"
   fi
+  log "changed: $CHANGED"
+  if ((DRY_RUN && CHANGED)); then exit 4; fi
 }
 
 main "$@"

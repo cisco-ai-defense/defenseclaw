@@ -144,11 +144,17 @@ check_sssd() {
 }
 
 check_user() {
-  local user=$1 line groups
+  local user=$1 line groups shell
   echo "User $user"
   if line=$(getent passwd "$user"); then
-    IFS=: read -r _ _ uid gid _ home _ <<< "$line"
+    IFS=: read -r _ _ uid gid _ home shell <<< "$line"
     pass "getent passwd: uid $uid, gid $gid, home $home"
+    if [[ $shell == */nologin || $shell == */false ]]; then
+      fail "DefenseClaw enrollment skips $user: login shell $shell is not interactive"
+    fi
+    if [[ $home != /home/* && $home != /var/home/* ]]; then
+      info "DefenseClaw enrollment needs enterprise.enrollment.home_roots to include $home"
+    fi
   else
     fail "getent passwd $user finds nothing. Check: the domain is Online; the Okta user has uidNumber, gidNumber and unixUsername; the bind user can read users (custom role); the uid is inside min_id..max_id"
     return
@@ -156,7 +162,15 @@ check_user() {
   if groups=$(id -Gn "$user" 2> /dev/null); then
     info "groups: $groups"
     if [[ -n $EXPECT_GROUP ]]; then
-      if [[ $groups == "$EXPECT_GROUP" || $groups == "$EXPECT_GROUP "* || $groups == *" $EXPECT_GROUP" || $groups == *" $EXPECT_GROUP "* ]]; then
+      # id -Gn joins names with spaces, so word matching accepts fragments of a
+      # multiword group. Resolve each numeric GID separately to retain boundaries.
+      local gid entry resolved matched=0
+      for gid in $(id -G "$user" 2> /dev/null); do
+        entry=$(getent group "$gid" 2> /dev/null) || continue
+        resolved=${entry%%:*}
+        if [[ ${resolved,,} == "${EXPECT_GROUP,,}" ]]; then matched=1; break; fi
+      done
+      if ((matched)); then
         pass "id -Gn lists $EXPECT_GROUP"
       else
         fail "id -Gn does not list $EXPECT_GROUP. The Okta group needs a gidNumber and the user must be a member; SSSD caches entries for entry_cache_timeout (sss_cache -E refreshes them)"
