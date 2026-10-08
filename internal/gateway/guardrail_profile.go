@@ -1065,12 +1065,13 @@ func profileProxyOverride(ctx context.Context, connectorName string) (mode, bloc
 // The proxy scanned every request with the global pack, so a profile's
 // rule_pack_dir never reached OpenClaw or ZeptoClaw traffic (GAP-0313).
 func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
+	connectorName := profileRequestConnector(ctx)
 	if resolved := proxyProfileFor(ctx); resolved != nil {
-		if generation := resolved.ruleGeneration(""); generation != nil {
+		if generation := resolved.ruleGeneration(connectorName); generation != nil {
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration("")
+	return snapshotRulePackGeneration(connectorName)
 }
 
 // proxyGuardrailProfileTelemetryFor describes only a profile actually used
