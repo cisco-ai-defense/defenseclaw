@@ -218,6 +218,16 @@ backslash as the start of an escape, so `"C:\ProgramData\..."` does not
 load (`\P` is not an escape); write `\\` for each backslash if you use
 double quotes. Setup refuses such a file with `1639` and names the line.
 
+The digest pins the pack's own files. Before the first install there is no
+`defenseclaw-gateway.exe` on the computer to print it, so put a placeholder
+in the config, such as `sha256:` and 64 zeros, and run Setup: it checks
+the pack before it changes anything and refuses with `1639`, printing the
+pack's digest (`digest sha256:<hex> does not match
+guardrail.custom_packs.my-pack.digest`). Review the pack, put that digest
+in the config and run Setup again. Once DefenseClaw is installed,
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' rulepack validate --dir "$Packs\my-pack"`
+prints it as `custom_packs pin:`, for example when you change the pack.
+
 Setup checks these permissions for the service account before it changes
 anything, and stops with exit code `1639` naming the folder and the
 `icacls` grant that fixes it. Setup checks the config with the

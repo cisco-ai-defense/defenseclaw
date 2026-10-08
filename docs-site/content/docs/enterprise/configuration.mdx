@@ -413,6 +413,13 @@ rules on Linux and macOS:
    match, and restarts the services with the new pack. If the gateway cannot load it, `ensure` fails and the previous
    config stays in force.
 
+On Windows, give the pack its own folder (not `data_dir` or the staging
+folder), quote its path with single quotes, and pin the digest that Setup
+prints when it refuses a placeholder, before the first install, or that
+`defenseclaw-gateway.exe rulepack validate --dir <pack>` prints once
+DefenseClaw is installed; see
+[Write the config](/docs/enterprise/windows#2-write-the-config).
+
 To change a pack that is in use, the safest route is the same as for a new
 one: create the edited copy in a new folder (for example
 `/etc/defenseclaw/policies/guardrail/acme-v2`), validate it, and switch
