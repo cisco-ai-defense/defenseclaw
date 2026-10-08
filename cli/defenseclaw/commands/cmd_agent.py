@@ -3656,6 +3656,9 @@ def signatures() -> None:
 def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
     """List the merged AI discovery signature catalog."""
     cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     try:
         sigs = ai_signatures.load_ai_signatures(
@@ -3664,12 +3667,18 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,
+            secure_client=secure_client,
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps([asdict(sig) for sig in sigs], indent=2, sort_keys=True))
+        payload = [asdict(sig) for sig in sigs]
+        if secure_client:
+            for sig in payload:
+                for field in ai_signatures.IDE_INVENTORY_FIELDS:
+                    sig.pop(field, None)
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     click.echo(_render_signatures_table(sigs).rstrip())
 
