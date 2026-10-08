@@ -96,13 +96,22 @@ func readIdentitySpoolFactsForAccount(key, accountName string, now time.Time) (e
 	return record, true
 }
 
-// mergeSpoolFacts overlays the guardian's root-resolved facts on the facts
+// mergeSpoolFacts overlays the guardian's root-resolved record on the facts
 // the gateway resolved itself for the same verified account. The spool wins
 // for the UPN and principal, which only root can read, and for the realm and
 // directory type it resolved with them; the gateway's own answer wins for
-// groups, which it resolved just now.
-func mergeSpoolFacts(own, spool useridentity.DirectoryFacts) useridentity.DirectoryFacts {
+// groups, which it resolved just now. When the guardian's InfoPipe lookup by
+// uid holds the account in another SSSD domain than the gateway's own facts
+// name (record.SSSDDomain), the gateway's domain, realm, principal and
+// directory type are another account's, and the spool's replace them even
+// where it has none.
+func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.IdentitySpoolRecord) useridentity.DirectoryFacts {
+	spool := record.Facts
 	merged := own
+	if record.SSSDDomain != "" && own.Domain != "" && !strings.EqualFold(own.Domain, record.SSSDDomain) &&
+		!strings.EqualFold(own.Domain, spool.Domain) {
+		merged.Domain, merged.Realm, merged.Principal, merged.Directory = "", "", "", ""
+	}
 	if spool.UPN != "" {
 		merged.UPN = spool.UPN
 	}

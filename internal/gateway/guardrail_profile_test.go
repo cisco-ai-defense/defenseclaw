@@ -955,3 +955,34 @@ func TestProfileExplainKeepsAgentWhenLookupFails(t *testing.T) {
 		t.Fatalf("cache view = %v", view)
 	}
 }
+
+// TestUnconfirmedQualifiedNameMatchesNoUsersEntry pins GAP-0596: with short
+// SSSD names a plain LDAP domain may name an account by an e-mail address in
+// the joined domain (dcad-bob@dclab.test). Its facts confirm no domain, so no
+// users entry selects it by name: its bare part is the AD dcad-bob's name and
+// its whole name his principal. Its uid still selects it, and the AD account,
+// whose domain its facts confirm, keeps matching by name and principal.
+func TestUnconfirmedQualifiedNameMatchesNoUsersEntry(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	now := time.Now()
+	ldap := profileSubjectFromVerified(VerifiedSubject{UserID: "62001", UserName: "dcad-bob@dclab.test",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Directory: useridentity.DirectoryLDAP, ResolvedAt: now}}, true)
+	ad := profileSubjectFromVerified(VerifiedSubject{UserID: "94401104", UserName: "dcad-bob",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "dclab.test", Realm: "DCLAB.TEST",
+			Principal: "dcad-bob@dclab.test", ResolvedAt: now}}, true)
+	matches := func(subject profileSubject, entry string) bool {
+		_, _, ok := assignmentMatches(config.ProfileMatch{Users: []string{entry}}, &subject, &subjectGroups{}, true, "", "")
+		return ok
+	}
+	for entry, want := range map[string]bool{"dcad-bob": false, "dcad-bob@dclab.test": false, "DCLAB.TEST\\dcad-bob": false, "62001": true} {
+		if matches(ldap, entry) != want {
+			t.Errorf("users [%s] on the LDAP account %+v: match %v, want %v", entry, ldap, !want, want)
+		}
+	}
+	for _, entry := range []string{"dcad-bob", "dcad-bob@DCLAB.TEST", "94401104"} {
+		if !matches(ad, entry) {
+			t.Errorf("users [%s] does not select the AD account %+v", entry, ad)
+		}
+	}
+}

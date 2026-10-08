@@ -70,7 +70,7 @@ func resolveWindowsDirectoryFacts(sid string, upnWait time.Duration) (useridenti
 	now := time.Now().UTC()
 	facts := useridentity.WindowsDirectoryFacts(sid, upnWait)
 	if record, ok := readIdentitySpoolFacts(sid, now); ok {
-		facts = mergeSpoolFacts(facts, record.Facts)
+		facts = mergeSpoolFacts(facts, record)
 	}
 	if facts.Empty() {
 		return useridentity.DirectoryFacts{ResolvedAt: now}, nil

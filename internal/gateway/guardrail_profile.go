@@ -73,6 +73,9 @@ type profileSubject struct {
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
+	// nameUnconfirmed marks a UserName that kept a domain the directory facts
+	// do not confirm (profileUserName): no users entry matches it by name.
+	nameUnconfirmed bool
 }
 
 // The verified subject comes from S1's VerifiedSubject
@@ -578,8 +581,10 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // The account name is the bare one (alice for alice@corp.example.com and
 // CORP\alice) here, for every caller: a request and `explain --user` both
 // build their subject through this function, so a users entry cannot match
-// one and not the other (GAP-0182).
+// one and not the other (GAP-0182). A name whose DNS domain the directory
+// facts do not confirm keeps its domain (profileUserName).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
+	userName, nameUnconfirmed := profileUserName(s.UserName, s.Directory)
 	accountDomain := s.Directory.AccountDomain
 	if accountDomain == "" {
 		if domain, _, qualified := strings.Cut(s.UserName, `\`); qualified {
@@ -589,7 +594,7 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 	return profileSubject{
 		UserID:        s.UserID,
 		IDKind:        s.IDKind,
-		UserName:      useridentity.BareAccountName(s.UserName),
+		UserName:      userName,
 		Principal:     s.Directory.Principal,
 		UPN:           s.Directory.UPN,
 		Directory:     s.Directory.Directory,
@@ -600,6 +605,7 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 			(s.Directory.Source == useridentity.SourceWindowsLSA ||
 				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory)),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
+		nameUnconfirmed: nameUnconfirmed,
 	}
 }
 
@@ -808,18 +814,39 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 	return reason, group, true
 }
 
+// profileUserName is the name users entries match: the bare account, or,
+// unconfirmed, the whole name when it carries a DNS domain (user@domain) that
+// the directory facts do not give the account. With short SSSD names a plain
+// LDAP domain may name an account by an e-mail address in the joined domain
+// (dcad-bob@dclab.test, GAP-0596): its bare part is the name of another
+// account, the AD dcad-bob, so no users entry selects it by name.
+func profileUserName(name string, facts useridentity.DirectoryFacts) (string, bool) {
+	bare, domain := useridentity.SplitQualifiedName(name)
+	if identityFactsEnabled.Load() && !strings.Contains(name, `\`) && strings.Contains(domain, ".") &&
+		!strings.EqualFold(domain, facts.Domain) {
+		return strings.TrimSpace(name), true
+	}
+	return bare, false
+}
+
 // userEntryMatches reports whether a users entry names the subject: its uid
 // or SID, its account name without the domain, its principal or UPN, or its
 // account in DOMAIN\user form, the name winbind and Windows report. The
 // subject's name is bare and its principal is a UPN or user@REALM, so that
 // form matched none of them (GAP-0316).
 func userEntryMatches(subject *profileSubject, entry string) bool {
-	if anyEqualFold([]string{subject.UserID, subject.UserName}, entry) ||
+	// A name that kept its unconfirmed domain (profileUserName) is matched
+	// by no entry: an entry with an @ is a principal or a UPN.
+	userName := subject.UserName
+	if subject.nameUnconfirmed {
+		userName = ""
+	}
+	if anyEqualFold([]string{subject.UserID, userName}, entry) ||
 		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry) {
 		return true
 	}
 	domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
-	return qualified && account != "" && useridentity.EqualFold(account, subject.UserName) && subjectInDomain(subject, domain)
+	return qualified && account != "" && useridentity.EqualFold(account, userName) && subjectInDomain(subject, domain)
 }
 
 // subjectInDomain compares only verified account namespaces. Guessing a

@@ -70,8 +70,12 @@ type IdentitySpoolRecord struct {
 	// UPNSource says where Facts.UPN, or the derived Facts.Principal, came
 	// from: infopipe, identity_store, translate_name, or derived (the
 	// sAMAccountName@REALM fallback; Facts.UPN is then empty).
-	UPNSource string                      `json:"upn_source,omitempty"`
-	Facts     useridentity.DirectoryFacts `json:"facts"`
+	UPNSource string `json:"upn_source,omitempty"`
+	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
+	// Users.FindByID (Linux): the gateway drops a domain, realm and
+	// principal of its own that name another domain (mergeSpoolFacts).
+	SSSDDomain string                      `json:"sssd_domain,omitempty"`
+	Facts      useridentity.DirectoryFacts `json:"facts"`
 }
 
 // IdentitySpoolDir is the spool directory for a guardian authorization
