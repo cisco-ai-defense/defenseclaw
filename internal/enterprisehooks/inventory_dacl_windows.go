@@ -228,25 +228,22 @@ type inventoryDACLGrant struct {
 // because the grant stats and sets the DACL by name, and both follow the link
 // (GAP-0197).
 func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, rejectLinks bool) []inventoryDACLGrant {
-	grant := func(rel string, ensure func(string, *windows.SID) (inventoryDACLResult, error)) inventoryDACLGrant {
+	grant := func(rel string, ensure func(string, *windows.SID) (inventoryDACLResult, error), kind inventoryACE) inventoryDACLGrant {
 		if !rejectLinks {
 			return inventoryDACLGrant{rel, ensure}
 		}
-		return inventoryDACLGrant{rel, func(path string, sid *windows.SID) (inventoryDACLResult, error) {
-			if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
-				return inventoryDACLSkippedMissing, err
-			}
-			return ensure(path, sid)
+		return inventoryDACLGrant{rel, func(_ string, sid *windows.SID) (inventoryDACLResult, error) {
+			return ensureInventoryACEPinned(home, rel, sid, kind)
 		}}
 	}
 	grants := make([]inventoryDACLGrant, 0, len(inventoryDACLDotdirs)+len(inventoryDACLListOnlyDirs))
 	for _, dotdir := range inventoryDACLDotdirs {
 		if _, owned := guardianOwned[dotdir]; !owned {
-			grants = append(grants, grant(dotdir, ensureInventoryReadACE))
+			grants = append(grants, grant(dotdir, ensureInventoryReadACE, inventoryReadACE))
 		}
 	}
 	for _, dir := range inventoryDACLListOnlyDirs {
-		grants = append(grants, grant(dir, ensureInventoryListACE))
+		grants = append(grants, grant(dir, ensureInventoryListACE, inventoryListACE))
 	}
 	return grants
 }
@@ -267,25 +264,19 @@ func inventoryDACLIDEGrants(home string) []inventoryDACLGrant {
 	for _, rel := range ideplugins.WindowsLegacyBroadGrants(home) {
 		rel := rel
 		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
-			if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
-				return inventoryDACLSkippedMissing, err
-			}
-			return revokeInventoryLegacyReadACE(path, sid)
+			return revokeInventoryLegacyReadACEPinned(home, rel, sid)
 		}})
 	}
 	for _, g := range grants {
-		ensure := ensureInventorySelfACE
+		kind := inventorySelfACE
 		if g.Tree {
-			ensure = ensureInventoryReadACE
+			kind = inventoryReadACE
 		} else if g.Attributes {
-			ensure = ensureInventoryAttributesACE
+			kind = inventoryAttributesACE
 		}
 		rel := g.Path
-		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
-			if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
-				return inventoryDACLSkippedMissing, err
-			}
-			return ensure(path, sid)
+		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(_ string, sid *windows.SID) (inventoryDACLResult, error) {
+			return ensureInventoryACEPinned(home, rel, sid, kind)
 		}})
 	}
 	return out
@@ -318,6 +309,82 @@ func inventoryDACLRejectLinkBelow(home, rel string) error {
 		}
 	}
 	return nil
+}
+
+// inventoryDACLAfterLinkCheck is a test seam for a directory replacement
+// between the path walk and the handle open.
+var inventoryDACLAfterLinkCheck = func() {}
+
+// openInventoryDACLHandle pins the object whose DACL will change. The final
+// path must equal the requested child of the pinned profile even if a parent
+// was replaced with a junction after the path walk.
+func openInventoryDACLHandle(home, rel string) (windows.Handle, error) {
+	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+		return 0, err
+	}
+	inventoryDACLAfterLinkCheck()
+	open := func(path string, access uint32) (windows.Handle, error) {
+		ptr, err := winpath.UTF16Ptr(path)
+		if err != nil {
+			return 0, err
+		}
+		return windows.CreateFile(ptr, access,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	}
+	homeHandle, err := open(home, windows.FILE_READ_ATTRIBUTES)
+	if err != nil {
+		return 0, err
+	}
+	defer windows.CloseHandle(homeHandle)
+	var homeInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(homeHandle, &homeInfo); err != nil {
+		return 0, err
+	}
+	if homeInfo.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		homeInfo.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return 0, errInventoryDACLLink
+	}
+	target, err := open(filepath.Join(home, rel), windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC)
+	if err != nil {
+		return 0, err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(target, &info); err != nil {
+		windows.CloseHandle(target)
+		return 0, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		windows.CloseHandle(target)
+		return 0, errInventoryDACLLink
+	}
+	homePath, err := inventoryDACLFinalPath(homeHandle)
+	if err != nil {
+		windows.CloseHandle(target)
+		return 0, err
+	}
+	targetPath, err := inventoryDACLFinalPath(target)
+	if err != nil {
+		windows.CloseHandle(target)
+		return 0, err
+	}
+	if !strings.EqualFold(targetPath, filepath.Clean(filepath.Join(homePath, rel))) {
+		windows.CloseHandle(target)
+		return 0, errInventoryDACLLink
+	}
+	return target, nil
+}
+
+func inventoryDACLFinalPath(handle windows.Handle) (string, error) {
+	buf := make([]uint16, 32768)
+	n, err := windows.GetFinalPathNameByHandle(handle, &buf[0], uint32(len(buf)), 0)
+	if err != nil {
+		return "", err
+	}
+	if n == 0 || n >= uint32(len(buf)) {
+		return "", errors.New("inventory DACL final path exceeds Windows path limit")
+	}
+	return filepath.Clean(windows.UTF16ToString(buf[:n])), nil
 }
 
 type inventoryDACLResult int
@@ -454,6 +521,114 @@ func ensureInventoryACE(path string, sid *windows.SID, kind inventoryACE) (inven
 		nil, nil, merged, nil,
 	); err != nil {
 		return inventoryDACLSkippedMissing, fmt.Errorf("set DACL: %w", err)
+	}
+	return inventoryDACLGranted, nil
+}
+
+// ensureInventoryACEPinned reads and updates one pinned object. The preceding
+// path walk is advisory; the handle and final-path check enforce the boundary
+// if a user changes a directory while the enumerator is running.
+func ensureInventoryACEPinned(home, rel string, sid *windows.SID, kind inventoryACE) (inventoryDACLResult, error) {
+	handle, err := openInventoryDACLHandle(home, rel)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 &&
+		!(kind.files && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("get DACL: %w", err)
+	}
+	existing, _, err := sd.DACL()
+	if err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("inspect DACL: %w", err)
+	}
+	if existing == nil {
+		return inventoryDACLSkippedMissing, errors.New("null DACL; refusing to replace with sole gateway-service ACE")
+	}
+	if kind.present(existing, sid) {
+		return inventoryDACLAlreadyPresent, nil
+	}
+	entry := windows.EXPLICIT_ACCESS{
+		AccessPermissions: kind.mask,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       kind.inheritance,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+	merged, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, existing)
+	if err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("merge ACE: %w", err)
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION,
+		nil, nil, merged, nil); err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("set DACL: %w", err)
+	}
+	return inventoryDACLGranted, nil
+}
+
+func revokeInventoryLegacyReadACEPinned(home, rel string, sid *windows.SID) (inventoryDACLResult, error) {
+	handle, err := openInventoryDACLHandle(home, rel)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return inventoryDACLSkippedMissing, nil
+	}
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	existing, _, err := sd.DACL()
+	if err != nil || existing == nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("inspect legacy IDE DACL: %v", err)
+	}
+	if !daclContainsInventoryReadACE(existing, sid) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	for i := uint16(0); i < existing.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(existing, uint32(i), &ace); err != nil {
+			return inventoryDACLSkippedMissing, err
+		}
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE &&
+			(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
+			return inventoryDACLSkippedMissing, errors.New("service SID has an explicit deny on legacy IDE path")
+		}
+	}
+	entry := windows.EXPLICIT_ACCESS{
+		AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid)},
+	}
+	narrowed, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, existing)
+	if err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("remove legacy IDE grant: %w", err)
+	}
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION,
+		nil, nil, narrowed, nil); err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("set narrow IDE DACL: %w", err)
 	}
 	return inventoryDACLGranted, nil
 }

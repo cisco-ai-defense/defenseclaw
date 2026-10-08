@@ -278,6 +278,52 @@ func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T)
 	}
 }
 
+func TestInventoryDACLRejectsDirectoryReplacedAfterCheck(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	parent := filepath.Join(home, "AppData", "Local")
+	dir := filepath.Join(parent, "cursor-agent")
+	outsideDir := filepath.Join(outside, "cursor-agent")
+	for _, path := range []string{dir, outsideDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := inventoryDACLAfterLinkCheck
+	t.Cleanup(func() { inventoryDACLAfterLinkCheck = previous })
+	inventoryDACLAfterLinkCheck = func() {
+		inventoryDACLAfterLinkCheck = func() {}
+		if err := os.RemoveAll(parent); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", parent, outside).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v: %s", err, out)
+		}
+	}
+	var grant inventoryDACLGrant
+	for _, candidate := range inventoryDACLAgentGrants(home, nil, true) {
+		if candidate.dir == `AppData\Local\cursor-agent` {
+			grant = candidate
+			break
+		}
+	}
+	result, err := grant.ensure(dir, sid)
+	if result != inventoryDACLSkippedMissing || !errors.Is(err, errInventoryDACLLink) {
+		t.Fatalf("swapped parent grant = %v, %v; want reparse refusal", result, err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(outsideDir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || daclHasACEFor(dacl, []*windows.SID{sid}) {
+		t.Fatalf("junction target gained the service ACE: %v", err)
+	}
+}
+
 // Copilot CLI and Devin CLI keep their hook files on the guardian's protected
 // path, so, like Kiro CLI, they are discovered through list-only grants on
 // their install folders (GAP-1739). Those folders are never on a hook path.
