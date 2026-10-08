@@ -301,8 +301,13 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		}
 		if err == nil {
 			report := *outcome.Response.AIDiscovery
-			if err = inventory.SanitizeUserScanReport(&report, catalog, options.StoreRawLocalPaths); err == nil {
+			if err = inventory.SanitizeUserScanReport(&report, catalog, options.StoreRawLocalPaths, options.IncludeUserEmail); err == nil {
 				err = writeEnterpriseHookAIDiscoveryRecord(dir, outcome.Job.Account, report, time.Now())
+			}
+			// A connector account file the scan could not use is named,
+			// not silently left out (GAP-0961).
+			for _, note := range sortedUserEmailNotes(report.Summary.DetectorNotes) {
+				fmt.Fprintf(stderr, "[hook-guardian] ai discovery for %s: WARN include_user_email: %s\n", outcome.Job.Account.User, boundedString(note, 512))
 			}
 		}
 		if err != nil {
@@ -360,4 +365,17 @@ func writeEnterpriseHookAIDiscoverySpoolFile(dir, name string, data []byte) erro
 		err = os.Rename(tmpName, filepath.Join(dir, name))
 	}
 	return err
+}
+
+// sortedUserEmailNotes are a per-user report's include_user_email notes in a
+// stable order.
+func sortedUserEmailNotes(notes map[string]string) []string {
+	var out []string
+	for name, note := range notes {
+		if strings.HasPrefix(name, "user_email:") {
+			out = append(out, note)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

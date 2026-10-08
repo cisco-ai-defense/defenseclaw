@@ -304,3 +304,75 @@ func TestManagedDiscoveryRereadsTheProfileListEachFullScan(t *testing.T) {
 		t.Fatalf("homes = %v, want the profile created after the gateway started", homes)
 	}
 }
+
+// ai_discovery.home_dirs adds folders to a managed scan's profile list. It
+// replaced the list, so every IDE row and signal lost its owner (GAP-0969).
+func TestManagedDiscoveryHomeDirsAddToTheProfileList(t *testing.T) {
+	root := t.TempDir()
+	alice := discoveryHomeOwner{Home: filepath.Join(root, "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}
+	bob := discoveryHomeOwner{Home: filepath.Join(root, "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob"}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return []discoveryHomeOwner{alice, bob} }
+	extra := filepath.Join(root, "shared")
+	opts := normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+		HomeDirs: []string{alice.Home, bob.Home, extra},
+	})
+	svc := &ContinuousDiscoveryService{opts: opts}
+	homes := svc.homesToScan()
+	if len(homes) != 3 || homes[0] != alice.Home || homes[1] != bob.Home || homes[2] != extra {
+		t.Fatalf("homes = %v, want both profiles and the extra folder", homes)
+	}
+	if owner, ok := svc.homeOwnerForPath(filepath.Join(bob.Home, ".vscode", "extensions")); !ok || owner.UserName != "bob" {
+		t.Fatalf("owner of a folder in bob's profile = %+v, %t", owner, ok)
+	}
+}
+
+// enterprise.enrollment.exclude_users takes a profile off a managed scan:
+// its folders, a home_dirs folder inside it and its processes (GAP-1024).
+func TestManagedDiscoverySkipsExcludedAccounts(t *testing.T) {
+	root := t.TempDir()
+	alice := discoveryHomeOwner{Home: filepath.Join(root, "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}
+	bob := discoveryHomeOwner{Home: filepath.Join(root, "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob", Domain: "HOST"}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return []discoveryHomeOwner{alice, bob} }
+	svc := &ContinuousDiscoveryService{opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+		ExcludeUsers: []string{`host\BOB`}, HomeDirs: []string{filepath.Join(bob.Home, "work")},
+	})}
+	if homes := svc.homesToScan(); len(homes) != 1 || homes[0] != alice.Home {
+		t.Fatalf("homes = %v, want only alice's profile", homes)
+	}
+	procs := svc.withoutExcludedAccounts([]processInfo{
+		{PID: 1, Comm: "claude.exe", SessionOwnerID: alice.UserID},
+		{PID: 2, Comm: "claude.exe", SessionOwnerID: bob.UserID},
+	})
+	if len(procs) != 1 || procs[0].PID != 1 {
+		t.Fatalf("processes = %+v, want only alice's", procs)
+	}
+}
+
+// A managed Windows scan puts on each owned Claude Code or Codex signal the
+// address the enumerator published for its owner, and on no other signal
+// (GAP-1025).
+func TestManagedDiscoveryStampsThePublishedOwnerEmail(t *testing.T) {
+	alice := discoveryHomeOwner{Home: filepath.Join(t.TempDir(), "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}
+	t.Cleanup(SetOwnerEmailLookup(func(sid, connector string) string {
+		if sid == alice.UserID && connector == "codex" {
+			return "o3a.codex@example.test"
+		}
+		return ""
+	}))
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{IncludeUserEmail: true, homeOwners: []discoveryHomeOwner{alice}}}
+	signals := []AISignal{
+		{SignalID: "owned", SupportedConnector: "codex", UserID: alice.UserID},
+		{SignalID: "unowned", SupportedConnector: "codex"},
+		{SignalID: "other-connector", SupportedConnector: "cursor", UserID: alice.UserID},
+	}
+	svc.stampOwnerEmails(signals)
+	if signals[0].UserEmail != "o3a.codex@example.test" || signals[1].UserEmail != "" || signals[2].UserEmail != "" {
+		t.Fatalf("emails = %q %q %q", signals[0].UserEmail, signals[1].UserEmail, signals[2].UserEmail)
+	}
+}
