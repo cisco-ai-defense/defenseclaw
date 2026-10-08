@@ -147,6 +147,13 @@ var (
 // diagnostic (Enter-DefenseClawLifecycleLock).
 const windowsEnterpriseLifecycleBusyMarker = "holds the protected file lock"
 
+func init() {
+	windowsEnterpriseRunningAsLocalSystem = func() bool {
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		return err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
+	}
+}
+
 func windowsEnterpriseStandaloneRequested(opts *windowsEnterpriseLifecycleOptions) bool {
 	return opts != nil && (windowsEnterpriseStandalone(opts) ||
 		managed.IsStandaloneProfile(opts.profile))

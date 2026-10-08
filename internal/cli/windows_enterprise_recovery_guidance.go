@@ -423,9 +423,20 @@ func windowsEnterpriseStandaloneNextStep(
 			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
 			" and run a DefenseClaw Setup whose gateway carries its release version as LocalSystem: " + command + recovers
 	default:
+		if windowsEnterpriseRunningAsLocalSystem() {
+			// This run was the LocalSystem recovery the default step names;
+			// repeating it unchanged fails the same way (GAP-0920).
+			return lead + " This run was LocalSystem and its recovery did not finish, so running it again unchanged fails the same way." +
+				" Next step: correct what the error above names (the path and the account), then run " + command +
+				"; if it names neither, send the lifecycle log (" + windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
+		}
 		return lead + " Next step: run DefenseClaw Setup (this release or a newer one) as LocalSystem: " + command + recovers
 	}
 }
+
+// windowsEnterpriseRunningAsLocalSystem reports a lifecycle running as
+// LocalSystem; set on Windows, replaceable in tests.
+var windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
 
 // windowsEnterpriseStoppedServiceNextStep names what starts the stopped
 // DefenseClaw services again when status or verify fails on them

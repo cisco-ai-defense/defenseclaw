@@ -6678,7 +6678,54 @@ function Get-DefenseClawRedactionKeySecurityClass {
             -Expected $brokenExpected) {
         return 'broken_runtime_file'
     }
+    # Standalone: a hardening script or icacls run that removed the gateway
+    # service's entry (or reset the key to inherit) left an access list only
+    # trusted principals hold. Nothing untrusted could read the key, so the
+    # lifecycle records it as found and repair writes the exact contract
+    # again; refusing it wedged every recovery (GAP-0920).
+    if ((Test-DefenseClawStandaloneProfile) -and
+        (Test-DefenseClawRawAclTrustedOnly `
+            -Actual $Actual `
+            -TrustedSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID,
+                $GatewayServiceSID
+            ))) {
+        return 'trusted_drift'
+    }
     throw 'redaction correlation key has an unrecognized active ACL'
+}
+
+function Test-DefenseClawRawAclTrustedOnly {
+    <#
+        Whether a security descriptor's owner is one of TrustedSIDs and every
+        allow entry that applies to the object grants only those principals.
+        Deny entries and inherit-only entries grant nothing.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [Security.AccessControl.RawSecurityDescriptor]$Actual,
+        [Parameter(Mandatory)][string[]]$TrustedSIDs
+    )
+    if ($null -eq $Actual.Owner -or $Actual.Owner.Value -notin $TrustedSIDs -or
+        $null -eq $Actual.DiscretionaryAcl) {
+        return $false
+    }
+    foreach ($ace in $Actual.DiscretionaryAcl) {
+        if ($ace -isnot [Security.AccessControl.CommonAce]) {
+            return $false
+        }
+        if ($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessDenied -or
+            ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
+            continue
+        }
+        if ($ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
+            $ace.SecurityIdentifier.Value -notin $TrustedSIDs) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Get-DefenseClawRedactionKeySecuritySnapshot {
@@ -6734,9 +6781,37 @@ function Get-DefenseClawRedactionKeySecuritySnapshot {
         [byte[]]$captured.SecurityDescriptor,
         0
     )
-    $preimageClass = Get-DefenseClawRedactionKeySecurityClass `
-        -Actual $actual `
-        -GatewayServiceSID $GatewayServiceSID
+    try {
+        $preimageClass = Get-DefenseClawRedactionKeySecurityClass `
+            -Actual $actual `
+            -GatewayServiceSID $GatewayServiceSID
+    }
+    catch {
+        if (-not (Test-DefenseClawStandaloneProfile)) {
+            throw
+        }
+        $holders = @(
+            foreach ($ace in @($actual.DiscretionaryAcl)) {
+                if ($ace -is [Security.AccessControl.CommonAce] -and
+                    $ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and
+                    $ace.SecurityIdentifier.Value -notin @(
+                        $script:SystemSID,
+                        $script:AdministratorsSID,
+                        $script:TrustedInstallerSID,
+                        $GatewayServiceSID
+                    )) {
+                    $ace.SecurityIdentifier.Value
+                }
+            }
+        ) | Microsoft.PowerShell.Utility\Select-Object -Unique
+        $owner = if ($null -ne $actual.Owner) { $actual.Owner.Value } else { 'none' }
+        throw (
+            "untrusted principal $(@($holders + $owner)[0]) can open the redaction correlation key: $path " +
+            "(owner $owner; other principals with access: $(if (@($holders).Count -gt 0) { @($holders) -join ', ' } else { 'none' })). " +
+            'Only SYSTEM, Administrators and NT SERVICE\DefenseClawGateway may hold this key. Remove the other entries ' +
+            "(icacls `"$path`" /setowner *S-1-5-32-544, then icacls `"$path`" /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F), then run the command again"
+        )
+    }
     return [ordered]@{
         schema_version = 2
         path = $path
@@ -7045,6 +7120,15 @@ function Restore-DefenseClawRedactionKeySecuritySnapshot {
     # the exact older three-ACE service-owned compatibility contract.
     $expected = if ([string]$recordedClass -ceq 'broken_runtime_file') {
         New-DefenseClawLegacyRedactionKeyAcl `
+            -GatewayServiceSID $gatewaySID
+    }
+    elseif ([string]$recordedClass -ceq 'trusted_drift') {
+        # The drifted list could not start the gateway either (that is why it
+        # was recorded); roll back to the exact contract, which only grants
+        # the same trusted principals.
+        New-DefenseClawCanonicalPathAcl `
+            -IsDirectory $false `
+            -Kind RuntimeSecretFile `
             -GatewayServiceSID $gatewaySID
     }
     else {
@@ -13476,6 +13560,25 @@ function Recover-DefenseClawQuiescingIntent {
         -Path $Layout.PendingPath `
         -Phase quiesced `
         -ServicesQuiescedAt $recoveryQuiescedAt
+    $priorActiveProperty = $Intent.PSObject.Properties['prior_deployment_active']
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $null -ne $priorActiveProperty -and
+        [bool]$priorActiveProperty.Value -and
+        (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+        # Nothing of the deployment changed before this intent, so its own
+        # access lists are the ones to restart with. An administrator script
+        # that stripped NT SERVICE\DefenseClawGateway from runtime and etc
+        # made every service restart fail here, so the transaction stayed
+        # pending and every repair, ensure and uninstall failed the same way
+        # (GAP-0920). Put the deployment's access back first.
+        $recoveryGatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+        Set-DefenseClawRetainedRuntimeAcls `
+            -RuntimeDirectory $Layout.RuntimeDirectory `
+            -GatewayServiceSID $recoveryGatewaySID
+        Set-DefenseClawManagedCoreAcls `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
     Set-DefenseClawServiceActivationPhase `
         -State $Intent `
         -Path $Layout.PendingPath `
@@ -18885,6 +18988,32 @@ function ConvertTo-DefenseClawBoundedDiagnostic {
     return $text
 }
 
+function Assert-DefenseClawGatewayServiceAccess {
+    <#
+        The access the gateway service needs at start to the folders verify
+        checks for it: its config folder and file, and its runtime folder.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    $gatewayReaders = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID, $gatewaySID)
+    foreach ($check in @(
+        @($Layout.ConfigDirectory, 'ConfigDirectory', $adminWriters),
+        @($Layout.ConfigPath, 'Config', $adminWriters),
+        @($Layout.RuntimeDirectory, 'Runtime', $gatewayReaders)
+    )) {
+        Assert-DefenseClawPathAcl `
+            -Path ([string]$check[0]) `
+            -AllowedWriterSIDs $check[2] `
+            -AllowedReaderSIDs $gatewayReaders `
+            -RequiredRights (New-DefenseClawRequiredRights -Kind ([string]$check[1]) -GatewayServiceSID $gatewaySID) `
+            -RejectUntrustedRead
+    }
+}
+
 function Get-DefenseClawGuardianStatusReport {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -19042,6 +19171,19 @@ function Get-DefenseClawLifecycleStatus {
             $errors.Add(
                 'Codex machine requirements verification requires an elevated administrator token'
             )
+        }
+    }
+    if ((Test-DefenseClawStandaloneProfile) -and $installed -and -not $pending -and
+        (Test-DefenseClawAdministrator)) {
+        # Status said ok while verify failed on the gateway service's access
+        # to runtime and etc, and the gateway could not start (GAP-0920).
+        try {
+            Assert-DefenseClawGatewayServiceAccess `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            $errors.Add($_.Exception.Message)
         }
     }
     $brokerHealthyInstalled = (-not $brokerEnabled) -or $brokerState -eq 'running'
