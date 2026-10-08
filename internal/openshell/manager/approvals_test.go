@@ -922,6 +922,39 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	}
 }
 
+// GAP-0268, GAP-0236, GAP-0260: the connection that raised a host-port ask
+// failed at once, and the agent said no approval was needed; a reject said
+// only "rejected host.openshell.internal" and what it leaves was unsaid.
+// The agent's next hook tells it the connection waits, then that the user
+// declined; the reject names the port and how long its effect lasts.
+func TestHostPortAsksReachTheAgent(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "hpbox", HostPorts: []int{38830}})
+	b := e.binding("hpbox")
+	e.ocsf("hpbox", "CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18971,18972 mapping_id=m1", time.Now())
+	e.ocsf("hpbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:38830 [reason:transparent_tcp_mapping_denied]", time.Now())
+	if got := e.m.EgressRefusals(b.ID, "hpbox"); len(got) != 1 || got[0].Note != NoteAsked || got[0].Host != openshellHostAlias || got[0].Port != 38830 {
+		t.Fatalf("refusals while the ask waits = %+v", got)
+	}
+	asks, _ := e.m.Approvals(t.Context(), "hpbox")
+	if len(asks) != 1 {
+		t.Fatalf("asks = %+v", asks)
+	}
+	res, err := e.m.DecideApproval(t.Context(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject})
+	if err != nil || !strings.Contains(res.Message, "port 38830 on your machine (host.openshell.internal:38830) stays closed to hpbox") ||
+		!strings.Contains(res.Message, "the one after that asks again") {
+		t.Fatalf("reject = %+v, %v", res, err)
+	}
+	if !slices.ContainsFunc(e.events("hpbox", sandboxapi.ActivityApprovalResolved, ""), func(ev sandboxapi.ActivityEvent) bool {
+		return ev.Message == "rejected port 38830 on your machine (host.openshell.internal:38830)"
+	}) {
+		t.Fatalf("feed = %+v", e.events("hpbox", sandboxapi.ActivityApprovalResolved, ""))
+	}
+	if got := e.m.EgressRefusals(b.ID, "hpbox"); len(got) != 1 || got[0].Note != NoteDeclined {
+		t.Fatalf("refusals after the reject = %+v", got)
+	}
+}
+
 // esc is an inert terminal control marker, which a terminal must never
 // receive from sandbox text.
 const esc = "\x1b[0mDCMARK\x07"

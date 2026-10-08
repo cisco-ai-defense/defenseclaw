@@ -376,7 +376,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if r.Denied() && !quiet && r.Port == 22 && !replayed {
 			// The agent's git sees only "Permission denied": its next
 			// post-tool hook says to use HTTPS (GAP-0216).
-			m.refusals.noteSSH(id.BindingID, name, host, r.Port, m.now())
+			m.refusals.noteDirect(id.BindingID, name, host, r.Port, NoteSSH, m.now())
 		}
 		var feed *sandboxapi.ActivityEvent
 		if r.Denied() && !quiet {

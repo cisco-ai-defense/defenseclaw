@@ -597,6 +597,9 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 			Kind: sandboxapi.ActivityApprovalRequested, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port,
 			ApprovalID: a.id, Reason: string(d.Reason), Message: d.Message,
 		})
+		// The agent's next hook says the connection waits for the user
+		// (GAP-0268).
+		m.refusals.noteDirect(bindingID, p.Sandbox, triage.NormalizeHost(d.Host), d.Port, NoteAsked, now)
 	}
 }
 
@@ -792,6 +795,7 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 		if r.Forced {
 			msg += " (applied while hooks were busy)"
 		}
+		m.refusals.forgetNote(r.Item.BindingID, triage.NormalizeHost(a.decision.Host), a.decision.Port, NoteAsked)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: a.decision.Host, Port: a.decision.Port, Reason: a.actor, Message: msg})
 	}
@@ -1006,9 +1010,19 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		m.mu.Unlock()
 		decided = true
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorOperator)
+		// The feed names the port as the approval does, the reply says what
+		// the reject leaves, and the agent's next hook says the user
+		// declined, not a network error (GAP-0236, GAP-0260).
+		target := host
+		if local {
+			target = fmt.Sprintf("port %d on your machine (%s:%d)", port, host, port)
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
-			Host: host, Port: port, Reason: "rejected", Message: "rejected " + host})
-		res.Message = "rejected"
+			Host: host, Port: port, Reason: "rejected", Message: "rejected " + target})
+		res.Message = fmt.Sprintf("%s stays closed to %s; its attempts in the next %s are refused without a new ask, and the one after that asks again",
+			target, a.sandbox, packs.ShortDuration(collapseWindow))
+		m.refusals.forgetNote(bindingID, triage.NormalizeHost(host), port, NoteAsked)
+		m.refusals.noteDirect(bindingID, a.sandbox, triage.NormalizeHost(host), port, NoteDeclined, m.now())
 	default:
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "decision must be approve or reject")
 	}

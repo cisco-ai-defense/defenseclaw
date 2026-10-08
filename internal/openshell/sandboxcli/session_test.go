@@ -1459,7 +1459,7 @@ func TestRunResumeNamesTheFlagsItIgnores(t *testing.T) {
 	// still mounts live, and skip bringing the copy's changes back.
 	ta := existing("\n\ns\n")
 	ta.ok(t, ta.Run(bg, opts))
-	has(t, ta.output(), "Resuming it keeps its own settings and ignores --safe, --credential. Resume it anyway? [y/N]")
+	has(t, ta.output(), "Resuming it keeps its own settings and ignores --safe, --credential, which only a new sandbox takes (", ". Resume it anyway? [y/N]")
 	if req := createRequest(t, ta.daemon); !req.Safe || len(req.Credentials) != 1 || ta.calls("POST", "proj-0a1b/start") != 0 {
 		t.Fatalf("the default must start a new sandbox with the flags: %+v", req)
 	}
@@ -1534,7 +1534,7 @@ func TestRunWithAChangedRepoPolicy(t *testing.T) {
 		}
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
-	has(t, ta.output(), "ignores the changed repository policy .defenseclaw/sandbox.yaml. Resume it anyway? [y/N]")
+	has(t, ta.output(), "ignores the changed repository policy .defenseclaw/sandbox.yaml, which only a new sandbox takes (", "). Resume it anyway? [y/N]")
 	if req := createRequest(t, ta.daemon); req.RepoPolicyDigest != rp.Digest || !req.Copy || ta.calls("POST", "proj-0a1b/start") != 0 {
 		t.Fatalf("the default must create a sandbox on a copy with the new policy: %+v", req)
 	}

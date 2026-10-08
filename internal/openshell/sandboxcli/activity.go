@@ -365,6 +365,23 @@ func (a *App) Decide(ctx context.Context, o DecideOptions) error {
 		}
 	}
 	if !found {
+		if ev, ok := a.answeredAsk(ctx, api, o.Sandbox, o.ID); ok {
+			// Answered already (in the TUI, another terminal): say how
+			// and when, not that the ask does not exist (GAP-0249).
+			was := "answered"
+			switch {
+			case sandboxapi.ApprovalApplied(ev):
+				was = "approved"
+			case ev.Reason == "rejected":
+				was = "rejected"
+			}
+			msg := fmt.Sprintf("ask %s of sandbox %s was %s already, at %s (%s)", o.ID, o.Sandbox, was, a.clock(ev.Time), ev.Message)
+			if (was == "approved") == o.Approve && was != "answered" {
+				a.note(msg)
+				return nil
+			}
+			return errors.New(msg)
+		}
 		return fmt.Errorf("sandbox %s has no pending ask %s (see `%s approvals --sandbox %s`)", o.Sandbox, o.ID, CommandName, o.Sandbox)
 	}
 	d := sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject, Always: o.Always, Reason: o.Reason}
@@ -395,6 +412,20 @@ func (a *App) Decide(ctx context.Context, o DecideOptions) error {
 	}
 	a.ok(msg)
 	return nil
+}
+
+// answeredAsk is the feed's last answer to the ask id of sandbox, when the
+// feed still holds it.
+func (a *App) answeredAsk(ctx context.Context, api API, sandbox, id string) (sandboxapi.ActivityEvent, bool) {
+	var last sandboxapi.ActivityEvent
+	found := false
+	_ = api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: sandbox}, func(ev sandboxapi.ActivityEvent) error {
+		if ev.Kind == sandboxapi.ActivityApprovalResolved && ev.ApprovalID == id && ev.Sandbox == sandbox {
+			last, found = ev, true
+		}
+		return nil
+	})
+	return last, found
 }
 
 // UnblockOptions are the `sandbox unblock` flags.

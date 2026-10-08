@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -58,9 +59,11 @@ type SandboxEgressRefusal struct {
 	// peer").
 	Cut  bool
 	Sent int64
-	// SSH marks OpenShell's refusal of an SSH connection: no SSH leaves a
-	// sandbox, and Remedy names the HTTPS way instead.
-	SSH bool
+	// Note marks a connection the note tells of that is no block of the
+	// egress policy (manager.NoteSSH, NoteAsked, NoteDeclined): SSH, which
+	// no sandbox opens (Remedy names HTTPS), a connection that waits for
+	// the user's answer to an ask, or one the user declined.
+	Note string
 }
 
 const (
@@ -158,12 +161,22 @@ func (a *APIServer) addSandboxEgressRefusals(
 
 // sandboxEgressRefusalNotice is the agent's note of refused destinations.
 func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
-	if len(refusals) == 1 && refusals[0].SSH {
-		// Not a destination to leave alone: the same remote over HTTPS
-		// works (GAP-0216).
-		r := refusals[0]
-		return "This sandbox's SSH connection to " + sandboxEgressTarget(r) + " was refused: SSH does not leave a DefenseClaw sandbox, " +
-			"and a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) + " Tell the user if the task needs SSH itself."
+	if len(refusals) == 1 {
+		switch r := refusals[0]; r.Note {
+		case manager.NoteSSH:
+			// Not a destination to leave alone: the same remote over HTTPS
+			// works (GAP-0216).
+			return "This sandbox's SSH connection to " + sandboxEgressTarget(r) + " was refused: SSH does not leave a DefenseClaw sandbox, " +
+				"and a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) + " Tell the user if the task needs SSH itself."
+		case manager.NoteAsked:
+			// Neither done nor a mystery error (GAP-0268).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " waits for the user: DefenseClaw asked them to approve it, " +
+				"and until they do a tool sees only a connection error. Tell the user, and try again once they approve it " +
+				"(`defenseclaw sandbox approvals`)."
+		case manager.NoteDeclined:
+			return "The user declined this sandbox's connection to " + sandboxAskTarget(r) + " when DefenseClaw asked them; " +
+				"a tool sees only a connection error. Do not try it again unless the user says so."
+		}
 	}
 	if len(refusals) == 1 {
 		r := refusals[0]
@@ -197,8 +210,8 @@ func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 	if more := len(refusals) - len(shown); more > 0 {
 		fmt.Fprintf(&b, "\n- and %d more", more)
 	}
-	if slices.ContainsFunc(refusals, func(r SandboxEgressRefusal) bool { return r.SSH }) {
-		b.WriteString("\nTell the user if the task needs them; use HTTPS where it says so, and do not try to reach the others another way.")
+	if slices.ContainsFunc(refusals, func(r SandboxEgressRefusal) bool { return r.Note != "" }) {
+		b.WriteString("\nTell the user if the task needs them; do what each line says, and do not try to reach the others another way.")
 		return b.String()
 	}
 	b.WriteString("\nTell the user if the task needs them, and do not try to reach them another way.")
@@ -216,6 +229,15 @@ func sandboxEgressTarget(r SandboxEgressRefusal) string {
 		host = "[" + host + "]"
 	}
 	return host + ":" + strconv.Itoa(r.Port)
+}
+
+// sandboxAskTarget names an asked destination: a port on the user's
+// machine (host.openshell.internal) as such.
+func sandboxAskTarget(r SandboxEgressRefusal) string {
+	if r.Host == "host.openshell.internal" && r.Port > 0 {
+		return "port " + strconv.Itoa(r.Port) + " on the user's machine (" + sandboxEgressTarget(r) + ")"
+	}
+	return sandboxEgressTarget(r)
 }
 
 // sandboxUploadSize is what went up before a cut: "1.0 MiB", "512 KiB", or

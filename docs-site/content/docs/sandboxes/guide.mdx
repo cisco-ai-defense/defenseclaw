@@ -620,6 +620,14 @@ moment of the sandbox, because every OpenShell policy change closes the
 sandbox's open connections. In the TUI, the **Asks** view takes `a`
 (approve), `A` (always) and `x` (reject).
 
+The connection that raised an ask fails at once, and the agent's next tool
+hook tells it the connection waits for you, so it can tell you and try
+again once you approve. After a reject the agent is told that you declined;
+the sandbox's attempts at the same destination in the next 10 minutes are
+refused without a new ask, and the one after that asks again. Answering an
+ask that was answered already (in the TUI, or another terminal) says how and
+when it was answered.
+
 The `balanced` profile also asks about sites outside its allowlist, and
 `strict` asks about every request.
 

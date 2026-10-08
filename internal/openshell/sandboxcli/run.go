@@ -1131,8 +1131,15 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 	if repoChanged {
 		ignored = append(ignored, "the changed repository policy "+packs.RepoPolicyPath)
 	}
+	next := "pass --new"
+	if sb.WorkdirMode == config.OpenShellWorkdirMount && !copyMode {
+		// The folder takes one live mount, and it is sb's.
+		next = "run with --new --copy, or delete " + sb.Name + " first (`" + CommandName + " delete " + sb.Name + "`)"
+	}
 	if len(ignored) > 0 {
-		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". "
+		// The way to get them is in the question, not only after a yes
+		// (GAP-0249).
+		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ", which only a new sandbox takes (" + next + "). "
 	}
 	if len(ignored) > 0 || len(grants) > 0 {
 		question += "Resume it anyway?"
@@ -1144,11 +1151,6 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 		return false, err
 	}
 	if len(ignored) > 0 {
-		next := "pass --new"
-		if sb.WorkdirMode == config.OpenShellWorkdirMount && !copyMode {
-			// The folder takes one live mount, and it is sb's.
-			next = "run with --new --copy, or delete " + sb.Name + " first (`" + CommandName + " delete " + sb.Name + "`)"
-		}
 		a.warn("resuming " + sb.Name + " without " + strings.Join(ignored, ", ") + " (they apply to a new sandbox: " + next + ")")
 	}
 	return true, a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})

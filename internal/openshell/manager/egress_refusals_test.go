@@ -121,7 +121,7 @@ func TestEgressRefusalsTellOfAnSSHRefusal(t *testing.T) {
 	b := e.binding("sshbox")
 	e.ocsf("sshbox", "NET:OPEN [MED] DENIED /usr/bin/ssh(42) -> github.com:22/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
 	got := e.m.EgressRefusals(b.ID, b.SandboxName)
-	if len(got) != 1 || !got[0].SSH || got[0].Host != "github.com" || got[0].Port != 22 ||
+	if len(got) != 1 || got[0].Note != NoteSSH || got[0].Host != "github.com" || got[0].Port != 22 ||
 		!strings.Contains(got[0].Remedy, "git+https://github.com/OWNER/REPO.git") {
 		t.Fatalf("refusals = %+v", got)
 	}

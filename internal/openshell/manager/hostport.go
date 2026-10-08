@@ -220,6 +220,9 @@ func (m *Manager) hostPortAsk(ctx context.Context, b *box, port int, binary stri
 	a := &approval{id: id, sandbox: name, decision: d, proposal: p, status: sandboxapi.ApprovalPending, createdAt: now.UTC(), local: true}
 	m.storeApproval(a)
 	m.recordApproval(ctx, ident, a, audit.SandboxApprovalRequested, "", "")
+	// The connection that asked failed at once: the agent's next hook
+	// says it waits for the user (GAP-0268).
+	m.refusals.noteDirect(ident.BindingID, name, openshellHostAlias, port, NoteAsked, now)
 	m.feed.Publish(sandboxapi.ActivityEvent{
 		Kind: sandboxapi.ActivityApprovalRequested, Sandbox: name, Host: openshellHostAlias, Port: port,
 		ApprovalID: id, Reason: string(d.Reason), Message: d.Message,
@@ -331,6 +334,7 @@ func (m *Manager) hostPortApplied(ctx context.Context, a *approval, res *openshe
 		ev.PolicyHash = res.PolicyHash
 	}
 	m.tel.RecordSandboxPolicy(ctx, ev)
+	m.refusals.forgetNote(ident.BindingID, openshellHostAlias, port, NoteAsked)
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 		Host: openshellHostAlias, Port: port, Reason: a.actor,
 		Message: fmt.Sprintf("approved port %d on your machine (%s:%d)", port, openshellHostAlias, port)})

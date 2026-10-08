@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -201,11 +202,24 @@ func TestSandboxPostToolHookTellsTheAgentOfEgressRefusals(t *testing.T) {
 // GAP-0216: an SSH refusal's note gives the agent the HTTPS way, and does
 // not tell it to leave the destination alone.
 func TestSandboxEgressRefusalNoticeOfSSH(t *testing.T) {
-	got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{{Host: "github.com", Port: 22, Category: "ssh", SSH: true,
+	got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{{Host: "github.com", Port: 22, Category: "ssh", Note: manager.NoteSSH,
 		What: "SSH, which does not leave a sandbox", Remedy: "use HTTPS instead: a git remote https://github.com/OWNER/REPO.git"}})
 	if !strings.Contains(got, "SSH connection to github.com:22 was refused: SSH does not leave a DefenseClaw sandbox") ||
 		!strings.Contains(got, "Use HTTPS instead: a git remote https://github.com/OWNER/REPO.git.") || strings.Contains(got, "another way") {
 		t.Fatalf("note = %q", got)
+	}
+	// GAP-0268, GAP-0236: an ask that holds the connection, and one the
+	// user declined, read as such, not as a network error.
+	port := SandboxEgressRefusal{Host: "host.openshell.internal", Port: 8765}
+	asked, declined := port, port
+	asked.Note, declined.Note = manager.NoteAsked, manager.NoteDeclined
+	if got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{asked}); !strings.Contains(got,
+		"connection to port 8765 on the user's machine (host.openshell.internal:8765) waits for the user") {
+		t.Fatalf("asked note = %q", got)
+	}
+	if got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{declined}); !strings.Contains(got,
+		"The user declined this sandbox's connection to port 8765 on the user's machine") {
+		t.Fatalf("declined note = %q", got)
 	}
 }
 

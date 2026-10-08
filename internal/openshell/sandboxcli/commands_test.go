@@ -333,6 +333,15 @@ func TestApprovalsAndDecisions(t *testing.T) {
 	if calls := ta.daemon.callsTo("POST", sandboxapi.PathApprovals+"/ap-1"); !strings.Contains(string(calls[1].Body), `"decision":"reject"`) {
 		t.Fatalf("reject body = %s", calls[1].Body)
 	}
+	// GAP-0249: an ask answered already (in the TUI) is not "no pending
+	// ask": the answer says how and when, and the same answer again is no
+	// failure.
+	ta = newTestApp(t, "")
+	ta.daemon.events = []sandboxapi.ActivityEvent{{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: "box", ApprovalID: "ap-2",
+		Reason: sandboxapi.ApprovedByOperator, Message: "approved port 8765 on your machine (host.openshell.internal:8765)", Time: ta.Now()}}
+	ta.ok(t, ta.Decide(bg, DecideOptions{Sandbox: "box", ID: "ap-2", Approve: true}))
+	has(t, ta.output(), "ask ap-2 of sandbox box was approved already, at ")
+	wantErr(t, ta.fresh().Decide(bg, DecideOptions{Sandbox: "box", ID: "ap-2"}), "was approved already")
 }
 
 func TestUnblock(t *testing.T) {
