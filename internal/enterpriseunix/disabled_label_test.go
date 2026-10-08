@@ -88,3 +88,15 @@ func TestVerifyNamesAMaskedUnitAndRepairUnmasksIt(t *testing.T) {
 		t.Fatalf("repair does not say it unmasked the unit: %q", repair.Changes)
 	}
 }
+
+// GAP-0423: the apply oneshot a refused package upgrade left failed kept
+// verify warning unit_failed after a later ensure recovered the host.
+func TestARecoveringEnsureClearsTheFailedApplyOneshot(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.failed[unitApplyService] = true
+	requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")}))
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeUnitFailed); got != "" {
+		t.Fatalf("status still warns: %s", got)
+	}
+}

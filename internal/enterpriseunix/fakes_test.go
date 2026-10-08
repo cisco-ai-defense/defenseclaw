@@ -145,6 +145,14 @@ func (f *fakeServices) Disabled(_ context.Context, u Unit) bool {
 	return f.disabled[u.Name]
 }
 
+func (f *fakeServices) ResetFailed(_ context.Context, u Unit) error {
+	f.record("reset-failed " + u.Name)
+	f.mu.Lock()
+	delete(f.failed, u.Name)
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeServices) Masked(_ context.Context, u Unit) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

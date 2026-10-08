@@ -353,6 +353,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 				}
 			}
 			l.settleRejectedConfig()
+			l.clearSupersededUnitFailures(ctx)
 			l.describe(ctx, record, false)
 			// The host runs this package and is healthy, so what a failed
 			// package run left (its result and the kept gateway output) is
@@ -1237,6 +1238,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
 	l.clearSupersededFailures()
+	l.clearSupersededUnitFailures(ctx)
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}

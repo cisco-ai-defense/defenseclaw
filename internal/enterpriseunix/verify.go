@@ -161,6 +161,29 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	return 0
 }
 
+// clearSupersededUnitFailures clears the failed state an earlier lifecycle
+// run left on the apply or daily verify oneshot once this run has left the
+// deployment healthy (committed, or found up to date). Left in place, every
+// verify kept warning unit_failed after a refused package upgrade was
+// recovered, until an administrator ran systemctl reset-failed (GAP-0423).
+func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
+	env := l.env
+	resetter, ok := env.Services.(failedResetter)
+	if !ok {
+		return
+	}
+	for _, unit := range env.Services.Units() {
+		if unit.Name != unitApplyService && unit.Name != unitVerifyService {
+			continue
+		}
+		if status, err := env.Services.Status(ctx, unit); err == nil && strings.HasPrefix(status.State, "failed") {
+			if resetter.ResetFailed(ctx, unit) == nil {
+				l.noteChange("cleared the failed state an earlier run left on %s", unit.Name)
+			}
+		}
+	}
+}
+
 // interruptedTransactionProblem names a transaction a reset or a killed run
 // left pending, and the commands that finish it.
 func (e *Env) interruptedTransactionProblem(pending *Pending) string {

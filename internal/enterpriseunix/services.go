@@ -115,6 +115,12 @@ func unitMasked(ctx context.Context, services ServiceManager, unit Unit) bool {
 	return ok && reporter.Masked(ctx, unit)
 }
 
+// failedResetter is implemented by service managers that keep a unit's
+// failed state until it is cleared (systemd's reset-failed).
+type failedResetter interface {
+	ResetFailed(ctx context.Context, unit Unit) error
+}
+
 // restarter is implemented by service managers that restart a unit in one
 // job.
 type restarter interface {
@@ -315,6 +321,11 @@ func (m *systemdManager) PlannedRestart(ctx context.Context, unit Unit) bool {
 // Enabled reports whether the unit is enabled to start at boot.
 func (m *systemdManager) Enabled(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "enabled"
+}
+
+// ResetFailed clears a unit's failed state.
+func (m *systemdManager) ResetFailed(ctx context.Context, unit Unit) error {
+	return m.run(ctx, "reset-failed", unit.Name)
 }
 
 // Masked reports a masked unit (systemctl mask), persistent or runtime.
