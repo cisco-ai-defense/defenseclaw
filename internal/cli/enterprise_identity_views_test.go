@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,28 @@ func TestEnterpriseProfileExplainReadsTheManagedGateway(t *testing.T) {
 	}
 	if out.String() != "{\n  \"profile\": \"ml-team\",\n  \"match\": \"group\"\n}\n" {
 		t.Fatalf("printed %q", out.String())
+	}
+}
+
+func TestEnterpriseAgentIdentitiesRejectsUnknownAccount(t *testing.T) {
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	enterpriseIdentityViewGet = func(path string, out any) (string, error) {
+		if strings.HasPrefix(path, "/api/v1/guardrail/profiles/resolve?") {
+			return "", json.Unmarshal([]byte(`{"lookup_error":"no account named \"nosuchuser99\" on this host; check the current spelling with getent passwd or use the account uid","subject":{"user_id":""}}`), out)
+		}
+		t.Fatalf("unexpected request: %s", path)
+		return "", nil
+	}
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[1])
+	cmd.SetArgs([]string{"--user", "nosuchuser99"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "no account named") || commandExitCode(err) != 2 {
+		t.Fatalf("agent identities error = %v", err)
 	}
 }
 
