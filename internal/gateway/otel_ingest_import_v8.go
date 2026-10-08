@@ -108,10 +108,13 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		// A connector token authenticates the source, not the reported user,
 		// agent identity, or policy profile. Reject these claims before any
 		// canonical record or correlation state can treat them as local facts.
-		// Native exact records have a separate local provenance contract.
 		// Secure Client retains the pre-1.0 import behavior (issue #1092).
-		if !a.managedAIDOnly() && classification.match.Shape() != observability.InboundShapeNativeExact &&
-			unverifiedOTLPIdentityClaimV8(leaf.attributes()) {
+		// Native projection markers are sender-controlled too. Check their
+		// projected body as well as the OTLP leaf attributes.
+		if !a.managedAIDOnly() &&
+			(unverifiedOTLPIdentityClaimV8(leaf.attributes()) ||
+				(classification.match.Shape() == observability.InboundShapeNativeExact &&
+					unverifiedNativeOTLPIdentityClaimV8(leaf))) {
 			return addPrimary(leaf, otlpInboundInvalidMappedField)
 		}
 		correlated, correlationErr := a.correlateNativeOTLPLeafV8(
@@ -276,32 +279,56 @@ func primaryDispositionForInboundLeaf(result otlpInboundLeafResult) otlpInboundP
 	return otlpInboundInvalidRecord
 }
 
-// unverifiedOTLPIdentityClaimV8 checks only the sender's leaf attributes.
-// These values have no binding to the authenticated OTLP source. A local
-// identity/profile resolver may add them later, after it has verified the
-// caller and agent; accepting a sender value here would forge that result.
+// A connector token authenticates the OTLP source, not these identity and
+// profile claims. Only a local resolver may add them after verification.
+var unverifiedOTLPIdentityKeysV8 = [...]string{
+	"user.id",
+	"defenseclaw.user.id_kind",
+	"defenseclaw.user.name",
+	"defenseclaw.user.email",
+	"defenseclaw.user.principal",
+	"defenseclaw.user.domain",
+	"defenseclaw.user.directory",
+	"defenseclaw.user.tenant_id",
+	"defenseclaw.user.identity.source",
+	"defenseclaw.user.principal.assurance",
+	"defenseclaw.session.kind",
+	"defenseclaw.session.kerberos_principal",
+	"defenseclaw.agent.identity.id",
+	"defenseclaw.agent.instance_id",
+	"defenseclaw.guardrail.profile.name",
+	"defenseclaw.guardrail.profile.digest",
+	"defenseclaw.guardrail.profile.match",
+	"defenseclaw.guardrail.profile.matched_group",
+}
+
 func unverifiedOTLPIdentityClaimV8(index otlpTypedAttributeIndex) bool {
-	for _, key := range []string{
-		"user.id",
-		"defenseclaw.user.id_kind",
-		"defenseclaw.user.name",
-		"defenseclaw.user.email",
-		"defenseclaw.user.principal",
-		"defenseclaw.user.domain",
-		"defenseclaw.user.directory",
-		"defenseclaw.user.tenant_id",
-		"defenseclaw.user.identity.source",
-		"defenseclaw.user.principal.assurance",
-		"defenseclaw.session.kind",
-		"defenseclaw.session.kerberos_principal",
-		"defenseclaw.agent.identity.id",
-		"defenseclaw.agent.instance_id",
-		"defenseclaw.guardrail.profile.name",
-		"defenseclaw.guardrail.profile.digest",
-		"defenseclaw.guardrail.profile.match",
-		"defenseclaw.guardrail.profile.matched_group",
-	} {
+	for _, key := range unverifiedOTLPIdentityKeysV8 {
 		if _, state := index.lookup(key); state != otlpTypedAttributeAbsent {
+			return true
+		}
+	}
+	return false
+}
+
+func unverifiedNativeOTLPIdentityClaimV8(leaf otlpDecodedLeaf) bool {
+	if leaf.signal != otelSignalLogs || leaf.logRecord == nil {
+		return false
+	}
+	text, ok := inboundLogBodyString(leaf.logRecord.GetBody())
+	if !ok {
+		return false
+	}
+	var wire projectedLogRecordV8
+	if json.Unmarshal([]byte(text), &wire) != nil {
+		return false
+	}
+	members, err := decodeInboundJSONObject(wire.Body)
+	if err != nil {
+		return false
+	}
+	for _, key := range unverifiedOTLPIdentityKeysV8 {
+		if _, present := inboundJSONMember(members, key); present {
 			return true
 		}
 	}
