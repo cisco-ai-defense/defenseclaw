@@ -2685,6 +2685,18 @@ def test_an_ask_that_went_away_while_its_view_was_hidden_is_no_lost_selection() 
     assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-3")
 
 
+def test_an_ask_raised_again_in_an_emptied_asks_view_is_no_lost_selection() -> None:
+    """GAP-0328 (1.0.31): with the Asks view open, its one ask was rejected in
+    another terminal and raised again after the reject window; the first a
+    said it was no longer waiting."""
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1)])
+    model.view = "asks"
+    model.set_snapshot(STATUS, [RUNNING], [])
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 11)])
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1")
+
+
 def test_the_activity_selection_follows_its_event() -> None:
     model = _model()
     model.add_events([BLOCKED])
