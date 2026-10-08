@@ -20,8 +20,9 @@
 # `defenseclaw upgrade` on those versions downloads this file through the
 # signed 0.8.x release channel and runs it as
 #   bash defenseclaw-upgrade.sh [--yes] [--recover-corrupt-audit] --version X
-# This script only fetches the latest release's install.sh, checks it against
-# that release's checksums.txt, and runs it. Keep it this small: 0.8.x clients
+# This script fetches the requested release's install.sh (or the latest when
+# none was requested), verifies its checksums and signature, and runs it.
+# Keep it small: 0.8.x clients
 # run whatever version of it the channel names, so it cannot be hot-patched.
 # The last line must stay exactly as it is; 0.8.x clients require it.
 
@@ -30,14 +31,18 @@ set -eu
 dc_handoff() {
     # DEFENSECLAW_REPO only changes where the release is downloaded from; the
     # signature is always checked against the official release identity.
-    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 tag tmp expected major stamped
+    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 requested="" version_given=0 tag tmp expected major stamped
     local signer='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes|-y) yes="--yes" ;;
-            # 0.8.x always passes its channel's target; 1.x installs the latest release.
-            --version) [ "$#" -gt 1 ] && shift ;;
-            --version=*) ;;
+            --version)
+                if [ "$#" -lt 2 ]; then
+                    echo "  ✗ --version needs a release such as 1.0.0; nothing was changed" >&2
+                    return 1
+                fi
+                requested="$2"; version_given=1; shift ;;
+            --version=*) requested="${1#*=}"; version_given=1 ;;
             --plan) plan=1 ;;
             # The 1.x gateway moves a corrupt audit store aside on its own when
             # it starts, which is the recovery 0.8.x asks for with this flag.
@@ -47,6 +52,10 @@ dc_handoff() {
         esac
         shift
     done
+    if [ "${version_given}" = 1 ] && ! [[ "${requested}" =~ ^[1-9][0-9]*\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+        echo "  ✗ --version must look like 1.0.0; nothing was changed" >&2
+        return 1
+    fi
     # A computer managed by the organization is updated through its MDM.
     for descriptor in /etc/defenseclaw/managed-runtime.json /opt/cisco/defenseclaw/etc/managed-runtime.json; do
         if [ -f "${descriptor}" ] && [ ! -L "${descriptor}" ]; then
@@ -67,9 +76,13 @@ dc_handoff() {
         set -- --local "${DEFENSECLAW_UPGRADE_LOCAL_DIR}"
         tag="local"
     else
-        tag="$(curl -fsSI --proto '=https' --tlsv1.2 "https://github.com/${repo}/releases/latest" \
-            | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}' | tail -1)"
-        tag="${tag##*/tag/}"
+        if [ "${version_given}" = 1 ]; then
+            tag="${requested}"
+        else
+            tag="$(curl -fsSI --proto '=https' --tlsv1.2 "https://github.com/${repo}/releases/latest" \
+                | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}' | tail -1)"
+            tag="${tag##*/tag/}"
+        fi
         case "${tag}" in
             [1-9]*.*.*) ;;
             *) echo "  ✗ could not find a DefenseClaw 1.x release; nothing was changed" >&2; return 1 ;;
