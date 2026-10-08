@@ -105,6 +105,8 @@ type box struct {
 	// procs is the sandbox's process tree (processes.go), made once its
 	// process tree is on.
 	procs *procTree
+	// findings folds OpenShell's repeats of one finding (foldFinding).
+	findings map[string]*findingFold
 
 	hooks hookStats
 	// activeAt is the harness's latest activity and activeSince the start

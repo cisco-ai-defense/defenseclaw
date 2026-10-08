@@ -130,6 +130,12 @@ stopped`. Nothing is changed; use the install command above.
   (`openshell_telemetry_failed`).
 - Removed the `binary_drift` and `tamper_attempt` sandbox finding kinds,
   which nothing produced.
+- OpenShell's repeats of one finding within 10 minutes of a session are one
+  sandbox finding and one feed line (the next one names how many were
+  folded); "Credential-bearing traffic cannot be inspected" names the
+  conversation's credential placeholder and the new-conversation step, and
+  `defenseclaw alerts --show`/`--json` print a sandbox finding's details and
+  next step.
 - New Grafana dashboard **Sandboxes** (`defenseclaw-sandboxes`), linked from
   Overview: active sandboxes by connector, phase changes, egress by source
   (OpenShell or the DefenseClaw egress proxy) and decision, top blocked and

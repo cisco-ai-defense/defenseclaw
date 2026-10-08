@@ -236,6 +236,33 @@ class AlertFindingRowsTests(unittest.TestCase):
         show = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
         self.assertIn("rhs2-sb", show.output)
         self.assertIn("SANDBOX-OCSF-FINDING: Provider credential used at an unauthorized endpoint", show.output)
+        self.assertNotIn("Next step:", show.output)
+
+    # GAP-0377: the daemon's description and remediation say what an
+    # OpenShell finding means and what to do; --show and --json carry them.
+    def test_sandbox_finding_show_carries_details_and_next_step(self):
+        structured = dict(SANDBOX_FINDING, **{
+            "defenseclaw.finding.title": "Credential-bearing traffic cannot be inspected",
+            "defenseclaw.finding.description": "OpenShell forwards no request that carries a sandbox credential placeholder",
+            "defenseclaw.finding.remediation": "start a new conversation (`defenseclaw sandbox connect rhs2-sb`, without --continue)",
+        })
+        row = Event(action="sandbox-finding", target="", severity="HIGH", connector="claudecode",
+                    details="finding.observed", structured=structured)
+        self.app.store.log_event(row)
+        db = self.app.store.db
+        columns = {r[1] for r in db.execute("PRAGMA table_info(audit_events)")}
+        for column in ("bucket", "event_name"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        db.execute("UPDATE audit_events SET bucket='security.finding', event_name='finding.observed' WHERE id=?",
+                   (row.id,))
+        db.commit()
+        show = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(show.exit_code, 0, show.output)
+        self.assertIn("Details:   OpenShell forwards no request that carries a sandbox credential placeholder", show.output)
+        self.assertIn("Next step: start a new conversation (`defenseclaw sandbox connect rhs2-sb`", show.output)
+        rows = json.loads(self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output)
+        self.assertEqual(rows[0]["next_step"], structured["defenseclaw.finding.remediation"])
 
     def test_post_tool_finding_is_not_called_observe_mode(self):
         store = self.app.store

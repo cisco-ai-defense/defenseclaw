@@ -424,19 +424,101 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 	case ocsf.ClassAPI:
 		m.inferenceEvent(ctx, b, id, r, at)
 	case ocsf.ClassFinding:
-		severity := ocsfSeverity(r.Severity)
-		ev := audit.SandboxFindingEvent{
-			Sandbox: id, Kind: audit.SandboxFindingOCSF, Severity: severity, Title: truncate(firstNonEmpty(r.Title, "OpenShell finding"), 256),
-			Description: truncate(r.Message, 1024), Evidence: truncate(r.Raw, 1024), TargetRef: firstNonEmpty(r.Host, r.Binary),
-			Timestamp: at,
-		}
-		if c, err := parseConfidence(r.Confidence); err == nil {
-			ev.Confidence = c
-		}
-		m.tel.RecordSandboxFinding(ctx, ev)
-		m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
-			Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
+		m.ocsfFinding(ctx, b, id, name, r, at, replayed)
 	}
+}
+
+// ocsfFinding records and shows an OpenShell finding, once for its repeats
+// within findingFoldWindow (foldFinding).
+func (m *Manager) ocsfFinding(ctx context.Context, b *box, id audit.SandboxIdentity, name string, r ocsf.Record, at time.Time, replayed bool) {
+	target := firstNonEmpty(r.Host, r.Binary)
+	folded, repeats, since := m.foldFinding(b, firstNonEmpty(r.FindingType, r.Title)+"\x00"+target)
+	if folded {
+		return
+	}
+	severity := ocsfSeverity(r.Severity)
+	ev := audit.SandboxFindingEvent{
+		Sandbox: id, Kind: audit.SandboxFindingOCSF, Severity: severity, Title: truncate(firstNonEmpty(r.Title, "OpenShell finding"), 256),
+		Description: r.Message, Evidence: truncate(r.Raw, 1024), TargetRef: target,
+		Timestamp: at,
+	}
+	if uninspectableCredential(r) {
+		// OpenShell's words name neither the placeholder nor what to do.
+		ev.Description = strings.TrimSuffix(firstNonEmpty(r.Message, ev.Title), ".") + ". " + uninspectableCredentialText
+		ev.Remediation = "If the sandbox's conversation printed its environment, start a new conversation " +
+			"(`defenseclaw sandbox connect " + name + "`, without --continue)."
+	}
+	if repeats > 0 {
+		ev.Description = strings.TrimSpace(ev.Description + " (OpenShell raised it " + strconv.Itoa(repeats) +
+			" more times after the alert of " + since.UTC().Format("15:04:05") + " UTC.)")
+	}
+	ev.Description = truncate(ev.Description, 1024)
+	if c, err := parseConfidence(r.Confidence); err == nil {
+		ev.Confidence = c
+	}
+	m.tel.RecordSandboxFinding(ctx, ev)
+	m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
+		Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
+}
+
+// uninspectableCredential reports OpenShell's finding that it refused
+// credential-bearing traffic it cannot inspect, such as a request whose body
+// carries a sandbox credential placeholder (sandboxapi.PlaceholderRefusal).
+func uninspectableCredential(r ocsf.Record) bool {
+	return r.FindingType == "openshell.credentials.traffic_uninspectable" ||
+		strings.EqualFold(strings.TrimSpace(r.Title), "Credential-bearing traffic cannot be inspected")
+}
+
+// uninspectableCredentialText says what an uninspectableCredential finding
+// means for a harness, which sends its whole conversation with each request.
+const uninspectableCredentialText = "OpenShell forwards no request that carries a sandbox credential placeholder where it cannot " +
+	"substitute it, such as the body. A harness whose conversation shows a placeholder (an `env` output prints them) sends it " +
+	"with every request, so OpenShell refuses them all, to the model and to DefenseClaw's hooks; the model key, the sandbox " +
+	"token and DefenseClaw are fine."
+
+// findingFold is the fold of one OpenShell finding's repeats since its last
+// record, in the session that started at started (foldFinding).
+type findingFold struct {
+	started, since time.Time
+	repeats        int
+}
+
+// maxFindingFolds bounds the findings a sandbox keeps fold windows for.
+const maxFindingFolds = 256
+
+// foldFinding reports whether OpenShell's finding key of b (its type or
+// title, and its target) repeats one recorded within findingFoldWindow in
+// the same session: then it only counts. Otherwise it is recorded, and
+// repeats and since say how many repeats the window before it folded, from
+// when. OpenShell raises a finding again for every request it refuses on the
+// same grounds: one conversation that held a credential placeholder made a
+// HIGH alert and a feed line for each refused request (GAP-0377).
+func (m *Manager) foldFinding(b *box, key string) (folded bool, repeats int, since time.Time) {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f := b.findings[key]
+	if f != nil && f.started.Equal(b.started) {
+		if now.Sub(f.since) < findingFoldWindow {
+			f.repeats++
+			return true, 0, time.Time{}
+		}
+		repeats, since = f.repeats, f.since
+	}
+	if b.findings == nil {
+		b.findings = map[string]*findingFold{}
+	}
+	if f == nil && len(b.findings) >= maxFindingFolds {
+		for k, old := range b.findings {
+			if now.Sub(old.since) >= findingFoldWindow || !old.started.Equal(b.started) {
+				delete(b.findings, k)
+			}
+		}
+	}
+	if f != nil || len(b.findings) < maxFindingFolds {
+		b.findings[key] = &findingFold{started: b.started, since: now}
+	}
+	return false, repeats, since
 }
 
 // l7Window bounds how long after OpenShell allowed a connection the first

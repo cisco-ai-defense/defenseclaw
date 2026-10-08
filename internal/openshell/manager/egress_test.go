@@ -866,6 +866,43 @@ func TestOCSFMapping(t *testing.T) {
 	}
 }
 
+// GAP-0377: one conversation that held a credential placeholder made a HIGH
+// alert and a feed line, in OpenShell's words only, for each request
+// OpenShell refused. Repeats of one finding within the fold window are one
+// record and one line, whose record says what the placeholder does and what
+// to do; the next one after the window names the repeats, and another
+// finding is its own.
+func TestRepeatedOpenShellFindingsAreOneAlert(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "findbox"})
+	const uninspectable = `FINDING:CREATE [HIGH] "Credential-bearing traffic cannot be inspected" [type:openshell.credentials.traffic_uninspectable]`
+	for range 4 {
+		e.ocsf("findbox", uninspectable, e.m.now())
+		advance(5 * time.Second)
+	}
+	e.ocsf("findbox", `FINDING:BLOCKED [HIGH] "Binary drift detected" [confidence:0.9]`, e.m.now())
+	findings := func() []audit.SandboxFindingEvent {
+		return where(&e.tel.mu, &e.tel.findings, func(f audit.SandboxFindingEvent) bool { return f.Kind == audit.SandboxFindingOCSF })
+	}
+	got := findings()
+	if len(got) != 2 || got[0].Title != "Credential-bearing traffic cannot be inspected" || got[1].Title != "Binary drift detected" {
+		t.Fatalf("findings = %+v, want one per finding", got)
+	}
+	if f := got[0]; !strings.Contains(f.Description, "sandbox credential placeholder") || !strings.Contains(f.Description, "`env` output") ||
+		f.Remediation != "If the sandbox's conversation printed its environment, start a new conversation (`defenseclaw sandbox connect findbox`, without --continue)." {
+		t.Fatalf("finding = %+v, want the placeholder named with the next step", f)
+	}
+	if lines := e.events("findbox", sandboxapi.ActivityFinding, ""); len(lines) != 2 {
+		t.Fatalf("feed = %+v, want one line per finding", lines)
+	}
+	advance(findingFoldWindow)
+	e.ocsf("findbox", uninspectable, e.m.now())
+	if got = findings(); len(got) != 3 || !strings.Contains(got[2].Description, "(OpenShell raised it 3 more times after the alert of ") {
+		t.Fatalf("findings = %+v, want the next one to name the 3 folded repeats", got)
+	}
+}
+
 func TestRecoverCredential(t *testing.T) {
 	sb := &openshell.Sandbox{Spec: openshell.SandboxSpec{Environment: map[string]string{"HTTPS_PROXY": "http://dcx-abc:secret@host.openshell.internal:18972"}}}
 	if c, ok := recoverCredential(sb, "dcx-abc"); !ok || c.Password != "secret" {
