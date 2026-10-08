@@ -833,6 +833,7 @@ func TestRunCopyCleansItsStageAfterARolledBackCreate(t *testing.T) {
 		return nil
 	}
 	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}), "create sandbox copybox failed")
+	has(t, ta.output(), "waiting for the daemon to undo the create of copybox before removing its staged copy")
 	if !slices.Equal(ta.copy.steps, []string{"stage copybox", "discard copybox"}) {
 		t.Fatalf("copy steps = %v", ta.copy.steps)
 	}

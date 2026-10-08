@@ -1472,7 +1472,13 @@ func (a *App) discardStagedCopy(ctx context.Context, api API, name string) {
 		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 			break
 		}
-		if err != nil || !passingPhase(sb.Phase) || waited >= discardWait || a.Sleep(ctx, discardInterval) != nil {
+		if err != nil || !passingPhase(sb.Phase) || waited >= discardWait {
+			return
+		}
+		if waited == 0 {
+			a.note("waiting for the daemon to undo the create of " + name + " before removing its staged copy…")
+		}
+		if a.Sleep(ctx, discardInterval) != nil {
 			return
 		}
 	}
