@@ -292,6 +292,58 @@ func TestMapperMarksTheCollectorOpenShellStarts(t *testing.T) {
 	}
 }
 
+// The collector's script forks a subshell for each pipeline stage. The fork
+// never execs: it has an exec id and an exit, but no exec event, so its child
+// (tr) and its exit were forwarded every 5 s and filled the exited list
+// (GAP-0050). Both are the collector's now; the workload's own forks, and a
+// program the collector never runs below a fork, stay in the tree.
+func TestMapperMarksTheCollectorsForkedPipelineStages(t *testing.T) {
+	script := `"export LC_ALL=C mode=$1 max=$2" defenseclaw-collect ps 4096 64`
+	envArgs := "-i PATH=/usr/bin:/bin HOME=/sandbox LC_ALL=C /bin/bash -p -c " + script
+	init := proc{pid: 7000, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	shell := proc{pid: 7100, ktime: 1e9, docker: workload, binary: "/bin/bash", parent: &init,
+		args: `-c "timeout -k 5 10 /usr/bin/env -i 'PATH=/usr/bin:/bin' 'HOME=/sandbox' 'LC_ALL=C' /bin/bash -p -c ` + script + `"`}
+	timeout := proc{pid: 7100, ktime: 1e9 + 500, docker: workload, binary: "/usr/bin/timeout", args: "-k 5 10 /usr/bin/env " + envArgs, parent: &shell}
+	env := proc{pid: 7101, ktime: 2e9, docker: workload, binary: "/usr/bin/env", args: envArgs, parent: &timeout}
+	bash := proc{pid: 7101, ktime: 2e9 + 500, docker: workload, binary: "/bin/bash", args: "-p -c " + script, parent: &env}
+	fork := proc{pid: 7105, ktime: 3e9, docker: workload, binary: "/bin/bash", args: "-p -c " + script, parent: &bash}
+	tr := proc{pid: 7106, ktime: 3e9 + 10, docker: workload, binary: "/usr/bin/tr", args: `\n\0 \001\n`, parent: &fork}
+	idle := proc{pid: 7107, ktime: 3e9 + 20, docker: workload, binary: "/bin/bash", args: "-p -c " + script, parent: &bash}
+	curl := proc{pid: 7108, ktime: 3e9 + 30, docker: workload, binary: "/usr/bin/curl", args: "https://example.invalid", parent: &fork}
+	agent := proc{pid: 7200, ktime: 4e9, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	agentFork := proc{pid: 7201, ktime: 4e9 + 10, docker: workload, binary: "/usr/local/bin/claude", parent: &agent}
+	userTr := proc{pid: 7202, ktime: 4e9 + 20, docker: workload, binary: "/usr/bin/tr", args: "a-z A-Z", parent: &agentFork}
+	m := NewMapper(MapperConfig{Containers: testContainers(), Proc: fakeProc{
+		7000: {ns: 1}, 7100: {ns: 50}, 7101: {ns: 51}, 7105: {ns: 55}, 7106: {ns: 56}, 7107: {ns: 57}, 7108: {ns: 58},
+		7200: {ns: 60}, 7201: {ns: 61}, 7202: {ns: 62},
+	}})
+	ctx := context.Background()
+	for _, p := range []proc{shell, timeout, env, bash} {
+		if f := one(t, m.Map(ctx, execOf(p))).Frame; !f.Collector {
+			t.Fatalf("%s is not marked as the collector: %+v", p.binary, f)
+		}
+	}
+	if f := one(t, m.Map(ctx, execOf(tr))).Frame; !f.Collector {
+		t.Fatalf("the pipeline stage below the collector's fork is not marked: %+v", f)
+	}
+	if f := one(t, m.Map(ctx, execOf(curl))).Frame; f.Collector {
+		t.Fatalf("a program the collector never runs, below its fork, was left out: %+v", f)
+	}
+	for _, p := range []proc{tr, fork, idle} {
+		if f := one(t, m.Map(ctx, exitOf(p, 0, ""))).Frame; !f.Collector {
+			t.Fatalf("the exit of %d (%s) is not marked: %+v", p.pid, p.binary, f)
+		}
+	}
+	for _, p := range []proc{agent, userTr} {
+		if f := one(t, m.Map(ctx, execOf(p))).Frame; f.Collector {
+			t.Fatalf("a workload process was taken for the collector: %+v", f)
+		}
+	}
+	if f := one(t, m.Map(ctx, exitOf(agentFork, 0, ""))).Frame; f.Collector {
+		t.Fatalf("a workload fork's exit was taken for the collector's: %+v", f)
+	}
+}
+
 // A Codex notify program's arguments (the turn's JSON) never leave the feed.
 func TestMapperWithholdsNotifyArguments(t *testing.T) {
 	notify := proc{pid: 9000, ktime: 1e9, docker: workload, binary: "/sandbox/.defenseclaw/notify-bridge.sh",

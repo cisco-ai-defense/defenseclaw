@@ -221,6 +221,14 @@ func (m *Mapper) exec(ctx context.Context, response *pb.GetEventsResponse, exec 
 			m.pinned.put(frame.ParentExecID, pid)
 		}
 	}
+	if parent != nil && frame.ParentExecID != "" && !m.collectors.has(frame.ParentExecID) {
+		// The parent is a fork that never exec-ed (a pipeline stage's
+		// subshell): its exec id has no exec event, and only its own parent
+		// ties it to the collector.
+		if bounded, ok := m.forkOfCollector(parent); ok {
+			m.markCollector(frame.ParentExecID, bounded)
+		}
+	}
 	frame.Collector = m.collector(process, frame)
 	m.images.put(hostPID, execID)
 	m.count(func(s *MapperStats) {
@@ -268,6 +276,26 @@ func (m *Mapper) collector(process *pb.Process, frame sandboxfeed.Frame) bool {
 	return true
 }
 
+// forkOfCollector reports whether a process is a fork of one of the
+// collector's processes that never exec-ed: Tetragon gives the fork an exec
+// id of its own and reports its exit, but no exec, so only its parent's exec
+// id ties it to the collector. The collector's script forks a subshell for
+// each pipeline stage (`... | tr ...`), and without this the stage and the
+// fork's exit were forwarded every 5 s (GAP-0050). A fork runs its parent's
+// program, so a bounded collector's fork is one of its own programs; the
+// workload cannot make a process a child of the collector's.
+func (m *Mapper) forkOfCollector(process *pb.Process) (bounded, ok bool) {
+	parentID := redaction.TruncateUTF8(process.GetParentExecId(), sandboxfeed.MaxIDBytes)
+	if parentID == "" {
+		return false, false
+	}
+	bounded, ok = m.collectors.get(parentID)
+	if !ok || (bounded && !sandboxfeed.CollectorProgram(process.GetBinary())) {
+		return false, false
+	}
+	return bounded, true
+}
+
 func (m *Mapper) markCollector(execID string, bounded bool) {
 	if execID != "" {
 		m.collectors.put(execID, bounded)
@@ -307,6 +335,10 @@ func (m *Mapper) exit(ctx context.Context, response *pb.GetEventsResponse, exit 
 		SandboxID: container.SandboxID, SandboxName: container.SandboxName, ContainerID: container.ID, Role: container.Role,
 		ExecID: execID, HostPID: hostPID, Binary: redaction.TruncateUTF8(process.GetBinary(), sandboxfeed.MaxPathBytes),
 		Collector: m.collectors.has(execID),
+	}
+	if !frame.Collector {
+		// A fork of the collector that never exec-ed nor started a program.
+		_, frame.Collector = m.forkOfCollector(process)
 	}
 	frame.PID, _ = m.pinned.get(execID)
 	if signal := strings.TrimSpace(exit.GetSignal()); signal != "" {
