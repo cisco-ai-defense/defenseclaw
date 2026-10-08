@@ -209,10 +209,12 @@ dc_download() {
         [ "$result" = 0 ] && return 0
         case "$http_status" in 4?? | 5??) DC_DOWNLOAD_ERROR="download failed: HTTP $http_status"; return 1 ;; esac
         case "$result" in
-            6) reason="DNS lookup failed" ;; 7) reason="connection refused" ;;
-            18) reason="transfer ended early" ;; 28) reason="timed out" ;;
+            5) reason="proxy lookup failed" ;; 6) reason="DNS lookup failed" ;;
+            7) reason="connection failed" ;; 18) reason="transfer ended early" ;;
+            28) reason="timed out" ;; 35) reason="TLS handshake failed" ;;
+            52) reason="server sent no response" ;; 56) reason="connection closed during transfer" ;;
             60) reason="TLS certificate verification failed" ;;
-            *) reason="curl exit $result" ;;
+            *) reason="network error" ;;
         esac
         DC_DOWNLOAD_ERROR="download failed: $reason (curl exit $result)"
         return 1

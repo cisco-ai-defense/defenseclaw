@@ -185,7 +185,10 @@ def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
-@pytest.mark.parametrize(("http", "code", "reason"), [(302, 0, "redirected (HTTP 302)"), (404, 22, "HTTP 404")])
+@pytest.mark.parametrize(
+    ("http", "code", "reason"),
+    [(302, 0, "redirected (HTTP 302)"), (404, 22, "HTTP 404"), (0, 5, "proxy lookup failed (curl exit 5)")],
+)
 def test_unix_download_reports_status_without_url_query(
     http: int, code: int, reason: str, tmp_path: Path
 ) -> None:
