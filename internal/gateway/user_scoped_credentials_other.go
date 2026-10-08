@@ -22,6 +22,10 @@ var userScopedIdentityName = useridentity.NameForID
 // credential is bound to (the SID's ProfileList entry on Windows), or "".
 var userScopedIdentityHome = useridentity.HomeForID
 
+// agentIdentityAccountName names no account on Windows: an agent identity
+// is keyed on a SID, which no other account ever gets.
+var agentIdentityAccountName = func(string) string { return "" }
+
 // setManagedHookPeerHomeStore persists nothing on Windows: a profile path
 // comes from the SID's ProfileList entry, not from a directory lookup.
 func setManagedHookPeerHomeStore(string) {}

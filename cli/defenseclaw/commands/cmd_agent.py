@@ -5957,7 +5957,8 @@ def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
         if hint:
             root = f"{root} (agent claims {hint})"
         table.append((
-            _bounded(user, 32),
+            # A retired identity's account no longer holds its uid (GAP-0947).
+            _bounded(user, 32) + (" (retired)" if row.get("retired") else ""),
             str(row.get("connector", "")),
             str(row.get("agent_id", "")),
             str(row.get("sessions_seen", 0)),
