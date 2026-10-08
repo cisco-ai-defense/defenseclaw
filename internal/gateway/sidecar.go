@@ -81,6 +81,10 @@ type modelRouterHealthChecker interface {
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
+	// installWatcher is the running install watcher, nil while none runs;
+	// a reload that changes a denied list asks it to rescan (GAP-0627).
+	installWatcher atomic.Pointer[watcher.InstallWatcher]
+
 	startedAt  time.Time
 	cfg        *config.Config
 	cfgCurrent atomic.Pointer[config.Config]
@@ -2031,6 +2035,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	nextGen.Config = appliedCfg
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
+	if assetDenyListsChanged(oldCfg, appliedCfg) {
+		// Installed skills and plugins a new denied entry names are refused
+		// now, not when their content next changes (GAP-0627).
+		if w := s.installWatcher.Load(); w != nil {
+			w.RequestRescan()
+		}
+	}
 	if privateUpstreamsReload {
 		// Replace, rather than merge, so removing the last entry takes effect.
 		// Drop pooled transports as well: an already-idle connection otherwise
@@ -2225,6 +2236,17 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	preparedCommitted = true
 	return nil
+}
+
+// assetDenyListsChanged reports a reload that changes
+// asset_policy.skill.denied or plugin.denied outside Secure Client, whose
+// watcher keeps the cycle of main (issue #1092).
+func assetDenyListsChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Denied, newCfg.AssetPolicy.Skill.Denied) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied)
 }
 
 // inspectorNeedsRebuild reports whether any field on
@@ -3663,7 +3685,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if enrolled != nil {
 		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, w, changed)
 	}
+	s.installWatcher.Store(w)
 	runErr := w.Run(watchCtx)
+	s.installWatcher.CompareAndSwap(w, nil)
 	s.health.SetWatcher(StateStopped, "", nil)
 	if errors.Is(runErr, context.Canceled) && ctx.Err() == nil {
 		runErr = nil

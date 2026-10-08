@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -273,5 +274,42 @@ func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {
 	}
 	if fake.calls != 3 {
 		t.Fatalf("ungated: scanner calls = %d, want 3 (one per cycle)", fake.calls)
+	}
+}
+
+// GAP-0627: a skill installed before a denied entry names it is refused by
+// the next rescan cycle, without a content change, and quarantined.
+func TestRescanCycleRefusesInstalledSkillAddedToDeniedList(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Watch.RescanContentGated = true
+	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
+	if err := os.WriteFile(ocPath, []byte(`{"mcp":{"servers":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.ConfigFile = ocPath
+	skillPath := filepath.Join(skillDir, "epa-notes")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillPath, "SKILL.md"), []byte("---\nname: epa-notes\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var verdicts []AdmissionResult
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) { verdicts = append(verdicts, r) })
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+
+	ctx := context.Background()
+	w.runRescanCycle(ctx)
+	if len(verdicts) != 0 {
+		t.Fatalf("baseline cycle verdicts = %+v", verdicts)
+	}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-notes"}}
+	w.runRescanCycle(ctx)
+	if len(verdicts) != 1 || verdicts[0].Verdict != VerdictBlocked || verdicts[0].Event.Name != "epa-notes" {
+		t.Fatalf("verdicts after the deny = %+v, want epa-notes blocked", verdicts)
+	}
+	if _, err := os.Lstat(skillPath); !os.IsNotExist(err) {
+		t.Fatalf("denied skill still installed: %v", err)
 	}
 }
