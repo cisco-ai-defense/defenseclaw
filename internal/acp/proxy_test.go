@@ -111,7 +111,10 @@ func TestCopyFramesObserveFailsClosedOnRuntimeModeMismatch(t *testing.T) {
 		Mode: ModeObserve, Profile: "p", Evaluator: modeMismatchEvaluator{}, Stderr: &stderr, Managed: true,
 		SetupCommand: "/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp setup --client zed --agent kiro --profile p",
 	}, state, ClientToAgent, bytes.NewBufferString(frame), &forwarded, &rejected)
-	if !errors.Is(err, ErrModeMismatch) || !strings.Contains(err.Error(), "changed the ACP mode of profile p to action") ||
+	// An entry set up without --activate is not told that the administrator
+	// changed the mode (GAP-0924).
+	if !errors.Is(err, ErrModeMismatch) || !strings.Contains(err.Error(), "profile p is in action mode, but this editor entry is set up for observe mode") ||
+		!strings.Contains(err.Error(), "set up without --activate") ||
 		!strings.Contains(err.Error(), "enterprise acp setup --client zed --agent kiro --profile p --activate") {
 		t.Fatalf("mode drift message = %v", err)
 	}

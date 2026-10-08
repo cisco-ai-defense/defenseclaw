@@ -1047,19 +1047,21 @@ func trimFrameEnd(line []byte) []byte {
 	return bytes.TrimSuffix(line, []byte{'\r'})
 }
 
-// modeDriftError ends a session whose profile changed mode centrally. Its
-// text named "managed setup", a command no host has, and the editor showed
-// only "Agent failed to run" (GAP-0355): it now names the setup command to
-// run, with --activate when the profile moved to action mode.
+// modeDriftError ends a session whose editor entry is set up for another
+// mode than its profile has centrally. Its text named "managed setup", a
+// command no host has, and the editor showed only "Agent failed to run"
+// (GAP-0355): it now names the setup command to run, with --activate when the
+// profile is in action mode. An entry set up without --activate for an
+// action profile was told the administrator had changed the mode, which
+// nobody had (GAP-0924), so it states both modes and the possible causes.
 func modeDriftError(opts ProxyOptions) error {
 	now, command := "action", opts.setupCommandFor(opts.Profile, ModeAction)
+	cause := "it was set up without --activate, or the mode changed since"
 	if opts.Mode == ModeAction {
 		now, command = "observe", opts.setupCommandFor(opts.Profile, ModeObserve)
+		cause = "the mode changed since setup"
 	}
-	who := "the ACP mode of profile " + opts.Profile + " changed to " + now
-	if opts.Managed {
-		who = "your administrator changed the ACP mode of profile " + opts.Profile + " to " + now
-	}
+	who := fmt.Sprintf("profile %s is in %s mode, but this editor entry is set up for %s mode (%s)", opts.Profile, now, opts.Mode, cause)
 	next := "run the setup command of this editor entry again"
 	if strings.TrimSpace(opts.SetupCommand) != "" {
 		next = "run '" + command + "' to set this editor entry up again"
