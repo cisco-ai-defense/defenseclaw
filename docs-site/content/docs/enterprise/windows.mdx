@@ -202,6 +202,22 @@ it replaces the pack folder instead of copying into it. Copying a folder
 onto one that exists nests a copy (`my-pack\my-pack`), which Setup refuses,
 naming the nested folder.
 
+Then name the pack in the config and select it:
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  rule_pack: my-pack
+  custom_packs:
+    my-pack:
+      path: 'C:\ProgramData\DefenseClaw-RulePacks\my-pack'
+      digest: 'sha256:<digest>'
+```
+
+Quote Windows paths with single quotes. In double quotes YAML reads a
+backslash as the start of an escape, so `"C:\ProgramData\..."` does not
+load (`\P` is not an escape); write `\\` for each backslash if you use
+double quotes. Setup refuses such a file with `1639` and names the line.
+
 Setup checks these permissions for the service account before it changes
 anything, and stops with exit code `1639` naming the folder and the
 `icacls` grant that fixes it. Setup checks the config with the
