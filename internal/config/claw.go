@@ -340,9 +340,6 @@ func (c *Config) ReadWatchedMCPServers(connectors []string) ([]MCPServerEntry, e
 	return out, nil
 }
 
-// maxClaudeProjects bounds the projects claudeCodeProjectMCPServers reads.
-const maxClaudeProjects = 512
-
 // claudeCodeProjectMCPServers lists, for each project in the Claude Code
 // state file, the local-scope servers stored there and the project .mcp.json.
 func claudeCodeProjectMCPServers() []MCPServerEntry {
@@ -390,9 +387,6 @@ func claudeStateProjectServers(state map[string]any, readProjectMCP func(project
 		}
 	}
 	sort.Strings(projects)
-	if len(projects) > maxClaudeProjects {
-		projects = projects[:maxClaudeProjects]
-	}
 	var out []MCPServerEntry
 	for _, project := range projects {
 		if raw, ok := projectStates[project].(map[string]any); ok {
