@@ -10,7 +10,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -140,7 +142,11 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 	if m == nil {
 		return
 	}
-	disabled, haveList := s.readJetBrainsDisabled(p.config)
+	disabled, enabledSource := s.readJetBrainsDisabled(p.config)
+	enabled := EnabledOn
+	if enabledSource == SourceUnknown {
+		enabled = EnabledUnknown
+	}
 	inst := Install{Family: FamilyJetBrains, Product: jetbrainsToken(m[1]), Channel: "stable", Version: m[2]}
 	seen := map[string]bool{}
 	for _, dir := range p.pluginDirs {
@@ -180,13 +186,10 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 			plugin := Plugin{
 				ID: id, DisplayName: clean(meta.Name), Version: clean(meta.Version),
 				Publisher: clean(meta.Vendor), Scope: ScopeUser, Path: path,
-				Enabled: EnabledOn, EnabledSource: SourceDefault,
+				Enabled: enabled, EnabledSource: enabledSource,
 			}
-			if haveList {
-				plugin.EnabledSource = SourceDisabledPlugins
-				if disabled[id] {
-					plugin.Enabled = EnabledOff
-				}
+			if disabled[id] {
+				plugin.Enabled = EnabledOff
 			}
 			inst.Plugins = append(inst.Plugins, plugin)
 		}
@@ -201,13 +204,19 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 }
 
 // readJetBrainsDisabled reads disabled_plugins.txt, one plugin id a line.
-func (s *scanner) readJetBrainsDisabled(config string) (map[string]bool, bool) {
+// A missing list means the IDE default applies; an unreadable or malformed
+// list cannot establish which plugins are enabled.
+func (s *scanner) readJetBrainsDisabled(config string) (map[string]bool, string) {
 	if config == "" {
-		return nil, false
+		return nil, SourceDefault
 	}
-	data, ok := s.readFile(filepath.Join(config, "disabled_plugins.txt"))
+	path := filepath.Join(config, "disabled_plugins.txt")
+	data, ok := s.readFile(path)
 	if !ok {
-		return nil, false
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return nil, SourceDefault
+		}
+		return nil, SourceUnknown
 	}
 	out := map[string]bool{}
 	lines := bufio.NewScanner(bytes.NewReader(data))
@@ -216,7 +225,10 @@ func (s *scanner) readJetBrainsDisabled(config string) (map[string]bool, bool) {
 			out[id] = true
 		}
 	}
-	return out, true
+	if lines.Err() != nil {
+		return nil, SourceUnknown
+	}
+	return out, SourceDisabledPlugins
 }
 
 type jetbrainsPluginXML struct {
