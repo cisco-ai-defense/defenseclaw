@@ -394,6 +394,27 @@ func TestLeftoversNeedAdoption(t *testing.T) {
 	}
 }
 
+// The tmpfiles.d entry of the rpm and deb creates empty state directories
+// before the postinstall ensure runs: they are not foreign state, a file in
+// one is (GAP-0831, a regression of the GAP-0697 fix).
+func TestPackageTmpfilesDirsAreNotLeftovers(t *testing.T) {
+	h := newTestHost(t, "linux")
+	acp := h.env.P(filepath.Join(h.env.Layout.DataDir, "acp"))
+	if err := os.MkdirAll(acp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(acp, "enrollment.json")
+	if err := os.WriteFile(record, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload := h.payload("1.0.0")
+	requireError(t, h.run(Options{Action: ActionEnsure, PayloadDir: payload}), codeUnmanagedLayout)
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: payload}))
+}
+
 func TestPreStagedConfigIsNotALeftover(t *testing.T) {
 	h := newTestHost(t, "linux")
 	if err := os.MkdirAll(h.env.P(h.env.Layout.ConfigDir), 0o755); err != nil {
