@@ -418,6 +418,13 @@ func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
 	if got := enterpriseACPWindowsTargetError(cause, true); !errors.Is(got, cause) {
 		t.Fatal("the refusal dropped its cause")
 	}
+	// The refusal names the account, not only its SID (GAP-0835).
+	previousUser := enterpriseACPUser
+	t.Cleanup(func() { enterpriseACPUser = previousUser })
+	enterpriseACPUser = `HOST\dcw-user`
+	if got := enterpriseACPWindowsTargetError(&enterprisehooks.WindowsTargetSessionUnavailableError{SID: "S-1-5-21-1-2-3-1001"}, false); !strings.Contains(got.Error(), `HOST\dcw-user (S-1-5-21-1-2-3-1001) is not signed in`) {
+		t.Fatalf("no-session refusal = %q, want the account named", got)
+	}
 }
 
 func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {

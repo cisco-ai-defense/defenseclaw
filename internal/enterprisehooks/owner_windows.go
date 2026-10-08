@@ -49,6 +49,9 @@ func runAsTarget(target TargetCredentials, fn func() error) error {
 		}
 		return fn()
 	}
+	if target.AllowDisconnected {
+		return withWindowsEnterpriseTargetTokenImpersonation(sid, home, windowsEnterpriseSignedInTargetTokenResolver, fn)
+	}
 	return withWindowsEnterpriseTargetImpersonation(sid, home, fn)
 }
 

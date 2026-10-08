@@ -160,6 +160,8 @@ func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterp
 	}
 	_ = enterprisehooks.RunAsTarget(enterprisehooks.TargetCredentials{
 		UserHome: account.home, UID: account.uid, GID: account.gid, SID: account.sid,
+		// A disconnected user is signed in: list showed unknown (GAP-0835).
+		AllowDisconnected: true,
 	}, func() error {
 		row.TokenCopy, row.Setup = "missing", "not run"
 		if info, statErr := os.Lstat(tokenPath); statErr == nil && info.Mode().IsRegular() {

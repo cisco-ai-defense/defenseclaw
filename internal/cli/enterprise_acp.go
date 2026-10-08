@@ -518,10 +518,14 @@ func enterpriseACPClientIDs() []string {
 }
 
 // enterpriseACPWho names the account of an enrollment in a message: the
-// --user given, else the principal.
+// --user given, else the account name of a SID principal, else the
+// principal. A SID alone named nobody the administrator knew (GAP-0835).
 func enterpriseACPWho(enrollment enterpriseACPEnrollment) string {
 	if name := strings.TrimSpace(enterpriseACPUser); name != "" {
 		return name
+	}
+	if strings.HasPrefix(enrollment.principal, "sid:") {
+		return enterpriseACPAccountLabel(strings.TrimPrefix(enrollment.principal, "sid:"))
 	}
 	if strings.HasPrefix(enrollment.principal, "home:") && enrollment.target.home != "" {
 		// A digest of the folder named nothing the administrator typed.
@@ -549,6 +553,9 @@ func enterpriseACPTargetCredentials(enrollment enterpriseACPEnrollment) enterpri
 	return enterprisehooks.TargetCredentials{
 		UserHome: enrollment.target.home, UID: enrollment.target.uid,
 		GID: enrollment.target.gid, SID: enrollment.target.sid,
+		// A user whose RDP window was closed is still signed in (GAP-0835);
+		// Secure Client keeps main's active-session rule.
+		AllowDisconnected: cfg == nil || !cfg.SecureClientIntegration(),
 	}
 }
 
