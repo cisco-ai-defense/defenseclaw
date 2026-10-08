@@ -171,6 +171,25 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	}
 }
 
+// GAP-0646: a byte-only edit still goes through the running gateway path.
+func TestWindowsEnterpriseEnsureAppliesFormattingOnlyConfigWithoutRestart(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const next = "config_version: 9\r\nguardrail:\r\n  mode: observe # reviewed\r\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if len(stub.calls) != 2 || stub.calls[1][1] != "Verify" || len(host.writes) != 1 {
+		t.Fatalf("installer runs %q, writes %q: want status and verify only, one write", stub.calls, host.writes)
+	}
+	if got, _ := os.ReadFile(host.configPath); string(got) != next {
+		t.Fatalf("config.yaml = %q, want supplied bytes", got)
+	}
+	if !result.OK || result.Policy == nil || !result.Policy.Applied {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 // GAP-0145: the config.yaml an ensure replaces after a hand edit is kept as
 // rejected-config.yaml beside it.
 func TestWindowsEnterpriseEnsureKeepsAHandEditedConfig(t *testing.T) {

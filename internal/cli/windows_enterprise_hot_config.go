@@ -19,6 +19,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -159,7 +160,7 @@ func windowsEnterpriseHotConfigApply(
 		return false
 	}
 	changed, err := configwrite.ChangedPaths(previous, next)
-	if err != nil || len(changed) == 0 || len(configwrite.ManagedRestartRequired(changed)) > 0 {
+	if err != nil || bytes.Equal(previous, next) || len(configwrite.ManagedRestartRequired(changed)) > 0 {
 		return false
 	}
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
@@ -217,7 +218,11 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+kept)
 	}
 	applyWindowsEnterprisePolicy(ctx, result)
-	result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+strings.Join(changed, ", "))
+	changeSummary := strings.Join(changed, ", ")
+	if len(changed) == 0 {
+		changeSummary = "formatting only"
+	}
+	result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+changeSummary)
 	return true
 }
 
