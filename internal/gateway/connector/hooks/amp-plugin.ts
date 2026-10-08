@@ -315,6 +315,30 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 	return fetch(`http://localhost${path}`, { ...init, unix: DC_HOOK_SOCKET } as RequestInit)
 }
 
+// retryBusy sends the call again while the gateway answers 429: it is taking
+// all the hook calls it can, or this account is over its budget, and has not
+// evaluated the call. It waits the Retry-After the gateway asks for (1 to
+// 3 s) at most 3 times; the caller's abort signal keeps the whole exchange
+// inside the plugin timeout. The native hook runner does the same
+// (GAP-0205); without it a short burst failed the tool call (GAP-0535).
+async function retryBusy(send: () => Promise<Response>, signal: AbortSignal): Promise<Response> {
+	let response = await send()
+	for (let retry = 0; retry < 3 && response.status === 429; retry++) {
+		const asked = Number.parseInt(response.headers.get("retry-after") || "", 10)
+		const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000
+		await new Promise<void>((resolve, reject) => {
+			if (signal.aborted) return reject(new Error("DefenseClaw gateway busy"))
+			const timer = setTimeout(resolve, delay)
+			signal.addEventListener("abort", () => {
+				clearTimeout(timer)
+				reject(new Error("DefenseClaw gateway busy"))
+			}, { once: true })
+		})
+		response = await send()
+	}
+	return response
+}
+
 async function scopedHookToken(): Promise<string> {
 	const runtime = (globalThis as typeof globalThis & { Bun?: BunFileRuntime }).Bun
 	if (!runtime) throw new Error("scoped hook credential reader unavailable")
@@ -603,12 +627,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		if (token) headers.Authorization = `Bearer ${token}`
 
 		try {
-			const response = await {{if .Sandbox}}sandboxFetch(headers, body){{else}}gatewayFetch("/api/v1/amp/hook", {
+			const response = await {{if .Sandbox}}sandboxFetch(headers, body){{else}}retryBusy(() => gatewayFetch("/api/v1/amp/hook", {
 				method: "POST",
 				headers,
 				body,
 				signal: controller.signal,
-			}, token){{end}}
+			}, token), controller.signal){{end}}
 			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 
 			const data = await response.json() as GatewayResponse

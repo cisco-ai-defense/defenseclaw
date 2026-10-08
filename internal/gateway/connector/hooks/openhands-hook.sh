@@ -159,7 +159,8 @@ defenseclaw_hook_post() {
 RESPONSE=$(defenseclaw_hook_post) || {
   defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
   RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
-}{{end}}
+}
+defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')

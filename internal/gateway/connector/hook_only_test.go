@@ -3729,6 +3729,38 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 	}
 }
 
+// GAP-0535: a gateway that is taking all the hook calls it can answers 429
+// with Retry-After before it evaluates the call. The shell hook waits and
+// sends the same call again instead of failing the tool call.
+func TestOpenHandsHookScript_RetriesBusyGateway(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited","retry_after_seconds":"1"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "tok-test", HookFailMode: "closed"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, NewOpenHandsConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "openhands-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"date"}}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+t.TempDir())
+	if out, err := cmd.CombinedOutput(); err != nil || calls.Load() != 2 {
+		t.Fatalf("busy gateway: err=%v calls=%d output=%s, want one retry and an allow", err, calls.Load(), out)
+	}
+}
+
 // Hermes writes its direct-native state only on Windows; elsewhere the
 // file must not be declared as patched, or the enterprise installer
 // refuses every install for a file that never exists.

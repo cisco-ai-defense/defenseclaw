@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -676,6 +677,54 @@ print(json.dumps(module.defenseclaw_policy({
 	}
 	if _, invented := received["agent_id"]; invented {
 		t.Fatalf("actor identity was reclassified as agent_id: %#v", received)
+	}
+}
+
+// GAP-0535: a gateway that is taking all the hook calls it can answers 429
+// with Retry-After before it evaluates the call. The bridge waits and sends
+// the call again instead of failing it (owner: live OmniGent run skipped).
+func TestOmnigentPolicyBridgeRetriesBusyGateway(t *testing.T) {
+	python := omnigentTestPython(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"action":"block","reason":"blocked by test"}`))
+	}))
+	defer server.Close()
+	root := testenv.PrivateTempDir(t)
+	withOmnigentPathOverrides(t, filepath.Join(root, ".omnigent", "config.yaml"), filepath.Join(root, "site-packages"))
+	token := strings.Repeat("b", 64)
+	opts := SetupOpts{
+		DataDir:      filepath.Join(root, "defenseclaw"),
+		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
+		APIToken:     token,
+		HookFailMode: "closed",
+	}
+	writeOmnigentScopedToken(t, opts.DataDir, token)
+	conn := NewOmnigentConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Teardown(context.Background(), opts) })
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "target": "shell", "data": {"name": "shell", "arguments": {"command": "date"}}})))
+`
+	output, err := exec.Command(python, "-c", script, omnigentPolicyModulePath(opts)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute policy module: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), `"blocked by test"`) || calls.Load() != 2 {
+		t.Fatalf("busy gateway: verdict %s after %d calls, want the gateway verdict after one retry", output, calls.Load())
 	}
 }
 

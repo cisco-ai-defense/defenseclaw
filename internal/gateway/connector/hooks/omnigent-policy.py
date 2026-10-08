@@ -146,14 +146,56 @@ class _HookSocketConnection(http.client.HTTPConnection):
         self.sock = connection
 
 
-def _post_hook_socket(body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
+def _post_hook_socket(body: bytes, headers: dict[str, str]) -> tuple[int, str, bytes]:
     connection = _HookSocketConnection(_HOOK_SOCKET, _TIMEOUT_SECONDS)
     try:
         connection.request("POST", _HOOK_PATH, body=body, headers=headers)
         response = connection.getresponse()
-        return response.status, response.read(_MAX_RESPONSE_BYTES + 1)
+        return response.status, response.getheader("Retry-After") or "", response.read(_MAX_RESPONSE_BYTES + 1)
     finally:
         connection.close()
+
+
+def _post_direct(body: bytes, headers: dict[str, str]) -> tuple[int, str, bytes]:
+    request = urllib.request.Request(_ENDPOINT, data=body, headers=headers, method="POST")
+    try:
+        with _DIRECT_OPENER.open(request, timeout=_TIMEOUT_SECONDS) as response:
+            return response.status, response.headers.get("Retry-After") or "", response.read(_MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        return exc.code, (exc.headers.get("Retry-After") if exc.headers else "") or "", b""
+
+
+# A gateway that is taking all the hook calls it can, or an account over its
+# hook budget, answers 429 before it evaluates the call. The bridge sends the
+# call again after the Retry-After it asks for (1 to 3 s), at most 3 times and
+# 6 s of waiting in all, inside OmniGent's policy deadline. The native hook
+# runner does the same (GAP-0205); without it a burst failed the call (GAP-0535).
+_BUSY_RETRIES = 3
+_BUSY_WAIT_BUDGET_SECONDS = 6
+
+
+def _retry_after_seconds(value: str) -> int:
+    try:
+        seconds = int(str(value or "").strip())
+    except ValueError:
+        seconds = 1
+    return min(max(seconds, 1), 3)
+
+
+def _post(body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
+    send = _post_hook_socket if _HOOK_SOCKET else _post_direct
+    status, retry_after, response_body = send(body, headers)
+    waited = 0
+    for _ in range(_BUSY_RETRIES):
+        if status != 429:
+            break
+        delay = _retry_after_seconds(retry_after)
+        if waited + delay > _BUSY_WAIT_BUDGET_SECONDS:
+            break
+        time.sleep(delay)
+        waited += delay
+        status, retry_after, response_body = send(body, headers)
+    return status, response_body
 
 _EVENT_NAMES = {
     "request": "UserPromptSubmit",
@@ -569,25 +611,14 @@ def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
             "Content-Type": "application/json",
             "X-DefenseClaw-Client": "omnigent-policy/1.0",
         })
-        if _HOOK_SOCKET:
-            status, response_body = _post_hook_socket(body, headers)
-            if status < 200 or status >= 300:
-                return _failure(f"HTTP {status}")
-            if len(response_body) > _MAX_RESPONSE_BYTES:
-                return _failure("gateway response exceeded 1 MiB")
-            result = json.loads(response_body.decode("utf-8"))
-        else:
+        if not _HOOK_SOCKET:
             headers["Authorization"] = f"Bearer {token}"
-            request = urllib.request.Request(_ENDPOINT, data=body, headers=headers, method="POST")
-            with _DIRECT_OPENER.open(request, timeout=_TIMEOUT_SECONDS) as response:
-                if response.status < 200 or response.status >= 300:
-                    return _failure(f"HTTP {response.status}")
-                response_body = response.read(_MAX_RESPONSE_BYTES + 1)
-                if len(response_body) > _MAX_RESPONSE_BYTES:
-                    return _failure("gateway response exceeded 1 MiB")
-                result = json.loads(response_body.decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        return _failure(f"HTTP {exc.code}")
+        status, response_body = _post(body, headers)
+        if status < 200 or status >= 300:
+            return _failure(f"HTTP {status}")
+        if len(response_body) > _MAX_RESPONSE_BYTES:
+            return _failure("gateway response exceeded 1 MiB")
+        result = json.loads(response_body.decode("utf-8"))
     except Exception as exc:
         # Preserve KeyboardInterrupt/SystemExit while routing every ordinary
         # normalization, propagation, serialization, transport, read, and
