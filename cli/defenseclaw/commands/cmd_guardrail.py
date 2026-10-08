@@ -3636,11 +3636,10 @@ def use_pack_cmd(
             return
         _preflight_config_write(app)
         key = _scope_key(connector_key, None)
+        stale, dropped = _stale_rule_changes(app.cfg, fallback.path, connector_key)
         result = _write_guardrail_config(
             app,
-            [
-                config_writer.Change(f"{key}.rule_pack", unset=True),
-            ],
+            [config_writer.Change(f"{key}.rule_pack", unset=True), *stale],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
         )
@@ -3653,9 +3652,11 @@ def use_pack_cmd(
             exit_code=0,
             pack_name=fallback.pack,
             path=fallback.path,
+            dropped=dropped,
             message=(
                 f"{_connector_label(connector_key)} now uses the global rule pack '{fallback.pack}'. "
-                f"{_applied_note(app, result)}"
+                + (f"Dropped rule references the pack does not have: {'; '.join(dropped)}. " if dropped else "")
+                + _applied_note(app, result)
             ),
         )
         return
