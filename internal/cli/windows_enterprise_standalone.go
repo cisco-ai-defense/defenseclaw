@@ -286,10 +286,27 @@ func runWindowsEnterpriseStandaloneAction(
 	if action == "repair" && windowsEnterpriseIsElevated() {
 		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
 	}
+	configReplaced := ""
+	if action == "repair" || action == "upgrade" {
+		// As ensure does: never load an installed config.yaml that does not
+		// parse before the supplied one (GAP-0948).
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		if err != nil {
+			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			result.AddError("preflight_failed", err.Error())
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		if kept != "" {
+			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
+		}
+	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
 	if hookRuntimeRepaired != "" {
 		result.Changes = append(result.Changes, hookRuntimeRepaired)
+	}
+	if configReplaced != "" {
+		result.Changes = append(result.Changes, configReplaced)
 	}
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
@@ -2189,6 +2206,21 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		startOnlyKeys = keys
 		keptConfig = keepInstalledWindowsEnterpriseEditedConfig()
+	}
+	if (plan.Action == "upgrade" || plan.Action == "repair") && !statusReport.TransactionPending {
+		// The transaction must not load an installed config.yaml that does
+		// not parse before it uses the supplied one (GAP-0948).
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		if err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		if kept != "" {
+			keptConfig = kept
+			result.Changes = append(result.Changes, windowsEnterpriseUnparseableConfigChange(kept, plan.Action))
+		}
 	}
 
 	actionOpts := *opts

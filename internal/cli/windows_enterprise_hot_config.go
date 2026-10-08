@@ -31,6 +31,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -342,6 +343,13 @@ func keepWindowsEnterpriseEditedConfig(layout managed.StandaloneLayout, current 
 	if err != nil || state.ConfigSHA256 == "" || strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(current)) {
 		return ""
 	}
+	return keepWindowsEnterpriseRejectedConfig(layout, current)
+}
+
+// keepWindowsEnterpriseRejectedConfig writes current as rejected-config.yaml
+// beside config.yaml, with deployment.json's access control (administrators
+// only). It returns the kept path, or "" when it could not be kept.
+func keepWindowsEnterpriseRejectedConfig(layout managed.StandaloneLayout, current []byte) string {
 	sibling := layout.ConfigPath
 	if deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone); err == nil && deployment.MetadataPath != "" {
 		if _, err := os.Stat(deployment.MetadataPath); err == nil {
@@ -353,6 +361,76 @@ func keepWindowsEnterpriseEditedConfig(layout managed.StandaloneLayout, current 
 		return ""
 	}
 	return kept
+}
+
+// windowsEnterpriseConfigParses reports whether body is a YAML document whose
+// root is a mapping, the least any reader of config.yaml needs.
+func windowsEnterpriseConfigParses(body []byte) bool {
+	var document map[string]any
+	return yaml.Unmarshal(trimWindowsJSONBOM(body), &document) == nil && document != nil
+}
+
+// installWindowsEnterpriseSuppliedConfigOverUnparseable puts the supplied
+// config in place of an installed config.yaml that does not parse, after it
+// keeps the broken file as rejected-config.yaml (GAP-0948). Ensure CONFIG=
+// and repair CONFIG= loaded the installed file before they used the supplied
+// one: the transaction snapshot refused it, the rollback wrote its bytes
+// back, and the transaction stayed pending with every service stopped. With
+// the supplied config in place the transaction snapshots a config that
+// loads, and a rollback puts that config back. It returns the kept path, or
+// "" when there is nothing to do: no supplied config, an installed config
+// that parses, a pending transaction (its recovery restores its own
+// preimage), a source a standard user can write (the transaction refuses
+// it), or a busy lifecycle lock.
+func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (string, error) {
+	supplied := strings.TrimSpace(configPath)
+	if supplied == "" || !windowsEnterpriseIsElevated() {
+		return "", nil
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return "", nil
+	}
+	current, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil || windowsEnterpriseConfigParses(current) {
+		return "", nil
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(layout.ConfigDir), "install", "pending.json")); err == nil {
+		return "", nil
+	}
+	if windowsEnterpriseHotConfigSourceCheck(supplied) != nil {
+		return "", nil
+	}
+	next, err := readWindowsEnterpriseBoundedFile(supplied, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return "", fmt.Errorf("read the supplied config %s: %w", supplied, err)
+	}
+	if !windowsEnterpriseConfigParses(next) {
+		return "", fmt.Errorf("the installed %s does not parse, and neither does the supplied config %s: its root must be a YAML mapping", layout.ConfigPath, supplied)
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		return "", nil
+	}
+	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
+	if err != nil {
+		return "", nil
+	}
+	defer release()
+	kept := keepWindowsEnterpriseRejectedConfig(layout, current)
+	if kept == "" {
+		return "", fmt.Errorf("the installed %s does not parse and could not be kept as rejected-config.yaml", layout.ConfigPath)
+	}
+	if err := writeFileKeepingDACL(layout.ConfigPath, next, layout.ConfigPath); err != nil {
+		return "", fmt.Errorf("install the supplied config over the unparseable %s: %w", layout.ConfigPath, err)
+	}
+	return kept, nil
+}
+
+// windowsEnterpriseUnparseableConfigChange is the result line for a config
+// installWindowsEnterpriseSuppliedConfigOverUnparseable replaced.
+func windowsEnterpriseUnparseableConfigChange(kept, action string) string {
+	return "the installed config.yaml did not parse; kept it as " + kept + " and installed the supplied config before the " + action
 }
 
 // acquireWindowsEnterpriseLifecycleLock opens the lifecycle lock the way the

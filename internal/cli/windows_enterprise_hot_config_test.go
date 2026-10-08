@@ -257,6 +257,24 @@ func TestWindowsEnterpriseEnsureKeepsAHandEditedConfig(t *testing.T) {
 	}
 }
 
+// GAP-0948: ensure CONFIG= over an installed config.yaml that does not parse
+// keeps it as rejected-config.yaml and installs the supplied config before
+// the upgrade transaction, which loaded the installed file first, refused
+// it, and wrote its bytes back on rollback.
+func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t *testing.T) {
+	const broken = "an administrator edit left this line instead of YAML\n"
+	const next = "config_version: 9\nguardrail:\n  mode: action\n"
+	host, opts := newHotConfigHost(t, broken, next)
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	got, _ := os.ReadFile(host.configPath)
+	kept, _ := os.ReadFile(filepath.Join(filepath.Dir(host.configPath), "rejected-config.yaml"))
+	if len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" || string(got) != next || string(kept) != broken ||
+		!strings.Contains(strings.Join(result.Changes, "\n"), "did not parse") {
+		t.Fatalf("installer runs %q, config.yaml %q, rejected-config.yaml %q, changes %q", stub.calls, got, kept, result.Changes)
+	}
+}
+
 // GAP-0180: the policy digest call carries the service pins whichever console
 // runs it. An administrator or SYSTEM console carries none of them and the
 // managed-host guard refused the call there, so status, verify and every
