@@ -211,6 +211,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	for _, change := range result.Changes {
 		fmt.Fprintf(w, "  - %s\n", change)
 	}
+	if result.Action == enterpriseunix.ActionRotateCredentials && result.Noop && result.NoopReason == enterpriseunix.NoopNoCredentials {
+		fmt.Fprintln(w, "  no enrolled user holds a DefenseClaw credential yet: hooks use the hook socket, and the guardian creates the per-user key when it first gives a user one (agent telemetry, an in-agent plugin or ACP)")
+	}
 	if result.Action == enterpriseunix.ActionRepair && result.OK {
 		if len(result.Changes) == 0 {
 			fmt.Fprintln(w, "  nothing to repair")
