@@ -191,10 +191,11 @@ var enterpriseHookWindowsCursorAdapterRefresh = enterprisehooks.RefreshWindowsCu
 var windowsStandaloneGoOwnedPolicyMu sync.Mutex
 
 // enterpriseHookStandalonePlatformWatch starts, for the life of the watch
-// loop, the guardian's managed OpenCode plugin watch, which restores the
-// plugin right after a standard account changes its attributes instead of
-// at the next pass.
+// loop, the guardian's hook binary check and its managed OpenCode plugin
+// watch, which restores the plugin right after a standard account changes
+// its attributes instead of at the next pass.
 func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
+	go watchWindowsStandaloneHookBinary(ctx, stderr)
 	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || strings.TrimSpace(opts.OpenCodePluginPath) == "" {
 		return

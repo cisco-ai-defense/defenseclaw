@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/sys/windows"
 
@@ -37,19 +39,57 @@ import (
 // non-blocking error, so while defenseclaw-hook.exe is missing (an antivirus
 // quarantine, for example) every tool call runs unchecked. The standalone
 // guardian keeps a protected copy of the recorded hook binary in its own
-// administrator-only folder and puts it back within one cycle (GAP-0935).
+// administrator-only folder and puts it back before each reconcile, which
+// fails on the missing file, and within windowsHookBinaryCheckInterval
+// between reconciles (GAP-0935).
 
 // windowsInstallFileSDDL is the InstallFile contract of the lifecycle:
 // SYSTEM and Administrators full control, Users read and execute, protected.
 const windowsInstallFileSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)"
 
 func init() {
+	previousBefore := enterpriseHookBeforeWatchReconcile
+	enterpriseHookBeforeWatchReconcile = func(stderr io.Writer) {
+		previousBefore(stderr)
+		if enterprisehooks.WindowsStandaloneProcess() {
+			keepWindowsStandaloneHookBinary(stderr, false)
+		}
+	}
 	previous := enterpriseHookAfterWatchReconcile
 	enterpriseHookAfterWatchReconcile = func(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 		previous(ctx, stderr, run)
 		if enterprisehooks.WindowsStandaloneProcess() {
-			keepWindowsStandaloneHookBinary(stderr)
 			removeWindowsStandaloneReplacementCopies(stderr)
+		}
+	}
+}
+
+// windowsHookBinaryCheckInterval is how often the guardian checks, between
+// reconciles, that the hook binary is still in place.
+var windowsHookBinaryCheckInterval = 5 * time.Second
+
+// windowsHookBinaryMu serializes the restore between the check and the
+// reconcile; windowsHookBinaryLastErr keeps the check from logging the same
+// failure every interval.
+var (
+	windowsHookBinaryMu      sync.Mutex
+	windowsHookBinaryLastErr string
+)
+
+// watchWindowsStandaloneHookBinary restores a missing hook binary within
+// one check interval for the life of the guardian watch loop.
+func watchWindowsStandaloneHookBinary(ctx context.Context, stderr io.Writer) {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return
+	}
+	ticker := time.NewTicker(windowsHookBinaryCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			keepWindowsStandaloneHookBinary(stderr, true)
 		}
 	}
 }
@@ -92,24 +132,35 @@ func removeWindowsReplacementCopies(dir string) []string {
 	return removed
 }
 
-// keepWindowsStandaloneHookBinary keeps the guardian's copy of the recorded
-// hook binary and restores the binary from it when it is missing.
-func keepWindowsStandaloneHookBinary(stderr io.Writer) {
+// keepWindowsStandaloneHookBinary keeps the guardian copy of the recorded
+// hook binary and restores the binary from it when it is missing. With
+// onlyWhenMissing it does nothing while the binary is in place.
+func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenMissing bool) {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
 		return
 	}
+	target := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-hook.exe")
+	if _, err := os.Lstat(target); onlyWhenMissing && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	windowsHookBinaryMu.Lock()
+	defer windowsHookBinaryMu.Unlock()
 	want, err := windowsRecordedArtifactHash(roots.MetadataPath, "hook")
 	if err != nil || want == "" {
 		return
 	}
-	target := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-hook.exe")
 	copyPath := filepath.Join(roots.StateRoot, "hook-guardian", "payload", "defenseclaw-hook.exe")
 	restored, err := keepWindowsManagedFileCopy(target, copyPath, want)
-	switch {
-	case err != nil:
-		fmt.Fprintf(stderr, "[hook-guardian] %s\n", err)
-	case restored:
+	if err != nil {
+		if message := err.Error(); message != windowsHookBinaryLastErr {
+			windowsHookBinaryLastErr = message
+			fmt.Fprintf(stderr, "[hook-guardian] %s\n", message)
+		}
+		return
+	}
+	windowsHookBinaryLastErr = ""
+	if restored {
 		fmt.Fprintf(stderr, "[hook-guardian] restored the missing hook binary %s from the guardian's protected copy (sha256 %s)\n", target, want)
 	}
 }
