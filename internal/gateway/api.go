@@ -4019,6 +4019,9 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
 	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	if !secureClient {
+		input.VerifyFirstParty()
+	}
 	if secureClient {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
 		// The engine of main needed data.json: without it, main answered from

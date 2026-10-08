@@ -211,6 +211,14 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
+	err := runTree(cmd, allowManagedBreakaway)
+	return output.Bytes(), err
+}
+
+// runTree runs cmd, with the streams the caller set, inside a kill-on-close
+// Job Object: cancellation, completion and the death of this process end
+// every non-breakaway descendant.
+func runTree(cmd *exec.Cmd, allowManagedBreakaway bool) error {
 	if cmd.WaitDelay == 0 {
 		cmd.WaitDelay = capturedTreeWaitDelay
 	}
@@ -223,7 +231,7 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 
 	job, err := createCapturedProcessJob(allowManagedBreakaway)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer windows.CloseHandle(job)
 
@@ -243,7 +251,7 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	}
 
 	if err := cmd.Start(); err != nil {
-		return output.Bytes(), err
+		return err
 	}
 	var jobAssignErr error
 	assignErr := cmd.Process.WithHandle(func(handle uintptr) {
@@ -255,13 +263,13 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	if assignErr != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return output.Bytes(), fmt.Errorf("assign captured process to kill-on-close job: %w", assignErr)
+		return fmt.Errorf("assign captured process to kill-on-close job: %w", assignErr)
 	}
 	if err := resumeCapturedProcess(uint32(cmd.Process.Pid)); err != nil {
 		_ = windows.TerminateJobObject(job, 1)
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return output.Bytes(), err
+		return err
 	}
 
 	// Wait for the direct process handle rather than cmd.Wait so inherited pipe
@@ -296,7 +304,7 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 		jobErr = fmt.Errorf("terminate captured process tree: %w", jobErr)
 	}
 	if directWaitErr == nil && jobErr == nil {
-		return output.Bytes(), waitErr
+		return waitErr
 	}
-	return output.Bytes(), errors.Join(waitErr, directWaitErr, jobErr)
+	return errors.Join(waitErr, directWaitErr, jobErr)
 }

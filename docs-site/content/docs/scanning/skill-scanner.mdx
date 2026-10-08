@@ -465,7 +465,14 @@ Running a one-shot scan is a starting point. The real value is the **install wat
   <Edge from="policy" to="q" label="block" />
 </Flow>
 
-The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (a scan is cut off after `timeouts.scan_s`), so an agent session that is already open can see it in that window. A scan that fails counts as a block. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
+The order is **check the lists → scan in place → act on the verdict**. The skill is not hidden while the scan runs (a scan is cut off after `timeouts.scan_s`), so an agent session that is already open can see it in that window; `defenseclaw skill list` and the TUI show it as `pending` or `scanning` until the verdict. The watcher scans up to three new skills at once, and the skills that arrived while the gateway was stopped have two more slots of their own, so a bulk copy of skills is not admitted one after another. A scan that fails counts as a block. A scan cut off because the gateway stops, or because a config change restarts the watcher, decides nothing: the skill is not blocked, and the watcher admits it at its next start. Watcher implementation lives in [`internal/watcher/watcher.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/watcher/watcher.go).
+
+A `SKILL.md` saved as UTF-16 (Notepad's "Unicode", PowerShell 5.1 redirection) or as UTF-8 with a byte order mark is read as text: the watcher and `defenseclaw skill scan` scan a copy re-encoded as UTF-8 (the skill's own file is not changed), and `skill list` shows its front matter description. A skill too large to copy (64 MiB, 2,000 files) or holding links is refused with that reason instead.
+
+Two cases do not end in quarantine storage, and both say so in `defenseclaw alerts`, `defenseclaw skill list` and `defenseclaw skill info`:
+
+- **A skill folder that is a link** (a symlink, or a junction on Windows) is not copied: the watcher removes the link from the skills folder and never changes the folder it points to. The verdict reads `link removed` and the reason names the target. Recreate the link once you trust the skill (`defenseclaw skill allow` first).
+- **A quarantine that fails** (the quarantine folder is not writable, the disk is full, a managed account may not delete in a user's folder) leaves the files in place. The verdict reads `quarantine failed` with the error, and the install block and runtime disable stay.
 
 You don't have to wire any of that yourself. To record the severity verdicts without acting on them, set `gateway.watcher.skill.take_action` to `false`; block-list matches and failed scans are still quarantined.
 
@@ -473,7 +480,7 @@ You don't have to wire any of that yourself. To record the severity verdicts wit
 defenseclaw config set gateway.watcher.skill.take_action false
 ```
 
-The watcher also rescans the skills it already knows. When it starts, and then every `watch.rescan_interval_min` minutes (60 by default), it rescans a skill whose content or scanner fingerprint changed. The fingerprint covers the scanner version, the policy, the judge model and the enabled analyzers. Every config reload restarts the watcher in place with the new settings, so a changed scanner setting reaches skills that were installed under the old one at once. The gateway log shows `restarting watcher after config reload` and then `[rescan] scanning skill <name> (scanner-fingerprint-changed)`; `defenseclaw audit logs --grep rescan` finds them.
+The watcher also rescans the skills it already knows. When it starts, and then every `watch.rescan_interval_min` minutes (60 by default), it rescans a skill whose content or scanner fingerprint changed. The fingerprint covers the scanner version, the policy, the judge model, the enabled analyzers and the connector's rule pack; other keys (`watch.rescan_interval_min`, `admission` actions) and a gateway restart do not rescan unchanged skills. Every config reload restarts the watcher in place with the new settings, so a changed scanner setting reaches skills that were installed under the old one at once. The gateway log shows `restarting watcher after config reload` and then `[rescan] scanning skill <name> (scanner-fingerprint-changed)`; `defenseclaw audit logs --grep rescan` finds them.
 
 ## Configure the action mapping
 
@@ -529,7 +536,10 @@ other Codex skill, including CodeGuard under `.agents/skills`, is scanned. For
 [Hermes](/docs/connectors/hermes), a skill under `$HERMES_HOME/skills` is
 inventory only when it matches the installer's `.bundled_manifest` and the
 bundled source exactly; modified, extra or unverifiable copies are scanned.
-`aibom scan` counts these skills as discovery-only.
+`aibom scan` counts these skills as discovery-only. A watcher verdict on
+another connector's skill with the same name never applies to them: the
+watcher records its block, quarantine and runtime disable for the connector
+that holds the scanned copy only.
 </Callout>
 
 A named policy sets these actions for every asset type at once, as an explicit map (so it replaces the scanner gate, as noted above):
@@ -548,6 +558,7 @@ Everything the scanner does comes from `config.yaml`. Your shell environment and
 - **`.skill_scannerrc` is not read.** The upstream scanner reads that file only in its own pre-commit hook. DefenseClaw never generates it or reads it, so an rc file in a skill directory changes nothing.
 - **DefenseClaw never passes `--fail-on-severity`.** It applies the gate itself from the scanner's JSON findings (the scanner's own exit code for that option would turn findings into a failure).
 - **Exit codes fail closed.** The scanner exits 2 when the judge, behavioral or meta analyzer cannot start (a missing key, an unreachable model, a bad option). Any non-zero exit makes the scan a `scan_error`, and the message carries the scanner's stderr. The watcher blocks a skill whose scan errors; the CLI exits non-zero.
+- **A judge that does not answer fails the scan too.** When the judge starts but its calls fail (an outage, blocked egress, a model error), the scanner finishes with the static rules and reports an INFO `LLM_ANALYSIS_FAILED` finding. DefenseClaw treats that scan as failed: the watcher blocks the skill (`scanner failure (fail-closed): ... the LLM judge did not run`), `defenseclaw alerts` lists it, `defenseclaw skill info` shows the reason, `defenseclaw doctor` warns about the outage for a day, and `defenseclaw skill scan` exits non-zero. Once the judge answers again, `defenseclaw skill restore <name>` brings the skill back and it is scanned again. Pass `--no-use-llm` to `skill scan` to scan with the static rules alone on purpose.
 
 ### Changes apply without a restart
 
@@ -612,6 +623,18 @@ Without `--connector`, policy and runtime commands apply to matching configured 
 `skill list`, `skill info`, `skill scan` and the AIBOM inventory report the same policy verdict: `blocked`, `quarantined` or `allowed` from an explicit action, otherwise `rejected`, `warning` or `clean` from the latest scan and the admission actions. The list's Status column only says whether the skill is loaded (`ready`), removed from disk (`removed`) or missing. A `rejected` verdict means the policy refuses the skill at install time. A copy that is already on disk stays loaded until you run `skill block`, `skill disable` or `skill quarantine`, or accept it with `skill allow`.
 
 Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail is intact even when the manual override contradicts the watcher.
+
+### A skill you trust that the scanner quarantines
+
+Some published skills run helper code the scanner's rules flag, for example `os.system` with string formatting, `subprocess` calls, `shell=True` or a long-running loop (several skills in `anthropics/skills` do). Those findings come from cisco-ai-skill-scanner itself. Once you have reviewed the skill, allow that copy and bring it back:
+
+```bash
+defenseclaw skill allow docx --connector claudecode --reason "reviewed: helper scripts are expected"
+defenseclaw skill restore docx --connector claudecode
+defenseclaw config get asset_policy.skill.allowed      # the entry and the path it is pinned to
+```
+
+The allow entry is pinned to the path of that copy (`source_path_contains`), so a skill with the same name in another folder is still scanned and blocked. Do not lower `admission.skill.actions` or turn the scanner off to get one skill through.
 
 ## See also
 

@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -935,6 +936,10 @@ def _skill_info_card(
 
     if connector:
         info_map["connector"] = connector
+    if info_map.get("bundled"):
+        # Discovery-only: no scan or enforcement verdict applies (GAP-0393).
+        scan_entry = None
+        actions_map.pop(skill_name, None)
     if scan_entry is not None:
         info_map["scan"] = scan_entry
     action_entry = actions_map.get(skill_name)
@@ -943,6 +948,10 @@ def _skill_info_card(
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
     info_map["disabled"] = _skill_effectively_disabled(info_map, action_entry)
+    if action_entry is not None and getattr(action_entry, "reason", ""):
+        # Why the watcher held the skill (a failed scan, a refused file, a
+        # failed quarantine), not only in gateway.log (GAP-0376).
+        info_map["reason"] = action_entry.reason
     if scan_entry is not None or action_entry is not None:
         label, _, reason = _skill_policy_verdict(
             app, skill_name, skill=info_map, scan_entry=scan_entry,
@@ -1007,6 +1016,8 @@ def _print_skill_info_card(
         style = _POLICY_VERDICT_STYLES.get(verdict, "white")
         click.echo()
         click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
+        if info_map.get("reason") and verdict in ("blocked", "rejected", "quarantined", "disabled"):
+            click.echo(f"  {ux.bold('Reason:')} {info_map['reason']}")
         note = _skill_policy_note(
             info_map.get("name", skill_name), verdict, held=held,
             connector=str(info_map.get("connector") or ""),
@@ -1162,6 +1173,8 @@ def _skill_status(s: dict[str, Any]) -> str:
         return "disabled"
     if s.get("blockedByAllowlist"):
         return "blocked"
+    if s.get("admission"):
+        return str(s["admission"])
     if s.get("eligible"):
         return "active"
     return "inactive"
@@ -1185,6 +1198,8 @@ def _skill_status_display(
         return "✗ disabled"
     if s.get("blockedByAllowlist"):
         return "✗ blocked"
+    if s.get("admission"):
+        return f"… {s['admission']}"
     if action_entry and not action_entry.actions.is_empty():
         a = action_entry.actions
         if a.file == "quarantine":
@@ -1354,6 +1369,45 @@ def _skill_policy_verdicts(
     return out
 
 
+# The install watcher's list of assets it has not decided on yet
+# (internal/watcher AdmissionStateFile); older than this, the watcher is gone.
+_ADMISSION_STATE_FILE = "watcher-admission.json"
+_ADMISSION_STATE_MAX_AGE_S = 30 * 60
+
+
+def _pending_admissions(app: AppContext) -> dict[str, str]:
+    """Normalized path -> pending|scanning for skills the watcher has not admitted yet."""
+    data_dir = str(getattr(getattr(app, "cfg", None), "data_dir", "") or "")
+    path = os.path.join(data_dir, _ADMISSION_STATE_FILE) if data_dir else ""
+    try:
+        if not path or time.time() - os.path.getmtime(path) > _ADMISSION_STATE_MAX_AGE_S:
+            return {}
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for asset in doc.get("assets") or []:
+        if isinstance(asset, dict) and asset.get("type") == "skill" and asset.get("path"):
+            out[os.path.normcase(os.path.abspath(str(asset["path"])))] = str(asset.get("state") or "pending")
+    return out
+
+
+def _mark_pending_admissions(app: AppContext, skills: list[dict[str, Any]]) -> None:
+    """Show a skill the watcher has not scanned yet as pending or scanning (GAP-0341).
+
+    It used to read ready with no verdict, as if it were clean, until its turn.
+    """
+    pending = _pending_admissions(app)
+    if not pending:
+        return
+    for s in skills:
+        base = str(s.get("baseDir") or "")
+        state = pending.get(os.path.normcase(os.path.abspath(base))) if base else None
+        if state:
+            s["admission"] = state
+
+
 def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) -> None:
     """Flag off-disk skills whose files are held in quarantine.
 
@@ -1399,7 +1453,7 @@ def _collect_skills_for_connector(
         # never leak a global/peer enforcement row into this connector.
         if connector != "openclaw" and not (
             _normalize_runtime_connector(ae.connector) == _normalize_runtime_connector(connector)
-            and ae.actions.file == "quarantine"
+            and (ae.actions.file == "quarantine" or str(ae.reason or "").startswith("link removed"))
         ):
             continue
         if name not in known_names:
@@ -1432,6 +1486,17 @@ def _collect_skills_for_connector(
             known_names.add(name)
 
     _mark_quarantined_phantoms(app, skills)
+    _mark_pending_admissions(app, skills)
+
+    # Vendor-bundled skills are discovery-only: DefenseClaw never scans or
+    # blocks them, so a verdict on another connector's skill with the same
+    # name (or an older unscoped row) must not mark them quarantined or
+    # disabled (GAP-0393). The callers' maps drop those names.
+    bundled = {s.get("name", "") for s in skills if s.get("bundled")}
+    bundled -= {s.get("name", "") for s in skills if not s.get("bundled")}
+    for name in bundled:
+        actions_map.pop(name, None)
+        scan_map.pop(name, None)
 
     for discovered in skills:
         name = discovered.get("name", "")
@@ -2598,7 +2663,7 @@ def _apply_scan_enforcement(
             _verify_scan_action_persisted(
                 app, skill_name, "install", "block", scoped_connector,
             )
-            applied_actions.append("added to block list")
+            applied_actions.append("install blocked by this scan")
         except Exception as exc:  # noqa: BLE001 - preserve other defense-in-depth actions.
             click.echo(
                 f"[scan] install-block persistence failed for {skill_name!r}: {exc}",
@@ -5503,7 +5568,7 @@ def _scan_installed_skill_for_connector(
 
     if action_cfg.install == "block":
         pe.record_scan_block("skill", skill_name, connector, enforcement_reason)
-        applied_actions.append("added to block list")
+        applied_actions.append("install blocked by this scan")
 
     pe.set_source_path("skill", skill_name, skill_path, connector)
 

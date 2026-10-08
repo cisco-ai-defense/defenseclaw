@@ -2755,7 +2755,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         result = self._invoke_install(["install", "--action", "danger-pkg"])
 
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("added to block list", result.output)
+        self.assertIn("install blocked by this scan", result.output)
         self.assertIn("quarantined", result.output)
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "danger-pkg")))
 
@@ -2773,7 +2773,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
         self.assertEqual(result.exit_code, 1)
         self.assertIn("quarantined", result.output)
-        self.assertIn("block list", result.output)
+        self.assertIn("install blocked by this scan", result.output)
         # A scan verdict's install block is enforcement journal, not policy.
         journal = self.app.store.get_action("plugin", "strict-danger-pkg", "openclaw")
         self.assertEqual(journal.actions.install if journal else None, "block")

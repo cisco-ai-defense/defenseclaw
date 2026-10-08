@@ -127,6 +127,7 @@ func (w *InstallWatcher) queueSyncedSkill(ctx context.Context, path string) {
 	w.mu.Lock()
 	if _, exists := w.pending[path]; !exists {
 		w.pending[path] = time.Now()
+		defer w.state.set(w.classifyEvent(path), AdmissionPending)
 	}
 	w.mu.Unlock()
 }

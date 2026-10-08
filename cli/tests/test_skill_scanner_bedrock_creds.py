@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from defenseclaw.config import BedrockKeyConfig, LLMConfig, SkillScannerConfig
-from defenseclaw.models import ScanResult
+from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner import skill as skill_mod
 
 _ENV_KEYS = (
@@ -57,7 +57,7 @@ class TestSkillScannerBedrockInstanceRole(unittest.TestCase):
         self._env.stop()
         skill_mod._warned_llm_skips.clear()
 
-    def _scan(self, creds_found: bool, scans: int = 1):
+    def _scan(self, creds_found: bool, scans: int = 1, findings=None):
         build_analyzers = MagicMock(return_value=[])
         sdk = MagicMock()
         sdk.SkillScanner.return_value.scan_skill.return_value = MagicMock(findings=[])
@@ -65,7 +65,7 @@ class TestSkillScannerBedrockInstanceRole(unittest.TestCase):
             scanner="skill-scanner",
             target="/tmp/skill",
             timestamp=datetime.now(timezone.utc),
-            findings=[],
+            findings=findings or [],
         )
         stderr = io.StringIO()
         with patch.dict("sys.modules", {
@@ -101,6 +101,16 @@ class TestSkillScannerBedrockInstanceRole(unittest.TestCase):
         self.assertEqual(err.count("LLM analyzer skipped"), 1)
         self.assertIn("no AWS credentials found for Bedrock (auth_mode=instance_role)", err)
         self.assertNotIn("DEFENSECLAW_LLM_KEY", err)
+
+
+    def test_judge_that_did_not_answer_fails_the_scan(self):
+        # GAP-0376: the outage came back as an INFO finding and exit 0.
+        outage = Finding(
+            id="llm_analysis_failed_x", severity="INFO", title="LLM analysis failed",
+            description="The LLM analyzer encountered an error: APIConnectionError", rule_id="LLM_ANALYSIS_FAILED",
+        )
+        with self.assertRaisesRegex(skill_mod.JudgeUnavailableError, "the LLM judge did not run"):
+            self._scan(creds_found=True, findings=[outage])
 
 
 if __name__ == "__main__":

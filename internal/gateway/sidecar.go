@@ -3228,6 +3228,12 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				// schema-aware Amp resolver instead of watching static defaults.
 				compTargets["skill"] = ampWatcherSkillDirs(cfg)
 				compTargets["plugin"] = cfg.PluginDirsForConnector("amp")
+			} else if strings.EqualFold(strings.TrimSpace(conn.Name()), "codex") {
+				// Codex also loads $CODEX_HOME/skills, the folder skill list
+				// shows; watch it when it exists (GAP-0392).
+				if dir := filepath.Join(connector.CodexHomeDir(), "skills"); isExistingDir(dir) {
+					compTargets["skill"] = append(compTargets["skill"], dir)
+				}
 			} else if strings.EqualFold(strings.TrimSpace(conn.Name()), "opencode") {
 				activeRoot := ""
 				if cfg != nil {
@@ -3248,7 +3254,7 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 			skillDirs = append([]string(nil), compTargets["skill"]...)
 			src.Skill = watcherDirsFromConnector
 		default:
-			skillDirs = cfg.SkillDirs()
+			skillDirs = watcherDefaultSkillDirs(cfg, conn)
 			src.Skill = watcherDirsFromDefault
 		}
 	} else {
@@ -3268,7 +3274,7 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 			pluginDirs = append([]string(nil), connectorPluginDirs...)
 			src.Plugin = watcherDirsFromConnector
 		default:
-			pluginDirs = cfg.PluginDirs()
+			pluginDirs = watcherDefaultPluginDirs(cfg, conn)
 			src.Plugin = watcherDirsFromDefault
 		}
 	} else {
@@ -3276,6 +3282,95 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	}
 
 	return skillDirs, pluginDirs, src
+}
+
+// watcherDefaultSkillDirs is the config layout of conn's skill folders, or
+// of the active connector's without one.
+func watcherDefaultSkillDirs(cfg *config.Config, conn connector.Connector) []string {
+	if conn != nil {
+		return cfg.SkillDirsForConnector(conn.Name())
+	}
+	return cfg.SkillDirs()
+}
+
+// watcherDefaultPluginDirs is the config layout of conn's plugin folders, or
+// of the active connector's without one.
+func watcherDefaultPluginDirs(cfg *config.Config, conn connector.Connector) []string {
+	if conn != nil {
+		return cfg.PluginDirsForConnector(conn.Name())
+	}
+	return cfg.PluginDirs()
+}
+
+func isExistingDir(dir string) bool {
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
+}
+
+// watcherConnectors resolves every configured connector, owners of a shared
+// folder layout first (enrolledRootPrecedence). A per-user watcher watches
+// the skill and plugin folders of each one, not only the first connector's
+// (GAP-0392). With no connector configured it resolves the default, as before.
+func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.Connector {
+	names := cfg.ActiveConnectors()
+	if len(names) == 0 {
+		names = []string{configuredConnectorName(cfg)}
+	}
+	sort.SliceStable(names, func(i, j int) bool {
+		if pi, pj := enrolledRootPrecedence(names[i]), enrolledRootPrecedence(names[j]); pi != pj {
+			return pi < pj
+		}
+		return names[i] < names[j]
+	})
+	conns := make([]connector.Connector, 0, len(names))
+	for _, name := range names {
+		conn, err := resolveActiveConnector(reg, name, "watcher")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
+			continue
+		}
+		conns = append(conns, conn)
+	}
+	return conns
+}
+
+// resolveWatcherDirsForConnectors is resolveWatcherDirs over every connector:
+// the union of their folders, each discovered folder tagged with the first
+// connector that lists it (roots). Explicit gateway.watcher dirs apply once
+// and are not tagged.
+func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources) {
+	if len(conns) == 0 {
+		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
+		return skillDirs, pluginDirs, nil, src
+	}
+	roots = map[string]string{}
+	seenSkill, seenPlugin := map[string]bool{}, map[string]bool{}
+	add := func(out *[]string, seen map[string]bool, dirs []string, owner string, tag bool) {
+		for _, dir := range dirs {
+			key := filepath.Clean(dir)
+			if runtime.GOOS == "windows" {
+				key = strings.ToLower(key)
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			*out = append(*out, dir)
+			if tag {
+				roots[dir] = owner
+			}
+		}
+	}
+	for i, conn := range conns {
+		skills, plugins, connSrc := resolveWatcherDirs(cfg, conn, wcfg)
+		if i == 0 {
+			src = connSrc
+		}
+		owner := strings.ToLower(strings.TrimSpace(conn.Name()))
+		add(&skillDirs, seenSkill, skills, owner, connSrc.Skill != watcherDirsFromConfig)
+		add(&pluginDirs, seenPlugin, plugins, owner, connSrc.Plugin != watcherDirsFromConfig)
+	}
+	return skillDirs, pluginDirs, roots, src
 }
 
 // absoluteDirs returns dirs without its relative entries.
@@ -3404,12 +3499,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	// the watcher useful for the OpenClaw default flow even while a
 	// freshly-broken connector name is being debugged.
 	reg := connector.NewDefaultRegistry()
-	conn, err := resolveActiveConnector(reg, configuredConnectorName(s.currentConfig()), "watcher")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
-	}
-
-	skillDirs, pluginDirs, src := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
+	conns := watcherConnectors(reg, s.currentConfig())
+	skillDirs, pluginDirs, roots, src := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
 	var enrolled *enrolledWatchSet
 	if cfg := s.currentConfig(); cfg != nil && !watcherUsesConnectorDirs(cfg) {
 		if src.Skill != watcherDirsFromConfig {
@@ -3511,16 +3602,40 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
 		w.SetMCPServerSource(enrolled.live.list)
+	} else {
+		if len(conns) > 1 {
+			// Each folder belongs to the connector that lists it, so its
+			// events, rule pack and enforcement are that connector's
+			// (GAP-0392).
+			w.SetRootConnectors(roots)
+		}
+		if cfg := s.currentConfig(); watcherUsesConnectorDirs(cfg) && !cfg.SecureClientIntegration() {
+			// Every connector's servers in every scope, admitted when they
+			// appear: claude mcp add and .mcp.json servers were never
+			// scanned (GAP-0405).
+			names := make([]string, 0, len(conns))
+			for _, conn := range conns {
+				names = append(names, conn.Name())
+			}
+			w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+				return s.currentConfig().ReadWatchedMCPServers(names)
+			})
+			w.SetMCPDiscoveryPoll(true)
+		}
 	}
-	if conn != nil {
-		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
+	var artifacts []string
+	bundledSet := false
+	for _, conn := range conns {
+		artifacts = append(artifacts, connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
-		}))
-		if bundled, ok := conn.(connector.BundledPluginChecker); ok {
+		})...)
+		if bundled, ok := conn.(connector.BundledPluginChecker); ok && !bundledSet {
+			bundledSet = true
 			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
 			w.SetBundledPluginDir(bundled.BundledPluginDir())
 		}
 	}
+	w.SetManagedArtifacts(artifacts)
 	watcherRuntime, _ := s.observabilityV8LifecycleRuntime().(watcher.ObservabilityV8Runtime)
 	w.BindObservabilityV8(watcherRuntime)
 	if webhooks := s.webhooksSnapshot(); webhooks != nil {

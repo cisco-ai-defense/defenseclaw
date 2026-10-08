@@ -256,14 +256,22 @@ It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exac
 
 ## Continuous protection
 
-MCP servers are not found by watching files. They are admitted through the CLI
-and rescanned on a schedule:
+MCP servers are admitted through the CLI, admitted when the agent's own
+commands add them, and rescanned on a schedule:
 
 <Steps>
   <Step>
     **Scan on add.** `defenseclaw mcp set <name> ...` scans the server before
     writing it into the connector's MCP config, unless you pass `--skip-scan`.
     A scan failure stops the add.
+  </Step>
+  <Step>
+    **Admit what the agent adds.** The gateway reads every configured
+    connector's servers in every scope, including Claude Code's local scope
+    (`claude mcp add`) and each project's `.mcp.json` for every project Claude
+    Code knows, and within about 30 seconds scans and admits a server it has
+    not seen before, as `mcp set` would. A server that was there when the
+    gateway started is scanned once to record its baseline.
   </Step>
   <Step>
     **Act on the verdict.** The top severity maps through `admission.mcp` (below):

@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -96,6 +97,9 @@ type AdmissionResult struct {
 	// ScanID is the scan_results row admission recorded, or "" when no
 	// scan was logged. It becomes the rescan baseline's scan (GAP-2507).
 	ScanID string
+	// Interrupted is a scan the watcher's own stop cut off: nothing was
+	// decided, no baseline is kept, and the next start admits the asset.
+	Interrupted bool
 }
 
 // OnAdmission is called after each install event is processed.
@@ -206,6 +210,30 @@ type InstallWatcher struct {
 	// mcpMu serializes MCP admission between that loop and the rescan
 	// cycle, so a server is admitted once.
 	mcpMu sync.Mutex
+
+	// binaryVersions caches each scanner binary's probed --version.
+	binaryVersions sync.Map
+
+	// state publishes the assets awaiting admission (AdmissionStateFile).
+	state *admissionState
+	// inFlight are the queued paths an admission worker holds (under mu);
+	// an event for one waits in pending until that admission ends.
+	inFlight map[string]bool
+	// liveSlots and startupSlots bound the concurrent admissions of the
+	// live watcher and of the startup rescan; admissions tracks them.
+	liveSlots    chan struct{}
+	startupSlots chan struct{}
+	admissions   sync.WaitGroup
+	// admitMu serializes onAdmit, which admission workers call.
+	admitMu sync.Mutex
+	// fpMu guards a rescan cycle's fingerprint cache.
+	fpMu sync.Mutex
+
+	// pollMCP has Run look for MCP servers added outside `mcp set` every
+	// mcpDiscoveryInterval (SetMCPDiscoveryPoll); firstCycleDone gates it
+	// until the first rescan cycle recorded the existing servers.
+	pollMCP        bool
+	firstCycleDone atomic.Bool
 }
 
 type rootConnector struct {
@@ -243,6 +271,11 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		rescanNow:  make(chan struct{}, 1),
 
 		admitMCPNow: make(chan struct{}, 1),
+
+		state:        newAdmissionState(cfg.DataDir),
+		inFlight:     make(map[string]bool),
+		liveSlots:    make(chan struct{}, liveAdmissionWorkers),
+		startupSlots: make(chan struct{}, startupAdmissionWorkers),
 	}
 }
 
@@ -331,20 +364,67 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 		if !names[server.Name] || server.Bundled {
 			continue
 		}
-		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: server.Name, Connector: server.Connector, Timestamp: time.Now().UTC()}
+		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector, Timestamp: time.Now().UTC()}
 		w.mcpMu.Lock()
 		if _, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path); errors.Is(err, sql.ErrNoRows) {
 			if snap, err := w.snapshotForEvent(evt); err == nil {
 				fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
 				res := w.runAdmission(ctx, evt)
-				if w.onAdmit != nil {
-					w.onAdmit(res)
+				w.notifyAdmission(res)
+				if !res.Interrupted {
+					w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
 				}
-				w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
 			}
 		}
 		w.mcpMu.Unlock()
 	}
+}
+
+// mcpDiscoveryInterval is how often a per-user watcher looks for MCP
+// servers added outside `defenseclaw mcp set`.
+var mcpDiscoveryInterval = 30 * time.Second
+
+// SetMCPDiscoveryPoll has the watcher admit, within mcpDiscoveryInterval, an
+// MCP server added by the agent's own commands (claude mcp add, an edited
+// .mcp.json) instead of at the next hourly rescan (GAP-0405). Call it after
+// SetMCPServerSource and before Run.
+func (w *InstallWatcher) SetMCPDiscoveryPoll(enabled bool) {
+	w.pollMCP = enabled && w.admitNewMCP
+}
+
+func (w *InstallWatcher) mcpDiscoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(mcpDiscoveryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.discoverAddedMCPServers()
+		}
+	}
+}
+
+// discoverAddedMCPServers queues for admission the MCP servers that have no
+// baseline yet, once the first rescan cycle recorded the existing ones.
+func (w *InstallWatcher) discoverAddedMCPServers() {
+	if !w.firstCycleDone.Load() || w.store == nil {
+		return
+	}
+	servers, err := w.readMCPServers()
+	if err != nil {
+		return
+	}
+	var added []string
+	for _, server := range servers {
+		if strings.TrimSpace(server.Name) == "" || server.Bundled {
+			continue
+		}
+		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), MCPEventPath(server)); errors.Is(err, sql.ErrNoRows) {
+			added = append(added, server.Name)
+		}
+	}
+	w.AdmitAddedMCPServers(added)
 }
 
 // readMCPServers is the MCP server list admission and the rescan use.
@@ -584,6 +664,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	if w.admitNewMCP {
 		go w.addedMCPLoop(ctx)
 	}
+	if w.pollMCP {
+		if !w.cfg.Watch.RescanEnabled {
+			w.firstCycleDone.Store(true)
+		}
+		go w.mcpDiscoveryLoop(ctx)
+	}
 
 	ticker := time.NewTicker(w.debounce)
 	defer ticker.Stop()
@@ -591,6 +677,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			// In-flight admissions see the stop and end without a verdict
+			// (GAP-0335); wait for them before the store goes away.
+			w.admissions.Wait()
+			w.state.reset()
 			_ = w.logger.LogAction(string(audit.ActionWatchStop), "", "context cancelled")
 			return ctx.Err()
 
@@ -653,11 +743,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				evtType = "rename"
 			}
 			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(queued).Type.String(), "")
-			w.mu.Lock()
-			if _, exists := w.pending[queued]; !exists {
-				w.pending[queued] = time.Now()
-			}
-			w.mu.Unlock()
+			w.queuePending(queued)
 
 		case err, ok := <-fsw.Errors:
 			if !ok {
@@ -685,33 +771,93 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 }
 
+// queuePending queues path for admission after the debounce and shows it
+// as pending (AdmissionStateFile).
+func (w *InstallWatcher) queuePending(path string) {
+	w.mu.Lock()
+	_, exists := w.pending[path]
+	if !exists {
+		w.pending[path] = time.Now()
+	}
+	w.mu.Unlock()
+	if !exists {
+		w.state.set(w.classifyEvent(path), AdmissionPending)
+	}
+}
+
+// processPending hands each debounced path to an admission worker. At most
+// liveAdmissionWorkers scans run at once, and the Run loop keeps reading
+// events while they do: a bulk drop of skills used to be admitted one at a
+// time, about one a minute with the judge, each skill loaded and unscanned
+// until its turn (GAP-0341).
 func (w *InstallWatcher) processPending(ctx context.Context) {
 	w.mu.Lock()
 	now := time.Now()
 	var ready []string
 	for path, firstSeen := range w.pending {
+		if w.inFlight[path] {
+			continue // admitted again once the running admission ends
+		}
 		if now.Sub(firstSeen) >= w.debounce {
 			ready = append(ready, path)
 		}
 	}
 	for _, p := range ready {
 		delete(w.pending, p)
+		w.inFlight[p] = true
 	}
 	w.mu.Unlock()
 
 	for _, path := range ready {
 		if _, err := os.Stat(path); err != nil {
+			w.endAdmission(path)
 			continue
 		}
-		for _, evt := range w.pendingInstallEvents(path) {
-			snap := w.admissionSnapshot(evt)
-			result := w.runAdmission(ctx, evt)
-			w.recordAdmissionBaseline(evt, snap, result.ScanID)
-			if w.onAdmit != nil {
-				w.onAdmit(result)
+		events := w.pendingInstallEvents(path) // Run goroutine state
+		w.admissions.Add(1)
+		go func() {
+			defer w.admissions.Done()
+			defer w.endAdmission(path)
+			select {
+			case w.liveSlots <- struct{}{}:
+			case <-ctx.Done():
+				return // no baseline: the next start admits it
 			}
-		}
+			defer func() { <-w.liveSlots }()
+			for _, evt := range events {
+				if ctx.Err() != nil {
+					return
+				}
+				w.state.set(evt, AdmissionScanning)
+				snap := w.admissionSnapshot(evt)
+				result := w.runAdmission(ctx, evt)
+				w.recordAdmissionBaseline(evt, snap, result.ScanID)
+				w.state.clear(evt.Path)
+				w.notifyAdmission(result)
+			}
+		}()
 	}
+}
+
+// endAdmission releases a queued path an admission worker held.
+func (w *InstallWatcher) endAdmission(path string) {
+	w.mu.Lock()
+	delete(w.inFlight, path)
+	w.mu.Unlock()
+	w.state.clear(path)
+}
+
+// waitAdmissions waits for the admissions processPending started.
+func (w *InstallWatcher) waitAdmissions() { w.admissions.Wait() }
+
+// notifyAdmission reports an admission result; workers call it one at a time.
+func (w *InstallWatcher) notifyAdmission(res AdmissionResult) {
+	if w.onAdmit == nil {
+		return
+	}
+	w.admitMu.Lock()
+	defer w.admitMu.Unlock()
+	w.onAdmit(res)
 }
 
 // pendingInstallEvents expands a top-level Hermes category notification into
@@ -875,7 +1021,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 	}
 
-	pe := enforce.NewPolicyEngine(w.store)
 	targetType := string(evt.Type)
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
 	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID)
@@ -960,6 +1105,24 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	// An MCP event's Path is its watcher key; the scanner gets the server.
 	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	if err == nil && !w.secureClientActive() {
+		err = scanner.JudgeFailure(result)
+	}
+	if err != nil && ctx.Err() != nil && !w.secureClientActive() {
+		// The watcher itself is stopping (a config reload restarts it, or
+		// the gateway stops), not the scanner failing: the scan was cut off
+		// with nothing known about the asset. It is not blocked, and with no
+		// baseline the next start admits it (GAP-0335). A scan that times
+		// out or fails while the watcher runs still fails closed below.
+		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
+			fmt.Sprintf("type=%s scanner=%s error=interrupted: the watcher is stopping", targetType, s.Name()))
+		fmt.Fprintf(os.Stderr, "[watch] %s %s: scan interrupted because the watcher is stopping; the next start admits it\n",
+			evt.Type, evt.Name)
+		w.recordAdmission(ctx, "scan-error", targetType)
+		res = AdmissionResult{Event: evt, Verdict: VerdictScanError, Interrupted: true,
+			Reason: "scan interrupted: the watcher is stopping; the next start admits it"}
+		return res
+	}
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
@@ -972,13 +1135,27 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		// Treat scanner failures as fail-closed: enforce a block
 		// (which quarantines + disables per fallback policy) before
 		// surfacing the verdict to the sidecar.
-		w.enforceBlock(ctx, evt)
+		reason := fmt.Sprintf("scanner failure (fail-closed): %v", err)
+		if w.secureClientActive() {
+			w.enforceBlock(ctx, evt)
+		} else {
+			// The reason goes on the quarantine record (skill info) and
+			// in an alert, not only in gateway.log (GAP-0376).
+			w.enforceBlockWith(ctx, evt, true, reason)
+			_ = w.logger.LogEventCtx(ctx, audit.Event{
+				Action:   string(audit.ActionWatcherBlock),
+				Target:   evt.Path,
+				Actor:    "defenseclaw",
+				Details:  fmt.Sprintf("type=%s scan failed, blocked: %s", targetType, reason),
+				Severity: "HIGH",
+			})
+		}
 		_ = w.logger.LogAction("install-blocked", evt.Path,
 			fmt.Sprintf("type=%s reason=scanner-error scanner=%s (F-3187)",
 				targetType, s.Name()))
 		w.recordAdmission(ctx, "scan-error", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked,
-			Reason:        fmt.Sprintf("scanner failure (fail-closed): %v", err),
+			Reason:        reason,
 			InstallAction: "block",
 		}
 		return res
@@ -1024,7 +1201,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	}
 
 	out = w.evaluateAdmission(ctx, input)
-	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
+	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
 	res = AdmissionResult{
@@ -1046,10 +1223,7 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 	block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: targetType, Name: evt.Name, Connector: connector, SourcePath: evt.Path,
 	})
-	if cfg.SecureClientIntegration() {
-		block, allow = w.legacyListEntries("block"), w.legacyListEntries("allow")
-	}
-	return policy.AdmissionInput{
+	input := policy.AdmissionInput{
 		TargetType: targetType,
 		TargetName: evt.Name,
 		Path:       evt.Path,
@@ -1057,6 +1231,12 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 		AllowList:  allow,
 		Admission:  policy.AdmissionFor(policy.CompileAdmission(cfg), targetType),
 	}
+	if cfg.SecureClientIntegration() {
+		input.BlockList, input.AllowList = w.legacyListEntries("block"), w.legacyListEntries("allow")
+	} else {
+		input.VerifyFirstParty()
+	}
+	return input
 }
 
 // legacyListEntries is the Secure Client operator list read from the
@@ -1124,7 +1304,7 @@ func (w *InstallWatcher) evaluateAdmission(ctx context.Context, input policy.Adm
 // perform itself. It respects file_action and install_action from OPA output.
 //
 // The caller has already returned for block- and allow-listed items.
-func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enforce.PolicyEngine, out *policy.AdmissionOutput, evt InstallEvent, targetType string, result *scanner.ScanResult, scannerName string) {
+func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *policy.AdmissionOutput, evt InstallEvent, targetType string, result *scanner.ScanResult, scannerName string) {
 	switch out.Verdict {
 	case "clean":
 		_ = w.logger.LogAction(string(audit.ActionInstallClean), evt.Path,
@@ -1136,6 +1316,11 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 
 		if w.takeActionFor(evt) {
 			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
+			if !w.secureClientActive() {
+				// Name the findings that decided it, so the alert and skill
+				// info show why the skill was blocked (GAP-0418).
+				blockReason += decidingFindings(result)
+			}
 			// An operator restore keeps the files only while the install
 			// block it left in place remains. Decide that before this scan
 			// adds its own block: after an unblock + restore, the block below
@@ -1146,11 +1331,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			installAction := coalesce(out.InstallAction, "block")
 			runtimeAction := coalesce(out.RuntimeAction, "allow")
 			fileAction := coalesce(out.FileAction, "none")
+			scope := w.journalScope(w.eventConnector(evt))
 
 			if installAction == "block" {
-				_ = pe.Block(targetType, evt.Name, blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", blockReason)
 			}
-			pe.SetSourcePath(targetType, evt.Name, evt.Path)
+			_ = w.store.SetSourcePathForConnector(targetType, evt.Name, scope, evt.Path)
 
 			enforcement := map[string]string{
 				"source_path": evt.Path,
@@ -1159,11 +1345,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 				"file":        fileAction,
 			}
 
-			if fileAction == "quarantine" && !retainRestored {
-				_ = pe.Quarantine(targetType, evt.Name, blockReason)
+			secureClient := w.secureClientActive()
+			if fileAction == "quarantine" && !retainRestored && secureClient {
+				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "file", "quarantine", blockReason)
 			}
 			if runtimeAction == "block" {
-				_ = pe.Disable(targetType, evt.Name, blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "runtime", "disable", blockReason)
 			}
 
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
@@ -1173,7 +1360,21 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			// shorthand (install block, runtime disable, file none) leaves
 			// them where they are.
 			if fileAction == "quarantine" {
-				w.enforceBlockWith(ctx, evt, retainRestored)
+				err := w.enforceBlockWith(ctx, evt, retainRestored, "")
+				if !retainRestored && !secureClient {
+					// The journal says quarantined only once the files are
+					// in quarantine storage; a failed move says so, plainly,
+					// and the block and runtime disable stay (GAP-0394).
+					switch {
+					case err == nil:
+						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "file", "quarantine", blockReason)
+					case errors.Is(err, errLinkRemoved):
+						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", err.Error())
+					default:
+						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block",
+							quarantineFailedReason+err.Error())
+					}
+				}
 			}
 		}
 	case "warning":
@@ -1272,6 +1473,48 @@ func (w *InstallWatcher) withRulePackOverlay(inner scanner.Scanner, evt InstallE
 	return guardrail.NewArtifactOverlay(inner, w.rulePackSource(w.eventConnector(evt)))
 }
 
+// decidingFindings names up to three findings at the scan's top severity,
+// as ": RULE title; RULE title", or "" when there are none.
+func decidingFindings(result *scanner.ScanResult) string {
+	if result == nil {
+		return ""
+	}
+	top := result.MaxSeverity()
+	var named []string
+	for _, f := range result.Findings {
+		if f.Severity != top {
+			continue
+		}
+		label := strings.TrimSpace(f.RuleID + " " + f.Title)
+		if label == "" {
+			continue
+		}
+		if len(named) == 3 {
+			named = append(named, "...")
+			break
+		}
+		named = append(named, label)
+	}
+	if len(named) == 0 {
+		return ""
+	}
+	return ": " + strings.Join(named, "; ")
+}
+
+// journalScope is the connector the watcher's automatic enforcement rows
+// belong to: the connector that holds the scanned copy, so blocking one
+// connector's skill no longer disables another connector's skill (a
+// vendor-bundled one included) that only shares its name (GAP-0393).
+// OpenClaw, whose gateway enforces by name, and the Secure Client watcher
+// keep the global row.
+func (w *InstallWatcher) journalScope(connector string) string {
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	if w.secureClientActive() || connector == "openclaw" {
+		return ""
+	}
+	return connector
+}
+
 // takeActionFor returns whether enforcement actions should be applied for the
 // given event type, using the per-type gateway watcher config with a fallback
 // to the legacy watch.auto_block flag.
@@ -1289,20 +1532,31 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 }
 
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
-	w.enforceBlockWith(ctx, evt, true)
+	w.enforceBlockWith(ctx, evt, true, "")
 }
 
+// quarantineFailedReason and errLinkRemoved lead the journal reason of a
+// blocked asset the watcher could not move into quarantine storage, and of a
+// linked one it took out of the folder; skill list and skill info show them
+// (cli/defenseclaw/commands/__init__.py compute_verdict reads the prefixes).
+const quarantineFailedReason = "quarantine failed: "
+
+var errLinkRemoved = errors.New("link removed")
+
 // enforceBlockWith applies the block; honorRestore keeps the files of an
-// operator-restored asset whose earlier install block still stands.
-func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
+// operator-restored asset whose earlier install block still stands. reason,
+// when set, is the quarantine record's reason (skill info shows it). The
+// error is a failed quarantine (already reported) or errLinkRemoved.
+func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) error {
 	switch evt.Type {
 	case InstallMCP:
 		// MCP servers have no filesystem artifact to quarantine. The sidecar's
 		// handleMCPAdmission applies the block verdict to the connector's MCP
 		// configuration from the admission result this watcher publishes.
 	case InstallSkill, InstallPlugin:
-		w.quarantineAssetWith(ctx, evt, honorRestore)
+		return w.quarantineAssetWith(ctx, evt, honorRestore, reason)
 	}
+	return nil
 }
 
 // pluginCategoryQuarantineDir is the quarantine tree of plugins in a Hermes
@@ -1310,18 +1564,22 @@ func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent,
 const pluginCategoryQuarantineDir = "plugin-categories"
 
 func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
-	w.quarantineAssetWith(ctx, evt, true)
+	_ = w.quarantineAssetWith(ctx, evt, true, "")
 }
 
-func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
+func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool, reason string) error {
 	if w == nil || w.cfg == nil || w.store == nil {
-		w.emitQuarantineFailure(ctx, evt, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
-		return
+		err := fmt.Errorf("watcher: quarantine provenance store is unavailable")
+		w.emitQuarantineFailure(ctx, evt, err)
+		return err
 	}
 	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
 		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
 			fmt.Sprintf("type=%s restored physical files retained while install block remains", evt.Type))
-		return
+		return nil
+	}
+	if !w.secureClientActive() && enforce.IsLinkedAsset(evt.Path) {
+		return w.removeLinkedAsset(ctx, evt)
 	}
 	connector := w.eventConnector(evt)
 	// The admission identity is connector-defined and may come from an asset
@@ -1336,7 +1594,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
-		return
+		return err
 	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
 		// A plugin in a category folder keeps its category in quarantine, so
@@ -1352,7 +1610,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,
 		OriginalPath: plan.SourcePath, QuarantinePath: plan.QuarantinePath,
-		ContentHash: plan.ContentHash, Reason: "watcher enforcement",
+		ContentHash: plan.ContentHash, Reason: coalesce(reason, "watcher enforcement"),
 		State: audit.QuarantineStatePending, OwnershipJSON: plan.OwnershipJSON,
 		// The physical owner and global action scope are committed together so
 		// either Go or Python restore clears the exact logical file decision.
@@ -1360,7 +1618,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	})
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
-		return
+		return err
 	}
 	if record.State == audit.QuarantineStateRestoring &&
 		sameWatcherPath(record.RestorePath, plan.SourcePath) {
@@ -1368,7 +1626,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		if hashErr == nil && matches {
 			_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
 				fmt.Sprintf("type=%s restore in progress; physical files retained", evt.Type))
-			return
+			return nil
 		}
 	}
 	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
@@ -1378,7 +1636,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
 		}
 		w.emitQuarantineFailure(ctx, evt, err)
-		return
+		return err
 	}
 	if err := w.store.UpdateQuarantineRecordState(
 		ctx, record.ID, audit.QuarantineStateActive, "",
@@ -1388,6 +1646,32 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		fmt.Fprintf(os.Stderr, "[watch] quarantine provenance remains pending for %s: %v\n", evt.Path, err)
 	}
 	w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, plan.QuarantinePath)
+	return nil
+}
+
+// removeLinkedAsset takes a skill or plugin that is a symlink or Windows
+// junction out of the watched folder: the link is removed and the folder it
+// points to is never touched (GAP-0394). Before, quarantine refused the link
+// and only gateway.log said so, while the skill read as quarantined.
+func (w *InstallWatcher) removeLinkedAsset(ctx context.Context, evt InstallEvent) error {
+	target, err := enforce.RemoveLinkedAsset(w.sourceRootsFor(evt.Type), evt.Type.String(), evt.Path)
+	if err != nil {
+		w.emitQuarantineFailure(ctx, evt, err)
+		return err
+	}
+	if target == "" {
+		target = "an unreadable target"
+	}
+	removed := fmt.Errorf("%w: it pointed to %s; that folder was not changed", errLinkRemoved, target)
+	_ = w.logger.LogEventCtx(ctx, audit.Event{
+		Action:   string(audit.ActionWatcherBlock),
+		Target:   evt.Path,
+		Actor:    "defenseclaw",
+		Details:  fmt.Sprintf("type=%s %v", evt.Type, removed),
+		Severity: "HIGH",
+	})
+	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, removed)
+	return removed
 }
 
 // RestoreQuarantined restores one connector-owned watcher quarantine. The
@@ -1516,6 +1800,13 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 		if entry.Actions.File != "" {
 			return false
 		}
+		// A block whose quarantine move failed, or whose link the watcher
+		// removed, was never restored by an operator: a copy that shows up
+		// again is quarantined (GAP-0394 keeps file=quarantine off the
+		// journal until the move succeeds).
+		if strings.HasPrefix(entry.Reason, quarantineFailedReason) || strings.HasPrefix(entry.Reason, errLinkRemoved.Error()) {
+			return false
+		}
 		if entry.SourcePath != "" && sameWatcherPath(entry.SourcePath, evt.Path) {
 			restored = true
 		}
@@ -1553,6 +1844,7 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 		w.mu.Lock()
 		if _, exists := w.pending[child]; !exists {
 			w.pending[child] = time.Now()
+			defer w.state.set(w.classifyEvent(child), AdmissionPending)
 		}
 		w.mu.Unlock()
 	}

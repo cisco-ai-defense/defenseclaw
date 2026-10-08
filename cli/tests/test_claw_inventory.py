@@ -2056,9 +2056,10 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             # unscanned (its only scan target, /tmp/downloads/codeguard,
             # does not match the resolved on-disk path — F-0423).
             self.assertEqual(inv["skills"][0]["policy_verdict"], "unscanned")
-            # The defenseclaw plugin has no untrusted source marker, so the
-            # first-party allow still applies on its resolved provenance.
-            self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
+            # GAP-0419: a plugin folder named defenseclaw is not trusted by
+            # its name and location alone (the gateway recognizes DefenseClaw's
+            # own plugin by its bytes), so this empty one stays unscanned.
+            self.assertEqual(inv["plugins"][0]["policy_verdict"], "unscanned")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

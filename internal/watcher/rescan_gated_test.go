@@ -20,16 +20,19 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // countingScanner is a scanner.Scanner test double that records how many times
 // Scan was invoked so tests can assert the watcher only scans on real drift.
 type countingScanner struct {
+	mu       sync.Mutex
 	name     string
 	calls    int
 	findings []scanner.Finding
@@ -40,7 +43,9 @@ func (s *countingScanner) Version() string            { return "fake-1" }
 func (s *countingScanner) SupportedTargets() []string { return []string{"skill"} }
 
 func (s *countingScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
 	s.calls++
+	s.mu.Unlock()
 	return &scanner.ScanResult{
 		Scanner:   s.name,
 		Target:    target,
@@ -147,6 +152,14 @@ func TestScannerFingerprintStableAndChanges(t *testing.T) {
 	}
 	if again := w.scannerFingerprint(evt); again != base {
 		t.Fatalf("fingerprint not stable for identical config: %q != %q", again, base)
+	}
+
+	// GAP-0415: a config reload (new whole-config hash, next generation) of
+	// a key that does not change scan output must not rescan every skill.
+	version.SetContentHash([]byte("watch:\n  rescan_interval_min: 1\n"))
+	version.BumpGeneration()
+	if again := w.scannerFingerprint(evt); again != base {
+		t.Fatal("fingerprint changed with the config hash and generation alone")
 	}
 
 	// A scan-affecting config change must change the fingerprint.

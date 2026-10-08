@@ -2041,6 +2041,62 @@ class TestSkillList(SkillCommandTestBase):
         )
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_bundled_skill_ignores_a_verdict_on_another_copy(self, mock_list):
+        """GAP-0393: another connector's quarantined skill-creator marked the
+        vendor-bundled skill-creator quarantined and disabled."""
+        mock_list.return_value = {
+            "skills": [
+                {"name": "skill-creator", "description": "", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "bundled", "bundled": True, "homepage": ""},
+            ]
+        }
+        self.app.store.set_action_field("skill", "skill-creator", "file", "quarantine", "watcher")
+        self.app.store.set_action_field("skill", "skill-creator", "runtime", "disable", "watcher")
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertFalse(item["disabled"])
+        self.assertNotIn("actions", item)
+        self.assertEqual(item["verdict"], "-")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_says_quarantine_failed_when_the_move_failed(self, mock_list):
+        """GAP-0394: a blocked skill the watcher could not move read as quarantined."""
+        mock_list.return_value = {
+            "skills": [
+                {"name": "aws-deploy", "description": "", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "user", "bundled": False, "homepage": ""},
+            ]
+        }
+        self.app.store.set_action_field(
+            "skill", "aws-deploy", "install", "block", "quarantine failed: permission denied",
+        )
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertEqual(item["verdict"], "quarantine failed")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_shows_a_skill_the_watcher_has_not_scanned_as_pending(self, mock_list):
+        """GAP-0341: an unscanned skill read active/ready, as if clean."""
+        base = os.path.join(self.tmp_dir, "skills", "bulk-7")
+        mock_list.return_value = {
+            "skills": [
+                {"name": "bulk-7", "description": "", "emoji": "", "baseDir": base,
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "user", "bundled": False, "homepage": ""},
+            ]
+        }
+        with open(os.path.join(self.app.cfg.data_dir, "watcher-admission.json"), "w", encoding="utf-8") as fh:
+            json.dump({"assets": [{"type": "skill", "name": "bulk-7", "path": base, "state": "pending"}]}, fh)
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertEqual(item["status"], "pending")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_table_title_shows_connector_in_scope(self, mock_list):
         # Mirror the MCP table's (connector=...) banner so the active
         # connector the list is scoped to is discoverable.

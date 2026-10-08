@@ -410,12 +410,19 @@ class TestF0742UserSourceNotFirstParty(unittest.TestCase):
         self.assertNotEqual(inv["skills"][0]["policy_verdict"], "allowed")
 
     def test_bundled_codeguard_still_first_party_allowed(self):
+        # GAP-0419: first-party trust needs the shipped CodeGuard content.
+        from defenseclaw.paths import bundled_codeguard_dir
+
+        home = tempfile.mkdtemp(prefix="dclaw-f0742-")
+        self.addCleanup(shutil.rmtree, home, True)
+        path = os.path.join(home, ".openclaw", "skills", "codeguard")
+        shutil.copytree(bundled_codeguard_dir(), path, ignore=shutil.ignore_patterns("__pycache__"))
         inv = {
             "skills": [
                 {
                     "id": "codeguard",
                     "source": "bundled",
-                    "path": "/home/u/.openclaw/skills/codeguard",
+                    "path": path,
                 }
             ],
             "summary": {"skills": {"count": 1}},

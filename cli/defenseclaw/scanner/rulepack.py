@@ -178,6 +178,7 @@ class RulePack:
         """
         if not text:
             return []
+        doc = _is_doc(location)
         folded = _fold(text)
         py: PySource | None | bool = False  # False: not built yet
         code = text
@@ -185,8 +186,15 @@ class RulePack:
         for rule in self.rules:
             if rule.required is not None and not _holds(rule.required, folded):
                 continue
+            # A path-write rule in documentation is a mention of the file, not
+            # an access (internal/guardrail scanArtifactText, GAP-0364).
+            if doc and rule.path_write:
+                continue
             source = text
             m = _search(rule, text, folded)
+            if m is not None and rule.category == _COMMAND_CATEGORY:
+                # A command is one line (GAP-0364).
+                m = _first_line_match(rule.pattern, text)
             if m is not None and python:
                 if py is False:
                     py = python_source(text)
@@ -258,6 +266,34 @@ class RulePack:
 
 
 RulePackOverlayCache: TypeAlias = dict[str, RulePack]
+
+
+# The command-line rules' category (rules/commands.yaml).
+_COMMAND_CATEGORY = "command"
+_DOC_EXTS = frozenset({".md", ".mdx", ".markdown", ".txt", ".rst"})
+
+
+def _is_doc(location: str) -> bool:
+    """A documentation file other than the skill's own SKILL.md."""
+    path = location.rsplit(":", 1)[0] if location.count(":") and location.rsplit(":", 1)[1].isdigit() else location
+    if os.path.splitext(path)[1].lower() not in _DOC_EXTS:
+        return False
+    return path.replace("\\", "/").lower() != "skill.md"
+
+
+def _first_line_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    """The first match of *pattern* that lies on one line of *text*."""
+    start = 0
+    while start <= len(text):
+        end = text.find("\n", start)
+        stop = len(text) if end < 0 else end
+        m = pattern.search(text, start, stop)
+        if m is not None:
+            return m
+        if end < 0:
+            return None
+        start = end + 1
+    return None
 
 
 def _is_python(path: str) -> bool:
