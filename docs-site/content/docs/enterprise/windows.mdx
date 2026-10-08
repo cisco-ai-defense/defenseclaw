@@ -595,7 +595,9 @@ per-user install:
   user folders, so it copies the folder to
   `C:\ProgramData\Cisco\DefenseClaw\runtime\quarantine` and the hook
   guardian removes the original as that user, after checking that it is in a
-  watched folder and matches the copy. For a signed-out user it uses an S4U
+  watched folder and matches the copy. A folder that an administrator or a
+  SYSTEM job copied into the profile, and so owns, is removed the same way,
+  as long as the user may delete it. For a signed-out user it uses an S4U
   logon; a Microsoft Entra ID account has none, so the guardian removes the
   folder when that user next signs in, and `hook-guardian.log` says so
   (`deferred: ... removes the folder when that user next signs in`, then
