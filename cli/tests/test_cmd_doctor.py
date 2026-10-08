@@ -129,6 +129,16 @@ class DoctorPolicyStateTests(unittest.TestCase):
                 cmd_doctor._check_policy_state(SimpleNamespace(data_dir=data_dir), result, live_health=None)
                 self.assertEqual(result.checks[0]["status"], want, result.checks[0])
 
+    def test_invalid_config_does_not_claim_gateway_stopped(self):
+        from defenseclaw.commands import cmd_doctor
+
+        result = _DoctorResult()
+        result.checks.append({"check_id": "doctor.config.validation", "status": "fail"})
+        with patch.object(cmd_doctor, "_emit_policy_without_gateway") as emit:
+            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health=None)
+        self.assertIn("live state was not checked", emit.call_args.args[3])
+        self.assertNotIn("gateway is not running", emit.call_args.args[3])
+
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
     def test_only_data_json_is_retired(self):

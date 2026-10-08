@@ -9482,7 +9482,12 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     """
     label = "Policy"
     if not isinstance(live_health, dict):
-        _emit_policy_without_gateway(cfg, r, label, "the gateway is not running")
+        reason = (
+            "live state was not checked while config.yaml is invalid; see the Config validation row"
+            if _config_validation_failed(r)
+            else "the gateway is not running"
+        )
+        _emit_policy_without_gateway(cfg, r, label, reason)
         return
     if r.sidecar_unverified:
         _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
@@ -11424,6 +11429,9 @@ def doctor(
     # still render inside their label context, so two peers sharing a pack
     # retain attribution without executing the authoritative helper twice.
     rule_pack_validation_cache: dict[str, object] = {}
+    inventory_health = None
+    if not _config_validation_failed(r) and _trusted_gateway_listener(cfg).trusted:
+        inventory_health = _live_gateway_health(cfg)
     for _c in inventory_connectors:
         if not _connector_enabled(cfg, _c):
             # Operator-disabled (guardrail disable --connector X): the Go boot
@@ -11447,6 +11455,7 @@ def doctor(
                 _c,
                 r,
                 rule_pack_validation_cache=rule_pack_validation_cache,
+                live_health=inventory_health,
             )
             _check_hook_contract_lock(cfg, _c, r)
             _check_hook_runtime_integrity(cfg, _c, r)
@@ -13542,6 +13551,7 @@ def _check_connector_inventory(
     r: _DoctorResult,
     *,
     rule_pack_validation_cache: dict[str, object] | None = None,
+    live_health: dict | None = None,
 ) -> None:
     """Surface one connector and everything it resolves to.
 
@@ -13739,6 +13749,9 @@ def _check_connector_inventory(
         strategy = (getattr(gc, "detection_strategy", "") or "").strip() or "regex_judge"
         judge = getattr(gc, "judge", None)
         judge_enabled = bool(getattr(judge, "enabled", False)) if judge is not None else False
+        guardrail_health = live_health.get("guardrail") if isinstance(live_health, dict) else None
+        judge_details = guardrail_health.get("details") if isinstance(guardrail_health, dict) else None
+        judge_failing = isinstance(judge_details, dict) and judge_details.get("judge_state") == "failing"
         detail = f"strategy={strategy}"
         if not judge_enabled:
             detail += "; judge disabled (regex and Cisco AI Defense lanes only)"
@@ -13756,7 +13769,9 @@ def _check_connector_inventory(
                     "lane (regex and Cisco AI Defense lanes only); opt in: "
                     f"defenseclaw guardrail judge add {connector}"
                 )
-        _emit("pass", "Detection", detail, r=r)
+        if judge_enabled and judge_failing:
+            detail += "; judge failing: all recent calls failed, so only the rules decide"
+        _emit("warn" if judge_enabled and judge_failing else "pass", "Detection", detail, r=r)
 
 
 def _check_hook_contract_lock(
