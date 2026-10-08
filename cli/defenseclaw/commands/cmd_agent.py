@@ -33,6 +33,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw import legacy_connector
 from defenseclaw.config import (
     FULL_RUNTIME_PLANES,
     USER_RUNTIME_PLANES,
@@ -423,7 +424,7 @@ def ide_plugins(
     try:
         payload = client.ai_usage_ide_plugins_all(
             user=user.strip(),
-            ide="devin-desktop" if ide.strip().lower() == "windsurf" else ide.strip().lower(),
+            ide="devin-desktop" if ide.strip().lower() == legacy_connector.RETIRED_DESKTOP_ID else ide.strip().lower(),
             ai_only=ai_only,
         )
     except requests.ConnectionError as exc:

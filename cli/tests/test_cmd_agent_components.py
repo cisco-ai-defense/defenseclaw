@@ -43,6 +43,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import legacy_connector
 from defenseclaw.commands import cmd_agent
 from defenseclaw.context import AppContext
 
@@ -995,7 +996,7 @@ class IDEPluginsTests(unittest.TestCase):
             self.assertIn("2 plugin(s) shown; 2 in total, 1 AI, 1 disabled, 2 user(s)", result.output)
 
             calls.clear()
-            alias = runner.invoke(cmd_agent.agent, ["ide-plugins", "--ide", "windsurf"], obj=_make_ctx())
+            alias = runner.invoke(cmd_agent.agent, ["ide-plugins", "--ide", legacy_connector.RETIRED_DESKTOP_ID], obj=_make_ctx())
             self.assertEqual(alias.exit_code, 0, msg=alias.output)
             self.assertEqual(calls[0]["ide"], "devin-desktop")
 

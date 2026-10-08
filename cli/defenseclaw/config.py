@@ -3646,6 +3646,10 @@ class Config:
         except ConfigSaveError:
             raise
         except OSError as exc:
+            if exc.errno is None:
+                # A refusal (a managed_enterprise change without admin
+                # rights), not a failed write: keep its own error.
+                raise
             raise ConfigSaveError(path, exc) from exc
 
     def save_verified(self, verify: Callable[[str], None], *, actor: str | None = None, reason: str = "") -> Any:

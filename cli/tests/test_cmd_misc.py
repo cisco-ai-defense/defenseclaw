@@ -636,7 +636,7 @@ class TestAIBOMCommand(unittest.TestCase):
         first, second = json.loads(result.output[result.output.index("["):])
         self.assertEqual([p["plugin_id"] for p in first["ide_plugins"]], ["github.copilot", "org.rust.lang"])
         self.assertEqual(first["summary"]["ide_plugins"],
-                         {"count": 2, "ai": 1, "disabled": 1, "users": 2, "scope": "all"})
+                         {"count": 2, "ai": 1, "disabled": 1, "users": 2, "scope": "all", "partial": False})
         self.assertNotIn("ide_plugins", second)
 
         # Locally scanned connector plugins and MCP servers name their account.
