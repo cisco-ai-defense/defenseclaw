@@ -23,3 +23,18 @@ def test_ide_page_cap_is_partial() -> None:
     assert inv["summary"]["ide_plugins"]["count"] == 1
     assert inv["summary"]["ide_plugins"]["partial"] is True
 
+def test_secure_client_aibom_skips_ide_gateway_and_output() -> None:
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.cfg.active_connectors = lambda: ["codex"]
+        with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"), \
+             patch("defenseclaw.commands.cmd_aibom._fetch_ide_plugins") as fetch, \
+             patch("defenseclaw.commands.cmd_aibom._scan_one_connector",
+                   return_value=({"connector": "codex"}, None)):
+            result = CliRunner().invoke(aibom, ["scan", "--json"], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {"connector": "codex"}
+        fetch.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
