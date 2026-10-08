@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -101,6 +102,15 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		fmt.Println(line)
 	}
 	fmt.Println()
+
+	// A per-user gateway keeps the connector config roots its setup bound,
+	// whatever the shell that started it has set (GAP-0433). A managed
+	// gateway sets up no user hooks.
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		for _, note := range connector.PinConnectorConfigRootsToSetup(cfg.DataDir) {
+			fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+note)
+		}
+	}
 
 	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog)
 	if err != nil {
