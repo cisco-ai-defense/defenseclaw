@@ -367,6 +367,67 @@ def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatc
     assert ("group-id", "device-id", "new-group") in posts
 
 
+def test_intune_groups_validate_all_names_before_graph_write() -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+        def wait_for_named_object(self, _path):
+            return []
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {"id": "group-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "group-id"}
+
+    args = intune.build_parser().parse_args([
+        "groups", "--name", "valid", "--name", "!!!", "--apply",
+    ])
+    with pytest.raises(SystemExit, match="mail nickname"):
+        intune.cmd_groups(Graph(), args)
+    assert writes == []
+
+    class ExistingGraph(Graph):
+        def get_all(self, path):
+            return [{"id": "existing", "securityEnabled": True}] if intune.odata_eq("displayName", "!!!") in path else []
+
+    assert intune.cmd_groups(ExistingGraph(), args) == 0
+    assert len(writes) == 1
+
+
+def test_intune_groups_unicode_name_previews_and_applies(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+        def wait_for_named_object(self, _path):
+            return []
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {"id": "group-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "group-id"}
+
+    graph = Graph()
+    args = intune.build_parser().parse_args(["groups", "--name", "研究"])
+    assert intune.cmd_groups(graph, args) == 0
+    assert "would create" in capsys.readouterr().out
+    args = intune.build_parser().parse_args(["groups", "--name", "研究", "--apply"])
+    assert intune.cmd_groups(graph, args) == 0
+    nickname = writes[0][2]["mailNickname"]
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", nickname)
+
+
 def test_okta_group_name_with_spaces_and_admin_url(monkeypatch: pytest.MonkeyPatch) -> None:
     okta = _load(OKTA)
     assert okta.named_int("Research ML Team=1720001") == ("Research ML Team", 1720001)
