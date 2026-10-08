@@ -294,6 +294,18 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
     return 1 if report.problems else 0
 
 
+
+def password_only_method(method: dict[str, Any]) -> bool:
+    constraints = method.get("constraints") or []
+    return (
+        method.get("type") == "ASSURANCE"
+        and method.get("factorMode") == "1FA"
+        and len(constraints) == 1
+        and set(constraints[0]) == {"knowledge"}
+        and constraints[0]["knowledge"].get("types") == ["password"]
+        and constraints[0]["knowledge"].get("required") is not False
+    )
+
 def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
                         bind_login: str | None, group_names: list[str]) -> None:
     href = ((app.get("_links") or {}).get("accessPolicy") or {}).get("href", "")
@@ -325,7 +337,7 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
         report.note(f"rule '{rule.get('name')}' ({rule.get('status')}, priority {rule.get('priority')}): "
                     f"{factor}, {scope}")
         if (rule.get("status") != "ACTIVE" or action.get("access") != "ALLOW"
-                or factor != "1FA" or users.get("exclude") or scoped_groups.get("exclude")):
+                or not password_only_method(method) or users.get("exclude") or scoped_groups.get("exclude")):
             continue
         # Okta ANDs users and groups on the same rule. An unrestricted rule covers both.
         if bind and not group_ids and (not user_ids or bind["id"] in user_ids):
@@ -715,15 +727,7 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
     have = (rule.get("conditions") or {}).get("people") or {}
     action = (rule.get("actions") or {}).get("appSignOn") or {}
     method = action.get("verificationMethod") or {}
-    constraints = method.get("constraints") or []
-    password_only = (
-        method.get("type") == "ASSURANCE"
-        and method.get("factorMode") == "1FA"
-        and len(constraints) == 1
-        and set(constraints[0]) == {"knowledge"}
-        and constraints[0]["knowledge"].get("types") == ["password"]
-        and constraints[0]["knowledge"].get("required") is not False
-    )
+    password_only = password_only_method(method)
     same = (
         all(
             set((have.get(kind) or {}).get("include") or []) == set((people.get(kind) or {}).get("include") or [])
