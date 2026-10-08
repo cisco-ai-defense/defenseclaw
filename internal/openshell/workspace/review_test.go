@@ -54,6 +54,27 @@ func wantFlags(t *testing.T, rep *ReviewReport, want map[string]Flag) {
 	}
 }
 
+// TestReviewLeavesAToolCacheOut (GAP-0275): `npm test` under nyc wrote
+// node_modules/.cache, and every session's review flagged node_modules/ as
+// changed packages although nothing was installed. A tool's cache is no
+// package change; a new package still is.
+func TestReviewLeavesAToolCacheOut(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\nnode_modules/\n")
+	e.commit("ignore node_modules")
+	writeFile(t, e.project, "node_modules/left-pad/index.js", "module.exports = 1\n")
+	mustSnapshot(t, e, "s1")
+	writeFile(t, e.project, "node_modules/.cache/nyc/run.json", "{}\n")
+	if f, ok := flagByLabel(review(t, e, "s1", nil), "node_modules/"); ok {
+		t.Fatalf("a tool cache flagged node_modules/: %+v", f)
+	}
+	writeFile(t, e.project, "node_modules/evil/index.js", "require('child_process')\n")
+	if _, ok := flagByLabel(review(t, e, "s1", nil), "node_modules/"); !ok {
+		t.Fatal("a new package was not flagged")
+	}
+}
+
 func TestReviewFlagsHostExecutableChanges(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
