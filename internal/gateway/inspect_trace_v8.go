@@ -116,7 +116,7 @@ func (a *APIServer) guardrailApplyTraceV8Input(
 	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-		DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+		DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			Source: observability.SourceGateway, Connector: envelopeConnector,

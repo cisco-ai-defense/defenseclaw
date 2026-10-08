@@ -92,11 +92,14 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
-	cfg     *config.GuardrailConfig
-	logger  *audit.Logger
-	health  *SidecarHealth
-	store   *audit.Store
-	dataDir string
+	// generationSource is the gateway's published generation; each request
+	// pins it in withProxyAgent. nil outside a gateway.
+	generationSource func() *Generation
+	cfg              *config.GuardrailConfig
+	logger           *audit.Logger
+	health           *SidecarHealth
+	store            *audit.Store
+	dataDir          string
 
 	observabilityV8Mu                  sync.RWMutex
 	observabilityV8Trace               lifecycleV8Runtime
@@ -546,7 +549,16 @@ func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 			sharedAgentIdentities.observe(facts, "", false)
 		}
 	}
-	return r.WithContext(withGuardrailProfile(ctx, liveGuardrailProfiles.Load(), connectorName))
+	// One generation decides the request: its rules, local patterns,
+	// profiles and the policy stamp of its records (GAP-0455).
+	set := liveGuardrailProfiles.Load()
+	if p.generationSource != nil {
+		if g := p.generationSource(); g.published() {
+			ctx = withPinnedGeneration(ctx, g)
+			set = pinnedGeneration(ctx).Profiles
+		}
+	}
+	return r.WithContext(withGuardrailProfile(ctx, set, connectorName))
 }
 
 // profileModeFor applies the request's identity-based guardrail profile to

@@ -530,9 +530,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	for name, compiled := range initialHarnessRules {
 		publishConnectorRulePackOverrides(name, compiled)
 	}
-	router.SetRulePack(rp)
 	router.SetHealth(sidecar.health)
 	sidecar.setEventRouter(router)
+	// The boot generation carries the enforcement inputs just published to
+	// the process-wide scanners, so a request reads them with its digest.
+	bootGen.activeRules = initialRules
+	bootGen.activePatterns = initialPatterns
+	bootGen.judge = hookJudge
 	bootGen.Config = sidecar.publishConfig(cfg)
 	sidecar.publishGeneration(bootGen)
 	// Publish the process-global managed carve-out only after every fallible
@@ -588,6 +592,15 @@ func (s *Sidecar) Generation() *Generation {
 		return nil
 	}
 	return s.generation.Load()
+}
+
+// activeRulePack is the active rule pack of the published generation, else
+// the one the event router reads.
+func (s *Sidecar) activeRulePack() *guardrail.RulePack {
+	if g := s.Generation(); g != nil && g.active != nil {
+		return g.active
+	}
+	return s.router.rulePack()
 }
 
 func (s *Sidecar) publishGeneration(g *Generation) {
@@ -2024,6 +2037,39 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setAgentIdentityConfig(&next)
 	applyIdentityPosture(&next)
 
+	// The judge is wired before the generation is published: a request
+	// that pins the next generation runs its judge, already bound to the
+	// trace runtime (GAP-0455). The router reads it from the generation.
+	if judgeChanged {
+		if nextJudge != nil {
+			s.observabilityV8Mu.Lock()
+			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
+			if s.observabilityV8ConsumersDetached {
+				judgeRuntime = nil
+			}
+			nextJudge.bindJudgeTraceV8(judgeRuntime)
+			s.observabilityV8Mu.Unlock()
+		}
+		s.setSharedJudge(nextJudge)
+		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
+		if api := s.apiSnapshot(); api != nil {
+			api.SetHookJudge(nextJudge)
+		}
+		if proxy := s.proxySnapshot(); proxy != nil {
+			proxy.SetJudge(nextJudge)
+		}
+		nextGen.judge = nextJudge
+	} else if previousGen != nil {
+		nextGen.judge = previousGen.judge
+	} else {
+		nextGen.judge = s.sharedJudge()
+	}
+	if !rulePackChanged && previousGen != nil {
+		// The same pack stays: keep its compiled rules and patterns, which
+		// the process-wide scanners keep too.
+		nextGen.activeRules, nextGen.activePatterns = previousGen.activeRules, previousGen.activePatterns
+	}
+
 	appliedCfg := current
 	if !onlyReloadModeChange {
 		appliedCfg = s.publishConfig(&next)
@@ -2058,35 +2104,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		}
 	}
 	if s.router != nil {
-		if rulePackChanged {
-			s.router.SetRulePack(rulePackCandidate.active)
-		}
 		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
 		s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
 		s.router.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
-	}
-
-	if judgeChanged {
-		if nextJudge != nil {
-			s.observabilityV8Mu.Lock()
-			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
-			if s.observabilityV8ConsumersDetached {
-				judgeRuntime = nil
-			}
-			nextJudge.bindJudgeTraceV8(judgeRuntime)
-			s.observabilityV8Mu.Unlock()
-		}
-		s.setSharedJudge(nextJudge)
-		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
-		if s.router != nil {
-			s.router.SetJudge(nextJudge)
-		}
-		if api := s.apiSnapshot(); api != nil {
-			api.SetHookJudge(nextJudge)
-		}
-		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.SetJudge(nextJudge)
-		}
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
@@ -3003,6 +3023,7 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 			lifecycle = nil
 		}
 		proxy.bindObservabilityV8TraceMode(lifecycle, true)
+		proxy.generationSource = s.Generation
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
@@ -3029,6 +3050,7 @@ func (s *Sidecar) setEventRouter(router *EventRouter) {
 			lifecycle = nil
 		}
 		router.bindObservabilityV8Capabilities(emitter, lifecycle)
+		router.generationSource = s.Generation
 		// Operator tool and MCP blocks come from the live config.
 		if router.policy != nil {
 			router.policy = router.policy.WithConfig(s.currentConfig)
@@ -4003,7 +4025,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// NewSidecar strictly loaded and published the effective single-connector
 	// pack before returning. Runtime startup consumes that immutable candidate
 	// and never performs an implicit second disk load.
-	rp := s.router.rulePack()
+	rp := s.activeRulePack()
 	if rp == nil {
 		return fmt.Errorf("guardrail: validated cold-start rule pack is unavailable")
 	}
@@ -4571,7 +4593,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 
 	// NewSidecar has already strictly loaded and published the global pack.
 	// Per-connector candidates are loaded only by the isolated setup loop.
-	if s.router == nil || s.router.rulePack() == nil {
+	if s.activeRulePack() == nil {
 		return fmt.Errorf("multi-connector boot: validated global rule pack is unavailable")
 	}
 

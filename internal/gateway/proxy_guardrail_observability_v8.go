@@ -518,7 +518,7 @@ func (p *GuardrailProxy) emitProxyGuardrailObservabilityV8(
 	if !ok {
 		return proxyGuardrailV8Overlay{}
 	}
-	overlay := facts.overlay()
+	overlay := facts.overlay(signalCtx)
 
 	input, inputOK := facts.traceInput(signalCtx)
 	var guardrailTrace *observabilityruntime.GuardrailApplyTrace
@@ -553,7 +553,7 @@ func (p *GuardrailProxy) emitProxyGuardrailObservabilityV8(
 	return overlay
 }
 
-func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
+func (facts proxyGuardrailV8Facts) overlay(ctx context.Context) proxyGuardrailV8Overlay {
 	timestamp := uint64(facts.observedAt.UnixNano())
 	evaluationID := observability.Present(facts.evaluationID)
 	decision := observability.Present(facts.decision)
@@ -572,7 +572,7 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 				DefenseClawGuardrailDecision:    decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
 				DefenseClawGuardrailEnforced:     enforced,
-				DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+				DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 			},
 		)
 		if err == nil {
@@ -586,7 +586,7 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 				DefenseClawGuardrailDecision:    decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
 				DefenseClawGuardrailEnforced:     enforced,
-				DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+				DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 			},
 		)
 		if err == nil {
@@ -746,8 +746,8 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 			DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
 			DefenseClawGuardrailWouldBlock:      observability.Present(facts.wouldBlock),
 			DefenseClawGuardrailEnforced:        observability.Present(facts.enforced),
-			DefenseClawPolicyEffectiveDigest:    livePolicyDigestV8(),
-			DefenseClawPolicyGeneration:         livePolicyGenerationV8(),
+			DefenseClawPolicyEffectiveDigest:    policyDigestV8(ctx),
+			DefenseClawPolicyGeneration:         policyGenerationV8(ctx),
 		},
 	)
 	if err != nil {
@@ -770,7 +770,7 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 	}
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-		DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+		DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(facts.observedAt),
@@ -858,7 +858,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 		profileTelemetry := proxyGuardrailProfileTelemetryFor(ctx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: facts.envelope(ctx, snapshot), Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,

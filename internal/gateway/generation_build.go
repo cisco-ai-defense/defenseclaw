@@ -85,6 +85,16 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 			g.RulePacks["conn:"+name] = pack
 		}
 		g.active = rp.active
+		g.activeRules = rp.activeRules
+		g.activePatterns = rp.activePatterns
+		for raw, rules := range rp.connectorRules {
+			if name := canonicalConnectorRulePackKey(raw); name != "" && rules != nil {
+				if g.connectorRules == nil {
+					g.connectorRules = make(map[string]*compiledRulePackCategories, len(rp.connectorRules))
+				}
+				g.connectorRules[name] = rules
+			}
+		}
 	}
 	if in.profiles != nil {
 		for name, derived := range in.profiles.profiles {

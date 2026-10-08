@@ -354,6 +354,15 @@ func (a *APIServer) SetCiscoInspector(c Inspector) {
 	a.ciscoInspector = c
 }
 
+// judgeFor is the hook-lane judge of the generation ctx pinned, else the
+// server's own (an API server outside a gateway).
+func (a *APIServer) judgeFor(ctx context.Context) *LLMJudge {
+	if a == nil {
+		return nil
+	}
+	return judgeOf(pinnedGeneration(ctx), a.hookJudge)
+}
+
 // SetHookJudge wires the LLM judge onto the API server so the hook
 // content lane (inspectMessageContent) can adjudicate prompts and
 // tool results for connectors listed in
