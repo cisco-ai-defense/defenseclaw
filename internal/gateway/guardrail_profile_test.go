@@ -178,6 +178,7 @@ func TestGuardrailProfileTelemetryBoundsTheMatchedGroup(t *testing.T) {
 // profile's rule pack, under the posture that pack implies, and applies its
 // HILT, as explain says it does (GAP-0313).
 func TestGuardrailProxyAppliesTheProfileRulePackAndHILT(t *testing.T) {
+	stubProfileSources(t)
 	resetConnectorRuleCategories(t)
 	withLocalPatternsRestored(t)
 	previous := liveGuardrailProfiles.Load()
@@ -207,9 +208,10 @@ rules:
 	inspector := NewGuardrailInspector("local", nil, nil, "")
 	inspector.SetHILTConfig(false, "HIGH")
 	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}}
-	ctx := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)).Context()
+	subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(subject)).Context()
 	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "contractors" {
-		t.Skip("the gateway's own account is not a verified subject on this host")
+		t.Fatalf("proxy profile = %q, want contractors", name)
 	}
 	// A completion: the prompt surface reports and never blocks.
 	verdict := inspector.Inspect(ctx, "completion", "please keep proxy_profile_marker_token safe", nil, "test-model", "action")
