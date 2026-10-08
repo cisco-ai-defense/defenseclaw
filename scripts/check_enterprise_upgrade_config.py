@@ -66,8 +66,11 @@ def problems(before_raw: bytes, after: Any, record: dict[str, Any]) -> list[str]
         if path == "config_version" or path in removed:
             continue
         if path in moved:
-            if lookup(after, moved[path]) is MISSING:
+            kept = lookup(after, moved[path])
+            if kept is MISSING:
                 found.append(f"{path} moved to {moved[path]}, which the upgraded config does not set")
+            elif kept != value:
+                found.append(f"{path} changed from {value!r} to {kept!r} at {moved[path]}")
             continue
         kept = lookup(after, path)
         if kept is MISSING:
