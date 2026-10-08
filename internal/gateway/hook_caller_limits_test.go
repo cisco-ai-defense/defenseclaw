@@ -77,6 +77,29 @@ func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
 	}
 }
 
+func TestHookCallerLimiterReservesGlobalCapacityForOtherAccounts(t *testing.T) {
+	limiter := &hookCallerLimiter{rate: 1000, burst: 1000, inFlight: 32, globalInFlight: 32}
+	var releases []func()
+	for i := 0; i < 8; i++ {
+		release, _, refusal, _ := limiter.acquire("1001")
+		if refusal != "" {
+			t.Fatalf("first caller request %d refused: %s", i, refusal)
+		}
+		releases = append(releases, release)
+	}
+	if release, _, refusal, _ := limiter.acquire("1001"); release != nil || refusal == "" {
+		t.Fatal("one caller consumed more than its fair share of the global bound")
+	}
+	if release, _, refusal, _ := limiter.acquire("1002"); refusal != "" {
+		t.Fatalf("second caller starved: %s", refusal)
+	} else {
+		release()
+	}
+	for _, release := range releases {
+		release()
+	}
+}
+
 func TestAdmitHookCallerAnswersRateLimited(t *testing.T) {
 	api := &APIServer{}
 	api.hookCallerLimits = hookCallerLimiter{rate: 1, burst: 1}

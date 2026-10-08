@@ -112,12 +112,18 @@ func resolveWindowsDirectoryFacts(
 	}
 	join := readWindowsJoinState(r)
 	account, domain, ok := r.LookupAccount(sid)
+	if ok {
+		facts.AccountDomain = domain
+	}
 	upn, provider := identityStoreUPN(r, sid)
 	switch {
 	case strings.HasPrefix(sid, entraUserSIDPrefix) || (strings.EqualFold(provider, entraProviderName) && !ok):
 		// An Entra ID account (S-1-12-1-...) has no domain account; its UPN
 		// is in the identity store.
 		facts.Directory = DirectoryEntraID
+		if facts.AccountDomain == "" {
+			facts.AccountDomain = "AzureAD"
+		}
 		facts.TenantID = join.TenantID
 		if upn != "" {
 			facts.UPN = upn
@@ -125,7 +131,10 @@ func resolveWindowsDirectoryFacts(
 		}
 	case ok && strings.EqualFold(domain, r.ComputerName()):
 		facts.Directory = DirectoryLocal
-	case ok && domain != "":
+	case ok && strings.HasPrefix(sid, "S-1-5-") && !strings.HasPrefix(sid, "S-1-5-21-"):
+		// Built-in and service SIDs use pseudo-domains such as NT AUTHORITY.
+		facts.Directory = DirectoryLocal
+	case ok && domain != "" && strings.HasPrefix(sid, "S-1-5-21-"):
 		// The domain is reported in lower case, by its DNS name when it is
 		// the machine's own domain, as SSSD and winbind report it on
 		// Linux; LookupAccountSid gives only the NetBIOS name.

@@ -264,10 +264,21 @@ func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, re
 func inventoryDACLIDEGrants(home string) []inventoryDACLGrant {
 	grants := ideplugins.WindowsHomeGrants(home)
 	out := make([]inventoryDACLGrant, 0, len(grants))
+	for _, rel := range ideplugins.WindowsLegacyBroadGrants(home) {
+		rel := rel
+		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
+			if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+				return inventoryDACLSkippedMissing, err
+			}
+			return revokeInventoryLegacyReadACE(path, sid)
+		}})
+	}
 	for _, g := range grants {
 		ensure := ensureInventorySelfACE
 		if g.Tree {
 			ensure = ensureInventoryReadACE
+		} else if g.Attributes {
+			ensure = ensureInventoryAttributesACE
 		}
 		rel := g.Path
 		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
@@ -335,6 +346,11 @@ var (
 		mask: inventoryListMask, inheritance: windows.NO_INHERITANCE,
 		present: daclContainsInventoryListACE,
 	}
+	inventoryAttributesACE = inventoryACE{
+		mask:        windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE,
+		inheritance: windows.NO_INHERITANCE,
+		present:     daclContainsInventoryAttributesACE,
+	}
 	inventorySelfACE = inventoryACE{
 		mask: inventorySelfMask, inheritance: windows.NO_INHERITANCE, files: true,
 		present: daclContainsInventorySelfACE,
@@ -357,6 +373,12 @@ const inventoryListMask = windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIB
 // (inventoryDACLListOnlyDirs).
 func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
 	return ensureInventoryACE(path, sid, inventoryListACE)
+}
+
+// ensureInventoryAttributesACE permits Lstat on an intermediate folder,
+// without a list or content right and without inheritance.
+func ensureInventoryAttributesACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, inventoryAttributesACE)
 }
 
 // inventorySelfMask lets the service read one folder's own listing or one
@@ -436,6 +458,63 @@ func ensureInventoryACE(path string, sid *windows.SID, kind inventoryACE) (inven
 	return inventoryDACLGranted, nil
 }
 
+// revokeInventoryLegacyReadACE removes the service SID's former explicit tree
+// grant. Windows then drops its inherited copies from descendants. An explicit
+// deny for the service SID is left untouched rather than revoked.
+func revokeInventoryLegacyReadACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	fi, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	if !fi.IsDir() {
+		return inventoryDACLSkippedMissing, nil
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return inventoryDACLSkippedMissing, err
+	}
+	existing, _, err := sd.DACL()
+	if err != nil || existing == nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("inspect legacy IDE DACL: %v", err)
+	}
+	if !daclContainsInventoryReadACE(existing, sid) {
+		return inventoryDACLSkippedMissing, nil
+	}
+	for i := uint16(0); i < existing.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(existing, uint32(i), &ace); err != nil {
+			return inventoryDACLSkippedMissing, err
+		}
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE &&
+			(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
+			return inventoryDACLSkippedMissing, errors.New("service SID has an explicit deny on legacy IDE path")
+		}
+	}
+	entry := windows.EXPLICIT_ACCESS{
+		AccessMode: windows.REVOKE_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+	narrowed, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, existing)
+	if err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("remove legacy IDE grant: %w", err)
+	}
+	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION, nil, nil, narrowed, nil); err != nil {
+		return inventoryDACLSkippedMissing, fmt.Errorf("set narrow IDE DACL: %w", err)
+	}
+	return inventoryDACLGranted, nil
+}
+
 // daclContainsInventoryReadACE reports whether `acl` already grants `sid`
 // at least Read+Execute on the folder itself and, inherited, on everything
 // below it. Used as an idempotency short-circuit so repeat ticks skip the
@@ -499,6 +578,27 @@ func daclContainsInventoryListACE(acl *windows.ACL, sid *windows.SID) bool {
 		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if aceSID != nil && windows.EqualSid(aceSID, sid) &&
 			uint32(ace.Mask)&uint32(inventoryListMask) == uint32(inventoryListMask) {
+			return true
+		}
+	}
+	return false
+}
+
+func daclContainsInventoryAttributesACE(acl *windows.ACL, sid *windows.SID) bool {
+	if acl == nil || sid == nil {
+		return false
+	}
+	want := windows.ACCESS_MASK(windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if aceSID != nil && windows.EqualSid(aceSID, sid) && mapWindowsUserPathGenericMask(ace.Mask)&want == want {
 			return true
 		}
 	}

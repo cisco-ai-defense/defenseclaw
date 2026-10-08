@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -53,7 +54,7 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	if err != nil {
 		return IdentitySpoolRecord{}, err
 	}
-	facts, err := resolver.DirectoryFactsForUID(account.UID, now)
+	facts, err := resolver.DirectoryFactsWithoutGroupsForUID(account.UID, now)
 	if err != nil {
 		return IdentitySpoolRecord{}, err
 	}
@@ -70,14 +71,20 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 			callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
 			provider, providerErr := infoPipeDomainProvider(callCtx, nss.Name)
 			cancel()
-			if providerErr == nil {
-				facts.Directory = sssdProviderDirectory(provider)
+			if providerErr != nil {
+				record.Facts = facts
+				return record, fmt.Errorf("SSSD InfoPipe provider lookup: %w", providerErr)
 			}
+			facts.Directory = sssdProviderDirectory(provider)
 		}
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
 		upn, upnErr := infoPipeUPN(callCtx, nss.Name)
 		cancel()
-		if upn = useridentity.NormalizeUPN(upn); upnErr == nil && upn != "" {
+		if upnErr != nil {
+			record.Facts = facts
+			return record, fmt.Errorf("SSSD InfoPipe UPN lookup: %w", upnErr)
+		}
+		if upn = useridentity.NormalizeUPN(upn); upn != "" {
 			facts.UPN = upn
 			facts.Principal = upn
 			facts.Source = useridentity.SourceSSSDInfoPipe

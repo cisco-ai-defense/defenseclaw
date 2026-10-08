@@ -2114,3 +2114,27 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 		t.Fatalf("a run that migrated nothing warned %+v", got)
 	}
 }
+
+// Secure Client keeps the historical ensure preflight even for a standard
+// caller; the standalone elevation answer would direct the user to the
+// wrong lifecycle profile.
+func TestWindowsSecureClientEnsureKeepsHistoricalPreflight(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		"secure_client": winpath.EnterpriseDeploymentInstalled,
+	})
+	originalElevated := windowsEnterpriseIsElevated
+	windowsEnterpriseIsElevated = func() bool { return false }
+	t.Cleanup(func() { windowsEnterpriseIsElevated = originalElevated })
+	for _, profile := range []string{"", "secure_client"} {
+		var stdout, stderr bytes.Buffer
+		command := &cobra.Command{Use: "ensure"}
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		err := runWindowsEnterpriseLifecycle(context.Background(), command, "ensure",
+			&windowsEnterpriseLifecycleOptions{profile: profile})
+		if err == nil || !strings.Contains(err.Error(), "ensure is available only for the standalone profile") ||
+			strings.Contains(err.Error(), "elevation_required") {
+			t.Fatalf("profile %q: error %v", profile, err)
+		}
+	}
+}

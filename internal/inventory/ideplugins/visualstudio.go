@@ -6,6 +6,7 @@ package ideplugins
 import (
 	"bytes"
 	"encoding/xml"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -27,6 +28,23 @@ var visualStudioInstanceDir = regexp.MustCompile(`^(\d+)\.(\d+)_[0-9A-Za-z]+$`)
 // Windows.
 var visualStudioEnabledLookup = func(instanceDir, instanceName string) (map[string]bool, bool) {
 	return nil, false
+}
+
+// visualStudioEnabledNames accepts io.EOF from ReadValueNames when fewer
+// than the requested maximum are present.
+func visualStudioEnabledNames(read func(int) ([]string, error)) (map[string]bool, bool) {
+	names, err := read(visualStudioMaxExtensions)
+	if err != nil && err != io.EOF || len(names) > visualStudioMaxExtensions {
+		return nil, false
+	}
+	out := make(map[string]bool, len(names))
+	for _, name := range names {
+		id, _, _ := strings.Cut(name, ",")
+		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
+			out[id] = true
+		}
+	}
+	return out, true
 }
 
 func (s *scanner) scanVisualStudio() {

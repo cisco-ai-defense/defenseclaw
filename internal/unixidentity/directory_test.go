@@ -206,3 +206,46 @@ func TestGroupNameLookupDefinitive(t *testing.T) {
 		}
 	}
 }
+
+// A local passwd entry must remain resolvable while a directory backend is unavailable.
+func TestDirectoryFactsLocalAccountSkipsDirectoryProbe(t *testing.T) {
+	dir := t.TempDir()
+	oldPasswd, oldNSS := localPasswdPath, nsswitchPath
+	t.Cleanup(func() { localPasswdPath, nsswitchPath = oldPasswd, oldNSS })
+	localPasswdPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "nsswitch.conf")
+	if err := os.WriteFile(localPasswdPath, []byte("opsadmin:x:1001:1001::/home/opsadmin:/bin/bash\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRun{errs: map[string]error{"-s sss passwd 1001": errors.New("getent timed out")}, results: map[string]commandResult{
+		"passwd 1001":         {stdout: []byte("opsadmin:x:1001:1001::/home/opsadmin:/bin/bash\n")},
+		"initgroups opsadmin": {stdout: []byte("opsadmin 1001\n")},
+		"group 1001":          {stdout: []byte("opsadmin:x:1001:\n")},
+	}}
+	facts, err := newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
+	if err != nil || facts.Directory != useridentity.DirectoryLocal || len(facts.Groups) != 1 {
+		t.Fatalf("local facts = %+v, %v", facts, err)
+	}
+}
+
+func TestDirectoryFactsWithoutGroupsSkipsNaming(t *testing.T) {
+	dir := t.TempDir()
+	oldPasswd, oldNSS := localPasswdPath, nsswitchPath
+	t.Cleanup(func() { localPasswdPath, nsswitchPath = oldPasswd, oldNSS })
+	localPasswdPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "nsswitch.conf")
+	if err := os.WriteFile(localPasswdPath, []byte("opsadmin:x:1001:1001::/home/opsadmin:/bin/bash\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRun{errs: map[string]error{"initgroups opsadmin": errors.New("group lookup timed out")}, results: map[string]commandResult{
+		"passwd 1001": {stdout: []byte("opsadmin:x:1001:1001::/home/opsadmin:/bin/bash\n")},
+	}}
+	facts, err := newFakeNSS(f).DirectoryFactsWithoutGroupsForUID(1001, time.Now())
+	if err != nil || facts.Directory != useridentity.DirectoryLocal || len(facts.Groups) != 0 {
+		t.Fatalf("spool facts = %+v, %v", facts, err)
+	}
+}

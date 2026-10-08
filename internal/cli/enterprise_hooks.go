@@ -3609,27 +3609,50 @@ func resolveEnterpriseHookTarget() (enterpriseHookTarget, error) {
 	return resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookSID, enterpriseHookDataDir)
 }
 
+var enterpriseHookLookupUser = user.Lookup
+
 func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, sid, dataDir string) (enterpriseHookTarget, error) {
+	return resolveEnterpriseHookTargetValuesForPlatform(userName, userHome, uid, gid, sid, dataDir, runtime.GOOS == "windows")
+}
+
+func resolveEnterpriseHookTargetValuesForPlatform(userName, userHome string, uid, gid int, sid, dataDir string, windows bool) (enterpriseHookTarget, error) {
 	target := enterpriseHookTarget{
 		home: strings.TrimSpace(userHome),
 		uid:  uid,
 		gid:  gid,
 		sid:  strings.TrimSpace(sid),
 	}
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
 	if name := strings.TrimSpace(userName); name != "" &&
-		!(runtime.GOOS == "windows" && target.home != "") {
-		u, err := user.Lookup(name)
+		!(windows && target.home != "" && secureClient) {
+		u, err := enterpriseHookLookupUser(name)
 		if err != nil {
 			u, err = enterpriseHookStandaloneLookupFallback(name, err)
 		}
 		if err != nil {
 			return target, fmt.Errorf("enterprise hooks: lookup user %q: %w", name, err)
 		}
+		if windows && !secureClient {
+			resolvedSID := strings.TrimSpace(u.Uid)
+			if target.sid != "" && !strings.EqualFold(target.sid, resolvedSID) {
+				return target, fmt.Errorf("enterprise hooks: --user and --sid name different accounts")
+			}
+			target.sid = resolvedSID
+			if target.home != "" && !secureClient {
+				profileHome, err := enterpriseHookSIDProfilePath(target.sid)
+				if err != nil {
+					return target, fmt.Errorf("enterprise hooks: resolve profile for user %q: %w", name, err)
+				}
+				if !sameEnterpriseHookPath(profileHome, target.home) {
+					return target, fmt.Errorf("enterprise hooks: --user-home does not belong to --user %q", name)
+				}
+			}
+		}
 		if target.home == "" {
 			target.home = u.HomeDir
 		}
 		if target.uid < 0 {
-			if runtime.GOOS == "windows" {
+			if windows {
 				if target.sid == "" {
 					target.sid = strings.TrimSpace(u.Uid)
 				}
@@ -3642,7 +3665,7 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 			}
 		}
 		if target.gid < 0 {
-			if runtime.GOOS != "windows" {
+			if !windows {
 				gid, err := strconv.Atoi(u.Gid)
 				if err != nil {
 					return target, fmt.Errorf("enterprise hooks: parse gid for %q: %w", name, err)

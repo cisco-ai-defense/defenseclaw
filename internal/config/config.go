@@ -2671,6 +2671,9 @@ func loadConfigSourceChecked(
 	if err := restoreSignaturePackDigests(&cfg, sourceBytes, configFile); err != nil {
 		return nil, err
 	}
+	if !resolvesToSecureClient(&cfg, pinnedDeploymentMode) {
+		restoreEmptyGuardrailProfiles(&cfg)
+	}
 	cfg.ConfigFilePath = configFile
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
@@ -2862,6 +2865,41 @@ func loadConfigSourceChecked(
 	}
 
 	return &cfg, nil
+}
+
+// restoreEmptyGuardrailProfiles preserves profile and connector override entries
+// whose only values are empty maps. Viper omits those entries during Unmarshal,
+// but they are valid named profiles and per-connector inheritance points.
+// Keep absent or empty HILT blocks nil so they inherit the global setting.
+func restoreEmptyGuardrailProfiles(cfg *Config) {
+	listed, ok := viper.Get("guardrail.profiles").(map[string]any)
+	if !ok {
+		return
+	}
+	if cfg.Guardrail.Profiles == nil {
+		cfg.Guardrail.Profiles = make(map[string]GuardrailProfile, len(listed))
+	}
+	for name, value := range listed {
+		profile := cfg.Guardrail.Profiles[name]
+		body, ok := value.(map[string]any)
+		if ok {
+			if connectors, ok := body["connectors"].(map[string]any); ok {
+				if profile.Connectors == nil {
+					profile.Connectors = make(map[string]PerConnectorGuardrailConfig, len(connectors))
+				}
+				for connector, override := range connectors {
+					if _, present := profile.Connectors[connector]; present {
+						continue
+					}
+					if fields, ok := override.(map[string]any); override != nil && (!ok || len(fields) != 0) {
+						continue
+					}
+					profile.Connectors[connector] = PerConnectorGuardrailConfig{}
+				}
+			}
+		}
+		cfg.Guardrail.Profiles[name] = profile
+	}
 }
 
 // restoreRuntimeV8GuardrailConnectors closes Viper decode gaps by decoding

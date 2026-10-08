@@ -349,7 +349,7 @@ func runWindowsEnterpriseLifecycle(
 	// parsed or compiled: it used to be told to fix a file that no fix would
 	// let it apply (GAP-0120).
 	if windowsEnterpriseMutationAction(action) && !windowsEnterpriseIsElevated() &&
-		(action == "ensure" || managed.IsStandaloneProfile(opts.profile)) {
+		managed.IsStandaloneProfile(opts.profile) {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
 			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
 	}

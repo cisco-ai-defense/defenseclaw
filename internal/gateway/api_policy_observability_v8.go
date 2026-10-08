@@ -258,7 +258,13 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 			DefenseClawGuardrailReason:          hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable:  severity.IsPresent(),
 		}
-		auditCallerIdentity(operation.signalCtx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(operation.signalCtx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
@@ -326,7 +332,13 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 			DefenseClawGuardrailReason:         hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable: severity.IsPresent(),
 		}
-		auditCallerIdentity(operation.signalCtx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(operation.signalCtx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationFailed(input)
 	})
 	return err
@@ -479,7 +491,13 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		ConditionOperationTerminal:          outcome != observability.OutcomeAttempted,
 		ConditionTechnicalFailure:           technicalErr != nil,
 	}
-	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	}
+	caller.Identity.applyTo(&input)
 	return input
 }
 

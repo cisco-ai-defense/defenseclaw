@@ -3418,3 +3418,39 @@ def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
         "Rule activity — rule_id (rows) × time (cols)",
     ):
         assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")
+
+def test_identity_assurance_pie_assigns_each_host_user_once() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    panel = _panel(dashboard, "Verified vs claimed identity")
+    expression = panel["targets"][0]["expr"]
+
+    assert "unless on (host_name, user_id)" in expression
+    assert 'body_defenseclaw_user_principal_assurance="verified"' in expression
+    assert 'body_defenseclaw_user_principal_assurance="claimed"' in expression
+    assert "sum by (host_name, user_id, assurance)" in expression
+
+
+def test_user_name_regex_is_case_insensitive_on_filtered_log_panels() -> None:
+    filtered = 0
+    for path in DASHBOARD_DIR.glob("*.json"):
+        dashboard = _dashboard(path.name)
+        for panel in _all_panels(dashboard["panels"]):
+            for target in panel.get("targets", []):
+                expression = target.get("expr", "")
+                if 'body_defenseclaw_user_name=~' in expression:
+                    filtered += 1
+                    assert 'body_defenseclaw_user_name=~"(?i)$user"' in expression, (path.name, panel["title"])
+    assert filtered > 0
+
+
+def test_identity_dashboard_keeps_host_local_user_ids_separate() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    variables = {variable["name"] for variable in dashboard["templating"]["list"]}
+    assert "host" in variables
+    users_observed = _panel(dashboard, "Users observed")["targets"][0]["expr"]
+    assert "sum by (host_name, user_id)" in users_observed
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            expression = target.get("expr", "")
+            if "$user" in expression:
+                assert 'host_name=~"$host"' in expression, panel["title"]

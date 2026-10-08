@@ -46,7 +46,7 @@ func verifiedAuditCaller(ctx context.Context) (auditCaller, bool) {
 		return auditCaller{}, false
 	}
 	if peer, found := managedHookPeerFromContext(ctx); found {
-		caller := auditCaller{ID: strconv.Itoa(peer.UID), IDKind: useridentity.KindPOSIXUID, Name: peer.Name}
+		caller := auditCaller{ID: strconv.Itoa(peer.UID), IDKind: useridentity.KindPOSIXUID, Name: localAccountName(peer.Name)}
 		if agent := AgentIdentityFromContext(ctx); caller.Name == "" && agent.UserID == caller.ID {
 			// The account lookup failed; the name the guardian recorded for
 			// the uid attributes the row (attachVerifiedSubject).

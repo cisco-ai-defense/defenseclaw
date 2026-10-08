@@ -6,8 +6,9 @@
 package ideplugins
 
 import (
+	"io"
+	"os"
 	"path/filepath"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -20,13 +21,39 @@ func init() {
 	visualStudioEnabledLookup = readVisualStudioEnabled
 }
 
-// readVisualStudioEnabled loads an instance's privateregistry.bin with
-// RegLoadAppKey (no options, so a hive Visual Studio already loaded is
-// shared rather than locked against it) and reads the value names of
+// readVisualStudioEnabled loads a private copy of an instance's hive. The
+// registry API can create a missing hive and needs write access even when
+// reading, so it must never receive the path in the user's profile. It reads
+// the value names of
 // ExtensionManager\EnabledExtensions, which are "<id>,<version>".
 func readVisualStudioEnabled(instanceDir, instanceName string) (map[string]bool, bool) {
 	hive := filepath.Join(instanceDir, "privateregistry.bin")
-	path, err := windows.UTF16PtrFromString(hive)
+	const maxHiveBytes = 64 << 20
+	info, err := os.Lstat(hive)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxHiveBytes {
+		return nil, false
+	}
+	source, err := os.Open(hive)
+	if err != nil {
+		return nil, false
+	}
+	defer source.Close()
+	privateDir, err := os.MkdirTemp("", "defenseclaw-vs-hive-")
+	if err != nil {
+		return nil, false
+	}
+	defer os.RemoveAll(privateDir)
+	copyPath := filepath.Join(privateDir, "privateregistry.bin")
+	copyFile, err := os.Create(copyPath)
+	if err != nil {
+		return nil, false
+	}
+	copied, copyErr := io.Copy(copyFile, io.LimitReader(source, maxHiveBytes+1))
+	closeErr := copyFile.Close()
+	if copyErr != nil || closeErr != nil || copied <= 0 || copied > maxHiveBytes {
+		return nil, false
+	}
+	path, err := windows.UTF16PtrFromString(copyPath)
 	if err != nil {
 		return nil, false
 	}
@@ -50,19 +77,9 @@ func readVisualStudioEnabled(instanceDir, instanceName string) (map[string]bool,
 		if err != nil {
 			continue
 		}
-		names, err := k.ReadValueNames(visualStudioMaxExtensions)
+		out, ok := visualStudioEnabledNames(k.ReadValueNames)
 		k.Close()
-		if err != nil {
-			return nil, false
-		}
-		out := make(map[string]bool, len(names))
-		for _, name := range names {
-			id, _, _ := strings.Cut(name, ",")
-			if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
-				out[id] = true
-			}
-		}
-		return out, true
+		return out, ok
 	}
 	return nil, false
 }

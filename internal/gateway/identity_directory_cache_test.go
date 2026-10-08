@@ -6,12 +6,15 @@ package gateway
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -240,5 +243,30 @@ func TestDirectoryHealthViewNamesTheFailingLookups(t *testing.T) {
 	}
 	if view["failing"] != 3 || view["max_age_seconds"] != 3600 || view["message"] != message {
 		t.Errorf("view = %v", view)
+	}
+}
+
+func TestIdentitySpoolRecordRequiresCurrentAccountName(t *testing.T) {
+	dir := t.TempDir()
+	key := "15001"
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+		Key: key, User: "alice@corp.example.com", UpdatedAt: time.Now().UTC(),
+		Facts: useridentity.DirectoryFacts{UPN: "alice@corp.example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, key+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate; setIdentitySpoolDir("") })
+	setIdentitySpoolDir(dir)
+	if _, ok := readIdentitySpoolFactsForAccount(key, "bob@corp.example.com", time.Now()); ok {
+		t.Fatal("spool facts crossed uid reuse")
+	}
+	if _, ok := readIdentitySpoolFactsForAccount(key, "ALICE@CORP.EXAMPLE.COM", time.Now()); !ok {
+		t.Fatal("case-only account variation was rejected")
 	}
 }

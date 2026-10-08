@@ -55,6 +55,13 @@ def stub_client(monkeypatch: pytest.MonkeyPatch) -> _StubClient:
     return client
 
 
+
+def test_identities_normalizes_connector_alias(stub_client: _StubClient) -> None:
+    result = CliRunner().invoke(cli, ["agent", "identities", "--connector", "claude-code"])
+    assert result.exit_code == 0, result.output
+    assert stub_client.calls[0]["connector"] == "claudecode"
+    assert "agt-0123456789abcdef" in result.output
+
 def test_identities_forwards_filters_and_renders_rows(stub_client: _StubClient) -> None:
     result = CliRunner().invoke(cli, ["agent", "identities", "--user", "alice", "--connector", "claudecode"])
     assert result.exit_code == 0, result.output

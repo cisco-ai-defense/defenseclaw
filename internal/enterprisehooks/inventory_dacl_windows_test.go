@@ -193,6 +193,11 @@ func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
 	jar := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\plugins\ai\lib\ai.jar`))
 	pkg := write(filepath.Join(home, `.vscode-server\cli\servers\Stable-0a1b\server\package.json`))
 	caches := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\caches\content.dat`))
+	privateState := write(filepath.Join(home, `AppData\Roaming\Code\User\globalStorage\agent.example\session.json`))
+	legacyRoot := filepath.Join(home, `AppData\Roaming\Code\User\globalStorage`)
+	if _, err := ensureInventoryReadACE(legacyRoot, sid); err != nil {
+		t.Fatal(err)
+	}
 	linked := write(filepath.Join(outside, `AndroidStudio2025.1\plugins\x.jar`))
 	google := filepath.Join(home, `AppData\Local\Google`)
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", google, outside).CombinedOutput(); err != nil {
@@ -223,7 +228,7 @@ func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
 			}
 		}
 	}
-	for path, want := range map[string]bool{jar: true, pkg: true, caches: false, filepath.Dir(caches): false, linked: false, outside: false} {
+	for path, want := range map[string]bool{jar: true, pkg: true, caches: false, filepath.Dir(caches): false, privateState: false, linked: false, outside: false} {
 		if got := hasACE(path); got != want {
 			t.Errorf("service ACE on %s = %v, want %v", path, got, want)
 		}

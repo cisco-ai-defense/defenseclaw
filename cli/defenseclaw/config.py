@@ -5344,7 +5344,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
 
 
 def _merge_guardrail_connectors(
-    raw: Any,
+    raw: Any, *, profile: bool = False,
 ) -> dict[str, PerConnectorGuardrailConfig]:
     """Parse the optional ``guardrail.connectors`` map.
 
@@ -5368,7 +5368,7 @@ def _merge_guardrail_connectors(
         enabled = enabled_raw if isinstance(enabled_raw, bool) else None
         out[str(name)] = PerConnectorGuardrailConfig(
             mode=entry.get("mode", ""),
-            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
+            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None and (not profile or bool(hilt_entry)) else None,
             hook_fail_mode=entry.get("hook_fail_mode", ""),
             block_message=entry.get("block_message", ""),
             rule_pack=str(entry.get("rule_pack", "") or ""),
@@ -5401,11 +5401,11 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             mode=str(entry.get("mode", "") or ""),
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
-            hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) else None,
+            hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) and hilt_entry else None,
             rule_pack=str(entry.get("rule_pack", "") or ""),
             rules=_merge_guardrail_rules(entry.get("rules")),
             block_message=str(entry.get("block_message", "") or ""),
-            connectors=_merge_guardrail_connectors(entry.get("connectors")),
+            connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
             enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
             hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
         )
