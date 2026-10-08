@@ -880,6 +880,17 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 		recs[0].DecisionCode != "SANDBOX_EGRESS_HOST_PORT_ASK" || !strings.Contains(recs[0].Reason, "asks to reach port 38830 on your machine") {
 		t.Fatalf("audited %+v", recs)
 	}
+	// policy test reads the declared port as the ask it raises, not as a
+	// host_internal block (GAP-0265).
+	test := func() sandboxapi.PolicyDecision {
+		res, err := e.m.PolicyTest(t.Context(), sandboxapi.PolicyTestRequest{Sandbox: "hpbox",
+			Checks: []sandboxapi.PolicyCheck{{Host: openshellHostAlias, Port: 38830}}})
+		must(t, err)
+		return res.Decisions[0]
+	}
+	if d := test(); d.Allowed || !d.Ask || d.Rule != "host_port" || !strings.Contains(d.Reason, "sandbox approvals") {
+		t.Fatalf("policy test before the approval = %+v", d)
+	}
 	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)
 	}
@@ -894,6 +905,9 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	})
 	if e.approvedRules("hpbox")[rule] != actorOperator {
 		t.Fatal("the operator is not the recorded approver")
+	}
+	if d := test(); !d.Allowed || d.Ask {
+		t.Fatalf("policy test after the approval = %+v", d)
 	}
 	if len(where(&e.tel.mu, &e.tel.approvals, func(a audit.SandboxApprovalEvent) bool {
 		return a.ApprovalID == ask.ID && a.Stage == audit.SandboxApprovalResolved && a.Result == audit.SandboxApprovalApproved

@@ -981,6 +981,10 @@ type PolicyDecision struct {
 	Source      string `json:"source"`
 	Reason      string `json:"reason,omitempty"`
 	Unblockable bool   `json:"unblockable"`
+	// Ask is set for a destination that raises an ask the user answers
+	// (a --host-port of the sandbox not yet approved): not allowed until
+	// approved.
+	Ask bool `json:"ask,omitempty"`
 	// Direct names a provider of the sandbox (its --llm model endpoint, a
 	// --credential binding) whose OpenShell rule opens the destination to
 	// that provider's programs around the egress proxy.

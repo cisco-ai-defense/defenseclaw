@@ -1483,6 +1483,9 @@ same decider the egress proxy uses, so it can't disagree with it.
 `--sandbox NAME` tests that sandbox's policy, its unblocks included, through
 the daemon, and names a provider of the sandbox (its model endpoint, a
 `--credential` binding) that opens the destination directly around the proxy.
+A port the sandbox was started with `--host-port` (on
+`host.openshell.internal`) reads `asks` until you approve its first
+connection, then `allowed` (rule `host_port`).
 Without it, `--pack`, `--profile`, and `--harness` resolve the policy a run in
 this folder would get, with this machine's `config.yaml` (or the defaults)
 and the folder's repository policy, and no daemon is needed, so CI can check
