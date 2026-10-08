@@ -348,6 +348,14 @@ func validateEnterpriseACPUserToken(path string) error {
 // with the one the lock names.
 func resolveACPExecutable(value, label string) (string, error) {
 	candidate, err := exec.LookPath(value)
+	if errors.Is(err, exec.ErrDot) {
+		// Windows looks in the current folder first and Go refuses that
+		// match; "was not found" sent the user looking for an install that
+		// was on PATH all along (GAP-0734).
+		where, _ := filepath.Abs(candidate)
+		return "", fmt.Errorf("%s executable %s resolves to %s in the current folder, which DefenseClaw does not run; "+
+			"run setup from another folder, or pass --agent-binary with the full path of the agent", label, value, where)
+	}
 	if err != nil {
 		if !filepath.IsAbs(value) {
 			return "", fmt.Errorf("%s executable was not found: %s", label, value)
