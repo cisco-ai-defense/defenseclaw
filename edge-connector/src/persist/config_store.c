@@ -224,8 +224,11 @@ static void load_active_partition_from_flash(void) {
             goto apply_version;
         }
 
-        fprintf(stderr, "[DCLAW] WARNING: Both partition records corrupt — using defaults.\n");
-        return; /* fall back to defaults (partition A, version 0) */
+        /* First boot or fully corrupted flash — write default record so this
+         * warning does not fire on every subsequent boot. */
+        fprintf(stderr, "[DCLAW] INFO: No partition records found (first boot) — initializing defaults.\n");
+        persist_active_partition();
+        return;
     }
 
     if (buf[2] <= 1) {

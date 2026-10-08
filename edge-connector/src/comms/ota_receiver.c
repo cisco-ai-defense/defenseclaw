@@ -536,7 +536,7 @@ int dclaw_policy_reload_from_flash(void) {
     if (max_size < 8) return 1;
     uint16_t payload_len = ((uint16_t)flash_buf[2] << 8) | flash_buf[3];
     if (payload_len == 0 || (uint32_t)(8 + payload_len) > max_size) {
-        fprintf(stderr, "[DCLAW] WARNING: Invalid policy payload length %u in flash. "
+        fprintf(stderr, "[DCLAW] INFO: No OTA policy in flash (payload_len=%u). "
                 "Compiled-in defaults remain active.\n", payload_len);
         return 1;
     }
