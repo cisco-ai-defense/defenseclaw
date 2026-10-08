@@ -1108,11 +1108,10 @@ def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]
         "assign-app", "--app", "app", "--group", "team", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert len(calls) == 2
-    assert calls[0][0] == "DELETE"
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
     assert calls[0][1].endswith("/assignments/assignment-1")
-    assert calls[1][0] == "POST"
-    assert calls[1][2]["target"]["@odata.type"] == intune.GROUP_TARGET
+    assert calls[0][2]["target"]["@odata.type"] == intune.GROUP_TARGET
 
 
 def test_intune_assign_app_updates_existing_intent() -> None:
@@ -1142,10 +1141,10 @@ def test_intune_assign_app_updates_existing_intent() -> None:
         "assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert [call[0] for call in calls] == ["DELETE", "POST"]
-    assert calls[1][2]["intent"] == "uninstall"
-    assert calls[1][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
-    assert "settings" in calls[1][2]
+    assert [call[0] for call in calls] == ["PATCH"]
+    assert calls[0][2]["intent"] == "uninstall"
+    assert calls[0][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
+    assert "settings" in calls[0][2]
 
 
 def test_intune_groups_reject_dynamic_group() -> None:
@@ -1201,8 +1200,8 @@ def test_intune_remove_assignment_deletes_only_target_group() -> None:
             if "/groups?" in path:
                 return [{"id": "target"}]
             if "/assignments" in path:
-                return [{"id": "one", "target": {"groupId": "target"}},
-                        {"id": "two", "target": {"groupId": "other"}}]
+                return [{"id": "one", "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "target"}},
+                        {"id": "two", "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "other"}}]
             return [{"id": "app", "publishingState": "published"}]
 
         def request(self, method, path, body=None):
@@ -1349,3 +1348,125 @@ def test_macos_bridge_refuses_unsafe_names_before_touching_the_mac(args: list[st
     result = subprocess.run([bash, str(script), *args], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 2, result
     assert result.stderr.startswith("error: ")
+
+
+def test_intune_expired_apple_push_certificate_fails_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+    monkeypatch.setattr(intune, "try_get", lambda _graph, path: (
+        ({"expirationDateTime": "2020-01-01T00:00:00Z"}, None)
+        if "applePushNotificationCertificate" in path else ({"value": []}, None)
+    ))
+    rows = intune.check_items(Graph(), ["macos"], [])
+    certificate = next(row for row in rows if row["item"] == "Apple push certificate")
+    assert certificate["status"] == intune.FAIL
+
+
+def test_intune_remediation_rerun_uploads_changed_default_scripts(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    writes = []
+    scripts = {"Remediate-Detect.ps1": b"new detection", "Remediate-Fix.ps1": b"new remediation"}
+    monkeypatch.setattr(intune, "read_script", lambda path, _limit: scripts[Path(path).name])
+
+    class Graph:
+        def get_all(self, path):
+            return [{"id": "script-1"}]
+
+        def get(self, _path):
+            return {"detectionScriptContent": intune.b64(b"old detection"),
+                    "remediationScriptContent": intune.b64(b"old remediation")}
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args(["remediation", "--apply"])
+    assert intune.cmd_remediation(Graph(), args) == 0
+    assert writes == [("PATCH", "/beta/deviceManagement/deviceHealthScripts/script-1",
+                       {"detectionScriptContent": intune.b64(scripts["Remediate-Detect.ps1"]),
+                        "remediationScriptContent": intune.b64(scripts["Remediate-Fix.ps1"])})]
+
+
+def test_intune_remediation_reenables_detection_only_assignment(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
+    writes = []
+    old = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
+           "runRemediationScript": False,
+           "runSchedule": {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
+                           "interval": 1, "time": "03:00:00", "useUtc": False}}
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [old]
+            return [{"id": "script-1"}]
+
+        def get(self, _path):
+            return {"detectionScriptContent": intune.b64(b"script"),
+                    "remediationScriptContent": intune.b64(b"script")}
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
+    assert intune.cmd_remediation(Graph(), args) == 0
+    assert len(writes) == 1
+    assert writes[0][2]["deviceHealthScriptAssignments"][0]["runRemediationScript"] is True
+    assert writes[0][2]["deviceHealthScriptAssignments"][0]["runSchedule"] == old["runSchedule"]
+
+
+def test_intune_remove_assignment_preserves_exclusion() -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{"id": "exclusion", "intent": "required",
+                         "target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget",
+                                    "groupId": "group-1"}}]
+            return [{"id": "app-1"}]
+
+        def request(self, method, path, body=None):
+            writes.append((method, path))
+
+    args = intune.build_parser().parse_args(
+        ["remove-assignment", "--app", "app", "--group", "team", "--apply"])
+    assert intune.cmd_remove_assignment(Graph(), args) == 0
+    assert writes == []
+
+
+def test_intune_intent_change_failure_keeps_original_assignment() -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{"id": "assignment-1", "intent": "required",
+                         "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"}}]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method, path, body=None):
+            writes.append(method)
+            if method != "DELETE":
+                raise intune.GraphError(400, "Rejected", "change rejected")
+            return {}
+
+    args = intune.build_parser().parse_args(
+        ["assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply"])
+    with pytest.raises(intune.GraphError, match="Rejected"):
+        intune.cmd_assign_app(Graph(), args)
+    assert writes == ["PATCH"]
