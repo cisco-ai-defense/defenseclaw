@@ -396,7 +396,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — repair the managed DefenseClaw installation; source checkouts: uv sync", s.Name(), s.Config.Binary)
+			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {

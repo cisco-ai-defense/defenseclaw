@@ -5,6 +5,7 @@
 package scanner
 
 import (
+	"fmt"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -23,6 +24,18 @@ const scannerRuntimeName = "defenseclaw-scanners"
 func usesScannerRuntime(binary string) bool {
 	base := strings.ToLower(filepath.Base(strings.TrimSpace(binary)))
 	return base == scannerRuntimeName || base == scannerRuntimeName+".exe"
+}
+
+// scannerNotFound is the error of a scanner binary that does not exist. On
+// a host with a managed scanner runtime it says why that runtime was not
+// used: a scan never falls back to a PATH lookup there, and the bare name it
+// reported before (skill-scanner not found at "skill-scanner") hid the cause
+// (GAP-0686). hint is the generic remedy.
+func scannerNotFound(name, binary, hint string) error {
+	if problem := scannerRuntimeProblem(); problem != nil && !usesScannerRuntime(binary) {
+		return fmt.Errorf("scanner: %s: the managed scanner runtime cannot be run (%v); run the DefenseClaw Setup with /repair", name, problem)
+	}
+	return fmt.Errorf("scanner: %s not found at %q — %s", name, binary, hint)
 }
 
 // runtimeSettings is scanners.mcp_scanner as JSON with config.yaml's keys,

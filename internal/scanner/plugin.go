@@ -116,7 +116,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — repair the managed DefenseClaw installation; source checkouts: uv sync", s.Name(), s.BinaryPath)
+			scanErr = scannerNotFound(s.Name(), s.BinaryPath, "repair the managed DefenseClaw installation; source checkouts: uv sync")
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {

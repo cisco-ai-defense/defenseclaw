@@ -89,6 +89,22 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 			t.Fatalf("%s: errors=%+v warnings=%+v scanners=%+v", action, result.Errors, result.Warnings, result.Scanners)
 		}
 	}
+
+	// GAP-0686: a prepared runtime the gateway service cannot run fails
+	// verify too; before, verify said ok while every rescan failed.
+	readerSeam, checkSeam := windowsScannerRuntimeReader, windowsScannerRuntimeServiceCheck
+	t.Cleanup(func() { windowsScannerRuntimeReader, windowsScannerRuntimeServiceCheck = readerSeam, checkSeam })
+	windowsScannerRuntimeReader = func() *enterprisestatus.ScannerRuntime {
+		return &enterprisestatus.ScannerRuntime{State: "ready", JudgeModel: "judge"}
+	}
+	windowsScannerRuntimeServiceCheck = func() error { return errors.New("the gateway service account cannot read it") }
+	result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	result.Installed = true
+	applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})
+	if len(result.Errors) != 1 || result.Errors[0].Code != "scanner_runtime_unavailable" ||
+		!strings.Contains(result.Errors[0].Message, "cannot read it") {
+		t.Fatalf("a runtime the gateway cannot run: errors=%+v", result.Errors)
+	}
 }
 
 // GAP-0311: the staged scanner executable is admitted like every other

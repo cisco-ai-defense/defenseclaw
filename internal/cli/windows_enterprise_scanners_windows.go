@@ -165,11 +165,19 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		// recorded deployment; a standard account cannot read the runtime
 		// folder anyway.
 		if result.Installed && !windowsEnterpriseResultHasWarning(result, windowsEnterpriseHealthNotChecked) {
-			result.Scanners = readWindowsScannerRuntime()
+			result.Scanners = windowsScannerRuntimeReader()
 			// Every scan fails closed without a ready runtime, so verify
 			// fails and an MDM detection remediates (GAP-0294).
+			message := ""
 			if result.Scanners.State != "ready" {
-				message := windowsScannerRuntimeUnavailable(result.Scanners.State)
+				message = windowsScannerRuntimeUnavailable(result.Scanners.State)
+			} else if err := windowsScannerRuntimeServiceCheck(); err != nil {
+				// Prepared, but not as the gateway service runs it: every
+				// scan failed while status and verify said ok (GAP-0686).
+				message = "the skill, MCP and plugin scanner runtime is prepared but the gateway service cannot run it (" + err.Error() +
+					"), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed); run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair"
+			}
+			if message != "" {
 				if result.Action == "verify" {
 					result.AddError("scanner_runtime_unavailable", message)
 				} else {
@@ -183,6 +191,27 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			}
 		}
 	}
+}
+
+// windowsScannerRuntimeReader is readWindowsScannerRuntime; a seam for tests.
+var windowsScannerRuntimeReader = readWindowsScannerRuntime
+
+// windowsScannerRuntimeServiceCheck checks the runtime the way the gateway
+// service runs it: the trust check every scan makes, and that the service
+// account can read the runtime folder and the security descriptors of its
+// parents. A seam for tests.
+var windowsScannerRuntimeServiceCheck = func() error {
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return err
+	}
+	if err := managed.ValidateTrustedFilePath(filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName), "scanner runtime"); err != nil {
+		return err
+	}
+	if err := managed.ValidateServiceCanReadTree(root, "scanner runtime", windowsScannerGatewayAccount); err != nil && !managed.IsServiceAccountUnresolved(err) {
+		return err
+	}
+	return nil
 }
 
 // installWindowsScannerRuntime copies source into the protected root unless
