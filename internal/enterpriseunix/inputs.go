@@ -45,8 +45,9 @@ func (l *lifecycle) inputsChanged() bool {
 		return true
 	}
 	if len(r.Errors) > 0 && !planned.configFromInstalled {
-		// A failed --config run put the previous config.yaml back.
-		return false
+		// A failed --config run put the previous config.yaml back, and the
+		// one another writer put in place during the run after it.
+		return l.configWrittenDuringRun != nil
 	}
 	current, err := sha256File(env.P(env.Layout.ConfigPath))
 	if err != nil {

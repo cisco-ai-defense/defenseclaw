@@ -71,22 +71,31 @@ func writeOnce(t *testing.T, h *testHost, unit, canonical string, data []byte) f
 // had planned from back over the change (or leave a later write on disk
 // unapplied, with the apply trigger stopped), and the next ensure was a
 // no-op: the change was silently lost. The run now keeps the newer bytes and
-// applies them in a follow-up transaction before it releases the lock.
+// applies them in a follow-up transaction before it releases the lock. A
+// run given --config is no different: it wrote its own file over one
+// written in place while it ran, and the later writer lost (GAP-0745).
 func TestConfigWrittenDuringATransactionIsApplied(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
-		for _, moment := range []string{"quiesce", "activation"} {
+		for _, moment := range []string{"quiesce", "activation", "quiesce-with-config-flag"} {
 			t.Run(goos+"-"+moment, func(t *testing.T) {
 				h := newTestHost(t, goos)
 				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 				edited := []byte(strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
 				hooked := &hookedServices{fakeServices: h.services}
-				if moment == "quiesce" {
+				if strings.HasPrefix(moment, "quiesce") {
 					hooked.onStop = writeOnce(t, h, unitOf(goos, "enumerator"), h.env.Layout.ConfigPath, edited)
 				} else {
 					hooked.onStart = writeOnce(t, h, unitOf(goos, "gateway"), h.env.Layout.ConfigPath, edited)
 				}
 				h.env.Services = hooked
-				r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})
+				opts := Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")}
+				if moment == "quiesce-with-config-flag" {
+					opts.ConfigFile = filepath.Join(t.TempDir(), "pushed.yaml")
+					if err := os.WriteFile(opts.ConfigFile, append(DefaultConfig(h.env.Layout), "# pushed\n"...), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r := h.run(opts)
 				requireOK(t, r)
 				if !strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
 					t.Fatal("the transaction wrote its planned config over the administrator's change")
