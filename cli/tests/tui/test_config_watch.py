@@ -664,3 +664,37 @@ async def test_failed_config_save_keeps_draft_for_retry(monkeypatch: pytest.Monk
     assert "saved" in app._save_setup_config().hint
     assert not model.has_changes()
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["asset_policy"]["mode"] == "action"
+
+
+@pytest.mark.asyncio
+async def test_failed_config_save_revert_does_not_leak_into_later_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.mode = "config"
+
+    def edit(key: str, value: str) -> None:
+        model.active_section, model.active_line = next(
+            (si, li)
+            for si, section in enumerate(model.sections)
+            for li, field in enumerate(section.fields)
+            if field.key == key
+        )
+        assert model.set_current_field_value(value)
+
+    edit("asset_policy.mode", "action")
+    original_save = app.config.save
+    monkeypatch.setattr(app.config, "save", lambda **_kwargs: (_ for _ in ()).throw(OSError("read-only directory")))
+    assert "failed" in app._save_setup_config().hint
+    assert "reverted" in app._handle_setup_config_key("r").hint
+    assert not model.has_changes()
+
+    monkeypatch.setattr(app.config, "save", original_save)
+    edit("environment", "later-change")
+    assert "saved" in app._save_setup_config().hint
+    persisted = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert persisted["environment"] == "later-change"
+    assert persisted.get("asset_policy", {}).get("mode") != "action"

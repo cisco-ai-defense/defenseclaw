@@ -679,6 +679,13 @@ func newContainer(parts []pathPart, nextIndex int, value *yaml.Node, last bool) 
 }
 
 func keepComments(dst, src *yaml.Node) {
+	keepNodeComments(dst, src)
+	if dst.Kind == yaml.SequenceNode && src.Kind == yaml.SequenceNode {
+		keepRetainedListComments(dst, src)
+	}
+}
+
+func keepNodeComments(dst, src *yaml.Node) {
 	if dst.HeadComment == "" {
 		dst.HeadComment = src.HeadComment
 	}
@@ -687,6 +694,39 @@ func keepComments(dst, src *yaml.Node) {
 	}
 	if dst.FootComment == "" {
 		dst.FootComment = src.FootComment
+	}
+}
+
+// Match retained items by value, not index: list edits can insert, remove, or
+// reorder items, and comments must follow the item they describe.
+func keepRetainedListComments(dst, src *yaml.Node) {
+	used := make([]bool, len(src.Content))
+	for _, item := range dst.Content {
+		for i, old := range src.Content {
+			if used[i] || !sameValue(item, old) {
+				continue
+			}
+			keepItemComments(item, old)
+			used[i] = true
+			break
+		}
+	}
+}
+
+func keepItemComments(dst, src *yaml.Node) {
+	keepNodeComments(dst, src)
+	switch {
+	case dst.Kind == yaml.MappingNode && src.Kind == yaml.MappingNode:
+		for i := 0; i+1 < len(dst.Content); i += 2 {
+			j, oldValue := mapLookup(src, dst.Content[i].Value)
+			if oldValue == nil {
+				continue
+			}
+			keepNodeComments(dst.Content[i], src.Content[j])
+			keepItemComments(dst.Content[i+1], oldValue)
+		}
+	case dst.Kind == yaml.SequenceNode && src.Kind == yaml.SequenceNode:
+		keepRetainedListComments(dst, src)
 	}
 }
 

@@ -1664,11 +1664,14 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		)
 		// The Windows scanner runtime applies the rule pack as the CLI does (GAP-0296).
 		ms.RulePack = scanner.MCPRulePackFor(cfg, w.eventConnector(evt))
-		// A project-scoped command server is found only from its project
-		// (GAP-0623).
-		if entry, err := w.lookupMCPServer(evt); err == nil && entry.Project != "" && entry.URL == "" {
-			if info, statErr := os.Stat(entry.Project); statErr == nil && info.IsDir() {
-				ms.Project, ms.Connector = entry.Project, entry.Connector
+		if entry, err := w.lookupMCPServer(evt); err == nil {
+			ms.ServerEntry = entry
+			// A project-scoped command server is found only from its project
+			// (GAP-0623).
+			if entry.Project != "" && entry.URL == "" {
+				if info, statErr := os.Stat(entry.Project); statErr == nil && info.IsDir() {
+					ms.Project, ms.Connector = entry.Project, entry.Connector
+				}
 			}
 		}
 		return ms

@@ -1302,8 +1302,14 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
 	connector = canonicalConnectorRulePackKey(connector)
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
-		if pack := resolved.set.packs[effectiveRulePackKey(resolved.derived, connector)]; pack != nil {
+		key := effectiveRulePackKey(resolved.derived, connector)
+		if pack := resolved.set.packs[key]; pack != nil {
 			return pack
+		}
+		if retry := resolved.set.missing[key]; retry != nil {
+			if pack := retry.pack.Load(); pack != nil {
+				return pack
+			}
 		}
 	}
 	g := a.generation()
@@ -1350,12 +1356,13 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	if judge == nil || content == "" {
 		return nil
 	}
-	// Gate on the live configuration, like every other decision site. A hot
-	// reload swaps the judge (SetHookJudge) but leaves a.scannerCfg at the
-	// start-time snapshot, so reading it here kept a judge that a reload had
-	// enabled, or pointed at another connector, wired but never asked
-	// (GAP-0216: judge ready was logged, no prompt was ever judged).
+	// Gate on the configuration of the generation the judge came from: the
+	// request pins one, so a reload cannot pair a new gate with a nil or
+	// previous judge. A start-time scannerCfg can have another connector gate.
 	cfg := a.decisionConfig(ctx)
+	if g := pinnedGeneration(ctx); g.published() && cfg != nil && !cfg.SecureClientIntegration() {
+		cfg = a.decisionConfigFrom(ctx, g.Config)
+	}
 	if cfg == nil {
 		return nil
 	}
@@ -1391,6 +1398,7 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 		return nil
 	}
 
+	a.hookJudgeSemOnce.Do(func() { a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges) })
 	select {
 	case a.hookJudgeSem <- struct{}{}:
 	default:

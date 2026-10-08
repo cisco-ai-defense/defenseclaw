@@ -165,7 +165,11 @@ func (g *GuardrailInspector) fallbackVerdict(ctx context.Context, local, merged,
 	if local == nil {
 		local = allowVerdict("fallback")
 	}
-	out := *merged
+	trusted := merged
+	if thresholds.CiscoTrustLevel == "none" {
+		trusted = local
+	}
+	out := *trusted
 	out.Action = fallbackGuardrailVerdictForThresholds(local, cisco, thresholds, mode, g.hiltInputFor(ctx)).Action
 	return &out
 }

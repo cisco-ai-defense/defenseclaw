@@ -232,6 +232,25 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         )
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_skips_server_denied_by_name_and_url(self, mock_scan):
+        from defenseclaw.config import AssetPolicyRule
+
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner", target="https://server.example/mcp",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.mcp_servers = lambda connector=None, **_: [
+            MCPServerEntry(name="reviewed", url="https://server.example/mcp", transport="sse"),
+        ]
+        self.app.cfg.asset_policy.mcp.denied = [
+            AssetPolicyRule(name="reviewed", url="https://server.example/mcp"),
+        ]
+        result = self.invoke(["scan", "reviewed", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("BLOCKED", result.output)
+        mock_scan.assert_not_called()
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_honors_per_connector_block(self, mock_scan):
         # Fix-plan verification: block --connector codex → scanning codex is
         # blocked, scanning a different connector still scans.

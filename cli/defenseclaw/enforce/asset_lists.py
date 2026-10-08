@@ -620,7 +620,9 @@ def merge_operator_entries(entries: list[Any], cfg: Any, target_type: str) -> li
                 continue
             connector = (getattr(rule, "connector", "") or "").strip()
             for i, entry in enumerate(out):
-                if entry.target_name == name and _connector_key(entry.connector) == _connector_key(connector):
+                if _same_name(entry.target_name, name, target_type) and (
+                    _connector_key(entry.connector) == _connector_key(connector)
+                ):
                     out[i] = dataclasses.replace(
                         entry,
                         actions=dataclasses.replace(entry.actions, install=decision),

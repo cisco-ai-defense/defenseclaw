@@ -67,15 +67,16 @@ func (s *MCPScanner) runtimeSettings() (string, error) {
 func (s *MCPScanner) runtimeEnv() []string {
 	llm := s.LLM
 	derived := map[string]string{
-		"NO_COLOR":                         "1",
-		"TERM":                             "dumb",
-		"DEFENSECLAW_SCANNER_LLM_MODEL":    liteLLMModel(llm),
-		"DEFENSECLAW_SCANNER_LLM_PROVIDER": strings.TrimSpace(llm.Provider),
-		"DEFENSECLAW_SCANNER_LLM_API_KEY":  llm.ResolvedAPIKey(),
-		"DEFENSECLAW_SCANNER_LLM_BASE_URL": strings.TrimSpace(llm.BaseURL),
-		"DEFENSECLAW_SCANNER_LLM_REGION":   strings.TrimSpace(llm.Region),
-		"DEFENSECLAW_SCANNER_AID_API_KEY":  s.CiscoAIDefense.ResolvedAPIKey(),
-		"DEFENSECLAW_SCANNER_AID_ENDPOINT": strings.TrimSpace(s.CiscoAIDefense.Endpoint),
+		"NO_COLOR":                            "1",
+		"TERM":                                "dumb",
+		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true",
+		"DEFENSECLAW_SCANNER_LLM_MODEL":       liteLLMModel(llm),
+		"DEFENSECLAW_SCANNER_LLM_PROVIDER":    strings.TrimSpace(llm.Provider),
+		"DEFENSECLAW_SCANNER_LLM_API_KEY":     llm.ResolvedAPIKey(),
+		"DEFENSECLAW_SCANNER_LLM_BASE_URL":    strings.TrimSpace(llm.BaseURL),
+		"DEFENSECLAW_SCANNER_LLM_REGION":      strings.TrimSpace(llm.Region),
+		"DEFENSECLAW_SCANNER_AID_API_KEY":     s.CiscoAIDefense.ResolvedAPIKey(),
+		"DEFENSECLAW_SCANNER_AID_ENDPOINT":    strings.TrimSpace(s.CiscoAIDefense.Endpoint),
 	}
 	if llm.Bedrock != nil && strings.TrimSpace(llm.Bedrock.Region) != "" {
 		derived["DEFENSECLAW_SCANNER_LLM_REGION"] = strings.TrimSpace(llm.Bedrock.Region)
@@ -90,6 +91,9 @@ func (s *MCPScanner) runtimeEnv() []string {
 			continue
 		}
 		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
+			continue
+		}
 		if v, set := derived[upper]; set && v != "" {
 			continue
 		}

@@ -554,6 +554,13 @@ func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
 	if info, err := os.Lstat(target); err != nil || !info.Mode().IsRegular() {
 		return state
 	}
+	// Status and verify run this executable with elevated caller privileges.
+	// Check the runtime root as a protected directory, then the executable
+	// and its ancestors, before invoking even the read-only versions command.
+	if managed.ValidateTrustedRuntimeDir(root, "scanner runtime") != nil ||
+		managed.ValidateTrustedFilePath(target, "scanner runtime executable") != nil {
+		return state
+	}
 	state.State = "not_prepared"
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

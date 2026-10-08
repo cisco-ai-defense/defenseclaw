@@ -7,6 +7,7 @@ package scanner
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,5 +96,69 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 	plugin := &PluginScanner{BinaryPath: runtimeBinary, IncludeSelf: true}
 	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--include-self"}) {
 		t.Fatalf("plugin args = %v", args)
+	}
+}
+
+// GAP-0710: the Windows runtime must receive the exact stdio definition,
+// not only its name (which the wrapper would otherwise parse as a URL).
+func TestMCPRuntimeStdioEntry(t *testing.T) {
+	mcp := &MCPScanner{
+		Config: config.MCPScannerConfig{Binary: "defenseclaw-scanners.exe"},
+		ServerEntry: &config.MCPServerEntry{
+			Name: "local", Command: "npx", Args: []string{"-y", "example-mcp"},
+			Env: map[string]string{"MODE": "test"}, CWD: "C:/workspace",
+		},
+	}
+	args, err := mcp.commandArgs("local")
+	if err != nil || !slices.Contains(args, "--server-entry-stdin") {
+		t.Fatalf("local runtime args = %v (%v)", args, err)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "example-mcp") || strings.Contains(arg, "MODE") {
+			t.Fatalf("server definition leaked to command line: %v", args)
+		}
+	}
+	body, err := mcp.runtimeServerEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Name    string            `json:"name"`
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+		CWD     string            `json:"cwd"`
+	}
+	if err := json.Unmarshal(body, &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Name != "local" || entry.Command != "npx" ||
+		!reflect.DeepEqual(entry.Args, []string{"-y", "example-mcp"}) ||
+		entry.Env["MODE"] != "test" || entry.CWD != "C:/workspace" {
+		t.Fatalf("stdio entry lost launch fields: %+v", entry)
+	}
+}
+
+// GAP-0711: inherited endpoint overrides, including service-specific ones,
+// cannot change the Bedrock judge destination in either scanner subprocess.
+func TestScannerAWSConfiguredEndpointsIgnored(t *testing.T) {
+	t.Setenv("AWS_ENDPOINT_URL", "https://inherited.example.test")
+	t.Setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "https://inherited.example.test")
+	t.Setenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "false")
+	t.Setenv("AWS_PROFILE", "credential-profile")
+	skill := &SkillScanner{Config: config.SkillScannerConfig{UseLLM: true},
+		LLM: config.LLMConfig{Provider: "bedrock", Model: "bedrock/test"}}
+	mcp := &MCPScanner{LLM: config.LLMConfig{Provider: "bedrock", Model: "bedrock/test"}}
+	for name, env := range map[string][]string{"skill": skill.scanEnv(), "mcp": mcp.runtimeEnv()} {
+		vars := map[string]string{}
+		for _, line := range env {
+			key, value, _ := strings.Cut(line, "=")
+			vars[strings.ToUpper(key)] = value
+		}
+		if vars["AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"] != "true" ||
+			vars["AWS_ENDPOINT_URL"] != "" || vars["AWS_ENDPOINT_URL_BEDROCK_RUNTIME"] != "" ||
+			vars["AWS_PROFILE"] != "credential-profile" {
+			t.Fatalf("%s AWS endpoint settings are not pinned", name)
+		}
 	}
 }

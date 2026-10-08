@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -319,13 +320,14 @@ type APIServer struct {
 	// nil unless guardrail.judge.enabled; wired by the sidecar at
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
-	hookJudge *LLMJudge
+	hookJudge atomic.Pointer[LLMJudge]
 	// hookJudgeSem bounds concurrent hook-lane judge executions,
 	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
 	// the judge is skipped (fail-open to the regex/AID verdict)
 	// rather than queued — a queued hook would stall the agent past
 	// the hook scripts' curl --max-time budget.
-	hookJudgeSem chan struct{}
+	hookJudgeSem     chan struct{}
+	hookJudgeSemOnce sync.Once
 
 	// sandboxIngress is the OpenShell sandbox hook listener configured by
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
@@ -361,7 +363,7 @@ func (a *APIServer) judgeFor(ctx context.Context) *LLMJudge {
 	if a == nil {
 		return nil
 	}
-	return judgeOf(pinnedGeneration(ctx), a.hookJudge)
+	return judgeOf(pinnedGeneration(ctx), a.hookJudge.Load())
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook
@@ -370,10 +372,7 @@ func (a *APIServer) judgeFor(ctx context.Context) *LLMJudge {
 // guardrail.judge.hook_connectors. Pass nil to disable (the default
 // when guardrail.judge is off).
 func (a *APIServer) SetHookJudge(j *LLMJudge) {
-	a.hookJudge = j
-	if j != nil && a.hookJudgeSem == nil {
-		a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges)
-	}
+	a.hookJudge.Store(j)
 }
 
 // otlpPathTokenEntry holds only the last securely loaded value. Once the
@@ -2280,18 +2279,22 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		reason = "allowed via REST API"
 	}
 
-	pe := enforce.NewPolicyEngine(a.store)
+	legacy := a.legacyEnforcementRows()
+	actionConnector := ""
+	if !legacy {
+		req.Connector = config.NormalizeConnectorName(req.Connector)
+		actionConnector = req.Connector
+	}
 	policyName := req.TargetName
 	runtimeName := req.TargetName
 	if req.TargetType == "plugin" {
 		policyName = normalizePluginPolicyName(req.TargetName)
-		runtimeName = resolvePluginRuntimeActionName(pe, req.TargetName, policyName)
+		runtimeName = resolvePluginRuntimeActionName(a.store, req.TargetName, policyName, actionConnector)
 	}
-	legacy := a.legacyEnforcementRows()
 	var result assetListResult
 	if legacy {
 		// Secure Client keeps its pre-1.0 mutation order and response bytes.
-		if status, err := a.enableAllowedRuntime(r.Context(), req, pe, runtimeName, policyName); err != nil {
+		if status, err := a.enableAllowedRuntime(r.Context(), req, runtimeName, policyName, ""); err != nil {
 			a.writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
@@ -2311,7 +2314,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		}
 		if result.reloadErr == nil {
 			// Only activate an asset after the allow rule is committed and applied.
-			if status, err := a.enableAllowedRuntime(r.Context(), req, pe, runtimeName, policyName); err != nil {
+			if status, err := a.enableAllowedRuntime(r.Context(), req, runtimeName, policyName, req.Connector); err != nil {
 				a.writeJSON(w, status, map[string]any{
 					"error": err.Error(), "policy_written": true, "generation": result.Generation,
 				})
@@ -2320,8 +2323,8 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			// An operator allow lifts the automatic quarantine/disable journal
 			// state, as it always did.
 			if a.store != nil {
-				_ = a.store.ClearActionField(req.TargetType, policyName, "file")
-				_ = a.store.ClearActionField(req.TargetType, policyName, "runtime")
+				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "file")
+				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "runtime")
 			}
 		}
 	}
@@ -2338,11 +2341,11 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 // enableAllowedRuntime restores a disabled skill or plugin in OpenClaw. The
 // caller chooses the mutation order: Secure Client retains the legacy flow;
 // config-driven policy commits before this is called.
-func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, pe *enforce.PolicyEngine, runtimeName, policyName string) (int, error) {
+func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, runtimeName, policyName, actionConnector string) (int, error) {
 	if a.store == nil {
 		return 0, nil
 	}
-	entry, err := pe.GetAction(req.TargetType, runtimeName)
+	entry, err := a.store.GetActionForConnector(req.TargetType, runtimeName, actionConnector)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
@@ -2368,7 +2371,7 @@ func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementReq
 			return http.StatusBadGateway, err
 		}
 		if runtimeName != policyName {
-			if err := pe.Enable("plugin", runtimeName); err != nil {
+			if err := a.store.ClearActionFieldForConnector("plugin", runtimeName, actionConnector, "runtime"); err != nil {
 				return http.StatusInternalServerError, err
 			}
 		}
@@ -2465,7 +2468,10 @@ func normalizePluginPolicyName(name string) string {
 	return base
 }
 
-func resolvePluginRuntimeActionName(pe *enforce.PolicyEngine, rawName, policyName string) string {
+func resolvePluginRuntimeActionName(store *audit.Store, rawName, policyName, actionConnector string) string {
+	if store == nil {
+		return policyName
+	}
 	candidates := []string{policyName}
 	for _, suffix := range []string{"-plugin", "-provider"} {
 		if strings.HasSuffix(policyName, suffix) {
@@ -2479,7 +2485,7 @@ func resolvePluginRuntimeActionName(pe *enforce.PolicyEngine, rawName, policyNam
 		if candidate == "" {
 			continue
 		}
-		entry, err := pe.GetAction("plugin", candidate)
+		entry, err := store.GetActionForConnector("plugin", candidate, actionConnector)
 		if err == nil && entry != nil && entry.Actions.Runtime == "disable" {
 			return candidate
 		}

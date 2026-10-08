@@ -867,6 +867,44 @@ def test_world_readable_dotenv_fails_the_private_files_row(tmp_path) -> None:
     assert "defenseclaw doctor --fix --yes" in exposed.checks[-1]["remediation"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_writable_dotenv_recommends_secure_replacement(tmp_path) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    dotenv = data_dir / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    os.chmod(dotenv, 0o666)
+
+    result = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, result)
+
+    row = result.checks[-1]
+    assert row["status"] == "fail"
+    assert "replace" in row["remediation"]
+    assert "doctor --fix" not in row["remediation"]
+
+
+def test_windows_private_files_distinguish_unsafe_acl_from_uninspected_acl(tmp_path, monkeypatch) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    (data_dir / ".env").write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    fake_os = SimpleNamespace(name="nt", path=os.path, lstat=os.lstat)
+    monkeypatch.setattr(cmd_doctor, "os", fake_os)
+
+    for problem, status, detail in (
+        ("owner SID S-1-5-21-foreign is not the current user", "fail", "unsafe"),
+        ("ACL grants write access to untrusted SID S-1-5-21-foreign", "fail", "unsafe"),
+        ("cannot read Windows ACL (access denied)", "warn", "could not verify"),
+    ):
+        with patch("defenseclaw.file_permissions.windows_acl_confidentiality_error", return_value=problem):
+            result = _DoctorResult()
+            cmd_doctor._check_private_file_exposure(cfg, result)
+        row = result.checks[-1]
+        assert row["status"] == status
+        assert detail in row["detail"]
+        assert "doctor --fix" not in row["remediation"]
+
+
 def test_audit_recovery_removes_stale_pid_dependency_in_one_run(tmp_path) -> None:
     data_dir = _private_data_dir(tmp_path)
     cfg = _cfg(data_dir)

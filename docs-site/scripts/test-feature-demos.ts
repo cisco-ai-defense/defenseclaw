@@ -250,6 +250,13 @@ describe('feature demo catalog', () => {
       { scan_prompts: true, scan_resources: true });
   });
 
+  it('shows a v9 config.yaml sample in the skill demo', () => {
+    const demo = featureDemos.find((scenario) => scenario.id === 'skill-quarantine');
+    const source = demo!.tabs.find((tab) => tab.id === 'skill-actions')!.source;
+    const config = yaml.load(source) as Record<string, unknown>;
+    assert.equal(config.config_version, 9);
+  });
+
   it('identifies the enforcement write counter as config generation', () => {
     const page = readFileSync(new URL('../content/docs/reference/gateway-api.mdx', import.meta.url), 'utf8');
     assert.match(page, /returns the new config writer generation/);

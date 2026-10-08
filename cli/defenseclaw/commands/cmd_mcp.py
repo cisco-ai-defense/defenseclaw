@@ -1292,9 +1292,13 @@ def _scan_all_mcp(
         # N2: honor a per-connector block — resolve most-specific-wins for the
         # connector being scanned (connector-scoped entry, else global), so a
         # block scoped to a different peer doesn't skip this connector's scan.
+        facts = dict(
+            source_path=s.source, url=s.url, command=s.command, args=s.args,
+            transport=s.transport,
+        )
         if pe.is_blocked_for_connector(
-            "mcp", s.name, connector
-        ) or pe.is_blocked_for_connector("mcp", scan_target, connector):
+            "mcp", s.name, connector, **facts,
+        ) or pe.is_blocked_for_connector("mcp", scan_target, connector, **facts):
             if not as_json:
                 ux.echo(
                     f"BLOCKED: {s.name} — skipping (remove from block list first)",
@@ -1602,8 +1606,15 @@ def _scan_one_resolved(
     # check both keys so neither path bypasses the block list. N2: resolve
     # most-specific-wins for this connector (connector-scoped entry, else
     # global) so a peer-scoped block only skips the scan for that peer.
+    facts = dict(
+        source_path=entry.source if entry else "",
+        url=entry.url if entry else (resolved if resolved.startswith(("http://", "https://")) else ""),
+        command=entry.command if entry else "",
+        args=entry.args if entry else [],
+        transport=entry.transport if entry else "",
+    )
     for blocked_key in {target, resolved}:
-        if pe.is_blocked_for_connector("mcp", blocked_key, connector):
+        if pe.is_blocked_for_connector("mcp", blocked_key, connector, **facts):
             ux.echo(
                 f"BLOCKED: {blocked_key} — remove from block list first",
                 err=True,

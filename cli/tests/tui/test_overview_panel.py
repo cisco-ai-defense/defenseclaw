@@ -1444,3 +1444,22 @@ def test_telemetry_detail_names_full_disk_and_marks_local_sqlite_failing(monkeyp
 
     model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="running", details=details)))
     assert model.telemetry_detail() == "1 destination: local-sqlite (healthy)"
+
+
+def test_secure_client_status_keeps_legacy_scanner_override(tmp_path, monkeypatch) -> None:
+    import json
+
+    from defenseclaw.commands.cmd_status import _scanner_overrides_summary
+    from defenseclaw.config import default_config
+
+    policy_dir = tmp_path / "policies"
+    (policy_dir / "rego").mkdir(parents=True)
+    (policy_dir / "rego" / "data.json").write_text(json.dumps({
+        "scanner_overrides": {"mcp": {"MEDIUM": {"install": "block"}}}
+    }))
+    cfg = default_config()
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.policy_dir = str(policy_dir)
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "secure_client")
+
+    assert _scanner_overrides_summary(cfg) == "mcp: MEDIUM install=block"

@@ -1473,6 +1473,15 @@ class TestRegistryEditPromptShortCircuit(RegistryCommandTestBase):
 
 
 class TestManagedDeviceRefusal(RegistryCommandTestBase):
+    def test_sync_refuses_before_fetch_or_cache_write(self):
+        with (
+            patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=True),
+            patch("defenseclaw.commands.cmd_registry.sync_all") as fetch,
+        ):
+            result = self.invoke(["sync", "--all", "--no-promote", "--no-scan"])
+        self.assertEqual(result.exit_code, 3, result.output)
+        fetch.assert_not_called()
+
     def test_every_config_writer_refuses_with_exit_3_before_it_touches_anything(self):
         # GAP-0052: approve, require and remove answered late, as exit 1 or wrapped in
         # "previous configuration restored"; a managed device refuses first, with exit 3.

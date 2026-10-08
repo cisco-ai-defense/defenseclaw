@@ -97,6 +97,31 @@ func TestApplyPatchesValidatesAndAdvancesGeneration(t *testing.T) {
 	}
 }
 
+func TestApplyKeepsCommentsOnRetainedListItems(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	path := writeTestConfig(t, "asset_policy:\n  skill:\n    denied:\n      - name: first # first operator note\n      - name: second # second operator note\n")
+	_, err := Apply(context.Background(), path, []Change{{
+		Path: "asset_policy.skill.denied",
+		Value: []map[string]string{
+			{"name": "second"},
+			{"name": "first"},
+			{"name": "third"},
+		},
+	}}, Options{Actor: "cli:test"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"name: first # first operator note", "name: second # second operator note"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("retained list item lost %q:\n%s", want, raw)
+		}
+	}
+}
+
 func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	path := writeTestConfig(t, "observability: {}\n")
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
