@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -339,6 +338,11 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 	// Secure Client keeps the order it has on main.
 	secureClient := cfg.SecureClientIntegration()
 	if !secureClient {
+		if home := strings.TrimSpace(enrollment.target.home); home != "" {
+			if _, statErr := os.Lstat(home); errors.Is(statErr, os.ErrNotExist) {
+				return enterpriseACPResult(cmd, nil, errors.New(enterpriseACPNoHomeText(enterpriseACPWho(enrollment), home, enrollment.target.sid)))
+			}
+		}
 		if err := enterprisehooks.RunAsTarget(target, func() error { return nil }); err != nil {
 			return enterpriseACPResult(cmd, nil, enterpriseACPRefusal(err))
 		}
@@ -463,9 +467,10 @@ func enterpriseACPWho(enrollment enterpriseACPEnrollment) string {
 // for the ACP commands: it named the enterprise hooks commands and gave an
 // unknown account as an os/user lookup error (GAP-0355).
 func enterpriseACPPlainError(err error, userName string) error {
-	var unknown user.UnknownUserError
-	if errors.As(err, &unknown) && strings.TrimSpace(userName) != "" {
-		return &enterpriseACPTargetRefusal{err: err, message: fmt.Sprintf("enterprise acp: no account named %s on this computer", strings.TrimSpace(userName))}
+	if enterpriseACPUnknownAccount(err) && strings.TrimSpace(userName) != "" {
+		// On Windows it was the LSA text with the name quoted, so every
+		// backslash doubled (GAP-0735).
+		return &enterpriseACPTargetRefusal{err: err, message: enterpriseACPNoAccountText(strings.TrimSpace(userName))}
 	}
 	if rest, ok := strings.CutPrefix(err.Error(), "enterprise hooks: "); ok {
 		return &enterpriseACPTargetRefusal{err: err, message: "enterprise acp: " + rest}

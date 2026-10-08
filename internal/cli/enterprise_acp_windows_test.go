@@ -6,11 +6,32 @@
 package cli
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"golang.org/x/sys/windows"
 )
+
+// An unknown account and an account that never signed in are refused in
+// words: the LSA text with doubled backslashes (GAP-0735), and "deleted ...
+// run Setup /ensure" (GAP-0715).
+func TestEnterpriseACPWindowsAccountRefusalsArePlain(t *testing.T) {
+	previous := enterpriseHookSIDProfilePath
+	t.Cleanup(func() { enterpriseHookSIDProfilePath = previous })
+	cause := fmt.Errorf("enterprise hooks: lookup user %q: %w", `HOST\nosuchuser`, windows.ERROR_NONE_MAPPED)
+	if got := enterpriseACPPlainError(cause, `HOST\nosuchuser`).Error(); !strings.Contains(got, `no account named HOST\nosuchuser on this computer`) ||
+		strings.Contains(got, `\\`) || strings.Contains(got, "mapping") {
+		t.Fatalf("unknown account refusal = %q", got)
+	}
+	enterpriseHookSIDProfilePath = func(string) (string, error) { return "", os.ErrNotExist }
+	if got := enterpriseACPNoHomeText(`HOST\dcw-new`, `C:\Users\dcw-new`, "S-1-5-21-1-2-3-1002"); !strings.Contains(got, "has not signed in") ||
+		strings.Contains(got, "/ensure") {
+		t.Fatalf("never-signed-in refusal = %q", got)
+	}
+}
 
 // revoke --sid of an account with no profile any more acts on its service
 // record; it failed on the profile lookup (GAP-0367).

@@ -84,6 +84,16 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		return payload
 	}
 
+	// An account with no home is refused in words, not with an lstat error
+	// (GAP-0687).
+	enterpriseACPJSON = false
+	enterpriseACPUserHome, enterpriseACPUserDataDir = filepath.Join(userHome, "missing"), filepath.Join(userHome, "missing", ".defenseclaw")
+	if err := runEnterpriseACPEnroll(&cobra.Command{}, nil); err == nil ||
+		!strings.Contains(err.Error(), "has no home directory") || strings.Contains(err.Error(), "lstat") {
+		t.Fatalf("enroll of an account without a home: %v", err)
+	}
+	enterpriseACPUserHome, enterpriseACPUserDataDir, enterpriseACPJSON = userHome, userData, true
+
 	// An enrollment that cannot publish the bearer leaves no credential,
 	// and a failed re-enrollment keeps the working one (GAP-0260).
 	failEnroll := func(why string) {
