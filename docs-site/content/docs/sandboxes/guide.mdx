@@ -471,6 +471,15 @@ You can keep working in the folder and running things on your machine while
 the agent works. The harness runs as it always does; DefenseClaw stays out
 of the way unless something needs you.
 
+With a live mount, the end-of-session review covers the whole folder since
+the undo point, so it includes what you changed and committed there
+meanwhile: it cannot tell your edits from the agent's. It lists the commits
+HEAD gained (`1 commit since the undo point (the session's, or yours if you
+committed in the folder meanwhile; undo resets them all): 4d2bdf3 …`), and
+`undo` puts the folder back as it was at the undo point, your own edits and
+commits of the session included. Work you want to keep apart belongs in
+another folder, or in a copy-mode sandbox (`--copy`).
+
 `Ctrl+Z` doesn't suspend a sandboxed harness: there's no shell in the
 sandbox to bring it back with `fg`, so the harness comes straight back to
 your terminal and you carry on. Claude Code still prints

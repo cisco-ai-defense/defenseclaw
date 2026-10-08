@@ -951,6 +951,7 @@ func (s *session) end(ctx context.Context) error {
 		}
 	}
 	if rev != nil && rev.Report != nil {
+		a.printCommits(rev.Report)
 		if line := riskLine(rev.Report); line != "" {
 			a.println(a.style(line, ansiYellow))
 		}

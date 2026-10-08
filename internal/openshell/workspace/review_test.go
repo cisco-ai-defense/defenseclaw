@@ -308,6 +308,22 @@ func TestReviewFindingsAreOnChangedLines(t *testing.T) {
 	}
 }
 
+// TestReviewListsTheCommitsSinceTheUndoPoint (GAP-0223): a commit the
+// user made on the host during a live-mounted session read as the
+// session's work ("HEAD moved (0f12df4 → 4d2bdf3)"). The review lists the
+// commits HEAD gained, so the user can tell their own.
+func TestReviewListsTheCommitsSinceTheUndoPoint(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	mustSnapshot(t, e, "s1")
+	writeFile(t, e.project, "docs/index.md", "# docs\n")
+	e.commit("me: plain own commit")
+	rep := review(t, e, "s1", nil)
+	if len(rep.Commits) != 1 || !strings.HasSuffix(rep.Commits[0], " me: plain own commit") || rep.HeadBefore == rep.HeadAfter {
+		t.Fatalf("commits = %q (head %s → %s)", rep.Commits, rep.HeadBefore, rep.HeadAfter)
+	}
+}
+
 func TestClassifyChangesUnits(t *testing.T) {
 	noContent := func(TreeChange, bool) ([]byte, bool) { return nil, false }
 	flags := classifyChanges([]TreeChange{

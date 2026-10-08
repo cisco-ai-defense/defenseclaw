@@ -585,6 +585,15 @@ func TestReviewKeepsAHostileFileNameOnOneLine(t *testing.T) {
 	}
 }
 
+// TestReviewNamesTheCommitsSinceTheUndoPoint (GAP-0223): the commits HEAD
+// gained are named, with a word that they may be the user's own.
+func TestReviewNamesTheCommitsSinceTheUndoPoint(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.printReviewDetail(&workspace.ReviewReport{Commits: []string{"4d2bdf3 me: plain own commit"}})
+	has(t, ta.output(), "1 commit since the undo point (the session's, or yours if you committed in the folder meanwhile; undo resets them all): "+
+		"4d2bdf3 me: plain own commit")
+}
+
 // The review merges each file's reasons into one line (manual test L10).
 func TestReviewMergesAFilesReasons(t *testing.T) {
 	flags := []workspace.Flag{

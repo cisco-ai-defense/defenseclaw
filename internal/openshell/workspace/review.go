@@ -60,8 +60,13 @@ type ReviewReport struct {
 	Flags    []Flag        `json:"flags,omitempty"`
 	Findings []ScanFinding `json:"findings,omitempty"`
 
-	HeadBefore   string      `json:"head_before,omitempty"`
-	HeadAfter    string      `json:"head_after,omitempty"`
+	HeadBefore string `json:"head_before,omitempty"`
+	HeadAfter  string `json:"head_after,omitempty"`
+	// Commits are the commits HEAD gained since the undo point, newest
+	// first ("4d2bdf3 subject", at most maxReviewCommits): the session's,
+	// or the user's own made in the folder meanwhile, which a live mount
+	// cannot tell apart (undo resets both).
+	Commits      []string    `json:"commits,omitempty"`
 	BranchBefore string      `json:"branch_before,omitempty"`
 	BranchAfter  string      `json:"branch_after,omitempty"`
 	RefChanges   []RefChange `json:"ref_changes,omitempty"`
@@ -227,6 +232,7 @@ func reviewGit(ctx context.Context, rec *SnapshotRecord, man *ignoredManifest, n
 	}
 	rep.HeadBefore, rep.BranchBefore = gs.Head, gs.Branch
 	rep.HeadAfter, rep.BranchAfter = st.head, st.branch
+	rep.Commits = newCommits(ctx, rec.Project, gs.Head, st.head)
 	rep.RefChanges = refChanges(gs.Refs, st.refs)
 	control, err := controlChanges(gs)
 	if err != nil {
@@ -293,6 +299,30 @@ func scanChanges(changes []TreeChange, scanners []ContentScanner, content conten
 			found = onChangedLines(found, before, b)
 		}
 		out = append(out, found...)
+	}
+	return out
+}
+
+// maxReviewCommits bounds ReviewReport.Commits.
+const maxReviewCommits = 5
+
+// newCommits lists the commits head has that before has not, in the
+// project's repository, newest first: the review showed only "HEAD moved
+// (0f12df4 → 4d2bdf3)", and a commit the user made on the host during the
+// session read as the session's work (GAP-0223).
+func newCommits(ctx context.Context, project, before, head string) []string {
+	if before == "" || head == "" || before == head || !isOID(before) || !isOID(head) {
+		return nil
+	}
+	raw, err := gitCmd{dir: project}.output(ctx, "log", "--no-decorate", "--format=%h %s", "-n", strconv.Itoa(maxReviewCommits+1), before+".."+head)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			out = append(out, truncate(l, 100))
+		}
 	}
 	return out
 }

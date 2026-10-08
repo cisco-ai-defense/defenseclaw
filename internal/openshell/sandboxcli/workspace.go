@@ -1167,6 +1167,7 @@ func (a *App) printReviewDetail(r *workspace.ReviewReport) {
 	if r == nil {
 		return
 	}
+	a.printCommits(r)
 	for _, f := range mergeFlags(r.Flags) {
 		a.line(fmt.Sprintf("  %-8s %s — %s", strings.ToUpper(string(f.severity)), pathText(f.name), strings.Join(f.details, "; ")))
 	}
@@ -1176,6 +1177,22 @@ func (a *App) printReviewDetail(r *workspace.ReviewReport) {
 	if secrets := r.SecretPaths(); len(secrets) > 0 {
 		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(pathTexts(firstN(secrets, 4)), ", "))
 	}
+}
+
+// printCommits names the commits HEAD gained since the undo point, which
+// may be the user's own made in the folder during the session: undo resets
+// them too (GAP-0223).
+func (a *App) printCommits(r *workspace.ReviewReport) {
+	if len(r.Commits) == 0 {
+		return
+	}
+	shown := r.Commits
+	more := ""
+	if len(shown) > 4 {
+		shown, more = shown[:4], ", and more"
+	}
+	a.note(plural(int64(len(r.Commits)), "commit", "commits") + " since the undo point (the session's, or yours if you committed in the folder " +
+		"meanwhile; undo resets them all): " + strings.Join(pathTexts(shown), "; ") + more)
 }
 
 // riskLine is the review's warning about changed files that can run code
