@@ -71,6 +71,14 @@ var policyCmd = &cobra.Command{
 // environment variables, as status does; a standard user gets the managed
 // answer instead of a per-user config that does not exist.
 func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
+	if err := managedStandardUserGatewayRefusal(); err != nil {
+		return err
+	}
+	if err := pinManagedAdministratorEnvironment("policy", func() string {
+		return windowsManagedStandardUserViewAnswer("the managed policy", "enterprise policy show --user "+managedHostCurrentAccountName())
+	}); err != nil {
+		return err
+	}
 	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 	return loadGatewayCommandConfigFor(cmd)
 }
@@ -274,6 +282,15 @@ func showSecureClientPolicy() error {
 var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
 	Short: "Dry-run the admission policy for a given input",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if _, windows := managedHostWindowsStandalone(); windows {
+			return policyConfigOnlyPreRunE(cmd, args)
+		}
+		if _, unix := managedHostUnixRecord(nil); unix {
+			return policyConfigOnlyPreRunE(cmd, args)
+		}
+		return rootPersistentPreRunE(cmd, args)
+	},
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		paths, err := resolvePolicyPaths()
 		if err != nil {
@@ -348,6 +365,12 @@ var policyEvaluateCmd = &cobra.Command{
 var policyReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Tell the running gateway to reload OPA policies",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := managedStandardUserGatewayRefusal(); err != nil {
+			return err
+		}
+		return rootPersistentPreRunE(cmd, args)
+	},
 	RunE: func(_ *cobra.Command, _ []string) error {
 		port := 18790
 		bind := "127.0.0.1"

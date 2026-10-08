@@ -98,7 +98,10 @@ func TestGatewayStatusConfigLoadErrorNamesStateAndNextStep(t *testing.T) {
 	if err := gatewayStatusConfigLoadError(other); err != other {
 		t.Fatalf("unrelated error rewritten: %v", err)
 	}
-	err := gatewayStatusConfigLoadError(errors.New("failed to load config: config.yaml:3: [yaml_syntax_invalid] bad"))
+	err := gatewayStatusConfigLoadError(errors.New("failed to load config: config.yaml:3: [yaml_syntax_invalid] bad."))
+	if strings.Contains(err.Error(), ".. The gateway") {
+		t.Fatalf("status repeats sentence punctuation: %v", err)
+	}
 	for _, want := range []string{"failed to load config", "The gateway is not running.", "defenseclaw config validate"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v does not contain %q", err, want)
