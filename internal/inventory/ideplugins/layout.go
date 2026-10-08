@@ -4,8 +4,6 @@
 package ideplugins
 
 import (
-	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -212,9 +210,6 @@ func windowsVimGrants(home, root string, out *[]WindowsGrant) {
 	if strings.HasSuffix(root, `\nvim-data`) {
 		lazy := root + `\lazy`
 		self(lazy)
-		for _, name := range windowsNvimLockNames(home, `AppData\Local\nvim\lazy-lock.json`) {
-			self(lazy + `\` + name)
-		}
 		for _, name := range windowsSubdirs(home, lazy, vimMaxPlugins) {
 			self(lazy + `\` + name)
 		}
@@ -250,36 +245,6 @@ func windowsVimGrants(home, root string, out *[]WindowsGrant) {
 			}
 		}
 	}
-}
-
-// windowsNvimLockNames names the plugin folders referenced by the lockfile.
-// Bound the read to the scanner's metadata scale.
-func windowsNvimLockNames(home, rel string) []string {
-	path := filepath.Join(home, filepath.FromSlash(strings.ReplaceAll(rel, `\`, "/")))
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
-	if err != nil {
-		return nil
-	}
-	var lock map[string]json.RawMessage
-	if json.Unmarshal(data, &lock) != nil {
-		return nil
-	}
-	var names []string
-	for name := range lock {
-		if safeName(name) && !strings.HasPrefix(name, ".") {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	if len(names) > vimMaxPlugins {
-		names = names[:vimMaxPlugins]
-	}
-	return names
 }
 
 // windowsSubdirs lists up to limit folder names in home\rel, as Scan's

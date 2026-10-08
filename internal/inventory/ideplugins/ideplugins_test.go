@@ -294,10 +294,10 @@ func TestVisualStudioEnabledNamesAcceptsShortEnumeration(t *testing.T) {
 }
 
 // A managed Windows gateway reads only what the enumerator grants it
-// (WindowsHomeGrants): everything a Windows scan reports, Remote-SSH
-// servers, %LOCALAPPDATA%\JetBrains and Android Studio included, must be
-// granted, while the caches and other data beside those folders and a
-// linked folder are not (GAP-0042).
+// (WindowsHomeGrants): every path a Windows scan reads, including Remote-SSH
+// servers, %LOCALAPPDATA%\JetBrains and Android Studio, must be granted.
+// Lockfile entries can report a path without reading it. Caches, unrelated
+// data beside plugin folders and linked folders remain ungranted (GAP-0042).
 func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 	home := t.TempDir()
 	local, roaming := filepath.Join(home, "AppData", "Local"), filepath.Join(home, "AppData", "Roaming")
@@ -365,7 +365,8 @@ func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 		}
 		for _, p := range inst.Plugins {
 			plugins++
-			if !readable(p.Path) {
+			// Lockfile entries supply a path as metadata; Scan never reads it.
+			if p.EnabledSource != SourceLockfile && !readable(p.Path) {
 				t.Errorf("%s plugin %s at %s is not granted", inst.Product, p.ID, p.Path)
 			}
 		}
