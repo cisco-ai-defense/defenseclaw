@@ -127,15 +127,19 @@ Then it:
 2. **Switches the gateway to MicroVMs.** It asks:
 
    ```text
-   Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in ~/.config/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n]
+   Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in /opt/homebrew/var/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n]
    ```
 
    Yes writes the driver, your uid and gid as the MicroVM sandbox user, and
    more resources for each MicroVM (4 vCPUs, up to 4 GiB of memory and a
    16 GiB disk for its changes, which is sparse and costs nothing until
-   used) into `gateway.toml`, with a timestamped backup, then restarts the
-   gateway once. These settings apply to every sandbox on the gateway, and
-   the question says so.
+   used) into `gateway.toml`, with a timestamped backup beside it, then
+   restarts the gateway once. These settings apply to every sandbox on the
+   gateway, and the question says so. The question names the `gateway.toml`
+   the gateway service reads: for the Homebrew service that is the formula's
+   own, `/opt/homebrew/var/openshell/gateway.toml`, unless
+   `~/.config/openshell/gateway.toml` exists, which it then reads instead.
+   `gateway.env` (step 3) is in `~/.config/openshell`.
 3. **Turns OpenShell's anonymous usage telemetry off**, if you agree,
    unless you keep it (`--upstream-telemetry`):
 
@@ -379,7 +383,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 
 | Topic | What to know |
 | --- | --- |
-| Resources | Every MicroVM on the gateway gets the same vCPUs, memory and disk, set under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`. The run flags `--cpu` and `--memory` have no effect. The doctor warns when the disk for changes is under 8 GiB. |
+| Resources | Every MicroVM on the gateway gets the same vCPUs, memory and disk, set under `[openshell.drivers.vm]` in the gateway's `gateway.toml` (`/opt/homebrew/var/openshell/gateway.toml` for the Homebrew service, unless `~/.config/openshell/gateway.toml` exists). The run flags `--cpu` and `--memory` have no effect. The doctor warns when the disk for changes is under 8 GiB. |
 | The sandbox user | Set for the whole gateway: every MicroVM on it runs as your uid and gid. |
 | Disk use | About 5 GB per image the driver has started, in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` and `sandbox image rm` remove images you no longer use, and their disks. |
 | Per-run settings | Claude Code and Codex settings are baked, root-owned and read-only, into a small run image for each sandbox. A run with other `--env`, credentials or model provider prepares another disk. |
@@ -420,7 +424,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | **Docker file sharing** fails: your temporary folder is not shared with Docker Desktop | Add the folder it names in Docker Desktop → Settings → Resources → File sharing. `/var/folders` and `/tmp` are shared by default. |
 | `no sandbox can start on this gateway: it runs sandboxes on the docker driver` | Run `defenseclaw sandbox setup` and answer yes to the MicroVM question. |
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
-| **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`, then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
+| **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in the gateway's `gateway.toml` (`/opt/homebrew/var/openshell/gateway.toml` for the Homebrew service, unless `~/.config/openshell/gateway.toml` exists), then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.
