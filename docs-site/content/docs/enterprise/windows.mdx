@@ -941,6 +941,16 @@ running Setup uses it, and Setup removes such folders on its next run too.
 The `machine_state_remaining` warning names any of these folders it could
 not remove, and why.
 
+If `C:\ProgramData\Cisco\DefenseClaw` was deleted by hand, uninstall
+finds no recorded deployment. It still removes the four services, the
+binaries, DefenseClaw's Claude Code files in
+`C:\Program Files\ClaudeCode\managed-settings.d`, the runtime selector
+state and `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, so agents stop
+calling the removed hook. It cannot tell DefenseClaw's files in an
+account's `%USERPROFILE%\.defenseclaw` from the account's own, so with
+`PURGE=1` the `per_user_state_remaining` warning names each such folder
+for you to remove instead.
+
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
 `C:\ProgramData\Cisco\DefenseClaw-HookRuntime` and the install marker. The

@@ -22237,6 +22237,79 @@ function Invoke-DefenseClawNamespaceRootCleanup {
 # invocation's exact four SCM identities, their exact IPC grant, and one
 # canonical install-root inode whose full tree is validated by the native
 # no-follow cleanup primitive.
+# A standalone uninstall that finds no recorded state (an administrator
+# deleted C:\ProgramData\Cisco\DefenseClaw) cannot attribute anything per
+# account, but DefenseClaw's own machine-wide hook files carry its names in
+# folders only administrators can write. They stayed and pointed at the
+# removed hook binary, so Claude Code showed a hook error on every prompt
+# (GAP-0533). This removes them: the Claude Code drop-ins and their state,
+# the runtime selector state of the machine-policy folders, and the hook
+# runtime folder beside StateRoot. It writes "path: reason" for what stays.
+function Remove-DefenseClawUnattributedStandaloneMachineHooks {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $claude = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d')
+    foreach ($leaf in @('90-defenseclaw.json', '00-defenseclaw-version-floor.json', '.defenseclaw-managed-hooks.state')) {
+        $path = [IO.Path]::Combine($claude, $leaf)
+        try {
+            Remove-DefenseClawManagedHooksSerializationLock -Path $path -Label 'Claude Code managed hook file'
+        }
+        catch {
+            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+        }
+    }
+    @(Remove-DefenseClawRuntimeSelectorState -Directories @(
+            $claude,
+            [string]$Layout.CodexMachinePolicyDirectory,
+            [IO.Path]::Combine($script:ProgramData, 'Cursor')
+        ))
+    @(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)
+    $hookRuntime = [IO.Path]::Combine(
+        [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')),
+        'DefenseClaw-HookRuntime'
+    )
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $hookRuntime) {
+        try {
+            Assert-DefenseClawPathAcl -Path $hookRuntime -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) -AllowUsersRead -AllowInheritance
+            Remove-DefenseClawManagedTree -Path $hookRuntime -RequiredBase $script:ProgramData -Label 'hook runtime'
+        }
+        catch {
+            "${hookRuntime}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+        }
+    }
+}
+
+# The per-account folders a purge without recorded state leaves: it cannot
+# tell DefenseClaw's files from the account's own there, so it names each
+# account's %USERPROFILE%\.defenseclaw instead ("account (SID): path:
+# reason") for an administrator to remove (GAP-0533).
+function Get-DefenseClawUnattributedUserStateFolders {
+    $profileList = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    foreach ($key in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $profileList -ErrorAction SilentlyContinue)) {
+        $sid = [string]$key.PSChildName
+        if ($sid -cnotmatch '^S-1-(5-21|12-1)-[0-9-]+$') {
+            continue
+        }
+        $profile = [Environment]::ExpandEnvironmentVariables(
+            [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue)
+        )
+        if ([string]::IsNullOrWhiteSpace($profile)) {
+            continue
+        }
+        $folder = [IO.Path]::Combine($profile, '.defenseclaw')
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $folder -PathType Container)) {
+            continue
+        }
+        $account = $sid
+        try {
+            $account = [Security.Principal.SecurityIdentifier]::new($sid).Translate([Security.Principal.NTAccount]).Value
+        }
+        catch {
+            $account = $sid
+        }
+        "$account ($sid): ${folder}: the recorded deployment state was missing, so the uninstall could not tell DefenseClaw's files there from the account's own"
+    }
+}
+
 function Invoke-DefenseClawExactScopeRecoveryPurge {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -22471,7 +22544,7 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         }
     }
 
-    return [pscustomobject]@{
+    $result = [pscustomobject]@{
         schema_version = 1
         ok = $true
         action = 'uninstall'
@@ -22482,6 +22555,17 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         cached_enterprise_clients_require_reload = $true
         errors = @()
     }
+    if (Test-DefenseClawStandaloneProfile) {
+        $result | Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name machine_state_remaining -Value ([string[]]@(
+                @(Remove-DefenseClawUnattributedStandaloneMachineHooks -Layout $Layout) +
+                @(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData -WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp')))
+            ))
+        if ([bool]$script:DefenseClawUninstallPurgeUserState) {
+            $result | Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name user_state_remaining -Value ([string[]]@(
+                    Get-DefenseClawUnattributedUserStateFolders))
+        }
+    }
+    return $result
 }
 
 function Invoke-DefenseClawPreLayoutRecovery {

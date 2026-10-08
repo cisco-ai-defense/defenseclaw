@@ -192,6 +192,37 @@ $failures = & $module {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
         }
 
+        # GAP-0533: an uninstall that finds no recorded state still removes
+        # DefenseClaw's machine-wide hook files (the ACL check and the tree
+        # removal are still replaced, as above).
+        $savedProgramFiles = $script:ProgramFiles
+        $savedProgramData = $script:ProgramData
+        try {
+            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF533'
+            $script:ProgramData = Microsoft.PowerShell.Management\Join-Path $Scratch 'PD533'
+            $claudeDropIns = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d')
+            [void][IO.Directory]::CreateDirectory($claudeDropIns)
+            foreach ($leaf in @('90-defenseclaw.json', '00-defenseclaw-version-floor.json', '.defenseclaw-managed-hooks.state', '.defenseclaw-managed-runtime-selector.state')) {
+                [IO.File]::WriteAllText([IO.Path]::Combine($claudeDropIns, $leaf), '{}')
+            }
+            $hookRuntime = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw-HookRuntime')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($hookRuntime, 'opencode'))
+            [IO.File]::WriteAllText([IO.Path]::Combine($hookRuntime, 'machine-policy.json'), '{}')
+            $left = @(Remove-DefenseClawUnattributedStandaloneMachineHooks -Layout @{
+                    StateRoot = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw')
+                    CodexMachinePolicyDirectory = ''
+                })
+            if ($left.Count -ne 0 -or
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode'))) -or
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath $hookRuntime)) {
+                $failures.Add("a state-absent uninstall left DefenseClaw's machine-wide hook files: $($left -join '; ')")
+            }
+        }
+        finally {
+            $script:ProgramFiles = $savedProgramFiles
+            $script:ProgramData = $savedProgramData
+        }
+
         # GAP-0262 (the ACL check is still replaced, as above).
         $selector = Microsoft.PowerShell.Management\Join-Path $Scratch 'selector'
         $selectorDropIns = [IO.Path]::Combine($selector, 'ClaudeCode', 'managed-settings.d')
