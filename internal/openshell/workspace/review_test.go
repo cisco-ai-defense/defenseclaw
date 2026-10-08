@@ -291,6 +291,23 @@ func TestReviewNamesTheFileALifecycleScriptRuns(t *testing.T) {
 	}
 }
 
+// TestReviewFindingsAreOnChangedLines (GAP-0224): a user's own commit
+// appended a comment to docs/index.md during the session, and the review
+// reported the file's old include directive (line 12) as the sandbox's
+// MEDIUM path traversal. A finding on a line the file had before is left
+// out; one on a new line, or naming no line, stays.
+func TestReviewFindingsAreOnChangedLines(t *testing.T) {
+	before := []byte("# Docs\n{% include-markdown \"../README.md\" %}\n")
+	after := []byte("# Docs\n{% include-markdown \"../README.md\" %}\n<!-- note -->\nload(\"../../etc/passwd\")\n")
+	found := []ScanFinding{{Path: "docs/index.md", Location: "docs/index.md:2", Title: "Potential path traversal"},
+		{Path: "docs/index.md", Location: "docs/index.md:4", Title: "Potential path traversal"},
+		{Path: "docs/index.md", Title: "no line"}}
+	got := onChangedLines(found, before, after)
+	if len(got) != 2 || got[0].Location != "docs/index.md:4" || got[1].Title != "no line" {
+		t.Fatalf("kept %+v", got)
+	}
+}
+
 func TestClassifyChangesUnits(t *testing.T) {
 	noContent := func(TreeChange, bool) ([]byte, bool) { return nil, false }
 	flags := classifyChanges([]TreeChange{

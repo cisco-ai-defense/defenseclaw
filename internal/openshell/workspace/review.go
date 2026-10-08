@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -287,7 +288,36 @@ func scanChanges(changes []TreeChange, scanners []ContentScanner, content conten
 		if scanned++; scanned > maxScannedFiles {
 			break
 		}
-		out = append(out, runScanners(scanners, c.Path, b)...)
+		found := runScanners(scanners, c.Path, b)
+		if before, ok := content(c, false); ok && c.Status != "A" {
+			found = onChangedLines(found, before, b)
+		}
+		out = append(out, found...)
+	}
+	return out
+}
+
+// onChangedLines keeps the findings of a changed file that are on lines
+// the file did not have before (or that name no line): a finding on a
+// line that was there already is not the session's. A Markdown include
+// directive the user's own commit left untouched read as the sandbox's
+// MEDIUM path traversal (GAP-0224).
+func onChangedLines(found []ScanFinding, before, after []byte) []ScanFinding {
+	if len(found) == 0 {
+		return found
+	}
+	old := map[string]bool{}
+	for _, l := range strings.Split(string(before), "\n") {
+		old[strings.TrimRight(l, "\r")] = true
+	}
+	lines := strings.Split(string(after), "\n")
+	out := found[:0]
+	for _, f := range found {
+		i := strings.LastIndexByte(f.Location, ':')
+		n, err := strconv.Atoi(f.Location[i+1:])
+		if i < 0 || err != nil || n < 1 || n > len(lines) || !old[strings.TrimRight(lines[n-1], "\r")] {
+			out = append(out, f)
+		}
 	}
 	return out
 }
