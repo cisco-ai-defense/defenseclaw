@@ -1181,6 +1181,29 @@ func TestLinuxInsideWSL(t *testing.T) {
 	}
 }
 
+// A newly written roster is not covered until the guardian attests its digest.
+func TestVerifyWaitsForGuardianToReconcileNewTargets(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	ledger, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true})
+	h.publishLedger(ledger)
+	manifest := h.env.P(h.env.Layout.ManifestPath)
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, append(data, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := h.run(Options{Action: ActionVerify})
+	if result.ExitCode == 0 || result.Readiness.Guardian || result.CoverageComplete || result.SecurityComplete {
+		t.Fatalf("unreconciled targets reported covered: exit=%d readiness=%+v coverage=%t security=%t", result.ExitCode, result.Readiness, result.CoverageComplete, result.SecurityComplete)
+	}
+	if !strings.Contains(messagesOf(result.Errors, codeVerify), guardianManifestNotReconciled) {
+		t.Fatalf("verify did not report pending guardian reconcile: %+v", result.Errors)
+	}
+}
+
 func TestStatusAndVerify(t *testing.T) {
 	h := newTestHost(t, "linux")
 	status := h.run(Options{Action: ActionStatus})

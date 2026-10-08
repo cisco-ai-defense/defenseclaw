@@ -900,7 +900,7 @@ const (
 
 func (a *APIServer) acpScopedTokenReadyUncached() bool {
 	if managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
-		return acp.EnterpriseCredentialsReady(a.scannerCfg.DataDir)
+		return acp.EnterpriseCredentialsReady(a.scannerCfg.DataDir, a.scannerCfg.SecureClientIntegration())
 	}
 	path := filepath.Join(a.scannerCfg.DataDir, "acp", ".token")
 	info, err := os.Lstat(path)

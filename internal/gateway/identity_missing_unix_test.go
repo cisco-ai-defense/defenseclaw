@@ -16,7 +16,8 @@ func TestUnixDefinitiveMissingAccount(t *testing.T) {
 	if !definitiveMissingAccount(unixidentity.ErrNotFound) || !definitiveMissingAccount(osuser.UnknownUserIdError(1001)) {
 		t.Fatal("NSS definitive absence counted as an outage")
 	}
-	if newIdentityDirectoryCache(nil).gone == nil {
-		t.Fatal("the directory cache does not mark missing accounts")
+	cache := newIdentityDirectoryCache(nil)
+	if cache.gone == nil || cache.confirmGone {
+		t.Fatal("NSS absence must remain visible after an unrelated local lookup")
 	}
 }

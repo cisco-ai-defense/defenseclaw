@@ -6,6 +6,7 @@ package acp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,7 @@ func EnterpriseUserCopyCleanups(dataDir string) ([]EnterpriseUserCopyCleanup, er
 }
 
 // UpdateEnterpriseUserCopyCleanups replaces the waiting user copies with
-// what update returns, under the enrollment lock. A damaged list is replaced.
+// what update returns, under the credential mutation lock. A damaged list is replaced.
 func UpdateEnterpriseUserCopyCleanups(dataDir string, update func([]EnterpriseUserCopyCleanup) []EnterpriseUserCopyCleanup) error {
 	if strings.TrimSpace(dataDir) == "" {
 		return errors.New("ACP enterprise credential data directory is empty")
@@ -66,7 +67,7 @@ func UpdateEnterpriseUserCopyCleanups(dataDir string, update func([]EnterpriseUs
 		entries, _ := EnterpriseUserCopyCleanups(dataDir)
 		next := update(entries)
 		if len(next) > maxEnterpriseUserCopyCleanups {
-			next = next[len(next)-maxEnterpriseUserCopyCleanups:]
+			return fmt.Errorf("ACP user copy cleanup list has %d entries; limit is %d", len(next), maxEnterpriseUserCopyCleanups)
 		}
 		path := enterpriseUserCopyCleanupPath(dataDir)
 		if len(next) == 0 {

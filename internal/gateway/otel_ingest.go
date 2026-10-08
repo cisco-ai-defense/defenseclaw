@@ -977,7 +977,11 @@ func (a *APIServer) codexNotifyAgentID(ctx context.Context, sessionID string) st
 	if sessionID == "" || a.managedAIDOnly() {
 		return ""
 	}
-	return agentNodeID(agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID), "codex", sessionID, "root")
+	identityID := agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID)
+	if identityID == "" {
+		return ""
+	}
+	return agentNodeID(identityID, "codex", sessionID, "root")
 }
 
 func normalizeCodexNotifyPayloadAliases(p *codexNotifyPayload, body []byte) map[string]any {
@@ -1076,12 +1080,18 @@ func (a *APIServer) joinCodexNotifyLineage(meta llmEventMeta) llmEventMeta {
 	if a == nil || meta.AgentID == "" || meta.SessionID == "" {
 		return meta
 	}
-	snapshot, ok := a.hookLifecycleSnapshot("codex", meta.SessionID, meta.AgentID)
-	if !ok {
+	snapshot, exact := a.hookLifecycleSnapshot("codex", meta.SessionID, meta.AgentID)
+	if !exact {
 		// A sub-agent thread's hooks name its own agent node.
+		var ok bool
 		if snapshot, ok = a.hookLifecycleSnapshot("codex", meta.SessionID, ""); !ok {
 			return meta
 		}
+	}
+	if meta.UserID == "" || snapshot.UserID == "" || meta.UserID != snapshot.UserID {
+		return meta
+	}
+	if !exact {
 		meta.AgentID = snapshot.AgentID
 	}
 	meta.RootAgentID = firstNonEmpty(snapshot.RootAgentID, snapshot.AgentID)

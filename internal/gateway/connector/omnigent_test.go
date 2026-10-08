@@ -728,6 +728,48 @@ print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "target": "shel
 	}
 }
 
+func TestOmnigentSecureClientPolicyDoesNotRetryBusyGateway(t *testing.T) {
+	python := omnigentTestPython(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	}))
+	defer server.Close()
+
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testenv.PrivateTempDir(t)
+	path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+	rendered := renderOmnigentPolicyFull(
+		string(templateBytes), strings.TrimPrefix(server.URL, "http://"),
+		"", "closed", "", 0, "", true,
+	)
+	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module._post(b"{}", {})[0])
+`
+	output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute policy module: %v\n%s", err, output)
+	}
+	if strings.TrimSpace(string(output)) != "429" || calls.Load() != 1 {
+		t.Fatalf("Secure Client busy gateway: status %s after %d calls, want 429 after one call", output, calls.Load())
+	}
+}
+
 func TestOmnigentPolicyBridgeReloadsScopedTokenForRotationAndRollback(t *testing.T) {
 	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")

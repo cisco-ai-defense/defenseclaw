@@ -558,7 +558,7 @@ def _render_table(alert_list: list, store, connector: str | None = None, *, secu
     # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
     w_target = (
         _W_TARGET if term_width < 100 else
-        20 if secure_client else min(40, max(20, (term_width - 60) // 2))
+        18 if secure_client else min(40, max(20, (term_width - 60) // 2))
     )
     w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 

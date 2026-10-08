@@ -183,6 +183,28 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn('"fail_mode": "open"', result.output)
         self.assertNotIn('"fail_mode": "closed"', result.output)
 
+    def test_secure_client_status_keeps_main_enabled_and_warnings(self):
+        from defenseclaw.commands import cmd_status
+
+        app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+        app.cfg.guardrail.mode = "action"
+        app.cfg.guardrail.effective_enabled = lambda name: False
+        with (
+            patch.object(cmd_status, "_enterprise_profile", return_value="secure_client"),
+            patch("defenseclaw.gateway.current_user_guardrail_profile", side_effect=AssertionError("profile queried")),
+        ):
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertIs(payload["enabled"], True)
+            self.assertEqual(payload["warnings"], [])
+            self.assertNotIn("profile", payload)
+
+            text = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(text.exit_code, 0, msg=text.output)
+            self.assertIn("enabled:    yes", text.output)
+            self.assertNotIn("action mode with fail mode open", text.output)
+
     def test_status_flags_action_connector_on_fail_open(self):
         # GAP-0415: an upgrade keeps the fail mode an older setup chose.
         app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")

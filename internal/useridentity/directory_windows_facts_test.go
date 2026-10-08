@@ -9,12 +9,13 @@ import (
 )
 
 type fakeWindowsReader struct {
-	values   map[string]string // path|name -> value
-	subkeys  map[string][]string
-	accounts map[string][2]string
-	computer string
-	adDomain string
-	dnsName  string
+	values    map[string]string // path|name -> value
+	subkeys   map[string][]string
+	accounts  map[string][2]string
+	computer  string
+	adDomain  string
+	dnsName   string
+	adDNSName string
 }
 
 func (f fakeWindowsReader) StringValue(path, name string) (string, bool) {
@@ -26,9 +27,10 @@ func (f fakeWindowsReader) LookupAccount(sid string) (string, string, bool) {
 	a, ok := f.accounts[sid]
 	return a[0], a[1], ok
 }
-func (f fakeWindowsReader) ComputerName() string       { return f.computer }
-func (f fakeWindowsReader) DomainJoin() (string, bool) { return f.adDomain, f.adDomain != "" }
-func (f fakeWindowsReader) DNSDomain() string          { return f.dnsName }
+func (f fakeWindowsReader) ComputerName() string { return f.computer }
+func (f fakeWindowsReader) DomainJoin() (string, string, bool) {
+	return f.adDomain, f.adDNSName, f.adDomain != ""
+}
 
 func TestResolveWindowsDirectoryFacts(t *testing.T) {
 	const tenant = "6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b"
@@ -46,7 +48,7 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 		},
 		subkeys:  map[string][]string{cloudJoinInfoKey: {"ABCD"}},
 		accounts: map[string][2]string{adSID: {"bob", "CORP"}, localSID: {"carol", "WS01"}},
-		computer: "WS01", adDomain: "CORP", dnsName: "corp.example.com",
+		computer: "WS01", adDomain: "CORP", adDNSName: "corp.example.com",
 	}
 	now := time.Unix(1_800_000_000, 0)
 
@@ -72,6 +74,21 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 	if upnForm.Directory != DirectoryActiveDirectory || upnForm.UPN != "dave@corp.example.com" ||
 		upnForm.Principal != "dave@corp.example.com" {
 		t.Fatalf("UPN-form LSA account facts = %+v", upnForm)
+	}
+}
+
+// A disjoint computer DNS suffix must not become a verified account domain or realm.
+func TestWindowsADDomainIgnoresComputerDNSSuffix(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1105"
+	reader := fakeWindowsReader{
+		accounts: map[string][2]string{sid: {"alice", "CORP"}},
+		computer: "WS01", adDomain: "CORP", dnsName: "workstations.example.net",
+		adDNSName: "corp.example.com",
+	}
+	facts := resolveWindowsDirectoryFacts(reader, sid, nil, time.Unix(1_800_000_000, 0))
+	if facts.Domain != "corp.example.com" || facts.Domain == reader.dnsName || facts.Realm != "CORP.EXAMPLE.COM" ||
+		facts.Principal != "alice@corp.example.com" || facts.AccountDomain != "CORP" {
+		t.Fatalf("disjoint-namespace AD facts = %+v", facts)
 	}
 }
 

@@ -323,11 +323,14 @@ func profileRulePackScopes(cfg *config.Config, tuned []string) []rulePackScope {
 	for _, name := range tuned {
 		add(connectorRulePackScope(cfg, name))
 	}
-	if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
-		add(overlay)
-	}
-	for name := range cfg.ApplicationProtection.Connectors {
-		add(connectorRulePackScope(cfg, name))
+	if cfg.ApplicationProtection.Enabled {
+		// Disabled application protection selects no rule pack (GAP-0975).
+		if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
+			add(overlay)
+		}
+		for name := range cfg.ApplicationProtection.Connectors {
+			add(connectorRulePackScope(cfg, name))
+		}
 	}
 	sort.Slice(scopes, func(i, j int) bool { return scopes[i].key() < scopes[j].key() })
 	return scopes

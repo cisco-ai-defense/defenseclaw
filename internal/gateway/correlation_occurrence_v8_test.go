@@ -1125,3 +1125,42 @@ func TestHookTraceContextIsTopologyNotSameOccurrenceAuthority(t *testing.T) {
 		t.Fatalf("trace/span topology missing canonical identities: %+v", graph.Relationships)
 	}
 }
+
+func TestHookCursorAfterRestartDoesNotCrossAgentIdentity(t *testing.T) {
+	installCorrelationHMACForTest()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	server, store := newHookCorrelationServer(t, path)
+	profile := server.hookProfileForConnector("claudecode")
+	startBody := []byte(`{"hook_event_name":"UserPromptSubmit","session_id":"shared-session","prompt":"hello"}`)
+	var startPayload map[string]interface{}
+	if err := json.Unmarshal(startBody, &startPayload); err != nil {
+		t.Fatal(err)
+	}
+	start := normalizeAgentHookRequestWithProfile("claudecode", startPayload, profile)
+	start.AgentIdentityID = "agt-user-a"
+	_, start, err := server.correlateHookOccurrence(t.Context(), profile, start, startBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server, reopened := newHookCorrelationServer(t, path)
+	defer reopened.Close() //nolint:errcheck
+	profile = server.hookProfileForConnector("claudecode")
+	hookBody := []byte(`{"hook_event_name":"PreToolUse","session_id":"shared-session","tool_name":"Read"}`)
+	var hookPayload map[string]interface{}
+	if err := json.Unmarshal(hookBody, &hookPayload); err != nil {
+		t.Fatal(err)
+	}
+	hook := normalizeAgentHookRequestWithProfile("claudecode", hookPayload, profile)
+	hook.AgentIdentityID = "agt-user-b"
+	_, hook, err = server.correlateHookOccurrence(t.Context(), profile, hook, hookBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hook.AgentID == start.AgentID || hook.TurnID == start.TurnID ||
+		(start.ExecutionID != "" && hook.ExecutionID == start.ExecutionID) {
+		t.Fatalf("another identity's cursor reused: start=%+v hook=%+v", start, hook)
+	}
+}

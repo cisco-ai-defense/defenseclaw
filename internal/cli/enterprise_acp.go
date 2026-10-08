@@ -546,7 +546,7 @@ func enterpriseACPQuotePath(path string, windows bool) string {
 	if windows {
 		return "'" + strings.ReplaceAll(path, "'", "''") + "'"
 	}
-	return fmt.Sprintf("%q", path)
+	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
 }
 
 // enterpriseACPSetupCommand is the user-side command an enrollment reports:
@@ -667,6 +667,21 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	// Keep service revocation and user-copy cleanup in the same enrollment
+	// transaction so a concurrent enroll cannot publish a token between them.
+	// Secure Client retains the main branch sequence.
+	if !cfg.SecureClientIntegration() {
+		var unlock func()
+		err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+			var lockErr error
+			unlock, lockErr = acp.AcquireEnterpriseCredentialEnrollmentLock(cfg.DataDir)
+			return lockErr
+		})
+		if err != nil {
+			return enterpriseACPResult(cmd, nil, err)
+		}
+		defer unlock()
+	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
 	found := true
@@ -700,6 +715,16 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	if !found && !cfg.SecureClientIntegration() {
+		// The copy is shared across profiles. An unknown or retired profile
+		// cannot own it, so leave any active enrollment's copy alone.
+		payload := map[string]any{
+			"ok": true, "principal": enrollment.principal, "client": enrollment.client,
+			"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
+			"note": "the user's copy was not checked because this profile has no enrollment",
+		}
+		return enterpriseACPResult(cmd, enterpriseACPRevokePayload(payload, notFound), nil)
+	}
 	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
 		return removeEnterpriseACPUserTokenCopy(tokenPath)
 	})
@@ -712,10 +737,6 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	err = enterpriseACPRefusal(err)
 	if !cfg.SecureClientIntegration() && err != nil {
 		switch {
-		case !found:
-			// Nothing was revoked, so the copy is only tidying; the error
-			// used to say the service record was removed (GAP-0355).
-			note, err = "the user's copy was not checked: "+strings.TrimPrefix(err.Error(), "enterprise acp: "), nil
 		case errors.Is(err, os.ErrNotExist):
 			// The home is gone with its account: nothing is left to remove,
 			// and the revoke used to end in an error (GAP-0367).

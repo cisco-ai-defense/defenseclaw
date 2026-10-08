@@ -225,7 +225,7 @@ func (factory *Factory) PrepareDestination(
 		adapter, err := local.NewJSONL(local.JSONLConfig{
 			Path: destination.Transport.Path, MaxSizeMB: rotation.MaxSizeMB,
 			MaxBackups: rotation.MaxBackups, MaxAgeDays: rotation.MaxAgeDays,
-			Compress: rotation.Compress,
+			Compress: rotation.Compress, FailOnOpenError: factory.secureClient,
 		})
 		if err != nil {
 			return nil, cleanup, newError(ErrorAdapterPrepare)

@@ -45,6 +45,7 @@ const (
 // A published inventory is shared read-only; never mutate one returned by
 // ContinuousDiscoveryService.IDEInventory.
 type IDEInventory struct {
+	ScanID        string            `json:"-"`
 	Scope         string            `json:"scope"`
 	ScannedAt     time.Time         `json:"scanned_at"`
 	Installations []IDEInstallation `json:"installations"`

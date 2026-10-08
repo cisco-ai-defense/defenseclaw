@@ -739,3 +739,27 @@ func TestCodexSSETokenAliasesAcceptEqualTypedDuplicateAndRejectConflict(t *testi
 		t.Fatalf("conflicting token alias accounting=%+v err=%v", conflict, err)
 	}
 }
+
+func TestCodexNotifyLineageDoesNotCrossUser(t *testing.T) {
+	if id := (&APIServer{}).codexNotifyAgentID(context.Background(), "unbound-r6-notify-session"); id != "" {
+		t.Fatalf("unbound notify received agent ID %q", id)
+	}
+	retained := llmEventMeta{
+		Source: "codex", SessionID: "shared-session", AgentID: "agent-a",
+		RootAgentID: "agent-a", ParentAgentID: "parent-a",
+		LifecycleID: "lifecycle-a", ExecutionID: "execution-a", UserID: "1001",
+	}
+	key := hookSessionStateKey(retained)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{key: {meta: retained}},
+		hookSessionStateOrder: []string{key},
+	}
+	notify := llmEventMeta{
+		Source: "codex", SessionID: "shared-session", AgentID: "agent-b", UserID: "1002",
+	}
+	got := api.joinCodexNotifyLineage(notify)
+	if got.AgentID != notify.AgentID || got.RootAgentID != "" || got.ParentAgentID != "" ||
+		got.LifecycleID != "" || got.ExecutionID != "" {
+		t.Fatalf("notify inherited another user's lineage: %+v", got)
+	}
+}

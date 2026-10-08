@@ -361,7 +361,9 @@ US$0.04 an hour while running.
 
 A `configure --apply` run writes the keys above and removes any other
 `himmelblau.conf` settings. Its preview names the unmanaged keys, and each
-apply keeps a timestamped backup. Review the backup for site-specific settings
+apply keeps a timestamped backup. An omitted `--allow-group` preserves an
+existing `pam_allow_groups` sign-in restriction; use `--allow-all` to remove
+it explicitly. Review the backup for site-specific settings
 before running it again.
 
 ### Remove Himmelblau
@@ -499,8 +501,13 @@ so the script cannot tell who the assignment is for:
 - An Intune copy without `USER_NAME` stops with exit 2. An `add` copy changes
   the named account only while that account is in front at the console; with
   another user in front (fast user switching) or the login window showing it
-  changes nothing and exits 1, so Intune runs it again later. A `remove` copy
-  acts on the named account at any time.
+  changes nothing and exits 1. In Intune, set **Script frequency** for both
+  copies (for example, daily) and **Max number of times to retry if script fails**
+  for the `add` copy (for example, 3). The defaults run each copy once and
+  never retry a failure. Check the script result and local group membership
+  after sign-in; if the user was never in front during a run, rerun the copy.
+  A `remove` copy acts on the named account at any time. See
+  [Microsoft's macOS shell script settings](https://learn.microsoft.com/en-us/intune/device-management/tools/run-shell-scripts-macos).
 - The script refuses built-in and privileged groups (`admin`, `wheel`,
   `staff`, `com.apple.*`, any group with an id below 500) unless
   `--allow-system-group` (`ALLOW_SYSTEM_GROUP=yes`) is given, and names that

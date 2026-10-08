@@ -736,10 +736,10 @@ func (l *lifecycle) ledgerProblem() string {
 			// An apply, ensure or enumerator cycle has just rewritten
 			// targets.yaml, and the guardian reconciles it within about a
 			// minute while it keeps enforcing the targets it last reconciled.
-			// That is a wait, not a failure an automation should page for
-			// (GAP-0691); a guardian that stays behind fails again later.
+			// Keep the wait guidance (GAP-0691), but report incomplete
+			// coverage until the guardian attests the new roster.
 			l.noteGuardianCatchingUp()
-			return ""
+			return problem
 		}
 		if !torn || attempt == 5 {
 			return problem
@@ -769,7 +769,7 @@ func (e *Env) packageTransactionInProgress() bool {
 const guardianCatchUpWindow = 3 * time.Minute
 
 // codeGuardianReconcilePending warns that the guardian has not reconciled
-// a targets.yaml that changed moments ago.
+// a targets.yaml that changed moments ago without declaring coverage complete.
 const codeGuardianReconcilePending = "guardian_reconcile_pending"
 
 // manifestJustChanged reports a targets.yaml written within

@@ -7,11 +7,13 @@ package gateway
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	"golang.org/x/sys/windows"
 )
 
 // Windows: the gateway resolves a verified SID itself (LookupAccountSid,
@@ -74,6 +76,13 @@ func resolveWindowsDirectoryFacts(sid string, upnWait time.Duration) (useridenti
 		facts = mergeSpoolFacts(facts, record)
 	}
 	if facts.Empty() {
+		parsed, err := windows.StringToSid(sid)
+		if err != nil {
+			return useridentity.DirectoryFacts{}, err
+		}
+		if _, _, _, err = parsed.LookupAccount(""); err != nil {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("Windows directory lookup: %w", err)
+		}
 		return useridentity.DirectoryFacts{}, errors.New("Windows directory lookup returned no facts")
 	}
 	return facts, nil

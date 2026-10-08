@@ -402,7 +402,8 @@ def check_items(graph: Graph, platforms: list[str], groups: list[str]) -> list[d
             left = (
                 time.mktime(time.strptime(data["expirationDateTime"][:19], "%Y-%m-%dT%H:%M:%S")) - time.time()
             ) / 86400
-            add(PASS if left > 30 else WARN, "Apple push certificate", f"expires in {int(left)} days")
+            add(FAIL if left <= 0 else PASS if left > 30 else WARN, "Apple push certificate",
+                f"expires in {int(left)} days")
 
     for name in groups:
         found = graph.get_all(f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,displayName")
@@ -656,7 +657,7 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if included and assignment.get("intent") == args.intent:
         print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
         return 0
-    action = "delete the existing assignment and create a new one" if assignment else "assign"
+    action = "update the existing assignment" if assignment else "assign"
     if not args.apply:
         print(f"[plan] would {action} app {args.app} for group {args.group} with intent {args.intent}")
         print("Nothing was changed. Run again with --apply to make this change.")
@@ -671,8 +672,9 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if assignment:
         if "settings" in assignment:
             body["settings"] = assignment["settings"]
-        graph.request("DELETE", f"{collection}/{assignment['id']}")
-    graph.request("POST", collection, body)
+        graph.request("PATCH", f"{collection}/{assignment['id']}", body)
+    else:
+        graph.request("POST", collection, body)
     print(f"app {args.app}: {action} completed for group {args.group} as {args.intent}")
     return 0
 
@@ -681,9 +683,11 @@ def cmd_remove_assignment(graph: Graph, args: argparse.Namespace) -> int:
     app = one_by_name(graph, f"{BETA}/deviceAppManagement/mobileApps", args.app, "app")
     group = group_by_name(graph, args.group)
     collection = f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments"
-    matching = [a for a in graph.get_all(collection) if (a.get("target") or {}).get("groupId") == group["id"]]
+    targeting = [a for a in graph.get_all(collection) if (a.get("target") or {}).get("groupId") == group["id"]]
+    matching = [a for a in targeting if (a.get("target") or {}).get("@odata.type") == GROUP_TARGET]
     if not matching:
-        print(f"app {args.app}: no assignment to {args.group}")
+        detail = "; exclusion target left in place" if targeting else ""
+        print(f"app {args.app}: no included assignment to {args.group}{detail}")
         return 0
     for assignment in matching:
         if not args.apply:
@@ -743,11 +747,10 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
         "detectionScriptContent": b64(detect),
         "remediationScriptContent": b64(remediate),
     }
-    body = {}
-    if args.detect is not None:
-        body["detectionScriptContent"] = b64(detect)
-    if args.remediate is not None:
-        body["remediationScriptContent"] = b64(remediate)
+    body = {
+        "detectionScriptContent": b64(detect),
+        "remediationScriptContent": b64(remediate),
+    }
     collection = f"{BETA}/deviceManagement/deviceHealthScripts"
     group = group_by_name(graph, args.group) if args.group else None
     script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package", create_body)
@@ -757,9 +760,6 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
         matching = [a for a in existing if a.get("target", {}).get("groupId") == group["id"]]
         if len(matching) > 1:
             raise SystemExit(f"error: {len(matching)} assignments target {args.group!r}; resolve them in Intune")
-        if matching and args.daily_at is None:
-            print(f"{args.name} assignment to {args.group}: unchanged")
-            return 0
         at = args.daily_at or "02:00"
         schedule = {
             "@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
@@ -767,21 +767,23 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             "time": at + ":00",
             "useUtc": False,
         }
+        if matching and args.daily_at is None:
+            schedule = matching[0].get("runSchedule") or schedule
         wanted = {
-            "target": {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
+            "target": matching[0]["target"] if matching else {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
             "runRemediationScript": True,
             "runSchedule": schedule,
         }
-        if matching and matching[0].get("runSchedule") == schedule:
+        if matching and all(matching[0].get(key) == value for key, value in wanted.items()):
             print(f"{args.name} assignment to {args.group}: unchanged")
         elif not args.apply or script_id is None:
-            print(f"[plan] would assign {args.name!r} to group {args.group}, daily at {at}")
+            print(f"[plan] would assign {args.name!r} to group {args.group} with remediation enabled")
         else:
             keep = [{k: a[k] for k in ("target", "runRemediationScript", "runSchedule") if k in a} for a in kept]
             graph.request(
                 "POST", f"{collection}/{script_id}/assign", {"deviceHealthScriptAssignments": keep + [wanted]}
             )
-            print(f"assigned {args.name!r} to group {args.group}, daily at {at}")
+            print(f"assigned {args.name!r} to group {args.group} with remediation enabled")
     if not args.apply:
         print("Nothing was changed. Run again with --apply to make these changes.")
     return 0
@@ -917,10 +919,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remediation.add_argument("--name", default="DefenseClaw Enterprise health", metavar="NAME")
     remediation.add_argument(
-        "--detect", metavar="FILE", help="detection script (kit default on create)"
+        "--detect", metavar="FILE", help="detection script (kit default on every run)"
     )
     remediation.add_argument(
-        "--remediate", metavar="FILE", help="remediation script (kit default on create)"
+        "--remediate", metavar="FILE", help="remediation script (kit default on every run)"
     )
     remediation.add_argument("--group", metavar="NAME", help="assign it to this group")
     remediation.add_argument(

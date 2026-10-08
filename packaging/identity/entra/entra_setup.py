@@ -224,7 +224,7 @@ def odata_eq(field: str, value: str) -> str:
 
 SID_PREFIX = "S-1-12-1-"
 GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
-NICKNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+USER_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9_-])?$")
 DOMAIN_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$")
 
 
@@ -393,8 +393,11 @@ def _load_plan(path: str) -> dict:
     seen_users: dict[str, dict] = {}
     unique_users: list[dict] = []
     for user in users:
-        if not isinstance(user, dict) or not NICKNAME_RE.match(str(user.get("name", ""))):
-            raise SystemExit("error: every entry of 'users' needs a 'name' of letters, digits, '-' and '_'")
+        if not isinstance(user, dict) or not USER_NAME_RE.match(str(user.get("name", ""))):
+            raise SystemExit(
+                "error: every entry of 'users' needs a 'name' of letters, digits, dots, '-' and '_'"
+                " (no leading or trailing dot)"
+            )
         user["name"] = user["name"].lower()
         if not isinstance(user.get("groups", []), list):
             raise SystemExit("error: each user's groups must be a list")

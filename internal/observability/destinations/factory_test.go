@@ -1306,3 +1306,23 @@ func TestFactoryConsoleStreamChoiceAndPanickingCALoader(t *testing.T) {
 		t.Fatalf("resolver panic adapter=%T cleanup=%v error=%v", adapter, cleanup != nil, err)
 	}
 }
+
+func TestFactorySecureClientJSONLOpenFailureKeepsStartupError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open a read-only file for writing")
+	}
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, nil, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	factory := newTestFactory(t, &output, nil, nil, net.Dialer{}, nil)
+	factory.secureClient = true
+	destination := compileDestination(t, config.ObservabilityV8DestinationSource{
+		Name: "file", Kind: config.ObservabilityV8DestinationJSONL, Path: path,
+	})
+	adapter, _, err := factory.PrepareDestination(t.Context(), destination, telemetry.V8ResourceContext{})
+	if adapter != nil || !IsError(err, ErrorAdapterPrepare) || output.Len() != 0 {
+		t.Fatalf("secure client JSONL startup adapter=%T error=%v output=%q", adapter, err, output.String())
+	}
+}

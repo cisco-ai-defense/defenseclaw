@@ -404,7 +404,34 @@ def _toggle_connector_guardrail(
     )
 
 
-@click.group("guardrail")
+class _GuardrailGroup(click.Group):
+    """Keep identity profile commands off the Secure Client command tree."""
+
+    def _secure_client(self, ctx: click.Context) -> bool:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        app = ctx.find_object(AppContext)
+        cfg = app.cfg if app is not None else None
+        if cfg is None:
+            from defenseclaw.config import load
+
+            try:
+                cfg = load()
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return _enterprise_profile(cfg) == "secure_client"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = super().list_commands(ctx)
+        return [name for name in names if name != "profile"] if self._secure_client(ctx) else names
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name == "profile" and self._secure_client(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group("guardrail", cls=_GuardrailGroup)
 def guardrail() -> None:
     """Control guardrail policy: status, enable/disable, fail-mode, hilt, block-message.
 
@@ -425,7 +452,6 @@ def guardrail() -> None:
       use-pack       switch the rule pack, globally or for one connector
       protection     turn opt-in protection packs on/off per scope
       validate-pack  validate one pack with the authoritative Go loader
-      profile        identity-based guardrail profiles: list, show, explain
 
     \b
     Multi-connector: one gateway enforces N hook connectors. Each policy
@@ -625,7 +651,8 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
 
 
 def _echo_status_json(
-    gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str], profile: dict | None = None
+    gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str], profile: dict | None = None,
+    *, secure_client: bool = False,
 ) -> None:
     """Machine-readable ``guardrail status``: the same fields as the table."""
     import json  # noqa: PLC0415
@@ -637,7 +664,11 @@ def _echo_status_json(
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
         connectors.append(item)
     payload = {
-        "enabled": bool(gc.enabled and any(item["state"] == "enabled" for item in connectors)),
+        "enabled": (
+            bool(gc.enabled)
+            if secure_client
+            else bool(gc.enabled and any(item["state"] == "enabled" for item in connectors))
+        ),
         "port": gc.port,
         "connectors": connectors,
         "warnings": warnings,
@@ -712,12 +743,18 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     connector set up, status says so and names the setup command.
     """
     from defenseclaw import policy_catalog
+    from defenseclaw.commands.cmd_status import _enterprise_profile
 
+    secure_client = _enterprise_profile(app.cfg) == "secure_client"
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
+        if secure_client:
+            enabled_txt = "yes" if gc.enabled else "no"
+            enabled_val = ux._style(enabled_txt, fg="green" if gc.enabled else "yellow")
+            ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
@@ -747,9 +784,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     )
     if not actives and not configured:
         if as_json:
-            _echo_status_json(gc, [], [])
+            _echo_status_json(gc, [], [], secure_client=secure_client)
             return
-        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {ux._style('no', fg='yellow')}")
+        if not secure_client:
+            ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {ux._style('no', fg='yellow')}")
         ux.echo(
             f"  • {ux._style('connectors:', fg='bright_black', bold=True)} "
             f"{ux.dim('(none configured)')}"
@@ -784,7 +822,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             raise SystemExit(1)
         actives = scoped
 
-    if not as_json:
+    if not as_json and not secure_client:
         # The summary must describe the same selected rows as --json.
         all_enabled = gc.enabled and any(
             gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
@@ -802,7 +840,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     runtime_limit_rows: list[str] = []
     posture_rows: list[str] = []
     for name in actives:
-        if normalize_connector(name) == "cursor":
+        if not secure_client and normalize_connector(name) == "cursor":
             runtime_limit_rows.append(
                 "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected "
                 "and fail-closed applies only to hook events the CLI sends. "
@@ -859,7 +897,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         else:
             state_raw = "disabled"
             state = ux._style(state_raw, fg="yellow")
-        if gc.enabled and c_enabled:
+        if not secure_client and gc.enabled and c_enabled:
             unrunnable = unrunnable_hook_problem(app.cfg, name)
             if unrunnable:
                 # The agent treats a hook it cannot start as a non-blocking
@@ -933,9 +971,14 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         )
     from defenseclaw.gateway import current_user_guardrail_profile, gateway_reload_notice
 
-    profile = current_user_guardrail_profile(app.cfg)
+    profile = None
+    if not secure_client:
+        profile = current_user_guardrail_profile(app.cfg)
     if as_json:
-        _echo_status_json(gc, rows, posture_rows + runtime_drift_rows + runtime_limit_rows, profile)
+        _echo_status_json(
+            gc, rows, posture_rows + runtime_drift_rows + runtime_limit_rows, profile,
+            secure_client=secure_client,
+        )
         return
     _render_connector_table(rows)
     for posture_row in posture_rows:
@@ -957,8 +1000,8 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 indent="    ",
             )
     # The rows describe config.yaml; say when the running gateway does not
-    # enforce it yet (GAP-0352).
-    if notice := gateway_reload_notice(app.cfg):
+    # enforce it yet (GAP-0352). Secure Client keeps the origin/main output.
+    if not secure_client and (notice := gateway_reload_notice(app.cfg)):
         ux.warn(notice, indent="  ")
     ux.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
     if any_disabled:
@@ -969,7 +1012,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     click.echo()
     if not gc.enabled:
         click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
-    elif any(gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True for name in actives):
+    elif secure_client or any(
+        gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
+        for name in actives
+    ):
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
     else:
         click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable --connector <name>")
@@ -2949,7 +2995,9 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
         raise click.UsageError("PATH must not be empty.")
 
     # A bare pack name has the same meaning here as in list-packs/use-pack.
-    if not any(sep in path for sep in (os.sep, os.altsep) if sep) and not path.startswith(("~", ".")):
+    if not os.path.exists(os.path.expanduser(path)) and not any(
+        sep in path for sep in (os.sep, os.altsep) if sep
+    ) and not path.startswith(("~", ".")):
         from defenseclaw import config, policy_catalog
 
         named = next((p.path for p in policy_catalog.discover_rule_packs(config.load()) if p.name == path), None)

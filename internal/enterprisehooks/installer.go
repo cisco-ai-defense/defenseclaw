@@ -667,6 +667,9 @@ func validateActivationSurfaces(
 
 func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRepair bool) error {
 	if !allowMissing && !allowRepair {
+		if !standaloneProfileProcess() {
+			return validateExistingUserFile(home, path, uid, "hook config")
+		}
 		if err := validateExistingUserParentPrefix(home, path, uid, "hook config"); err != nil {
 			return err
 		}
@@ -678,8 +681,10 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRe
 	if err := validateOptionalUserPathPrefix(home, path, uid, "hook config", false); err != nil {
 		return err
 	}
-	if err := tightenLooseUserHookConfig(path, uid); err != nil {
-		return err
+	if standaloneProfileProcess() {
+		if err := tightenLooseUserHookConfig(path, uid); err != nil {
+			return err
+		}
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -701,6 +706,15 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRe
 		return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", path)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
+		if !standaloneProfileProcess() {
+			if allowRepair {
+				if ok, actual := fileOwnerMatches(path, uid); !ok {
+					return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
+				}
+				return chmodOwnedPath(path, 0o600)
+			}
+			return fmt.Errorf("enterprise hooks: hook config %s is group/other writable", path)
+		}
 		// tightenLooseUserHookConfig already fixed a file the account owns.
 		if ok, actual := fileOwnerMatches(path, uid); !ok {
 			return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d; make the account own it (chown) and retry", path, actual, uid)

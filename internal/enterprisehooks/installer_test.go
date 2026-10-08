@@ -1890,6 +1890,31 @@ func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *te
 	}
 }
 
+func TestSecureClientVerifyDoesNotTightenHookConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix modes")
+	}
+	setStandaloneProfileForTest(t, false)
+	home := t.TempDir()
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("hooks: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHookConfigSurface(home, path, os.Getuid(), false, false); err == nil {
+		t.Fatal("Secure Client verify accepted a group-writable hook config")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o664 {
+		t.Fatalf("Secure Client verify changed hook config: mode=%v", info.Mode().Perm())
+	}
+}
+
 // GAP-0681: an agent that writes its config under the account umask leaves
 // it 0664 on a host with user-private groups (Hermes on Ubuntu). The guardian
 // tightens a hook config the account owns, through a descriptor that does not
@@ -1899,6 +1924,7 @@ func TestHookConfigTheAccountOwnsIsTightened(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix modes")
 	}
+	setStandaloneProfileForTest(t, true)
 	home := t.TempDir()
 	path := filepath.Join(home, ".hermes", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

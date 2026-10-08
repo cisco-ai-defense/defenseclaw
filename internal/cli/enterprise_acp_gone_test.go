@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -39,7 +40,31 @@ func TestEnterpriseACPUserCopyRemovedAtNextSignIn(t *testing.T) {
 		t.Fatalf("pending while signed out = %v", pending)
 	}
 	signedIn = true
-	cleanEnterpriseACPUserCopies(cfg.DataDir, remove, nil, &log)
+	var release func()
+	if err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		var lockErr error
+		release, lockErr = acp.AcquireEnterpriseCredentialEnrollmentLock(cfg.DataDir)
+		return lockErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() {
+		cleanEnterpriseACPUserCopies(cfg.DataDir, remove, nil, &log)
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		release()
+		t.Fatal("deferred cleanup passed an active enrollment transaction")
+	case <-time.After(250 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deferred cleanup stayed blocked after enrollment completed")
+	}
 	if pending, _ := acp.EnterpriseUserCopyCleanups(cfg.DataDir); len(pending) != 0 || !strings.Contains(log.String(), "removed the revoked ACP token copy") {
 		t.Fatalf("pending after sign-in = %v, log = %q", pending, log.String())
 	}

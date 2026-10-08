@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "docs-site/content/docs"
@@ -9,8 +10,10 @@ def page(name: str) -> str:
 
 def test_quickstart_explains_installer_choice_and_init() -> None:
     text = page("get-started/quickstart.mdx")
-    assert "the installer asks which agent to guard" in text
-    assert "defenseclaw init --connector claudecode" in text
+    assert "<include>../../snippets/install-commands.mdx</include>" in text
+    assert "defenseclaw setup <connector>" in text
+    assert re.search(r"install.{0,90}(?:asks|pick|choose).{0,50}agent|install.{0,90}agent.{0,50}guard", text, re.I)
+    assert re.search(r"defenseclaw init --connector [a-z]+", text)
 
 
 def test_copilot_workspace_scope_and_guardrail_route() -> None:
@@ -63,3 +66,17 @@ def test_identity_redaction_warns_about_qualified_account_name() -> None:
     assert "Every redaction profile preserves `defenseclaw.user.name`" in text
     assert "alice@corp.example.com" in text
     assert "must not receive the directory account name" in text
+
+
+def test_quickstart_contract_accepts_equivalent_wording(monkeypatch) -> None:
+    equivalent = """
+    <include>../../snippets/install-commands.mdx</include>
+    During installation, choose the agent to guard. The installer then prints
+    the next command. Add others later using defenseclaw setup <connector>.
+    ```bash
+    defenseclaw init --connector codex
+    ```
+    """
+    monkeypatch.setitem(test_quickstart_explains_installer_choice_and_init.__globals__,
+                        "page", lambda _name: " ".join(equivalent.split()))
+    test_quickstart_explains_installer_choice_and_init()

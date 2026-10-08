@@ -136,6 +136,28 @@ func TestIdentityDirectoryCacheBlockingRequestWaitsForIncompleteRefresh(t *testi
 	}
 }
 
+// Expired partial groups must be refreshed before a blocking profile lookup.
+func TestIdentityDirectoryCacheBlockingRequestRefreshesPartialGroups(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		if calls == 1 {
+			return useridentity.DirectoryFacts{Groups: []string{"lenient"}, GroupsPartial: true, ResolvedAt: now}, nil
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"strict"}, ResolvedAt: now}, nil
+	})
+	cache.now = func() time.Time { return now }
+	cache.partial = func(facts useridentity.DirectoryFacts) bool { return facts.GroupsPartial }
+	if facts, ok := cache.get("S-1-5-21-1-2-3-1103", true); !ok || !facts.GroupsPartial {
+		t.Fatalf("initial partial groups = %+v, %v", facts, ok)
+	}
+	now = now.Add(identityDirectoryRetry)
+	if facts, ok := cache.get("S-1-5-21-1-2-3-1103", true); !ok || facts.GroupsPartial || len(facts.Groups) != 1 || facts.Groups[0] != "strict" {
+		t.Fatalf("blocking lookup used stale group: %+v, %v", facts, ok)
+	}
+}
+
 // TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce pins GAP-0124: an
 // account whose lookup cannot finish (in more groups than are named, a
 // directory that never answers) leaves one line with the reason in the
@@ -188,6 +210,7 @@ func TestIdentityDirectoryCacheDropsAGoneAccountOnceTheDirectoryAnswers(t *testi
 		return useridentity.DirectoryFacts{ResolvedAt: now}, nil
 	})
 	cache.gone = func(err error) bool { return errors.Is(err, gone) }
+	cache.confirmGone = true
 	cache.now = func() time.Time { return now }
 	cache.get("1001", true)
 	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1001" {
@@ -197,6 +220,26 @@ func TestIdentityDirectoryCacheDropsAGoneAccountOnceTheDirectoryAnswers(t *testi
 	cache.get("1002", true)
 	if h := cache.health(); h.Failing != 0 {
 		t.Fatalf("after the directory answered for another account: %+v, want nothing failing", h)
+	}
+}
+
+// A successful local NSS lookup does not prove that a missed AD account is gone.
+func TestIdentityDirectoryCacheLocalAnswerDoesNotClearDirectoryFailure(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	gone := errors.New("NSS account not found")
+	cache := newIdentityCache(func(key string) (useridentity.DirectoryFacts, error) {
+		if key == "ad-uid" {
+			return useridentity.DirectoryFacts{}, gone
+		}
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: now}, nil
+	})
+	cache.gone = func(err error) bool { return errors.Is(err, gone) }
+	cache.now = func() time.Time { return now }
+	cache.get("ad-uid", true)
+	now = now.Add(time.Second)
+	cache.get("local-uid", true)
+	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "ad-uid" {
+		t.Fatalf("local answer hid AD lookup failure: %+v", h)
 	}
 }
 

@@ -1895,6 +1895,9 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 	sortAISignals(out)
 	report := AIDiscoveryReport{Summary: summary, Signals: out}
 	report.IDEInventory = s.finishIDEInventory(stats.ideInventory, full, now)
+	if full && report.IDEInventory != nil {
+		report.IDEInventory.ScanID = scanID
+	}
 	// Best-effort SQL persistence of the scan + computed
 	// confidence snapshots. Failures are logged via stderr but
 	// never fail the scan: the JSON state file remains the
@@ -3193,11 +3196,26 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return nil
 			}
 			files++
-			// The file the walk found, never what a link there points
-			// at, and never a device, FIFO or oversized file (GAP-0694).
-			raw, readErr := readBoundedRegularFileNoFollow(path, s.opts.MaxFileBytes)
-			if readErr != nil {
-				return nil
+			var raw []byte
+			if s.opts.SecureClient {
+				// Keep the pre-1.0 manifest read for Secure Client, including
+				// package.json links. Its discovery signals must match main.
+				info, statErr := os.Stat(path)
+				if statErr != nil || info.IsDir() || info.Size() > s.opts.MaxFileBytes {
+					return nil
+				}
+				raw, statErr = os.ReadFile(path)
+				if statErr != nil {
+					return nil
+				}
+			} else {
+				// Read the walked file itself, never a link target, device,
+				// FIFO or oversized file (GAP-0694).
+				var readErr error
+				raw, readErr = readBoundedRegularFileNoFollow(path, s.opts.MaxFileBytes)
+				if readErr != nil {
+					return nil
+				}
 			}
 			body := string(raw)
 			// wsHash is the PROJECT ROOT hash, not the
