@@ -72,12 +72,61 @@ func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
 	}
 }
 
+// GAP-0947: a uid handed to a new account, even with the removed account's
+// home, gets new agent identities. The listing keeps the removed account's
+// identity under its own name, retired, and an inventory record of that
+// account names no agent identity.
+func TestAgentIdentityDoesNotCrossAUIDReassignment(t *testing.T) {
+	agentIdentityTestSetup(t)
+	home, holder := t.TempDir(), "o3x"
+	restoreName, restoreAccount, restoreHome := userScopedIdentityName, agentIdentityAccountName, userScopedIdentityHome
+	t.Cleanup(func() {
+		userScopedIdentityName, agentIdentityAccountName, userScopedIdentityHome = restoreName, restoreAccount, restoreHome
+	})
+	userScopedIdentityName = func(id string) string { return map[string]string{"2301": holder}[id] }
+	agentIdentityAccountName = userScopedIdentityName
+	userScopedIdentityHome = func(string) string { return home }
+	hook := func(name string) agentIdentityFacts {
+		peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 2301, Name: name, Home: home})
+		return resolveHookAgentIdentity(peer, agentHookRequest{ConnectorName: "claudecode"})
+	}
+	removed := hook("o3x")
+	holder = "o3y"
+	reused := hook("o3y")
+	if removed.ID == "" || reused.ID == removed.ID {
+		t.Fatalf("agent identity after the uid was reassigned = %q, removed account's %q; want a new one", reused.ID, removed.ID)
+	}
+	record := func(facts agentIdentityFacts, name string) inventory.AgentIdentityRecord {
+		return inventory.AgentIdentityRecord{AgentID: facts.ID, UserID: facts.UserID, UserName: name,
+			Connector: facts.Connector, InstallFP: facts.InstallFP, MachineHash: facts.MachineHash}
+	}
+	for _, name := range []string{"o3x", ""} {
+		rows := mergeAgentIdentityRows([]inventory.AgentIdentityRecord{record(removed, name), record(reused, "o3y")},
+			nil, nil, inventory.AgentIdentityFilter{})
+		nameAgentIdentityRows(rows)
+		for _, row := range rows {
+			if want := row.AgentID == removed.ID; row.Retired != want || want && row.UserName != name || !want && row.UserName != "o3y" {
+				t.Fatalf("recorded as %q: listed %+v, want only the removed account's identity retired under its own name", name, row)
+			}
+		}
+	}
+	if got := inventoryAgentIdentityID("claudecode", "2301", "o3x"); got != "" {
+		t.Fatalf("inventory record of the removed account names agent identity %q, want none", got)
+	}
+	if got := inventoryAgentIdentityID("claudecode", "2301", "o3y"); got != reused.ID {
+		t.Fatalf("inventory record of the uid's account names %q, want %q", got, reused.ID)
+	}
+}
+
 // The agent identity comes from verified facts only: forged identity headers
 // and a claimed config dir in the payload change neither it nor the session
 // instance, which is keyed by (agent identity, session) and survives a
 // restart. A sub-agent sharing its parent's session gets a derived instance.
 func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 	agentIdentityTestSetup(t)
+	restoreAccount := agentIdentityAccountName
+	agentIdentityAccountName = func(id string) string { return map[string]string{"4242": "alice", "4343": "bob"}[id] }
+	t.Cleanup(func() { agentIdentityAccountName = restoreAccount })
 	home := t.TempDir()
 	alice := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4242, Name: "alice", Home: home})
 	req := agentHookRequest{
@@ -89,7 +138,7 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 
 	machine, machineVerified := agentidentity.HostMachineHash()
 	want := agentidentity.AgentID(agentidentity.Inputs{
-		MachineHash: machine, UserID: "4242", Connector: "claudecode", InstallFP: filepath.Join(home, ".claude"),
+		MachineHash: machine, UserID: "4242", Account: "alice", Connector: "claudecode", InstallFP: filepath.Join(home, ".claude"),
 	})
 	if first.IdentityID == "" || first.IdentityID != want || first.IdentityVerified != machineVerified {
 		t.Fatalf("identity = %q verified=%v, want %q verified=%v", first.IdentityID, first.IdentityVerified, want, machineVerified)

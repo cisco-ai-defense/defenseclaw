@@ -1207,6 +1207,26 @@ def test_keyboard_interrupt_rolls_back_partial_activation(
     assert fixture["environment_path"].read_bytes() == fixture["environment"]
 
 
+def test_generation_record_failure_rolls_back_config_and_environment(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    generation_path = fixture["config_path"].parent / "config.generation.json"
+    generation_path.mkdir()
+
+    with pytest.raises(V8ActivationError) as captured:
+        activate_v8_migration(
+            fixture["migration"],
+            validator=_validator(fixture["candidate"], fixture["secret"]),
+            data_dir=fixture["data_dir"],
+            config_path=fixture["config_path"],
+        )
+
+    assert captured.value.code == "activation_failed"
+    assert captured.value.stage == "generation_record"
+    assert fixture["config_path"].read_bytes() == fixture["source"]
+    assert fixture["environment_path"].read_bytes() == fixture["environment"]
+    assert generation_path.is_dir()
+
+
 def test_injected_second_write_failure_restores_environment_and_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

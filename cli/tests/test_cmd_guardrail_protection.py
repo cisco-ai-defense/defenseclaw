@@ -27,6 +27,7 @@ from defenseclaw import config_writer, rulepack_validation
 from defenseclaw import policy_catalog as pc
 from defenseclaw.commands import cmd_guardrail
 from defenseclaw.config import (
+    GuardrailProfile,
     GuardrailRulesConfig,
     PerConnectorGuardrailConfig,
     config_path_for_data_dir,
@@ -112,6 +113,21 @@ def test_protection_list_reads_config(env) -> None:
     app.cfg.guardrail.rules = GuardrailRulesConfig(protections=[DB])
     rows = pc.scope_postures(app.cfg)
     assert rows[0].scope == "global" and rows[0].protection == (DB,)
+
+
+def test_protection_list_includes_profile_scopes(env) -> None:
+    app, _root, _writes = env
+    app.cfg.guardrail.profiles = {
+        "contractors": GuardrailProfile(
+            rules=GuardrailRulesConfig(protections=[DB]),
+            connectors={"codex": PerConnectorGuardrailConfig(rules=GuardrailRulesConfig(protections=[K8S]))},
+        )
+    }
+    result = _run(app, "protection", "list", "--json")
+    assert result.exit_code == 0, result.output
+    scopes = {row["scope"]: row["enabled"] for row in json.loads(result.output)["scopes"]}
+    assert DB in scopes["profile:contractors"]
+    assert set(scopes["profile:contractors/connector:codex"]) >= {DB, K8S}
 
 
 def test_rule_and_suppress_wrappers(env) -> None:

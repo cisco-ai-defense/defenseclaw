@@ -214,7 +214,8 @@ the `release-channel` branch. After the first 1.x release is published and
 verified, run the Release workflow once with `operation: legacy-channel` and
 `version: <that release>`. It runs the 0.8.10 channel publisher from the
 `0.8.10` tag, pointing 0.8.x clients at the release's `defenseclaw-upgrade.sh`,
-which hands off to the latest `install.sh`. It does not need to run again.
+which hands off to the requested release's `install.sh` (or the latest if no
+version was requested). It does not need to run again.
 
 ## Never change
 

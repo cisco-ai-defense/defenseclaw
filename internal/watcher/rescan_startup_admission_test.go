@@ -167,3 +167,42 @@ func TestStartupRescanAdmitsANewRoot(t *testing.T) {
 		t.Fatalf("startup rescan admitted %#v, want the plugin in the new root rejected", admitted)
 	}
 }
+
+// A root absent during one completed gateway run must still be covered by its
+// startup marker: a skill placed there while stopped needs install admission.
+func TestStartupRescanAdmitsSkillInRootCreatedWhileStopped(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	absentRoot := filepath.Join(filepath.Dir(skillDir), "later-skills")
+	start := func() []AdmissionResult {
+		var admitted []AdmissionResult
+		w := New(cfg, []string{absentRoot}, nil, store, logger, nil, func(r AdmissionResult) {
+			admitted = append(admitted, r)
+		})
+		w.scannerFactory = func(InstallEvent) scanner.Scanner {
+			return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{{
+				ID: "f1", RuleID: "SKILL-001", Severity: scanner.SeverityCritical, Title: "critical finding",
+			}}}
+		}
+		w.runRescanCycle(context.Background())
+		return admitted
+	}
+	if admitted := start(); len(admitted) != 0 {
+		t.Fatalf("absent root admitted %#v", admitted)
+	}
+	skill := filepath.Join(absentRoot, "offline")
+	if err := os.MkdirAll(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: offline\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admitted := start()
+	if len(admitted) != 1 || admitted[0].Event.Path != skill || admitted[0].Verdict != VerdictRejected {
+		t.Fatalf("restart admitted %#v, want offline skill rejected", admitted)
+	}
+	if _, err := os.Lstat(skill); !os.IsNotExist(err) {
+		t.Fatalf("skill created while stopped stayed in place: %v", err)
+	}
+}

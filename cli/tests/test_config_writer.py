@@ -607,3 +607,59 @@ def test_a_global_mode_change_names_the_connectors_that_keep_their_own_mode(tmp_
     assert out.exit_code == 0, out.output
     assert "keeps its own mode (observe)" in out.output
     assert "defenseclaw guardrail mode action --connector codex" in out.output
+
+
+def test_derived_provider_keeps_yaml_12_name_after_unrelated_write(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "llm_providers:\n  custom:\n    - name: on\n      domains: [llm.example.test]\n")
+    config_writer.apply([Change("update.check", False)], "cli:test", "t", path=path)
+    overlay = json.loads((tmp_path / "custom-providers.json").read_text(encoding="utf-8"))
+    assert overlay["providers"][0]["name"] == "on"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership")
+def test_durable_replacement_preserves_existing_owner_and_group(tmp_path, monkeypatch):
+    path = tmp_path / "config.yaml"
+    path.write_bytes(b"old")
+    owner = path.stat()
+    wanted = (owner.st_uid + 1, owner.st_gid + 1)
+    real_stat = os.stat
+    seen = []
+
+    def existing_owner(name, *args, **kwargs):
+        result = real_stat(name, *args, **kwargs)
+        if os.fspath(name) != str(path):
+            return result
+        fields = list(result)
+        fields[4:6] = wanted
+        return os.stat_result(fields)
+
+    def record_owner(_fd, uid, gid):
+        seen.append((uid, gid))
+
+    monkeypatch.setattr(os, "stat", existing_owner)
+    monkeypatch.setattr(os, "fchown", record_owner)
+    config_writer._write_durable(str(path), b"new", 0o600)
+    assert seen == [wanted]
+    assert path.read_bytes() == b"new"
+
+
+def test_alternate_config_uses_active_data_dir_for_derived_providers(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    active = tmp_path / "active"
+    alternate = tmp_path / "alternate"
+    active.mkdir()
+    alternate.mkdir()
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(active))
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(alternate / "config.yaml"))
+    path = alternate / "config.yaml"
+    path.write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+    entry = {"name": "custom-gateway", "domains": ["llm.example.test"]}
+    config_writer.apply([Change("llm_providers.custom", [entry])], "cli:test", "t", path=path)
+    overlay = json.loads((active / "custom-providers.json").read_text(encoding="utf-8"))
+    assert overlay["providers"][0]["name"] == "custom-gateway"
+    assert not (alternate / "custom-providers.json").exists()

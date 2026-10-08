@@ -1416,3 +1416,54 @@ def test_installed_version_is_the_gateway_on_path_not_a_stale_release_venv(tmp_p
     ps1 = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     body = ps1[ps1.index("function Get-InstalledVersion {") :]
     assert body.index('"defenseclaw-gateway.exe"') < body.index("dist-info")
+
+
+def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    for version in ("1.0.0", "1.0.1"):
+        target = releases / version
+        target.mkdir(parents=True)
+        installer = f'#!/bin/bash\nreadonly DC_VERSION="{version}"\n'
+        (target / "install.sh").write_text(installer, encoding="utf-8")
+        digest = hashlib.sha256(installer.encode()).hexdigest()
+        (target / "checksums.txt").write_text(f"{digest}  install.sh\n", encoding="utf-8")
+        (target / "checksums.txt.bundle").write_text("{}", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    curl = tools / "curl"
+    curl.write_text(
+        '#!/bin/sh\n'
+        'previous=""\n'
+        'for arg in "$@"; do\n'
+        '  [ "$previous" = "-o" ] && output="$arg"\n'
+        '  case "$arg" in https://github.com/*) url="$arg";; esac\n'
+        '  previous="$arg"\n'
+        'done\n'
+        'echo "$url" >> "$CURL_LOG"\n'
+        'case "$url" in\n'
+        '  */releases/latest) printf "HTTP/2 302\\r\\nlocation: https://github.com/cisco-ai-defense/defenseclaw/releases/tag/1.0.1\\r\\n";;\n'
+        '  */releases/download/*) cp "$FAKE_RELEASES/${url#*/releases/download/}" "$output";;\n'
+        '  *) exit 1;;\n'
+        'esac\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    cosign = tools / "cosign"
+    cosign.write_text('#!/bin/sh\n[ "$1" = version ] && echo "GitVersion: v2.6.3"\nexit 0\n', encoding="utf-8")
+    cosign.chmod(0o755)
+    curl_log = tmp_path / "curl.log"
+
+    result = _run(
+        [str(HANDOFF_SH), "--plan", "--version", "1.0.0"],
+        tmp_path,
+        PATH=f"{tools}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        FAKE_RELEASES=str(releases),
+        CURL_LOG=str(curl_log),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "would upgrade to DefenseClaw 1.0.0" in result.stdout
+    urls = curl_log.read_text(encoding="utf-8").splitlines()
+    assert all("/releases/latest" not in url for url in urls)
+    assert any("/releases/download/1.0.0/install.sh" in url for url in urls)

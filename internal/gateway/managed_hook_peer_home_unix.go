@@ -16,10 +16,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -40,6 +43,29 @@ const managedHookPeerHomeTTL = 5 * time.Minute
 const managedHookPeerLookupRetry = 15 * time.Second
 
 var errManagedHookPeerNoResolver = errors.New("no account resolver")
+
+// managedHookPeerAccountsStamp identifies the state of the local account
+// database: useradd, userdel and usermod replace /etc/passwd, and macOS
+// keeps a local account's record in the dslocal users directory. When it
+// changes, every cached account is looked up again at once, so a uid that
+// was removed and handed to a new account inside managedHookPeerHomeTTL
+// never gets the removed account's name, home, directory facts or agent
+// identity (GAP-0947). "" when it cannot be read: the TTL alone applies.
+var managedHookPeerAccountsStamp = func() string {
+	path := "/etc/passwd"
+	if runtime.GOOS == "darwin" {
+		path = "/var/db/dslocal/nodes/Default/users"
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	stamp := strconv.FormatInt(info.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(info.Size(), 10)
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		stamp += "/" + strconv.FormatUint(uint64(st.Ino), 10)
+	}
+	return stamp
+}
 
 // managedHookPeerHome resolves the home directory of a kernel-verified
 // hook-socket caller through the platform account database (NSS on Linux,
@@ -72,6 +98,7 @@ type managedHookPeerHomeCache struct {
 	mu          sync.Mutex
 	resolver    unixidentity.Resolver
 	resolvedAt  time.Time
+	stamp       string // managedHookPeerAccountsStamp when resolver was made
 	newResolver func() unixidentity.Resolver
 	now         func() time.Time
 	// accounts holds one answer per uid. A lookup in flight is shared by
@@ -88,10 +115,15 @@ type managedHookPeerHomeCache struct {
 	// config root and the agent identity derived from it do not move while
 	// the directory is away (GAP-0314).
 	homes map[int]string
-	// homesFile persists homes in the gateway's data directory, so a
-	// gateway that starts while the directory is away still has the last
-	// home of each uid and keeps its agent identity (GAP-0314). Empty when
-	// nothing is persisted (per-user gateways, Secure Client).
+	// names keeps the last account name each uid resolved to for its agent
+	// identity, which is keyed on the account too (GAP-0947), so an outage
+	// moves it no more than the home (agentIdentityAccountName).
+	names map[int]string
+	// homesFile persists homes and names in the gateway's data directory,
+	// so a gateway that starts while the directory is away still has the
+	// last home and name of each uid and keeps its agent identity
+	// (GAP-0314). Empty when nothing is persisted (per-user gateways,
+	// Secure Client).
 	homesFile   string
 	homesLoaded bool
 	// holders is the account (name and home) each uid's cached directory
@@ -115,8 +147,14 @@ func (c *managedHookPeerHomeCache) setStore(path string) {
 	}
 }
 
-// loadHomesLocked merges the persisted homes under the ones this process
-// resolved itself. c.mu is held.
+// managedHookPeerLast is what the store keeps of one uid.
+type managedHookPeerLast struct {
+	Home string `json:"home,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// loadHomesLocked merges the persisted homes and names under the ones this
+// process resolved itself. c.mu is held.
 func (c *managedHookPeerHomeCache) loadHomesLocked() {
 	if c.homesLoaded || c.homesFile == "" {
 		return
@@ -126,34 +164,46 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 	if err != nil {
 		return
 	}
-	var stored map[string]string
+	var stored map[string]managedHookPeerLast
 	if json.Unmarshal(data, &stored) != nil {
 		return
 	}
-	for key, home := range stored {
+	for key, last := range stored {
 		uid, err := strconv.Atoi(key)
-		if err != nil || uid < 0 || normalizeManagedHookPeerHome(home) != home {
+		if err != nil || uid < 0 {
 			continue
 		}
-		if _, known := c.homes[uid]; known || len(c.homes) >= managedHookPeerHomesMax {
-			continue
+		if _, known := c.homes[uid]; !known && last.Home != "" &&
+			normalizeManagedHookPeerHome(last.Home) == last.Home && len(c.homes) < managedHookPeerHomesMax {
+			if c.homes == nil {
+				c.homes = make(map[int]string)
+			}
+			c.homes[uid] = last.Home
 		}
-		if c.homes == nil {
-			c.homes = make(map[int]string)
+		if _, known := c.names[uid]; !known && last.Name != "" &&
+			sanitizeLLMEventUser(last.Name) == last.Name && len(c.names) < managedHookPeerHomesMax {
+			if c.names == nil {
+				c.names = make(map[int]string)
+			}
+			c.names[uid] = last.Name
 		}
-		c.homes[uid] = home
 	}
 }
 
-// saveHomesLocked writes homes to the store. c.mu is held; it runs only
-// when a uid's home changes, which is rare.
+// saveHomesLocked writes homes and names to the store. c.mu is held; it
+// runs only when a uid's home or name changes, which is rare.
 func (c *managedHookPeerHomeCache) saveHomesLocked() {
 	if c.homesFile == "" {
 		return
 	}
-	stored := make(map[string]string, len(c.homes))
+	stored := make(map[string]managedHookPeerLast, len(c.homes))
 	for uid, home := range c.homes {
-		stored[strconv.Itoa(uid)] = home
+		stored[strconv.Itoa(uid)] = managedHookPeerLast{Home: home}
+	}
+	for uid, name := range c.names {
+		last := stored[strconv.Itoa(uid)]
+		last.Name = name
+		stored[strconv.Itoa(uid)] = last
 	}
 	data, err := json.Marshal(stored)
 	if err != nil {
@@ -184,12 +234,18 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	if uid < 0 {
 		return unixidentity.Account{}, false
 	}
+	stamp := ""
+	if !ManagedEnterpriseActive() {
+		// Secure Client keeps main's lifetime (#1092).
+		stamp = managedHookPeerAccountsStamp()
+	}
 	c.mu.Lock()
 	now := c.now()
-	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL {
+	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL || stamp != c.stamp {
 		c.resolver = c.newResolver()
 		c.resolvedAt = now
 		c.accounts = nil
+		c.stamp = stamp
 	}
 	if entry := c.accounts[uid]; entry != nil {
 		select {
@@ -345,6 +401,29 @@ func (c *managedHookPeerHomeCache) lookupName(uid int) string {
 		return ""
 	}
 	return sanitizeLLMEventUser(account.Name)
+}
+
+// rememberName records the name uid resolved to for lastName.
+func (c *managedHookPeerHomeCache) rememberName(uid int, name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	if previous, known := c.names[uid]; previous == name || !known && len(c.names) >= managedHookPeerHomesMax {
+		return
+	}
+	if c.names == nil {
+		c.names = make(map[int]string)
+	}
+	c.names[uid] = name
+	c.saveHomesLocked()
+}
+
+// lastName returns the last name rememberName recorded for uid, or "".
+func (c *managedHookPeerHomeCache) lastName(uid int) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	return c.names[uid]
 }
 
 // normalizeManagedHookPeerHome keeps only an absolute, clean home below the

@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -484,6 +485,32 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 	}
 	if hasMCPEntry(entries, "daemon-cwd") {
 		t.Fatalf("entries = %+v, should not read daemon cwd MCP server", entries)
+	}
+}
+
+func TestClaudeStateMCPServersIncludesProjectsAfterFirst512(t *testing.T) {
+	root := t.TempDir()
+	projects := make(map[string]any)
+	for i := 0; i < 512; i++ {
+		projects[filepath.Join(root, fmt.Sprintf("a%03d", i))] = map[string]any{}
+	}
+	active := filepath.Join(root, "z-active")
+	projects[active] = map[string]any{}
+	data, err := json.Marshal(map[string]any{"projects": projects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
+		if project == active {
+			return []byte(`{"mcpServers":{"active":{"command":"echo"}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "active" || entries[0].Project != active {
+		t.Fatalf("active project MCP server missing: %+v", entries)
 	}
 }
 

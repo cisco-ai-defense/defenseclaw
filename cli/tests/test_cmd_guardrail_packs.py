@@ -21,9 +21,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
-from defenseclaw import config_writer, rulepack_validation
+from defenseclaw import config_writer, policy_catalog, rulepack_validation
 from defenseclaw.commands import cmd_guardrail
-from defenseclaw.config import CustomRulePack, PerConnectorGuardrailConfig, default_config
+from defenseclaw.config import CustomRulePack, GuardrailRulesConfig, PerConnectorGuardrailConfig, default_config
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
@@ -208,6 +208,26 @@ def test_clear_connector_override(env):
     assert payload["connector"] == "codex"
     assert payload["path"] == str(root / "default")
     assert writes == [[config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True)]]
+
+
+def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
+    app, _root, _custom, writes = env
+    monkeypatch.setattr(policy_catalog, "pack_rule_defaults", lambda _path: {"SEC-AWS-KEY": True})
+    monkeypatch.setattr(policy_catalog, "rule_defaults_with_protections", lambda _path, _packs: {"SEC-AWS-KEY": True})
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(
+            rule_pack="strict", rules=GuardrailRulesConfig(disable=["SEC-ENV-DUMP-REQUEST"])
+        )
+    }
+    result = _run(app, ["use-pack", "--clear", "--connector", "codex", "--json"])
+    assert result.exit_code == 0, result.output
+    assert writes[-1] == [
+        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
+        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True),
+    ]
+    assert json.loads(result.output)["dropped_rule_references"] == [
+        "guardrail.connectors.codex.rules.disable: SEC-ENV-DUMP-REQUEST"
+    ]
 
 
 def test_usage_errors(env):

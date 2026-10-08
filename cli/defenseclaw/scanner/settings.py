@@ -170,9 +170,11 @@ def verified_asset_bytes(path: str, digest: str) -> bytes:
     return data
 
 
-def _drop_inherited(name: str) -> bool:
+def _drop_inherited(name: str, *, secure_client: bool = False) -> bool:
     upper = name.upper()
     if upper.startswith("ENABLE_") and upper.endswith("_ANALYZER"):
+        return True
+    if not secure_client and upper in {"OPENAI_BASE_URL", "OPENAI_API_BASE"}:
         return True
     return upper.startswith(_SCANNER_ENV_PREFIXES)
 
@@ -188,19 +190,19 @@ def _remember(name: str) -> None:
 
 
 @contextlib.contextmanager
-def scanner_env(values: Mapping[str, str]) -> Iterator[None]:
+def scanner_env(values: Mapping[str, str], *, secure_client: bool = False) -> Iterator[None]:
     """Run a scan with the scanner environment built from config only.
 
     Sets every non-empty value (config wins over the shell) and removes the
     inherited scanner families (``SKILL_SCANNER_*``, ``ENABLE_*_ANALYZER``,
-    ``AI_DEFENSE_*``, ``MCP_SCANNER_*``, ``VIRUSTOTAL_*``) that config did
+    ``AI_DEFENSE_*``, ``MCP_SCANNER_*``, ``VIRUSTOTAL_*`` and inherited OpenAI endpoints) that config did
     not set. The previous environment comes back when the outermost scan
     ends; concurrent scans of one batch share the same derived values.
     """
     global _env_depth
     with _env_lock:
         if _env_depth == 0:
-            for name in [n for n in os.environ if _drop_inherited(n)]:
+            for name in [n for n in os.environ if _drop_inherited(n, secure_client=secure_client)]:
                 _remember(name)
                 del os.environ[name]
         for name, value in values.items():

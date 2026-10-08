@@ -98,7 +98,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := processutil.RunTree(cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 

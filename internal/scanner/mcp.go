@@ -179,30 +179,40 @@ func (s *MCPScanner) Name() string               { return "mcp-scanner" }
 func (s *MCPScanner) Version() string            { return "1.0.0" }
 func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 
-// commandArgs is the scanner command line. The Python CLI reads
-// scanners.mcp_scanner from config.yaml itself. The embedded scanner runtime
-// reads no config, so its "mcp-scan" gets the whole block (runtimeSettings)
-// and its judge from the config-derived environment (runtimeEnv).
+// commandArgs keeps the Windows runtime command line short. The complete
+// settings, rule pack and local server definition travel on stdin.
 func (s *MCPScanner) commandArgs(target string) ([]string, error) {
 	if !usesScannerRuntime(s.Config.Binary) {
 		return s.buildArgs(target), nil
 	}
+	return []string{"mcp-scan", "--input-stdin", target}, nil
+}
+
+func (s *MCPScanner) runtimeInput() ([]byte, error) {
 	settings, err := s.runtimeSettings()
 	if err != nil {
 		return nil, fmt.Errorf("scanner: %s settings for the scanner runtime: %w", s.Name(), err)
 	}
-	args := []string{"mcp-scan", "--settings", settings}
+	input := struct {
+		Settings    json.RawMessage `json:"settings"`
+		RulePack    json.RawMessage `json:"rule_pack,omitempty"`
+		ServerEntry json.RawMessage `json:"server_entry,omitempty"`
+	}{Settings: json.RawMessage(settings)}
 	if s.RulePack.Dir != "" {
 		pack, err := s.RulePack.runtimeArg()
 		if err != nil {
 			return nil, fmt.Errorf("scanner: %s rule pack for the scanner runtime: %w", s.Name(), err)
 		}
-		args = append(args, "--rule-pack", pack)
+		input.RulePack = json.RawMessage(pack)
 	}
 	if s.ServerEntry != nil && s.ServerEntry.Command != "" && s.ServerEntry.URL == "" {
-		args = append(args, "--server-entry-stdin")
+		entry, err := s.runtimeServerEntry()
+		if err != nil {
+			return nil, fmt.Errorf("scanner: encode MCP server entry: %w", err)
+		}
+		input.ServerEntry = entry
 	}
-	return append(args, target), nil
+	return json.Marshal(input)
 }
 
 // buildArgs builds the argument vector for “defenseclaw mcp scan“.
@@ -302,12 +312,12 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		cmd.Env = s.runtimeEnv()
 	}
 
-	if usesScannerRuntime(s.Config.Binary) && s.ServerEntry != nil && s.ServerEntry.Command != "" && s.ServerEntry.URL == "" {
-		entry, err := s.runtimeServerEntry()
+	if usesScannerRuntime(s.Config.Binary) {
+		input, err := s.runtimeInput()
 		if err != nil {
-			return nil, fmt.Errorf("scanner: encode MCP server entry: %w", err)
+			return nil, err
 		}
-		cmd.Stdin = bytes.NewReader(entry)
+		cmd.Stdin = bytes.NewReader(input)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

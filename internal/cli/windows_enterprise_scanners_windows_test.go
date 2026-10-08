@@ -22,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0132: an upgrade replaces the scanner runtime while a scan still runs
@@ -209,5 +210,50 @@ func TestWindowsScannerRuntimeTimeoutIsNamed(t *testing.T) {
 	}
 	if !strings.Contains(progress.String(), "is still running") || !strings.Contains(progress.String(), "stopped after 500ms") {
 		t.Fatalf("progress = %q, want the elapsed time and the bound while it waits", progress.String())
+	}
+}
+
+// A timed-out prepare must end the Python worker that inherited its streams.
+func TestWindowsScannerRuntimeTimeoutStopsWorker(t *testing.T) {
+	switch os.Getenv("DC_PREPARE_CANCEL_ROLE") {
+	case "child":
+		time.Sleep(10 * time.Second)
+		return
+	case "parent":
+		child := exec.Command(os.Args[0], "-test.run=^TestWindowsScannerRuntimeTimeoutStopsWorker$")
+		child.Env = append(os.Environ(), "DC_PREPARE_CANCEL_ROLE=child")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(20)
+		}
+		if err := testenv.PublishFile(os.Getenv("DC_PREPARE_CHILD_MARKER"), []byte("ready")); err != nil {
+			os.Exit(21)
+		}
+		time.Sleep(10 * time.Second)
+		return
+	}
+	dir := t.TempDir()
+	wrapper := filepath.Join(dir, "prepare.cmd")
+	script := fmt.Sprintf("@echo off\r\n\"%s\" -test.run=^TestWindowsScannerRuntimeTimeoutStopsWorker$\r\n", os.Args[0])
+	if err := os.WriteFile(wrapper, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "child.ready")
+	t.Setenv("DC_PREPARE_CANCEL_ROLE", "parent")
+	t.Setenv("DC_PREPARE_CHILD_MARKER", marker)
+	originalTimeout, originalProgress := windowsScannerPrepareTimeout, windowsScannerProgress
+	t.Cleanup(func() { windowsScannerPrepareTimeout, windowsScannerProgress = originalTimeout, originalProgress })
+	windowsScannerPrepareTimeout = 2 * time.Second
+	windowsScannerProgress = io.Discard
+	start := time.Now()
+	err := runWindowsScannerRuntime(wrapper, "prepare")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("prepare error = %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("prepare kept waiting for its Python worker")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("prepare helper did not launch worker: %v", err)
 	}
 }

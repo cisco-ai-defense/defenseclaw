@@ -42,7 +42,7 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 		LLM: config.LLMConfig{Model: "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", APIKey: "k", Region: "us-east-1"},
 	}
 	args, err := mcp.commandArgs("https://mcp.example.test/mcp")
-	if err != nil || len(args) != 4 || args[0] != "mcp-scan" || args[1] != "--settings" || args[3] != "https://mcp.example.test/mcp" {
+	if err != nil || !reflect.DeepEqual(args, []string{"mcp-scan", "--input-stdin", "https://mcp.example.test/mcp"}) {
 		t.Fatalf("mcp args = %v (%v)", args, err)
 	}
 	var settings struct {
@@ -56,13 +56,23 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 			} `json:"extra_rules"`
 		} `json:"yara"`
 	}
-	if err := json.Unmarshal([]byte(args[2]), &settings); err != nil {
-		t.Fatalf("settings %q: %v", args[2], err)
+	input, err := mcp.runtimeInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Settings json.RawMessage `json:"settings"`
+	}
+	if err := json.Unmarshal(input, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload.Settings, &settings); err != nil {
+		t.Fatalf("settings: %v", err)
 	}
 	if !reflect.DeepEqual(settings.Analyzers, []string{"yara", "llm"}) || settings.Binary != nil ||
 		settings.YARA.IncludeBundled == nil || *settings.YARA.IncludeBundled ||
 		len(settings.YARA.ExtraRules) != 1 || settings.YARA.ExtraRules[0].Path != rule.Path || settings.YARA.ExtraRules[0].Digest != rule.Digest {
-		t.Fatalf("runtime settings = %s", args[2])
+		t.Fatalf("runtime settings = %s", payload.Settings)
 	}
 	// GAP-0296: the runtime also gets the rule pack the CLI overlays.
 	mcp.RulePack = MCPRulePack{
@@ -70,9 +80,12 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 		Rules: []config.GuardrailRulesConfig{{Disable: []string{"SEC-X"}}},
 	}
 	args, err = mcp.commandArgs("https://mcp.example.test/mcp")
-	if err != nil || len(args) != 6 || args[3] != "--rule-pack" || args[5] != "https://mcp.example.test/mcp" ||
-		!strings.Contains(args[4], `"rules":[{"disable":["SEC-X"]}]`) {
-		t.Fatalf("mcp args with a rule pack = %v (%v)", args, err)
+	if err != nil || len(args) != 3 {
+		t.Fatalf("mcp args with rule pack = %v (%v)", args, err)
+	}
+	input, err = mcp.runtimeInput()
+	if err != nil || !strings.Contains(string(input), `"rules":[{"disable":["SEC-X"]}]`) {
+		t.Fatalf("mcp input lost rule pack: %v", err)
 	}
 	env := strings.Join(mcp.runtimeEnv(), "\n")
 	for _, wantLine := range []string{
@@ -110,7 +123,7 @@ func TestMCPRuntimeStdioEntry(t *testing.T) {
 		},
 	}
 	args, err := mcp.commandArgs("local")
-	if err != nil || !slices.Contains(args, "--server-entry-stdin") {
+	if err != nil || !slices.Contains(args, "--input-stdin") {
 		t.Fatalf("local runtime args = %v (%v)", args, err)
 	}
 	for _, arg := range args {
@@ -118,10 +131,17 @@ func TestMCPRuntimeStdioEntry(t *testing.T) {
 			t.Fatalf("server definition leaked to command line: %v", args)
 		}
 	}
-	body, err := mcp.runtimeServerEntry()
+	input, err := mcp.runtimeInput()
 	if err != nil {
 		t.Fatal(err)
 	}
+	var payload struct {
+		ServerEntry json.RawMessage `json:"server_entry"`
+	}
+	if err := json.Unmarshal(input, &payload); err != nil {
+		t.Fatal(err)
+	}
+	body := payload.ServerEntry
 	var entry struct {
 		Name    string            `json:"name"`
 		Command string            `json:"command"`
@@ -136,6 +156,25 @@ func TestMCPRuntimeStdioEntry(t *testing.T) {
 		!reflect.DeepEqual(entry.Args, []string{"-y", "example-mcp"}) ||
 		entry.Env["MODE"] != "test" || entry.CWD != "C:/workspace" {
 		t.Fatalf("stdio entry lost launch fields: %+v", entry)
+	}
+}
+
+// Large pinned rule sets are carried on stdin, outside the Windows command line.
+func TestMCPRuntimeLargeSettingsStayOffCommandLine(t *testing.T) {
+	rules := make([]config.AssetFileRef, 200)
+	for i := range rules {
+		rules[i] = config.AssetFileRef{Path: strings.Repeat("long-directory/", 20) + "rule.yar",
+			Digest: "sha256:" + strings.Repeat("ab", 32)}
+	}
+	mcp := &MCPScanner{Config: config.MCPScannerConfig{Binary: "defenseclaw-scanners.exe",
+		YARA: config.MCPScannerYARAConfig{ExtraRules: rules}}}
+	args, err := mcp.commandArgs("server")
+	if err != nil || len(strings.Join(args, " ")) > 100 {
+		t.Fatalf("runtime arguments grew with settings: %v", err)
+	}
+	input, err := mcp.runtimeInput()
+	if err != nil || len(input) < 32767 || !strings.Contains(string(input), "rule.yar") {
+		t.Fatalf("large scanner settings did not reach stdin: %v", err)
 	}
 }
 

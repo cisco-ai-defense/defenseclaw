@@ -3871,6 +3871,41 @@ func TestRemoveOpenHandsHookReferencesPrunesOnlyNewlyEmptyMatcherGroups(t *testi
 	}
 }
 
+func TestSecureClientOpenHandsTeardownRemovesEmptyMatcherGroup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	// An operator edit makes the managed backup ineligible for restoration.
+	source, err := json.Marshal(map[string]interface{}{
+		"pre_tool_use": []interface{}{
+			map[string]interface{}{"matcher": "*", "hooks": []interface{}{map[string]interface{}{"command": "dc-hook"}}},
+		},
+		"operator": "edited",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := &hookOnlyConnector{name: "openhands"}
+	opts := SetupOpts{ManagedEnterprise: true}
+	if err := conn.removeConfigEntries(path, "dc-hook", opts); err != nil {
+		t.Fatal(err)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got["operator"] != "edited" {
+		t.Fatalf("Secure Client OpenHands cleanup differs from main: %s", body)
+	}
+}
+
 func TestRemoveSecureClientJSONHookReferencesPrunesEmptyEntriesLikeMain(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	opts := SetupOpts{DataDir: t.TempDir(), ManagedEnterprise: true}

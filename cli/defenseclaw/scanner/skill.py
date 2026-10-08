@@ -209,8 +209,10 @@ class SkillScannerWrapper:
         cisco_ai_defense: CiscoAIDefenseConfig | None = None,
         *,
         llm: LLMConfig | None = None,
+        secure_client: bool = False,
     ) -> None:
         self.config = config
+        self.secure_client = secure_client
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
         self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
@@ -278,7 +280,7 @@ class SkillScannerWrapper:
         if settings.osv_enabled(cfg):
             build_kwargs["use_osv"] = True
 
-        with settings.scanner_env(env):
+        with settings.scanner_env(env, secure_client=self.secure_client):
             self._inject_env()
             analyzers = build_analyzers(**build_kwargs)
             scanner = SkillScanner(analyzers=analyzers, policy=policy)
@@ -307,10 +309,14 @@ class SkillScannerWrapper:
         """
         llm = self._llm
         model = litellm_model(llm)
+        if self.secure_client and not model:
+            model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "")
         if not model:
             _log.info("skill-scanner: no judge model resolved from llm.model; running the static rules")
             return {}
         api_key = llm.resolved_api_key()
+        if self.secure_client and not api_key:
+            api_key = os.environ.get("SKILL_SCANNER_LLM_API_KEY", "")
         if not llm_analyzer_ready(llm, model=model, api_key=api_key):
             key_name = llm.api_key_env or "DEFENSECLAW_LLM_KEY"
             _warn_llm_skipped_once(f"{key_name} is not configured")

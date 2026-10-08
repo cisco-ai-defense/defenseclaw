@@ -1040,6 +1040,22 @@ class TestPolicyEngineToolConnectorScope(_StoreTestBase):
     Mirrors internal/enforce/policy_test.go::TestPolicyEngineToolConnectorScope.
     """
 
+    def test_secure_client_tool_scope_uses_gateway_key(self):
+        from unittest.mock import patch
+
+        self.cfg.deployment_mode = "managed_enterprise"
+        with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}):
+            self.pe.block_tool_for_connector("delete_file", "claudecode", "scoped")
+            row = self.store.get_action("tool", "@claudecode/delete_file")
+            self.assertIsNotNone(row)
+            self.assertEqual(row.actions.install, "block")
+            self.assertTrue(self.pe.is_blocked_for_connector("tool", "delete_file", "claudecode"))
+            self.assertFalse(self.pe.is_blocked_for_connector("tool", "delete_file", "codex"))
+            self.pe.allow_tool_for_connector("delete_file", "claudecode", "reviewed")
+            self.assertTrue(self.pe.is_allowed_for_connector("tool", "delete_file", "claudecode"))
+            self.pe.unblock_tool_for_connector("delete_file", "claudecode")
+            self.assertIsNone(self.store.get_action("tool", "@claudecode/delete_file"))
+
     def test_connector_block_isolated(self):
         self.pe.block_tool_for_connector("delete_file", "hermes", "scoped")
         self.assertTrue(self.pe.is_blocked_for_connector("tool", "delete_file", "hermes"))

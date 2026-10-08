@@ -2810,11 +2810,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	cfg := a.liveConfig()
 	// The rule pack an install-time scan applies to a skill (none under the
 	// Secure Client integration), so a scan reports what admission sees.
-	ss := guardrail.NewArtifactOverlay(scanner.NewSkillScannerFromLLM(
+	skillScanner := scanner.NewSkillScannerFromLLM(
 		cfg.Scanners.SkillScanner,
 		cfg.ResolveLLM("scanners.skill"),
 		cfg.CiscoAIDefense,
-	), installScanRulePack(""))
+	)
+	skillScanner.SecureClient = cfg.SecureClientIntegration()
+	ss := guardrail.NewArtifactOverlay(skillScanner, installScanRulePack(""))
 
 	ctx, cancel := context.WithTimeout(r.Context(), componentScanTimeout(cfg, "skill"))
 	defer cancel()
@@ -2970,12 +2972,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.scannerCfg == nil {
+	cfg := a.liveConfig()
+	if cfg == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
 		return
 	}
 
-	ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+	ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()

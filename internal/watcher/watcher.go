@@ -71,6 +71,9 @@ type InstallEvent struct {
 	// pre-existing global behavior for events that do not tag a connector.
 	Connector string
 	Timestamp time.Time
+	// readmitReason names why the rescan admits a known target again; the
+	// watcher-block row carries it.
+	readmitReason string
 }
 
 // Verdict is the outcome of running the admission gate on an install.
@@ -101,6 +104,10 @@ type AdmissionResult struct {
 	// Interrupted is a scan the watcher's own stop cut off: nothing was
 	// decided, no baseline is kept, and the next start admits the asset.
 	Interrupted bool
+	// Unenforced is a rejection decided while take_action was off for the
+	// type, so nothing was blocked or quarantined. Its rescan baseline keeps
+	// a mark, and admission runs again once take_action is on (GAP-0774).
+	Unenforced bool
 }
 
 // OnAdmission is called after each install event is processed.
@@ -481,7 +488,7 @@ func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEve
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
 	if !res.Interrupted {
-		w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
+		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, w.cachedFingerprint(evt, nil)))
 	}
 }
 
@@ -1018,7 +1025,7 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 				w.state.set(evt, AdmissionScanning)
 				snap := w.admissionSnapshot(evt)
 				result := w.runAdmission(ctx, evt)
-				w.recordAdmissionBaseline(evt, snap, result.ScanID)
+				w.recordAdmissionBaseline(evt, snap, result)
 				w.state.clear(evt.Path)
 				w.notifyAdmission(result)
 			}
@@ -1400,6 +1407,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		InstallAction: out.InstallAction,
 		FileAction:    out.FileAction,
 		RuntimeAction: out.RuntimeAction,
+		Unenforced:    out.Verdict == "rejected" && !w.takeActionFor(evt),
 	}
 	return res
 }
@@ -1543,6 +1551,9 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 				// info show why the skill was blocked (GAP-0418).
 				blockReason += decidingFindings(result)
 			}
+			if evt.readmitReason != "" {
+				blockReason += "; " + evt.readmitReason
+			}
 			// An operator restore keeps the files only while the install
 			// block it left in place remains. Decide that before this scan
 			// adds its own block: after an unblock + restore, the block below
@@ -1651,11 +1662,13 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	// picked up automatically on the next install.
 	switch evt.Type {
 	case InstallSkill:
-		return w.withRulePackOverlay(scanner.NewSkillScannerFromLLM(
+		ss := scanner.NewSkillScannerFromLLM(
 			cfg.Scanners.SkillScanner,
 			cfg.ResolveLLM("scanners.skill"),
 			cfg.CiscoAIDefense,
-		), evt)
+		)
+		ss.SecureClient = cfg.SecureClientIntegration()
+		return w.withRulePackOverlay(ss, evt)
 	case InstallMCP:
 		ms := scanner.NewMCPScannerFromLLM(
 			cfg.Scanners.MCPScanner,

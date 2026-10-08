@@ -434,6 +434,8 @@ with the staged payload path:
 ```sh
 PACK_SOURCE=/path/to/mdm-payload/acme
 PACK_DEST=/opt/cisco/defenseclaw/etc/policies/guardrail/acme
+test -d "$PACK_SOURCE" || exit 1
+rm -rf "$PACK_DEST"
 install -d -o root -g wheel -m 0755 "$PACK_DEST"
 cp -R "$PACK_SOURCE/." "$PACK_DEST/"
 chown -R root:wheel "$PACK_DEST"
@@ -454,8 +456,10 @@ guardrail:
     acme: {path: /opt/cisco/defenseclaw/etc/policies/guardrail/acme, digest: "sha256:<digest>"}
 ```
 
-Re-run the stage script and update the pin before applying an edited pack. An
-uninstall removes the policy folder; re-stage the pack before a reinstall.
+Re-run the stage script and update the pin before applying an edited pack.
+The script replaces the destination directory, so files removed from the MDM
+payload do not remain in the pack or change its digest. An uninstall removes
+the policy folder; re-stage the pack before a reinstall.
 
 ## Detection
 

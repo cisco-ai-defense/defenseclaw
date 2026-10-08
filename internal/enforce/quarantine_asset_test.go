@@ -311,13 +311,17 @@ func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
 		if !signedIn {
 			return ErrQuarantineRemovalDeferred
 		}
+		if retries == 2 {
+			return fmt.Errorf("sharing violation")
+		}
 		return nil
 	}
 	channel.ServeDeferred(retry)
 	signedIn = true
 	channel.ServeDeferred(retry)
 	channel.ServeDeferred(retry)
-	if retries != 2 {
-		t.Fatalf("deferred removal ran %d times, want 2 (kept while signed out, dropped once removed)", retries)
+	channel.ServeDeferred(retry)
+	if retries != 3 {
+		t.Fatalf("deferred removal ran %d times, want 3 (kept after transient error, dropped once removed)", retries)
 	}
 }

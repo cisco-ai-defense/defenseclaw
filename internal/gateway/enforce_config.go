@@ -65,8 +65,9 @@ type assetListEdit struct {
 // kept), then appends the new rule; an unblock only drops the denied rule.
 // Names compare as the readers match them: skill, MCP and plugin names
 // case-insensitively (assetRuleMatches), tool names exactly
-// (ToolListDecision). An exact compare left a denied MySkill in place on an
-// unblock or allow of myskill, which still matched it (GAP-0319).
+// (ToolListDecision). An unnamed rule matches the first key shown by
+// /enforce/blocked and /enforce/allowed. An exact compare left a denied
+// MySkill in place on an unblock or allow of myskill (GAP-0319).
 func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Change {
 	base := "asset_policy." + edit.TargetType
 	sameAsset := func(name, connector string) bool {
@@ -114,7 +115,13 @@ func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Chang
 	keep := func(rules []config.AssetPolicyRule) []map[string]any {
 		out := []map[string]any{}
 		for _, rule := range rules {
-			if !sameAsset(rule.Name, rule.Connector) {
+			matches := sameAsset(rule.Name, rule.Connector)
+			if strings.TrimSpace(rule.Name) == "" {
+				key := listedAssetRuleName(rule)
+				matches = key != "" && key == strings.TrimSpace(edit.Name) &&
+					config.SameConnector(rule.Connector, edit.Connector)
+			}
+			if !matches {
 				out = append(out, assetRuleMap(rule))
 			}
 		}
@@ -348,7 +355,7 @@ func configListEntries(cfg *config.Config, denied bool) []enforcementEntry {
 			rules = typed.policy.Denied
 		}
 		for _, rule := range rules {
-			name := firstNonEmptyString(rule.Name, rule.URL, rule.Command, strings.Join(rule.SourcePathContains, ","))
+			name := listedAssetRuleName(rule)
 			add(typed.targetType, name, rule.Connector, rule.Reason)
 		}
 	}
@@ -360,6 +367,10 @@ func configListEntries(cfg *config.Config, denied bool) []enforcementEntry {
 		add("tool", rule.Name, rule.Connector, rule.Reason)
 	}
 	return out
+}
+
+func listedAssetRuleName(rule config.AssetPolicyRule) string {
+	return firstNonEmptyString(rule.Name, rule.URL, rule.Command, strings.Join(rule.SourcePathContains, ","))
 }
 
 func firstNonEmptyString(values ...string) string {

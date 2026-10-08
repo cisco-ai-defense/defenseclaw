@@ -1699,7 +1699,8 @@ def _build_skill_scanner(
     cfg = app.cfg.scanners.skill_scanner
     # Auto turns the judge on when a model resolves, unless config.yaml turned it off
     # (scanners.skill_scanner.use_llm: false); --use-llm still forces it on (GAP-0055).
-    effective = (cfg.use_llm and bool(litellm_model(llm))) if use_llm is None else use_llm
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    effective = (cfg.use_llm and (secure_client or bool(litellm_model(llm)))) if use_llm is None else use_llm
 
     if cfg.use_llm != effective:
         cfg = dataclasses.replace(cfg, use_llm=effective)
@@ -1709,6 +1710,7 @@ def _build_skill_scanner(
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
         llm=llm,
+        secure_client=secure_client,
     )
     # R4: overlay the guardrail rule pack (and guardrail.rules) so `skill scan`
     # flags what the gateway's rule lanes would catch, and what the install

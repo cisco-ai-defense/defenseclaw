@@ -34,6 +34,22 @@ func TestNewSkillScanner_DefaultBinary(t *testing.T) {
 // The scanner environment comes from config only: a shell value of a
 // scanner variable never wins over config, and other scanner variables
 // from the gateway's environment are dropped.
+func TestSecureClientSkillScannerKeepsInheritedJudge(t *testing.T) {
+	t.Setenv("SKILL_SCANNER_LLM_MODEL", "openai/inherited-model")
+	t.Setenv("SKILL_SCANNER_LLM_API_KEY", "inherited-key")
+	ss := NewSkillScannerFromLLM(config.SkillScannerConfig{UseLLM: true},
+		config.LLMConfig{}, config.CiscoAIDefenseConfig{})
+	ss.SecureClient = true
+	if !slices.Contains(ss.buildArgs("/skill", "quiet"), "--use-llm") {
+		t.Fatal("Secure Client scan lost the inherited LLM judge")
+	}
+	env := strings.Join(ss.scanEnv(), "\n")
+	if !strings.Contains(env, "SKILL_SCANNER_LLM_MODEL=openai/inherited-model") ||
+		!strings.Contains(env, "SKILL_SCANNER_LLM_API_KEY=inherited-key") {
+		t.Fatal("Secure Client scan lost inherited scanner settings")
+	}
+}
+
 func TestSkillScanner_ScanEnv_ConfigOnly(t *testing.T) {
 	t.Setenv("SKILL_SCANNER_LLM_MODEL", "other")
 	t.Setenv("ENABLE_LLM_ANALYZER", "1")

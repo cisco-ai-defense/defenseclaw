@@ -47,6 +47,14 @@ type Inputs struct {
 	// InstallFP is the connector's config root inside the user's home, as
 	// the gateway resolves it. It is never a path the agent claimed.
 	InstallFP string
+	// Account is the name the host's account database gives UserID now.
+	// Linux and macOS hand a removed account's uid to the next account, so
+	// a uid's ID is also keyed on its account (AccountKey): the new account
+	// never gets the removed one's agent identities, their history or the
+	// guardrail profile assigned to them (GAP-0947). A SID is never reused,
+	// so a SID's account is ignored and a renamed Windows account keeps its
+	// IDs.
+	Account string
 }
 
 // AgentID returns "agt-" plus the first 16 hex digits of the namespaced
@@ -59,7 +67,41 @@ func AgentID(in Inputs) string {
 	if machine == "" || user == "" || connector == "" {
 		return ""
 	}
-	return AgentIDPrefix + digest16(agentNamespace, machine, user, connector, NormalizeInstallFP(in.InstallFP))
+	parts := []string{machine, user, connector, NormalizeInstallFP(in.InstallFP)}
+	if !IsSID(user) {
+		parts = append(parts, AccountKey(in.Account))
+	}
+	return AgentIDPrefix + digest16(agentNamespace, parts...)
+}
+
+// AccountKey is the form of an account name a uid's agent identity is keyed
+// on: the bare account, without a DOMAIN\ prefix or an @realm suffix,
+// lower-cased, so the spellings one directory account is reported in
+// (alice, alice@corp.example.com, CORP\alice) are one account.
+func AccountKey(name string) string {
+	name = clean(name)
+	if i := strings.IndexByte(name, '\\'); i > 0 && i < len(name)-1 {
+		name = name[i+1:]
+	} else if i := strings.LastIndexByte(name, '@'); i > 0 && i < len(name)-1 {
+		name = name[:i]
+	}
+	return strings.ToLower(name)
+}
+
+// UIDReassigned reports whether holder, the account that holds the uid
+// userID now, is another account than recorded, the one a record of that
+// uid was made for: recorded was removed and its uid handed to holder, or
+// renamed. A SID is never handed on, and an unknown side proves nothing.
+func UIDReassigned(userID, recorded, holder string) bool {
+	if IsSID(NormalizeUserID(userID)) || clean(recorded) == "" || clean(holder) == "" {
+		return false
+	}
+	return AccountKey(recorded) != AccountKey(holder)
+}
+
+// IsSID reports whether a normalized user id is a Windows SID.
+func IsSID(id string) bool {
+	return len(id) > 2 && id[0] == 'S' && id[1] == '-'
 }
 
 // InstanceID returns the session instance id of sessionID under agentID:

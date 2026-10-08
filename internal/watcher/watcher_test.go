@@ -1515,7 +1515,7 @@ func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
 	evt := InstallEvent{Type: InstallSkill, Name: "rvw-crit1", Path: path, Timestamp: time.Now()}
 	snap := first.admissionSnapshot(evt)
 	res := first.runAdmission(context.Background(), evt)
-	first.recordAdmissionBaseline(evt, snap, res.ScanID)
+	first.recordAdmissionBaseline(evt, snap, res)
 	// A host upgraded from a build that wrote it still has that baseline.
 	first.persistSnapshot(evt, snap, "scan-before-upgrade", first.scannerFingerprint(evt))
 	if err := os.Chmod(skillDir, 0o700); err != nil {
@@ -1532,6 +1532,50 @@ func TestQuarantinedSkillCopiedBackIsAdmittedByTheRescan(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("the copy put back was not quarantined (lstat err %v)", err)
+	}
+}
+
+// GAP-0774: a skill rejected while take_action was false stayed installed
+// and usable after take_action was turned back on, because its admission
+// baseline let every rescan skip it as unchanged. Once take_action is on,
+// the rescan admits it again and quarantines it; while it is off, the
+// rescan does not scan it on every cycle.
+func TestSkillRejectedWithTakeActionOffIsEnforcedOnceItIsOn(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Watch.RescanEnabled = true
+	cfg.Watch.RescanContentGated = true
+	scans := &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+		{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
+	}}
+	watch := func(takeAction bool) *InstallWatcher {
+		c := *cfg
+		c.Gateway.Watcher.Skill.TakeAction = takeAction
+		w := New(&c, []string{skillDir}, nil, store, logger, nil, nil)
+		w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+		return w
+	}
+	ctx := context.Background()
+	observe := watch(false)
+	observe.runRescanCycle(ctx) // the root is covered
+	path := filepath.Join(skillDir, "epa-crit-e")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# epa-crit-e\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evt := InstallEvent{Type: InstallSkill, Name: "epa-crit-e", Path: path, Timestamp: time.Now()}
+	snap := observe.admissionSnapshot(evt)
+	res := observe.runAdmission(ctx, evt)
+	observe.recordAdmissionBaseline(evt, snap, res)
+	before := scans.calls
+	observe.runRescanCycle(ctx)
+	if _, err := os.Lstat(path); res.Verdict != VerdictRejected || err != nil || scans.calls != before {
+		t.Fatalf("take_action off: verdict %s, lstat err %v, rescan scans %d (was %d)", res.Verdict, err, scans.calls, before)
+	}
+	watch(true).runRescanCycle(ctx)
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("take_action on: the rejected skill was not quarantined (lstat err %v)", err)
 	}
 }
 

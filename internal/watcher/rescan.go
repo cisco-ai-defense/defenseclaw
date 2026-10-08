@@ -263,9 +263,9 @@ func watchRootMarkerType(typ InstallType) string { return string(typ) + "_root" 
 
 // baselinedWatchRoots lists, per type, the skill and plugin roots that a
 // completed rescan cycle covered in an earlier run: a root with a marker row,
-// or one holding baselines from a build without markers. A target without a
-// baseline under one of them arrived while the gateway was stopped (GAP-2475),
-// even when the root was empty before. On a first start nothing is listed, so
+// or one holding baselines from a build without markers. A marker also covers
+// a root that was absent during the previous run: a target appearing there
+// while stopped needs admission. On a first start nothing is listed, so
 // the startup rescan only records baselines, as before.
 func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
 	roots := make(map[InstallType][]string)
@@ -295,9 +295,9 @@ func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
 	return roots
 }
 
-// markWatchRoots records, after a completed rescan cycle, that every existing
-// skill and plugin root was covered, so a target added to it while the gateway
-// is stopped is admitted at the next start even if the root was empty.
+// markWatchRoots records, after a completed rescan cycle, every configured
+// skill and plugin root, including absent roots. A target placed in a new
+// root while the gateway is stopped then receives startup admission.
 func (w *InstallWatcher) markWatchRoots() {
 	if w.markedWatchRoots == nil {
 		w.markedWatchRoots = make(map[string]bool)
@@ -309,7 +309,9 @@ func (w *InstallWatcher) markWatchRoots() {
 			if w.markedWatchRoots[key] {
 				continue
 			}
-			if _, err := os.Lstat(dir); err != nil {
+			// Secure Client keeps its existing-root marker behavior.
+			if _, err := os.Lstat(dir); err != nil &&
+				(!errors.Is(err, os.ErrNotExist) || w.secureClientActive()) {
 				continue
 			}
 			if err := w.store.SetTargetSnapshot(markerType, dir, "", "{}", "{}", "[]", "", ""); err != nil {
@@ -777,7 +779,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
 				if !res.Interrupted {
-					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
+					w.persistSnapshot(evt, currentSnap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 				}
 				return rescanScanned
 			}
@@ -791,7 +793,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted && !moved {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
-					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
+					w.persistSnapshot(evt, currentSnap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 				}
 				return rescanScanned
 			}
@@ -806,6 +808,26 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
 		return rescanSkipped
+	}
+
+	// A rejection decided while take_action was off left the target in
+	// place. Once take_action is on, admission runs again and its actions
+	// apply as for a new install. Until then the baseline keeps the mark and
+	// the scan below compares against the real fingerprint (GAP-0774).
+	keepMark := false
+	if strings.HasSuffix(baseline.ScannerFingerprint, unenforcedRejectionMark) {
+		if w.takeActionFor(evt) && !w.secureClientActive() {
+			return w.readmitUnenforcedRejection(ctx, evt, currentSnap, fingerprint)
+		}
+		unmarked := *baseline
+		unmarked.ScannerFingerprint = strings.TrimSuffix(unmarked.ScannerFingerprint, unenforcedRejectionMark)
+		baseline, keepMark = &unmarked, true
+	}
+	marked := func(fp string) string {
+		if keepMark {
+			return fp + unenforcedRejectionMark
+		}
+		return fp
 	}
 
 	// Cheap content/dependency/config/endpoint drift derived purely from
@@ -832,7 +854,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		// case a future cheap signal lands without a content-hash change.
 		if len(deltas) > 0 {
 			w.emitDriftAlerts(evt, deltas)
-			w.persistSnapshot(evt, currentSnap, baseline.ScanID, baseline.ScannerFingerprint)
+			w.persistSnapshot(evt, currentSnap, baseline.ScanID, marked(baseline.ScannerFingerprint))
 		}
 		return rescanSkipped
 	}
@@ -864,7 +886,42 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 			evt.Path)
 		return rescanScanned
 	}
-	w.persistSnapshot(evt, currentSnap, scanID, fingerprint)
+	w.persistSnapshot(evt, currentSnap, scanID, marked(fingerprint))
+	return rescanScanned
+}
+
+// unenforcedRejectionMark ends the scanner fingerprint of a baseline whose
+// admission rejected the target while take_action was off for its type. No
+// scanner fingerprint contains it.
+const unenforcedRejectionMark = "|rejected-unenforced"
+
+// admissionFingerprint is the baseline fingerprint for an admission result:
+// fingerprint, marked when the result is a rejection nothing enforced.
+// Secure Client keeps the baseline of main (issue #1092).
+func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint string) string {
+	if res.Unenforced && !w.secureClientActive() {
+		return fingerprint + unenforcedRejectionMark
+	}
+	return fingerprint
+}
+
+// readmitUnenforcedRejection runs admission again for a target rejected while
+// take_action was off, now that it is on: the block, quarantine and runtime
+// disable apply as for a new install, the gateway is told, and the
+// watcher-block row says why. When nothing is decided (an interrupted or
+// failed scan) or the target moved, the mark stays and a later cycle retries.
+func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[rescan] %s %s was rejected while take_action was off; take_action is on, running install admission\n", evt.Type, evt.Name)
+	evt.readmitReason = "rejected while take_action was off, enforced once it was turned on"
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	moved := w.movedByAdmission(evt)
+	if res.Interrupted || res.ScanID == "" || moved {
+		return rescanScanned
+	}
+	if _, err := os.Lstat(evt.Path); err == nil {
+		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
+	}
 	return rescanScanned
 }
 
@@ -969,14 +1026,14 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // it again for lack of a baseline scan: three scans and three scan-finding
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
-func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, scanID string) {
-	if w.movedByAdmission(evt) || snap == nil || scanID == "" {
+func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
+	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
 		return
 	}
-	w.persistSnapshot(evt, snap, scanID, w.scannerFingerprint(evt))
+	w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, w.scannerFingerprint(evt)))
 }
 
 // persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint
