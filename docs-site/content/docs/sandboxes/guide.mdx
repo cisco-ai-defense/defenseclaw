@@ -801,12 +801,18 @@ start` there. If none of the session's hooks gets through (the daemon is
 stopped, or the ingress is unreachable), every tool call is blocked. The
 run tells you three times:
 
-- live, in your terminal, as soon as DefenseClaw notices or the first hook
-  is more than 45 seconds late:
+- live, as soon as DefenseClaw notices or the first hook is more than 45
+  seconds late. In a terminal session the bell rings and the terminal's
+  title shows it for a moment (Claude Code takes the title back at once);
+  a run without a terminal, such as `--prompt`, prints the line:
 
   ```text
   [defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor
   ```
+
+  A stopped daemon is announced the same way, as
+  `⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed: …`,
+  and its return as `✓ the DefenseClaw daemon is reachable again`;
 
 - again in the end-of-session summary;
 - in the exit status: 69 when not one hook got through, unless the harness
