@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -467,5 +468,22 @@ func TestEnterpriseACPSetupPathQuotesForPowerShell(t *testing.T) {
 	got := enterpriseACPQuotePath(`C:\Program Files\DefenseClaw\bin\gateway.exe`, true)
 	if got != `'C:\Program Files\DefenseClaw\bin\gateway.exe'` {
 		t.Fatalf("PowerShell path = %q", got)
+	}
+}
+
+// A setup command is pasted into a POSIX shell, which expands dollar signs
+// inside double quotes and needs apostrophes escaped inside single quotes.
+func TestEnterpriseACPSetupPathQuotesForUnixShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	path := "/home/person$group/O'Brien data/.defenseclaw"
+	quoted := enterpriseACPQuotePath(path, false)
+	output, err := exec.Command("sh", "-c", "set -- "+quoted+"; printf %s \"$1\"").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != path {
+		t.Fatalf("shell parsed %q as %q, want %q", quoted, output, path)
 	}
 }

@@ -546,7 +546,7 @@ func enterpriseACPQuotePath(path string, windows bool) string {
 	if windows {
 		return "'" + strings.ReplaceAll(path, "'", "''") + "'"
 	}
-	return fmt.Sprintf("%q", path)
+	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
 }
 
 // enterpriseACPSetupCommand is the user-side command an enrollment reports:
