@@ -983,8 +983,10 @@ boundary, and says what each one is:
   provider's rule;
 - **credential**: the endpoint of a `--credential` binding (never shadow
   AI: you bound a credential there);
-- **harness vendor**: an AI API of the harness's own vendor (for example
-  `api.openai.com` in a Codex sandbox);
+- **harness vendor**: a host of the harness's own vendor that DefenseClaw's
+  provider catalog lists, with its subdomains (for example `api.openai.com`
+  or `learn.chatgpt.com` in a Codex sandbox), and the harness's own request
+  to an AI host such as OpenCode's model catalog;
 - **shadow AI**: another AI provider DefenseClaw's provider catalog knows,
   or **shadow AI?** for a host that only looks like an inference endpoint.
   Each provider raises a `shadow_ai` finding once a session: LOW the first
