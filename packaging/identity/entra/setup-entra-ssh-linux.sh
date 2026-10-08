@@ -107,6 +107,22 @@ vm_identity=$(printf '%s\n' "$vm_info" | sed -n 3p)
 [ "$vm_os" = "Linux" ] || die "$vm is a $vm_os VM; this script is for Linux VMs" 1
 echo "VM: $vm ($vm_os) in $rg"
 
+# Resolve all principals before any VM or role changes.
+user_ids=()
+group_ids=()
+for principal in ${users[@]+"${users[@]}"}; do
+  oid=$("$AZ" ad user show --id "$principal" --query id -o tsv 2>/dev/null) ||
+    die "user $principal was not found in Entra ID" 1
+  [ -n "$oid" ] || die "user $principal was not found in Entra ID" 1
+  user_ids+=("$oid")
+done
+for principal in ${groups[@]+"${groups[@]}"}; do
+  oid=$("$AZ" ad group show --group "$principal" --query id -o tsv 2>/dev/null) ||
+    die "group $principal was not found in Entra ID" 1
+  [ -n "$oid" ] || die "group $principal was not found in Entra ID" 1
+  group_ids+=("$oid")
+done
+
 # 1. System-assigned managed identity (the extension needs it).
 case "${vm_identity:-None}" in
   *SystemAssigned*) echo "ok: system-assigned managed identity is on" ;;
@@ -125,12 +141,10 @@ fi
 
 # 3. The sign-in role, for each user and group.
 grant() {
-  local kind=$1 principal=$2 oid principal_type count
+  local kind=$1 principal=$2 oid=$3 principal_type count
   if [ "$kind" = "user" ]; then
-    oid=$("$AZ" ad user show --id "$principal" --query id -o tsv 2>/dev/null) || die "user $principal was not found in Entra ID" 1
     principal_type=User
   else
-    oid=$("$AZ" ad group show --group "$principal" --query id -o tsv 2>/dev/null) || die "group $principal was not found in Entra ID" 1
     principal_type=Group
   fi
   count=$("$AZ" role assignment list --assignee "$oid" --scope "$vm_id" --role "$role" --query 'length(@)' -o tsv 2>/dev/null || echo 0)
@@ -141,8 +155,8 @@ grant() {
       --assignee-object-id "$oid" --assignee-principal-type "$principal_type" --role "$role" --scope "$vm_id"
   fi
 }
-for principal in ${users[@]+"${users[@]}"}; do grant user "$principal"; done
-for principal in ${groups[@]+"${groups[@]}"}; do grant group "$principal"; done
+for i in "${!users[@]}"; do grant user "${users[i]}" "${user_ids[i]}"; done
+for i in "${!groups[@]}"; do grant group "${groups[i]}" "${group_ids[i]}"; done
 if [ "${#users[@]}" -eq 0 ] && [ "${#groups[@]}" -eq 0 ]; then
   echo "note: no --user or --group given, so no sign-in role was checked or granted"
 fi

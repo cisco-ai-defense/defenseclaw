@@ -293,6 +293,82 @@ def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> No
     assert calls == [("POST", "/v1.0/groups")]
 
 
+def test_entra_apply_checks_all_groups_before_creating_any(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.test", "groups": [
+        {"name": "new-team"}, {"name": "existing-mail-group"}]}))
+    writes = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/organization?" in path:
+                return [{"verifiedDomains": [{"name": "example.test"}]}]
+            if "existing-mail-group" in path:
+                return [{"id": "mail-id", "securityEnabled": False}]
+            return []
+
+        def request(self, method, path, body):
+            writes.append((method, path))
+            return {"id": "new-id"}
+
+        def get_after_create(self, path):
+            return {"id": "new-id"}
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    with pytest.raises(entra.GraphError, match="NotSecurityGroup"):
+        entra.cmd_apply(Graph(), args)
+    assert writes == []
+
+
+def test_entra_plan_rejects_repeated_group_names_before_graph_calls(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.test", "groups": [
+        {"name": "new-team"}, {"name": "NEW-TEAM"}]}))
+    with pytest.raises(SystemExit, match="duplicate group"):
+        entra.cmd_apply(object(), argparse.Namespace(config=str(plan), apply=True, password_file=None))
+
+
+def test_entra_ssh_apply_example_grants_previewed_group() -> None:
+    doc = (ROOT / "docs-site/content/docs/enterprise/identity-entra-id.mdx").read_text()
+    # Read the first command block under the SSH heading.
+    commands = doc.split("### Azure VMs with Entra SSH sign-in", 1)[1].split(chr(96) * 3 + "bash", 1)[1]
+    commands = commands.split(chr(96) * 3, 1)[0].splitlines()
+    preview = next(line for line in commands if line.startswith("./setup-entra-ssh-linux.sh") and "--apply" not in line)
+    apply = next(line for line in commands if line.startswith("./setup-entra-ssh-linux.sh") and "--apply" in line)
+    group = preview.split("--group ", 1)[1].split()[0]
+    assert "--group " + group in apply
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_entra_ssh_resolves_every_principal_before_vm_changes(tmp_path: Path) -> None:
+    az = tmp_path / "az-fake"
+    log = tmp_path / "az.log"
+    az.write_text("""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$AZ_LOG"
+case "$*" in
+  "account show"*) echo subscription-id ;;
+  "vm show"*) printf '/subscriptions/test/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm\nLinux\nNone\n' ;;
+  "ad user show"*) echo user-id ;;
+  "ad group show"*) exit 1 ;;
+  "vm extension list"*) ;;
+  "role assignment list"*) echo 0 ;;
+esac
+""", encoding="ascii")
+    az.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(ENTRA.parent / "setup-entra-ssh-linux.sh"), "-g", "rg", "-n", "vm",
+         "--user", "alice@example.test", "--group", "missing", "--apply"],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "AZ": str(az), "AZ_LOG": str(log)},
+    )
+    calls = log.read_text().splitlines()
+    assert result.returncode == 1
+    assert not any("identity assign" in call or "extension set" in call
+                   or "role assignment create" in call for call in calls)
+
+
 def test_entra_apply_records_password_before_user_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     entra = _load(ENTRA)
     plan = tmp_path / "tenant.json"
