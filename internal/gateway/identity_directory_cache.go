@@ -41,8 +41,8 @@ import (
 //
 // Facts whose refreshes keep failing are not served forever: past maxAge
 // (identityDirectoryMaxAge for directory facts, four times the TTL) they are
-// dropped, and the account is a failed lookup (default_lookup_failed) until a
-// lookup succeeds. Without the bound a user removed from the directory kept the
+// dropped, and directory-dependent assignments use default_lookup_failed
+// until a lookup succeeds. Without the bound a user removed from the directory kept the
 // profile of the group they had left, and a user added to one stayed on the
 // default, for as long as the outage lasted (GAP-0145). health reports how many
 // accounts are failing and how stale their facts are, for doctor and status.
@@ -305,9 +305,9 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 		entry.failedSince = now
 	}
 	entry.lastErr = reason
-	keeps := "the account gets the default guardrail profile (default_lookup_failed) until a lookup succeeds"
+	keeps := "directory-dependent assignments use the default guardrail profile (default_lookup_failed) until a lookup succeeds"
 	if entry.ok && c.maxAge > 0 {
-		keeps = fmt.Sprintf("the account keeps its last facts for at most %s, then gets the default guardrail "+
+		keeps = fmt.Sprintf("the account keeps its last facts for at most %s, then directory-dependent assignments use the default guardrail "+
 			"profile (default_lookup_failed) until a lookup succeeds", c.maxAge)
 	}
 	return fmt.Sprintf("directory lookup for %s failed: %s; %s", key, reason, keeps)

@@ -1295,3 +1295,21 @@ func TestUnconfirmedQualifiedNameMatchesNoUsersEntry(t *testing.T) {
 		}
 	}
 }
+
+// A verified UID is sufficient for a users assignment during a directory outage.
+func TestVerifiedUIDAssignmentSurvivesDirectoryFailure(t *testing.T) {
+	set := &guardrailProfileSet{
+		defaultProfile: "watch",
+		profiles: map[string]config.DerivedGuardrailProfile{
+			"strict": {}, "watch": {},
+		},
+		assignments: []config.ProfileAssignment{
+			{Profile: "watch", Match: config.ProfileMatch{Users: []string{"1002"}, Groups: []string{"ops"}}},
+			{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+		},
+	}
+	subject := &profileSubject{UserID: "1001", LookupFailed: true}
+	if got := set.matchUncached(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchUser {
+		t.Fatalf("verified UID selected %+v; want strict user assignment", got)
+	}
+}
