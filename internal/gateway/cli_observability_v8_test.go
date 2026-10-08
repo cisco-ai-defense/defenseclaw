@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -622,5 +624,18 @@ func TestCLIObservabilityV8ModelSpanCarriesUserAndRunID(t *testing.T) {
 	}
 	if got := gatewayProtoAttribute(attrs, "defenseclaw.run.id"); got != "python-scan-run" {
 		t.Errorf("defenseclaw.run.id=%q", got)
+	}
+}
+
+func TestCLIObservabilityV8SecureClientInvalidRequestResponse(t *testing.T) {
+	_, api, _ := newCLIObservabilityV8Fixture(t)
+	api.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader("{")))
+	if response.Code != http.StatusBadRequest ||
+		response.Header().Get("Content-Type") != "text/plain; charset=utf-8" ||
+		response.Body.String() != "{\"error\":\"invalid canonical observability request\"}\n" {
+		t.Fatalf("Secure Client invalid request wire response: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 	}
 }
