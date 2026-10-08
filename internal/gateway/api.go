@@ -2245,56 +2245,14 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		policyName = normalizePluginPolicyName(req.TargetName)
 		runtimeName = resolvePluginRuntimeActionName(pe, req.TargetName, policyName)
 	}
-
-	legacyRows := a.legacyEnforcementRows()
-	runtimeDisabled := false
-	if a.store != nil {
-		entry, err := pe.GetAction(req.TargetType, runtimeName)
-		if err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		runtimeDisabled = entry != nil && entry.Actions.Runtime == "disable"
-		if runtimeDisabled && a.client == nil {
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway client not configured"})
-			return
-		}
-	}
-
-	enableRuntime := func() (int, error) {
-		ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
-		defer cancel()
-		switch req.TargetType {
-		case "skill":
-			if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-				return a.client.EnableSkill(callCtx, req.TargetName)
-			}); err != nil {
-				return http.StatusBadGateway, err
-			}
-		case "plugin":
-			if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-				return a.client.EnablePlugin(callCtx, runtimeName)
-			}); err != nil {
-				return http.StatusBadGateway, err
-			}
-			if runtimeName != policyName {
-				if err := pe.Enable("plugin", runtimeName); err != nil {
-					return http.StatusInternalServerError, err
-				}
-			}
-		}
-		return 0, nil
-	}
-	// Secure Client retains the pre-1.0 ordering of the legacy action rows.
-	if legacyRows && runtimeDisabled {
-		if status, err := enableRuntime(); err != nil {
+	legacy := a.legacyEnforcementRows()
+	var result assetListResult
+	if legacy {
+		// Secure Client keeps its pre-1.0 mutation order and response bytes.
+		if status, err := a.enableAllowedRuntime(r.Context(), req, pe, runtimeName, policyName); err != nil {
 			a.writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
-	}
-
-	var result assetListResult
-	if legacyRows {
 		if err := a.legacyAllow(req.TargetType, policyName, reason); err != nil {
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -2309,17 +2267,16 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			a.writeAssetListError(w, r, audit.ActionAPIEnforceAllow, err)
 			return
 		}
-		// Enable the runtime only after the writer and the live reload have
-		// accepted the allow. A failed gateway call leaves the disable journal.
 		if result.reloadErr == nil {
-			if runtimeDisabled {
-				if status, err := enableRuntime(); err != nil {
-					a.writeJSON(w, status, map[string]string{"error": err.Error()})
-					return
-				}
+			// Only activate an asset after the allow rule is committed and applied.
+			if status, err := a.enableAllowedRuntime(r.Context(), req, pe, runtimeName, policyName); err != nil {
+				a.writeJSON(w, status, map[string]any{
+					"error": err.Error(), "policy_written": true, "generation": result.Generation,
+				})
+				return
 			}
 			// An operator allow lifts the automatic quarantine/disable journal
-			// state after the new policy is live.
+			// state, as it always did.
 			if a.store != nil {
 				_ = a.store.ClearActionField(req.TargetType, policyName, "file")
 				_ = a.store.ClearActionField(req.TargetType, policyName, "runtime")
@@ -2329,11 +2286,52 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceAllow), policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
-	if legacyRows {
+	if legacy {
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 		return
 	}
 	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse("allowed", result))
+}
+
+// enableAllowedRuntime restores a disabled skill or plugin in OpenClaw. The
+// caller chooses the mutation order: Secure Client retains the legacy flow;
+// config-driven policy commits before this is called.
+func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, pe *enforce.PolicyEngine, runtimeName, policyName string) (int, error) {
+	if a.store == nil {
+		return 0, nil
+	}
+	entry, err := pe.GetAction(req.TargetType, runtimeName)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if entry == nil || entry.Actions.Runtime != "disable" {
+		return 0, nil
+	}
+	if a.client == nil {
+		return http.StatusServiceUnavailable, fmt.Errorf("gateway client not configured")
+	}
+	callCtx, cancel := context.WithTimeout(ctx, pluginGatewayMutationTimeout)
+	defer cancel()
+	switch req.TargetType {
+	case "skill":
+		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
+			return a.client.EnableSkill(ctx, req.TargetName)
+		}); err != nil {
+			return http.StatusBadGateway, err
+		}
+	case "plugin":
+		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
+			return a.client.EnablePlugin(ctx, runtimeName)
+		}); err != nil {
+			return http.StatusBadGateway, err
+		}
+		if runtimeName != policyName {
+			if err := pe.Enable("plugin", runtimeName); err != nil {
+				return http.StatusInternalServerError, err
+			}
+		}
+	}
+	return 0, nil
 }
 
 // decodeEnforcementRequest reads and validates an /enforce/* body.
