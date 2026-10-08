@@ -6855,8 +6855,12 @@ function Test-DefenseClawRawAclTrustedOnly {
             ([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
             continue
         }
+        # OWNER RIGHTS (S-1-3-4) grants the owner, checked above, and no one
+        # else. The key contract carries one, so the list an icacls run leaves
+        # after it removes the gateway entry has it too (GAP-0920).
         if ($ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
-            $ace.SecurityIdentifier.Value -notin $TrustedSIDs) {
+            ($ace.SecurityIdentifier.Value -notin $TrustedSIDs -and
+                $ace.SecurityIdentifier.Value -cne $script:OwnerRightsSID)) {
             return $false
         }
     }
@@ -6933,6 +6937,7 @@ function Get-DefenseClawRedactionKeySecuritySnapshot {
                         $script:SystemSID,
                         $script:AdministratorsSID,
                         $script:TrustedInstallerSID,
+                        $script:OwnerRightsSID,
                         $GatewayServiceSID
                     )) {
                     $ace.SecurityIdentifier.Value
@@ -6940,8 +6945,9 @@ function Get-DefenseClawRedactionKeySecuritySnapshot {
             }
         ) | Microsoft.PowerShell.Utility\Select-Object -Unique
         $owner = if ($null -ne $actual.Owner) { $actual.Owner.Value } else { 'none' }
+        # One holder is a string, not a list: + joined the two SIDs.
         throw (
-            "untrusted principal $(@($holders + $owner)[0]) can open the redaction correlation key: $path " +
+            "untrusted principal $(@(@($holders) + @($owner))[0]) can open the redaction correlation key: $path " +
             "(owner $owner; other principals with access: $(if (@($holders).Count -gt 0) { @($holders) -join ', ' } else { 'none' })). " +
             'Only SYSTEM, Administrators and NT SERVICE\DefenseClawGateway may hold this key. Remove the other entries ' +
             "(icacls `"$path`" /setowner *S-1-5-32-544, then icacls `"$path`" /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F), then run the command again"
@@ -8380,6 +8386,74 @@ function Assert-DefenseClawServiceImagePath {
     }
 }
 
+function Get-DefenseClawTransactionRedactionKeyGatewaySID {
+    <#
+        The gateway service SID a transaction checks the redaction key
+        against: the live service SID, the deterministic one when an active
+        deployment lost its service, and none otherwise.
+    #>
+    param(
+        [Parameter(Mandatory)]$Services,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [switch]$PriorDeploymentActive
+    )
+    $gatewayServiceEntry = @($Services) |
+        Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals(
+                [string]$_.name,
+                $GatewayServiceName,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        } |
+        Microsoft.PowerShell.Utility\Select-Object -First 1
+    if ($null -ne $gatewayServiceEntry -and [bool]$gatewayServiceEntry.existed) {
+        return Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    }
+    if ($PriorDeploymentActive) {
+        return Get-DefenseClawDeterministicServiceSID -ServiceName $GatewayServiceName
+    }
+    return ''
+}
+
+function Repair-DefenseClawDeploymentAclDrift {
+    <#
+        Standalone, with the services stopped. When the gateway service lost
+        its access to runtime, etc or logs (an icacls run that removed
+        NT SERVICE\DefenseClawGateway), or the redaction key list has only
+        trusted entries but not the contract, put the deployment's own access
+        lists back and return $true. Repair, ensure and every other
+        transaction then snapshot and restart with them; before, the snapshot
+        recorded the stripped lists, the gateway could not start, and the
+        rollback stayed pending (GAP-0920).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [string]$RedactionKeyClass
+    )
+    $drifted = [string]$RedactionKeyClass -ceq 'trusted_drift'
+    if (-not $drifted) {
+        try {
+            Assert-DefenseClawGatewayServiceAccess `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            $drifted = $true
+        }
+    }
+    if (-not $drifted) {
+        return $false
+    }
+    Set-DefenseClawRetainedRuntimeAcls `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+    Set-DefenseClawManagedCoreAcls `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+    return $true
+}
+
 function New-DefenseClawTransaction {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -8451,7 +8525,22 @@ function New-DefenseClawTransaction {
     }
     $quiescingIntentPublished = $false
     $servicesQuiescedAt = ''
+    $precheckRedactionKeyClass = ''
     try {
+        if (Test-DefenseClawStandaloneProfile) {
+            # Read-only, before any service changes: a redaction key another
+            # account can open is refused with the services as they were. The
+            # same refusal after the stop below left every service stopped
+            # and the transaction pending (GAP-0920).
+            $precheckRedactionKeyClass = [string](
+                Get-DefenseClawRedactionKeySecuritySnapshot `
+                    -Layout $Layout `
+                    -GatewayServiceSID (Get-DefenseClawTransactionRedactionKeyGatewaySID `
+                        -Services $services `
+                        -GatewayServiceName $GatewayServiceName `
+                        -PriorDeploymentActive:$PriorDeploymentActive)
+            ).preimage_class
+        }
         # Publish prior service state before the first explicit stop. If this
         # process is terminated after either stop or while copying preimages,
         # recovery can restore enforcement without requiring snapshot.json to
@@ -8525,25 +8614,18 @@ function New-DefenseClawTransaction {
             -Value $quiescingIntent `
             -Path $Layout.PendingPath
 
-        $gatewayServiceEntry = $services |
-            Microsoft.PowerShell.Core\Where-Object {
-                [string]::Equals(
-                    [string]$_.name,
-                    $GatewayServiceName,
-                    [StringComparison]::OrdinalIgnoreCase
-                )
-            } |
-            Microsoft.PowerShell.Utility\Select-Object -First 1
-        $redactionKeyGatewaySID = if ($null -ne $gatewayServiceEntry -and
-            [bool]$gatewayServiceEntry.existed) {
-            Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
-        }
-        elseif ($PriorDeploymentActive) {
-            Get-DefenseClawDeterministicServiceSID `
-                -ServiceName $GatewayServiceName
-        }
-        else {
-            ''
+        $redactionKeyGatewaySID = Get-DefenseClawTransactionRedactionKeyGatewaySID `
+            -Services $services `
+            -GatewayServiceName $GatewayServiceName `
+            -PriorDeploymentActive:$PriorDeploymentActive
+        if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and
+            (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+            # Nothing writes runtime now: put the deployment's access lists
+            # back before the snapshot records them (GAP-0920).
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -RedactionKeyClass $precheckRedactionKeyClass)
         }
         $redactionKeySecurity =
             Get-DefenseClawRedactionKeySecuritySnapshot `
@@ -8878,6 +8960,7 @@ function New-DefenseClawTransaction {
             throw $snapshotError
         }
         $restartErrors = [Collections.Generic.List[string]]::new()
+        $aclRestoreFailure = ''
         try {
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
@@ -8915,12 +8998,34 @@ function New-DefenseClawTransaction {
                 [void](ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
                     -Value $servicesQuiescedAt)
             }
+            $restoreServices = $services
+            if (Test-DefenseClawStandaloneProfile) {
+                # The recorded states are in-memory dictionaries here, which
+                # the service reader refused ("invalid identity or running
+                # state"), so a failed snapshot never restarted the services
+                # it had stopped (GAP-0920).
+                $restoreServices = @(foreach ($entry in $services) { [pscustomobject]$entry })
+                if ($PriorDeploymentActive -and
+                    (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+                    try {
+                        [void](Repair-DefenseClawDeploymentAclDrift `
+                            -Layout $Layout `
+                            -GatewayServiceName $GatewayServiceName `
+                            -RedactionKeyClass $precheckRedactionKeyClass)
+                    }
+                    catch {
+                        # The restart below still runs; this is reported
+                        # only if it fails too.
+                        $aclRestoreFailure = $_.Exception.Message
+                    }
+                }
+            }
             Set-DefenseClawServiceActivationPhase `
                 -State $quiescingIntent `
                 -Path $Layout.PendingPath `
                 -Phase activating
             Start-DefenseClawTransactionServices `
-                -Services $services `
+                -Services $restoreServices `
                 -Layout $Layout `
                 -ServicesQuiescedAt $servicesQuiescedAt `
                 -TrustInProcessQuiescence `
@@ -8929,6 +9034,9 @@ function New-DefenseClawTransaction {
         }
         catch {
             $restartErrors.Add($_.Exception.Message)
+        }
+        if ($restartErrors.Count -gt 0 -and $aclRestoreFailure) {
+            $restartErrors.Add("restoring the deployment access lists also failed: $aclRestoreFailure")
         }
         if ($restartErrors.Count -gt 0) {
             throw "transaction snapshot failed ($($snapshotError.Exception.Message)); restoring prior service state also failed and protected quiescing recovery was retained: $($restartErrors -join '; ')"

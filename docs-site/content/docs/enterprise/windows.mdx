@@ -805,11 +805,12 @@ and the lifecycle continues; the result names each such process in a
 A hardening script that removes `NT SERVICE\DefenseClawGateway` from
 `C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
 starting. `status` and `verify` both fail and name the folder and the
-missing entry. `repair`, Setup `/ensure` and the recovery of a pending
-transaction put the deployment's own permissions back on those folders and
-their files before they restart the services. A key or folder that another
-account can open is refused instead, and the message names the path, the
-account and the `icacls` commands that remove it.
+missing entry. `repair`, Setup `/ensure` and `/uninstall`, and the recovery
+of a pending transaction, put the deployment's own permissions back on those
+folders, their files and the redaction correlation key once the services are
+stopped, before they record or restart anything. A key that another account
+can open is refused before any service is stopped, and the message names the
+path, the account and the `icacls` commands that remove it.
 
 The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
 that it cannot prove DefenseClaw wrote: a file or folder it did not create,
