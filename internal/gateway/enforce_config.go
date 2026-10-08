@@ -132,6 +132,17 @@ func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Chang
 		nextAllowed = nil
 	}
 	rule := config.AssetPolicyRule{Name: edit.Name, Connector: edit.Connector, Reason: edit.Reason}
+	var prior []config.AssetPolicyRule
+	switch edit.Op {
+	case assetListOpBlock:
+		prior = p.Allowed
+	case assetListOpAllow:
+		prior = p.Denied
+	}
+	if listed, ok := listedUnnamedRule(prior, edit); ok {
+		rule = listed
+		rule.Connector, rule.Reason = edit.Connector, edit.Reason
+	}
 	if edit.SourcePath != "" {
 		rule.SourcePathContains = []string{edit.SourcePath}
 	}
@@ -142,6 +153,19 @@ func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Chang
 		nextAllowed = append(nextAllowed, assetRuleMap(rule))
 	}
 	return listChanges(base, nextDenied, nextAllowed)
+}
+
+// listedUnnamedRule keeps the selector behind a URL, command or path shown
+// as target_name by /enforce/allowed or /enforce/blocked.
+func listedUnnamedRule(rules []config.AssetPolicyRule, edit assetListEdit) (config.AssetPolicyRule, bool) {
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Name) == "" &&
+			listedAssetRuleName(rule) == strings.TrimSpace(edit.Name) &&
+			config.SameConnector(rule.Connector, edit.Connector) {
+			return rule, true
+		}
+	}
+	return config.AssetPolicyRule{}, false
 }
 
 func listChanges(base string, denied, allowed []map[string]any) []configwrite.Change {
