@@ -458,6 +458,12 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
         </div>
       )}
 
+      {domain === 'admission' && (
+        <p className="text-[11px] text-fd-muted-foreground">
+          Live Test cannot verify shipped CodeGuard or DefenseClaw plugin content. It evaluates those names without the built-in first-party scan bypass; the gateway checks the installed content.
+        </p>
+      )}
+
       {source !== 'corpus' && (
       <div className="rounded-md border border-fd-border bg-fd-background p-3">
         <div className="flex items-center justify-between gap-2">
