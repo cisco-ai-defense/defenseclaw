@@ -222,6 +222,32 @@ def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) 
     assert writes == []
 
 
+def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","groups":[{"name":"new-team"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, path):
+            return ([{"verifiedDomains": [{"name": "example.test"}]}]
+                    if "/organization?" in path else [])
+
+        def wait_for_named_object(self, _path):
+            raise AssertionError("missing group must be created without polling")
+
+        def request(self, method, path, _body):
+            calls.append((method, path))
+            return {"id": "group-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "group-id", "displayName": "new-team"}
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    assert entra.cmd_apply(Graph(), args) == 0
+    assert calls == [("POST", "/v1.0/groups")]
+
+
 def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatch) -> None:
     intune = _load(INTUNE)
     graph = intune.Graph("token")

@@ -464,7 +464,7 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
 
     for spec in plan.get("groups", []):
         name = spec["name"]
-        group = find_group(graph, name, wait=apply)
+        group = find_group(graph, name)
         if group is not None:
             print(f"{tag}group {name}: exists")
         elif not apply:
@@ -477,9 +477,20 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
                 "mailNickname": _nickname(name),
                 "securityEnabled": True,
             }
-            made = graph.request("POST", "/v1.0/groups", body)
-            group = graph.get_after_create(f"/v1.0/groups/{made['id']}?$select=id,displayName,securityIdentifier")
-            print(f"group {name}: created")
+            try:
+                made = graph.request("POST", "/v1.0/groups", body)
+            except GraphError as exc:
+                if exc.status not in (400, 409) or "already exist" not in str(exc).lower():
+                    raise
+                # A previous run's create may have committed while the name
+                # query still lagged. Wait only after Graph reports a conflict.
+                group = find_group(graph, name, wait=True)
+                if group is None:
+                    raise
+                print(f"group {name}: exists")
+            else:
+                group = graph.get_after_create(f"/v1.0/groups/{made['id']}?$select=id,displayName,securityIdentifier")
+                print(f"group {name}: created")
         created_groups[name] = group
 
     for spec in plan.get("users", []):
