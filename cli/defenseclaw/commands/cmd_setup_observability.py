@@ -260,6 +260,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             allow_private_networks, plaintext = _confirm_private_endpoint(preset, resolved_inputs, plaintext)
         _require_v8_operator_status(app.cfg.data_dir)
         destination_name = _destination_name(preset, name, _resolve_inputs(preset, resolved_inputs))
+        if destination_name == "local-sqlite":
+            raise click.ClickException("local-sqlite is a reserved destination name; pick another name")
         # Only picks "added" or "updated" for the summary line. A missing or
         # unreadable config is the add step's to report, not this lookup's.
         try:
