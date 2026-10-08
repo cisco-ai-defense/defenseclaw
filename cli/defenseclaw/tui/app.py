@@ -117,7 +117,7 @@ from defenseclaw.tui.policy_panel import PolicyPanelMixin
 from defenseclaw.tui.registry import CmdEntry, build_registry
 from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
-from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
+from defenseclaw.tui.screens.config_diff import ConfigDiffModalModel, ConfigDiffScreen
 from defenseclaw.tui.screens.consequence import (
     ConsequenceAction,
     ConsequenceModalModel,
@@ -13298,7 +13298,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.run_worker(record, thread=True, exclusive=False, group="config-save-audit")
 
     async def _open_config_diff(self) -> None:
-        result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))
+        from defenseclaw.enforce import asset_lists
+
+        diff = ConfigDiffModalModel.from_entries(
+            self.setup_model.config_diff(), secure_client=asset_lists.is_secure_client(self.config)
+        )
+        result = await self.push_screen_wait(ConfigDiffScreen(diff))
         if result is None:
             self._set_status("Config save cancelled.")
             return
