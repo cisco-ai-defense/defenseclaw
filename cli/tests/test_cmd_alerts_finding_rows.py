@@ -125,6 +125,29 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertIn("tool.execute.before", table.output)
         self.assertNotIn("....execute.before", table.output)
 
+    def test_table_target_matches_exact_selector_outside_secure_client(self):
+        from unittest.mock import patch
+
+        self.app.store.log_event(Event(
+            action="scan-finding", target="", severity="HIGH",
+            connector="opencode", details="finding.observed",
+            structured={**FINDING, "defenseclaw.finding.target_ref": "opencode:acp"},
+            timestamp=datetime.now(timezone.utc),
+        ))
+        table = self.runner.invoke(alerts, ["--connector", "opencode"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertIn("opencode:acp", table.output)
+        self.assertEqual(
+            _alert_selector(alert_ids=(), connector="opencode", target="opencode:acp",
+                            severity="all", since=None, before=None)["target"],
+            "opencode:acp",
+        )
+        with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+            legacy = self.runner.invoke(alerts, ["--connector", "opencode"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(legacy.exit_code, 0, legacy.output)
+        self.assertNotIn("opencode:acp", legacy.output)
+        self.assertIn("acp", legacy.output)
+
     def test_target_selector_sends_the_shown_copilot_target(self):
         # GAP-2619: acknowledge/dismiss --target takes the Target alerts print.
         def selector(target, connector=None):
@@ -254,7 +277,7 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertIn("decision=detected after the tool ran (cannot block)", table.output)
         self.assertNotIn("observe mode", table.output)
         # GAP-1535: a wide terminal shows the whole hook event, not "...tToolUse".
-        self.assertIn("| PostToolUse ", table.output.replace("\u2503", "|").replace("\u2502", "|"))
+        self.assertIn("| claudecode:PostToolUse ", table.output.replace("\u2503", "|").replace("\u2502", "|"))
 
     # GAP-1525: a plugin finding names the plugin (target_ref) and the file.
     def test_plugin_finding_names_plugin_and_file(self):
