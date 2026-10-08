@@ -20,8 +20,8 @@ import (
 //     IdentityCache\<SID>, holds the UPN of a cloud sign-in (UserName) and
 //     the provider that issued it (ProviderName, "AzureAD" for Entra ID).
 //   - CloudDomainJoin\JoinInfo\<thumbprint> (TenantId) and TenantInfo say the
-//     device is Entra joined, and NetGetJoinInformation says it is AD
-//     joined; both together is a hybrid join.
+//     device is Entra joined, and the LSA primary-domain policy says it is
+//     AD joined; both together is a hybrid join.
 //   - An AD account's UPN comes from TranslateNameW, which may contact a
 //     domain controller, so it runs in the background (adUPNCache) and the
 //     caller says how long it may wait for it.
@@ -47,12 +47,9 @@ type windowsDirectoryReader interface {
 	LookupAccount(sid string) (account, domain string, ok bool)
 	// ComputerName is the NetBIOS computer name.
 	ComputerName() string
-	// DomainJoin reports the NetBIOS name of the AD domain the machine is
-	// joined to, if any.
-	DomainJoin() (domain string, joined bool)
-	// DNSDomain is the machine's DNS domain (the AD domain's DNS name on a
-	// joined machine), or "".
-	DNSDomain() string
+	// DomainJoin reports the NetBIOS and DNS names of the primary AD domain
+	// from LSA policy. The computer DNS suffix can differ from this domain.
+	DomainJoin() (domain, dnsDomain string, joined bool)
 }
 
 // windowsJoinState is the machine's join state: the Entra tenant and the AD
@@ -80,10 +77,10 @@ func readWindowsJoinState(r windowsDirectoryReader) windowsJoinState {
 			}
 		}
 	}
-	domain, adJoined := r.DomainJoin()
+	domain, dnsDomain, adJoined := r.DomainJoin()
 	if adJoined {
 		state.ADDomain = strings.TrimSpace(domain)
-		state.DNSDomain = strings.TrimSpace(r.DNSDomain())
+		state.DNSDomain = strings.TrimSpace(dnsDomain)
 	}
 	return state
 }
@@ -155,8 +152,8 @@ func resolveWindowsDirectoryFacts(
 			facts.UPN = NormalizeUPN(adUPN(sid, domain+`\`+account))
 		}
 		if join.DNSDomain != "" && strings.EqualFold(domain, join.ADDomain) {
-			// The account is in the machine's own domain, whose DNS name
-			// is the Kerberos realm.
+			// LSA identifies the joined AD domain, even when the computer
+			// has a disjoint primary DNS suffix.
 			facts.Realm = strings.ToUpper(join.DNSDomain)
 			facts.Domain = strings.ToLower(join.DNSDomain)
 		}
