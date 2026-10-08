@@ -501,6 +501,27 @@ func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 	}
 }
 
+func TestWriteRebasedRulePackPreservesExistingStagingSibling(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "acme-1.0")
+	sibling := dir + ".rebasing"
+	if err := os.Mkdir(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(sibling, "operator-owned")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRebasedRulePack(dir, map[string][]byte{"rules/new.yaml": []byte("rebased")}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "keep" {
+		t.Fatalf("existing sibling was changed: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "rules/new.yaml")); err != nil || string(got) != "rebased" {
+		t.Fatalf("rebased pack: %q, %v", got, err)
+	}
+}
+
 func TestMigrateV9KeepsThePackPosture(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
