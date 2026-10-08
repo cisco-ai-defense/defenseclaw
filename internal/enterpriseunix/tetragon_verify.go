@@ -556,10 +556,10 @@ func setTetragonEndpointChecks(set func(id, status, message string, fix ...strin
 		set(checkTetragonAPI, checkPass, "API: unix socket "+host.Path)
 		switch {
 		case strings.HasPrefix(host.Verdict, "trusted"):
-			set(checkTetragonSocket, checkPass, "the socket and its directory are root-owned and not world-writable")
+			set(checkTetragonSocket, checkPass, "the info file, socket and their directories pass the helper's trust check")
 		case host.UntrustedPath != "":
-			set(checkTetragonSocket, checkFail, host.UntrustedPath+" must be owned by root and not writable by others (found owner "+
-				host.UntrustedOwner+", mode "+host.UntrustedPerm+"); restart Tetragon so it recreates the socket", restart)
+			set(checkTetragonSocket, checkFail, host.UntrustedPath+" must be owned by root and "+defaultStr(host.UntrustedRule, "not writable by others")+
+				" (found owner "+host.UntrustedOwner+", mode "+host.UntrustedPerm+"); restore its owner and mode, or restart Tetragon so it recreates it", restart)
 		default:
 			set(checkTetragonSocket, checkFail, "the socket "+host.Path+" is not usable ("+host.Verdict+"); restart Tetragon so it recreates it", restart)
 		}

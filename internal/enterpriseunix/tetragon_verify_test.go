@@ -146,7 +146,7 @@ func TestTetragonReadinessChecks(t *testing.T) {
 	}{
 		{"healthy consume", "consume", "consume", nil, []want{
 			{checkTetragonInstalled, checkPass, "installed"}, {checkTetragonRunning, checkPass, "pid 912"},
-			{checkTetragonAPI, checkPass, "unix socket"}, {checkTetragonSocket, checkPass, "root-owned"},
+			{checkTetragonAPI, checkPass, "unix socket"}, {checkTetragonSocket, checkPass, "trust check"},
 			{checkTetragonVersion, checkPass, "v1.7.1 is supported for consume"}, {checkTetragonStream, checkPass, "reads Tetragon's events"},
 			{checkKeepSensorsOnExit, checkSkip, "only enforce"}, {checkBPFLSM, checkSkip, "only enforce"},
 			{checkMetricsLoopback, checkPass, "loopback"}, {checkHealthLoopback, checkPass, "loopback"}, {checkPlaneC, checkPass, "on"},
@@ -369,7 +369,7 @@ func TestTetragonReadyForEnforceText(t *testing.T) {
   ✓ Tetragon is installed (/var/run/tetragon/tetragon-info.json)
   ✓ Tetragon is running (pid 912)
   ✓ API: unix socket /var/run/tetragon/tetragon.sock
-  ✓ The socket and its directory are root-owned and not world-writable
+  ✓ The info file, socket and their directories pass the helper's trust check
   ✓ Tetragon v1.7.1 is supported for enforce
   ✓ The sensor helper reads Tetragon's events
   ✓ Tetragon does not keep sensors on exit
@@ -620,6 +620,7 @@ func TestTetragonVerifyExitCodesAndSchema(t *testing.T) {
 	writeHostFile(t, h, "/var/run/tetragon/tetragon.sock", "")
 	h.owners[h.env.P("/var/run/tetragon/tetragon.sock")] = [2]int{0, 0}
 	h.owners[h.env.P("/var/run/tetragon")] = [2]int{0, 0}
+	h.owners[h.env.P(tetragonInfoPath)] = [2]int{0, 0}
 	yes, no := true, false
 	h.writeTetragonState(kernelpolicy.FileState{Version: 1, UpdatedAt: time.Now().UTC(), KernelPolicy: kernelpolicy.Digest(), Effective: "observe", InSync: true,
 		Intent:   kernelpolicy.IntentStatus{Mode: kernelpolicy.ModeObserve, BurnIn: "168h"},

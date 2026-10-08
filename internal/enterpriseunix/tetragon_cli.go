@@ -538,7 +538,7 @@ func refusedEndpointFacts(code, detail string, state kernelpolicy.State, host te
 	case codeTetragonTCPAPI:
 		facts.Address = defaultStr(host.Address, detail)
 	case codeTetragonUntrusted:
-		facts.Path, facts.Owner, facts.Perm = host.UntrustedPath, host.UntrustedOwner, host.UntrustedPerm
+		facts.Path, facts.Owner, facts.Perm, facts.Rule = host.UntrustedPath, host.UntrustedOwner, host.UntrustedPerm, host.UntrustedRule
 	case kernelpolicy.WarnUnsupportedVersion:
 		facts.Variant, facts.Version = variantFallback, defaultStr(state.Tetragon.Version, detail)
 	}
@@ -1195,9 +1195,11 @@ type tetragonHost struct {
 	// TCP is set when the API is served on TCP, which the helper never dials.
 	TCP bool
 	// Path is the socket; Untrusted* name the file or directory that failed
-	// the ownership check, its owner and its mode.
-	Path                                         string
-	UntrustedPath, UntrustedOwner, UntrustedPerm string
+	// the ownership check, its owner and its mode, and UntrustedRule the
+	// write rule it broke ("writable only by root" for the info file and
+	// its directory, "not writable by others" for the socket and its).
+	Path                                                        string
+	UntrustedPath, UntrustedOwner, UntrustedPerm, UntrustedRule string
 	// MetricsAddress is the info file's metrics_address; MetricsKnown is
 	// false when the file does not carry it (Tetragon 1.6).
 	MetricsAddress string
@@ -1208,8 +1210,13 @@ type tetragonHost struct {
 }
 
 // tetragonHost reads Tetragon's info file (never its socket) and says
-// whether its API endpoint is one the helper may use: a unix socket whose
-// file and directory are root-owned and not world-writable.
+// whether its API endpoint is one the helper may use, by the helper's own
+// rules (internal/sensor/tetragon trust_linux.go): the info file and its
+// directory root-owned and writable only by root (another account could
+// otherwise swap the file and name a socket of its own), and a unix socket
+// whose file and directory are root-owned and not world-writable. Status
+// and verify passed a group-writable info directory the helper refuses
+// (GAP-0090).
 func (e *Env) tetragonHost() tetragonHost {
 	data, err := readBounded(e.P(tetragonInfoPath), 64<<10)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1242,16 +1249,27 @@ func (e *Env) tetragonHost() tetragonHost {
 		return host
 	}
 	host.Path = path
-	for _, candidate := range []string{path, filepath.Dir(path)} {
-		info, err := os.Stat(e.P(candidate))
+	const infoRule, socketRule = "writable only by root", "not writable by others"
+	for _, check := range []struct {
+		path      string
+		writeMask os.FileMode
+		rule      string
+	}{
+		{filepath.Dir(tetragonInfoPath), 0o022, infoRule},
+		{tetragonInfoPath, 0o022, infoRule},
+		{path, 0o002, socketRule},
+		{filepath.Dir(path), 0o002, socketRule},
+	} {
+		info, err := os.Stat(e.P(check.path))
 		if err != nil {
 			host.Verdict = "unavailable: " + err.Error()
 			return host
 		}
-		uid, _, err := e.OwnerOf(e.P(candidate))
-		if err != nil || uid != 0 || info.Mode().Perm()&0o002 != 0 {
-			host.Verdict = "refused: " + candidate + " is not root-owned or is world-writable"
-			host.UntrustedPath, host.UntrustedPerm = candidate, fmt.Sprintf("%04o", info.Mode().Perm())
+		uid, _, err := e.OwnerOf(e.P(check.path))
+		if err != nil || uid != 0 || info.Mode().Perm()&check.writeMask != 0 {
+			host.Verdict = "refused: " + check.path + " must be root-owned and " + check.rule
+			host.UntrustedPath, host.UntrustedPerm = check.path, fmt.Sprintf("%04o", info.Mode().Perm())
+			host.UntrustedRule = check.rule
 			host.UntrustedOwner = "unknown"
 			if err == nil {
 				host.UntrustedOwner = userLabel(uid)

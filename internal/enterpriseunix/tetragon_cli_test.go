@@ -759,6 +759,58 @@ func validateTetragonReport(t *testing.T, schema *jsonschema.Schema, rep *Tetrag
 
 // The --json output follows the pinned schema, empty or full, and the text
 // view shows what spec 10.2 lists.
+// Status and verify judge Tetragon's endpoint by the sensor helper's rules:
+// the info file and its directory writable only by root, the socket and its
+// directory not world-writable. A group-writable info directory, which the
+// helper refuses, was reported trusted (GAP-0090).
+func TestTetragonHostUsesTheHelpersTrustRules(t *testing.T) {
+	h := tetragonCLIHost(t)
+	writeHostFile(t, h, tetragonInfoPath, `{"server_address":"unix:///var/run/tetragon/tetragon.sock","pid":777}`)
+	writeHostFile(t, h, "/var/run/tetragon/tetragon.sock", "")
+	for _, path := range []string{"/var/run/tetragon/tetragon.sock", "/var/run/tetragon", tetragonInfoPath} {
+		h.owners[h.env.P(path)] = [2]int{0, 0}
+	}
+	chmod := func(path string, mode os.FileMode) {
+		t.Helper()
+		if err := os.Chmod(h.env.P(path), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chmod("/var/run/tetragon/tetragon.sock", 0o660) // the stock socket
+	if host := h.env.tetragonHost(); host.Verdict != "trusted (root-owned unix socket)" {
+		t.Fatalf("stock modes: %+v", host)
+	}
+	for _, tc := range []struct {
+		path       string
+		mode       os.FileMode
+		perm, rule string
+	}{
+		{"/var/run/tetragon", 0o775, "0775", "writable only by root"},
+		{tetragonInfoPath, 0o664, "0664", "writable only by root"},
+		{"/var/run/tetragon/tetragon.sock", 0o662, "0662", "not writable by others"},
+	} {
+		chmod("/var/run/tetragon", 0o755)
+		chmod(tetragonInfoPath, 0o644)
+		chmod("/var/run/tetragon/tetragon.sock", 0o660)
+		chmod(tc.path, tc.mode)
+		host := h.env.tetragonHost()
+		if !strings.HasPrefix(host.Verdict, "refused: ") || host.UntrustedPath != tc.path || host.UntrustedRule != tc.rule ||
+			host.UntrustedPerm != tc.perm || host.UntrustedOwner != userLabel(0) {
+			t.Fatalf("%s %s: %+v", tc.path, tc.perm, host)
+		}
+		var checks []string
+		setTetragonEndpointChecks(func(id, status, message string, _ ...string) {
+			if id == checkTetragonSocket {
+				checks = append(checks, status+": "+message)
+			}
+		}, host, "restart")
+		want := "fail: " + tc.path + " must be owned by root and " + tc.rule
+		if len(checks) != 1 || !strings.HasPrefix(checks[0], want) {
+			t.Fatalf("%s %s: verify %v, want %q", tc.path, tc.perm, checks, want)
+		}
+	}
+}
+
 func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 	schema := compileTetragonStatusSchema(t)
 	h := tetragonCLIHost(t)
@@ -780,6 +832,7 @@ func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 	writeHostFile(t, h, "/var/run/tetragon/tetragon.sock", "")
 	h.owners[h.env.P("/var/run/tetragon/tetragon.sock")] = [2]int{0, 0}
 	h.owners[h.env.P("/var/run/tetragon")] = [2]int{0, 0}
+	h.owners[h.env.P(tetragonInfoPath)] = [2]int{0, 0}
 	// Written as this (non-root) user, the pause file is untrusted: it still
 	// counts as a pause, and the report says why it is not trusted.
 	if rep := RunTetragon(ctx, h.env, TetragonOptions{Action: TetragonActionPause, For: 2 * time.Hour, Reason: "dccert"}); !rep.OK {
@@ -1084,6 +1137,7 @@ func statusHost(t *testing.T, block string, state kernelpolicy.FileState, extra 
 	writeHostFile(t, h, "/var/run/tetragon/tetragon.sock", "")
 	h.owners[h.env.P("/var/run/tetragon/tetragon.sock")] = [2]int{0, 0}
 	h.owners[h.env.P("/var/run/tetragon")] = [2]int{0, 0}
+	h.owners[h.env.P(tetragonInfoPath)] = [2]int{0, 0}
 	data, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)

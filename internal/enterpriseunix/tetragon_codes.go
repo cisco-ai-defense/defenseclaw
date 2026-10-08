@@ -145,9 +145,10 @@ type tetragonFacts struct {
 	Mode, Applied string
 	// Digest is this build's kernel_policy; Ack the approval as rendered.
 	Digest, Ack string
-	// Address, Path, Owner and Perm describe Tetragon's endpoint.
-	Address, Path, Owner, Perm string
-	Version                    string
+	// Address, Path, Owner and Perm describe Tetragon's endpoint, and Rule
+	// the write rule Path broke.
+	Address, Path, Owner, Perm, Rule string
+	Version                          string
 	// Pause and PauseInvalid describe a pause; SetBy names who set it.
 	Pause        *kernelpolicy.Pause
 	PauseInvalid string
@@ -217,7 +218,7 @@ var tetragonCodes = map[string]tetragonCodeText{
 		if f.Owner != "" && f.Perm != "" {
 			found = " (found owner " + f.Owner + ", mode " + f.Perm + ")"
 		}
-		return f.Path + " must be owned by root and not writable by others" + found +
+		return f.Path + " must be owned by root and " + defaultStr(f.Rule, "not writable by others") + found +
 			" (the sensor helper does not connect: " + nativePlaneC + ")" + next
 	}},
 	kernelpolicy.WarnUnsupportedVersion: {Variants: []string{"", variantFallback}, Message: func(f tetragonFacts) string {

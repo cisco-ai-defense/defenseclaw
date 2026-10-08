@@ -92,7 +92,7 @@ ls /etc/tetragon/tetragon.conf.d/   # your settings; DefenseClaw never writes he
 | Output | Meaning | If it is not as wanted |
 | --- | --- | --- |
 | `server_address` | Tetragon's API address. A `unix://` path is what DefenseClaw uses. Tetragon's packaged default is a TCP port on localhost, which any local account can use to load kernel policies | Set `server-address` in [Harden Tetragon](#harden-tetragon) |
-| `stat` | The socket and its folder must belong to root and not be writable by others, or the helper refuses to connect (`tetragon_untrusted_endpoint`) | Restart Tetragon so it recreates the socket, and fix any other owner of the folder |
+| `stat` | The socket and its folder must belong to root and not be writable by others; the info file `tetragon-info.json` and its folder (the same `/var/run/tetragon`) must belong to root and be writable only by root, so a group-writable folder is refused too. Otherwise the helper refuses to connect (`tetragon_untrusted_endpoint`), and `tetragon status` and `verify` name the path | Restart Tetragon so it recreates the socket, and fix any other owner or group write bit of the folder (`sudo chmod go-w /var/run/tetragon`) |
 | `tetra version` | The supported window for each mode | Keep `mode: consume` on 1.6.x, or install 1.7.x |
 | `lsm` | BPF LSM is what lets a kernel control return an error | Add `bpf` to the `lsm=` boot parameter and reboot before you enforce |
 | `tetragon.conf.d` | Your own settings, one file per flag | Nothing: DefenseClaw reads Tetragon and never edits these files |
@@ -574,7 +574,7 @@ is ready for `observe`.
     { type: 'ok', text: '  ✓ Tetragon is installed (/var/run/tetragon/tetragon-info.json)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon is running (pid 380213)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ API: unix socket /var/run/tetragon/tetragon.sock', pauseMs: 40 },
-    { type: 'ok', text: '  ✓ The socket and its directory are root-owned and not world-writable', pauseMs: 40 },
+    { type: 'ok', text: '  ✓ The info file, socket and their directories pass the helper\'s trust check', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon v1.7.1 is supported for consume', pauseMs: 40 },
     { type: 'ok', text: '  ✓ The sensor helper reads Tetragon\'s events', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon\'s metrics endpoint listens on loopback (127.0.0.1:2112)', pauseMs: 40 },
@@ -803,7 +803,7 @@ returns `Operation not permitted`; see
     { type: 'ok', text: '  ✓ Tetragon is installed (/var/run/tetragon/tetragon-info.json)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon is running (pid 380213)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ API: unix socket /var/run/tetragon/tetragon.sock', pauseMs: 40 },
-    { type: 'ok', text: '  ✓ The socket and its directory are root-owned and not world-writable', pauseMs: 40 },
+    { type: 'ok', text: '  ✓ The info file, socket and their directories pass the helper\'s trust check', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon v1.7.1 is supported for enforce', pauseMs: 40 },
     { type: 'ok', text: '  ✓ The sensor helper reads Tetragon\'s events', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon does not keep sensors on exit', pauseMs: 40 },
