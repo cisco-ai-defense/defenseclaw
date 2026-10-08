@@ -189,6 +189,10 @@ func TestStageRefusesOversizedFolders(t *testing.T) {
 	if _, err := LoadCopy(e.data, "p1"); !errors.Is(err, ErrCopyNotFound) {
 		t.Fatalf("refused stage left a record: %v", err)
 	}
+	// Nor a data directory teardown would list (GAP-0274).
+	if _, err := os.Stat(filepath.Join(e.data, "sandboxes", "p1")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused stage left sandboxes/p1: %v", err)
+	}
 	opts.MaxWalkEntries = 5
 	if rec, err := Stage(bg, opts); err != nil || rec.Kind != CopyPlain || rec.Files != 4 {
 		t.Fatalf("record: %+v, %v", rec, err)

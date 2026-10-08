@@ -355,15 +355,24 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		Warnings: warnings,
 	}
 	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
-	if err := ensurePrivateDir(dir); err != nil {
-		return nil, "", err
-	}
+	// A refused copy (too large, a secret it cannot hold back) of a
+	// sandbox that has no data yet leaves no directory: teardown listed
+	// it as the leftover data of a sandbox that never existed (GAP-0274).
+	sandboxDir := lay.sandboxDir(opts.Name)
+	fresh := !pathExists(sandboxDir)
 	ok := false
 	defer func() {
 		if !ok {
 			_ = removeTree(dir)
+			if fresh {
+				_ = os.Remove(lay.copyDir(opts.Name))
+				_ = os.Remove(sandboxDir)
+			}
 		}
 	}()
+	if err := ensurePrivateDir(dir); err != nil {
+		return nil, "", err
+	}
 	stageRoot := filepath.Join(dir, "stage")
 	if err := os.Mkdir(stageRoot, 0o700); err != nil {
 		return nil, "", err
