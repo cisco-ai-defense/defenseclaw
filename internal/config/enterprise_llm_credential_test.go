@@ -60,3 +60,19 @@ func TestStandaloneLLMKeyComesFromProtectedCredential(t *testing.T) {
 		t.Fatalf("secure client resolved a credential key %q", got)
 	}
 }
+
+// GAP-0674: the installed config still names the judge key, so `enterprise
+// secret remove` of that credential is refused with the key that names it;
+// AI Defense only counts while it is enabled.
+func TestInstalledCredentialReferenceNamesTheJudgeKey(t *testing.T) {
+	raw := []byte("\xef\xbb\xbfconfig_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n  inspection:\n    llm:\n      credential: llm-judge\n    ai_defense:\n      credential: aid-key\n")
+	if at := InstalledCredentialReference("config.yaml", raw, t.TempDir(), "llm-judge"); at != "enterprise.inspection.llm.credential" {
+		t.Fatalf("judge key reference = %q", at)
+	}
+	if at := InstalledCredentialReference("config.yaml", raw, t.TempDir(), "aid-key"); at != "" {
+		t.Fatalf("disabled AI Defense key reference = %q, want none", at)
+	}
+	if at := InstalledCredentialReference("config.yaml", raw, t.TempDir(), "unused"); at != "" {
+		t.Fatalf("unused key reference = %q, want none", at)
+	}
+}
