@@ -451,3 +451,21 @@ func TestEvaluateAssetPolicyRegistryHTTPTransportAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestSecureClientAssetPolicyDeniedRespectsMode(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}, AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: "marker-skill"}}
+	in := AssetPolicyInput{TargetType: "skill", Name: "marker-skill"}
+
+	disabled := cfg.EvaluateAssetPolicy(in)
+	if disabled.Action != "allow" || disabled.WouldBlock || disabled.Enabled {
+		t.Fatalf("disabled Secure Client decision = %+v, want disabled allow", disabled)
+	}
+
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
+	observed := cfg.EvaluateAssetPolicy(in)
+	if observed.Action != "allow" || !observed.WouldBlock || observed.RawAction != "block" || observed.Mode != AssetPolicyModeObserve {
+		t.Fatalf("observe Secure Client decision = %+v, want would-block", observed)
+	}
+}
