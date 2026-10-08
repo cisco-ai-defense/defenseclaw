@@ -292,7 +292,9 @@ func TestScanOtherEditors(t *testing.T) {
 		`<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011"><Metadata><Identity Id="Other.Ext" Version="2.0" Publisher="Other"/><DisplayName>Other</DisplayName></Metadata></PackageManifest>`)
 	saved := visualStudioEnabledLookup
 	t.Cleanup(func() { visualStudioEnabledLookup = saved })
-	visualStudioEnabledLookup = func(string, string) (map[string]bool, bool) { return map[string]bool{"example.tool": true}, true }
+	visualStudioEnabledLookup = func(*scanner, string, string) (map[string]bool, bool) {
+		return map[string]bool{"example.tool": true}, true
+	}
 	vs := byID(Scan(win, "windows", Limits{}), FamilyVisualStudio, "visual-studio", "")
 	if p := vs["Example.Tool|user"]; p.DisplayName != "Example Tool" || p.Enabled != EnabledOn || p.EnabledSource != SourcePrivateRegistry {
 		t.Fatalf("vs = %v", vs)
