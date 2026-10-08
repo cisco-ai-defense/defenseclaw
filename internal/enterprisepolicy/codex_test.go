@@ -268,6 +268,12 @@ func TestCodexVerifyOnlyNeverWrites(t *testing.T) {
 	if readFile(t, path) != adminCodexRequirements || state.Covered || !strings.Contains(strings.Join(state.Details, " "), "missing_defenseclaw_hooks") {
 		t.Fatalf("verify_only must report missing hooks without writing: %+v", state)
 	}
+	// enterprise policy verify names the export too, not only one conflict
+	// per missing entry (GAP-0918).
+	if verified, _ := VerifyAll(opts, []string{"codex"}); len(verified.States) == 0 ||
+		!strings.Contains(strings.Join(verified.States[0].Details, " "), "policy export --connector codex") {
+		t.Fatalf("policy verify does not name the export: %+v", verified.States)
+	}
 	exported, err := codexTarget{}.Export(opts, "toml")
 	if err != nil {
 		t.Fatal(err)

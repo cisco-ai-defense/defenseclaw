@@ -190,23 +190,30 @@ func coveredMachinePolicy(intended []string, result enterprisepolicy.Result) []s
 // reportMachinePolicy copies per-connector machine policy states into the
 // lifecycle result and warns for every intended connector that is not
 // covered.
-func reportMachinePolicy(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error) {
-	reportMachinePolicyExcept(r, intended, result, err, nil)
+func (e *Env) reportMachinePolicy(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error) {
+	e.reportMachinePolicyExcept(r, intended, result, err, nil)
 }
 
 // reportMachinePolicyExcept is reportMachinePolicy for callers that report
-// the connectors in skip themselves.
-func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error, skip []string) {
+// the connectors in skip themselves. A connector under ownership: verify_only
+// gets a warning of its own that names the export, so a lifecycle failure
+// made only of those does not end with "run repair", which never writes
+// such a file (GAP-0918).
+func (e *Env) reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error, skip []string) {
 	for _, state := range result.States {
 		if state.Route != enterprisepolicy.RouteMachinePolicy {
 			continue
 		}
 		r.MachinePolicy[state.Connector] = state.ToStatus()
 	}
-	missing := []string{}
+	var missing, exportOnly []string
 	covered := coveredMachinePolicy(intended, result)
 	for _, name := range intended {
-		if !contains(covered, name) && !contains(skip, name) {
+		switch {
+		case contains(covered, name) || contains(skip, name):
+		case e.verifyOnlyExport(name, result) != "":
+			exportOnly = append(exportOnly, name)
+		default:
 			missing = append(missing, machinePolicyLabel(name, result))
 		}
 	}
@@ -215,17 +222,17 @@ func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, re
 		if err != nil {
 			message += ": " + err.Error()
 		}
-		for _, name := range intended {
-			if !contains(covered, name) && !contains(skip, name) {
-				for _, state := range result.States {
-					if state.Connector == name && state.Ownership == config.MachinePolicyOwnershipVerifyOnly {
-						message += fmt.Sprintf("; %s: ownership verify_only, so DefenseClaw never writes it: deploy the output of `enterprise policy export --connector %s` (missing_defenseclaw_hooks), then run ensure", name, name)
-					}
-				}
-			}
+		r.AddWarning(codeMachinePolicyIncomplete, message)
+	}
+	for index, name := range exportOnly {
+		message := fmt.Sprintf("DefenseClaw hooks are not in place in vendor machine policy for %s, so %s runs without them; %s",
+			machinePolicyLabel(name, result), name, e.verifyOnlyExport(name, result))
+		if index == 0 && err != nil && len(missing) == 0 {
+			message += " (" + err.Error() + ")"
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
-	} else if err != nil && len(skip) == 0 {
+	}
+	if len(missing) == 0 && len(exportOnly) == 0 && err != nil && len(skip) == 0 {
 		r.AddWarning(codeMachinePolicyIncomplete, err.Error())
 	}
 }
@@ -276,7 +283,7 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return err
 	}
 	l.machinePolicyErr = err
-	reportMachinePolicy(r, p.intended, result, err)
+	env.reportMachinePolicy(r, p.intended, result, err)
 	for _, state := range result.States {
 		if state.Changed {
 			l.noteChange("rewrote DefenseClaw's %s machine policy entries", state.Connector)
@@ -380,7 +387,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 			}
 		}
 	}
-	reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
+	env.reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
 	// A connector whose DefenseClaw entries are gone from its vendor file runs
 	// without hooks, so status fails on it as verify does (GAP-0529).
 	var gone []string
@@ -680,7 +687,7 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 		r.AddWarning(codeMachinePolicy, publishErr.Error())
 		return
 	}
-	reportMachinePolicy(r, intended, result, publishErr)
+	env.reportMachinePolicy(r, intended, result, publishErr)
 	if record != nil && record.MachinePolicyConnectors != nil &&
 		!sameStrings(coveredMachinePolicy(intended, result), intersectSorted(record.MachinePolicyConnectors, intended)) {
 		r.AddWarning(codeMachinePolicyIncomplete, "the machine-policy connectors in place differ from the runtime descriptor; run ensure")
