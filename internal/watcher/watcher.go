@@ -1486,6 +1486,9 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		)
 		// The Windows scanner runtime applies the rule pack as the CLI does (GAP-0296).
 		ms.RulePack = scanner.MCPRulePackFor(cfg, w.eventConnector(evt))
+		if entry, err := w.lookupMCPServer(evt); err == nil {
+			ms.ServerEntry = entry
+		}
 		return ms
 
 	case InstallPlugin:

@@ -92,23 +92,34 @@ print(json.dumps(scan_plugin(t,o).to_dict()))`
 	// internal/scanner runtimeEnv derives from config.
 	mcpScanScript = `import json,os,sys
 from types import SimpleNamespace
-from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, _merge_mcp_scanner
+from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, MCPServerEntry, _merge_mcp_scanner
 from defenseclaw.scanner.mcp import MCPScannerWrapper
 a=sys.argv[1:]
-if len(a) not in (3,5) or a[0]!="--settings" or (len(a)==5 and a[2]!="--rule-pack") or a[-1].startswith("--"):
-    sys.exit("usage: mcp-scan --settings <scanners.mcp_scanner as JSON> [--rule-pack <pack as JSON>] <server URL>")
-c=_merge_mcp_scanner(json.loads(a[1])); t=a[-1]
+usage="usage: mcp-scan --settings <scanners.mcp_scanner as JSON> [--rule-pack <pack as JSON>] [--server-entry-stdin] <server URL or name>"
+if len(a)<3 or a[0]!="--settings":
+    sys.exit(usage)
+c=_merge_mcp_scanner(json.loads(a[1])); i=2; rp=None; entry=None
+if i<len(a) and a[i]=="--rule-pack":
+    if i+1>=len(a): sys.exit(usage)
+    rp=json.loads(a[i+1]); i+=2
+if i<len(a) and a[i]=="--server-entry-stdin":
+    entry=MCPServerEntry(**json.load(sys.stdin)); i+=1
+if len(a)!=i+1 or a[i].startswith("--"):
+    sys.exit(usage)
+t=a[i]
+if entry is not None and (entry.name!=t or not entry.command or entry.url):
+    sys.exit("mcp-scan: invalid local server entry")
 e=os.environ.get
 llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""))
 aid=CiscoAIDefenseConfig(api_key=e("DEFENSECLAW_SCANNER_AID_API_KEY",""), endpoint=e("DEFENSECLAW_SCANNER_AID_ENDPOINT","") or CiscoAIDefenseConfig().endpoint)
 s=MCPScannerWrapper(c, None, aid, llm=llm)
-if len(a)==5:
+if rp is not None:
     from defenseclaw.scanner.rulepack import RulePackOverlayScanner, _layer_of, load_rule_pack
-    rp=json.loads(a[3]); layers=tuple(x for x in (_layer_of(SimpleNamespace(**r)) for r in rp.get("rules") or []) if x)
+    layers=tuple(x for x in (_layer_of(SimpleNamespace(**r)) for r in rp.get("rules") or []) if x)
     p=load_rule_pack(rp["dir"], layers)
     if not p.is_empty():
         s=RulePackOverlayScanner(s, p, None)
-print(s.scan(t).to_json())`
+print(s.scan(t, server_entry=entry).to_json())`
 )
 
 func main() {
