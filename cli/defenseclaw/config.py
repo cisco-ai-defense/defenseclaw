@@ -4026,6 +4026,9 @@ def _prune_unset(value: Any, *, drop_false: bool = False) -> Any:
             pruned = _prune_unset(item, drop_false=drop_false)
             if pruned is not _V8_MISSING:
                 out[key] = pruned
+            elif key == "first_party_allow_list" and item == []:
+                # An explicit empty list disables Go's built-in exemptions.
+                out[key] = []
         return out or _V8_MISSING
     if isinstance(value, list):
         items = [_prune_unset(item, drop_false=drop_false) for item in value]

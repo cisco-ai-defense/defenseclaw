@@ -527,3 +527,27 @@ def test_secure_client_v8_plaintext_virustotal_key_is_resolved(tmp_path, monkeyp
     )
     scanner = config_module.load(data_dir=str(tmp_path)).scanners.skill_scanner
     assert scanner.resolved_virustotal_api_key() == "sample-key"
+
+
+def test_empty_plugin_first_party_list_survives_config_save(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path)
+    cfg = config_module.load(data_dir=str(tmp_path))
+    cfg.admission.plugin.first_party_allow_list = []
+    cfg.save()
+    assert yaml.safe_load(open(path, encoding="utf-8"))["admission"]["plugin"]["first_party_allow_list"] == []
+    assert config_module.load(data_dir=str(tmp_path)).admission.plugin.first_party_allow_list == []
+
+
+def test_empty_skill_first_party_list_survives_config_save(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path)
+    cfg = config_module.load(data_dir=str(tmp_path))
+    cfg.admission.skill.first_party_allow_list = []
+    cfg.save()
+    assert yaml.safe_load(open(path, encoding="utf-8"))["admission"]["skill"]["first_party_allow_list"] == []
+    assert config_module.load(data_dir=str(tmp_path)).admission.skill.first_party_allow_list == []
