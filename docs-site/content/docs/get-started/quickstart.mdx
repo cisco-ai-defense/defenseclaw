@@ -57,8 +57,10 @@ one:
 
 `✓` is done and `-` is optional or skipped. You don't need an LLM key or a
 Cisco AI Defense key for this guide. When more than one agent was set up, the
-first line says `connectors=N` instead. If `status` isn't `ready`, the report
-names what needs attention, and `defenseclaw doctor` explains it.
+first line says `connectors=N` instead. If the selected agent is not installed, the report says `partial` and names
+that agent even if DefenseClaw wrote its hook file. Install the agent and rerun
+`defenseclaw setup <connector>`. Other non-`ready` reports also name what
+needs attention; `defenseclaw doctor` explains it.
 
 For every `init` option, the zero-prompt `defenseclaw quickstart` and scripted
 setups, see [init and quickstart reference](/docs/get-started/first-run).

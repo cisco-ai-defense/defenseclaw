@@ -1568,3 +1568,22 @@ def test_init_waits_past_the_windows_gateway_readiness_wait():
         src = inspect.getsource(fn)
         assert "timeout=_GATEWAY_START_TIMEOUT" in src
         assert "timeout=15" not in src and "timeout=30" not in src
+
+
+
+def test_agent_installation_not_inferred_from_generated_codex_config(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from defenseclaw import bootstrap
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+    (tmp_path / "config.toml").write_text("# generated hook config")
+    monkeypatch.setattr(
+        bootstrap.agent_discovery,
+        "discover_agents",
+        lambda **kwargs: SimpleNamespace(agents={"codex": SimpleNamespace(installed=False)}),
+    )
+    step = bootstrap._agent_installation_readiness(cfg, "codex")
+    assert step.status == "warn"
+    assert "not installed" in step.detail
+    assert "setup codex" in step.next_command

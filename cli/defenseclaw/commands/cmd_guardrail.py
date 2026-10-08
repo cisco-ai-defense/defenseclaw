@@ -252,6 +252,15 @@ def _verify_agents_before_enable(app: AppContext, connectors: list[str]) -> None
     cmd_setup._record_windows_setup_agent_selections(app.cfg.data_dir, list(connectors))
 
 
+def _note_running_agent_restart() -> None:
+    """A running agent keeps its previous OTLP token after connector setup."""
+
+    ux.subhead(
+        "Restart any running affected agent (for example Codex) to load refreshed OTLP credentials.",
+        indent="  ",
+    )
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -386,6 +395,7 @@ def _toggle_connector_guardrail(
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
 
+    _note_running_agent_restart()
     _log_guardrail_action(
         app,
         f"guardrail-{verb}",
@@ -1045,6 +1055,7 @@ def disable_cmd(
             ux.ok(f"{_connector_label(connector)} connector teardown complete", indent="  ")
         click.echo()
 
+    _note_running_agent_restart()
     _log_guardrail_action(
         app,
         "guardrail-disable",
@@ -1187,6 +1198,7 @@ def enable_cmd(
             )
         click.echo()
 
+    _note_running_agent_restart()
     _log_guardrail_action(
         app,
         "guardrail-enable",

@@ -5431,7 +5431,10 @@ def _connector_not_detected_message(label: str) -> str:
     hook connector does not — that is a different failure than "the agent isn't
     installed".
     """
-    return f"{label}: connector was not detected locally; setup will write DefenseClaw config anyway."
+    return (
+        f"{label}: agent is not installed (connector was not detected locally); "
+        "setup will write DefenseClaw config, but it is not ready until the agent is installed."
+    )
 
 
 def _connector_contract_upgrade_guidance(

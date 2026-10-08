@@ -1091,6 +1091,8 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
 
     connector = _normalize_connector(options.connector)
     steps.append(_connector_readiness(cfg, connector))
+    if connector != "none":
+        steps.append(_agent_installation_readiness(cfg, connector))
 
     if options.start_gateway:
         pid_file = os.path.join(cfg.data_dir, "gateway.pid")
@@ -1961,6 +1963,28 @@ def _hermes_installed() -> bool:
         return True
     # The upstream installer links ~/.local/bin/hermes, which may not be on PATH yet.
     return os.path.isfile(os.path.expanduser("~/.local/bin/hermes"))
+
+
+def _agent_installation_readiness(cfg: Config, connector: str) -> StepResult:
+    """A hook file DefenseClaw created does not prove the agent is installed."""
+    try:
+        discovery = agent_discovery.discover_agents(
+            use_cache=False, refresh=True, data_dir=cfg.data_dir, persist_cache=False
+        )
+        signal = discovery.agents.get(connector)
+    except Exception as exc:
+        return StepResult(
+            "Agent installation", "warn",
+            f"could not verify {connector} installation: {exc}",
+            "defenseclaw agent discover --refresh",
+        )
+    if signal is not None and signal.installed:
+        return StepResult("Agent installation", "pass", f"{connector} is installed")
+    return StepResult(
+        "Agent installation", "warn",
+        f"{connector} agent is not installed; generated hook files alone do not make it ready",
+        f"install {connector}, then run defenseclaw setup {connector}",
+    )
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:

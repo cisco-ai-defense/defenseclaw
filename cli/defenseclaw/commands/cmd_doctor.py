@@ -148,7 +148,7 @@ from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
-from defenseclaw.webhooks import list_webhooks, validate_webhook_url
+from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
 # TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
@@ -807,6 +807,9 @@ def _check_generated_hook_freshness(
         _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
         return
 
+    if any(reason.endswith(" missing") for reason in reasons):
+        _emit("skip", f"{label} freshness", "missing hook script is covered by Hook runtime files", r=r)
+        return
     detail = "; ".join(reasons[:2])
     if len(reasons) > 2:
         detail += f"; +{len(reasons) - 2} more"
@@ -972,7 +975,7 @@ def _http_probe_once(
         # instead of leaking the auth header to the redirect target.
         return 0, str(exc)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return 0, str(exc)
+        return 0, network_error_text(exc, url)
 
 
 # Upper bound for the accepted server socket to show up in the verified
@@ -2907,6 +2910,22 @@ def _check_recent_judge_outage(cfg, r: _DoctorResult, *, window_hours: int = 24)
     )
 
 
+def _missing_launcher_interpreter(path: str) -> str:
+    """Return a missing absolute shebang interpreter for an existing launcher."""
+
+    try:
+        with open(path, "rb") as launcher:
+            first_line = launcher.readline(256)
+    except OSError:
+        return ""
+    if not first_line.startswith(b"#!"):
+        return ""
+    interpreter = first_line[2:].decode("utf-8", errors="replace").strip().split()
+    if not interpreter or not os.path.isabs(interpreter[0]) or os.path.exists(interpreter[0]):
+        return ""
+    return interpreter[0]
+
+
 def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> None:
     """The gateway runs the skill-scanner launcher; probe it and its version."""
     name = "skill-scanner"
@@ -2956,12 +2975,13 @@ def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> No
         )
         return
     except OSError as exc:
-        _emit(
-            "fail",
-            f"Scanner: {name}",
-            f"{probe_path} could not start: {exc}; {_scanner_repair_hint()}",
-            r=r,
+        interpreter = _missing_launcher_interpreter(probe_path) if exc.errno == errno.ENOENT else ""
+        detail = (
+            f"{probe_path} exists, but its launcher interpreter {interpreter} is missing"
+            if interpreter
+            else f"{probe_path} could not start: {exc}"
         )
+        _emit("fail", f"Scanner: {name}", f"{detail}; {_scanner_repair_hint()}", r=r)
         return
     output = " ".join(
         line.strip()
@@ -3304,6 +3324,14 @@ def _guardrail_health_mode(details: dict) -> str:
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
+    if _config_validation_failed(r):
+        _emit(
+            "skip",
+            "Sidecar API",
+            "not checked while config.yaml is invalid; run defenseclaw config validate",
+            r=r,
+        )
+        return None
     bind = _gateway_api_host(cfg)
     url = _gateway_api_url(cfg, "/health")
     code, body = _http_probe(
@@ -5375,19 +5403,24 @@ def _check_claudecode_hooks(
     try:
         with open(settings_path, encoding="utf-8") as fh:
             settings = json.load(fh)
-    except (json.JSONDecodeError, OSError) as exc:
+    except json.JSONDecodeError as exc:
         # The gateway refuses to set up Claude Code until the file parses
         # again; the other connectors still start (GAP-0368).
         _emit(
             "fail",
             "Claude Code hooks",
+            f"{settings_path} is not valid JSON at line {exc.lineno}, column {exc.colno}",
+            r=r,
+            remediation="fix the JSON or restore the settings.json backup, then run: defenseclaw-gateway restart",
+        )
+        return
+    except OSError as exc:
+        _emit(
+            "fail",
+            "Claude Code hooks",
             f"cannot read {settings_path}: {exc}",
             r=r,
-            remediation=(
-                f"fix the JSON in {settings_path} (or restore it from a backup), then run: defenseclaw-gateway restart"
-                if isinstance(exc, json.JSONDecodeError)
-                else _CLAUDECODE_HOOKS_FIX
-            ),
+            remediation=_CLAUDECODE_HOOKS_FIX,
         )
         return
     hooks = settings.get("hooks", {})
@@ -8957,6 +8990,14 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
             r=r,
         )
         return
+    if not api_key and llm.provider_prefix() in {"bedrock", "amazon-bedrock"}:
+        _emit(
+            "skip",
+            "LLM API key",
+            "no Bedrock bearer key configured; AWS credential chain is checked by LLM reachable",
+            r=r,
+        )
+        return
     if not api_key:
         _emit(
             "fail",
@@ -10468,9 +10509,9 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
     else:
         remediation = (
             "attempts are recent: a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent "
-            "config usually causes this. Re-run 'defenseclaw setup <connector>' for each agent that "
-            "exports telemetry; if the count keeps growing, look for other OTLP senders pointed at "
-            "the gateway port"
+            "config usually causes this. Restart any running affected agent (for example Codex) "
+            "so it loads refreshed OTLP credentials. If attempts continue, re-run "
+            "'defenseclaw setup <connector>' and check other OTLP senders pointed at the gateway port"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
@@ -12620,8 +12661,10 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
 def _repair_display_tag(state: str) -> str:
     if state == "applied":
         return "pass"
-    if state in {"failed", "blocked"}:
+    if state == "failed":
         return "fail"
+    if state == "blocked":
+        return "skip"
     if state in {"applicable", "manual", "requires_confirmation"}:
         return "warn"
     return "skip"
@@ -13916,7 +13959,7 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     missing token blocks every call, while the other hook rows stay green
     (GAP-1141, GAP-1138). Both are repaired by rerunning setup.
     """
-    from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
+    from defenseclaw.hook_integrity import hook_runtime_problems
 
     # Token problems are reported once, by the Connector hook credential row,
     # with the repair doctor --fix applies (GAP-1436).
@@ -13925,7 +13968,7 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
         _emit(
             "fail",
             "Hook runtime files",
-            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`, or `{setup_command(connector)}`",
+            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`",
             r=r,
         )
     from defenseclaw.hook_integrity import hook_command_problems

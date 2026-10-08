@@ -3449,6 +3449,7 @@ def _llm_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
             "regional",
             "Use a regional provider (Bedrock / Vertex / Azure)",
             summary="Switch to a cloud-region provider; auth rows appear on pick.",
+            presets={"--provider": "bedrock"},
             fields=("Provider", "Model", *_LLM_PROVIDER_SECTIONS),
         ),
         WizardGoal(
@@ -5871,6 +5872,8 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
         return field.value
     if reveal:
         return field.value or "(empty)"
+    if field.label == "Secret Value":
+        return "********" if field.value else "(empty)"
     return mask_secret(field.value)
 
 
@@ -8130,7 +8133,7 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             "guardrail.alert_at",
             "choice",
             ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
-            "Lowest severity prompts, completions and tool calls alert at; blank=the rule pack's level.",
+            "Lowest alert level; blocking severities always alert too. Effective level cannot be above Block At.",
         ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),

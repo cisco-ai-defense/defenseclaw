@@ -191,6 +191,9 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     problems: list[str] = []
     for script in scripts:
         expected = digests.get(script.name)
+        if not script.exists():
+            problems.append(f"hook script {script} is missing")
+            break
         if expected and _sha256_regular_file(script) != expected:
             if _is_disabled_placeholder(script):
                 # A rollback after a failed gateway start leaves this; the

@@ -36,18 +36,18 @@ have data to show.
 
 ## Panels
 
+On Overview, press `G` to start or restart the gateway and `z` to enable or run
+AI Discovery. The key row shows both actions at 80 columns.
+
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
-`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
-terminal every tab stays on screen: Overview, Alerts and Policies keep their
-names first, then as many other tabs as fit get a short name (`Inv`, `Log`),
-and the rest show only their key. Which tabs keep a name depends only on the
-terminal width and the unread counts, so switching panels changes only the tab
-you leave and the tab you open. Unread counts stay ahead of names (`8⁶⁴`), and
-some room stays free for the longest panel name when you open it. Below 80
-columns the tab you are on gets as much of its name as fits (`R Regis…`), ahead
-of the other tabs' unread counts; the Alerts count stays. Below about 68
-columns every tab shows only its key, and the panel title names the panel.
+`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
+the current panel (for example, `1 Overview`); other tabs may show only their
+keys. The title below the strip names the current panel. Wider terminals add
+short or full names to other tabs as room allows. Unread counts stay visible
+on Alerts and, when space allows, on Logs and Activity; switching panels can
+change which other tabs have names. Below 80 columns the current panel may
+shorten to an ellipsis, and the panel title remains the full name.
 
 With two or more connectors set up, `m` filters Overview, Alerts, Audit, Logs,
 Skills, MCPs, Plugins, Tools and Inventory by connector. With one connector,
@@ -265,8 +265,9 @@ terminals it becomes a one-line switcher (`←`/`→`). Each task shows its real
 state, such as `✓ on · observe`, `! not set` or `○ not set up`, and the pane
 beside it says what the task does, what is set now, what needs attention (with
 the fix) and what it runs. The line above sums up readiness (for example `7 ok
-· 3 need attention`); press `i` for every check and its fix command. The hint
-line and `?` list only the keys of the view you are in.
+· 3 need attention`); press `i` for the highlighted task's details,
+including its checks and any fix command. The hint line and `?` list only
+the keys of the view you are in.
 
 In a task form, `Enter` on a text field (or just start typing, or paste) opens
 a text box: `Enter` saves the value, `Esc` cancels, and `Ctrl+T` shows a hidden
