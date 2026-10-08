@@ -340,6 +340,13 @@ func TestMapperLeavesOutTheRuntimesInit(t *testing.T) {
 	if f := one(t, m.Map(ctx, execOf(ls))).Frame; f.Binary != "/usr/bin/ls" || !f.Injected {
 		t.Fatalf("the exec's command = %+v", f)
 	}
+	// Its exit is left out too, so exits match execs (GAP-0026).
+	if items := m.Map(ctx, exitOf(runc, 0, "")); len(items) != 0 {
+		t.Fatalf("runc init's exit was forwarded: %+v", items)
+	}
+	if f := one(t, m.Map(ctx, exitOf(ls, 0, ""))).Frame; f.Kind != sandboxfeed.FrameExit || f.Binary != "/usr/bin/ls" {
+		t.Fatalf("the command's exit = %+v", f)
+	}
 	// The workload's own process named like it is forwarded: only an exec
 	// into the container is the runtime's.
 	own := runc

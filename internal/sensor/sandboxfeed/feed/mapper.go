@@ -294,6 +294,14 @@ func (m *Mapper) exit(ctx context.Context, response *pb.GetEventsResponse, exit 
 	}
 	execID := redaction.TruncateUTF8(process.GetExecId(), sandboxfeed.MaxIDBytes)
 	hostPID := int(process.GetPid().GetValue())
+	if process.GetInInitTree() != nil && !process.GetInInitTree().GetValue() && runtimeInit(process) {
+		// The runtime's init, whose exec was left out: so is its exit
+		// (GAP-0026).
+		if image, _ := m.images.get(hostPID); image == execID {
+			m.images.remove(hostPID)
+		}
+		return nil
+	}
 	frame := sandboxfeed.Frame{
 		Kind: sandboxfeed.FrameExit, At: at,
 		SandboxID: container.SandboxID, SandboxName: container.SandboxName, ContainerID: container.ID, Role: container.Role,
