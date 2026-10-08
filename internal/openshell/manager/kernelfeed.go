@@ -87,6 +87,9 @@ type kernelFeed struct {
 	// socketID names the feed's socket as it is now ("" when there is
 	// none): an install, update or restart of the feed replaces it.
 	socketID func() string
+	// unitInstalled reports the feed's systemd unit on this computer: one
+	// without a socket is stopped (kernel_feed_unavailable), not missing.
+	unitInstalled func() bool
 
 	mu     sync.Mutex
 	state  sandboxapi.ProcessKernelFeed
@@ -96,7 +99,8 @@ type kernelFeed struct {
 func newKernelFeed(dial KernelFeedDialer, version string, logf func(string, ...any)) *kernelFeed {
 	return &kernelFeed{dial: dial, version: version, logf: logf, logged: map[string]bool{},
 		poll: kernelFeedPoll, idle: kernelFeedIdle, retry: kernelFeedRetry, skewRetry: kernelFeedSkewRetry, socketID: feedSocketID,
-		state: sandboxapi.ProcessKernelFeed{Source: audit.SandboxProcessSourceTetragon, Reason: sandboxfeed.ReasonNotInstalled}}
+		unitInstalled: sandboxfeed.UnitInstalled,
+		state:         sandboxapi.ProcessKernelFeed{Source: audit.SandboxProcessSourceTetragon, Reason: sandboxfeed.ReasonNotInstalled}}
 }
 
 // kernelFeedApplies reports whether a sandbox's tree can take the feed: a
@@ -242,6 +246,9 @@ func (k *kernelFeed) up(header sandboxfeed.Header) {
 // long to wait before the next attempt.
 func (k *kernelFeed) down(err error) time.Duration {
 	reason := sandboxfeed.ReasonFor(err)
+	if reason == sandboxfeed.ReasonNotInstalled && k.unitInstalled != nil {
+		reason = sandboxfeed.InstalledReason(reason, k.unitInstalled())
+	}
 	if errors.Is(err, errKernelFeedIdle) {
 		reason = ""
 	}

@@ -42,6 +42,17 @@ const (
 	UnitPath        = "/etc/systemd/system/" + UnitName
 )
 
+// StartCommand starts the feed's service, or restarts one that runs but
+// does not answer.
+const StartCommand = "sudo systemctl restart " + UnitName
+
+// UnitInstalled reports whether the feed's systemd unit is on this
+// computer; anyone can read it.
+func UnitInstalled() bool {
+	_, err := os.Stat(UnitPath)
+	return err == nil
+}
+
 // helperLimit bounds the helper binary copied (it is about 30 MB).
 const helperLimit = 512 << 20
 
@@ -320,7 +331,7 @@ func (l *Lifecycle) Status(ctx context.Context, gatewayVersion string) Status {
 	}
 	conn, err := l.Dial(ctx, l.path(DefaultSocketPath))
 	if err != nil {
-		out.Reason, out.Detail = ReasonFor(err), err.Error()
+		out.Reason, out.Detail = InstalledReason(ReasonFor(err), out.Installed), err.Error()
 		var skew *SkewError
 		if errors.As(err, &skew) {
 			out.Protocol, out.Build = skew.Server, skew.Build

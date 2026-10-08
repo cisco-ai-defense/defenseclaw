@@ -208,7 +208,7 @@ func printSandboxKernelFeedStatus(out io.Writer, r sandboxKernelFeedStatus) {
 		fmt.Fprintf(out, "  feed:       answers (build %s, protocol %d); its Tetragon stream is %s\n",
 			firstNonEmptyText(r.Build, "unknown"), r.Protocol, tetragon)
 	case r.Installed || r.Reason != sandboxfeed.ReasonNotInstalled:
-		what, next := kernelFeedProblem(r.Reason)
+		what, next := kernelFeedProblem(r.Reason, r.Active)
 		fmt.Fprintf(out, "  feed:       %s\n", what)
 		if next != "" {
 			fmt.Fprintf(out, "              %s\n", next)
@@ -221,9 +221,10 @@ func printSandboxKernelFeedStatus(out io.Writer, r sandboxKernelFeedStatus) {
 	}
 }
 
-// kernelFeedProblem says why the feed is not read, by its reason, and what
-// to do when there is something to do (next, a line of its own).
-func kernelFeedProblem(reason string) (what, next string) {
+// kernelFeedProblem says why the feed is not read, by its reason and its
+// unit's state (active), and what to do when there is something to do
+// (next, a line of its own).
+func kernelFeedProblem(reason, active string) (what, next string) {
 	switch reason {
 	case sandboxfeed.ReasonVersionSkew:
 		return "not used: it speaks another protocol (" + reason + ")", ""
@@ -232,6 +233,10 @@ func kernelFeedProblem(reason string) (what, next string) {
 	case sandboxfeed.ReasonUntrusted:
 		return "refused (" + reason + ")", "its socket or folder is not root's, or others can write it"
 	case sandboxfeed.ReasonUnavailable:
+		if active != "active" {
+			// Installed and stopped (GAP-0091).
+			return "not running (" + reason + "); start it:", sandboxfeed.StartCommand
+		}
 		return "does not answer (" + reason + ")", "sudo systemctl status " + sandboxfeed.UnitName
 	case sandboxfeed.ReasonNotInstalled:
 		return "no socket (" + reason + ")", ""

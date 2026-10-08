@@ -52,6 +52,12 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "unavailable", TetragonReason: "tetragon_unavailable"},
 			want:   []string{"its Tetragon is not (tetragon_unavailable)", "sampled every 5s"},
 		},
+		// GAP-0091: a stopped feed names the command that starts it.
+		"stopped feed": {
+			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Reason: "kernel_feed_unavailable"},
+			want:   []string{"does not answer (kernel_feed_unavailable); start it:\n", "  sudo systemctl restart defenseclaw-sandbox-feed.service", "sampled every 5s"},
+			never:  []string{"source: kernel"},
+		},
 		"no feed": {want: []string{"sampled every 5s"}, never: []string{"kernel"}},
 	} {
 		app, out := inventoryApp(t, sandboxapi.ProcessList{Name: "box", Enabled: true, IntervalSeconds: 5, Processes: procs, Kernel: c.kernel},

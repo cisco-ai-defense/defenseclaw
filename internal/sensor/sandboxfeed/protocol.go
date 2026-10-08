@@ -276,6 +276,18 @@ func ReasonFor(err error) string {
 	return ReasonUnavailable
 }
 
+// InstalledReason is reason for a feed whose unit is installed (installed),
+// or not: a feed installed without a socket is one that is not running, so
+// it does not answer (ReasonUnavailable), not one missing from the computer
+// (GAP-0091: status and doctor said kernel_feed_not_installed and sandbox ps
+// kernel_feed_unavailable for the same stopped feed).
+func InstalledReason(reason string, installed bool) string {
+	if installed && reason == ReasonNotInstalled {
+		return ReasonUnavailable
+	}
+	return reason
+}
+
 // WriteLine writes v as one JSON line.
 func WriteLine(w io.Writer, v any) error {
 	data, err := json.Marshal(v)

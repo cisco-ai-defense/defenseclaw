@@ -1367,12 +1367,18 @@ def _check_sandbox_kernel_feed(
             "kernel-feed-not-permitted",
         )
         return
+    active = str(report.get("active") or "unknown").strip()
+    # A stopped feed gets the command that starts it (GAP-0091).
+    next_step = (
+        "run `sudo systemctl status defenseclaw-sandbox-feed`"
+        if active == "active"
+        else "start it with `sudo systemctl restart defenseclaw-sandbox-feed`"
+    )
     emit(
         "warn",
-        f"installed ({report.get('active') or 'unknown'}), but not answering: {reason or 'unknown'}",
+        f"installed ({active}), but not answering: {reason or 'unknown'}",
         "kernel-feed-unavailable",
-        "run `sudo systemctl status defenseclaw-sandbox-feed`; "
-        "sandbox process trees use the 5-second sample until it answers",
+        f"{next_step}; sandbox process trees use the 5-second sample until it answers",
     )
 
 

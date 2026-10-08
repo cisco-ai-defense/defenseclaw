@@ -215,6 +215,12 @@ func TestStatusSaysWhenTheFeedNeedsAnUpdate(t *testing.T) {
 	if s := e.l.Status(context.Background(), "1.2.3"); !s.Installed || s.Reachable || s.Reason != ReasonNotPermitted {
 		t.Fatalf("not permitted = %+v", s)
 	}
+	// An installed feed without a socket is stopped: it does not answer,
+	// it is not missing (GAP-0091).
+	e.dialErr = ErrNotInstalled
+	if s := e.l.Status(context.Background(), "1.2.3"); !s.Installed || s.Reachable || s.Reason != ReasonUnavailable {
+		t.Fatalf("stopped = %+v", s)
+	}
 }
 
 func TestOlder(t *testing.T) {

@@ -332,6 +332,24 @@ func (f *fakeFeedStream) Close() error {
 	return nil
 }
 
+// GAP-0091: with the feed's unit installed, a missing socket is a stopped
+// feed (kernel_feed_unavailable), which sandbox ps names with the command
+// that starts it; without the unit there is no feed and nothing to say.
+func TestKernelFeedStoppedIsUnavailableNotMissing(t *testing.T) {
+	for _, installed := range []bool{true, false} {
+		k := newKernelFeed(func(context.Context) (KernelFeedStream, error) { return nil, sandboxfeed.ErrNotInstalled }, "1.2.3", t.Logf)
+		k.unitInstalled = func() bool { return installed }
+		k.down(fmt.Errorf("%w: /run/defenseclaw-sandbox-feed/feed.sock", sandboxfeed.ErrNotInstalled))
+		view := k.view()
+		switch {
+		case installed && (view == nil || view.Reason != sandboxfeed.ReasonUnavailable):
+			t.Fatalf("installed, stopped: view %+v, want %s", view, sandboxfeed.ReasonUnavailable)
+		case !installed && view != nil:
+			t.Fatalf("not installed: view %+v, want none", view)
+		}
+	}
+}
+
 // withKernelFeed replaces the manager's feed before it runs, fast-paced.
 func withKernelFeed(e *harnessEnv, dial KernelFeedDialer) *kernelFeed {
 	k := newKernelFeed(dial, "1.2.3", e.t.Logf)

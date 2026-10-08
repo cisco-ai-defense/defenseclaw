@@ -171,6 +171,23 @@ func TestSandboxKernelFeedStatusSaysWhyInShortLines(t *testing.T) {
 	}
 }
 
+// GAP-0091: an installed feed that is stopped has no socket; it is
+// kernel_feed_unavailable (not "not installed"), and status prints the
+// command that starts it.
+func TestSandboxKernelFeedStatusOfAStoppedFeed(t *testing.T) {
+	var out strings.Builder
+	printSandboxKernelFeedStatus(&out, sandboxKernelFeedStatus{
+		Status: sandboxfeed.Status{Installed: true, Active: "inactive", Binary: "/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper",
+			Version: "1.0.44", Reason: sandboxfeed.InstalledReason(sandboxfeed.ReasonNotInstalled, true),
+			GatewayVersion: "1.0.44", GatewayProtocol: sandboxfeed.ProtocolVersion},
+		InstallCommand: "sudo /home/dccert-user/.local/bin/defenseclaw-gateway sandbox kernel-feed install",
+	})
+	want := "  feed:       not running (kernel_feed_unavailable); start it:\n              sudo systemctl restart " + sandboxfeed.UnitName + "\n"
+	if text := out.String(); !strings.Contains(text, want) || strings.Contains(text, "not_installed") {
+		t.Fatalf("stopped feed:\n%s\nwant a line %q", text, want)
+	}
+}
+
 func TestSandboxKernelFeedRefusals(t *testing.T) {
 	gateway, calls := kernelFeedTest(t, 1000)
 	out, err := runKernelFeed(t, "install")

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
 )
 
 // DiscoverOptions are `sandbox discover`'s.
@@ -157,6 +158,9 @@ func (a *App) processSourceNote(list *sandboxapi.ProcessList) {
 	case k.UpdateCommand != "":
 		a.warn("the sandbox kernel feed is not used (" + k.Reason + "); update it:")
 		a.note("  " + k.UpdateCommand)
+	case k.Reason == sandboxfeed.ReasonUnavailable:
+		a.warn("the sandbox kernel feed does not answer (" + k.Reason + "); start it:")
+		a.note("  " + sandboxfeed.StartCommand)
 	default:
 		a.warn("the sandbox kernel feed is not used (" + k.Reason + ")")
 	}

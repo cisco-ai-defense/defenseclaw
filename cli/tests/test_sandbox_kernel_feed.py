@@ -139,6 +139,11 @@ def test_feed_row_pass_skip_and_unavailable(tmp_path: Path) -> None:
     assert row["status"] == "skip" and "docker group" in row["detail"]
     (row,), _ = _feed_rows(tmp_path, {"installed": True, "active": "failed", "reason": "kernel_feed_unavailable"})
     assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-unavailable"
+    # GAP-0091: a stopped feed gets the command that starts it; a running one
+    # that does not answer, the status command.
+    assert "sudo systemctl restart defenseclaw-sandbox-feed" in row["remediation"]
+    (row,), _ = _feed_rows(tmp_path, {"installed": True, "active": "active", "reason": "kernel_feed_unavailable"})
+    assert "sudo systemctl status defenseclaw-sandbox-feed" in row["remediation"]
     (row,), _ = _feed_rows(tmp_path, "not json")
     assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-status-unavailable"
 
