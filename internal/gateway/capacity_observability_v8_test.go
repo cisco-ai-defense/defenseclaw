@@ -222,6 +222,29 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	}
 }
 
+func TestSecureClientOmitsDestinationLossMetrics(t *testing.T) {
+    old := ManagedEnterpriseActive()
+    SetManagedEnterpriseActive(true)
+    t.Cleanup(func() { SetManagedEnterpriseActive(old) })
+    runtime, capture := newProxyGeneratedTraceRuntime(t)
+    graph := runtime.Active()
+    wrapper := &capacityHealthRuntime{Runtime: runtime}
+    wrapper.snapshot = observabilityruntime.DestinationHealthSnapshot{
+        Generation: graph.Generation(), PlanDigest: graph.Digest(),
+        Destinations: []observabilityruntime.DestinationHealth{{
+            Name: "capture", Enabled: true, Signals: []observability.Signal{observability.SignalMetrics},
+            Sources: []delivery.HealthSnapshot{{
+                Destination: "capture", Generation: graph.Generation(), Signal: string(observability.SignalMetrics),
+                Counters: delivery.Counters{Dropped: 2, Rejected: 1},
+            }},
+        }},
+    }
+    (&Sidecar{}).recordExporterHealthMetricsV8(t.Context(), time.Now().UTC(), wrapper, wrapper.snapshot)
+    if drops := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawQueueDrops); len(drops) != 0 {
+        t.Fatalf("Secure Client exported %d destination loss metrics", len(drops))
+    }
+}
+
 // TestExporterHealthCollectionGateSkipsProcessingWhenMetricsDisabled replaces
 // the prior "gate precedes snapshot" test: the destination snapshot is now
 // fetched once by the caller and shared with the sibling circuit-health

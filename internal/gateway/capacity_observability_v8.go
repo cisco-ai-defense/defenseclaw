@@ -104,9 +104,14 @@ func (s *Sidecar) recordExporterHealthMetricsV8(
 	errorsEnabled, errorsErr := runtime.GeneratedMetricFamilyEnabled(
 		ctx, observability.EventName(observability.TelemetryInstrumentDefenseClawTelemetryExporterErrors),
 	)
-	lossEnabled, lossErr := runtime.GeneratedMetricFamilyEnabled(
-		ctx, observability.EventName(observability.TelemetryInstrumentDefenseClawQueueDrops),
-	)
+	// The destination loss series is new to this branch. Secure Client keeps
+	// origin/main record output until its telemetry contract changes (#1092).
+	lossEnabled, lossErr := false, error(nil)
+	if !ManagedEnterpriseActive() {
+		lossEnabled, lossErr = runtime.GeneratedMetricFamilyEnabled(
+			ctx, observability.EventName(observability.TelemetryInstrumentDefenseClawQueueDrops),
+		)
+	}
 	if (errorsErr != nil || !errorsEnabled) && (lossErr != nil || !lossEnabled) {
 		return
 	}
