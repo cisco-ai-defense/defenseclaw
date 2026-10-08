@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -294,12 +295,27 @@ func sssdAccountSID(sssd *sssdNSS, uid int) (string, error) {
 // account a joined domain confirmed is asked for in the domain\name form,
 // which SSSD looks up in that domain only: by its short name SSSD may find
 // another domain's account of that name and list its groups (GAP-0563).
+// The files module matches no /etc/group member to that form, so the
+// /etc/group groups that list the account by its passwd name, the groups the
+// OS gives it at login, are read from /etc/group (GAP-0729). Its name
+// qualified with the domain is not matched: under short names that is the
+// passwd name of an account a domain names by e-mail address, and a group
+// listing it is that account's.
 func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, error) {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
 	if inDomain != "" {
 		ids, err := r.GroupIDs(Account{Name: inDomain + `\` + bare, GID: account.GID})
 		if !IsNotFound(err) {
-			return ids, err
+			if err != nil {
+				return nil, err
+			}
+			local, err := localGroupsListing(account.Name)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, local...)
+			slices.Sort(ids)
+			return slices.Compact(ids), nil
 		}
 	}
 	return r.GroupIDs(account)
@@ -349,6 +365,31 @@ func localGroupIDs() (map[int]bool, error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		if gid, _, ok := parseGroupName(line); ok {
 			ids[gid] = true
+		}
+	}
+	return ids, nil
+}
+
+// localGroupsListing returns the gids of the /etc/group entries whose member
+// list names name, compared as the files module compares them. A missing
+// file holds none.
+func localGroupsListing(name string) ([]int, error) {
+	data, err := readSmallFile(localGroupPath, 16<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ids []int
+	for _, line := range strings.Split(string(data), "\n") {
+		gid, _, ok := parseGroupName(line)
+		if !ok {
+			continue
+		}
+		members := strings.Split(strings.TrimRight(line, "\r"), ":")[3]
+		if slices.Contains(strings.Split(members, ","), name) {
+			ids = append(ids, gid)
 		}
 	}
 	return ids, nil

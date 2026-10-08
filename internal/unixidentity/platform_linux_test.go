@@ -235,7 +235,10 @@ func (f *fakeSSSD) serve(conn net.Conn) {
 // account's SID, which SSSD maps to the AD account's uid. Groups count only
 // inside the domain of the account's SID: the LDAP carol does not get the
 // AD groups initgroups lists for the name carol (GAP-0563), and the AD alice
-// keeps her AD and local groups but not another domain's. An SSSD that is
+// keeps her AD groups and the /etc/group groups that list alice, which
+// initgroups by domain\name never lists (GAP-0729), but not another
+// domain's, nor one that lists alice@corp.example.com, the name of an
+// account that a domain names by e-mail address. An SSSD that is
 // stopped, while its memory cache still answers the uid, fails the lookup
 // instead of dropping the realm and the groups (GAP-0606).
 func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
@@ -245,7 +248,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	})
 	dir := t.TempDir()
 	nsswitchPath, localPasswdPath, localGroupPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd"), filepath.Join(dir, "group")
-	for path, content := range map[string]string{nsswitchPath: "passwd: files sss\n", localPasswdPath: "", localGroupPath: "docker:x:7000:alice\n"} {
+	for path, content := range map[string]string{nsswitchPath: "passwd: files sss\n", localPasswdPath: "", localGroupPath: "docker:x:7000:alice\nwheel:x:10:alice@corp.example.com\n"} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -268,7 +271,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 		return commandResult{stdout: []byte(name + ":*:" + id + ":" + id + "::/home/" + name + ":/bin/bash\n")}
 	}
 	f := &fakeRun{results: map[string]commandResult{
-		"initgroups corp.example.com\\alice": {stdout: []byte("corp.example.com\\alice 80001 5000 5300 7000\n")},
+		"initgroups corp.example.com\\alice": {stdout: []byte("corp.example.com\\alice 80001 5000 5300\n")},
 		"group 5000 7000 80001":              {stdout: []byte("domain users:*:5000:\ndocker:*:7000:\nalice:*:80001:\n")},
 		"initgroups carol":                   {stdout: []byte("carol 80003 5000 5100\n")},
 		"group 5100 80003":                   {stdout: []byte("ldap-devs:*:5100:\ncarol:*:80003:\n")},

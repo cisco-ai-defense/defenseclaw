@@ -197,7 +197,9 @@ decides the domain of an SSSD account from its uid, not from its name:
   the groups SSSD holds a SID for in the domain of the account's SID; for an
   account without a SID, the groups without one; and, for every account, the
   groups of the host's `/etc/group` and its primary group. A confirmed
-  account's groups are listed by its `domain\account` name. Groups of another
+  account's groups are listed by its `domain\account` name, plus the
+  `/etc/group` groups that list its account name, as the OS gives them at
+  login. Groups of another
   domain of the forest do not count. Two plain LDAP domains that hold the same
   short name are not told apart; give them fully qualified names.
 - **When SSSD does not answer.** Each call gets 2 seconds. When SSSD is stopped
