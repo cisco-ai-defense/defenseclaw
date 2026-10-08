@@ -242,6 +242,17 @@ const (
 //     finished burn-in) have native installs, only the lowest uid is denied
 //     and the others stay in monitor.
 
+// WarnSessionsPredateControls:<n> counts the native agent sessions of
+// enforced users that started before the enforcing controls policy loaded.
+// Tetragon marks an agent's processes for the binaries anchor when the agent
+// starts, so these are not denied until they restart (after enforce first
+// loads, or after a Tetragon restart reloads the policies). Each is also an
+// observed-only root with ReasonPredatesControls.
+const (
+	WarnSessionsPredateControls = "kernel_sessions_predate_controls"
+	ReasonPredatesControls      = "predates_controls"
+)
+
 // WarnCustomerEventsCapped:<policy> is one of the host's own Tetragon
 // policies whose events went over the helper's volume budget in the last
 // hour (the counts stay exact).

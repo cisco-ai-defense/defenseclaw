@@ -852,12 +852,11 @@ func TestPolicyModeFollowsTheHelpersOwnCalls(t *testing.T) {
 	h.now = h.now.Add(time.Minute)
 	h.pause(time.Hour)
 	h.pass()
-	if _, _, ok := h.ctl.PolicyMode(controls.Name); ok {
-		t.Fatal("paused enforcement left the old enforcing name loaded")
-	}
+	// A pause demotes the enforcing policy in place, so the sessions
+	// Tetragon marked keep their mark for the resume (GAP-0053).
 	paused, found := h.tg.find(FamilyControls)
-	if !found || paused.Mode != LoadedMonitor {
-		t.Fatalf("paused policy: %+v", paused)
+	if !found || paused.Name != controls.Name || paused.Mode != LoadedMonitor {
+		t.Fatalf("paused policy: %+v, want %s in monitor", paused, controls.Name)
 	}
 	mode, demoted, ok := h.ctl.PolicyMode(paused.Name)
 	if !ok || mode != "monitor" || !demoted.After(at) {

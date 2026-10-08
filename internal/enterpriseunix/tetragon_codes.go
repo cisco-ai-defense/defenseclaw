@@ -358,6 +358,12 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" (a process id can be reused between two passes, so it never denies; only a native agent binary is a deny anchor);" +
 			" nothing to do: their would-block hits are still counted, and the Tetragon guide lists this limit"
 	}},
+	kernelpolicy.WarnSessionsPredateControls: {Message: func(f tetragonFacts) string {
+		return defaultStr(f.Detail, "some") + " agent session(s) of enforced users started before the kernel controls loaded" +
+			" (Tetragon marks an agent's processes when the agent starts, so these are monitored, not denied);" +
+			" restart them to be denied: after enforce starts, and after a Tetragon restart. " + gwStatus + " lists them" +
+			" under Observed, not enforced"
+	}},
 	kernelpolicy.WarnBinaryScopeLimited: {Message: func(tetragonFacts) string {
 		return "more than one user of a controls policy has a native agent install" +
 			" (in enforce it denies for one of them, the lowest uid; the others stay in monitor mode);" +
@@ -428,6 +434,7 @@ var observedReasonWords = map[string]string{
 	kernelpolicy.ReasonHeuristicRoot:    "looks like an agent by name only",
 	kernelpolicy.ReasonNotEnrolled:      "user not enrolled",
 	kernelpolicy.ReasonGuardrailObserve: "connector in observe mode",
+	kernelpolicy.ReasonPredatesControls: "started before the kernel controls loaded; restart it to be denied",
 }
 
 // observedReason is the reason in words with the code in parentheses.

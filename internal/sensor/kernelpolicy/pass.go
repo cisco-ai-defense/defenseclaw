@@ -268,8 +268,29 @@ func sortedApplied(m map[string]Applied) []string {
 }
 
 func (c *Controller) markApplied(name string, family Family, mode PolicyMode, pid int, pending bool) {
-	c.st.Applied[name] = Applied{Family: family, Mode: mode, PID: pid, At: c.cfg.Now().UTC(), Pending: pending}
+	// A configure keeps the policy loaded, and with it the sessions Tetragon
+	// marked since the load.
+	loadTicks := c.st.Applied[name].LoadTicks
+	c.st.Applied[name] = Applied{Family: family, Mode: mode, PID: pid, At: c.cfg.Now().UTC(), Pending: pending, LoadTicks: loadTicks}
 	c.syncTally()
+}
+
+// loadTicks is the start time, in clock ticks since boot, of the newest
+// process alive right after a load: every agent session that started no
+// later than it may predate the load, and Tetragon marks an agent's
+// processes for matchBinaries followChildren only when the agent starts, so
+// such a session is not denied. 0 when the scan fails (nothing is then
+// reported as predating).
+func (c *Controller) loadTicks() uint64 {
+	procs, err := c.cfg.Procs(c.enrollment.Has)
+	if err != nil {
+		return 0
+	}
+	var newest uint64
+	for _, p := range procs {
+		newest = max(newest, p.StartTicks)
+	}
+	return newest
 }
 
 // configure flips a loaded policy's mode in place. A flip to enforce is
@@ -316,6 +337,11 @@ func (c *Controller) load(ctx context.Context, g guardedClient, agent Agent, p P
 		return err
 	}
 	c.markApplied(p.Name, p.Family, p.Mode, agent.PID, false)
+	if isControlsFamily(p.Family) {
+		applied := c.st.Applied[p.Name]
+		applied.LoadTicks = c.loadTicks()
+		c.st.Applied[p.Name] = applied
+	}
 	writePolicyCopy(c.cfg.Dirs, p.Name, p.YAML)
 	mode := p.Mode
 	c.change(Change{Event: EventLoaded, Policy: p.Name, Family: p.Family, Mode: mode, State: string(StateEnabled)})
@@ -522,6 +548,9 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 		status.Family, _ = FamilyOfName(name)
 		if p, ok := desired[name]; ok {
 			status.DesiredMode = p.Mode
+			if plan.Paused && p.Mode == PolicyEnforce {
+				status.DesiredMode = PolicyMonitor // held there by the pause
+			}
 		}
 		if lp, ok := byName[name]; ok {
 			status.ObservedMode, status.State, status.Error = lp.Mode, lp.State, lp.Error
@@ -563,6 +592,7 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 		c.warn(fmt.Sprintf("%s:%d", WarnRootsOverLimit, compiled.OverLimit))
 	}
 	c.fillUIDs(plan, compiled)
+	c.notePredating(compiled)
 	for _, note := range compiled.Notes {
 		if len(c.st.Warnings) < 64 {
 			c.warn(note)
@@ -580,13 +610,65 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 	c.st.InSync = !failed && !(c.cfg.Intent.Mode.LoadsPolicies() && plan.Effective == ModeConsume)
 	for _, p := range compiled.Policies {
 		lp, ok := byName[p.Name]
-		if !ok || lp.State != StateEnabled || (p.Mode == PolicyEnforce && !lp.Mode.Enforcing()) {
+		if !ok || lp.State != StateEnabled || (p.Mode == PolicyEnforce && !plan.Paused && !lp.Mode.Enforcing()) {
 			c.st.InSync = false
 		}
 	}
 	sort.Strings(c.st.Warnings)
 	c.syncTally()
 	c.persist()
+}
+
+// notePredating reports the native agent sessions of enforced users that
+// started before the enforcing controls policy loaded. The binaries anchor
+// follows the children of an agent Tetragon saw start; a session that was
+// already running when the policy loaded (enforce turned on, or Tetragon
+// restarted and the helper loaded it again) is not marked, so it is not
+// denied until it restarts, while its user shows as enforcing (GAP-0053).
+// Each such session is an observed-only root, and the warning counts them.
+func (c *Controller) notePredating(compiled Compiled) {
+	var loadTicks uint64
+	binaryUID := -1
+	for _, status := range c.st.Policies {
+		if status.Family != FamilyControls || status.State != StateEnabled || !status.ObservedMode.Enforcing() {
+			continue
+		}
+		for _, p := range compiled.Policies {
+			if p.Name == status.Name && p.BinaryUID > 0 {
+				loadTicks, binaryUID = c.st.Applied[p.Name].LoadTicks, p.BinaryUID
+			}
+		}
+	}
+	if loadTicks == 0 {
+		return
+	}
+	enforced := false
+	for _, user := range c.st.UIDs {
+		if user.UID == binaryUID && user.State == UIDEnforcing {
+			enforced = true
+		}
+	}
+	if !enforced {
+		return
+	}
+	counts := map[Observed]int{}
+	total := 0
+	for _, root := range c.roots.Roots {
+		if root.Native && root.UID == binaryUID && root.StartTicks <= loadTicks {
+			counts[Observed{UID: root.UID, Reason: ReasonPredatesControls, Connector: root.Connector}]++
+			total++
+		}
+	}
+	keys := make([]Observed, 0, len(counts))
+	for key, n := range counts {
+		key.Count = n
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Connector < keys[j].Connector })
+	c.st.Roots.Observed = append(c.st.Roots.Observed, keys...)
+	if total > 0 {
+		c.warn(fmt.Sprintf("%s:%d", WarnSessionsPredateControls, total))
+	}
 }
 
 func compiledFamily(compiled Compiled, family Family) []Policy {

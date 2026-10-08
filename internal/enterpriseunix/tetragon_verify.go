@@ -688,7 +688,34 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 	if len(missing) > 0 {
 		message += "; no row for " + strings.Join(missing, ", ")
 	}
+	if predating, names := predatingSessions(in.State); predating > 0 {
+		// GAP-0053: Tetragon marks an agent's processes when the agent
+		// starts; a session that was running when the controls loaded is
+		// not denied until it restarts.
+		set(checkAgents, checkWarn, message+fmt.Sprintf("; %d agent %s of %s started before the kernel controls loaded and %s not denied until restarted",
+			predating, plural(predating, "session", "sessions"), strings.Join(names, ", "), plural(predating, "is", "are")))
+		return
+	}
 	set(checkAgents, checkPass, message)
+}
+
+// predatingSessions counts the agent sessions the helper reports as started
+// before the enforcing controls loaded, and names their users.
+func predatingSessions(state kernelpolicy.State) (int, []string) {
+	count := 0
+	seen := map[int]bool{}
+	var names []string
+	for _, observed := range state.Roots.Observed {
+		if observed.Reason != kernelpolicy.ReasonPredatesControls {
+			continue
+		}
+		count += observed.Count
+		if !seen[observed.UID] {
+			seen[observed.UID] = true
+			names = append(names, userLabel(observed.UID))
+		}
+	}
+	return count, names
 }
 
 // helperModeLoadsPolicies reports whether the helper runs observe or enforce.

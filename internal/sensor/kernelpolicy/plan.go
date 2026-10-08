@@ -45,6 +45,12 @@ type Plan struct {
 	Effective Mode
 	UIDs      map[int]UIDStatus
 	Warnings  []string
+	// Paused keeps enforce's policies and holds them in monitor mode: a
+	// pause demotes them in place and a resume promotes them in place, so
+	// Tetragon keeps the agent sessions it marked when they started.
+	// Replacing them (the monitor render while paused, the enforce render
+	// again on resume) unmarked every running session (GAP-0053).
+	Paused bool
 }
 
 // MakePlan decides what runs. Every cap only narrows:
@@ -128,8 +134,6 @@ func MakePlan(in PlanInput) Plan {
 		capped = WarnEnforceAckStale
 	case !in.Agent.KeepSensorsOnExitKnown || in.Agent.KeepSensorsOnExit:
 		capped = WarnPersistentSensors
-	case in.Paused:
-		capped = WarnEnforcePaused
 	}
 	if capped != "" {
 		plan.Warnings = append(plan.Warnings, capped)
@@ -184,6 +188,15 @@ func MakePlan(in PlanInput) Plan {
 	if hasOverride(FamilyControls, OverrideMonitor) {
 		mode = PolicyMonitor
 		plan.Effective = ModeObserve
+	}
+	if in.Paused {
+		// The same policies, held in monitor mode by the apply step (a load
+		// or a configure to enforce is refused while the pause file exists).
+		plan.Paused, plan.Effective = true, ModeObserve
+		plan.Warnings = append(plan.Warnings, WarnEnforcePaused)
+		for _, uid := range ready {
+			status(uid, UIDMonitor, WarnEnforcePaused)
+		}
 	}
 	controls(Scope{Mode: mode, UIDs: ready, Connectors: enforceSet})
 	if len(waiting) > 0 {

@@ -683,6 +683,15 @@ Read these rules before you roll it out:
 4. **Controls are caps, never rejections.** A stale approval, a connector in
    observe mode or a persistent-sensors setting never rejects the config; it
    keeps the controls in monitor mode and `status` says why.
+5. **Restart agent sessions after enforce starts.** Tetragon marks an agent's
+   processes when the agent starts, so a session that was already running when
+   the controls loaded in enforce is monitored, not denied, until it restarts.
+   The same holds after a Tetragon restart, which loads the controls again. A
+   pause and a resume keep the controls loaded and keep their sessions.
+   `status` lists such sessions under "Observed, not enforced" and warns with
+   `kernel_sessions_predate_controls`; `verify` warns on the agents check. Ask
+   developers to restart their agents, or roll enforce out at a time they
+   start new sessions.
 
 What changes for developers: nothing for the normal shell, IDE terminals, other
 users and `tmux`. Below an enrolled user's command-line agent, an open of an SSH
@@ -1229,6 +1238,12 @@ execution.
 
 Known limits of these controls:
 
+- A control denies below an agent session that Tetragon saw start while the
+  controls were loaded. A session that was already running when they loaded
+  (enforce turned on, or Tetragon restarted) is monitored until it restarts
+  (`kernel_sessions_predate_controls`; "started before the kernel controls
+  loaded" under "Observed, not enforced" in `status`). A pause and a resume
+  keep the same policy loaded, so they do not have this effect.
 - A rule matches the name that is opened. A second name for the same file,
   created beforehand (a link), is outside the control.
 - Replacing a shell profile by rename, or removing it, is not denied.

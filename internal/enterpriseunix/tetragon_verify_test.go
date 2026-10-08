@@ -240,6 +240,11 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		{"agents unknown in consume", "consume", "observe", nil, []want{{checkAgents, checkInfo, "once mode observe runs"}}},
 		{"agents in observe", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) { *in = withUsers(*in) },
 			[]want{{checkAgents, checkPass, "3 enrolled users have an agent (dcr-std1, dcr-std2, dcr-std3)"}}},
+		// GAP-0053: sessions running before the controls loaded are not denied.
+		{"sessions predate the controls", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			*in = withUsers(*in)
+			in.State.Roots.Observed = []kernelpolicy.Observed{{UID: 1001, Reason: kernelpolicy.ReasonPredatesControls, Connector: "claudecode", Count: 2}}
+		}, []want{{checkAgents, checkWarn, "2 agent sessions of dcr-std1 (uid 1001) started before the kernel controls loaded and are not denied until restarted"}}},
 		{"nobody enrolled", "observe", "observe", nil, []want{{checkAgents, checkWarn, "no user is enrolled"}}},
 		{"no agent for enforce", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},

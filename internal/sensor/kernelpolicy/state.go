@@ -56,6 +56,11 @@ type Applied struct {
 	// Pending marks a call recorded before it was made; nothing is inferred
 	// from a pending record found after a restart.
 	Pending bool `json:"pending,omitempty"`
+	// LoadTicks is, for a controls-family policy, the start time (clock
+	// ticks since boot) of the newest process alive right after Tetragon
+	// loaded it. An agent session that started no later is not marked by
+	// the binaries anchor, so it is reported as predating the controls.
+	LoadTicks uint64 `json:"load_ticks,omitempty"`
 }
 
 // OverrideKind is what an operator did to a family.
