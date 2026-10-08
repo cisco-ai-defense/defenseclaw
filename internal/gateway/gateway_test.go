@@ -3549,8 +3549,8 @@ func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusBadGateway)
 	}
 
-	if len(*recorded) != 0 {
-		t.Fatalf("skill should not become allowed when gateway re-enable fails: %#v", *recorded)
+	if len(*recorded) == 0 {
+		t.Fatal("the authoritative allow should be recorded before runtime re-enable")
 	}
 
 	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
