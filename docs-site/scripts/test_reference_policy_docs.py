@@ -30,5 +30,13 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("does not apply to Secure Client", section)
 
 
+    def test_remote_skill_scan_uses_gateway_timeout(self):
+        text = (DOCS / "configuration.mdx").read_text()
+        row = next(line for line in text.splitlines()
+                   if line.startswith("| `scanners.skill_scanner.timeouts.scan_s` |"))
+        self.assertIn("`defenseclaw skill scan --remote`", row)
+        self.assertIn("`defenseclaw skill scan` without `--remote`", row)
+
+
 if __name__ == "__main__":
     unittest.main()
