@@ -699,6 +699,26 @@ func TestExplainNamesEntraIDAccountsThroughTheLSA(t *testing.T) {
 	if _, _, err := resolveWindowsExplainAccount("entra-bob@contoso.example", bySID, byName); err == nil || !strings.Contains(err.Error(), noMapping.Error()) {
 		t.Errorf("unknown account: err = %v; want an error with the LSA's reason", err)
 	}
+	// An AD UPN with an alternate suffix resolves through its
+	// DOMAIN\sAMAccountName, as the live decision names it (GAP-0609).
+	previous := windowsSAMNameForUPN
+	windowsSAMNameForUPN = func(upn string) string {
+		if strings.EqualFold(upn, "ew3.contract@alt.dclab.test") {
+			return `DCLAB\dcad-ew3`
+		}
+		return ""
+	}
+	t.Cleanup(func() { windowsSAMNameForUPN = previous })
+	ew3 := windowsAccount{SID: "S-1-5-21-1-2-3-1203", Name: "dcad-ew3", User: true}
+	adByName := func(name string) (windowsAccount, error) {
+		if strings.EqualFold(name, `DCLAB\dcad-ew3`) {
+			return ew3, nil
+		}
+		return byName(name)
+	}
+	if id, user, err := resolveWindowsExplainAccount("ew3.contract@alt.dclab.test", bySID, adByName); err != nil || id != ew3.SID || user != "dcad-ew3" {
+		t.Errorf("alternate-suffix UPN = %q, %q, %v; want %s, dcad-ew3", id, user, err, ew3.SID)
+	}
 }
 
 // TestExplainReportsGroupsThatCannotBeListed pins GAP-0201: an account whose

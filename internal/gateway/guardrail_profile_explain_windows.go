@@ -19,6 +19,10 @@ import (
 // resolveWindowsExplainAccount).
 var profileExplainAccount = LookupWindowsAccount
 
+func init() {
+	windowsSAMNameForUPN = func(upn string) string { return useridentity.SAMNameForUPN(upn, profileExplainUPNWait) }
+}
+
 // LookupWindowsAccount names a user account given as a SID, DOMAIN\name,
 // bare name or UPN through the LSA (see resolveWindowsExplainAccount).
 // Entra ID accounts resolve only this way; `enterprise policy show|verify

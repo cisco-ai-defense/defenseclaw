@@ -6,6 +6,7 @@
 package useridentity
 
 import (
+	"strings"
 	"time"
 	"unsafe"
 
@@ -140,13 +141,35 @@ const (
 )
 
 func translateNameToUPN(samName string) string {
-	input, err := windows.UTF16PtrFromString(samName)
+	return translateName(samName, nameSamCompatible, nameUserPrincipal)
+}
+
+// SAMNameForUPN returns the DOMAIN\sAMAccountName of the AD account a UPN
+// names, or "" when none answers within wait. LookupAccountName takes a UPN
+// only in a suffix it knows as a domain; TranslateNameW resolves one with an
+// alternate UPN suffix too, as the account signs in with it (GAP-0609).
+func SAMNameForUPN(upn string, wait time.Duration) string {
+	if NormalizeUPN(upn) == "" {
+		return ""
+	}
+	answer := make(chan string, 1)
+	go func() { answer <- translateName(strings.TrimSpace(upn), nameUserPrincipal, nameSamCompatible) }()
+	select {
+	case sam := <-answer:
+		return sam
+	case <-time.After(wait):
+		return ""
+	}
+}
+
+func translateName(name string, from, to uint32) string {
+	input, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return ""
 	}
 	var size uint32 = 512
 	buf := make([]uint16, size)
-	if err := windows.TranslateName(input, nameSamCompatible, nameUserPrincipal, &buf[0], &size); err != nil {
+	if err := windows.TranslateName(input, from, to, &buf[0], &size); err != nil {
 		return ""
 	}
 	if size > uint32(len(buf)) {

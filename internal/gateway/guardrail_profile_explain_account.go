@@ -29,6 +29,10 @@ type windowsAccount struct {
 // entraAccountDomain is the domain the LSA puts Entra ID accounts in.
 const entraAccountDomain = "AzureAD"
 
+// windowsSAMNameForUPN translates an AD UPN to DOMAIN\sAMAccountName
+// (TranslateNameW on Windows), or "".
+var windowsSAMNameForUPN = func(string) string { return "" }
+
 // resolveWindowsExplainAccount names an account given as a SID, DOMAIN\name,
 // bare name or UPN. LookupAccountName takes an Entra ID account only as
 // AzureAD\<name> or AzureAD\<UPN>, so a name without a domain that does not
@@ -41,8 +45,20 @@ func resolveWindowsExplainAccount(name string, bySID, byName func(string) (windo
 	if isSID {
 		account, err = bySID(name)
 	} else if account, err = byName(name); err != nil && !strings.Contains(name, `\`) {
-		if entra, entraErr := byName(entraAccountDomain + `\` + name); entraErr == nil {
-			account, err = entra, nil
+		// An AD UPN with an alternate suffix: the name the account signs in
+		// with and an assignment may name, which LookupAccountName does not
+		// take (GAP-0609).
+		if strings.Contains(name, "@") {
+			if sam := windowsSAMNameForUPN(name); sam != "" {
+				if ad, adErr := byName(sam); adErr == nil {
+					account, err = ad, nil
+				}
+			}
+		}
+		if err != nil {
+			if entra, entraErr := byName(entraAccountDomain + `\` + name); entraErr == nil {
+				account, err = entra, nil
+			}
 		}
 	}
 	switch {
