@@ -1135,7 +1135,6 @@ var windowsEnterpriseEnrolledConnectors = func() ([]string, error) {
 	}
 	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
 }
-
 // applyWindowsEnterpriseEnrolledConnectors reports an installed config that
 // enrols no connector: the enumerator then writes no target, so DefenseClaw
 // protects no agent while every service reads healthy. verify fails on it;
@@ -1871,6 +1870,14 @@ func planWindowsEnterpriseEnsure(
 	}
 	if drift != "" {
 		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 {
+			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{})) {
+				// The installed CLI carries no payload, so it can never pass
+				// the binary flags; naming them sent administrators the wrong
+				// way (GAP-0682). Setup is the command that applies a config.
+				return windowsEnterpriseEnsurePlan{}, windowsEnterpriseInvalidArguments(
+					"the installed CLI cannot apply a changed %s on Windows; nothing was changed. Run the installed release's Setup as LocalSystem or from an elevated prompt: "+
+						"DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<absolute path of an administrator-only config> JSON=1", drift)
+			}
 			return windowsEnterpriseEnsurePlan{}, windowsEnterpriseInvalidArguments("ensure must reapply %s and requires %s", drift, strings.Join(missing, ", "))
 		}
 		return windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:" + drift}, nil
