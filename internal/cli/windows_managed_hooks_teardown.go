@@ -553,7 +553,8 @@ func runWindowsManagedHooksTeardown(
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
 		if err == nil {
-			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+			err = windowsManagedHooksTeardownJournalNamed(
+				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
@@ -580,7 +581,8 @@ func runWindowsManagedHooksTeardown(
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
 		if err == nil {
-			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+			err = windowsManagedHooksTeardownJournalNamed(
+				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
 		}
 		if err == nil {
 			report.EnrollmentTargetCount =
@@ -611,7 +613,8 @@ func runWindowsManagedHooksTeardown(
 		var journal windowsManagedHooksTeardownJournal
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
 		if err == nil {
-			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+			err = windowsManagedHooksTeardownJournalNamed(
+				validateWindowsManagedHooksTeardownJournal(journal, identity), report.JournalPath)
 		}
 		if err == nil && journal.Phase != "prepared" && journal.Phase != "finalized" {
 			err = fmt.Errorf(
@@ -673,7 +676,8 @@ func prepareWindowsManagedHooksTeardown(
 ) (bool, int, error) {
 	if existing, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil {
 		if validateErr := validateWindowsManagedHooksTeardownJournal(existing, identity); validateErr != nil {
-			return false, 0, validateErr
+			// Name the file: the refusal named no path (GAP-1041).
+			return false, 0, fmt.Errorf("%w: %s (phase %s)", validateErr, journalPath, existing.Phase)
 		}
 		switch existing.Phase {
 		case "prepared":
@@ -1793,6 +1797,15 @@ func windowsManagedHooksTeardownFingerprint(
 	}
 	digest := sha256.Sum256(body)
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+// windowsManagedHooksTeardownJournalNamed adds the journal path to a
+// validation failure, which named no file (GAP-1041).
+func windowsManagedHooksTeardownJournalNamed(err error, path string) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", err, path)
 }
 
 func validateWindowsManagedHooksTeardownJournal(

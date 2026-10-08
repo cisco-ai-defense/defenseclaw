@@ -170,6 +170,10 @@ $script:DefenseClawRecoveryGatewayRefusal = $null
 # managed-hook lifecycle journal it could not retire (GAP-1322). Reset per
 # lifecycle run.
 $script:DefenseClawStaleLifecycleJournalRemoved = ''
+# Standalone: the managed-hook teardown journal this run removed because an
+# earlier uninstall that was refused or rolled back left it (GAP-1041). Reset
+# per lifecycle run.
+$script:DefenseClawStaleTeardownJournalRemoved = ''
 # Standalone: set when this run's managed-hook lifecycle capture wrote the
 # release's Cursor enterprise adapter back over a changed or deleted one
 # (GAP-2480). Reset per lifecycle run.
@@ -15921,6 +15925,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawRecoveryGatewayRuns = @()
     $script:DefenseClawRecoveryGatewayRefusal = $null
     $script:DefenseClawStaleLifecycleJournalRemoved = ''
+    $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
@@ -19560,6 +19565,10 @@ function Get-DefenseClawLifecycleStatus {
         if (-not [string]::IsNullOrEmpty($script:DefenseClawStaleLifecycleJournalRemoved)) {
             $status['stale_lifecycle_journal_removed'] =
                 $script:DefenseClawStaleLifecycleJournalRemoved
+        }
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawStaleTeardownJournalRemoved)) {
+            $status['stale_teardown_journal_removed'] =
+                $script:DefenseClawStaleTeardownJournalRemoved
         }
         if ($script:DefenseClawCursorAdapterRestored) {
             $status['cursor_adapter_restored'] = $true
@@ -24641,6 +24650,51 @@ function Suspend-DefenseClawStandaloneSensorHelperForServicing {
     return $true
 }
 
+function Remove-DefenseClawRolledBackTeardownJournal {
+    <#
+        Standalone. Removes the managed-hook teardown journal of a teardown
+        that was rolled back (phase rolled_back) when no transaction is
+        pending: the rollback that wrote that phase finished, so nothing reads
+        it again. Left behind, it made the next uninstall fail "managed-hook
+        teardown journal does not match the protected deployment" once the
+        deployment changed, and that failed uninstall stayed pending
+        (GAP-1041). With -Stale the removal is reported as
+        stale_lifecycle_journal_removed. Returns whether it removed the file.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$Stale
+    )
+    $path = [string]$Layout.ManagedHooksTeardownJournalPath
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return $false
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $phase = ''
+    try {
+        $journal = Microsoft.PowerShell.Management\Get-Content -LiteralPath $path -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $phaseProperty = $journal.PSObject.Properties['phase']
+        if ($null -ne $phaseProperty) {
+            $phase = [string]$phaseProperty.Value
+        }
+    }
+    catch {
+        # An unreadable journal is not provably finished; the teardown
+        # command reports it.
+        return $false
+    }
+    if ($phase -cne 'rolled_back') {
+        return $false
+    }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $path -Force
+    if ($Stale) {
+        $script:DefenseClawStaleTeardownJournalRemoved = $path
+    }
+    return $true
+}
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -24707,6 +24761,9 @@ function Invoke-DefenseClawUninstallLifecycle {
         Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        [void](Remove-DefenseClawRolledBackTeardownJournal -Layout $Layout -Stale)
     }
     $selfUninstallCallerIdentity = $null
     if ($SelfUninstallCallerPID -gt 0) {
@@ -24930,6 +24987,17 @@ function Invoke-DefenseClawUninstallLifecycle {
                 $rollbackErrors.Add(
                     "transaction cleanup failed: $($_.Exception.Message)"
                 )
+            }
+        }
+        if ($rollbackErrors.Count -eq 0 -and (Test-DefenseClawStandaloneProfile)) {
+            # The finished rollback was the last reader of the journal this
+            # uninstall wrote (GAP-1041). A removal that fails here is
+            # retried, and reported, by the next uninstall.
+            try {
+                [void](Remove-DefenseClawRolledBackTeardownJournal -Layout $Layout)
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Verbose "rolled-back teardown journal stays: $($_.Exception.Message)"
             }
         }
         if ($rollbackErrors.Count -gt 0) {

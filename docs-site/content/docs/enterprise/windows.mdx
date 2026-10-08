@@ -802,6 +802,14 @@ A service whose process does not answer the stop request within 30 seconds
 and the lifecycle continues; the result names each such process in a
 `service_process_terminated` warning.
 
+An uninstall that is refused or fails after it started, and rolls back,
+removes the managed-hook teardown journal it wrote
+(`C:\ProgramData\Cisco\DefenseClaw\install\managed-hooks-teardown-journal.json`).
+The next uninstall removes one that an earlier build left and says so in a
+`stale_lifecycle_journal_removed` warning, so a later config change does not
+make that uninstall fail with "managed-hook teardown journal does not match
+the protected deployment".
+
 A hardening script that removes `NT SERVICE\DefenseClawGateway` from
 `C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
 starting. `status` and `verify` both fail and name the folder and the

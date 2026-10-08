@@ -113,6 +113,10 @@ type windowsEnterpriseInstallerReport struct {
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
 	StaleLifecycleJournalRemoved string `json:"stale_lifecycle_journal_removed"`
+	// StaleTeardownJournalRemoved names the managed-hook teardown journal the
+	// lifecycle removed because an earlier uninstall that was refused or
+	// rolled back left it (GAP-1041).
+	StaleTeardownJournalRemoved string `json:"stale_teardown_journal_removed"`
 	// CursorAdapterRestored is set when the lifecycle wrote this release's
 	// Cursor enterprise adapter back over a changed or deleted one (GAP-2480).
 	CursorAdapterRestored bool `json:"cursor_adapter_restored"`
@@ -958,6 +962,13 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
 				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
 				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
+	if removed := strings.TrimSpace(report.StaleTeardownJournalRemoved); removed != "" {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "stale_lifecycle_journal_removed",
+			Message: "Setup removed the stale managed-hook teardown journal " + windowsEnterpriseBoundedDiagnostic(removed) +
+				", which an earlier uninstall left when it was refused or rolled back; its rollback had finished, so nothing used it",
 		})
 	}
 	for _, note := range report.SquattedRootNotes {
