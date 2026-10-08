@@ -109,6 +109,14 @@ Or set it for every run with `openshell.profile` in
 `~/.defenseclaw/config.yaml`. On a Mac every run works on a copy, whichever
 pack it uses.
 
+Claude Code's WebFetch asks `api.anthropic.com` whether each URL is safe
+before it fetches it. `balanced` and `strict` refuse that host, so WebFetch
+fails for every site, not only the one the agent asked for. The feed says
+so the first time (`api.anthropic.com is refused: Claude Code's WebFetch
+asks it …`), and so does the note the agent gets. To use WebFetch, open the
+host for the sandbox with `defenseclaw sandbox unblock api.anthropic.com
+--sandbox <name>`, or add it to your pack's `egress.allow`.
+
 <Callout type="warn" title="The open profile is a deliberate trade-off">
 With `open`, an agent tricked by a prompt injection could send your code to
 any site that is not on the blocklist. DefenseClaw's tool-call checks, the

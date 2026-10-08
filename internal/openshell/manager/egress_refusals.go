@@ -316,6 +316,12 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 		}
 		honored = p.Decider == nil || p.Decider.UnblocksAllowed()
 	}
+	harnessName := ""
+	m.mu.Lock()
+	if b := m.boxes[name]; b != nil {
+		harnessName = b.rec.Harness
+	}
+	m.mu.Unlock()
 	var out []EgressRefusal
 	for _, h := range m.refusals.take(bindingID, name, m.now()) {
 		switch h.note {
@@ -336,9 +342,14 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 		if _, lifted := m.EgressUnblock(bindingID, name, h.host); lifted {
 			continue
 		}
+		what := refusalWhat(h.category)
+		if tool, ok := toolHostOf(harnessName, h.host); ok {
+			// Not the site the agent fetched (GAP-0234, GAP-0263).
+			what += "; " + tool
+		}
 		out = append(out, EgressRefusal{
 			Host: h.host, Port: h.port, Category: string(h.category),
-			What:   refusalWhat(h.category),
+			What:   what,
 			Remedy: refusalRemedy(h, name, honored),
 			Cut:    h.cut, Sent: h.sent,
 		})

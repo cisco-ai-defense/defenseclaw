@@ -294,6 +294,16 @@ func harnessFetchHost(harnessName, host string, port int) bool {
 	return false
 }
 
+// toolHostOf says what refusing host breaks for the harness harnessName,
+// when a tool of the harness calls it on every use (harness.ToolHost).
+func toolHostOf(harnessName, host string) (string, bool) {
+	spec, ok := harness.Get(harnessName)
+	if !ok {
+		return "", false
+	}
+	return spec.ToolHostOf(triage.NormalizeHost(host))
+}
+
 // harnessFetches are the requests the sandbox's harness makes on its own
 // that it does without (harness.Spec.DirectFetches).
 func harnessFetches(name string) []triage.HarnessFetch {

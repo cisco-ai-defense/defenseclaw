@@ -1130,6 +1130,11 @@ const (
 	ReasonHooksRestored    = "hooks_restored"
 )
 
+// ReasonToolHostRefused is the Reason of the (INFO) finding event the feed
+// gets the first time the policy refuses a host a tool of the harness calls
+// for every use (Claude Code's WebFetch and api.anthropic.com).
+const ReasonToolHostRefused = "tool_host_refused"
+
 // ReasonUnflushedStop is the Reason of the finding event a MicroVM gets
 // when it goes down without DefenseClaw stopping it: its last writes may
 // be lost (no flush).

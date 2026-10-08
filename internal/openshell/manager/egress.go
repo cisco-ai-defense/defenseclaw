@@ -766,6 +766,22 @@ func (m *Manager) publishEgress(ev sandboxapi.ActivityEvent) {
 	m.feed.Publish(ev)
 }
 
+// firstToolHostRefusal reports whether host's refusal is the first the
+// box's sandbox got since the daemon started, and marks it.
+func (m *Manager) firstToolHostRefusal(b *box, host string) bool {
+	host = triage.NormalizeHost(host)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b.toolHostsSaid == nil {
+		b.toolHostsSaid = map[string]bool{}
+	}
+	if b.toolHostsSaid[host] {
+		return false
+	}
+	b.toolHostsSaid[host] = true
+	return true
+}
+
 func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) {
 	if e.Kind == egress.EventAuthFailed {
 		// No principal: the credential is what failed.
@@ -843,6 +859,16 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 				Source: sandboxapi.SourceProxy, Category: category, Rule: e.Rule, Unblockable: blocked && e.Unblockable,
 				Reason: truncate(e.Reason, 300), Message: msg,
 			})
+		}
+		if what, ok := toolHostOf(harnessName, e.Host); ok && blocked && m.firstToolHostRefusal(b, e.Host) {
+			// The refusal of a host a harness tool calls for every site
+			// read as the site's own (GAP-0234, GAP-0263).
+			line := "⚠ " + e.Host + " is refused: " + what
+			if e.Unblockable {
+				line += "; `defenseclaw sandbox unblock " + e.Host + " --sandbox " + e.SandboxName + "` opens it for this sandbox"
+			}
+			m.publishEgress(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityFinding, Sandbox: e.SandboxName, Host: e.Host,
+				Port: e.Port, Source: sandboxapi.SourceProxy, Severity: "INFO", Reason: sandboxapi.ReasonToolHostRefused, Message: line})
 		}
 	case egress.EventClosed, egress.EventFailed:
 		m.egressEnded(ctx, ident, e)

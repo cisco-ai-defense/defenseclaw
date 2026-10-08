@@ -120,6 +120,9 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
+	// toolHostsSaid are the harness tool hosts whose refusal the feed
+	// explained (firstToolHostRefusal).
+	toolHostsSaid map[string]bool
 	// seenChunks are the pending draft chunks triage decided; it is pruned
 	// to the inbox's pending chunks on every poll.
 	seenChunks map[string]struct{}
