@@ -373,6 +373,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "codex", action, reason, policy)
 	}
 	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			resp.AdditionalContext += sqlAlertOnlyHookNotice
+			resp.CodexOutput = codexOutput(req.HookEventName, action, rawAction, resp.Reason, resp.AdditionalContext)
+		}
+	}
 	resp.SourceReason = verdict.Reason
 	if mode != "action" && resp.AdditionalContext != "" {
 		eligible := assetContextEligible || codexObserveContextEnforcementEligible(verdict)

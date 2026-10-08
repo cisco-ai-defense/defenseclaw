@@ -130,9 +130,10 @@ type agentHookRequest struct {
 	HookSurface string
 	// AgentIdentityID is the agent identity (agt-) the request runs under, ""
 	// when it has none. It scopes the agent ids the request mints.
-	AgentIdentityID string
-	Payload         map[string]interface{}
-	toolChain       *toolChainHookCapture
+	AgentIdentityID    string
+	Payload            map[string]interface{}
+	toolChain          *toolChainHookCapture
+	alertOnlySQLNotice bool
 }
 
 type agentHookResponse struct {
@@ -163,6 +164,17 @@ type agentHookResponse struct {
 	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
 	// took part in the verdict. Never serialized.
 	laneVerdict bool
+}
+
+const sqlAlertOnlyHookNotice = " Rule impact.sql_destructive_mutation is alert-only; block_at does not turn it into a block."
+
+func hasAlertOnlySQLFinding(findings []string) bool {
+	for _, finding := range findings {
+		if strings.HasPrefix(finding, "impact.sql_destructive_mutation:") {
+			return true
+		}
+	}
+	return false
 }
 
 func hookSourceReason(resp agentHookResponse) string {
@@ -2243,6 +2255,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	responseReason, responsePolicy := resolveHookBlockReasonForConfig(
 		a.decisionConfig(ctx), req.ConnectorName, action, reason, sinkPolicyFor(ctx, verdict.RedactionEnabled),
 	)
+	if action == "alert" {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			req.alertOnlySQLNotice = hasAlertOnlySQLFinding(findings)
+		}
+	}
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
 	)
@@ -2714,6 +2731,9 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	safeReason = agentVerdictReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
 	safeReason = agentObservedReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
 	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
+	if req.alertOnlySQLNotice {
+		additional += sqlAlertOnlyHookNotice
+	}
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))
 	}
