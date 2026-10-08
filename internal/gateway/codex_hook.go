@@ -261,6 +261,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
+		if command == nil {
+			command, commandTool = codexPowerShellCommand(toolName, toolArgs)
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
@@ -1888,6 +1891,31 @@ func codexExactMapString(values map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// codexShellRunsPowerShell reports whether Codex runs its shell tool's
+// commands in PowerShell on this host, as it does on Windows. A variable so
+// tests can pin either host.
+var codexShellRunsPowerShell = runtime.GOOS == "windows"
+
+// codexPowerShellCommand returns a Codex shell tool call's command to judge
+// again as PowerShell, on a host where Codex runs it there (GAP-0175).
+// Codex names its shell tool Bash on every OS, so the call's own parse reads
+// a command as POSIX unless it carries PowerShell syntax. A cmdlet first
+// (Set-Content, Add-Content, Out-File) has no POSIX operand grammar there:
+// the parse was partial, and a CEL block rule on the command could only
+// report a detection-only match while the write ran.
+// inspectSandboxShellToolPolicyCtx judges the command as PowerShell only
+// when the call's own parse is not complete, and that verdict only ever adds
+// to the call's.
+func codexPowerShellCommand(toolName string, args json.RawMessage) (json.RawMessage, string) {
+	if !codexShellRunsPowerShell {
+		return nil, ""
+	}
+	if command, ok := connector.ShellCommandArgs("codex", toolName, args); ok {
+		return command, "powershell"
+	}
+	return nil, ""
 }
 
 func codexShellExecutionTool(tool string) bool {

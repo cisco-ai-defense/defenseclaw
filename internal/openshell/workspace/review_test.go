@@ -66,6 +66,8 @@ func TestReviewLeavesAToolCacheOut(t *testing.T) {
 	writeFile(t, e.project, "node_modules/left-pad/index.js", "module.exports = 1\n")
 	mustSnapshot(t, e, "s1")
 	writeFile(t, e.project, "node_modules/.cache/nyc/run.json", "{}\n")
+	// Vitest's results cache, which every `npm test` rewrites (GAP-0275).
+	writeFile(t, e.project, "node_modules/.vite/vitest/da39a3ee/results.json", "{}\n")
 	if f, ok := flagByLabel(review(t, e, "s1", nil), "node_modules/"); ok {
 		t.Fatalf("a tool cache flagged node_modules/: %+v", f)
 	}

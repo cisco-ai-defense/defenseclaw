@@ -871,6 +871,19 @@ func (s *session) end(ctx context.Context) error {
 	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 		return deleted()
 	}
+	if daemonUnreachable(err) {
+		// The session's end needs the daemon: say what did not run and the
+		// way to it, where it said only that the daemon was down (GAP-0336).
+		a.println()
+		later := "`" + CommandName + " review " + s.sb.Name + "` shows its changes and `" + CommandName + " undo " + s.sb.Name +
+			"` reverts them; " + s.sb.Name + " and its undo point are kept"
+		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			later = "`" + CommandName + " pull " + s.sb.Name + "` brings its work back; " + s.sb.Name + " keeps it"
+		}
+		a.warn("the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run: start it with " +
+			"`defenseclaw-gateway start`, then " + later)
+		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("the DefenseClaw daemon is not running")}}
+	}
 	if err != nil {
 		return apiError(err)
 	}
@@ -907,7 +920,7 @@ func (s *session) end(ctx context.Context) error {
 	// What the agent left running keeps writing to the mounted folder: a
 	// sandbox the session owns stops before the review, so the review, the
 	// keep/undo answer and the undo point cover everything it changed.
-	stopped := false
+	stopped, stopFailed := false, false
 	switch {
 	case after.Phase != "ready":
 		// Stopped from elsewhere: nothing runs in it any more.
@@ -918,8 +931,19 @@ func (s *session) end(ctx context.Context) error {
 		a.note(s.sb.Name + " keeps running for a reattach, so what changes after this review is not in it")
 	case s.started && !s.liveRun:
 		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
-			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
-				"); what still runs in it can change the folder after this review")
+			if now, gerr := s.api.Get(ctx, s.sb.Name); gerr == nil && now.Phase == "error" {
+				// Docker stopped the container as the session ended: the stop
+				// met that, in whatever words; the line says what happened,
+				// and nothing runs in it any more (GAP-0337).
+				after, stopped = now, true
+				if text := s.endedElsewhere(after); text != "" {
+					a.warn(text)
+				}
+			} else {
+				stopFailed = true
+				a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
+					"); what still runs in it can change the folder after this review")
+			}
 		} else {
 			stopped = true
 			if sb != nil {
@@ -1033,6 +1057,12 @@ func (s *session) end(ctx context.Context) error {
 			// The warning said the undo point stays.
 			a.ok("kept: the changes stay in the folder")
 		}
+	case accepted && reviewed && stopFailed:
+		// Not running, but not stopped either (OpenShell's error state after
+		// a Docker restart): "keeps running" was false there (GAP-0333).
+		a.ok("kept: the changes stay in the folder")
+		a.note("the undo point stays, since " + s.sb.Name + " could not be stopped: `" + CommandName + " undo " + s.sb.Name +
+			"` still reverts this session's changes")
 	case accepted && reviewed:
 		// The sandbox keeps running: what it changes after this review was
 		// not reviewed, so it must not become the base either.

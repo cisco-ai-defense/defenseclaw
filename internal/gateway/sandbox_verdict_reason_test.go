@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -198,6 +199,14 @@ func TestApplySandboxVerdictReasonLeavesHostAndAllowAlone(t *testing.T) {
 		got.AdditionalContext != "" || got.HookOutput["continue"] != true {
 		t.Fatalf("allow with a finding: reason %q source %q context %q output %v",
 			got.Reason, hookSourceReason(got), got.AdditionalContext, got.HookOutput)
+	}
+	// GAP-0312: in action mode an allowed CRITICAL match could not decide
+	// the call (a block at these thresholds), and the reason says so.
+	undecided := flagged
+	undecided.Mode, undecided.Severity = "action", "CRITICAL"
+	if got := apply(ctx, undecided); !strings.HasPrefix(got.Reason, "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER") ||
+		!strings.HasSuffix(got.Reason, sandboxapi.UndecidedNote) {
+		t.Fatalf("undecided match: reason %q", got.Reason)
 	}
 	flagged.Severity, flagged.Reason = "NONE", "kept"
 	if got := apply(ctx, flagged); got.Reason != "kept" {

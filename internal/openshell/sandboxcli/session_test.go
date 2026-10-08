@@ -360,6 +360,21 @@ func TestSessionAnnouncesAsks(t *testing.T) {
 	}
 }
 
+// GAP-0345: the banner promised the title for Codex, which keeps it too,
+// and "shown here" for a detached run, which leaves the terminal.
+func TestBannerAsksRowIsHonest(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.TTY = true
+	sb := sampleSandbox("cx")
+	sb.Harness, sb.HarnessName = "codex", "Codex"
+	ta.banner(&sb, bannerInfo{})
+	has(t, ta.output(), "Asks      Codex keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox cx")
+	ta.out.Reset()
+	ta.banner(&sb, bannerInfo{o: RunOptions{Detach: true, Prompt: "fix it"}})
+	has(t, ta.output(), "Asks      the run is in the background, so watch for them: defenseclaw sandbox approvals --watch --sandbox cx")
+	lacks(t, ta.output(), "shown here", "announced in this terminal")
+}
+
 // Manual R2-84 and R2-68: a blocked destination and a finding (an alert,
 // hook tamper) are announced while the harness runs, and the summary
 // repeats them, the block with the command that lifts it. What the harness
@@ -876,6 +891,37 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
 		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
 			not: []string{"the next session takes a new undo point"}},
+		// GAP-0336: the daemon stopped before the session ended: what did not
+		// run, and the way to it, without the HTTP client's error.
+		{name: "the daemon is down at the end", opts: claude, exit: 1, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.errors["GET "+sandboxapi.PathSandboxes+"/"+sbName] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "the DefenseClaw daemon is not reachable", Detail: "dial tcp 127.0.0.1:18970: connect: connection refused"}
+			ta.daemon.mu.Unlock()
+		}, want: []string{"the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run",
+			"review " + sbName + "` shows its changes"}, not: []string{"connection refused"}},
+		// GAP-0337: Docker stopped the container as the session ended, so the
+		// session's stop failed in gRPC's words: the first line says what
+		// happened instead.
+		{name: "the container stopped as the session stopped it", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream,
+				Message: "OpenShell: stop sandbox " + sbName + " failed", Detail: "Cancelled: grpc: the client connection is closing"}
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				for _, c := range ta.daemon.calls { // the fake holds its lock here
+					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/stop") {
+						sb.Phase = "error"
+					}
+				}
+			}
+		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed)"},
+			not: []string{"client connection is closing", "could not stop"}},
+		// GAP-0333: a sandbox the session could not stop (OpenShell's error
+		// state after a Docker restart) does not keep running.
+		{name: "keeping when the stop failed", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: sbName + " is in OpenShell's error state"}
+		}, want: []string{"✓ kept: the changes stay in the folder", "the undo point stays, since " + sbName + " could not be stopped"},
+			not: []string{"keeps running: `"}},
 		// The accept names the snapshot and the session it reviewed: the
 		// daemon refuses it once another start came in between.
 		{name: "keeping names the reviewed session", input: "y\n", opts: claude, during: func(_ *testing.T, ta *testApp) {
@@ -1308,6 +1354,24 @@ func TestLogsOfAStoppedSandbox(t *testing.T) {
 	// The pid check is the run-state script's; -f stops once the run is gone.
 	has(t, runStateScript, `kill -0 "$rs_pid"`, "/proc/$rs_pid/cmdline", "grep -q latest.exit", "run=interrupted")
 	has(t, runFollowScript, `while run_alive "$d" && [ ! -s "$d/latest.exit" ]`, `kill "$t"`)
+
+	// GAP-0318: a stop under `logs -f` ended the follower without a word; it
+	// says what stopped and how the run ended, as a later `logs` does.
+	ta = newTestApp(t, "")
+	ta.IO.TTY = false
+	ta.daemon.add(sampleSandbox("box"))
+	ta.stream.answer = func(argv []string) (int, string) {
+		if cmd := sandboxCommand(argv); len(cmd) > 2 && cmd[2] == runFollowScript {
+			stopped := sampleSandbox("box")
+			stopped.Phase = "stopped"
+			ta.daemon.add(stopped)
+			ta.daemon.runLogs["box"] = &sandboxapi.RunLog{Name: "box", State: sandboxapi.RunInterrupted, KeptAt: time.Now(), Log: "partial\n"}
+			return 0, "partial\n"
+		}
+		return 1, ""
+	}
+	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Follow: true}))
+	has(t, ta.output(), "partial", "box is stopped", "kept the log of its detached run", "the run did not finish")
 }
 
 // A detached Claude Code run streams its events, which `logs` renders; a

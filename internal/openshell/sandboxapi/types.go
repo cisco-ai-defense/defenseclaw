@@ -55,6 +55,10 @@ type Status struct {
 	// OpenShell gateway; Reason says why not.
 	Available bool   `json:"available"`
 	Reason    string `json:"reason,omitempty"`
+	// GatewayElsewhere says what holds this machine's OpenShell gateway
+	// port while sandboxes are off for this account and another account's
+	// process holds it: one gateway runs on a machine (GAP-0307).
+	GatewayElsewhere string `json:"gateway_elsewhere,omitempty"`
 	// Gateway describes the OpenShell gateway the daemon drives.
 	Gateway *Gateway `json:"gateway,omitempty"`
 	// IngressAddr and EgressAddr are the DefenseClaw listeners sandboxes
@@ -1111,6 +1115,14 @@ const ReasonShadowAI = "shadow_ai"
 // verdict's.
 const ReasonHookFinding = "hook_finding"
 
+// UndecidedNote closes the reason of a sandbox verdict that let a tool
+// call run although a rule that blocks such calls matched it: the match
+// could not decide the call (GAP-0312). The feed and the session summary
+// say so, where they said only "allowed but flagged".
+const UndecidedNote = "The rule could not decide this call, so it ran: DefenseClaw decides only the commands it can read in full " +
+	"(a shell variable, a substitution or a construct it does not analyze leaves a match undecided). " +
+	"DefenseClaw recorded the finding for the user's review."
+
 // ReasonPolicyChanged is the Reason of the sandbox.lifecycle event a
 // sandbox gets when a configuration change moves the policy it runs under
 // (its pack, profile, network mode, approvals, skip-permissions or the
@@ -1198,6 +1210,9 @@ type ActivityEvent struct {
 	// it ends: BytesUp is what had been sent then, and the upload sent
 	// more than Threshold.
 	Threshold int64 `json:"threshold,omitempty"`
+	// Repeats counts the refusals like this one folded into it, after the
+	// first was reported on its own line ("(and N more like it)").
+	Repeats int `json:"repeats,omitempty"`
 	// Approval and hook fields.
 	ApprovalID string `json:"approval_id,omitempty"`
 	Tool       string `json:"tool,omitempty"`

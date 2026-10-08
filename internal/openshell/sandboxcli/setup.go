@@ -101,6 +101,15 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 			retErr = &ExitError{Code: exitInterrupted, Err: fmt.Errorf("setup interrupted at %s: that step was not done, and the steps before it are kept; "+
 				"run `%s setup` again to finish", at, CommandName)}
 		}
+		if errors.Is(retErr, errNoAnswer) {
+			// Ctrl-D said only "no answer (end of input)" (GAP-0343).
+			at := "a question"
+			if a.asked != "" {
+				at = fmt.Sprintf("%q", a.asked+"?")
+			}
+			retErr = fmt.Errorf("setup stopped at %s, whose input ended before an answer (end of input): that step was not done, "+
+				"and the steps before it are kept; run `%s setup` again to finish", at, CommandName)
+		}
 	}()
 	if err := a.CheckSupported(); err != nil {
 		return err

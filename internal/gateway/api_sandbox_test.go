@@ -172,6 +172,7 @@ func (f *fakeSandboxController) SubscribeActivity(since uint64, sandbox string) 
 
 func sandboxTestAPI(t *testing.T, ctl SandboxController, enabled bool) (*APIServer, http.Handler) {
 	t.Helper()
+	stubSandboxGatewayElsewhere(t, "")
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Gateway.Token = "test-token"
@@ -336,6 +337,33 @@ func TestSandboxAPIStatusNamesTheDaemonUID(t *testing.T) {
 			(e.Code == sandboxapi.CodeDisabled && e.Message != sandboxapi.DisabledMessage) {
 			t.Fatalf("%s: list = %d %s", tc.name, w.Code, w.Body.String())
 		}
+	}
+}
+
+// stubSandboxGatewayElsewhere pins what the off answer finds on the
+// machine's OpenShell gateway port.
+func stubSandboxGatewayElsewhere(t *testing.T, held string) {
+	t.Helper()
+	previous := sandboxGatewayElsewhere
+	sandboxGatewayElsewhere = func() string { return held }
+	t.Cleanup(func() { sandboxGatewayElsewhere = previous })
+}
+
+// GAP-0307: on an account whose sandboxes are off while another account
+// runs the machine's OpenShell gateway, the status and every route say so,
+// with the holder, instead of sending the user to setup, which stops there.
+func TestSandboxAPIOffNamesAnotherAccountsGateway(t *testing.T) {
+	_, h := sandboxTestAPI(t, nil, false)
+	const held = "127.0.0.1:17670, the gateway's port, is held by PID 4242 of another account (uid 1001, dcm-sv1)"
+	stubSandboxGatewayElsewhere(t, held)
+	var st sandboxapi.Status
+	if w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, "")); json.Unmarshal(w.Body.Bytes(), &st) != nil ||
+		st.Enabled || st.GatewayElsewhere != held || !strings.Contains(st.Reason, "another account runs this machine's OpenShell gateway ("+held+")") {
+		t.Fatalf("status = %s", w.Body.String())
+	}
+	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, ""))
+	if e := decodeSandboxError(t, w); e.Code != sandboxapi.CodeDisabled || e.Message != st.Reason || e.Message != st.OffMessage() {
+		t.Fatalf("list = %d %s", w.Code, w.Body.String())
 	}
 }
 

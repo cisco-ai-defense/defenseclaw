@@ -574,6 +574,33 @@ func errorPhaseRefusal(name, mode, reason string, err error) error {
 	if err == nil || !openshell.IsConflict(err) || !strings.Contains(err.Error(), "current phase: Error") {
 		return nil
 	}
+	return errorPhaseError(name, mode, reason)
+}
+
+// errorPhaseNow is errorPhaseRefusal for an operation whose error does not
+// say why (the gateway connection closed under it, as a Docker restart
+// makes it): b's phase as OpenShell reported it after the failure
+// (restorePhase); nil unless that is the error phase (GAP-0337).
+func (m *Manager) errorPhaseNow(b *box) error {
+	m.mu.Lock()
+	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
+	inError := b.sb != nil && auditPhase(b.sb.Status.Phase) == audit.SandboxPhaseError
+	m.mu.Unlock()
+	if !inError {
+		return nil
+	}
+	return errorPhaseError(name, mode, reason)
+}
+
+// connectionClosed reports a call that failed because the client's
+// connection to the OpenShell gateway closed under it (gRPC's "the client
+// connection is closing"), which says nothing to the user.
+func connectionClosed(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "client connection is closing")
+}
+
+// errorPhaseError explains name's error phase, with the way on.
+func errorPhaseError(name, mode, reason string) error {
 	msg := name + " is in OpenShell's error state"
 	if reason != "" {
 		msg += ": " + reason

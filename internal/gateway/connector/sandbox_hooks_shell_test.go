@@ -550,7 +550,9 @@ func TestSandboxHookFailClosedNamesThePrompt(t *testing.T) {
 		}
 		// The reason says what is down and how the user brings it back,
 		// not "sandbox ingress unreachable" (GAP-0272).
-		if !strings.Contains(run.stderr, "its daemon is stopped or restarting") || !strings.Contains(run.stderr, "`defenseclaw-gateway start`") {
+		// A daemon just started takes a moment to answer (GAP-0332).
+		if !strings.Contains(run.stderr, "its daemon is stopped or restarting, or was started less than a minute ago") ||
+			!strings.Contains(run.stderr, "`defenseclaw-gateway start` there if it is stopped, and after a start retries in a minute") {
 			t.Fatalf("%s: stderr %q does not name the stopped daemon and defenseclaw-gateway start", tc.hook, run.stderr)
 		}
 	}

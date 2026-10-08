@@ -547,6 +547,12 @@ func TestDoctorChecks(t *testing.T) {
 
 		{name: "linger off", setup: func(f *doctorFixture) { f.runner.On("loginctl show-user dev", "no\n", nil) },
 			want: []checkWant{{"linger", warn, "stop when you log out"}}, fix: &fixWant{command: "sudo loginctl enable-linger dev", sudo: true}},
+		// A user with neither a session nor linger is unknown to loginctl:
+		// linger is off, in those words (GAP-0317).
+		{name: "linger off, not logged in", setup: func(f *doctorFixture) {
+			f.runner.On("loginctl show-user dev", "Failed to get user: User ID 1009 is not logged in or lingering\n", errors.New("exit status 1"))
+		}, want: []checkWant{{"linger", warn, "off: the gateway and its sandboxes stop when you log out"}},
+			fix: &fixWant{command: "sudo loginctl enable-linger dev", sudo: true}},
 		{name: "service failed", setup: func(f *doctorFixture) {
 			service("LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\n", nil)(f)
 			health(errors.New("connection refused"))(f)
@@ -579,7 +585,7 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "service only linked", setup: unit("active", "linked"),
 			want: []checkWant{{"gateway-service", warn, "does not start at login"}}, fix: &fixWant{command: start, auto: true}},
 		{name: "no user bus", setup: service("Failed to connect to bus: No medium found", errors.New("exit status 1")),
-			want: []checkWant{{"gateway-service", fail, "Failed to connect to bus"}}},
+			want: []checkWant{{"gateway-service", fail, "cannot read the gateway service: this session reaches no systemd user manager"}}},
 		{name: "macOS skips Linux-only checks", setup: func(f *doctorFixture) { f.onBrew() },
 			want: []checkWant{{"landlock", pass, "ABI 6 in the Linux VM Docker runs in"}, {"linger", skip, ""},
 				{"gateway-service", pass, "nvidia/openshell/openshell"},

@@ -434,6 +434,16 @@ func TestSetupCtrlCAtAQuestionSaysWhereItStopped(t *testing.T) {
 		` in place with NVIDIA's installer?": that step was not done, and the steps before it are kept; run `+"`defenseclaw sandbox setup`"+` again`)
 }
 
+// GAP-0343: end of input (Ctrl-D) at a setup question says the same.
+func TestSetupEndOfInputAtAQuestionSaysWhereItStopped(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.In, ta.IO.TTY = strings.NewReader(""), true
+	useGateway(ta)
+	ta.HostDoctor = upgradableReport(nil)
+	wantErr(t, ta.Setup(bg, SetupOptions{}), `setup stopped at "Upgrade OpenShell 0.1.1 to `+openshell.InstallerVersion+
+		` in place with NVIDIA's installer?", whose input ended before an answer (end of input): that step was not done, and the steps before it are kept`)
+}
+
 // upgradableReport is hostReport on OpenShell 0.1.1, which the doctor
 // offers the in-place upgrade to InstallerVersion (its CLI check warns).
 func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {

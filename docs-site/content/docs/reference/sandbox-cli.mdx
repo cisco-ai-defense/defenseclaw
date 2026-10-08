@@ -238,7 +238,11 @@ recorded before DefenseClaw built MicroVM images are `docker`. A gateway boots
 only the images for its driver, and when the list can tell which driver that
 is, a note names the images the gateway does not use. The doctor does not
 count those as built, and on a MicroVM gateway `sandbox image prune` removes
-them. With `--output json` every recorded image is listed, with
+them. After an upgrade, a note names the images another DefenseClaw build
+made: no new sandbox uses them, the next run of each harness builds its image
+for this build (which takes a while; the doctor's **Harness images** check
+says `built by an earlier DefenseClaw build only`), and `sandbox image prune`
+removes the old ones. With `--output json` every recorded image is listed, with
 `"microvm": true` for a MicroVM image, and one Docker no longer has carries
 `"missing": true`.
 
@@ -258,8 +262,9 @@ defenseclaw sandbox image list --output json
 Removes superseded harness images.
 
 - **What it keeps.** The current images and the images the daemon's
-  sandboxes run. It leaves images that another DefenseClaw data directory
-  recorded, or that nothing recorded.
+  sandboxes run. An image another DefenseClaw build made (before an upgrade)
+  is not current, so it goes unless a sandbox runs it. It leaves images that
+  another DefenseClaw data directory recorded, or that nothing recorded.
 - **Stale records.** It forgets, and names, the records of images Docker no
   longer has.
 - **On a MicroVM (vm) gateway**, and only while the daemon answers (without
@@ -267,7 +272,12 @@ Removes superseded harness images.
   images and aliases of superseded harness images. It counts every harness
   image built for the docker driver as superseded, however new it is (images
   recorded before DefenseClaw built MicroVM images are such images). Such an
-  image goes with its run images and aliases unless a sandbox runs it.
+  image goes with its run images and aliases unless a sandbox runs it. Each
+  run configuration (a profile, `--safe`, a key) makes its own run image,
+  and the MicroVM driver prepares a disk of about 5 GB for each; of a
+  current image, prune keeps the run images sandboxes run and the newest
+  other one (for the next run), and removes the rest with their disks, so a
+  deleted sandbox's disk does not stay behind.
 - **On a docker gateway**, or one whose driver it cannot tell, it keeps the
   newest image of both kinds.
 - **MicroVM disks.** With the daemon's list, it also removes the MicroVM
@@ -774,7 +784,8 @@ server with `--no-tty` to get the prompt back at once.
 
 Shows the output of a detached run (`run --detach`) and whether the run is
 still going, finished (with its exit status) or was interrupted. `-f` follows
-the output until the run ends. Once the sandbox is stopped, it shows the last
+the output until the run ends; when the sandbox is stopped under it, it says
+so and how the run ended. Once the sandbox is stopped, it shows the last
 1 MiB of the log that DefenseClaw kept on this machine as it stopped the
 sandbox, whoever stopped it (`stop`, the TUI, the macOS app, `undo`, a tamper
 stop). The agent writes this log, so on a terminal
@@ -942,8 +953,10 @@ and workspace events such as an undo or a copy-mode upload. The feed lives
 in the DefenseClaw daemon's memory: after the daemon restarts it starts
 over, and for a sandbox older than that, `activity` says so first (`the
 feed starts when the DefenseClaw daemon last started (HH:MM:SS); what
-happened before is in defenseclaw-gateway audit export …`). The audit store
-keeps every event. A destination
+happened before is in defenseclaw-gateway audit export …`). An empty feed
+says since when too (`no activity since the DefenseClaw daemon last started
+(HH:MM:SS) …`), also for a sandbox deleted before the restart. The audit
+store keeps every event. A destination
 shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
 `example.com:80`, so an HTTPS and an HTTP request refused at the same host
 are two different lines. An IPv6 address with its port is bracketed:

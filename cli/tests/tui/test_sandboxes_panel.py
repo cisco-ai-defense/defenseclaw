@@ -225,6 +225,15 @@ def test_snapshot_sorts_running_first_and_keeps_only_pending_asks() -> None:
     assert "OpenShell 0.1.1 gateway openshell" in model.headline()
 
 
+def test_off_on_an_account_whose_gateway_another_account_runs_says_so() -> None:
+    """GAP-0307: not "set them up", which stops at the other account's gateway."""
+    model = SandboxesPanelModel()
+    model.set_snapshot({"enabled": False, "gateway_elsewhere": "127.0.0.1:17670 ... another account"}, [], [])
+    assert model.state() == "off"
+    assert model.headline().startswith("Sandboxes are off for this account: another account runs this machine's")
+    assert "Setup (0)" not in model.headline() and "sandbox doctor" in model.off_hint()
+
+
 @pytest.mark.parametrize(
     ("gateway", "text", "note"),
     [
@@ -727,18 +736,21 @@ def test_blocked_lines_read_like_the_cli_feed() -> None:
             _blocked(72, "168.63.129.16", 80, category="host_internal"),
             _blocked(73, "127.0.0.1", 8080, category="host_internal"),
             _blocked(74, "github.com", 22, reason="transparent_tcp_policy_denied", unblockable=True),
+            # GAP-0309: a folded line names the refusals it stands for.
+            _blocked(75, "pypi.org", 443, reason="transparent_tcp_policy_denied", repeats=5),
         ]
     )
     model.view = "activity"
     metadata = "(cloud metadata or link-local address, never reachable from a sandbox)"
     assert [row[3] for row in model.data_table_rows()] == [
+        "pypi.org (no OpenShell rule allows it) (and 5 more like it)",
         "github.com:22 (SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…))",
         "127.0.0.1:8080 (this machine)",
         f"168.63.129.16:80 {metadata}",
         f"169.254.169.254:80 {metadata}",
         f"169.254.169.254:80 {metadata}",
     ]
-    model.cursor = 0
+    model.cursor = 1
     assert dict(model.detail_pairs()[1])["Unblock"] == "no unblock opens SSH: use an HTTPS remote"
 
 

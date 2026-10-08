@@ -428,6 +428,10 @@ The checks that follow from the gateway (its registration, the gateway
 itself, Docker Desktop) are skipped (`not checked: the OpenShell gateway on
 this machine is another account's`), and `sandbox setup` stops at that one
 line instead of asking you to start Docker Desktop or register the gateway.
+`sandbox list`, `sandbox status`, `sandbox run` and the TUI's Sandboxes
+panel say the same in that account (`OpenShell sandboxes are off for this
+account, and another account runs this machine's OpenShell gateway`),
+instead of sending you to `sandbox setup`.
 
 To hand sandboxes to another account, stop the gateway in the account that
 runs it:

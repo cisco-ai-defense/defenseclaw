@@ -137,7 +137,7 @@ The same feed from a real session on a Mac, for a sandbox named with
 | --- | --- |
 | `✓ host` | The sandbox reached a site through the egress proxy. |
 | `✗ host (why)` | The egress proxy blocked a site. The line ends with the unblock command when the block can be lifted. |
-| `⚠` | A finding: DefenseClaw allowed a tool call but recorded something for your review. |
+| `⚠` | A finding: DefenseClaw allowed a tool call but recorded something for your review. `⚠ Bash ran although DefenseClaw rule … matched it` means a rule that blocks such calls matched one it could not decide: DefenseClaw decides only the commands it can read in full, and a shell variable, a substitution or a construct it does not analyze leaves a match undecided. |
 | `✗ tool … blocked` | DefenseClaw's hooks blocked a tool call. The harness shows the reason too. |
 | `? ask …` | The sandbox asks to reach something only you can open, such as a port on your machine. |
 
@@ -403,8 +403,12 @@ session, every tool call is blocked, and the harness shows why with each
 blocked call:
 
 ```text
-defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there (`defenseclaw sandbox doctor` says what is wrong)
+defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there if it is stopped, and after a start retries in a minute (`defenseclaw sandbox doctor` says what is wrong)
 ```
+
+After `defenseclaw-gateway start` the daemon can take up to a minute to
+answer the sandbox again; a call blocked in that minute goes through when
+retried.
 
 The terminal's title says so too, and the bell rings (Claude Code keeps the
 title for itself). When not one hook of the session got through, the run

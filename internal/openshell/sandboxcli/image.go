@@ -530,12 +530,15 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 	driver, driverKnown := a.gatewayDriverKnown(ctx)
 	microVMGateway := image.MicroVMTarget(driver)
 	rows := make([][]string, 0, len(recs))
-	var missing []string
+	var missing, superseded []string
 	unused := 0
 	for _, r := range recs {
 		if gone[r.Tag] {
 			missing = append(missing, fmt.Sprintf("%s (%s %s)", r.Tag, r.Connector, r.HarnessVersion))
 			continue
+		}
+		if r.DefenseClawVersion != manager.ImageVersion() {
+			superseded = append(superseded, r.Tag)
 		}
 		verified := "no"
 		if r.HookFireVerified {
@@ -562,6 +565,11 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 		a.note(fmt.Sprintf("this gateway runs sandboxes on the docker driver and boots only the docker images: it does not use the %s for MicroVMs",
 			plural(int64(unused), "image", "images")))
 	}
+	if len(superseded) > 0 {
+		// An upgrade's images are built on the next run (GAP-0320).
+		a.note(fmt.Sprintf("built by another DefenseClaw build than this one (%s), so no new sandbox uses them: %s; the next run of each harness builds its image "+
+			"for this build, and `%s image prune` removes these unless a sandbox runs one", manager.ImageVersion(), strings.Join(superseded, ", "), CommandName))
+	}
 	if len(missing) > 0 {
 		a.note(fmt.Sprintf("recorded but no longer in Docker: %s; the next run of the harness builds its image again, and `%s image prune` forgets the record",
 			strings.Join(missing, ", "), CommandName))
@@ -587,7 +595,8 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 // removed whatever the list says (staleVMDisks).
 func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	a.defaults()
-	opts := image.PruneOptions{DryRun: dryRun}
+	// Another DefenseClaw build's images are not current (GAP-0320).
+	opts := image.PruneOptions{DryRun: dryRun, DefenseClawVersion: manager.ImageVersion()}
 	vm, _ := openshell.LookupDriver(string(openshell.DriverVM))
 	listed := false
 	if api, err := a.api(); err == nil {

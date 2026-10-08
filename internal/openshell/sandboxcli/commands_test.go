@@ -284,6 +284,12 @@ func TestActivitySaysWhereTheFeedStarts(t *testing.T) {
 	ta.out.Reset()
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "fresh"}))
 	lacks(t, ta.output(), line)
+	// GAP-0330: an empty feed says since when, also for a sandbox that went
+	// before the restart.
+	ta.out.Reset()
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "gone"}))
+	has(t, ta.output(), "no activity since the DefenseClaw daemon last started (", "`defenseclaw-gateway audit export`")
+	lacks(t, ta.output(), "no activity yet")
 }
 
 func TestActivityFollowsTheDaemonsNextFeed(t *testing.T) {
@@ -1511,6 +1517,22 @@ func TestAdminRefusalsSayWhy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// GAP-0338: a sandbox's explain says when its repository policy file
+// changed since it was created, and that it keeps the policy it had.
+func TestPolicyExplainNamesAChangedRepositoryPolicy(t *testing.T) {
+	ta := newTestApp(t, "")
+	file := filepath.Join(t.TempDir(), "sandbox.yaml")
+	if err := os.WriteFile(file, []byte("version: 1\negress: {allow: [example.org]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ta.daemon.explain.RepoPolicy = &sandboxapi.RepoPolicy{Path: file, Digest: "sha256:" + strings.Repeat("0", 64), Tightened: []string{"egress.block"}}
+	ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Sandbox: "box"}))
+	has(t, ta.output(), "the repository policy file changed since box was created; box keeps the policy it was created with")
+	ta.out.Reset()
+	ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Harness: "claude"}))
+	lacks(t, ta.output(), "keeps the policy it was created with")
 }
 
 func TestPolicyShowExplainSuggest(t *testing.T) {

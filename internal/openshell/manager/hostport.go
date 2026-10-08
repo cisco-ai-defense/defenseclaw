@@ -108,6 +108,16 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 		m.hostPortAsk(ctx, b, port, r.Binary)
 		return
 	}
+	if !replayed {
+		// The agent sees only a connection error: its next post-tool hook
+		// says the port is closed and what opens it, as the feed line does
+		// (GAP-0326).
+		note := NotePortClosed
+		if refusal != nil {
+			note = NotePortRefused
+		}
+		m.refusals.noteDirect(id.BindingID, name, openshellHostAlias, port, note, m.now())
+	}
 	// The feed names it blocked (now, or when the port was first denied),
 	// and so do the sandbox's destinations and its egress counts.
 	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: port, at: at, denied: true,

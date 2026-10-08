@@ -208,9 +208,21 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		// session: the feed shows every one.
 		what := firstNonEmpty(d.Tool, d.Event, "a hook event")
 		msg := "⚠ " + what + " allowed but flagged by DefenseClaw"
-		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+		label := sandboxapi.VerdictRuleLabel(reason)
+		if label != "" {
 			// The rule, not the reason's sentence to the agent (GAP-2018).
 			msg += ": " + truncate(label, 200)
+		}
+		if strings.Contains(reason, sandboxapi.UndecidedNote) {
+			// A rule that would have stopped the call matched it, but could
+			// not decide it (GAP-0312).
+			rule := "a DefenseClaw rule that blocks such calls"
+			if label != "" {
+				rule = "DefenseClaw rule " + truncate(label, 200)
+			}
+			msg = "⚠ " + what + " ran although " + rule + " matched it: the rule could not decide the call; " +
+				"DefenseClaw decides only the commands it can read in full " +
+				"(a shell variable, a substitution or a construct it does not analyze leaves a match undecided)"
 		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: severity, Reason: sandboxapi.ReasonHookFinding, Message: msg})

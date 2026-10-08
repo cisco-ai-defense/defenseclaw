@@ -421,7 +421,7 @@ how that host is reached.
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
 | `Policy` | Shown when the project has a [repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml): `repo policy .defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)`, or that the policy was as strict already. |
-| `Asks` | Where the rare asks go while the harness has your terminal: each one rings the bell and is announced in the terminal's title, and you answer it in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). Claude Code keeps the terminal's title for itself, so with Claude Code keep `defenseclaw sandbox approvals --watch --sandbox <name>` (or the TUI's Asks view) open in another terminal. |
+| `Asks` | Where the rare asks go while the harness has your terminal: each one rings the bell and is announced in the terminal's title, and you answer it in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). Claude Code and Codex keep the terminal's title for themselves, so with them keep `defenseclaw sandbox approvals --watch --sandbox <name>` (or the TUI's Asks view) open in another terminal, as with a `--detach` run, whose banner says so. |
 | `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
 | `Hooks` | Shown for user-tier harnesses: what of the harness's hooks the image keeps root-owned and what the agent can still change, for example `user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit (Kiro has no system settings tier) (DefenseClaw stops the sandbox when the harness works for 10m without its hooks)`; under the `open` pack it ends `DefenseClaw alerts when …` instead. It reads the same on every compute driver. The connector pages have the details. |
@@ -1062,7 +1062,10 @@ source. DefenseClaw records those files by their metadata when the session
 starts, so the review flags the ones the session added or changed, and undo
 names each directory it cannot restore with what to do about it: delete
 `node_modules/` and reinstall, or recreate `.venv/`. Undo deletes what the
-session wrote to Python bytecode caches, which Python rebuilds.
+session wrote to Python bytecode caches, which Python rebuilds. What test and
+build tools write to their caches inside `node_modules/` (`.cache`, `.vite`,
+`.vite-temp`, `.vitest`) installs no package, so a session that only ran the
+tests does not flag `node_modules/`.
 
 To have undo restore dependency directories too, turn on
 `openshell.workdir.undo_ignored`:
@@ -1420,7 +1423,10 @@ run warns about them and leaves them off the `Host` line. A connection to
 your machine is a door into it, so the sandbox's first connection to the
 port arrives as an ask for you to approve. Once approved, the session's
 first connection shows in `defenseclaw sandbox activity` as
-`✓ host.openshell.internal:5432 (port 5432 on this machine)`.
+`✓ host.openshell.internal:5432 (port 5432 on this machine)`. A port the
+run did not list stays closed: the feed says so with the flag to add, and
+so does the note the agent gets with its failing tool call (Claude Code,
+Codex, Copilot CLI, Cursor and Devin read it), so its answer names the fix.
 
 The ports DefenseClaw refuses are your account's: its API, hook ingress and
 egress proxy, and the OpenShell gateway. On a machine several accounts use,
@@ -1433,7 +1439,7 @@ sandbox. Approve only a port whose service you know.
 
 | Flag | Effect |
 | --- | --- |
-| `--unmask GLOB` | Share a hidden secret file with the sandbox (repeatable). On a copy the run names each secret-looking file it shared, and says so when a glob matched no file the copy takes: a copy never takes git-ignored files, unmasked or not. |
+| `--unmask GLOB` | Share a hidden secret file with the sandbox (repeatable). On a copy the run names each secret-looking file it shared, and says so when a glob you gave matched no file the copy takes: a copy never takes git-ignored files, unmasked or not. The pack's own `workspace.unmask` entries (templates such as `.env.example`) get no such line. |
 | `--no-mcp` | Leave the harness's MCP servers behind. |
 | `--env KEY=VALUE` | A non-secret environment variable for the sandbox (repeatable). |
 | `--no-snapshot` | Skip the pre-session snapshot, and with it undo (mount mode). |
@@ -1932,8 +1938,8 @@ which runs NVIDIA's installer and sets up the service.
 | The doctor's **vm-identity** check fails, or a create on a Mac says the MicroVM driver runs sandboxes as another uid | The gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid, so the harness images DefenseClaw built for you would not match. Run `defenseclaw sandbox doctor --fix`, which sets them and restarts the gateway. |
 | On macOS, the **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``, or setup marks ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`` | OpenShell was installed outside Homebrew. See [a gateway run another way on macOS](#a-gateway-run-another-way-on-macos). |
 | On Linux, setup marks ``⚠ OpenShell 0.1.1 has no openshell-gateway user service``, then ``⚠ Gateway service: openshell-gateway is not installed; …`` | OpenShell was installed without NVIDIA's installer. See [a gateway run another way on Linux](#a-gateway-run-another-way-on-linux). |
-| ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
-| ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
+| ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. A session that ends while it is down skips its review and keep/undo question and says how to run them once it is back (`sandbox review` and `sandbox undo`, or `sandbox pull` for a copy); the sandbox and its undo point are kept. |
+| ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. ``the OpenShell gateway is not running: nothing listens on 127.0.0.1:17670`` means its service is stopped (or, on Linux, stopped with your login session: the doctor's **systemd linger** row). |
 | ``… rejected the sandbox's model credential (HTTP 401), so Claude Code gets no answers`` | The model provider refused the key the sandbox was given, for example an expired short-term Bedrock key. Put a fresh key in your shell, end the session, and run `defenseclaw sandbox connect <name>` from that shell; see [Choose the model credential](#choose-the-model-credential). |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
 | ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start) | The check after ready found the sandbox other than DefenseClaw prepared it, on any compute driver, and the reason follows the message: the workload runs as another uid or holds capabilities, a hook, launcher or managed-settings file is missing, changed, not root-owned or writable, or (Linux) a per-run settings file is not on a read-only mount. Nothing of the sandbox kept running. Rebuild the harness image (`defenseclaw sandbox image build <harness> --force`) and run again; on a Mac, a uid mismatch is fixed by `defenseclaw sandbox doctor --fix`. If it repeats, keep the reason for a bug report. |

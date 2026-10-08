@@ -1086,6 +1086,10 @@ func (r *doctorRun) checkLinger(ctx context.Context) {
 	out, err := r.Runner.Output(ctx, Command{Name: "loginctl", Args: []string{"show-user", name, "--property=Linger", "--value"}, Timeout: 10 * time.Second})
 	fix := &Fix{Summary: "let your user services (the OpenShell gateway) keep running after you log out", Command: "sudo loginctl enable-linger " + shellQuote(name), Sudo: true}
 	switch v := strings.TrimSpace(string(out)); {
+	case err != nil && strings.Contains(v, "is not logged in or lingering"):
+		// loginctl knows no user that has neither a session nor linger
+		// (GAP-0317): linger is off.
+		c.Status, c.Detail, c.Fix = StatusWarn, "off: the gateway and its sandboxes stop when you log out", fix
 	case err != nil:
 		c.Status, c.Detail, c.Fix = StatusWarn, "could not query loginctl: "+strings.TrimSpace(v+" "+err.Error()), fix
 	case v == "yes":
@@ -1101,6 +1105,11 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	st, err := r.Gateway.ServiceState(ctx)
 	if err != nil {
 		c.Status, c.Detail = StatusFail, err.Error()
+		if r.GOOS == "linux" && strings.Contains(err.Error(), "Failed to connect to bus") {
+			// systemctl's words for a session without a user manager
+			// (GAP-0317); the fix below says what to do.
+			c.Detail = "cannot read the gateway service: this session reaches no systemd user manager"
+		}
 		switch {
 		case r.GOOS == "linux":
 			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}

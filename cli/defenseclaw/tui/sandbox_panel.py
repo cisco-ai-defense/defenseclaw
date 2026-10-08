@@ -1071,7 +1071,7 @@ class SandboxPanelMixin:
         # A wrapper runs `sandbox run`, so while sandboxes cannot run the
         # plain command would fail in every new shell; enable refuses then.
         blocked = {
-            "off": "Sandboxes are off; run the Sandbox wizard (0 Setup) first",
+            "off": model.off_hint(),
             "unavailable": "Sandboxes are unavailable; see: defenseclaw sandbox doctor",
             # Before the first snapshot the state is unknown; offering "Turn
             # on" then ran an enable the command refused (GAP-1371).
@@ -1113,7 +1113,7 @@ class SandboxPanelMixin:
             return
         model = self.sandbox_model
         if model.state() == "off":
-            self.notify_toast("info", "Sandboxes are off; run the Sandbox wizard (0 Setup) first.")  # type: ignore[attr-defined]
+            self.notify_toast("info", f"{model.off_hint()}.")  # type: ignore[attr-defined]
             return
         choices = harness_choices(model.harnesses, model.admin.allowed_harnesses)
         if not choices:

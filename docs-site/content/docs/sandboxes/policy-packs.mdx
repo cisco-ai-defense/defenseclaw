@@ -840,8 +840,11 @@ review list of every session, so a change to it is called out at the end.
 The launch banner names it (`Policy  repo policy .defenseclaw/sandbox.yaml:
 tightened 3 settings (…)`), `policy show` says what it tightened,
 `policy explain` lists it with its digest, and every setting it tightened
-has the source `repo` with the value it replaced. `openshell.admin` still
-applies on top.
+has the source `repo` with the value it replaced. A running sandbox keeps
+the repository policy it was created with: when the file changes on the
+host, `policy explain --sandbox NAME` says so, and the change applies to
+the next new run (which refuses it if it loosens the policy).
+`openshell.admin` still applies on top.
 
 ## Record, then lock
 

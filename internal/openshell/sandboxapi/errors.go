@@ -61,6 +61,19 @@ const (
 // false: sandbox run, connect and list, the gateway API and the manager.
 const DisabledMessage = "OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on"
 
+// OffMessage is DisabledMessage for st, which reports sandboxes off: for an
+// account whose setup would stop at another account's gateway it says so,
+// with the way on, instead of sending the user to setup first (GAP-0307).
+func (st *Status) OffMessage() string {
+	if st == nil || st.GatewayElsewhere == "" {
+		return DisabledMessage
+	}
+	return "OpenShell sandboxes are off for this account, and another account runs this machine's OpenShell gateway (" +
+		st.GatewayElsewhere + "); one gateway runs on a machine, under the account that started it: run sandboxes from " +
+		"that account, or have it hand its gateway over, then run `defenseclaw sandbox setup` here " +
+		"(`defenseclaw sandbox doctor` names the hand-over command)"
+}
+
 // AdminMessage is the sentence every admin refusal starts with.
 const AdminMessage = "blocked by your organization's DefenseClaw policy"
 

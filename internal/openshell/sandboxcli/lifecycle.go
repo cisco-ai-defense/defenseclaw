@@ -181,6 +181,10 @@ func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
 func (a *App) printStatus(st *sandboxapi.Status) {
 	row := func(k, v string) { a.line(fmt.Sprintf("%-16s%s", k, v)) }
 	state := "off (run `" + CommandName + " setup`)"
+	if st.GatewayElsewhere != "" {
+		// Setup would stop at the other account's gateway (GAP-0307).
+		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
+	}
 	if st.Enabled {
 		state = "on"
 	}
@@ -908,6 +912,14 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	// tail's inside the sandbox and exit runNoLog without a log.
 	code, err := a.Streamer.Stream(ctx, inv, out, a.IO.Err)
 	_ = flush()
+	if o.Follow && ctx.Err() == nil {
+		// A stop under the follower ends its stream: it says so, as a later
+		// `sandbox logs` does, where it ended without a word (GAP-0318).
+		if now, gerr := api.Get(ctx, o.Name); gerr == nil && now.Phase != "ready" {
+			a.stoppedUnderFollower(ctx, api, now)
+			return nil
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -978,6 +990,12 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 		what = "the log of its detached run started " + a.clock(kept.StartedAt) + ","
 	}
 	a.note(fmt.Sprintf("%s is %s; this is %s kept when it stopped (%s)", sb.Name, sb.Phase, what, a.clock(kept.KeptAt)))
+	a.keptRunState(kept)
+	return nil
+}
+
+// keptRunState says how the run of a kept log ended.
+func (a *App) keptRunState(kept *sandboxapi.RunLog) {
 	switch kept.State {
 	case sandboxapi.RunExited:
 		a.note("the run exited with status " + kept.Exit)
@@ -986,5 +1004,18 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 	case sandboxapi.RunRunning:
 		a.note("the run was still going when the log was kept")
 	}
-	return nil
+}
+
+// stoppedUnderFollower ends `sandbox logs -f` of a sandbox that stopped
+// while it followed: what stopped, and how the run ended, from the log
+// DefenseClaw kept.
+func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.Sandbox) {
+	kept, err := api.RunLog(ctx, sb.Name, 1)
+	if err != nil || kept == nil {
+		a.warn(sb.Name + " is " + sb.Phase + ", so its run log ends here")
+		return
+	}
+	a.note(fmt.Sprintf("%s is %s (%s); DefenseClaw kept the log of its detached run (`%s logs %s` shows it)",
+		sb.Name, sb.Phase, a.clock(kept.KeptAt), CommandName, sb.Name))
+	a.keptRunState(kept)
 }

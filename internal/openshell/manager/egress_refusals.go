@@ -18,6 +18,7 @@ package manager
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,11 +72,15 @@ type EgressRefusal struct {
 
 // What an EgressRefusal tells besides a block: OpenShell refused SSH, whose
 // remedy is HTTPS (GAP-0216); a connection waits for the user to answer an
-// ask (GAP-0268); the user declined the ask (GAP-0236).
+// ask (GAP-0268); the user declined the ask (GAP-0236); a port on the
+// user's machine is closed because the run did not declare it, or because
+// the sandbox policy opens none (GAP-0326).
 const (
-	NoteSSH      = "ssh"
-	NoteAsked    = "asked"
-	NoteDeclined = "declined"
+	NoteSSH         = "ssh"
+	NoteAsked       = "asked"
+	NoteDeclined    = "declined"
+	NotePortClosed  = "port_closed"
+	NotePortRefused = "port_refused"
 )
 
 // refusalMemory is the recent CONNECT refusals of every sandbox binding.
@@ -337,6 +342,15 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 		case NoteDeclined:
 			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NoteDeclined, Note: NoteDeclined,
 				What: "the user declined it", Remedy: "do not try it again unless the user says so"})
+			continue
+		case NotePortClosed:
+			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NotePortClosed, Note: NotePortClosed,
+				What:   "a port on the user's machine the run did not declare",
+				Remedy: "tell the user: running the sandbox again with --host-port " + strconv.Itoa(h.port) + " makes DefenseClaw ask them about it"})
+			continue
+		case NotePortRefused:
+			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NotePortRefused, Note: NotePortRefused,
+				What: "a port on the user's machine the sandbox policy does not open", Remedy: "do not try it again unless the user says so"})
 			continue
 		}
 		if _, lifted := m.EgressUnblock(bindingID, name, h.host); lifted {
