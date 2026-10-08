@@ -81,6 +81,25 @@ ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
 REPO_POLICY_PATH = ".defenseclaw/sandbox.yaml"
 
 
+def detached_run_text(run: Any, name: str) -> str:
+    """The detail's line for the detached run whose log a stop kept, or "" (GAP-0273).
+
+    ``run`` is ``GET .../logs`` (state, exit, started_at), which the daemon
+    keeps whenever it stops the sandbox.
+    """
+    data = _dict(run)
+    outcome = {
+        "exited": f"finished: exited with status {_text(data.get('exit')) or '?'}",
+        "interrupted": "did not finish: the sandbox stopped while it ran",
+        "running": "was still going when the sandbox stopped",
+    }.get(_text(data.get("state")), "")
+    if not outcome:
+        return ""
+    started = _time(data.get("started_at"))
+    when = f", started {started.astimezone().strftime('%H:%M')}" if started else ""
+    return f"{outcome}{when} · log: defenseclaw sandbox logs {name}"
+
+
 def branch_name_problem(value: str) -> str | None:
     """Why the TUI's Pull cannot use a branch name, or None; git judges the rest (GAP-0266)."""
     name = value.strip()
@@ -1884,12 +1903,13 @@ class SandboxesPanelModel:
         note = f"+{more} more · Enter" if more else "Enter for details"
         return f"⚠ {row.name}: {alert}", note
 
-    def detail_pairs(self, destinations: Any = None) -> tuple[str, tuple[tuple[str, str], ...]]:
+    def detail_pairs(self, destinations: Any = None, *, run: str = "") -> tuple[str, tuple[tuple[str, str], ...]]:
         """Title and label/value pairs for the detail modal.
 
         ``destinations`` is the selected sandbox's ``GET .../destinations``
         answer (the panel fetches it as the detail opens), or an error
-        string; ``None`` leaves the Destinations section out.
+        string; ``None`` leaves the Destinations section out. ``run`` is the
+        kept detached run's line (detached_run_text).
         """
         if self.view == "activity":
             event = self.selected_event()
@@ -1970,6 +1990,8 @@ class SandboxesPanelModel:
             ("Sites", f"{row.destinations} contacted, {row.blocked} blocked{_ai_sites_text(row)}"),
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked" + (f", {row.tool_asked} asked)" if row.tool_asked else ")")),
         ]
+        if run:
+            pairs.append(("Detached run", run))
         if row.hook_events_text:
             pairs.append(("Hook events", row.hook_events_text))
         if row.last_blocked:

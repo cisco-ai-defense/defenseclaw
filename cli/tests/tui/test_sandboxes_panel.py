@@ -396,6 +396,29 @@ async def test_the_sandbox_detail_shows_its_destinations_at_80x24(fetch, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_stopped_sandbox_detail_says_how_its_detached_run_ended(fetch, monkeypatch) -> None:
+    # GAP-0273: only `sandbox logs` said a detached run finished or was cut.
+    from defenseclaw.tui.services.sandbox_state import detached_run_text
+
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls({"name": "docs", "state": "interrupted", "started_at": "2026-10-08T07:15:00Z", "log": "x"})
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        stopped = next(row for row in app.sandbox_model.rows if row.name == "docs")
+        running = next(row for row in app.sandbox_model.rows if row.running)
+        text = await app._fetch_sandbox_run(stopped)  # noqa: SLF001
+        assert await app._fetch_sandbox_run(running) == ""  # noqa: SLF001 - no call for a running one
+    assert text.startswith("did not finish: the sandbox stopped while it ran, started ")
+    assert text.endswith(" · log: defenseclaw sandbox logs docs")
+    assert calls.calls == [("sandbox_run_log", ("docs",), {"lines": 1})]
+    assert detached_run_text({"state": "exited", "exit": "0"}, "night-un") == (
+        "finished: exited with status 0 · log: defenseclaw sandbox logs night-un"
+    )
+    assert detached_run_text({}, "docs") == ""
+
+
+@pytest.mark.asyncio
 async def test_a_detail_says_why_its_destinations_are_unavailable(monkeypatch) -> None:
     from defenseclaw.gateway import SandboxAPIError
 

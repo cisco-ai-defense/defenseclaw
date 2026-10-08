@@ -61,6 +61,7 @@ from defenseclaw.tui.services.sandbox_state import (
     SandboxesPanelModel,
     SandboxPanelAction,
     branch_name_problem,
+    detached_run_text,
     fit,
     harness_command,
     review_pairs,
@@ -751,6 +752,20 @@ class SandboxPanelMixin:
         except SandboxAPIError as exc:
             return f"unavailable: {exc.plain()}"
 
+    async def _fetch_sandbox_run(self, row: Any) -> str:
+        """How a stopped sandbox's last detached run ended, from the log its stop kept, or "".
+
+        One call as the detail opens (GAP-0273); a sandbox without a kept log
+        has no line.
+        """
+        if row is None or row.running:
+            return ""
+        try:
+            kept = await self._sandbox_call("sandbox_run_log", row.name, lines=1)
+        except SandboxAPIError:
+            return ""
+        return detached_run_text(kept, row.name)
+
     async def _open_sandbox_detail(self) -> None:
         model = self.sandbox_model
         selected = model.selected_sandbox() if model.view == "sandboxes" else None
@@ -762,7 +777,8 @@ class SandboxPanelMixin:
                 payload = await asyncio.to_thread(fetch_sandbox_processes, getattr(self, "config", None), selected.name)
             model.set_processes(selected.name, payload)
         destinations = await self._fetch_sandbox_destinations(selected.name) if selected is not None else None
-        title, pairs = model.detail_pairs(destinations)
+        run = await self._fetch_sandbox_run(selected)
+        title, pairs = model.detail_pairs(destinations, run=run)
         keys, keys_hint = self._sandbox_detail_keys()
         key: str | None = None
         try:
