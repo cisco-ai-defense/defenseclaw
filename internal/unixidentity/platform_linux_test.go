@@ -10,7 +10,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +96,7 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 			service = "winbind"
 		}
 		f.results["-s "+service+" passwd "+strconv.Itoa(uid)] = line
+		f.results["-s "+service+" passwd "+name] = line
 		f.results["initgroups "+name] = commandResult{stdout: []byte(name + " 70000\n")}
 	}
 	type view struct {
@@ -122,18 +126,84 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	}
 	// With winbind use default domain only the names of other domains are
 	// qualified, and realmd reports the format %U.
-	if realm, ok := realmFor("emea", useridentity.SourceWinbind, []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}); ok {
+	if realm, ok := realmFor("emea", useridentity.SourceWinbind, []Realm{{Domain: "corp.example.com", ClientSoftware: "winbind", NetBIOS: netBIOSName([]string{"%U"})}}, nil); ok {
 		t.Errorf("a trusted NetBIOS domain took the realm %+v", realm)
 	}
 }
 
-func TestBareSSSDAccountDoesNotInheritUnverifiedRealm(t *testing.T) {
-	realm := []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM",
-		ServerSoftware: "active-directory", ClientSoftware: "sssd"}}
-	facts := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Domain: "ldap"}
-	applyRealm(&facts, "bob@LDAP", realm)
-	if facts.Directory != "" || facts.Domain != "ldap" || facts.Realm != "" || facts.Principal != "" {
-		t.Fatalf("unrelated SSSD account inherited AD realm: %+v", facts)
+// A bare SSSD name (use_fully_qualified_names = False) takes the joined
+// realm only when SSSD resolves name@domain to the same account (GAP-0497):
+// not an account of a plain LDAP domain, not one that shares its short name
+// with an AD account, and not when SSSD does not answer. Nor does an LDAP
+// account named by an e-mail address in the joined domain, which SSSD
+// resolves to the AD account of that short name (GAP-0568). The LDAP carol,
+// whose short name SSSD resolves to the AD carol, does not get the AD
+// carol's groups either (GAP-0563). Each name is asked of the SSSD
+// responder: SSSD's memory cache answers a name with the entry the uid
+// lookup just stored under it, the account itself.
+func TestBareSSSDAccountTakesOnlyTheRealmSSSDConfirms(t *testing.T) {
+	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
+	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
+	dir := t.TempDir()
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM",
+			ServerSoftware: "active-directory", ClientSoftware: "sssd"}}, nil
+	}
+	line := func(name string, uid int) commandResult {
+		id := strconv.Itoa(uid)
+		return commandResult{stdout: []byte(name + ":*:" + id + ":" + id + "::/home/" + name + ":/bin/bash\n")}
+	}
+	f := &fakeRun{results: map[string]commandResult{}, errs: map[string]error{}}
+	memcache := map[string]commandResult{}
+	for uid, name := range map[int]string{80001: "alice", 80002: "bob", 80003: "carol", 80004: "dave", 80005: "erin@corp.example.com"} {
+		f.results["passwd "+strconv.Itoa(uid)] = line(name, uid)
+		f.results["-s sss passwd "+strconv.Itoa(uid)] = line(name, uid)
+		memcache["-s sss passwd "+name] = line(name, uid)
+	}
+	f.results["-s sss passwd alice@corp.example.com"] = line("alice", 80001)
+	f.results["-s sss passwd carol@corp.example.com"] = line("carol", 90003)
+	f.errs["-s sss passwd dave@corp.example.com"] = context.DeadlineExceeded
+	f.results["-s sss passwd erin@corp.example.com"] = line("erin", 90005)
+	r := newFakeNSS(f)
+	r.runner = func(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error) {
+		if cached, ok := memcache[strings.Join(args, " ")]; ok && !slices.Contains(commandEnv(ctx), "SSS_NSS_USE_MEMCACHE=NO") {
+			return cached, nil
+		}
+		return f.run(ctx, path, args, filters...)
+	}
+	for uid, principal := range map[int]string{80001: "alice@corp.example.com", 80002: "", 80003: "", 80004: "", 80005: ""} {
+		facts, err := r.DirectoryFactsWithoutGroupsForUID(uid, time.Now())
+		if err != nil {
+			t.Fatalf("uid %d: %v", uid, err)
+		}
+		want := useridentity.DirectoryFacts{Source: useridentity.SourceSSSD}
+		if principal != "" {
+			want = useridentity.DirectoryFacts{Source: useridentity.SourceSSSD, Directory: useridentity.DirectoryActiveDirectory,
+				Domain: "corp.example.com", Realm: "CORP.EXAMPLE.COM", Principal: principal}
+		}
+		got := useridentity.DirectoryFacts{Source: facts.Source, Directory: facts.Directory, Domain: facts.Domain,
+			Realm: facts.Realm, Principal: facts.Principal}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("uid %d = %+v, want %+v", uid, got, want)
+		}
+	}
+	f.results["-s sss passwd alice"] = line("alice", 80001)
+	f.results["-s sss passwd carol"] = line("carol", 90003)
+	f.results["initgroups alice"] = commandResult{stdout: []byte("alice 80001 5000\n")}
+	f.results["initgroups carol"] = commandResult{stdout: []byte("carol 90003 5000\n")}
+	f.results["group 5000 80001"] = commandResult{stdout: []byte("domain users:*:5000:\nalice:*:80001:\n")}
+	f.results["group 80003"] = commandResult{stdout: []byte("ldap-devs:*:80003:\n")}
+	for uid, want := range map[int][]string{80001: {"domain users", "alice"}, 80003: {"ldap-devs"}} {
+		if facts, err := r.DirectoryFactsForUID(uid, time.Now()); err != nil || !reflect.DeepEqual(facts.Groups, want) {
+			t.Errorf("uid %d groups = %q, %v; want %q", uid, facts.Groups, err, want)
+		}
 	}
 }
 
@@ -169,10 +239,11 @@ func TestFailedRealmdQueryDoesNotCacheEmptyRealms(t *testing.T) {
 	}
 	const name = "alice@corp.example.com"
 	f := &fakeRun{results: map[string]commandResult{
-		"passwd 80001":        {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
-		"-s sss passwd 80001": {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
-		"initgroups " + name:  {stdout: []byte(name + " 80001\n")},
-		"group 80001":         {stdout: []byte(name + ":*:80001:\n")},
+		"passwd 80001":          {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
+		"-s sss passwd 80001":   {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
+		"-s sss passwd " + name: {stdout: []byte(name + ":*:80001:80001::/home/alice:/bin/bash\n")},
+		"initgroups " + name:    {stdout: []byte(name + " 80001\n")},
+		"group 80001":           {stdout: []byte(name + ":*:80001:\n")},
 	}}
 	if facts, err := newFakeNSS(f).DirectoryFactsForUID(80001, time.Now()); err == nil {
 		t.Fatalf("realmd failure produced cacheable facts: %+v", facts)
