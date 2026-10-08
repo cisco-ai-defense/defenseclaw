@@ -192,11 +192,16 @@ runs in a session of its own, as a Codex 0.160 thread does, is not counted. The
 Secure Client profile keeps its existing agent IDs and gets no new attributes.
 
 A record carries an `ais-` ID only when its hook belongs to a session. Hermes
-sends `transform_terminal_output` with the task of the terminal call but no
-session; the gateway gives it the session that the `pre_tool_call` of that task
-named, so it carries the same `ais-`. The OpenCode `defenseclaw.plugin.loaded`
+sends `transform_terminal_output` without a session; the gateway gives it the
+session that the `pre_tool_call` of its task named or, when it names no task
+(Hermes 0.21), the session of the last `pre_tool_call` of the same agent within
+ten minutes, so it carries the same `ais-`. The OpenCode `defenseclaw.plugin.loaded`
 record is sent when the plugin loads, before any session exists, so it carries
-the `agt-` ID and no `ais-`.
+the `agt-` ID and no `ais-`. A denial of the foreign-hook guard (an unapproved
+plugin or hook) carries the `agt-` ID, and an `ais-` only when the hook named
+its session: the guard keys a block on the agent process, so the OpenCode
+plugin sends none with its `defenseclaw.plugin.loaded` and `tool.execute.before`
+denials.
 
 Claude Code and Codex name a sub-agent on every hook it makes, so each of those
 hooks carries the sub-agent's `ais-` at depth one with the main agent as its

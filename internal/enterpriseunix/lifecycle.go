@@ -2099,7 +2099,7 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 	// descriptor that account opened while it could write was applied by
 	// the follow-up transaction (GAP-0524).
 	if env.installedConfigWritable() != "" {
-		return
+		return false
 	}
 	path := env.P(env.Layout.ConfigPath)
 	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {

@@ -525,8 +525,12 @@ type enterpriseHookReconcileRow struct {
 }
 
 type enterpriseHookReconcileRun struct {
-	Manifest            string
-	ManifestSHA256      string
+	Manifest       string
+	ManifestSHA256 string
+	// Targets are the targets of the manifest the run reconciled (standalone
+	// Unix only): under manifest enrollment they, not the eligible-accounts
+	// record, say who is enrolled (GAP-0761).
+	Targets             []enterprisehooks.ManifestTarget
 	Rows                []enterpriseHookReconcileRow
 	Failures            int
 	Pending             int

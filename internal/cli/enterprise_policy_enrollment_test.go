@@ -61,6 +61,15 @@ func TestEnterprisePolicyShowSaysWhyTheUserIsNotEnrolled(t *testing.T) {
 	if target, err := enterprisePolicyTarget(current.Uid); err != nil || strconv.Itoa(target.UID) != current.Uid {
 		t.Fatalf("policy target by uid %s = %+v, %v", current.Uid, target, err)
 	}
+	// The resolver the hooks step uses still answers after the lookup
+	// context of the policy target has ended: it was bound to it, so every
+	// directory account failed with "getent timed out: context canceled"
+	// (GAP-0740).
+	t.Cleanup(func() { enterprisehooks.SetStandaloneResolver(nil) })
+	uid, _ := strconv.Atoi(current.Uid)
+	if _, err := enterprisehooks.StandaloneResolver().LookupUID(uid); err != nil {
+		t.Fatalf("the hooks step resolver fails after policy target returned: %v", err)
+	}
 	enterprisePolicyJSON = true
 	out, _ = runPolicyCommand(t, runEnterprisePolicyShow)
 	var report enterprisePolicyReport

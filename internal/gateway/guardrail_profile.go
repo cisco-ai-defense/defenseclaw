@@ -160,6 +160,9 @@ type guardrailProfileSet struct {
 	missing map[string]*profileRulePackRetry
 	// matches memoises match for repeated subjects.
 	matches *profileMatchCache
+	// groupSIDs holds the SIDs of the assignment group names on standalone
+	// Windows, where groups match on SIDs only (GAP-0860); nil elsewhere.
+	groupSIDs *profileGroupSIDs
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -184,6 +187,9 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 		rules:          make(map[string]*compiledRulePackCategories),
 		packs:          make(map[string]*guardrail.RulePack),
 		matches:        newProfileMatchCache(),
+	}
+	if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && profileGroupSIDLookup != nil {
+		set.groupSIDs = newProfileGroupSIDs(set.assignments, profileGroupSIDLookup, profileGroupSIDWait)
 	}
 	if cache == nil {
 		cache = guardrail.NewRulePackCache()
@@ -775,6 +781,10 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 		return set.matchUncached(subject, source, connectorName, agent)
 	}
 	key := profileMatchKey(subject, source, connectorName, agent)
+	if set.groupSIDs != nil {
+		set.groupSIDs.refresh(time.Now())
+		key = set.groupSIDs.matchKey(key)
+	}
 	if decision, ok := set.matches.get(key); ok {
 		return decision
 	}
@@ -788,7 +798,7 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 		return set.matchWithFailedLookup(subject, source, connectorName, agent)
 	}
 	verified := subject != nil && source != ""
-	groups := &subjectGroups{}
+	groups := &subjectGroups{sids: set.groupSIDs}
 	if verified {
 		groups.list = subject.Groups
 	}
@@ -985,6 +995,10 @@ func subjectInDomain(subject *profileSubject, domain string) bool {
 type subjectGroups struct {
 	list  []string
 	built bool
+	// sids, on standalone Windows, gives each group name an assignment
+	// writes its SID: the name matches the SID of the group and nothing
+	// else (GAP-0860).
+	sids *profileGroupSIDs
 	// exact holds every group, tails the name part after the last
 	// backslash of those that have one, both folded.
 	exact, tails map[string]struct{}
@@ -997,6 +1011,14 @@ func (g *subjectGroups) has(want string) bool {
 	}
 	if !g.built {
 		g.build()
+	}
+	if g.sids != nil && profileGroupNeedsSID(want) {
+		sid, ok := g.sids.sid(want)
+		if !ok {
+			return false
+		}
+		_, ok = g.exact[foldKey(sid)]
+		return ok
 	}
 	key := foldKey(want)
 	if _, ok := g.exact[key]; ok {

@@ -148,6 +148,16 @@ func restoreEnterprisePolicyDirs(stderr io.Writer) {
 	}
 }
 
+// enterpriseHookManifestEnrollment reports a standalone deployment whose
+// administrator publishes the targets (enterprise.enrollment.mode manifest).
+// Its enumerator is idle, so the eligible-accounts record is what the last
+// auto pass left, and only the accounts the manifest enrolls count
+// (GAP-0761).
+func enterpriseHookManifestEnrollment() bool {
+	return cfg != nil && cfg.StandaloneEnterprise() &&
+		strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest)
+}
+
 // enterpriseHookEnrolledAccountRows is the run's rows plus one row for each
 // eligible account the enumerator published that has none. Rows exist only
 // for per-user hook connectors: a deployment that selects only the
@@ -156,8 +166,7 @@ func restoreEnterprisePolicyDirs(stderr io.Writer) {
 func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
 	rows := append([]enterpriseHookReconcileRow(nil), run.Rows...)
 	manifest := strings.TrimSpace(run.Manifest)
-	if manifest == "" || (cfg != nil && cfg.StandaloneEnterprise() &&
-		strings.EqualFold(strings.TrimSpace(cfg.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest)) {
+	if manifest == "" || enterpriseHookManifestEnrollment() {
 		return rows
 	}
 	accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifest))

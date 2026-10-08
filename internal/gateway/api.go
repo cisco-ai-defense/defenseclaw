@@ -282,6 +282,7 @@ type APIServer struct {
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
 	copilotSubagents                  []copilotPendingSubagent
+	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState
