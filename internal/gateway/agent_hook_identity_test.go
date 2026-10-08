@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -136,6 +137,42 @@ func TestHermesTerminalOutputTakesTheSessionOfItsTask(t *testing.T) {
 	tasks.fill(&other)
 	if other.SessionID != "" {
 		t.Fatalf("another identity took session %q", other.SessionID)
+	}
+}
+
+func TestHermesTaskSessionSkipsOversizeTaskID(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+
+	taskID := strings.Repeat(" ", 4*1024) + "x"
+	var tasks hermesTaskSessions
+	pre := agentHookRequest{
+		ConnectorName: "hermes", AgentIdentityID: "agt-1", SessionID: "session-1",
+		Payload: map[string]interface{}{"extra": map[string]interface{}{"task_id": taskID}},
+	}
+	tasks.fill(&pre)
+	if len(tasks.sessions) != 0 {
+		t.Fatalf("oversize task ID retained in %d cache entries", len(tasks.sessions))
+	}
+
+	output := agentHookRequest{
+		ConnectorName: "hermes", AgentIdentityID: "agt-1",
+		Payload: map[string]interface{}{"extra": map[string]interface{}{"task_id": taskID}},
+	}
+	tasks.fill(&output)
+	if output.SessionID != "" {
+		t.Fatalf("oversize task ID recovered session %q", output.SessionID)
+	}
+
+	longSession := agentHookRequest{
+		ConnectorName: "hermes", AgentIdentityID: "agt-1",
+		SessionID: strings.Repeat("s", 4*1024+1),
+		Payload:   map[string]interface{}{"extra": map[string]interface{}{"task_id": "task-2"}},
+	}
+	tasks.fill(&longSession)
+	if len(tasks.sessions) != 0 {
+		t.Fatalf("oversize session ID retained in %d cache entries", len(tasks.sessions))
 	}
 }
 

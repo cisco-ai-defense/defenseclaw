@@ -10,8 +10,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// hermesTaskSessionsMax bounds the remembered Hermes tasks.
-const hermesTaskSessionsMax = 4096
+// Bound the number of remembered tasks and each retained task and session ID.
+const (
+	hermesTaskSessionsMax = 4096
+	hermesTaskIDMaxBytes  = 4 * 1024
+)
 
 // hermesTaskSessions remembers the session of each Hermes task. Hermes sends
 // transform_terminal_output with the task id of the terminal call
@@ -35,6 +38,10 @@ func (m *hermesTaskSessions) fill(req *agentHookRequest) {
 	}
 	extra, _ := req.Payload["extra"].(map[string]interface{})
 	task, _ := extra["task_id"].(string)
+	// TrimSpace may leave a short view retaining the original large string.
+	if len(task) > hermesTaskIDMaxBytes || len(req.SessionID) > hermesTaskIDMaxBytes {
+		return
+	}
 	if task = strings.TrimSpace(task); task == "" {
 		return
 	}
