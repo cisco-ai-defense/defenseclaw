@@ -421,3 +421,19 @@ def test_cursor_status_names_missing_prompt_hook(monkeypatch):
     result = CliRunner().invoke(cmd_guardrail.guardrail, ["status", "--json"], obj=app, catch_exceptions=False)
     assert result.exit_code == 0
     assert "beforeSubmitPrompt" in json.loads(result.output)["warnings"][-1]
+
+
+def test_secure_client_hides_profile_command(monkeypatch):
+    from defenseclaw.commands import cmd_status
+
+    app = AppContext()
+    app.cfg = default_config()
+    monkeypatch.setattr(cmd_status, "_enterprise_profile", lambda cfg: "secure_client")
+    runner = CliRunner()
+    help_result = runner.invoke(cmd_guardrail.guardrail, ["--help"], obj=app)
+    assert help_result.exit_code == 0, help_result.output
+    assert "profile" not in help_result.output
+
+    command_result = runner.invoke(cmd_guardrail.guardrail, ["profile", "list", "--json"], obj=app)
+    assert command_result.exit_code == 2
+    assert "No such command" in command_result.output
