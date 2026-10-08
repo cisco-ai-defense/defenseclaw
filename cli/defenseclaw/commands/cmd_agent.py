@@ -3680,9 +3680,13 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
     secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     pins, require_pins = ai_signatures.pack_pins(cfg)
+    configured = list(cfg.ai_discovery.signature_packs)
+    if secure_client:
+        # Secure Client v8 still discovers every pack in this directory.
+        configured.insert(0, str(ai_signatures.signature_pack_dir(cfg.data_dir) / "*.json"))
     try:
         sigs, refused = ai_signatures.load_ai_signature_catalog(
-            signature_packs=cfg.ai_discovery.signature_packs,
+            signature_packs=configured,
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,
@@ -3729,19 +3733,60 @@ def signatures_validate(pack_path: Path, as_json: bool) -> None:
 @click.option("--replace", is_flag=True, help="Replace an installed pack with the same pack id.")
 @pass_ctx
 def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
-    """Install a validated pack into the managed signature-pack directory and
-    add it to ai_discovery.signature_packs, the only packs discovery loads."""
+    """Install a validated pack and configure it for standalone discovery."""
+    from defenseclaw import config_writer
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+    from defenseclaw.config import config_path_for_data_dir
+
     cfg = _require_loaded_config(app)
     configured = list(getattr(cfg.ai_discovery, "signature_packs", []) or [])
+    secure_client = _enterprise_profile(cfg) == "secure_client"
+    if secure_client:
+        # Match the v8 command: install into the directory without a config
+        # write. The Secure Client gateway discovers that directory itself.
+        try:
+            legacy_packs = sorted(ai_signatures.signature_pack_dir(cfg.data_dir).glob("*.json"))
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=cfg.data_dir, signature_packs=[str(path) for path in legacy_packs],
+                replace=replace,
+            )
+        except ai_signatures.SignaturePackError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Installed signature pack: {dest}")
+        return
+
+    config_path = config_path_for_data_dir(cfg.data_dir)
     try:
-        dest = ai_signatures.install_signature_pack(
-            pack_path, data_dir=cfg.data_dir, signature_packs=configured, replace=replace
-        )
+        # A managed refusal must happen before an existing pack is replaced.
+        config_writer.refuse_when_managed(config_path)
+        with config_writer.hold_lock(config_path):
+            config_writer.refuse_when_managed(config_path)
+            dest = ai_signatures.signature_pack_destination(pack_path, cfg.data_dir)
+            previous = dest.read_bytes() if dest.exists() else None
+            previous_mode = dest.stat().st_mode & 0o777 if previous is not None else None
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=cfg.data_dir, signature_packs=configured, replace=replace
+            )
+            original_pins = dict(getattr(cfg.ai_discovery, "signature_pack_digests", None) or {})
+            try:
+                if str(dest) not in configured:
+                    cfg.ai_discovery.signature_packs = [*configured, str(dest)]
+                pins = dict(original_pins)
+                if str(dest) in pins:
+                    pins[str(dest)] = "sha256:" + hashlib.sha256(dest.read_bytes()).hexdigest()
+                    cfg.ai_discovery.signature_pack_digests = pins
+                if str(dest) not in configured or str(dest) in pins:
+                    cfg.save()
+            except Exception:
+                if previous is None:
+                    dest.unlink()
+                else:
+                    ai_signatures.restore_signature_pack(dest, previous, previous_mode)
+                cfg.ai_discovery.signature_packs = configured
+                cfg.ai_discovery.signature_pack_digests = original_pins
+                raise
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
-    if str(dest) not in configured:
-        cfg.ai_discovery.signature_packs = [*configured, str(dest)]
-        cfg.save()
     click.echo(f"Installed signature pack: {dest} (added to ai_discovery.signature_packs)")
 
 

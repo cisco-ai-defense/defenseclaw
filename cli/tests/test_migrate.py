@@ -199,6 +199,26 @@ def test_check_refuses_a_config_the_staged_gateway_would_refuse(data_dir: Path, 
     assert seen == ["/staged/defenseclaw-gateway"]
 
 
+def test_v8_update_check_preflight_uses_migrated_document(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _write_config(data_dir, "config_version: 8\nupdate_check: false\n")
+    seen = []
+
+    def preview(path: str, _gateway: str) -> None:
+        seen.append(path)
+
+    def reject_original(*_args) -> None:
+        pytest.fail("the staged validator must not inspect unmigrated v8 keys")
+
+    monkeypatch.setattr(migrations, "_preview_config_v9", preview)
+    monkeypatch.setattr(migrations, "_check_staged_gateway_accepts", reject_original)
+    result = migrate(str(data_dir), check=True, gateway_binary="/staged/defenseclaw-gateway")
+
+    assert result.applied == ["config_version 8 → 9"]
+    assert seen == [str(config)]
+
+
 def test_failing_step_names_itself(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(data_dir, "config_version: 7\n")
 

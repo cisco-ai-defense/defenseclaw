@@ -326,6 +326,19 @@ def _read_pack(path: str | Path) -> tuple[Path, bytes]:
         raise SignaturePackError(f"cannot read {pack}: {exc}") from exc
 
 
+def signature_pack_dir(data_dir: str | Path) -> Path:
+    return Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME
+
+
+def signature_pack_destination(source: str | Path, data_dir: str | Path) -> Path:
+    src = Path(source).expanduser()
+    pack = _load_pack_payload(src)
+    pack_id = _normalize_id(str(pack.get("id") or src.stem))
+    if not pack_id:
+        raise SignaturePackError("signature pack id or filename must normalize to a non-empty id")
+    return Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME / f"{pack_id}.json"
+
+
 def install_signature_pack(
     source: str | Path,
     *,
@@ -339,14 +352,11 @@ def install_signature_pack(
     *signature_packs* are the packs already configured, checked for id
     conflicts."""
     src = Path(source).expanduser()
-    pack = _load_pack_payload(src)
-    pack_id = _normalize_id(str(pack.get("id") or src.stem))
-    if not pack_id:
-        raise SignaturePackError("signature pack id or filename must normalize to a non-empty id")
+    dest = signature_pack_destination(src, data_dir)
     signatures = validate_signature_pack(src)
 
-    dest_dir = Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME
-    dest = dest_dir / f"{pack_id}.json"
+    dest_dir = dest.parent
+    pack_id = dest.stem
     if dest.exists() and not replace:
         raise SignaturePackError(f"signature pack already installed: {dest}")
 
@@ -370,6 +380,19 @@ def install_signature_pack(
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
     return dest
+
+
+def restore_signature_pack(dest: Path, content: bytes, mode: int | None) -> None:
+    """Restore the prior pack atomically when its config transaction fails."""
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}.", suffix=".tmp", dir=str(dest.parent))
+    try:
+        with os.fdopen(fd, "wb") as tmp:
+            tmp.write(content)
+        os.chmod(tmp_name, mode if mode is not None else 0o600)
+        os.replace(tmp_name, dest)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
 
 def _parse_catalog_text(text: str, *, source: str) -> list[AISignature]:
