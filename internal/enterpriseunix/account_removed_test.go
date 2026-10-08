@@ -182,3 +182,22 @@ func TestAccountRemovedWarningNeedsTheWholeErrorAndAMissingAccount(t *testing.T)
 		})
 	}
 }
+
+// GAP-0515: with the service account removed by configuration management,
+// verify said only that it was missing, and repair recreated it and restored
+// the owners of its folders but reported no changes.
+func TestRepairReportsTheRecreatedServiceAccountAndItsFolders(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	delete(h.accounts.accounts, h.env.Layout.ServiceUser)
+	verify := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, "is missing") || !strings.Contains(got, " repair` recreates it") {
+		t.Fatalf("verify does not name repair: %s", got)
+	}
+	repair := h.run(Options{Action: ActionRepair})
+	requireOK(t, repair)
+	got := strings.Join(repair.Changes, "\n")
+	if !strings.Contains(got, "created the service account "+h.env.Layout.ServiceUser) || !strings.Contains(got, "restored the mode and owner of "+h.env.Layout.DataDir) {
+		t.Fatalf("repair changes = %q", repair.Changes)
+	}
+}

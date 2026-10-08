@@ -190,7 +190,7 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	case err != nil:
 		add("service account %s: %v", record.ServiceUser, err)
 	case !ok:
-		add("service account %s is missing", record.ServiceUser)
+		add("service account %s is missing, so the gateway cannot start; `%s` recreates it and restores the owners of its folders", record.ServiceUser, env.lifecycleCommand("repair"))
 	case account.UID != record.ServiceUID || account.GID != record.ServiceGID:
 		add("service account %s is %d:%d, deployment recorded %d:%d", record.ServiceUser, account.UID, account.GID, record.ServiceUID, record.ServiceGID)
 	case account.LoginShell != "":

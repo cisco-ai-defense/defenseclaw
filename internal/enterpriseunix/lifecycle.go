@@ -939,6 +939,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	l.planned = &plannedInputs{configSHA: p.config.SHA, configFromInstalled: p.configFromInstalled, secretsSHA: p.secretsSHA}
 	l.reportChanges = record != nil && (l.opts.Action == ActionRepair || l.opts.Action == ActionEnsure)
 	changesBefore := len(r.Changes)
+	if account.Created {
+		// Configuration management removed the account (GAP-0515).
+		l.noteChange("created the service account %s (uid %d), which was missing", account.Name, account.UID)
+	}
 
 	units := env.Services.Units()
 	previouslyActive := []string{}
@@ -1310,6 +1314,9 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 				continue
 			}
 			created = append(created, dir.Path)
+		}
+		if l.reportChanges && env.metadataDiffers(path, dir.Mode, dir.Owner) {
+			l.noteChange("restored the mode and owner of %s", dir.Path)
 		}
 		if err := env.ensureDir(path, dir.Mode, dir.Owner); err != nil {
 			return nil, err
