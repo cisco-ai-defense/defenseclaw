@@ -157,7 +157,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad, errored []string
+	var bad, stopped, errored []string
 	running := 0
 	for _, sb := range list {
 		if sb.Phase == "ready" {
@@ -166,12 +166,23 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		if sb.Phase == "error" {
 			errored = append(errored, sb.Name)
 		}
-		if sb.Hooks.Unreachable {
+		switch {
+		case !sb.Hooks.Unreachable:
+		case sb.Phase == "ready":
 			bad = append(bad, sb.Name+": "+firstNonEmpty(sb.Hooks.UnreachableReason, "no hook request reaches DefenseClaw"))
+		case sb.Phase != "error":
+			// A stopped sandbox keeps its last session's verdict (GAP-0186),
+			// and nothing of it runs that could fail closed: it fails no
+			// machine check (GAP-0384).
+			stopped = append(stopped, sb.Name)
 		}
 	}
 	switch {
-	case len(errored) > 0 && len(bad) == 0:
+	case len(bad) > 0:
+		c.Status = openshell.StatusFail
+		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
+		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
+	case len(errored) > 0:
 		// A sandbox OpenShell lost (its container stopped: a Docker
 		// restart) can be neither stopped nor started (GAP-0278).
 		c.Status = openshell.StatusWarn
@@ -182,10 +193,19 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed), " +
 			"where OpenShell can neither stop nor start " + itThem(errored)
 		c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
-	case len(bad) > 0:
-		c.Status = openshell.StatusFail
-		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
-		c.Fix = &openshell.Fix{Summary: "fix the cause above, then start the session again"}
+	case len(stopped) > 0:
+		c.Status = openshell.StatusWarn
+		verb, its := " is stopped", "its"
+		if len(stopped) > 1 {
+			verb, its = " are stopped", "their"
+		}
+		c.Detail = strings.Join(stopped, ", ") + verb + ", and the hooks of " + its + " last session did not reach DefenseClaw (`" + CommandName +
+			" status NAME` says why); nothing of " + itThem(stopped) + " runs now"
+		if running > 0 {
+			c.Detail = fmt.Sprintf("the hooks of %s reach DefenseClaw (ingress %s); ", plural(int64(running), "running sandbox", "running sandboxes"),
+				firstNonEmpty(ingress, "(unknown)")) + c.Detail
+		}
+		c.Fix = &openshell.Fix{Summary: "fix that cause before you start " + itThem(stopped) + " again, or delete " + itThem(stopped)}
 	case running == 0:
 		c.Detail = "no sandbox is running"
 	default:

@@ -1266,6 +1266,19 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 		strings.Contains(c.Detail, "good") || !strings.Contains(c.Detail, "127.0.0.1:18971") || c.Fix == nil {
 		t.Fatalf("unreachable: %+v", c)
 	}
+	// GAP-0384: a stopped sandbox keeps its last session's verdict
+	// (GAP-0186), but nothing of it runs that could fail closed: it is
+	// named in a warning, and the machine check does not fail.
+	ta = newTestApp(t, "")
+	ta.daemon.add(sampleSandbox("good"))
+	silent := sampleSandbox("c7-stop")
+	silent.Phase = "stopped"
+	silent.Hooks.Unreachable, silent.Hooks.UnreachableReason = true, "the harness has been calling its model for 34s without a single hook request reaching DefenseClaw"
+	ta.daemon.add(silent)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "1 running sandbox reach") ||
+		!strings.Contains(c.Detail, "c7-stop is stopped, and the hooks of its last session") || strings.Contains(c.Detail, "fails closed") || c.Fix == nil {
+		t.Fatalf("stopped: %+v", c)
+	}
 }
 
 // A session in a sandbox that was running leaves it running (stopping it
