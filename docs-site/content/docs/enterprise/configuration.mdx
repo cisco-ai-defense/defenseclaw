@@ -49,6 +49,10 @@ copy in place: ensure only compares the file you supply.
 
 ## Files next to the config
 
+The source `config.yaml` is limited to 4 MiB (4,194,304 bytes) and 65,536
+parsed YAML nodes. An oversized or overly repetitive candidate is refused
+before it replaces the applied config.
+
 The config is the only file you write. The lifecycle keeps these records next
 to it. They are evidence of what was applied; nothing reads them back as policy,
 and you do not edit them:

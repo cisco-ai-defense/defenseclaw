@@ -15,6 +15,10 @@ keywords:
   - quarantine
 ---
 
+An admin config may contain at most 4 MiB of source text and 65,536 parsed
+YAML nodes, including repeated `asset_policy` entries. Split or simplify
+large lists before applying them.
+
 Admission is the check DefenseClaw runs when a skill, an MCP server or a plugin
 appears on a machine, or when you install one with the CLI. It answers one
 question: may this asset be installed and run? Two sections of `config.yaml`
