@@ -5915,7 +5915,15 @@ def identities(
         return
     if not rows:
         if user or connector_name:
-            existing = client.agent_identities(limit=1).get("total", 0)
+            try:
+                existing = client.agent_identities(limit=1).get("total", 0)
+            except requests.ConnectionError as exc:
+                raise click.ClickException(_sidecar_unavailable(exc)) from exc
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+            except requests.RequestException as exc:
+                raise click.ClickException(f"sidecar request failed: {exc}") from exc
             label = f"--user {user}" if user else f"--connector {connector_name}"
             click.echo(
                 f"No agent identity matches {label} "
