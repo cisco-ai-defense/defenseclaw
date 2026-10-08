@@ -120,6 +120,11 @@ type known struct {
 	expires time.Time
 }
 
+type nativeAnchor struct {
+	loadTicks uint64
+	enforce   bool
+}
+
 // Controller is the reconciler. One goroutine (Run) owns all state; the
 // event source reaches it through RecordHit, RecordLoss and SetStream, and
 // readers through Status.
@@ -139,8 +144,15 @@ type Controller struct {
 	lastStale  bool
 	pauseKey   string
 	lastPIDs   map[int]bool
+	lastNative map[int]map[string]nativeAnchor
 	enabled    map[int]bool
 	alive      map[int]int
+	pending    map[int]int
+	seenRoots  map[rootKey]bool
+	waiting    map[rootKey]bool
+	warmup     map[int]bool
+	// Restored evidence needs revalidation even if the policy state is absent.
+	restoredBurnin bool
 	// progressAt is when each user's last uid_progress change was emitted.
 	progressAt map[int]time.Time
 	// retireForeign are the policies in DefenseClaw's name pattern that the
@@ -201,14 +213,21 @@ func New(cfg Config) *Controller {
 		recorded:   map[string]bool{},
 		retryAt:    map[string]time.Time{},
 		lastPIDs:   map[int]bool{},
+		lastNative: map[int]map[string]nativeAnchor{},
 		enabled:    map[int]bool{},
 		alive:      map[int]int{},
+		pending:    map[int]int{},
+		seenRoots:  map[rootKey]bool{},
+		waiting:    map[rootKey]bool{},
+		warmup:     map[int]bool{},
 		progressAt: map[int]time.Time{},
 		nudge:      make(chan struct{}, 1),
 		burn:       LoadBurnin(cfg.Dirs),
 		names:      map[string]known{},
 		totals:     map[string]int64{},
 	}
+	_, burninErr := os.Stat(cfg.Dirs.BurnIn())
+	c.restoredBurnin = burninErr == nil
 	sweepInterruptedWrites(cfg.Dirs.State, cfg.Now(), cfg.Logger)
 	if err := readJSON(cfg.Dirs.StateFile(), &c.st); err != nil && !errors.Is(err, os.ErrNotExist) {
 		cfg.Logger.Warn("kernel policy state unreadable; starting from the live state", "error", err)
@@ -860,7 +879,92 @@ func (c *Controller) rescan() bool {
 	changed := sig != c.rootSig
 	c.rootSig = sig
 	c.alive = alive
+	c.refreshPending(true)
 	return changed
+}
+
+// refreshPending compares current roots with PID anchors in policies that
+// Tetragon reported enabled. A scan publishes the pending state immediately,
+// before a potentially slow add or replacement RPC finishes.
+func (c *Controller) refreshPending(publish bool) {
+	pending := map[int]int{}
+	live := map[rootKey]bool{}
+	c.tallyMu.Lock()
+	for _, root := range c.roots.Roots {
+		key := rootKey{root.PID, root.StartTicks}
+		live[key] = true
+		anchor := c.lastNative[root.UID][root.Exe]
+		binaryCovered := root.Native && (anchor.enforce || (anchor.loadTicks > 0 && root.StartTicks > anchor.loadTicks))
+		covered := c.lastPIDs[root.PID] || binaryCovered
+		eligible := c.cfg.Intent.Mode.LoadsPolicies()
+		if c.cfg.Intent.Mode == ModeEnforce {
+			eligible = !c.burn.Ready(root.UID, c.cfg.Intent.BurnIn) &&
+				contains(c.cfg.Intent.EnforceConnectors, root.Connector) &&
+				c.st.Overrides[FamilyControls].Kind != OverrideDeleted &&
+				c.st.Overrides[FamilyBurnin].Kind != OverrideDeleted
+		}
+		if !c.seenRoots[key] && eligible && !covered {
+			c.waiting[key] = true
+		}
+		c.seenRoots[key] = true
+		if covered || !eligible {
+			delete(c.waiting, key)
+		}
+		if c.waiting[key] {
+			pending[root.UID]++
+		}
+	}
+	for key := range c.seenRoots {
+		if !live[key] {
+			delete(c.seenRoots, key)
+			delete(c.waiting, key)
+		}
+	}
+	changed := len(pending) != len(c.pending)
+	if !changed {
+		for uid, n := range pending {
+			if c.pending[uid] != n {
+				changed = true
+				break
+			}
+		}
+	}
+	c.pending = pending
+	for uid := range pending {
+		// A first pass has no prior policy interval to invalidate. A
+		// restored helper has the previous policy record and does reset.
+		if (len(c.st.Policies) > 0 || len(c.recorded) > 0 || c.restoredBurnin) && c.burn.ResetUncovered(uid, c.cfg.Now()) {
+			id := uid
+			c.change(Change{Event: EventUIDBurnIn, UID: &id, Reason: WarnSessionPolicyPending,
+				NeededSeconds: int64(c.cfg.Intent.BurnIn / time.Second)})
+		}
+	}
+	c.tallyMu.Unlock()
+	if !publish || !changed {
+		return
+	}
+	kept := c.st.Warnings[:0:0]
+	for _, warning := range c.st.Warnings {
+		if !strings.HasPrefix(warning, WarnSessionPolicyPending) {
+			kept = append(kept, warning)
+		}
+	}
+	c.st.Warnings = kept
+	total := 0
+	for _, n := range pending {
+		total += n
+	}
+	if total > 0 {
+		c.warn(fmt.Sprintf("%s:%d", WarnSessionPolicyPending, total))
+	}
+	for i := range c.st.UIDs {
+		if pending[c.st.UIDs[i].UID] > 0 {
+			c.st.UIDs[i].State = UIDMonitor
+			c.st.UIDs[i].Reason = WarnSessionPolicyPending
+			c.st.UIDs[i].CoveredSeconds = 0
+		}
+	}
+	c.persist()
 }
 
 // accrue adds one tick of covered time to every user whose controls are
@@ -872,11 +976,22 @@ func (c *Controller) accrue() {
 	defer c.tallyMu.Unlock()
 	lossy := c.loss || !c.stream
 	c.loss = false
+	if lossy && !paused {
+		for uid := range c.warmup {
+			if c.enabled[uid] && c.alive[uid] > 0 && c.pending[uid] == 0 {
+				delete(c.warmup, uid)
+			}
+		}
+	}
 	if lossy || paused || !c.cfg.Intent.Mode.LoadsPolicies() {
 		return
 	}
 	for uid, on := range c.enabled {
-		if on && c.alive[uid] > 0 {
+		if on && c.alive[uid] > 0 && c.pending[uid] == 0 {
+			if c.warmup[uid] {
+				delete(c.warmup, uid)
+				continue
+			}
 			c.burn.Accrue(uid, c.cfg.Intervals.Accrue)
 		}
 	}

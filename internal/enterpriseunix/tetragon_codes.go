@@ -353,6 +353,10 @@ var tetragonCodes = map[string]tetragonCodeText{
 		return defaultStr(f.Detail, "some") + fmt.Sprintf(" live agent processes are over the %d-pid anchor limit", kernelpolicy.MaxPIDs) +
 			" (they are observed, not enforced); nothing to do, the count is reported"
 	}},
+	kernelpolicy.WarnSessionPolicyPending: {Message: func(f tetragonFacts) string {
+		return defaultStr(f.Detail, "some") + " agent session(s) are waiting for an enabled controls policy that includes their process ids" +
+			" (their users accrue no covered time while this lasts); check " + gwStatus + " if it persists"
+	}},
 	kernelpolicy.WarnPIDMonitorOnly: {Message: func(tetragonFacts) string {
 		return "agent sessions matched only by their process id, such as a script-hosted agent run by node, are monitored in enforce mode" +
 			" (a process id can be reused between two passes, so it never denies; only a native agent binary is a deny anchor);" +

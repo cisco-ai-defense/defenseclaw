@@ -700,6 +700,21 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 		set(checkAgents, failing, "no user is enrolled on this host (nothing can be anchored); enroll users in the admin config and apply it")
 		return
 	}
+	var pending []string
+	for _, user := range users {
+		if user.Reason == kernelpolicy.WarnSessionPolicyPending {
+			name := user.User
+			if name == "" {
+				name = fmt.Sprintf("uid %d", user.UID)
+			}
+			pending = append(pending, name)
+		}
+	}
+	if len(pending) > 0 {
+		set(checkAgents, failing, "the controls policy has not loaded for an agent session of "+strings.Join(pending, ", ")+
+			"; covered time is paused until its process id is in an enabled policy")
+		return
+	}
 	var with, without []string
 	for _, user := range users {
 		name := user.User
@@ -886,7 +901,8 @@ func readinessUsers(in tetragonInputs, now time.Time) []TetragonUserReadiness {
 		view := TetragonUserReadiness{
 			UID: user.UID, User: user.User, State: user.State, Reason: user.Reason, CoveredHours: roundHours(p.Covered),
 			NeededHours: roundHours(p.Needed), Percent: p.Percent,
-			Ready: (p.Ready || user.State == kernelpolicy.UIDEnforcing) && !p.MonitorOnly && !noDenyAnchor(user.State, user.Reason),
+			Ready: (p.Ready || user.State == kernelpolicy.UIDEnforcing) && !p.MonitorOnly && !noDenyAnchor(user.State, user.Reason) &&
+				user.Reason != kernelpolicy.WarnSessionPolicyPending,
 			Reset: p.Reset, Measuring: p.Measuring, MonitorOnly: p.MonitorOnly, Hits: hitDetails(record, user.UID),
 		}
 		if p.HasETA {
@@ -1346,6 +1362,9 @@ type burnInProgress struct {
 // is monitor-only and has no ETA. Without a readable config it is not known.
 func progressFor(user kernelpolicy.UIDStatus, record *kernelpolicy.UIDRecord, in tetragonInputs, now time.Time) burnInProgress {
 	p := progressOf(user, record, now)
+	if user.Reason == kernelpolicy.WarnSessionPolicyPending {
+		p.Ready, p.Measuring, p.HasETA = false, false, false
+	}
 	if monitorOnlyUser(user, in) {
 		p.MonitorOnly, p.HasETA, p.ETA = true, false, 0
 	}

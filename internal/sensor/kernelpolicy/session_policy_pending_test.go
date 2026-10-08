@@ -1,0 +1,97 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package kernelpolicy
+
+import (
+	"testing"
+	"time"
+)
+
+// A newly discovered root must not borrow another session's loaded policy
+// or previously clean time while its PID is being added to Tetragon.
+func TestNewSessionWaitsForLoadedPolicyBeforeBurnIn(t *testing.T) {
+	h := newHarness(t, observeIntent(), baseTargets)
+	h.procs = []Proc{nativeProc(4001, 1, 100, 1001, aliceClaudeNew)}
+	h.pass()
+	h.burnedIn(1001, 24*time.Hour)
+	h.procs = append(h.procs, codexProc(4002, 1, 200, 1001))
+	if !h.ctl.rescan() {
+		t.Fatal("new session did not trigger a policy pass")
+	}
+	if got := h.covered(1001); got != 0 {
+		t.Fatalf("new session retained %v of unverified clean time", got)
+	}
+	if s := userState(h, 1001); s.Reason != "kernel_session_policy_pending" {
+		t.Fatalf("pending session status = %+v", s)
+	}
+	if !h.has("kernel_session_policy_pending:1") {
+		t.Fatalf("pending warning missing: %v", h.status().Warnings)
+	}
+	h.accrueTick()
+	if got := h.covered(1001); got != 0 {
+		t.Fatalf("unloaded session accrued %v", got)
+	}
+	h.pass()
+	if h.has("kernel_session_policy_pending") {
+		t.Fatalf("pending after policy load: %v", h.status().Warnings)
+	}
+	h.accrueTick()
+	if got := h.covered(1001); got != time.Minute {
+		t.Fatalf("loaded session covered %v, want one minute", got)
+	}
+}
+
+func TestFailedPolicyReplacementKeepsNewSessionUnmeasured(t *testing.T) {
+	h := newHarness(t, observeIntent(), baseTargets)
+	h.procs = []Proc{nativeProc(4001, 1, 100, 1001, aliceClaudeNew)}
+	h.pass()
+	h.procs = append(h.procs, codexProc(4002, 1, 200, 1001))
+	h.tg.failAll = true
+	h.pass()
+	if s := userState(h, 1001); s.Reason != "kernel_session_policy_pending" {
+		t.Fatalf("failed replacement status = %+v", s)
+	}
+	h.accrueTick()
+	if got := h.covered(1001); got != 0 {
+		t.Fatalf("failed replacement accrued %v", got)
+	}
+	h.tg.failAll = false
+	h.pass()
+	if h.has("kernel_session_policy_pending") {
+		t.Fatalf("pending after repair: %v", h.status().Warnings)
+	}
+}
+
+func TestShellStartedSessionMeasuresAfterPolicyLoad(t *testing.T) {
+	h := newHarness(t, observeIntent(), baseTargets)
+	shell := Proc{PID: 3900, PPID: 1, StartTicks: 100, UID: 1001, EUID: 1001,
+		Exe: "/usr/bin/bash", Host: true}
+	h.procs = []Proc{shell, nativeProc(4001, shell.PID, 200, 1001, aliceClaudeNew)}
+	h.pass()
+	if h.has("kernel_session_policy_pending") {
+		t.Fatalf("loaded shell-started session is pending: %v pids=%v recorded=%v roots=%+v", h.status().Warnings, h.ctl.lastPIDs, h.ctl.recorded, h.ctl.roots.Roots)
+	}
+	h.accrueTick()
+	if got := h.covered(1001); got != time.Minute {
+		t.Fatalf("shell-started session covered %v, want one minute", got)
+	}
+}
+
+func TestRestoredCleanTimeWaitsForFirstLoadedPolicy(t *testing.T) {
+	h := newHarness(t, observeIntent(), baseTargets)
+	h.burnedIn(1001, 24*time.Hour)
+	h.start(observeIntent()) // persisted burn-in evidence, no policy record
+	h.procs = []Proc{codexProc(4002, 1, 200, 1001)}
+	h.pass()
+	if got := h.covered(1001); got != 0 {
+		t.Fatalf("restored clean time survived the uncovered first session: %v", got)
+	}
+}

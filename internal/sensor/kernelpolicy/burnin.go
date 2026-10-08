@@ -216,6 +216,20 @@ func (b *Burnin) Accrue(uid int, d time.Duration) {
 	}
 }
 
+// ResetUncovered discards clean time when a live session has not yet reached
+// an enabled controls policy. The next policy pass can start a new window.
+func (b *Burnin) ResetUncovered(uid int, now time.Time) bool {
+	rec := b.record(uid)
+	if rec == nil || rec.CoveredSeconds == 0 {
+		return false
+	}
+	rec.CoveredSeconds = 0
+	rec.WindowStart = now
+	rec.ResetReason = WarnSessionPolicyPending
+	b.dirty = true
+	return true
+}
+
 // Covered returns the covered time of uid since its last hit or reset.
 func (b *Burnin) Covered(uid int) time.Duration {
 	if rec := b.record(uid); rec != nil {

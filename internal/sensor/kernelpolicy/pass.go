@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,11 @@ func (c *Controller) pass(ctx context.Context, trigger string) {
 	c.rescan()
 	c.tallyMu.Lock()
 	resets := c.burn.Sync(Digest(), c.enrollment, now)
+	for uid := range c.pending {
+		if (len(c.st.Policies) > 0 || len(c.recorded) > 0 || c.restoredBurnin) && c.burn.ResetUncovered(uid, now) {
+			resets[uid] = WarnSessionPolicyPending
+		}
+	}
 	c.tallyMu.Unlock()
 	for uid, reason := range resets {
 		uid := uid
@@ -506,22 +512,45 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 		byName[lp.Name] = lp
 	}
 	desired := map[string]Policy{}
+	wasEligible := map[int]bool{}
+	for uid, on := range c.enabled {
+		wasEligible[uid] = on && c.alive[uid] > 0 && c.pending[uid] == 0
+	}
 	c.lastPIDs = map[int]bool{}
+	c.lastNative = map[int]map[string]nativeAnchor{}
 	c.enabled = map[int]bool{}
 	for _, p := range compiled.Policies {
 		desired[p.Name] = p
 		if !isControlsFamily(p.Family) {
 			continue
 		}
-		for _, pid := range p.PIDs {
-			c.lastPIDs[pid] = true
-		}
-		if lp, ok := byName[p.Name]; ok && lp.State == StateEnabled {
+		if lp, ok := byName[p.Name]; ok && c.recorded[p.Name] && lp.State == StateEnabled {
+			if p.BinaryUID > 0 && len(p.Binaries) > 0 {
+				if c.lastNative[p.BinaryUID] == nil {
+					c.lastNative[p.BinaryUID] = map[string]nativeAnchor{}
+				}
+				for _, binary := range p.Binaries {
+					c.lastNative[p.BinaryUID][binary] = nativeAnchor{
+						loadTicks: c.st.Applied[p.Name].LoadTicks, enforce: lp.Mode.Enforcing(),
+					}
+				}
+			}
+			for _, pid := range p.PIDs {
+				c.lastPIDs[pid] = true
+			}
 			for _, uid := range p.UIDs {
 				c.enabled[uid] = true
 			}
 		}
 	}
+	c.refreshPending(false)
+	keptWarnings := c.st.Warnings[:0:0]
+	for _, warning := range c.st.Warnings {
+		if !strings.HasPrefix(warning, WarnSessionPolicyPending) {
+			keptWarnings = append(keptWarnings, warning)
+		}
+	}
+	c.st.Warnings = keptWarnings
 	// A recorded policy that is loaded but has no record of a call (the helper
 	// died mid-call) is adopted as it stands, so hits are attributed and later
 	// changes to it are noticed.
@@ -573,6 +602,11 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 
 	// Roots and users.
 	c.rescanFromPolicies()
+	for uid, on := range c.enabled {
+		if on && c.alive[uid] > 0 && c.pending[uid] == 0 && !wasEligible[uid] {
+			c.warmup[uid] = true
+		}
+	}
 	c.st.Roots = RootsStatus{OverLimit: compiled.OverLimit, Observed: append([]Observed(nil), c.roots.Observed...)}
 	for _, n := range compiled.Anchored {
 		c.st.Roots.Anchored += n
@@ -592,6 +626,13 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 	}
 	if compiled.OverLimit > 0 {
 		c.warn(fmt.Sprintf("%s:%d", WarnRootsOverLimit, compiled.OverLimit))
+	}
+	pending := 0
+	for _, n := range c.pending {
+		pending += n
+	}
+	if pending > 0 {
+		c.warn(fmt.Sprintf("%s:%d", WarnSessionPolicyPending, pending))
 	}
 	c.fillUIDs(plan, compiled)
 	c.notePredating(compiled)
@@ -757,6 +798,9 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 				State: UIDMonitor, Reason: "mode " + string(plan.Effective)}
 		}
 		status.AnchoredRoots = c.alive[uid]
+		if c.pending[uid] > 0 {
+			status.State, status.Reason = UIDMonitor, WarnSessionPolicyPending
+		}
 		if status.State == UIDEnforcing && !c.hasAnchor(uid, plan, compiled) {
 			// Ready, but the enforcing policy cannot deny for this user: it
 			// stays measured in monitor mode, and the reason names which

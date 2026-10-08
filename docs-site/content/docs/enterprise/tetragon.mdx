@@ -1267,6 +1267,7 @@ execution.
 
 Known limits of these controls:
 
+- A new agent session may wait a few seconds for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; if loading fails, the warning remains until the policy is repaired.
 - A control denies below an agent session that Tetragon saw start while the
   controls were loaded. A session that was already running when they loaded
   (enforce turned on, or Tetragon restarted) is monitored until it restarts

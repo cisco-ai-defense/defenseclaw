@@ -245,6 +245,11 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			*in = withUsers(*in)
 			in.State.Roots.Observed = []kernelpolicy.Observed{{UID: 1001, Reason: kernelpolicy.ReasonPredatesControls, Connector: "claudecode", Count: 2}}
 		}, []want{{checkAgents, checkWarn, "2 agent sessions of dcr-std1 (uid 1001) started before the kernel controls loaded and are not denied until restarted"}}},
+		{"new session pending controls load", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
+			*in = withUsers(*in)
+			in.State.UIDs[0].Reason = kernelpolicy.WarnSessionPolicyPending
+			in.State.UIDs[0].CoveredSeconds = 0
+		}, []want{{checkAgents, checkWarn, "covered time is paused until its process id is in an enabled policy"}}},
 		{"nobody enrolled", "observe", "observe", nil, []want{{checkAgents, checkWarn, "no user is enrolled"}}},
 		{"no agent for enforce", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},
