@@ -206,10 +206,10 @@ func TestHermesNotesOnlyFolderIsACategory(t *testing.T) {
 	}
 }
 
-// GAP-0900: a skill folder with no file yet (just made with mkdir)
+// GAP-0900: a skill folder with no SKILL.md yet (just made with mkdir)
 // is not admitted, so it is not scanned and quarantined while the user is
 // creating it; it is waited on and admitted once its SKILL.md lands.
-func TestIncompleteSkillFolderWaitsForAFile(t *testing.T) {
+func TestIncompleteSkillFolderWaitsForSkillMD(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	atStart, live := filepath.Join(skillDir, "at-start"), filepath.Join(skillDir, "new-skill")
@@ -217,6 +217,9 @@ func TestIncompleteSkillFolderWaitsForAFile(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(live, "notes.txt"), []byte("draft\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	w.watchIncompleteSkillFolders(skillDir)
 	if _, ok := w.pluginWaiting[atStart]; !ok {
