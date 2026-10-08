@@ -345,7 +345,34 @@ def _toggle_connector_guardrail(
     )
 
 
-@click.group("guardrail")
+class _GuardrailGroup(click.Group):
+    """Keep identity profile commands off the Secure Client command tree."""
+
+    def _secure_client(self, ctx: click.Context) -> bool:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        app = ctx.find_object(AppContext)
+        cfg = app.cfg if app is not None else None
+        if cfg is None:
+            from defenseclaw.config import load
+
+            try:
+                cfg = load()
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return _enterprise_profile(cfg) == "secure_client"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = super().list_commands(ctx)
+        return [name for name in names if name != "profile"] if self._secure_client(ctx) else names
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name == "profile" and self._secure_client(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group("guardrail", cls=_GuardrailGroup)
 def guardrail() -> None:
     """Control guardrail policy: status, enable/disable, fail-mode, hilt, block-message.
 
@@ -366,7 +393,6 @@ def guardrail() -> None:
       use-pack       switch the rule pack, globally or for one connector
       protection     turn opt-in protection packs on/off per scope
       validate-pack  validate one pack with the authoritative Go loader
-      profile        identity-based guardrail profiles: list, show, explain
 
     \b
     Multi-connector: one gateway enforces N hook connectors. Each policy
