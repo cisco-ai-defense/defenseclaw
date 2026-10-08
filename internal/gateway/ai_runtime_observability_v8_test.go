@@ -183,6 +183,19 @@ func TestRuntimeSnapshotExportsOnlyRunningPlaneHealth(t *testing.T) {
 	}
 }
 
+func TestRuntimeSnapshotExportsStoppedSelectedPlane(t *testing.T) {
+    capture := &endpointInventoryCapture{}
+    snapshot := sensor.Snapshot{Planes: []sensor.PlaneHealth{
+        {Plane: "b", Selected: true, Available: true, Running: false, Reason: "permission denied"},
+    }}
+    if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
+        t.Fatal(err)
+    }
+    if records := capture.snapshot(); len(records) != 1 || records[0].EventName() != observability.EventName(observability.TelemetryEventAIRuntimePlaneHealth) {
+        t.Fatalf("stopped selected plane exported %d records, want one", len(records))
+    }
+}
+
 func TestRuntimeSnapshotEmitsUnattributedPlaneFinding(t *testing.T) {
 	t.Parallel()
 	capture := &endpointInventoryCapture{}
