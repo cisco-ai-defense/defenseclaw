@@ -19,8 +19,10 @@
 # hooks' runtime selector state and lock go, so the Claude Code folders they
 # kept go too. GAP-0575, GAP-0562: without a deployment record, the hook
 # machine state that names this scope's hook executable and the public
-# policy summary go. Runs in a disposable scratch directory; no service or
-# machine root is touched.
+# policy summary go. GAP-0938: a standalone uninstall drops the Codex ACL
+# preimage of a requirements.toml the managed-hook teardown already removed.
+# Runs in a disposable scratch directory; no service or machine root is
+# touched.
 
 [CmdletBinding()]
 param()
@@ -298,6 +300,61 @@ $failures = & $module {
             $left = @(Remove-DefenseClawStandaloneHookRuntimeLeftovers -Directory $hookRuntime)
             if ($left.Count -ne 0 -or [IO.Directory]::Exists($hookRuntime)) {
                 $failures.Add("the HookRuntime folder and its machine-policy.json stayed: $($left -join '; ')")
+            }
+        }
+        finally {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
+        # GAP-0938: a fresh ensure adopted the requirements.toml a purge
+        # without the state root left, so its ACL preimage records a file
+        # that existed before the deployment. The managed-hook teardown then
+        # deletes that file and its ownership record, and the removal after
+        # it finds nothing. A standalone uninstall drops the preimage of the
+        # missing file; Secure Client keeps the refusal.
+        $codexState = Microsoft.PowerShell.Management\Join-Path $Scratch 'codex-acl'
+        [void][IO.Directory]::CreateDirectory($codexState)
+        $codexLayout = @{
+            CodexMachinePolicyPath = [IO.Path]::Combine($codexState, 'requirements.toml')
+            CodexRequirementsOwnershipPath = [IO.Path]::Combine($codexState, 'codex-requirements-ownership.json')
+            CodexManagedHooksStatePath = [IO.Path]::Combine($codexState, '.defenseclaw-managed-hooks.state')
+            CodexRequirementsAclBackupPath = [IO.Path]::Combine($codexState, 'codex-requirements-acl-backup.json')
+        }
+        $absentRemoval = [pscustomobject]@{
+            disposition = 'ownership_absent'
+            safe_to_remove_binary = $true
+            managed_state_existed = $false
+            managed_state_removed = $false
+            managed_state_removed_or_absent = $true
+            surviving_owned_path_references = 0
+        }
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        try {
+            foreach ($case in @(@('Standalone', $false), @('SecureClient', $true))) {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case[0]
+                [IO.File]::WriteAllText($codexLayout.CodexRequirementsAclBackupPath, (([ordered]@{
+                                schema_version = 1
+                                path = $codexLayout.CodexMachinePolicyPath
+                                existed = $true
+                                sha256 = ('a' * 64)
+                                security_descriptor = 'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+                            }) | Microsoft.PowerShell.Utility\ConvertTo-Json))
+                $refused = $false
+                try {
+                    Complete-DefenseClawCodexRequirementsRemoval `
+                        -Layout $codexLayout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -Report $absentRemoval
+                }
+                catch {
+                    $refused = ([string]$_.Exception.Message).StartsWith('verified-absent Codex removal retains an ACL preimage')
+                    if (-not $refused) {
+                        $failures.Add("$($case[0]): unexpected Codex removal error: $($_.Exception.Message)")
+                    }
+                }
+                if ($refused -ne $case[1] -or [IO.File]::Exists($codexLayout.CodexRequirementsAclBackupPath) -ne $case[1]) {
+                    $failures.Add("$($case[0]): the preimage of a missing requirements.toml was refused=$refused, kept=$([IO.File]::Exists($codexLayout.CodexRequirementsAclBackupPath))")
+                }
             }
         }
         finally {

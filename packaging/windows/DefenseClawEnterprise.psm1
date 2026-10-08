@@ -15321,6 +15321,53 @@ function Invoke-DefenseClawCodexRequirementsCommand {
     return $report
 }
 
+function Restore-DefenseClawStandaloneCodexRequirementsAcl {
+    <#
+        Standalone uninstall. The managed-hook teardown has already removed
+        DefenseClaw's Codex hooks and their ownership record: it restored the
+        administrator's requirements.toml, or deleted one DefenseClaw created
+        (a file a fresh ensure adopted from a purged deployment included), so
+        the removal that follows finds nothing and only the ACL preimage is
+        left (GAP-0938). A file that is back byte-for-byte gets its recorded
+        access list again, one that keeps only the administrator's other keys
+        gets the machine-policy access list, and a missing file has nothing to
+        restore.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)]$Backup
+    )
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.CodexMachinePolicyPath `
+        -PathType Leaf)) {
+        return
+    }
+    Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
+    $actualHash = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.CodexMachinePolicyPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($actualHash -ceq [string]$Backup.sha256) {
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $security.SetSecurityDescriptorSddlForm(
+            [string]$Backup.security_descriptor,
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $Layout.CodexMachinePolicyPath `
+            -AclObject $security
+        Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
+        return
+    }
+    Set-DefenseClawPathAcl `
+        -Path $Layout.CodexMachinePolicyPath `
+        -Kind MachinePolicyFile `
+        -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+    Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
+}
+
 function Complete-DefenseClawCodexRequirementsRemoval {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -15386,11 +15433,17 @@ function Complete-DefenseClawCodexRequirementsRemoval {
             # file now missing is state this teardown cannot explain.
             $absentBackup = Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout
             if ([bool]$absentBackup.existed) {
-                throw (
-                    'verified-absent Codex removal retains an ACL preimage for ' +
-                    "$($Layout.CodexMachinePolicyPath), which existed before this deployment; " +
-                    'restore or remove that file, then run Uninstall again'
-                )
+                if (-not (Test-DefenseClawStandaloneProfile)) {
+                    throw (
+                        'verified-absent Codex removal retains an ACL preimage for ' +
+                        "$($Layout.CodexMachinePolicyPath), which existed before this deployment; " +
+                        'restore or remove that file, then run Uninstall again'
+                    )
+                }
+                Restore-DefenseClawStandaloneCodexRequirementsAcl `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -Backup $absentBackup
             }
             Microsoft.PowerShell.Management\Remove-Item `
                 -LiteralPath $Layout.CodexRequirementsAclBackupPath `

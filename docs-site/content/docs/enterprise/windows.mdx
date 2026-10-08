@@ -1115,7 +1115,8 @@ keys as well, so a purge without the deployment record leaves it. The next
 Setup `/ensure` adopts it: it separates DefenseClaw's hooks (the ones that
 name this deployment's hook binary) from the rest, records the rest as the
 file to restore on uninstall, and continues. A file DefenseClaw created on
-its own is deleted again by that later uninstall.
+its own is deleted again by that later uninstall, which also completes when
+you already deleted the file yourself.
 
 If `C:\ProgramData\Cisco\DefenseClaw` was deleted by hand, uninstall
 finds no recorded deployment. It still removes the four services, the
