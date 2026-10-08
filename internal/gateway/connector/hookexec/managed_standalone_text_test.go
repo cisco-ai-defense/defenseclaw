@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A Unix standalone managed hook that fails closed says, in one line that
@@ -132,5 +134,42 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	_, stdout, _, failures = run(false)
 	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayPeerUnverifiedReason) {
 		t.Fatalf("secure client: stdout = %q failures = %q, want the unchanged text and reason", stdout, failures)
+	}
+}
+
+// A newly enrolled Windows standalone account can meet a 401 on its first
+// call while the guardian's authorization ledger catches up: the hook sends
+// the call again and it is served. A 401 that stays fails closed with the
+// plain text and no operator-only advice a standard user cannot follow
+// (GAP-0680).
+func TestWindowsStandaloneFirstCallRetriesA401WithoutOperatorAdvice(t *testing.T) {
+	original := hookAuthRetryDelay
+	hookAuthRetryDelay = time.Millisecond
+	t.Cleanup(func() { hookAuthRetryDelay = original })
+	managed := func(opts *Options) {
+		token := "managed-test-token"
+		opts.ManagedEnterprise = true
+		opts.ExplainUnenrolledAccount = true
+		opts.AuthenticatedManagedToken = &token
+		opts.FailMode = "closed"
+	}
+	answers := []int{http.StatusUnauthorized, http.StatusOK}
+	rt := &stubRT{onRequest: func(s *stubRT, _ *http.Request) (*http.Response, error) {
+		status := answers[min(s.requests, len(answers))-1]
+		return &http.Response{StatusCode: status, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(`{"action":"allow"}`))}, nil
+	}}
+	if r := run(t, "codex", rt, managed); r.code != 0 || rt.requests != 2 || strings.Contains(r.stdout, "deny") {
+		t.Fatalf("first call: code %d after %d request(s), stdout %q", r.code, rt.requests, r.stdout)
+	}
+	refused := &stubRT{status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`}
+	r := run(t, "codex", refused, managed)
+	if refused.requests != 1+hookAuthRetries || !strings.Contains(r.stdout, `"permissionDecision":"deny"`) {
+		t.Fatalf("lasting 401: %d request(s), stdout %q", refused.requests, r.stdout)
+	}
+	for _, leaked := range []string{"token drift", "doctor --fix", "defenseclaw-gateway restart"} {
+		if strings.Contains(r.stdout+r.stderr, leaked) {
+			t.Fatalf("a standard user sees operator advice %q: %q", leaked, r.stdout+r.stderr)
+		}
 	}
 }

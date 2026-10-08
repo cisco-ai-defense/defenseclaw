@@ -657,6 +657,23 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
 	}
+	// A newly enrolled Windows standalone account holds its runtime (and the
+	// credential in it) a moment before the guardian's authorization ledger,
+	// which the gateway rereads every second, names it, so its first call
+	// can meet a 401 (GAP-0680). The call was not evaluated: send it again a
+	// few times within the hook's deadline. Secure Client is unchanged.
+	for retry := 0; err == nil && resp.StatusCode == http.StatusUnauthorized &&
+		opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && retry < hookAuthRetries; retry++ {
+		_ = resp.Body.Close()
+		timer := time.NewTimer(hookAuthRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized))
+		case <-timer.C:
+		}
+		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+	}
 	if err != nil {
 		reason := "gateway unreachable"
 		if errors.Is(context.Cause(ctx), errGatewayStartFailing) {
@@ -695,6 +712,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 // hookBusyRetries is how many times a hook sends its call again after the
 // gateway answered 429.
 const hookBusyRetries = 4
+
+// hookAuthRetries and hookAuthRetryDelay bound the resend of a Windows
+// standalone call the gateway answered 401 (GAP-0680): about 8 seconds,
+// inside every agent's hook timeout.
+const hookAuthRetries = 4
+
+var hookAuthRetryDelay = 2 * time.Second
 
 // retryAfterDelay is the pause a 429's Retry-After asks for, in whole seconds,
 // kept between 1 s and 3 s; a missing or unreadable value means 1 s.
@@ -1372,9 +1396,11 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
-	if !managedStandaloneHook(opts) {
+	if !managedStandaloneHook(opts) && !opts.ExplainUnenrolledAccount {
 		// The standalone hook socket carries no token, so the token-drift
-		// advice does not apply there.
+		// advice does not apply there. The Windows standalone hook runs as
+		// a standard user, who can run neither command (GAP-0680); its
+		// fail-closed text already says to contact the administrator.
 		reason = responseFailureReason(reason)
 	}
 	closes := !sp.failOpenOnly && failMode != "open"
