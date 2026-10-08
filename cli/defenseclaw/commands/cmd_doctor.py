@@ -1791,12 +1791,36 @@ def _check_hilt_support(
             mode_src = guardrail.effective_mode(connector) or mode_src
         except Exception:  # noqa: BLE001 — keep the global mode.
             pass
-    if not bool(getattr(hilt, "enabled", False)):
-        _emit("pass", "Human approval", "disabled (default)", r=r)
-        return
-
+    hilt_enabled = bool(getattr(hilt, "enabled", False))
     min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
     mode = mode_src.lower()
+    if getattr(guardrail, "profiles", None):
+        from defenseclaw.gateway import current_user_guardrail_profile
+
+        resolved = current_user_guardrail_profile(cfg, connector=connector)
+        effective = (resolved or {}).get("effective") or {}
+        profile_hilt = effective.get("hilt") or {}
+        if (
+            not resolved
+            or resolved.get("error")
+            or resolved.get("lookup_error")
+            or not effective.get("mode")
+            or "enabled" not in profile_hilt
+        ):
+            _emit(
+                "warn",
+                "Human approval",
+                f"{connector} approval posture unknown: could not resolve the account guardrail profile",
+                r=r,
+                remediation="defenseclaw guardrail profile explain --connector " + connector,
+            )
+            return
+        hilt_enabled = bool(profile_hilt["enabled"])
+        min_sev = str(profile_hilt.get("min_severity") or "HIGH").upper()
+        mode = str(effective["mode"]).lower()
+    if not hilt_enabled:
+        _emit("pass", "Human approval", "disabled (default)", r=r)
+        return
     if mode != "action":
         if observe_only is not None:
             # The caller prints one row for every connector in this state.

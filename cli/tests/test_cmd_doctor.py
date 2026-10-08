@@ -987,6 +987,36 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.checks[0]["status"], "skip")
         self.assertIn("not required by hook/policy enforcement", result.checks[0]["detail"])
 
+    def test_hilt_uses_resolved_identity_profile_for_connector(self):
+        from defenseclaw.config import GuardrailProfile
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="claudecode"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.guardrail.hilt.enabled = True
+        cfg.guardrail.profiles = {"read_only": GuardrailProfile(mode="observe")}
+        cfg.guardrail.default_profile = "read_only"
+        result = _DoctorResult()
+        with patch(
+            "defenseclaw.gateway.current_user_guardrail_profile",
+            return_value={
+                "profile": "read_only",
+                "effective": {"mode": "observe", "hilt": {"enabled": True, "min_severity": "HIGH"}},
+            },
+        ) as resolve:
+            _check_hilt_support(cfg, "claudecode", result)
+        resolve.assert_called_once_with(cfg, connector="claudecode")
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertEqual(result.passed, 0, result.checks)
+        self.assertIn("mode is observe", result.checks[0]["detail"])
+
     def test_hilt_disabled_is_pass(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
