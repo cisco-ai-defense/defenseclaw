@@ -127,15 +127,15 @@ type Sidecar struct {
 	// complete verification/Setup transaction. Config publication takes the
 	// write side, so an older fail-mode Setup cannot finish after a newer
 	// runtime policy becomes authoritative.
-	hookPolicyMu             sync.RWMutex
-	proxyMu                  sync.RWMutex
-	guardrailProxy           *GuardrailProxy
-	apiRestartCh             chan struct{}
-	watcherRestartCh         chan struct{}
+	hookPolicyMu     sync.RWMutex
+	proxyMu          sync.RWMutex
+	guardrailProxy   *GuardrailProxy
+	apiRestartCh     chan struct{}
+	watcherRestartCh chan struct{}
 	// enrolledWatchRoots are the enrolled user folders the previous
 	// watcher of this process watched (runWatcher only); nil before the
 	// first.
-	enrolledWatchRoots map[string]struct{}
+	enrolledWatchRoots       map[string]struct{}
 	guardrailRestartCh       chan struct{}
 	aiRestartCh              chan struct{}
 	aiRuntimeRestartCh       chan struct{}

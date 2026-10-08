@@ -5,8 +5,8 @@
 package scanner
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
