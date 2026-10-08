@@ -1366,6 +1366,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		return
 	}
 	base := a.runtimeConfigSnapshot()
+	// Explain the base that decisions use: the published generation.
+	if g := a.generation(); g != nil && g.Config != nil && (base == nil || !base.SecureClientIntegration()) {
+		base = g.Config
+	}
 	if base != nil && base.SecureClientIntegration() {
 		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "guardrail profiles are not supported with the Secure Client integration"})
 		return

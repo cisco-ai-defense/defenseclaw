@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -351,7 +352,8 @@ def test_mutate_v8_config_failed_generation_restores_original(tmp_path: Path) ->
     path.write_text(_source())
     (tmp_path / "config.generation.json").mkdir()
 
-    with pytest.raises(IsADirectoryError):
+    # Windows refuses to replace a directory with a file as access denied.
+    with pytest.raises(PermissionError if sys.platform == "win32" else IsADirectoryError):
         mutate_v8_config(
             path,
             [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
