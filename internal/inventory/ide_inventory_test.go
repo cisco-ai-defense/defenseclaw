@@ -169,29 +169,35 @@ func TestUserScanFollowsNoLinkOutOfTheHome(t *testing.T) {
 	}
 }
 
-// An editor-extension row stored by 0.8.x or 1.0.0 (keyed on the extension
-// id) is the predecessor of the signal the IDE inventory keys on the
-// installation: the first scan after an upgrade keeps its first-seen time
-// and reports nothing gone.
-func TestUpgradeCarriesEditorExtensionRowsKeyedOnTheExtensionID(t *testing.T) {
+// An upgrade from 1.0.0 keeps an editor-extension signal's fingerprint:
+// the stored row below is the Continue signal of a 1.0.0 per-user install
+// (dc-win2, GAP-0297), keyed on the extension id, and the first full scan
+// after the upgrade reports that same signal as seen since it was stored.
+func TestUpgradeFrom100KeepsTheEditorExtensionFingerprint(t *testing.T) {
 	withoutMachineIDEs(t)
 	home := t.TempDir()
-	writeVSCodeExtensions(t, home, "github.copilot")
-	copilot := AISignature{ID: "copilot", Name: "GitHub Copilot", Category: SignalSupportedConnector, ExtensionIDs: []string{"GitHub.copilot", "github.copilot-chat"}}
+	writeVSCodeExtensions(t, home, "continue.continue")
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
 	service := &ContinuousDiscoveryService{
-		catalog: []AISignature{copilot},
+		catalog: catalog,
 		opts:    AIDiscoveryOptions{Mode: "passive", HomeDir: home, HomeDirs: []string{home}},
 		store:   NewAIStateStore(filepath.Join(t.TempDir(), "state.json")),
 	}
-	legacy := service.signalFromValue(copilot, SignalEditorExtension, "editor_extension", "github.copilot")
-	legacy.FirstSeen = time.Now().Add(-48 * time.Hour).UTC()
-	prev := aiStateFile{Signals: map[string]aiStoredSignal{legacy.Fingerprint: {AISignal: legacy}}}
+	const fingerprint100 = "sha256:ff641fd7415804e6b4d636aefdbda5e88ea62e87ff81136104b5d51b2c9dd2a4"
+	firstSeen := time.Date(2026, 10, 7, 23, 40, 0, 0, time.UTC)
+	prev := aiStateFile{Signals: map[string]aiStoredSignal{fingerprint100: {AISignal: AISignal{
+		Fingerprint: fingerprint100, SignatureID: "continue", Category: SignalEditorExtension,
+		Detector: "editor_extension", FirstSeen: firstSeen, State: AIStateSeen,
+	}}}}
 	signals, _ := service.detectEditorExtensions()
 	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
 	report := service.classifyAndPersist("full-1", "test", time.Now(), signals, stats, prev, true)
-	if len(report.Signals) != 1 || report.Signals[0].Fingerprint == legacy.Fingerprint ||
-		report.Signals[0].State != AIStateSeen || !report.Signals[0].FirstSeen.Equal(legacy.FirstSeen) {
-		t.Fatalf("signals = %+v, want the installation's signal, seen since the stored row", report.Signals)
+	if len(report.Signals) != 1 || report.Signals[0].Fingerprint != fingerprint100 ||
+		report.Signals[0].State != AIStateSeen || !report.Signals[0].FirstSeen.Equal(firstSeen) {
+		t.Fatalf("signals = %+v, want the 1.0.0 signal, seen since it was stored", report.Signals)
 	}
 }
 
