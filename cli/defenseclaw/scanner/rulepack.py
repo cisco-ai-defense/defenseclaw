@@ -110,6 +110,16 @@ _TRAFFIC_DATA_CATEGORIES = frozenset({"enterprise-data"})
 _GO_UNICODE_SCALAR_ESCAPE = re.compile(
     r"(?P<slashes>\\+)x\{(?P<codepoint>[0-9A-Fa-f]{1,6})\}"
 )
+_GO_POSIX_CLASS = re.compile(r"\[:(?P<negated>\^?)(?P<name>[a-z]+):\]")
+# Go regexp/syntax's POSIX classes are ASCII, including [:word:] and [:space:].
+_POSIX_ASCII_CLASSES = {
+    "alnum": "A-Za-z0-9", "alpha": "A-Za-z", "ascii": r"\x00-\x7f",
+    "blank": r"\t ", "cntrl": r"\x00-\x1f\x7f", "digit": "0-9",
+    "graph": r"\x21-\x7e", "lower": "a-z", "print": r"\x20-\x7e",
+    "punct": r"\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e",
+    "space": r"\x09-\x0d ", "upper": "A-Z", "word": "A-Za-z0-9_",
+    "xdigit": "A-Fa-f0-9",
+}
 
 # A literal prefilter (GAP-2070): every match of a rule must contain certain
 # ASCII literals, e.g. ``ignore`` and one of ``previous|prior``. A node is a
@@ -627,19 +637,63 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
 
 
 def _compile(pattern: str, rule_id: str) -> re.Pattern[str] | None:
-    # Go/RE2 accepts ``\x{10FFFF}`` Unicode scalar escapes while Python's
-    # ``re`` does not. Translate only that representational difference so the
-    # static-artifact overlay does not silently drop shipped rules containing
-    # zero-width or other non-ASCII scalars. This is not validation: the
-    # gateway's strict Go loader remains authoritative for the source pattern,
-    # and every other unsupported construct still fails closed to "no Python
-    # overlay rule" here.
-    translated = _translate_go_unicode_scalar_escapes(pattern)
+    # Translate RE2 scalar escapes and POSIX classes that Python re interprets
+    # differently. The gateway's strict Go loader validates the source pattern.
+    translated = _translate_go_posix_classes(_translate_go_unicode_scalar_escapes(pattern))
     try:
         return re.compile(translated)
     except re.error as exc:
         _log.debug("rule-pack: invalid regex in %s (%s): %s", rule_id, exc, pattern)
         return None
+
+
+def _translate_go_posix_classes(pattern: str) -> str:
+    """Translate RE2 POSIX classes to Python character-class fragments."""
+
+    def _fragment(match: re.Match[str]) -> str:
+        name = match.group("name")
+        fragment = _POSIX_ASCII_CLASSES[name]
+        if match.group("negated"):
+            included = re.compile(f"[{fragment}]")
+            remaining = [code for code in range(128) if not included.fullmatch(chr(code))]
+            ranges = []
+            start = end = remaining[0] if remaining else -1
+            for code in remaining[1:]:
+                if code == end + 1:
+                    end = code
+                else:
+                    ranges.append((start, end))
+                    start = end = code
+            if start >= 0:
+                ranges.append((start, end))
+            fragment = "".join(
+                rf"\x{lo:02x}" + (rf"-\x{hi:02x}" if hi != lo else "")
+                for lo, hi in ranges
+            ) + r"\x80-\U0010ffff"
+        return fragment
+
+    parts = []
+    in_class = False
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\" and index + 1 < len(pattern):
+            parts.append(pattern[index:index + 2])
+            index += 2
+            continue
+        if char == "[" and in_class:
+            match = _GO_POSIX_CLASS.match(pattern, index)
+            if match and match.group("name") in _POSIX_ASCII_CLASSES:
+                parts.append(_fragment(match))
+                index = match.end()
+                continue
+        if char == "[" and not in_class:
+            in_class = True
+        elif char == "]" and in_class:
+            in_class = False
+        parts.append(char)
+        index += 1
+    return "".join(parts)
 
 
 def _translate_go_unicode_scalar_escapes(pattern: str) -> str:
