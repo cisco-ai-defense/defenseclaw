@@ -231,3 +231,14 @@ def test_a_stopped_gateway_is_one_root_cause_and_unused_sandboxes_only_warn(tmp_
     }
     assert result.checks[4]["detail"].startswith("depends on: OpenShell gateway")
     assert result.failed == 0
+
+
+def test_local_policy_digest_refuses_untrusted_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw import gateway
+
+    monkeypatch.setattr(gateway, "resolve_gateway_binary", lambda: "/tmp/untrusted-gateway")
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
+    monkeypatch.setattr(
+        gateway.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("untrusted gateway executed")
+    )
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir="")) is None
