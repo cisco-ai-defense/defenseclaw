@@ -2704,3 +2704,44 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 		})
 	}
 }
+
+func TestSecureClientPackageManifestFollowsSymlink(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	manifest := filepath.Join(project, "package.json")
+	mustWrite(t, filepath.Join(home, "shared", "manifest.json"), `{"dependencies":{"openai":"^4.0.0"}}`)
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "shared", "manifest.json"), manifest); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := func(secureClient bool) bool {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", SecureClient: secureClient,
+			DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: []string{project}, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		signals, _, err := svc.detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, signal := range signals {
+			if signal.Component != nil && signal.Component.Name == "openai" {
+				return true
+			}
+		}
+		return false
+	}
+	if !scan(true) {
+		t.Fatal("Secure Client lost the symlinked package dependency")
+	}
+	if scan(false) {
+		t.Fatal("standalone scan followed a package manifest symlink")
+	}
+}
