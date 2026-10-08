@@ -574,8 +574,8 @@ def validate_config() -> ValidationResult:
             res.errors.append("canonical v8 validator returned no validity decision")
         return res
 
-    if config_module.config_is_empty(cfg_path):
-        res.errors.append(config_module.empty_config_message(cfg_path))
+    if damage := config_module.config_damage_message(cfg_path):
+        res.errors.append(damage)
         return res
     res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res

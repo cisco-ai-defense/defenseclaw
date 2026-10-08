@@ -361,6 +361,13 @@ with `defenseclaw-gateway enterprise linux reconcile` or
   enrolled, so a user is enrolled after their first sign-in. Local, Active
   Directory (`S-1-5-21-…`) and Microsoft Entra ID (`S-1-12-1-…`) accounts
   are eligible.
+- **Desktop sessions only.** The guardian enrolls an account while it has an
+  interactive desktop session, at the console or over Remote Desktop. An SSH
+  session, a scheduled task or a `runas` window is not one, so an account
+  that only ever works that way is never enrolled and, under
+  `unenrolled_users: deny`, its agents stay blocked
+  (`enterprise_managed_sid_unregistered`). Have the user sign in to the
+  desktop once.
 - **`include_users`, `exclude_users` and `exempt_users`.** Each entry
   matches the account name, `DOMAIN\user`, the SID, or the profile folder
   name, ignoring case. `exclude_users` wins. When the account name cannot be

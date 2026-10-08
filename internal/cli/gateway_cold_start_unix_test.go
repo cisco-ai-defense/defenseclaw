@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,10 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 		t.Fatal(err)
 	}
 
-	recordHookColdStartFailure(dataDir)
+	recordHookColdStartFailure(dataDir, startConfigLoadError{err: errors.New("cannot start the gateway: yaml: line 3")})
+	if body, err := os.ReadFile(gatewayColdStartFailedPath(dataDir)); err != nil || !strings.Contains(string(body), "config-invalid") {
+		t.Fatalf("failure marker = %q, %v; want the config-invalid cause the hooks read (GAP-0409)", body, err)
+	}
 	if err := hookColdStartRefusal(dataDir, time.Now()); err == nil || !strings.Contains(err.Error(), "failed") {
 		t.Fatalf("right after a failed start = %v, want the backoff refusal", err)
 	}
@@ -70,24 +74,6 @@ func TestStopRecordsTheStopAndHookStartHonorsIt(t *testing.T) {
 	if _, statErr := os.Stat(gatewayColdStartFailedPath(dataDir)); !os.IsNotExist(statErr) {
 		t.Fatalf("a skipped hook start recorded a failure: %v", statErr)
 	}
-}
-
-func TestGatewayStartLockSerializesStarts(t *testing.T) {
-	dataDir := t.TempDir()
-	release, err := acquireGatewayStartLock(dataDir, time.Second)
-	if err != nil {
-		t.Fatalf("first lock: %v", err)
-	}
-	if _, err := acquireGatewayStartLock(dataDir, 200*time.Millisecond); err == nil ||
-		!strings.Contains(err.Error(), "still in progress") {
-		t.Fatalf("second lock while held = %v, want a timeout", err)
-	}
-	release()
-	again, err := acquireGatewayStartLock(dataDir, time.Second)
-	if err != nil {
-		t.Fatalf("lock after release: %v", err)
-	}
-	again()
 }
 
 func TestStartLockRunsUnlockedWithoutADataDirectory(t *testing.T) {

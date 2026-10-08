@@ -249,8 +249,15 @@ agent calls, and fail-open hooks (the observe default) let them through with a
 `gateway unreachable` line on stderr. On Windows a hook also starts a stopped
 gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
 
+When the watchdog runs (`gateway.watchdog.enabled`) and the gateway process
+stops on its own (a crash, or `kill -9`), the watchdog starts it again after
+`gateway.watchdog.debounce` failed health checks, under the same rules as a
+hook start. That covers an account with no connector hooks, whose IDE and agent
+inventory would otherwise stay dark until someone ran `defenseclaw-gateway
+start`.
+
 A gateway that is running but does not answer (frozen or hung) is not
-restarted by a hook. The hook's line says the gateway did not answer and names
+restarted by a hook or by the watchdog. The hook's line says the gateway did not answer and names
 the next step: check `defenseclaw-gateway status`, or run
 `defenseclaw-gateway restart`.
 

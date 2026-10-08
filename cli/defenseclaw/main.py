@@ -285,14 +285,14 @@ def cli(ctx: click.Context) -> None:
             ux.echo(str(exc), err=True)
             raise SystemExit(1) from exc
 
-    if invoked == "doctor" and cfg_mod.config_is_empty():
+    if invoked == "doctor" and (damage := cfg_mod.config_damage_message()):
         # An empty config.yaml loads as built-in defaults; judging the install
         # against them printed wrong FAIL rows. Stop at the config rows, as for
         # a malformed file (GAP-1633).
         from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
 
         app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(
-            cfg_mod.ConfigVersionError(cfg_mod.empty_config_message())
+            cfg_mod.ConfigVersionError(damage)
         )
         app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
         return

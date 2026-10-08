@@ -40,13 +40,16 @@ func (e readinessError) Unwrap() error        { return e.error }
 // The watchdog that restart stopped is started again so it reports whether
 // the gateway comes up. The exit code stays non-zero: protection is not
 // confirmed yet.
-func reportGatewayStillStarting(err error, pid int, logPath string, cfg *config.Config, cfgErr error) error {
+func reportGatewayStillStarting(_ error, pid int, logPath string, cfg *config.Config, cfgErr error) error {
 	fmt.Println(Style("STILL STARTING", "fg=yellow", "bold"))
 	_ = startConfiguredWatchdog(cfg, cfgErr, false)
-	return fmt.Errorf("the gateway (PID %d) is still starting and was left running: %v. "+
-		"Protection is not confirmed until it answers. Check it with: defenseclaw-gateway status. "+
-		"If it does not become healthy, run: defenseclaw-gateway restart (check %s for errors)",
-		pid, err, logPath)
+	// The probe error (a URL and a context deadline) is an internal detail;
+	// the user needs to know it is only slow and what that means (GAP-0478).
+	return fmt.Errorf("the gateway (PID %d) is still starting and was left running; on a busy machine this can "+
+		"take a few minutes. Protection is not active until it answers: fail-closed hooks block agent calls "+
+		"meanwhile. Check it in a minute with: defenseclaw-gateway status. If it does not become healthy, run: "+
+		"defenseclaw-gateway restart (check %s for errors)",
+		pid, logPath)
 }
 
 // gatewayLogExitReasonMaxBytes bounds how much of gateway.log a failed start
