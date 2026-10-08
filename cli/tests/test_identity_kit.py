@@ -290,6 +290,92 @@ def test_okta_explicit_gid_is_not_its_own_collision(monkeypatch: pytest.MonkeyPa
     assert report.problems == 0
 
 
+def test_okta_check_rejects_inactive_ldap_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_ldap_app", lambda *_args: {"status": "INACTIVE"})
+    monkeypatch.setattr(okta, "schema_properties", lambda _client, kind:
+                        {name: {"type": definition["type"]} for name, definition in
+                         (okta.USER_ATTRIBUTES if kind == "user" else okta.GROUP_ATTRIBUTES).items()})
+    args = okta.build_parser().parse_args(["check"])
+    assert okta.cmd_check(type("Client", (), {"org_url": "https://example.okta.com"})(), args) == 1
+
+
+def test_okta_check_requires_signon_coverage_for_requested_identities(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    okta = _load(OKTA)
+    app = {"status": "ACTIVE", "_links": {"accessPolicy": {"href": "/api/v1/policies/policy1"}}}
+    monkeypatch.setattr(okta, "find_ldap_app", lambda *_args: app)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1", "status": "ACTIVE"})
+    monkeypatch.setattr(okta, "find_group", lambda *_args, **_kwargs:
+                        {"id": "group1", "profile": {"gidNumber": 1720000}})
+    monkeypatch.setattr(okta, "schema_properties", lambda _client, kind:
+                        {name: {"type": definition["type"]} for name, definition in
+                         (okta.USER_ATTRIBUTES if kind == "user" else okta.GROUP_ATTRIBUTES).items()})
+    monkeypatch.setattr(okta, "check_bind_user", lambda *_args: None)
+    monkeypatch.setattr(okta, "check_group", lambda *_args: None)
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def must(self, method, path):
+            return {"id": "policy1", "name": "LDAP policy"}
+        def get_all(self, path):
+            return [{"name": "other user", "status": "ACTIVE", "priority": 0,
+                     "conditions": {"people": {"users": {"include": ["other"]}}},
+                     "actions": {"appSignOn": {"access": "ALLOW",
+                                              "verificationMethod": {"factorMode": "1FA"}}}}]
+
+    args = okta.build_parser().parse_args(
+        ["check", "--bind-login", "bind@example.com", "--group", "linux-users"])
+    assert okta.cmd_check(Client(), args) == 1
+    output = capsys.readouterr().out
+    assert "no active password-only ALLOW rule covers bind user" in output
+    assert "no active password-only ALLOW rule covers group" in output
+
+    bind_only = okta.build_parser().parse_args(["check", "--bind-login", "bind@example.com"])
+    assert okta.cmd_check(Client(), bind_only) == 1
+
+
+def test_okta_bind_role_rejects_privileged_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})
+    roles = [{"type": "SUPER_ADMIN", "label": "Super Administrator"}]
+    permissions = list(okta.BIND_PERMISSIONS)
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def get_all(self, path, key=None):
+            if key == "roles":
+                return [{"id": "role1", "label": "reader"}]
+            if key == "resource-sets":
+                return [{"id": "set1", "label": "all"}]
+            if key == "resources":
+                return [{"_links": {"self": {"href": self.org_url + "/api/v1/" + kind}}}
+                        for kind in ("users", "groups")]
+            raise AssertionError(path)
+        def must(self, method, path, body=None):
+            if path.endswith("/permissions"):
+                return {"permissions": [{"label": label} for label in permissions]}
+            if path.endswith("/roles") and method == "GET":
+                return roles
+            if method != "GET":
+                raise AssertionError("privileged account must not be changed")
+            raise AssertionError(path)
+
+    client = Client()
+    report = okta.Report(dry_run=False)
+    okta.check_bind_user(client, report, "bind@example.com")
+    assert report.problems > 0
+    args = okta.build_parser().parse_args(["bind-role", "--bind-login", "bind@example.com", "--apply"])
+    assert okta.cmd_bind_role(client, args) == 1
+
+    roles[:] = [{"type": "CUSTOM", "role": "role1", "resource-set": "set1"}]
+    permissions.append("okta.users.manage")
+    report = okta.Report(dry_run=False)
+    okta.check_bind_user(client, report, "bind@example.com")
+    assert report.problems > 0
+
+
 def test_okta_bind_role_refuses_extra_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
     okta = _load(OKTA)
     monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})

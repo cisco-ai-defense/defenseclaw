@@ -255,8 +255,15 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
             "Okta has no API for it.",
         )
     else:
-        report.ok(f"app {APP_NAME} is {app.get('status')}: ldaps://{host}:636, base {base}")
-        check_signon_policy(client, report, app)
+        if app.get("status") == "ACTIVE":
+            report.ok(f"app {APP_NAME} is ACTIVE: ldaps://{host}:636, base {base}")
+        else:
+            report.problem(f"app {APP_NAME} is {app.get('status') or 'unknown'}, not ACTIVE",
+                           "Activate the LDAP Interface app in the Okta Admin Console.")
+        if args.bind_login or args.group:
+            check_signon_policy(client, report, app, args.bind_login, [name for name, _ in args.group or []])
+        else:
+            report.note("Pass --bind-login and --group to verify sign-on policy coverage.")
 
     print("Profile attributes")
     for kind, wanted in (("user", USER_ATTRIBUTES), ("group", GROUP_ATTRIBUTES)):
@@ -277,31 +284,56 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
     return 1 if report.problems else 0
 
 
-def check_signon_policy(client: Okta, report: Report, app: dict[str, Any]) -> None:
+def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
+                        bind_login: str | None, group_names: list[str]) -> None:
     href = ((app.get("_links") or {}).get("accessPolicy") or {}).get("href", "")
     if not href:
+        report.problem("the LDAP Interface app has no assigned sign-on policy")
         return
     policy = client.must("GET", "/api/v1/policies/" + href.rsplit("/", 1)[-1])
     print(f"sign-on policy: {policy.get('name')}")
-    one_factor = False
+    bind = find_user(client, bind_login) if bind_login else None
+    groups = {name: find_group(client, name) for name in group_names}
+    if bind_login and bind is None:
+        report.problem(f"bind user {bind_login} does not exist; cannot verify its sign-on rule")
+    for name, group in groups.items():
+        if group is None:
+            report.problem(f"group {name} does not exist; cannot verify its sign-on rule")
+
+    bind_covered = False
+    group_covered = {name: False for name in groups}
     for rule in client.get_all(f"/api/v1/policies/{policy['id']}/rules"):
-        method = rule.get("actions", {}).get("appSignOn", {}).get("verificationMethod") or {}
+        action = (rule.get("actions") or {}).get("appSignOn") or {}
+        method = action.get("verificationMethod") or {}
         factor = method.get("factorMode", "?")
-        people = (rule.get("conditions") or {}).get("people") or {}
-        users = len((people.get("users") or {}).get("include") or [])
-        groups = len((people.get("groups") or {}).get("include") or [])
-        scope = f"{users} user(s), {groups} group(s)" if people else "everyone"
+        people = ((rule.get("conditions") or {}).get("people") or {})
+        users = people.get("users") or {}
+        scoped_groups = people.get("groups") or {}
+        user_ids = set(users.get("include") or [])
+        group_ids = set(scoped_groups.get("include") or [])
+        scope = f"{len(user_ids)} user(s), {len(group_ids)} group(s)" if people else "everyone"
         report.note(f"rule '{rule.get('name')}' ({rule.get('status')}, priority {rule.get('priority')}): "
                     f"{factor}, {scope}")
-        if rule.get("status") == "ACTIVE" and factor == "1FA":
-            one_factor = True
-    if one_factor:
-        report.ok("a password-only rule exists; check that it covers the bind user and the Linux users")
-    else:
-        report.problem(
-            "no active password-only (1FA) rule: LDAP binds fail with 'denied by sign on policy' (error 49)",
-            "Run: okta-ldap-setup.py signon-policy --group GROUP --bind-login LOGIN",
-        )
+        if (rule.get("status") != "ACTIVE" or action.get("access") != "ALLOW"
+                or factor != "1FA" or users.get("exclude") or scoped_groups.get("exclude")):
+            continue
+        # Okta ANDs users and groups on the same rule. An unrestricted rule covers both.
+        if bind and not group_ids and (not user_ids or bind["id"] in user_ids):
+            bind_covered = True
+        for name, group in groups.items():
+            if group and not user_ids and (not group_ids or group["id"] in group_ids):
+                group_covered[name] = True
+    if bind and bind_covered:
+        report.ok(f"password-only sign-on covers bind user {bind_login}")
+    elif bind:
+        report.problem(f"no active password-only ALLOW rule covers bind user {bind_login}",
+                       "Run: okta-ldap-setup.py signon-policy --group GROUP --bind-login LOGIN")
+    for name, group in groups.items():
+        if group and group_covered[name]:
+            report.ok(f"password-only sign-on covers group {name}")
+        elif group:
+            report.problem(f"no active password-only ALLOW rule covers group {name}",
+                           "Run: okta-ldap-setup.py signon-policy --group GROUP --bind-login LOGIN")
 
 
 def check_bind_user(client: Okta, report: Report, login: str) -> None:
@@ -311,14 +343,28 @@ def check_bind_user(client: Okta, report: Report, login: str) -> None:
         report.problem("the user does not exist")
         return
     report.ok(f"exists, status {user.get('status')}")
-    labels = [r.get("label") or r.get("type") for r in client.must("GET", f"/api/v1/users/{user['id']}/roles") or []]
-    if labels:
-        report.ok("admin roles: " + ", ".join(str(label) for label in labels))
-    else:
-        report.problem(
-            "no admin role: the bind user sees only itself, so SSSD finds no other user",
-            "Run: okta-ldap-setup.py bind-role --bind-login LOGIN",
-        )
+    assigned = client.must("GET", f"/api/v1/users/{user['id']}/roles") or []
+    if len(assigned) != 1 or assigned[0].get("type") != "CUSTOM":
+        report.problem("bind user must have only one read-only custom role, with no privileged roles",
+                       "Remove other roles in Okta, then run: okta-ldap-setup.py bind-role --bind-login LOGIN")
+        return
+    role_id = assigned[0].get("role")
+    resource_set_id = assigned[0].get("resource-set")
+    if not role_id or not resource_set_id:
+        report.problem("bind user's custom role is missing its role or resource set")
+        return
+    granted = client.must("GET", f"/api/v1/iam/roles/{role_id}/permissions") or {}
+    permissions = {entry.get("label") for entry in granted.get("permissions") or []}
+    if permissions != set(BIND_PERMISSIONS):
+        report.problem("bind user's role does not have exactly the user and group read permissions")
+        return
+    resources = client.get_all(f"/api/v1/iam/resource-sets/{resource_set_id}/resources", key="resources")
+    covered = {((entry.get("_links") or {}).get("self") or {}).get("href") for entry in resources}
+    required = {f"{client.org_url}/api/v1/{kind}" for kind in ("users", "groups")}
+    if not required <= covered:
+        report.problem("bind user's role does not cover all users and groups")
+        return
+    report.ok("only the read-only user and group role is assigned")
 
 
 def check_group(client: Okta, report: Report, name: str, gid: int | None) -> None:
@@ -521,9 +567,16 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
     user = find_user(client, args.bind_login)
     if user is None:
         raise OktaError(f"the bind user {args.bind_login} does not exist; create it in Okta first")
+    assigned = client.must("GET", f"/api/v1/users/{user['id']}/roles") or []
+    if any(entry.get("type") != "CUSTOM" for entry in assigned) or len(assigned) > 1:
+        report.problem("bind user has another admin role; remove it in Okta before assigning the read-only role")
+        return report.finish()
 
     roles = client.get_all("/api/v1/iam/roles", key="roles")
     role = next((r for r in roles if r.get("label") == args.role_label), None)
+    if assigned and (role is None or assigned[0].get("role") != role["id"]):
+        report.problem("bind user has a different admin role; remove it in Okta before assigning the read-only role")
+        return report.finish()
     if role is None:
         report.change(f"create role '{args.role_label}' with {', '.join(BIND_PERMISSIONS)}")
         if not report.dry_run:
@@ -544,6 +597,9 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
 
     sets = client.get_all("/api/v1/iam/resource-sets", key="resource-sets")
     rset = next((s for s in sets if s.get("label") == args.resource_set_label), None)
+    if assigned and (rset is None or assigned[0].get("resource-set") != rset["id"]):
+        report.problem("bind user has a different resource set; remove that role in Okta first")
+        return report.finish()
     if rset is None:
         report.change(f"create resource set '{args.resource_set_label}' (all users and all groups)")
         if not report.dry_run:
@@ -562,7 +618,11 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
             report.problem(f"resource set '{args.resource_set_label}' does not cover all users and groups")
             rset = None  # Do not assign a resource set with incomplete coverage.
 
-    assigned = client.must("GET", f"/api/v1/users/{user['id']}/roles") or []
+    if assigned and (len(assigned) != 1 or assigned[0].get("type") != "CUSTOM"
+                     or not role or not rset or assigned[0].get("role") != role["id"]
+                     or assigned[0].get("resource-set") != rset["id"]):
+        report.problem("bind user has another admin role; remove it in Okta before assigning the read-only role")
+        return report.finish()
     if role and rset and any(
         a.get("type") == "CUSTOM" and a.get("role") == role["id"] and a.get("resource-set") == rset["id"]
         for a in assigned
