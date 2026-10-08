@@ -331,9 +331,13 @@ hook socket:
 | Enrolled user | Allowed and inspected | Allowed and inspected |
 | User without an enrollment, `unenrolled_users: inspect` (default) | Allowed and inspected | Refused: `enterprise_managed_uid_unregistered` |
 | User without an enrollment, `unenrolled_users: deny` | Refused unless the user is enrolled for some agent | Refused |
-| `exempt_users` entry | Allowed, inspected, and logged as `enterprise_exempt_user` | Same |
+| `exempt_users` entry | Allowed and inspected; the gateway journal records `enterprise_exempt_user` | Same |
 | uid 0, `root: inspect` or `exempt` (default `inspect`) | Allowed and inspected | Allowed and inspected |
 | uid 0, `root: deny` | Refused: `enterprise_managed_root_denied` | Refused |
+
+The `enterprise_exempt_user` marker is a gateway journal line. Audit export
+contains ordinary `hook_decision` allow rows for exempt users.
+
 
 With `unenrolled_users: deny`, the enumerator also creates enrollment rows
 for machine-policy agents, so enrolled users keep working. OpenCode counts
