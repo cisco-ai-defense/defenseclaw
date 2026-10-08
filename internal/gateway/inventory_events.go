@@ -411,6 +411,17 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	return owner
 }
 
+// discoveryUserEmail is the connector account address of a discovery
+// signal's owner, read from that owner's own profile, while
+// ai_discovery.include_user_email is on. A signal without an owner never
+// carries one: the address would then name nobody on this endpoint.
+func discoveryUserEmail(signal inventory.AISignal) string {
+	if signal.UserID == "" || !UserEmailCollectionEnabled() {
+		return ""
+	}
+	return signal.UserEmail
+}
+
 // discoveryUserIDKind is the id namespace of the account a signal belongs
 // to: a uid from a Unix per-user scan, or the profile's SID from a managed
 // Windows scan.
@@ -1290,6 +1301,7 @@ func discoveredEntriesFromReport(
 				userID:          signal.UserID,
 				userIDKind:      discoveryUserIDKind(signal.UserID),
 				userName:        signal.UserName,
+				userEmail:       discoveryUserEmail(signal),
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
@@ -1342,6 +1354,7 @@ func discoveredMCPEntriesFromReport(
 				userID:         signal.UserID,
 				userIDKind:     discoveryUserIDKind(signal.UserID),
 				userName:       signal.UserName,
+				userEmail:      discoveryUserEmail(signal),
 			})
 		}
 	}

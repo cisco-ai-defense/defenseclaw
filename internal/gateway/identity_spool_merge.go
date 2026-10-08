@@ -97,6 +97,16 @@ func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.Identity
 	return record, true
 }
 
+// identitySpoolConnectorEmail is the connector address the enumerator
+// published in the current identity record of sid, or "".
+func identitySpoolConnectorEmail(sid, connector string) string {
+	record, ok := readIdentitySpoolFacts(sid, time.Now())
+	if !ok {
+		return ""
+	}
+	return record.ConnectorEmails[connector]
+}
+
 // readIdentitySpoolFactsForAccount rejects a reused uid's old record. A
 // missing name is also unverified; Windows uses the stable SID path above.
 func readIdentitySpoolFactsForAccount(key, accountName string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {

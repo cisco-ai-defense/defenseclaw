@@ -281,7 +281,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// The gateway's service account cannot read that cache: publish each
 		// user's verified directory facts and named groups where it can.
 		identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-		if spoolErr := enterpriseWindowsIdentitySpoolWriter(identityDir, enumerateOpts.GroupCache, enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+		if spoolErr := enterpriseWindowsIdentitySpoolWriter(identityDir, enumerateOpts.GroupCache, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		}); spoolErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
@@ -360,11 +360,24 @@ func publishEnterpriseWindowsManifestIdentity(stderr io.Writer, cfg *config.Conf
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the enrollment group cache: %v\n", err)
 	}
 	identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	if err := enterpriseWindowsIdentitySpoolWriter(identityDir, refreshed, enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+	if err := enterpriseWindowsIdentitySpoolWriter(identityDir, refreshed, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
 		fmt.Fprintf(stderr, format+"\n", args...)
 	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", err)
 	}
+}
+
+// enterpriseWindowsConnectorEmails reads the enrolled profiles' Claude Code
+// and Codex addresses for their identity records while
+// ai_discovery.include_user_email is on, and nil otherwise, so turning the
+// option off drops them at the next cycle.
+func enterpriseWindowsConnectorEmails(stderr io.Writer, cfg *config.Config, manifest enterprisehooks.Manifest) map[string]map[string]string {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !cfg.AIDiscovery.IncludeUserEmail {
+		return nil
+	}
+	return enterprisehooks.WindowsConnectorEmails(manifest, func(format string, args ...any) {
+		fmt.Fprintf(stderr, format+"\n", args...)
+	})
 }
 
 // runEnterpriseWindowsEnumerateInterval is the interval-loop entry.

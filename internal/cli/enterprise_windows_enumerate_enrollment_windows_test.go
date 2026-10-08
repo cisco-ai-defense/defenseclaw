@@ -153,7 +153,7 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	}
 	enterpriseWindowsEnumerateGroupCacheWriter = func(string, *enterprisehooks.WindowsEnrollmentGroupCache) (bool, error) { return true, nil }
 	var published *enterprisehooks.WindowsEnrollmentGroupCache
-	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ func(string) error, _ func(string, ...any)) error {
+	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
 		published = cache
 		return nil
 	}

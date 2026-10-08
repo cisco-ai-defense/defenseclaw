@@ -353,6 +353,9 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAIModelProvenanceSource:       base.DefenseClawAIModelProvenanceSource,
 				DefenseClawAIModelProvenanceConfidence:   base.DefenseClawAIModelProvenanceConfidence,
 				DefenseClawAgentIdentityID:               base.DefenseClawAgentIdentityID,
+				// The owner's connector address, once per discovery cycle
+				// (redaction drops it under strict).
+				DefenseClawUserEmail: v8UserEmail(discoveryUserEmail(signal)),
 			}
 			identity.applyTo(&observed)
 			return builder.BuildLogAIComponentObserved(observed)
