@@ -112,6 +112,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	strict := l.opts.Action == ActionVerify
 	problems := l.verifyInstalled(ctx, record, strict)
+	l.warnLowDiskSpace()
 	dropInProblems, dropIns := l.unitDropIns(ctx, record)
 	problems = append(problems, dropInProblems...)
 	if len(dropIns) > 0 {

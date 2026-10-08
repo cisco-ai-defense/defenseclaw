@@ -204,6 +204,9 @@ type Env struct {
 	// connectorName, over the route the standalone plugins use, and returns
 	// the proof (see rotation.go).
 	ListenerProof func(ctx context.Context, connectorName, keyID, nonce string) (string, error)
+	// DiskSpace reports the available bytes, size and device of the
+	// filesystem holding a path (see diskSpace).
+	DiskSpace func(path string) (avail, total, device uint64, err error)
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
@@ -311,6 +314,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.ProcessExecPath == nil {
 		e.ProcessExecPath = processExecPath
+	}
+	if e.DiskSpace == nil {
+		e.DiskSpace = diskSpace
 	}
 	if e.Services == nil {
 		e.Services = newServiceManager(e)
