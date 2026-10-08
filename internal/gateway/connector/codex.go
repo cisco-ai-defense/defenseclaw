@@ -984,7 +984,9 @@ func (c *CodexConnector) SupportsComponentScanning() bool { return true }
 func (c *CodexConnector) ComponentTargets(cwd string) map[string][]string {
 	codexDir := codexHomeDir()
 	targets := map[string][]string{
-		"skill": {},
+		// Codex loads $CODEX_HOME/skills as well as ~/.agents/skills; skill
+		// list shows both, so the watcher watches both (GAP-0392).
+		"skill": {filepath.Join(codexDir, "skills")},
 		"plugin": {
 			filepath.Join(codexDir, "plugins", "cache"),
 		},

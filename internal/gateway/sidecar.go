@@ -3235,12 +3235,6 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				// schema-aware Amp resolver instead of watching static defaults.
 				compTargets["skill"] = ampWatcherSkillDirs(cfg)
 				compTargets["plugin"] = cfg.PluginDirsForConnector("amp")
-			} else if strings.EqualFold(strings.TrimSpace(conn.Name()), "codex") {
-				// Codex also loads $CODEX_HOME/skills, the folder skill list
-				// shows; watch it when it exists (GAP-0392).
-				if dir := filepath.Join(connector.CodexHomeDir(), "skills"); isExistingDir(dir) {
-					compTargets["skill"] = append(compTargets["skill"], dir)
-				}
 			} else if strings.EqualFold(strings.TrimSpace(conn.Name()), "opencode") {
 				activeRoot := ""
 				if cfg != nil {
@@ -3307,11 +3301,6 @@ func watcherDefaultPluginDirs(cfg *config.Config, conn connector.Connector) []st
 		return cfg.PluginDirsForConnector(conn.Name())
 	}
 	return cfg.PluginDirs()
-}
-
-func isExistingDir(dir string) bool {
-	info, err := os.Stat(dir)
-	return err == nil && info.IsDir()
 }
 
 // watcherConnectors resolves every configured connector, owners of a shared

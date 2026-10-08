@@ -626,9 +626,10 @@ func TestWatcherUsesConnectorDirsSkipsManagedServiceHome(t *testing.T) {
 }
 
 // TestResolveWatcherDirsForConnectors_EveryConfiguredConnector pins GAP-0392:
-// with Claude Code and Codex configured the watcher watches both connectors'
-// skill folders (Codex's $CODEX_HOME/skills included), each tagged with the
-// connector that owns it, not only the first connector's.
+// with Claude Code and Codex configured the watcher watches the skill
+// folders of both connectors, each tagged with the connector that owns it,
+// $CODEX_HOME/skills included also before Codex creates it (it was watched
+// only when it existed at gateway start, so one created later never was).
 func TestResolveWatcherDirsForConnectors_EveryConfiguredConnector(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -636,7 +637,7 @@ func TestResolveWatcherDirsForConnectors_EveryConfiguredConnector(t *testing.T) 
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	codexSkills := filepath.Join(home, ".codex", "skills")
-	if err := os.MkdirAll(codexSkills, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(codexSkills), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.DefaultConfig()
