@@ -45,9 +45,10 @@ func init() {
 // lifecycle still learns what the gateway reports.
 type policyDigestReport struct {
 	gateway.EffectivePolicy
-	GatewayReportedDigest  string `json:"gateway_reported_digest,omitempty"`
-	GatewayLastReloadError string `json:"gateway_last_reload_error,omitempty"`
-	Error                  string `json:"error,omitempty"`
+	GatewayReportedDigest           string `json:"gateway_reported_digest,omitempty"`
+	GatewayReportedConfigGeneration uint64 `json:"gateway_reported_config_generation,omitempty"`
+	GatewayLastReloadError          string `json:"gateway_last_reload_error,omitempty"`
+	Error                           string `json:"error,omitempty"`
 }
 
 // gatewayReportedPolicy is the policy object of the gateway's /health: zero
@@ -162,7 +163,9 @@ gateway applied this configuration.`,
 		report := policyDigestReport{}
 		if asJSON && check {
 			reported := gatewayReportedPolicy(cfg)
-			report.GatewayReportedDigest, report.GatewayLastReloadError = reported.EffectiveDigest, reported.LastReloadError
+			report.GatewayReportedDigest = reported.EffectiveDigest
+			report.GatewayReportedConfigGeneration = reported.ConfigGeneration
+			report.GatewayLastReloadError = reported.LastReloadError
 		}
 		policy, err := gateway.ComputeEffectivePolicy(cmd.Context(), cfg)
 		if err != nil {
