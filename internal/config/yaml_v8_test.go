@@ -367,3 +367,24 @@ func TestParseV8YAMLSharesTheParseOfOneSource(t *testing.T) {
 		t.Fatal("malformed bytes were accepted from the cache")
 	}
 }
+
+// TestSecureClientV9SourceRejected keeps the Secure Client parser and schema
+// preflight on the v8 contract while other profiles can use v9.
+func TestSecureClientV9SourceRejected(t *testing.T) {
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n")
+	for name, check := range map[string]func(string, []byte) error{
+		"parse": func(source string, raw []byte) error {
+			_, err := ParseV8YAML(source, raw)
+			return err
+		},
+		"schema": ValidateV8SchemaBytes,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := check("config.yaml", raw)
+			var version *V8YAMLError
+			if !errors.As(err, &version) || version.Code != V8YAMLErrorVersionUnsupported {
+				t.Fatalf("Secure Client v9 error = %v, want unsupported version", err)
+			}
+		})
+	}
+}

@@ -348,6 +348,10 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
 	switch {
+	case version > v8YAMLConfigVersion && v9SecureClientDocument(root):
+		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
+			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
+			newerConfigAction)
 	case version >= v8YAMLConfigVersion && version <= MaxSupportedConfigVersion:
 		return nil
 	case version >= 0 && version < v8YAMLConfigVersion:
