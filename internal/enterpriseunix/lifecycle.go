@@ -779,6 +779,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	if migrated != nil {
+		l.warnConfigV8(migrated.Record)
 		v9, err := env.validateConfigSource(migrated.Migrated, l.opts.ConfigFile)
 		if err != nil {
 			return nil, &codedError{code: codeConfig, err: fmt.Errorf("the config_version 9 migration of the config does not validate: %w", err)}
@@ -923,6 +924,31 @@ func (e *Env) packageReinstallStep(version string) string {
 		return fmt.Sprintf("reinstall the package (sudo installer -pkg defenseclaw-enterprise-%s-darwin-arm64.pkg -target /) to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
 	}
 	return fmt.Sprintf("reinstall the defenseclaw-enterprise %s package with your package manager to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
+}
+
+// codeConfigV8 warns that the config a run read is still config_version 8.
+const codeConfigV8 = "config_version_8"
+
+// warnConfigV8 tells the administrator, on every run that reads a
+// config_version 8 file, that the file should be replaced and which values
+// the migration resolved differently. An MDM that keeps delivering the v8
+// file saw green results while two values were dropped, the first run
+// listing the migration only among its changes (GAP-0540).
+func (l *lifecycle) warnConfigV8(record config.MigrationRecord) {
+	source := l.opts.ConfigFile
+	if source == "" {
+		source = l.env.Layout.ConfigPath
+	}
+	message := fmt.Sprintf("the config this run read (%s) is config_version 8; DefenseClaw applies its config_version 9 migration. Deliver a config_version 9 file instead, for example the migrated %s",
+		source, l.env.Layout.ConfigPath)
+	var conflicts []string
+	for _, conflict := range record.Conflicts {
+		conflicts = append(conflicts, fmt.Sprintf("%s kept %s, dropped %s (%s)", conflict.To, conflict.Kept, conflict.Lost, conflict.Reason))
+	}
+	if len(conflicts) > 0 {
+		message += fmt.Sprintf("; %d value(s) conflicted and the migration resolved them: %s", len(conflicts), strings.Join(conflicts, "; "))
+	}
+	l.result.AddWarning(codeConfigV8, message)
 }
 
 func recordBinaries(env *Env, record *Deployment) map[string]string {

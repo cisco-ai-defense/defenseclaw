@@ -128,8 +128,13 @@ func TestReassertedV8ConfigIsNotRewritten(t *testing.T) {
 	if got := h.read(h.env.Layout.ConfigPath); got != v8 {
 		t.Fatalf("the re-asserted v8 config was rewritten:\n%s", got)
 	}
-	if r := h.run(Options{Action: ActionEnsure, Reason: "path"}); !r.Noop {
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	if !r.Noop {
 		t.Fatalf("the kept v8 config does not settle: %+v", r.Changes)
+	}
+	// The settled run still says the file is version 8 (GAP-0540).
+	if !hasWarning(r, codeConfigV8) {
+		t.Fatalf("a run that read a config_version 8 file does not say so: %+v", r.Warnings)
 	}
 }
 
