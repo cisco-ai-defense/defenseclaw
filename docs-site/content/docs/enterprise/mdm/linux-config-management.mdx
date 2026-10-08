@@ -392,8 +392,9 @@ This recipe uses the `directory`, `file`, `cookbook_file`, `remote_file`,
 [dpkg_package](https://docs.chef.io/client/19/resources/bundled/dpkg_package/),
 [rpm_package](https://docs.chef.io/client/19/resources/bundled/rpm_package/),
 [execute](https://docs.chef.io/client/19/resources/bundled/execute/)). Put
-`config.yaml` in the cookbook's `files` folder and the key in an encrypted
-data bag item `defenseclaw/ai_defense` with a `key` field.
+`config.yaml` in the cookbook's `files` folder. Store the optional key as
+the encrypted node attribute `defenseclaw.ai_defense_key`; leave the
+attribute unset on nodes without AI Defense.
 
 ```ruby title="recipes/default.rb"
 version = '1.0.0'
@@ -460,7 +461,7 @@ execute 'defenseclaw-repair' do
   retry_delay 30
 end
 
-key = data_bag_item('defenseclaw', 'ai_defense')['key'] rescue nil
+key = node['defenseclaw'] && node['defenseclaw']['ai_defense_key']
 if key
   file '/etc/mdm/defenseclaw/ai-defense-api-key' do
     content key
