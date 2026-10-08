@@ -2010,6 +2010,9 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 			return nil
 		}
 	}
+	if !w.secureClientActive() {
+		enforce.RemoveStaleQuarantineStages(plan, record.ID)
+	}
 	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
 		// Roll back only an unmaterialized journal. A verified destination is
 		// authoritative recovery data and must retain its pending provenance.
@@ -2457,6 +2460,10 @@ func watcherPathAtOrBelow(path, root string) bool {
 func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionResult) {
 	noted, hasNote := w.admissionNotes.LoadAndDelete(evt.Path)
 	if res.Interrupted || w.secureClientActive() {
+		return
+	}
+	if _, err := os.Lstat(addressablePath(evt.Path)); err != nil && evt.Type != InstallMCP {
+		w.state.clearIssue(evt.Path) // moved to quarantine or removed
 		return
 	}
 	issue := AdmissionIssue{Type: string(evt.Type), Name: evt.Name, Path: evt.Path, Connector: w.eventConnector(evt)}

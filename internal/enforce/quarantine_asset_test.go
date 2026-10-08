@@ -70,7 +70,7 @@ func TestAssetQuarantineAndRestorePreserveHashAndOwnership(t *testing.T) {
 
 // GAP-0826: a quarantine copy that failed (the disk was full) could leave its
 // .pending stage beside the destination; the next attempt, under another
-// journal id, removes it.
+// journal id, removes it first.
 func TestAssetQuarantineRemovesTheStageOfAnEarlierAttempt(t *testing.T) {
 	root := t.TempDir()
 	skillsRoot := filepath.Join(root, "skills")
@@ -92,6 +92,7 @@ func TestAssetQuarantineRemovesTheStageOfAnEarlierAttempt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stale, "pad6.dat"), []byte("partial"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	RemoveStaleQuarantineStages(plan, "rec-retry")
 	if err := ExecuteAssetQuarantine(plan, "rec-retry"); err != nil {
 		t.Fatalf("quarantine: %v", err)
 	}
