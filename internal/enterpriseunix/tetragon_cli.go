@@ -1118,6 +1118,9 @@ type tetragonInputs struct {
 	State      kernelpolicy.State
 	Running    bool
 	Host       tetragonHost
+	// Gateway is Plane C as the gateway's /health reports it; nil where it
+	// is not read (status's footer, the readiness unit tests).
+	Gateway *gatewayPlaneC
 }
 
 // maxCustomerPolicies bounds the customer policies the CLI shows.

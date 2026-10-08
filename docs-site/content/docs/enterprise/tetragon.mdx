@@ -263,7 +263,10 @@ Push it the way you push the rest of the config. The package's `ensure` step
 validates the candidate, applies it, and rolls back on failure; see
 [the procedure every recipe follows](/docs/enterprise/mdm/linux-config-management#the-procedure-every-recipe-follows).
 A change to `enterprise.tetragon` is rendered into a drop-in for the sensor
-helper, and the helper restarts into it.
+helper, and the helper restarts into it. The gateway re-attaches to the
+restarted helper within seconds and Plane C records again; until its next poll
+(30 seconds by default), `tetragon verify` warns that the gateway records
+nothing from Plane C. A warning never fails the gate.
 
 <Tabs items={['Ansible', 'Puppet, Chef, Salt']}>
 
@@ -509,7 +512,8 @@ Each line is a pass (`✓`), a warning (`!`), a failure (`✗`) or information
 order: Tetragon is installed and running, its API is a root-owned unix socket,
 its version is in the window for the mode, the helper's stream is connected
 (and not on the `cn_proc` fallback), the metrics and health listeners are on
-loopback, Plane C is on, and your policies are counted. `status` shows
+loopback, Plane C is on and the gateway records it, and your policies are
+counted. `status` shows
 Tetragon's version in `consume` too.
 
 {/* SCREENSHOT: terminal-tetragon-verify-consume.png — `tetragon verify --ready-for consume` on a host that passes, from round row OB-03 */}

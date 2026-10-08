@@ -307,6 +307,10 @@ func New(options Options) (*Service, error) {
 		// decision covers is a fact (hook_seen=false), not a missing
 		// install.
 		service.hostPlane.hooks = newHookRing(hookRingSize, hookRingWindow)
+		// The helper is its own service: systemd restarts it after a crash,
+		// on the printed fix and during a package upgrade. The plane opens a
+		// new stream then instead of staying detached (GAP-0051).
+		service.hostPlane.reopen = func() plane.Source { return options.NewPlaneSource(options.HomeDirs) }
 		if reader, ok := options.Acquirer.(kernelStatusReader); ok {
 			service.kernelReader = reader
 		}
@@ -540,7 +544,8 @@ func (s *Service) Run(ctx context.Context) error {
 // empty row. During a package upgrade the gateway can start before the
 // sensor helper listens again; the first dial error then stayed until the
 // gateway restarted (GAP-1255). Other start failures (a refused local
-// source, a stream that ended later) are reported, not retried. Only Run
+// source) are reported, not retried; a helper stream that ends later is
+// re-attached by the plane itself (hostPlane.reattach). Only Run
 // calls it, so the consumer runs on Run's context. A nil host plane means
 // Plane C is not selected (a per-user install without the sensor helper):
 // there is nothing to start, so every tick returns here (GAP-1810).
@@ -1003,7 +1008,11 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 	}
 	_, _, up, coverage := s.hostPlane.stats()
 	if !up {
-		return false, capability.Mechanism, "the kernel event source stopped delivering"
+		reason := "the kernel event source stopped delivering"
+		if state := s.hostPlane.reattachState(); state != "" {
+			reason += "; " + state
+		}
+		return false, capability.Mechanism, reason
 	}
 	// Partial coverage is running, with the gap named. Reporting it as fully
 	// up would hide a whole missing event class; reporting it as down would

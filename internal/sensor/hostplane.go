@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"net"
 	"sort"
 	"strconv"
@@ -125,7 +126,30 @@ type hostPlane struct {
 	// blocks are the recent attributed denials, DefenseClaw's controls' and
 	// customer policies', for the developer notice.
 	blocks []KernelBlock
+
+	// reopen, when set, gives a new source after the current one's stream
+	// ended: the managed sensor helper's broker stream, which systemd
+	// restarts (Restart=always, the printed fix, a package upgrade). Without
+	// it the gateway stayed detached until it restarted too (GAP-0051). nil
+	// keeps a local source's end final: nothing restarts it.
+	reopen func() plane.Source
+	// reattachDelay is the first wait before re-attaching; it doubles up to
+	// maxReattachDelay while the helper does not answer.
+	reattachDelay time.Duration
+	// reattachErr is the last failed try while re-attaching; closed is set
+	// once the plane shuts down, so no new source starts after it.
+	reattachErr string
+	reattached  int64
+	closed      bool
 }
+
+const (
+	// defaultReattachDelay and maxReattachDelay pace re-attaching to a
+	// sensor helper whose stream ended: a restart takes it a second or two,
+	// and a crash loop must not become a dial loop.
+	defaultReattachDelay = time.Second
+	maxReattachDelay     = 30 * time.Second
+)
 
 // kernelConnect is a process's connection to a peer as a kernel connect
 // event reported it, with what the event said about the process.
@@ -156,9 +180,10 @@ func newHostPlane(
 	return &hostPlane{
 		source: source, tracker: tracker, indicators: indicators,
 		window: window, minStages: minStages,
-		sessions: make(map[int]*agentchain.Session),
-		meta:     make(map[int]*sessionMeta),
-		joins:    newToolJoins(maxToolJoins),
+		sessions:      make(map[int]*agentchain.Session),
+		meta:          make(map[int]*sessionMeta),
+		joins:         newToolJoins(maxToolJoins),
+		reattachDelay: defaultReattachDelay,
 	}
 }
 
@@ -166,37 +191,115 @@ func newHostPlane(
 // caller rather than retried silently: the capability layer has already said
 // the plane should work here, so a failure is a fact an operator needs.
 func (h *hostPlane) start(ctx context.Context) error {
-	if err := h.source.Start(ctx); err != nil {
+	h.mu.Lock()
+	source := h.source
+	h.mu.Unlock()
+	if err := source.Start(ctx); err != nil {
 		return err
 	}
 	h.mu.Lock()
 	h.running = true
 	h.started = true
-	h.coverage = h.source.Coverage()
+	h.coverage = source.Coverage()
 	h.mu.Unlock()
 
-	go h.consume(ctx)
+	go h.consume(ctx, source)
 	return nil
 }
 
-func (h *hostPlane) consume(ctx context.Context) {
+func (h *hostPlane) consume(ctx context.Context, source plane.Source) {
 	defer func() {
 		h.mu.Lock()
 		h.running = false
 		h.mu.Unlock()
 	}()
-	events := h.source.Events()
+	events := source.Events()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case event, ok := <-events:
-			if !ok {
+			if ok {
+				h.handle(event)
+				continue
+			}
+			if source = h.reattach(ctx); source == nil {
 				return
 			}
-			h.handle(event)
+			events = source.Events()
 		}
 	}
+}
+
+// reattach opens a new stream after the current one ended and returns its
+// source, or nil when the plane does not re-attach (a local source, a shut
+// down plane, a cancelled context). The sessions, the lineage tracker and
+// the hook joins carry over. The loss and the gap are logged, and health
+// says Plane C is down until the new stream is up, so the coverage change
+// is reported, not papered over.
+func (h *hostPlane) reattach(ctx context.Context) plane.Source {
+	h.mu.Lock()
+	h.running = false
+	reopen, closed, delay := h.reopen, h.closed, h.reattachDelay
+	h.mu.Unlock()
+	if reopen == nil || closed || ctx.Err() != nil {
+		return nil
+	}
+	if delay <= 0 {
+		delay = defaultReattachDelay
+	}
+	lost := time.Now()
+	slog.Warn("ai runtime: the sensor helper's event stream ended; Plane C records nothing until the gateway re-attaches")
+	for attempt := 1; ; attempt++ {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		next := reopen()
+		err := next.Start(ctx)
+		h.mu.Lock()
+		if h.closed {
+			h.mu.Unlock()
+			_ = next.Close()
+			return nil
+		}
+		if err == nil {
+			old := h.source
+			h.source, h.running, h.coverage, h.reattachErr = next, true, next.Coverage(), ""
+			h.reattached++
+			h.mu.Unlock()
+			if old != nil {
+				_ = old.Close()
+			}
+			slog.Info("ai runtime: re-attached to the sensor helper's event stream",
+				"down", time.Since(lost).Round(time.Second).String(), "attempts", attempt)
+			return next
+		}
+		h.reattachErr = err.Error()
+		h.mu.Unlock()
+		_ = next.Close()
+		if delay *= 2; delay > maxReattachDelay {
+			delay = maxReattachDelay
+		}
+	}
+}
+
+// reattachState says, while Plane C is down, that the gateway is
+// re-attaching and why the last try failed; "" for a plane that does not
+// re-attach.
+func (h *hostPlane) reattachState() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reopen == nil || h.running || !h.started {
+		return ""
+	}
+	if h.reattachErr != "" {
+		return "the gateway is re-attaching to the sensor helper (last try: " + h.reattachErr + ")"
+	}
+	return "the gateway is re-attaching to the sensor helper"
 }
 
 func (h *hostPlane) handle(event plane.Event) {
@@ -659,19 +762,23 @@ func copyActivity(activity RuntimeActivity) RuntimeActivity {
 func (h *hostPlane) stats() (classified, gated int64, running bool, coverage plane.Coverage) {
 	h.mu.Lock()
 	classified, gated, running, coverage = h.classified, h.gated, h.running, h.coverage
-	started := h.started
+	started, source := h.started, h.source
 	h.mu.Unlock()
 	if started {
-		coverage = h.source.Coverage()
+		coverage = source.Coverage()
 	}
 	return classified, gated, running, coverage
 }
 
 func (h *hostPlane) close() error {
-	if h.source == nil {
+	h.mu.Lock()
+	h.closed = true
+	source := h.source
+	h.mu.Unlock()
+	if source == nil {
 		return nil
 	}
-	return h.source.Close()
+	return source.Close()
 }
 
 // HookDecision is one managed hook decision, as the gateway's hook socket

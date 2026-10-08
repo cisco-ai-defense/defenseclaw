@@ -227,6 +227,16 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			{checkHealthLoopback, checkPass, "127.0.0.1:6789"}}},
 		{"plane c off", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) { in.Intent.PlaneC = false },
 			[]want{{checkPlaneC, checkFail, "Plane C is off"}}},
+		// GAP-0051: the gateway's own report of Plane C, not only the config.
+		{"gateway records plane c", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.Gateway = &gatewayPlaneC{Read: true, Running: true}
+		}, []want{{checkPlaneC, checkPass, "the gateway records it"}}},
+		{"gateway plane c down after a helper restart", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.Gateway = &gatewayPlaneC{Read: true, Reason: "the kernel event source stopped delivering; the gateway is re-attaching to the sensor helper"}
+		}, []want{{checkPlaneC, checkWarn, "records nothing from it (the kernel event source stopped delivering; the gateway is re-attaching"}}},
+		{"gateway health unreadable", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.Gateway = &gatewayPlaneC{Err: "defenseclaw-gateway.service is not active"}
+		}, []want{{checkPlaneC, checkWarn, "is not known (defenseclaw-gateway.service is not active)"}}},
 		{"agents unknown in consume", "consume", "observe", nil, []want{{checkAgents, checkInfo, "once mode observe runs"}}},
 		{"agents in observe", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) { *in = withUsers(*in) },
 			[]want{{checkAgents, checkPass, "3 enrolled users have an agent (dcr-std1, dcr-std2, dcr-std3)"}}},
@@ -623,6 +633,29 @@ func TestTetragonVerifyExitCodesAndSchema(t *testing.T) {
 	h.env.Geteuid = func() int { return 1000 }
 	if rep := RunTetragonVerify(ctx, h.env, ""); rep.OK || rep.ExitCode != 1 || rep.Errors[0].Code != codeNotRoot {
 		t.Fatalf("non-root: %+v", rep)
+	}
+}
+
+// Plane C as the gateway's /health reports it (ai_runtime.details.planes.c).
+func TestPlaneCFromHealth(t *testing.T) {
+	down := `{"api":{"state":"running"},"ai_runtime":{"state":"running","details":{"planes":{
+		"a":{"available":true,"running":true},
+		"c":{"available":true,"running":false,"mechanism":"tetragon (via the sensor helper)","reason":"the kernel event source stopped delivering"}}}}}`
+	if got := planeCFromHealth([]byte(down)); !got.Read || got.Running || got.Reason != "the kernel event source stopped delivering" {
+		t.Fatalf("down: %+v", got)
+	}
+	up := `{"ai_runtime":{"details":{"planes":{"c":{"available":true,"running":true}}}}}`
+	if got := planeCFromHealth([]byte(up)); !got.Read || !got.Running {
+		t.Fatalf("up: %+v", got)
+	}
+	for body, says := range map[string]string{
+		`{"api":{"state":"running"}}`:                    "no ai_runtime section",
+		`{"ai_runtime":{"details":{"planes":{"a":{}}}}}`: "has not reported Plane C yet",
+		`not json`: "does not parse",
+	} {
+		if got := planeCFromHealth([]byte(body)); got.Read || !strings.Contains(got.Err, says) {
+			t.Fatalf("%s: %+v, want %q", body, got, says)
+		}
 	}
 }
 

@@ -35,7 +35,8 @@ import (
 // the mode this host's config asks for; with it, what moving to that mode
 // needs. It changes nothing and never connects to Tetragon: it reads the
 // installed config, the sensor helper's published state, Tetragon's info file,
-// /sys/kernel/security/lsm and the unit states. Exit 0 when no check fails, 1
+// /sys/kernel/security/lsm, the unit states and, for Plane C, the gateway's
+// /health over its hook socket. Exit 0 when no check fails, 1
 // when one does, 2 for bad arguments; warnings never fail it, so config
 // management can gate on the exit code. tetragon status prints its Next:
 // footer from the same engine.
@@ -275,7 +276,7 @@ func tetragonReadiness(in tetragonInputs, readyFor string, probes tetragonProbes
 
 	// DefenseClaw.
 	if intent.PlaneC {
-		set(checkPlaneC, checkPass, "AI Discovery Plane C is on")
+		setPlaneCDelivery(set, in.Gateway)
 	} else {
 		set(checkPlaneC, checkFail, "AI Discovery Plane C is off (the sensor helper runs with Tetragon off); set these in the admin config and apply it",
 			"ai_discovery:", "  runtime:", "    enabled: true", "    enable_host_plane: true")
@@ -342,6 +343,91 @@ func tetragonReadiness(in tetragonInputs, readyFor string, probes tetragonProbes
 	setOrphansCheck(set, in)
 	setYourPoliciesCheck(set, in)
 	return finishReadiness(rep, checks)
+}
+
+// setPlaneCDelivery checks that the gateway records Plane C, not only that
+// the config turns it on. A helper restart ended the gateway's subscription
+// and Plane C recorded nothing while every check passed (GAP-0051). The
+// gateway now re-attaches on its own, and its /health says Plane C is down
+// until the next poll after that, so this warns rather than fails: a ring
+// gate right after a push that restarted the helper must not fail on it.
+func setPlaneCDelivery(set func(id, status, message string, fix ...string), gateway *gatewayPlaneC) {
+	switch {
+	case gateway == nil:
+		set(checkPlaneC, checkPass, "AI Discovery Plane C is on")
+	case !gateway.Read:
+		set(checkPlaneC, checkWarn, "AI Discovery Plane C is on; whether the gateway records it is not known ("+gateway.Err+")",
+			adminCommand("enterprise", "linux", "verify"))
+	case !gateway.Running:
+		set(checkPlaneC, checkWarn, "AI Discovery Plane C is on, but the gateway records nothing from it ("+
+			defaultStr(gateway.Reason, "not running")+"); the gateway re-attaches to a restarted sensor helper within a minute; if this stays:",
+			"sudo systemctl restart defenseclaw-gateway", "sudo journalctl -u defenseclaw-gateway -n 50")
+	default:
+		set(checkPlaneC, checkPass, "AI Discovery Plane C is on and the gateway records it")
+	}
+}
+
+// gatewayPlaneC is Plane C as the gateway's /health reports it.
+type gatewayPlaneC struct {
+	// Read is false when /health could not be read or names no Plane C;
+	// Err says why.
+	Read    bool
+	Err     string
+	Running bool
+	Reason  string
+}
+
+// planeCFromHealth reads ai_runtime.details.planes.c from a /health body.
+func planeCFromHealth(body []byte) gatewayPlaneC {
+	var document struct {
+		AIRuntime *struct {
+			Details struct {
+				Planes map[string]struct {
+					Running bool   `json:"running"`
+					Reason  string `json:"reason"`
+				} `json:"planes"`
+			} `json:"details"`
+		} `json:"ai_runtime"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		return gatewayPlaneC{Err: "the gateway's /health does not parse: " + err.Error()}
+	}
+	if document.AIRuntime == nil {
+		return gatewayPlaneC{Err: "the gateway's /health has no ai_runtime section"}
+	}
+	c, ok := document.AIRuntime.Details.Planes["c"]
+	if !ok {
+		return gatewayPlaneC{Err: "the gateway has not reported Plane C yet; it does after its first poll"}
+	}
+	return gatewayPlaneC{Read: true, Running: c.Running, Reason: c.Reason}
+}
+
+// gatewayPlaneC reads Plane C from the gateway's /health over its hook
+// socket, after checking that the gateway serves that socket.
+func (l *lifecycle) gatewayPlaneC(ctx context.Context) *gatewayPlaneC {
+	env := l.env
+	if env.HealthGet == nil || env.HookSocketPeer == nil {
+		return nil
+	}
+	for _, unit := range env.Services.Units() {
+		if unit.Kind != "gateway" {
+			continue
+		}
+		if !env.Services.Active(ctx, unit) {
+			return &gatewayPlaneC{Err: unit.Name + " is not active"}
+		}
+		serviceUID := l.serviceUID
+		if record, err := env.loadDeployment(); err == nil && record != nil {
+			serviceUID = record.ServiceUID
+		}
+		body, err := l.gatewayHealth(ctx, unit, serviceUID)
+		if err != nil {
+			return &gatewayPlaneC{Err: err.Error()}
+		}
+		planeC := planeCFromHealth(body)
+		return &planeC
+	}
+	return nil
 }
 
 // withoutNextStep is a code-table message up to its impact: a check row
@@ -966,8 +1052,12 @@ func (e *Env) tetragonInputs(ctx context.Context) (tetragonInputs, error) {
 		intent = tetragonIntentOf(nil, e.GOOS, nil)
 	}
 	l := &lifecycle{env: e, opts: Options{Action: ActionStatus}, result: enterprisestatus.New(ActionStatus, "standalone", e.GOOS, e.ProductVersion)}
-	return tetragonInputs{GOOS: e.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: l.helperRunning(ctx),
-		Host: e.tetragonHost()}, nil
+	in := tetragonInputs{GOOS: e.GOOS, Intent: intent, HaveIntent: haveIntent, State: state, Running: l.helperRunning(ctx),
+		Host: e.tetragonHost()}
+	if intent.PlaneC {
+		in.Gateway = l.gatewayPlaneC(ctx)
+	}
+	return in, nil
 }
 
 // tetragonProbes reads the unit state and the kernel's security modules.

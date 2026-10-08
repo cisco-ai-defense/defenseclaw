@@ -36,9 +36,10 @@ import (
 // helperPlaneSource is Plane C delivered over the broker.
 //
 // It holds one long-lived connection: the helper writes a coverage frame,
-// then events until either side goes away. Reconnection is deliberately not
-// automatic -- a dropped privileged stream is a coverage change the operator
-// should see reported, not one this layer papers over.
+// then events until either side goes away. It never reconnects itself: when
+// the stream ends the host plane opens a new source (hostPlane.reattach),
+// logs the loss and reports Plane C down until the new stream is up, so the
+// coverage change is reported, not papered over.
 type helperPlaneSource struct {
 	helper *Helper
 	buffer *plane.Buffer
