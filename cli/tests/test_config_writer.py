@@ -619,3 +619,29 @@ def test_derived_provider_keeps_yaml_12_name_after_unrelated_write(tmp_path, mon
     assert overlay["providers"][0]["name"] == "on"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership")
+def test_durable_replacement_preserves_existing_owner_and_group(tmp_path, monkeypatch):
+    path = tmp_path / "config.yaml"
+    path.write_bytes(b"old")
+    owner = path.stat()
+    wanted = (owner.st_uid + 1, owner.st_gid + 1)
+    real_stat = os.stat
+    seen = []
+
+    def existing_owner(name, *args, **kwargs):
+        result = real_stat(name, *args, **kwargs)
+        if os.fspath(name) != str(path):
+            return result
+        fields = list(result)
+        fields[4:6] = wanted
+        return os.stat_result(fields)
+
+    def record_owner(_fd, uid, gid):
+        seen.append((uid, gid))
+
+    monkeypatch.setattr(os, "stat", existing_owner)
+    monkeypatch.setattr(os, "fchown", record_owner)
+    config_writer._write_durable(str(path), b"new", 0o600)
+    assert seen == [wanted]
+    assert path.read_bytes() == b"new"
+

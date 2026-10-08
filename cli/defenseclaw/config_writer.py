@@ -514,8 +514,21 @@ def _write_durable(target: str, data: bytes, mode: int) -> None:
     target_mode = mode & 0o600 or 0o600
     if target_mode == 0o600 and mode & 0o077 == 0o040:
         target_mode = 0o640
+    owner = None
+    if os.name != "nt":
+        try:
+            prior = os.stat(target, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISREG(prior.st_mode):
+                owner = (prior.st_uid, prior.st_gid)
     fd, staged = tempfile.mkstemp(prefix=f".{os.path.basename(target)}.", suffix=".tmp", dir=directory)
     try:
+        if owner is not None:
+            staged_stat = os.fstat(fd)
+            if (staged_stat.st_uid, staged_stat.st_gid) != owner:
+                os.fchown(fd, *owner)
         file_permissions.set_file_mode(fd, staged, target_mode, set_owner=True)
         with os.fdopen(fd, "wb") as stream:
             fd = -1
