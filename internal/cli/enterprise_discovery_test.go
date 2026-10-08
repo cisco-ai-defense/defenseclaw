@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -217,7 +218,7 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	}
 	var bad json.RawMessage
 	if _, err := enterpriseGatewayGet("/api/v1/guardrail/profiles/resolve?connector=bogus", &bad); err == nil ||
-		commandExitCode(err) != 2 || !strings.Contains(err.Error(), `unknown connector "bogus"`) ||
+		commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) || !strings.Contains(err.Error(), `unknown connector "bogus"`) ||
 		!strings.Contains(err.Error(), "claudecode, codex") {
 		t.Fatalf("unknown connector = %v", err)
 	}
