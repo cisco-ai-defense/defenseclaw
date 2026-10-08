@@ -450,6 +450,20 @@ test('live test: config_version 9 Rego gets the policy as input.admission and in
   assert.equal(guardrail.thresholds.block, policy.guardrail.block_threshold);
 });
 
+test('live test withholds built-in first-party trust without content verification', () => {
+  const data = projectPolicyToData(policyFromPreset('default'));
+  data.first_party_allow_list = [
+    { target_type: 'skill', target_name: 'codeguard', reason: '', source_path_contains: ['.claude/skills/codeguard'] },
+    { target_type: 'plugin', target_name: 'defenseclaw', reason: '', source_path_contains: ['.claude/extensions/defenseclaw'] },
+    { target_type: 'plugin', target_name: 'acme', reason: '', source_path_contains: ['.acme/plugins/acme'] },
+  ];
+  const entries = (target_type: string) => (withPolicyInput('admission', { target_type }, data) as {
+    admission: { first_party_allow_list: Array<{ name: string }> };
+  }).admission.first_party_allow_list;
+  assert.deepEqual(entries('skill'), []);
+  assert.deepEqual(entries('plugin').map((entry) => entry.name), ['acme']);
+});
+
 test('regex tester supports the shipped Go Unicode scalar syntax', () => {
   const pattern = String.raw`(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`;
   assert.equal(lintRegex(pattern).compiled, true);

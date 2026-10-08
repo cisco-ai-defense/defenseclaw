@@ -19,6 +19,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -161,7 +162,7 @@ func windowsEnterpriseHotConfigApply(
 		return false, nil
 	}
 	changed, err := configwrite.ChangedPaths(previous, next)
-	if err != nil {
+	if err != nil || bytes.Equal(previous, next) {
 		return false, nil
 	}
 	// A file that changes no setting (line endings, comments, formatting)
@@ -301,7 +302,8 @@ func windowsEnterpriseHotConfigAdopted(ctx context.Context) bool {
 		out, _ := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
 		if json.Unmarshal(out, &report) == nil && report.Digest != "" && report.Digest == report.GatewayReportedDigest &&
-			report.GatewayLastReloadError == "" && (report.ConfigGeneration == 0 || report.ConfigGenerationRecorded) {
+			report.GatewayLastReloadError == "" && report.ConfigGeneration > 0 && report.ConfigGenerationRecorded &&
+			report.GatewayReportedConfigGeneration == report.ConfigGeneration {
 			return true
 		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {

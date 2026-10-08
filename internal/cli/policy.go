@@ -102,10 +102,13 @@ var policyValidateCmd = &cobra.Command{
 			fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
 		} else {
 			fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
-			if _, err := policy.NewExact(regoDir); err != nil {
+			if _, err := policy.NewExact(regoDir); errors.Is(err, policy.ErrNoModules) {
+				fmt.Printf("No Rego modules in %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
+			} else if err != nil {
 				return fmt.Errorf("policy: compilation failed:\n%w", err)
+			} else {
+				fmt.Println("All Rego modules compiled successfully.")
 			}
-			fmt.Println("All Rego modules compiled successfully.")
 		}
 
 		for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin} {

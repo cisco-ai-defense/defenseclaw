@@ -29,20 +29,31 @@ import (
 // hotConfigHost stages an installed config and a supplied one, and stubs what
 // a config-only ensure touches outside them.
 type hotConfigHost struct {
-	configPath string
-	writes     []string
-	adopted    bool
-	refreshes  int
+	configPath  string
+	writes      []string
+	adopted     bool
+	digestCalls int
+	adoptAfter  int
+	refreshes   int
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
 // installed config computes to, and the one the gateway reports.
 func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
+	host.digestCalls++
 	reported := "sha256:" + strings.Repeat("a", 64)
 	if host.adopted {
 		reported = "sha256:" + strings.Repeat("b", 64)
 	}
-	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) + `","config_generation":2,"config_generation_recorded":true,"gateway_reported_digest":"` + reported + `"}`), nil
+	generation := len(host.writes) + 10
+	gatewayGeneration := generation
+	if host.adoptAfter > 0 && host.digestCalls < host.adoptAfter {
+		gatewayGeneration--
+	}
+	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) +
+		`","config_generation":` + strconv.Itoa(generation) +
+		`,"config_generation_recorded":true,"gateway_reported_digest":"` + reported +
+		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) + `}`), nil
 }
 
 func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *windowsEnterpriseLifecycleOptions) {
@@ -151,26 +162,16 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 		t.Fatalf("untrusted source: installer runs %q, writes %q", stub.calls, host.writes)
 	}
 
-	// GAP-0601, GAP-0716: a re-delivery that changes no setting (CRLF line
-	// endings) and an edit of who is enrolled are applied in place too; only
-	// the enrollment edit refreshes the enrolled targets.
+	// GAP-0716: an edit of who is enrolled is applied in place too, and
+	// refreshes the enrolled targets.
 	enrolled := "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: [dcw-eo1]\n"
-	for _, change := range []struct{ previous, next, warning string }{
-		{previous, strings.ReplaceAll(previous, "\n", "\r\n"), "no setting changed"},
-		{enrolled, strings.Replace(enrolled, "[dcw-eo1]", "[dcw-eo1, dcw-eo5]", 1), "enterprise.enrollment.exclude_users"},
-	} {
-		host, opts = newHotConfigHost(t, change.previous, change.next)
-		host.adopted = true
-		stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
-		result = runHotConfigEnsure(t, host, opts, stub)
-		wantRefreshes := 0
-		if strings.Contains(change.warning, "enrollment") {
-			wantRefreshes = 1
-		}
-		if len(stub.calls) != 2 || stub.calls[1][1] != "Verify" || host.refreshes != wantRefreshes ||
-			!strings.Contains(fmt.Sprint(result.Warnings), change.warning) {
-			t.Fatalf("%q: installer runs %q, target refreshes %d, warnings %v", change.warning, stub.calls, host.refreshes, result.Warnings)
-		}
+	host, opts = newHotConfigHost(t, enrolled, strings.Replace(enrolled, "[dcw-eo1]", "[dcw-eo1, dcw-eo5]", 1))
+	host.adopted = true
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	result = runHotConfigEnsure(t, host, opts, stub)
+	if len(stub.calls) != 2 || stub.calls[1][1] != "Verify" || host.refreshes != 1 ||
+		!strings.Contains(fmt.Sprint(result.Warnings), "enterprise.enrollment.exclude_users") {
+		t.Fatalf("enrollment edit: installer runs %q, target refreshes %d, warnings %v", stub.calls, host.refreshes, result.Warnings)
 	}
 
 	// A key the gateway reads once at start goes through the upgrade.
@@ -197,6 +198,42 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	if string(got) != previous || string(generation) == recorded || len(host.writes) != 2 ||
 		len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" {
 		t.Fatalf("gateway never adopted: config %q, generation %q, writes %q, installer runs %q", got, generation, host.writes, stub.calls)
+	}
+}
+
+// GAP-0646: a byte-only edit still goes through the running gateway path.
+func TestWindowsEnterpriseEnsureAppliesFormattingOnlyConfigWithoutRestart(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const next = "config_version: 9\r\nguardrail:\r\n  mode: observe # reviewed\r\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if len(stub.calls) != 2 || stub.calls[1][1] != "Verify" || len(host.writes) != 1 {
+		t.Fatalf("installer runs %q, writes %q: want status and verify only, one write", stub.calls, host.writes)
+	}
+	if got, _ := os.ReadFile(host.configPath); string(got) != next {
+		t.Fatalf("config.yaml = %q, want supplied bytes", got)
+	}
+	if !result.OK || result.Policy == nil || !result.Policy.Applied {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+// GAP-0647: a credential edit can keep the digest while the gateway still
+// uses the previous generation. Ensure waits for the new generation.
+func TestWindowsEnterpriseEnsureWaitsForCredentialGeneration(t *testing.T) {
+	const previous = "config_version: 9\nllm:\n  provider: openai\n  api_key: old-test-key\n"
+	const next = "config_version: 9\nllm:\n  provider: openai\n  api_key: new-test-key\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted, host.adoptAfter = true, 3
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if host.digestCalls < 3 || len(stub.calls) != 2 || stub.calls[1][1] != "Verify" {
+		t.Fatalf("digest polls %d, installer runs %q: want adoption before verify", host.digestCalls, stub.calls)
+	}
+	if !result.OK || result.Policy == nil || !result.Policy.Applied {
+		t.Fatalf("result = %+v", result)
 	}
 }
 

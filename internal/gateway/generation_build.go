@@ -137,7 +137,10 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	for key, digest := range assetDigestComponents(cfg) {
 		g.Components[key] = digest
 	}
-	g.Providers = buildGenerationProviders(cfg)
+	g.Providers, err = buildGenerationProviders(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("generation: providers: %w", err)
+	}
 	g.Components["providers"] = g.Providers.digest()
 	// Every profile scope that resolves to a pack points at the same loaded
 	// pack, so each pack is digested once: digesting it per scope cost about

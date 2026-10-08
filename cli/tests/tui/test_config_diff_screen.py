@@ -47,3 +47,11 @@ def test_config_diff_offers_a_restart_only_for_keys_read_at_start() -> None:
     hot = ConfigDiffModalModel((ConfigDiffEntry("ai_discovery.scan_interval_min", "5", "6"),))
     assert hot.save_label == "Save"
     assert ConfigDiffModalModel(_diff_entries()).save_label == "Save and queue restart"
+
+
+def test_secure_client_hot_key_offers_queued_restart() -> None:
+    hot = ConfigDiffModalModel(
+        (ConfigDiffEntry("asset_policy.mode", "observe", "action"),),
+        secure_client=True,
+    )
+    assert hot.save_label == "Save and queue restart"

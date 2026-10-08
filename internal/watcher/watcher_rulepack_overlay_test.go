@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -45,5 +46,21 @@ func TestSkillScanAppliesTheConnectorRulePack(t *testing.T) {
 	w.SetRulePackSource(func(string) *guardrail.RulePack { return nil })
 	if got := w.withRulePackOverlay(inner, evt); got != scanner.Scanner(inner) {
 		t.Fatal("a connector whose scope selects no pack must scan with the skill scanner alone")
+	}
+}
+
+func TestMCPScannerUsesReloadedRulePack(t *testing.T) {
+	startup := &config.Config{}
+	startup.Guardrail.Rules.Disable = []string{"OLD"}
+	live := &config.Config{}
+	live.Guardrail.Rules.Disable = []string{"NEW"}
+	w := New(startup, nil, nil, nil, nil, nil, nil)
+	w.SetConfigSource(func() *config.Config { return live })
+	got, ok := w.scannerFor(InstallEvent{Type: InstallMCP, Connector: "codex"}).(*scanner.MCPScanner)
+	if !ok {
+		t.Fatal("MCP event did not create an MCP scanner")
+	}
+	if !reflect.DeepEqual(got.RulePack.Rules, live.EffectiveRulesForConnector("codex")) {
+		t.Fatalf("MCP rule layers = %+v, want live layers", got.RulePack.Rules)
 	}
 }

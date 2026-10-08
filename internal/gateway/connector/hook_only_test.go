@@ -3802,3 +3802,27 @@ func TestRemoveOpenHandsHookReferencesKeepsOperatorKeysAndHooks(t *testing.T) {
 		t.Fatalf("hook cleanup changed operator hook or retained managed hook: %s", body)
 	}
 }
+
+func TestAntigravityAcceptsUnicodeHookPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	hook := filepath.Join(t.TempDir(), "élise", "hook.sh")
+	if err := patchAntigravityHooksForOS(path, hook, "linux"); err != nil {
+		t.Fatalf("register Unicode hook path: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Decode the JSON: on Windows the temp path has backslashes, which the
+	// file stores escaped.
+	var cfg map[string]map[string][]struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode hooks.json: %v", err)
+	}
+	stop := cfg["defenseclaw-antigravity-stop"]["Stop"]
+	if want := hook + " Stop"; len(stop) != 1 || stop[0].Command != want {
+		t.Fatalf("Stop hook = %+v, want command %q", stop, want)
+	}
+}
