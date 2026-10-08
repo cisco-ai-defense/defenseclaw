@@ -2078,6 +2078,14 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 	if l.opts.ConfigFile != "" || record == nil {
 		return
 	}
+	// A config.yaml another account could write is replaced by the
+	// transaction instead (replaceWritableConfig). Fixing its mode here, in
+	// place, made it look trusted to the plan, so a write through a
+	// descriptor that account opened while it could write was applied by
+	// the follow-up transaction (GAP-0524).
+	if env.installedConfigWritable() != "" {
+		return
+	}
 	path := env.P(env.Layout.ConfigPath)
 	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
 		return
