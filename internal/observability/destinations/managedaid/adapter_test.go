@@ -812,7 +812,7 @@ func TestAdapterUnavailableProviderFailsClosedWithDispatcherHealth(t *testing.T)
 	}
 	health := dispatcher.DeliveryHealthSnapshot()
 	if health.State != delivery.HealthFailing || health.Counters.Delivered != 0 ||
-		health.Counters.Rejected != 1 || health.Counters.Failed != 1 {
+		health.Counters.Dropped != 1 || health.Counters.Failed != 1 {
 		t.Fatalf("unavailable managed sink health = %+v", health)
 	}
 	if resolver.calls.Load() != 1 {
@@ -894,7 +894,7 @@ func TestAdapterRetriesCredentialFetchErrors(t *testing.T) {
 				}
 				flushAndClose(t, dispatcher)
 				counters := dispatcher.Counters()
-				if counters.Retried != 1 || counters.Rejected != 1 || counters.Failed != 2 {
+				if counters.Retried != 1 || counters.Dropped != 1 || counters.Failed != 2 {
 					t.Fatalf("credential fetch counters = %+v, want one retry", counters)
 				}
 				if resolver.calls.Load() != 2 {
@@ -982,7 +982,7 @@ func TestAdapterRejectsOversizedAcknowledgement(t *testing.T) {
 		t.Fatal(err)
 	}
 	health := dispatcher.DeliveryHealthSnapshot()
-	if health.Counters.Delivered != 0 || health.Counters.Rejected != 1 || health.Counters.Failed != 1 {
+	if health.Counters.Delivered != 0 || health.Counters.Dropped != 1 || health.Counters.Failed != 1 {
 		t.Fatalf("oversized acknowledgement health = %+v", health)
 	}
 	if err := dispatcher.Close(ctx); err != nil {
