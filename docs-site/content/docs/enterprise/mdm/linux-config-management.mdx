@@ -195,6 +195,19 @@ task has `no_log: true` and sends the value on standard input.
         group: root
         mode: "0644"
 
+    # get_url checks the pin; this also covers a package copied from the controller.
+    - name: Read the SHA-256 of the package
+      ansible.builtin.stat:
+        path: "/var/cache/{{ defenseclaw_package }}"
+        checksum_algorithm: sha256
+      register: defenseclaw_package_file
+
+    - name: Refuse a package that does not match its pin
+      ansible.builtin.assert:
+        that: defenseclaw_package_file.stat.checksum == defenseclaw_pins[defenseclaw_package]
+        fail_msg: "/var/cache/{{ defenseclaw_package }} does not match its SHA-256 pin"
+        quiet: true
+
     - name: Install or upgrade the package (Debian, Ubuntu)
       ansible.builtin.apt:
         deb: "/var/cache/{{ defenseclaw_package }}"
@@ -257,6 +270,9 @@ Notes:
 
 - `get_url` skips the download when the file already matches the checksum, and
   `apt` and `dnf` change nothing when that version is installed.
+- The `stat` and `assert` tasks check the file that `apt` or `dnf` installs.
+  They keep the pin when you replace `get_url` with `copy`, which checks no
+  SHA-256.
 - The `dnf` module checks signatures of local packages unless
   `disable_gpg_check` is set. The package has no embedded signature, so the
   task sets it and relies on the SHA-256 check.
@@ -547,13 +563,21 @@ defenseclaw-package-file:
     - group: root
     - mode: '0644'
 
+# source_hash is not checked for a salt:// source: check the pin here.
+defenseclaw-package-pin:
+  cmd.run:
+    - name: "echo '/var/cache/{{ pkg }} does not match its SHA-256 pin' >&2; exit 1"
+    - unless: "echo '{{ sha256 }}  /var/cache/{{ pkg }}' | sha256sum -c --status"
+    - require:
+      - file: defenseclaw-package-file
+
 defenseclaw-enterprise:
   pkg.installed:
     - sources:
       - defenseclaw-enterprise: /var/cache/{{ pkg }}
     - require:
       - file: defenseclaw-layout-config
-      - file: defenseclaw-package-file
+      - cmd: defenseclaw-package-pin
 
 defenseclaw-ensure:
   cmd.run:
@@ -607,8 +631,13 @@ Notes:
 
 - `pkg.installed` with `sources` reads the version from the file and installs
   it when it differs from the installed version.
-- `file.managed` checks the download against `source_hash`, and
-  `show_changes: False` keeps the key out of the state output.
+- `file.managed` checks `source_hash` only for `http(s)` and `ftp` sources. A
+  `salt://` source, such as a package you keep next to `config.yaml`, is
+  copied without that check. `defenseclaw-package-pin` checks the cached
+  package against the pin whatever the source, and `pkg.installed` requires
+  it, so a package that does not match is never installed. When it matches,
+  the check changes nothing.
+- `show_changes: False` keeps the key out of the state output.
 - `retry` runs a failed state again, so a busy lock (`75`) is retried.
 
 ## Plain apt and dnf
