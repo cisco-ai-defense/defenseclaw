@@ -295,6 +295,9 @@ func runWindowsEnterpriseStandaloneAction(
 				appendStandaloneGatewayWarnings(result, body)
 			}
 		}
+		if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
+			appendAdmissionIssueWarnings(result, layout.DataDir)
+		}
 	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))

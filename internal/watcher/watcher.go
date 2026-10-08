@@ -253,6 +253,9 @@ type InstallWatcher struct {
 	// movedOut are the paths whose asset admission quarantined or whose link
 	// it removed: they get no rescan baseline (forgetMovedAsset).
 	movedOut sync.Map
+	// admissionNotes are what an admission running on a path could not
+	// finish (an AdmissionIssue), for settleAdmissionIssue.
+	admissionNotes sync.Map
 	// fpMu guards a rescan cycle's fingerprint cache.
 	fpMu sync.Mutex
 
@@ -953,6 +956,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
+			// Admit again what a failed scan or quarantine left in place.
+			for _, issue := range w.state.dueIssues(time.Now(), AdmissionUnscanned, AdmissionNotQuarantined) {
+				w.queuePending(issue.Path)
+			}
 			w.processPending(ctx)
 		}
 	}
@@ -1183,6 +1190,8 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // When the OPA engine is available it delegates the verdict decision to
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
+	w.admissionNotes.Delete(evt.Path)
+	defer func() { w.settleAdmissionIssue(evt, res) }()
 	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
 		return AdmissionResult{
 			Event:   evt,
@@ -2427,7 +2436,37 @@ func watcherPathAtOrBelow(path, root string) bool {
 // could not move: it stays in place, so besides the log line and the metric
 // the audit log records an enforcement failure the administrator can find
 // (GAP-0133).
+// settleAdmissionIssue records what the admission of evt could not finish
+// (its scan failed, or its files could not be moved to quarantine), so the
+// watcher admits it again and status reports it; a finished admission
+// forgets the earlier problem (GAP-0825, GAP-0826). The Secure Client
+// profile records none.
+func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionResult) {
+	noted, hasNote := w.admissionNotes.LoadAndDelete(evt.Path)
+	if res.Interrupted || w.secureClientActive() {
+		return
+	}
+	issue := AdmissionIssue{Type: string(evt.Type), Name: evt.Name, Path: evt.Path, Connector: w.eventConnector(evt)}
+	if owner, ok := w.ownerOf(evt.Path); ok {
+		issue.Account = owner.Name
+	}
+	switch {
+	case strings.HasPrefix(res.Reason, scanFailureReason):
+		issue.Kind, issue.Detail = AdmissionUnscanned, strings.TrimPrefix(res.Reason, scanFailureReason)
+	case hasNote:
+		note, _ := noted.(AdmissionIssue)
+		issue.Kind, issue.Detail = note.Kind, note.Detail
+	default:
+		w.state.clearIssue(evt.Path)
+		return
+	}
+	w.state.setIssue(issue)
+}
+
 func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallEvent, err error) {
+	if w != nil && !w.secureClientActive() {
+		w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotQuarantined, Detail: err.Error()})
+	}
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
 		_ = w.logger.LogEventCtx(ctx, audit.Event{

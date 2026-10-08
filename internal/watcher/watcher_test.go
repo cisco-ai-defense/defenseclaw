@@ -1360,6 +1360,56 @@ func TestUnreadableSkillIsScannedAfterReadGrant(t *testing.T) {
 	}
 }
 
+// GAP-0826: a quarantine that failed (the disk was full) left the CRITICAL
+// skill in its folder with nothing retrying it. The watcher records the
+// unfinished admission with its account, admits it again once due, and
+// forgets it when the quarantine completes.
+func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a quarantine folder the test user may not write")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.SetAssetOwners([]AssetOwner{{Home: filepath.Dir(skillDir), Name: "dcw-std1"}})
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+			{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
+		}}
+	}
+	if err := os.MkdirAll(cfg.QuarantineDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+	path := filepath.Join(skillDir, "crit-k")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	evt := InstallEvent{Type: InstallSkill, Name: "crit-k", Path: path, Timestamp: time.Now()}
+	w.runAdmission(context.Background(), evt)
+	issues, err := ReadAdmissionIssues(cfg.DataDir)
+	if err != nil || len(issues) != 1 || issues[0].Kind != AdmissionNotQuarantined || issues[0].Account != "dcw-std1" {
+		t.Fatalf("issues %+v (err %v), want one not-quarantined issue of dcw-std1", issues, err)
+	}
+	if due := w.state.dueIssues(time.Now(), AdmissionNotQuarantined); len(due) != 0 {
+		t.Fatalf("due at once: %+v", due)
+	}
+	due := w.state.dueIssues(time.Now().Add(admissionRetryFirst), AdmissionNotQuarantined)
+	if len(due) != 1 || due[0].Path != path {
+		t.Fatalf("due after the first delay: %+v", due)
+	}
+	if err := os.Chmod(cfg.QuarantineDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.runAdmission(context.Background(), evt)
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("the retried quarantine left the skill in place: %v", err)
+	}
+	if issues, err := ReadAdmissionIssues(cfg.DataDir); err != nil || len(issues) != 0 {
+		t.Fatalf("issues after the quarantine completed: %+v (err %v)", issues, err)
+	}
+}
+
 // gateScanner holds every scan until release is closed and records the
 // largest number of scans that ran at once.
 type gateScanner struct {
