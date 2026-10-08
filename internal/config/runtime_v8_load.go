@@ -28,6 +28,9 @@ func LoadRuntimeV8File(configFile string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkManagedConfigTrustBeforeParse(absPath, raw); err != nil {
+		return nil, err
+	}
 	compiled, err := ParseCompileObservabilityV8(
 		absPath,
 		raw,

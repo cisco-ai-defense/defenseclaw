@@ -240,16 +240,21 @@ func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) 
 		}
 	}
 	path := filepath.Join(dir, DefaultConfigName)
-	data := []byte("config_version: 9\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	_, err := LoadFromFile(path)
-	if err == nil {
-		t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
-	}
-	if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
-		t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
+	// The path is refused before the content is checked: version 9 is newer
+	// than Secure Client reads (the Windows default for managed_enterprise)
+	// and 99 is newer than any build reads.
+	for _, version := range []string{"9", "99"} {
+		data := []byte("config_version: " + version + "\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		_, err := LoadFromFile(path)
+		if err == nil {
+			t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
+		}
+		if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+			t.Fatalf("config_version %s: LoadFromFile error = %v, want managed trust check failure", version, err)
+		}
 	}
 }
 

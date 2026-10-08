@@ -2490,6 +2490,11 @@ func loadFromFile(configFile string, publishProvenance, checkPolicyInputs bool) 
 
 // loadFileSource decodes the source bytes loadFromFile read from configFile.
 func loadFileSource(configFile string, raw []byte, publishProvenance, enforceManagedTrust, checkPolicyInputs bool) (*Config, error) {
+	if enforceManagedTrust {
+		if err := checkManagedConfigTrustBeforeParse(configFile, raw); err != nil {
+			return nil, err
+		}
+	}
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return nil, err
@@ -2505,11 +2510,44 @@ func loadFileSource(configFile string, raw []byte, publishProvenance, enforceMan
 	return candidate, nil
 }
 
+// checkManagedConfigTrustBeforeParse refuses an untrusted config path before
+// any content check when the environment pins managed_enterprise or the
+// source declares it. The full parse checks config_version and the schema,
+// and on a Secure Client host it refuses a version 9 source as newer; run
+// first, that told an operator to upgrade or restore a backup next to a file
+// whose location is not trusted, instead of naming the location. A source
+// that does not decode leaves the refusal to the parse and the trust check
+// in loadConfigSourceChecked.
+func checkManagedConfigTrustBeforeParse(configFile string, raw []byte) error {
+	mode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	if !managed.IsManagedEnterprise(mode) && len(raw) <= V8YAMLMaxSourceBytes {
+		var declared struct {
+			DeploymentMode string `yaml:"deployment_mode"`
+		}
+		if yaml.Unmarshal(raw, &declared) == nil {
+			mode = normalizeDeploymentMode(declared.DeploymentMode)
+		}
+	}
+	if !managed.IsManagedEnterprise(mode) {
+		return nil
+	}
+	if err := managed.ValidateTrustedConfigPath(filepath.Clean(configFile)); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+		}
+		return fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+	}
+	return nil
+}
+
 // LoadRuntimeV8FromBytes decodes the non-observability portions of an exact
 // schema-v8 source for the target gateway runtime. The caller remains
 // responsible for compiling the canonical ObservabilityV8 plan from the same
 // immutable bytes before activation.
 func LoadRuntimeV8FromBytes(configFile string, raw []byte) (*Config, error) {
+	if err := checkManagedConfigTrustBeforeParse(configFile, raw); err != nil {
+		return nil, err
+	}
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return nil, err
