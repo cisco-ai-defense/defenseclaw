@@ -239,6 +239,12 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	})
 	standalone := cfg.StandaloneEnterprise()
 	var unprotected []enterprisehooks.UnprotectedAgent
+	// The profiles the last cycle enrolled, so the gateway's read access
+	// can be taken from those this cycle drops.
+	previous, previousErr := enterprisehooks.Manifest{}, errors.New("not loaded")
+	if standalone {
+		previous, previousErr = enterprisehooks.LoadManifest(manifestPath)
+	}
 	if standalone {
 		cache, cacheErr := enterpriseWindowsEnumerateGroupCacheLoader(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath))
 		if cacheErr != nil {
@@ -293,6 +299,19 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	// profile, whose gateway has no IDE inventory.
 	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", !cfg.SecureClientIntegration(), logf); grantErr != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
+	}
+	if previousErr == nil {
+		// A profile this cycle no longer enrolls (its account was added to
+		// exclude_users, or no enrolled agent is left) loses the gateway's
+		// read access now, so its inventory rows go at the next scan
+		// (GAP-0717).
+		if dropped := enterprisehooks.ManifestHomesDropped(previous, manifest); len(dropped.Targets) > 0 {
+			if revokeErr := enterpriseWindowsInventoryReadRevoker(dropped); revokeErr != nil {
+				fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway keeps read access on %d profile(s) no longer enrolled; the revoke failed\n", countDistinctSIDs(dropped.Targets))
+			} else {
+				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d profile(s) no longer enrolled\n", countDistinctSIDs(dropped.Targets))
+			}
+		}
 	}
 	elapsed := time.Since(start)
 
@@ -428,6 +447,9 @@ var (
 	enterpriseWindowsEnumerateGroupCacheWriter  = enterprisehooks.SaveWindowsEnrollmentGroupCache
 	enterpriseWindowsIdentitySpoolWriter        = enterprisehooks.WriteWindowsIdentitySpool
 	enterpriseWindowsEnumerateUnprotectedWriter = enterprisehooks.WriteWindowsUnprotectedAgents
+	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory
+	// ACEs from the profiles a cycle stopped enrolling.
+	enterpriseWindowsInventoryReadRevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
 )
 
 // isEnterpriseWindowsEnumerateConfigMissing recognises the specific

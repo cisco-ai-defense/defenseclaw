@@ -9,6 +9,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -181,5 +182,50 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 	}
 	if len(seen.IncludeGroups)+len(seen.ExcludeGroups) != 0 || seen.GroupCache != nil || seen.ReportUnprotected != nil || savedCache != nil || published != nil {
 		t.Fatalf("Secure Client enumeration changed: %+v", seen)
+	}
+}
+
+// A profile the last cycle enrolled and this one does not (its account was
+// added to exclude_users) loses the gateway's inventory read access at this
+// cycle, so its rows go at the next scan (GAP-0717). The profiles still
+// enrolled keep theirs.
+func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfDroppedProfiles(t *testing.T) {
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"bob"}})
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	alice := enterprisehooks.ManifestTarget{User: "alice", UserHome: `C:\Users\alice`, SID: "S-1-5-21-1004336348-1177238915-682003330-1001", Connector: "claudecode", AgentVersion: "2.1.187"}
+	// The last cycle's targets.yaml enrolled alice and bob.
+	last := "version: 1\ntargets:\n" +
+		"  - {user: alice, user_home: 'C:\\Users\\alice', sid: S-1-5-21-1004336348-1177238915-682003330-1001, connector: claudecode, agent_version: 2.1.187}\n" +
+		"  - {user: bob, user_home: 'C:\\Users\\bob', sid: S-1-5-21-1004336348-1177238915-682003330-1002, connector: claudecode, agent_version: 2.1.187}\n"
+	if err := os.WriteFile(manifest, []byte(last), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousRevoker := enterpriseWindowsInventoryReadRevoker
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsInventoryReadRevoker = previousRevoker
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{alice}}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return true, nil }
+	var revoked []string
+	enterpriseWindowsInventoryReadRevoker = func(dropped enterprisehooks.Manifest) error {
+		for _, target := range dropped.Targets {
+			revoked = append(revoked, target.User)
+		}
+		return nil
+	}
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if strings.Join(revoked, ",") != "bob" {
+		t.Fatalf("revoked = %v, want only the profile the cycle dropped", revoked)
 	}
 }
