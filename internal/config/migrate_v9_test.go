@@ -18,8 +18,10 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -393,6 +395,44 @@ func mustJSON(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// A managed v8 host loaded packs from data_dir implicitly. The migrated
+// config must pin each discovered file so managed validation can apply it.
+func TestMigrateV9PinsManagedSignaturePack(t *testing.T) {
+	dir := t.TempDir()
+	pack := filepath.Join(dir, "signature-packs", "custom.json")
+	if err := os.MkdirAll(filepath.Dir(pack), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{"version":1,"signatures":[]}`)
+	if err := os.WriteFile(pack, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	source := fmt.Sprintf("config_version: 8\ndata_dir: %s\nobservability: {}\n", dir)
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, Source: []byte(source), DataDir: dir,
+		Managed: true, InMemory: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		AIDiscovery struct {
+			SignaturePacks   []string          `yaml:"signature_packs"`
+			SignatureDigests map[string]string `yaml:"signature_pack_digests"`
+		} `yaml:"ai_discovery"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	if !slices.Equal(doc.AIDiscovery.SignaturePacks, []string{pack}) ||
+		doc.AIDiscovery.SignatureDigests[pack] != wantDigest {
+		t.Errorf("migrated signature pack = %v, digests = %v; want %s and %s",
+			doc.AIDiscovery.SignaturePacks, doc.AIDiscovery.SignatureDigests, pack, wantDigest)
+	}
 }
 
 // TestMigrateV9KeepsThePackPosture: selecting the strict pack in v8 left the
