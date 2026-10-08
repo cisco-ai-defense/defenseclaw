@@ -1026,6 +1026,9 @@ func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T)
 // A missing audit.db is optional, but a path that cannot be accessed must
 // stop the persisted migration before it drops operator policy.
 func TestMigrateV9RefusesAuditDBAccessError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports a path under a regular file as not found, so this layout cannot produce an access error there")
+	}
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", dir)
