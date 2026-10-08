@@ -972,6 +972,23 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
 		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
 			not: []string{"the next session takes a new undo point"}},
+		// GAP-0389: another terminal started the sandbox again while the
+		// question was open, so the daemon refused the acceptance: the last
+		// line says it runs, not that it was kept stopped.
+		{name: "keeping while another terminal starts it again", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: "sandbox " + sbName + " is running; stop it before accepting its changes"}
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				for _, c := range ta.daemon.calls { // the fake holds its lock here
+					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/accept") {
+						sb.Phase = "ready"
+					}
+				}
+			}
+		}, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"could not record that you kept the changes", "Sandbox " + sbName + " is running again (started from outside this session) → reattach"},
+			not: []string{"Sandbox kept (stopped)"}},
 		// GAP-0336: the daemon stopped before the session ended: what did not
 		// run, and the way to it, without the HTTP client's error.
 		{name: "the daemon is down at the end", opts: claude, exit: 1, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
