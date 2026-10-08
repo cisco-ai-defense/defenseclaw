@@ -6849,8 +6849,10 @@ function Test-DefenseClawRawAclTrustedOnly {
         if ($ace -isnot [Security.AccessControl.CommonAce]) {
             return $false
         }
+        # AceFlags is a byte enum: Windows PowerShell 5.1 cannot compare it
+        # with an integer, so compare the integer values.
         if ($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessDenied -or
-            ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
+            ([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0) {
             continue
         }
         if ($ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
