@@ -777,3 +777,26 @@ func TestWindowsTakeBackVendorPolicyFolderTakesBackAUserCreatedCodexFolder(t *te
 		t.Fatalf("a missing folder was created: %v", err)
 	}
 }
+
+// GAP-0898: the uninstall takes back a Copilot policy.d a standard user
+// created first, as the install does, instead of failing on its owner.
+func TestWindowsCopilotRemovalTakesBackAUserCreatedPolicyDir(t *testing.T) {
+	opts := windowsTestOptions(t)
+	github := filepath.Join(opts.WindowsProgramData, "GitHub")
+	dir := filepath.Join(github, "Copilot", "policy.d")
+	for _, path := range []string{github, filepath.Dir(dir), dir} {
+		userCreatedDir(t, path)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "50-user.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := takeBackWindowsGoOwnedForRemoval(opts, copilotTarget{}); err != nil {
+		t.Fatalf("a user-created policy.d must not block the uninstall: %v", err)
+	}
+	for _, path := range []string{github, filepath.Dir(dir), dir} {
+		requireProtected(t, path)
+	}
+	if _, err := (copilotTarget{}).RemoveOwned(opts); err != nil {
+		t.Fatalf("remove after the take-back: %v", err)
+	}
+}

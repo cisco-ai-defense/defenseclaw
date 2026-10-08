@@ -288,7 +288,10 @@ config and plugin, and the foreign-hook guard summary. See
   drop-in name is removed (a link, never its target) or moved aside to a
   hidden `.<name>.defenseclaw-displaced-<time>-<id>` name that DefenseClaw
   owns, and the folder is created in its place. A `*.json` file a standard
-  user left in Copilot's `policy.d` is moved aside the same way. Objects
+  user left in Copilot's `policy.d` is moved aside the same way. Install,
+  reconcile and uninstall all do this, also for a connector that was never
+  configured, so a folder a standard user created cannot make the
+  administrator's or the MDM's uninstall fail. Objects
   Administrators, LocalSystem or TrustedInstaller own are never removed;
   DefenseClaw reports them instead.
 - **`policy show`.** It checks Claude Code with the same rules as on Linux

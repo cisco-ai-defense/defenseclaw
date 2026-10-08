@@ -106,6 +106,28 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 	return result, errors.Join(errs...)
 }
 
+// takeBackWindowsGoOwnedForRemoval takes back a target's vendor folders that
+// a standard user created first, as a reconcile does, before the removal
+// reads them. A user-created C:\ProgramData\GitHub\Copilot\policy.d made the
+// administrator's and the MDM's uninstall fail 1603 on its owner although
+// Copilot was never configured, while the install had gone through
+// (GAP-0898); install and uninstall now treat the folder the same way. A
+// file a standard user left in Copilot's policy.d is moved aside too.
+func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) error {
+	paths, err := target.Paths(opts)
+	if err != nil || len(paths) == 0 {
+		return nil
+	}
+	var state State
+	if _, err := takeBackPolicyPath(opts, paths[0], &state); err != nil {
+		return err
+	}
+	if target.Name() == ConnectorCopilot {
+		displaceUntrustedPolicyFiles(opts, platformPath(opts, dirFor(opts, paths[0])), DefenseClawDropInName, &state)
+	}
+	return nil
+}
+
 // RemoveWindowsGoOwned removes the DefenseClaw entries of the Go-owned
 // Windows targets, the public summary and the managed OpenCode plugin.
 // Administrator files are left byte-identical.
@@ -119,6 +141,10 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 	for _, name := range windowsGoOwnedNames {
 		target, ok := TargetFor(name)
 		if !ok {
+			continue
+		}
+		if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
 		state, err := target.RemoveOwned(opts)
