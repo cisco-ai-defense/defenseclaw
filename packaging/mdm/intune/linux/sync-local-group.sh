@@ -12,12 +12,16 @@ MEMBERS=() # Example: (alice bob). This script owns the complete member list.
 }
 for user in "${MEMBERS[@]}"; do
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "error: invalid user name: $user" >&2; exit 2; }
-  getent passwd "$user" > /dev/null || { echo "error: no local account: $user" >&2; exit 1; }
+  getent -s files passwd "$user" > /dev/null || { echo "error: no local account: $user" >&2; exit 1; }
 done
-if ! getent group "$GROUP_NAME" > /dev/null; then
+if ! getent -s files group "$GROUP_NAME" > /dev/null; then
+  if getent group "$GROUP_NAME" > /dev/null; then
+    echo "error: $GROUP_NAME resolves through NSS but is not a local group" >&2
+    exit 1
+  fi
   groupadd -- "$GROUP_NAME"
 fi
-current=$(getent group "$GROUP_NAME" | cut -d: -f4)
+current=$(getent -s files group "$GROUP_NAME" | cut -d: -f4)
 IFS=, read -ra current_members <<< "$current"
 normalize() { printf '%s\n' "$@" | sed '/^$/d' | LC_ALL=C sort -u; }
 if [[ $(normalize "${current_members[@]}") == $(normalize "${MEMBERS[@]}") ]]; then
