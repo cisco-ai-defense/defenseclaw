@@ -20,7 +20,10 @@ Run on a test tenant: the licences, users and groups; automatic enrollment;
 the Apple push certificate; a Windows 11 and an Ubuntu 24.04 Desktop device
 enrolled and compliant; the read-only and preview modes of the helper; and its
 create, update and assign calls and `status`, with throwaway objects and no
-device reporting yet.
+device reporting yet. Create-and-add-device hit Graph's 404 propagation window;
+an intent change on an existing app assignment hit Graph's read-only PATCH
+restriction. The kit now retries the add for about a minute and previews a
+delete-and-create intent change; those two fixes still need tenant re-verification.
 
 Not run yet: delivering DefenseClaw through Intune (the Win32 app, the
 Remediations package, the macOS shell script, the Linux platform script). The
@@ -135,9 +138,10 @@ python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ./d
 
 | Command | What it does |
 | --- | --- |
-| `assign-app` | Adds an assignment of an app you uploaded, by its exact display name, to a group. Intent `required` by default; `available` and `uninstall` are options. |
+| `assign-app` | Adds an assignment of an app you uploaded, by its exact display name, to a group. Intent `required` by default; `available` and `uninstall` are options. Changing an existing intent deletes and recreates that assignment; preview names both steps. |
+| `remove-assignment` | Removes an app's assignment to a group. Before an uninstall rollout, remove every Required assignment of the install, upgrade and config apps. |
 | `remediation` | Creates or updates a Remediations package from `Remediate-Detect.ps1` and `Remediate-Fix.ps1`, run as SYSTEM, and assigns it on a daily schedule. It keeps assignments that exist. |
-Microsoft Graph can take about 45 seconds to list a new group. The helper waits
+Microsoft Graph can take about a minute to list a new group. The helper waits
 before creating a missing name and retries a member add after creation. If a
 request fails, rerun it; ambiguous duplicate group names require an admin to
 choose a unique name.
@@ -187,14 +191,19 @@ and keeps its behavior as it was.
 | Device | Accounts | What DefenseClaw records | Groups for a profile |
 | --- | --- | --- | --- |
 | Windows, Entra-joined | Entra accounts | The same as any Entra-joined computer: directory `entra_id`, the SID, the UPN and the tenant ([the Entra guide](/docs/enterprise/identity-entra-id)) | An Entra group only after a built-in local group lists it |
-| Linux, enrolled with the Intune app | Local accounts. The Entra user is only the device's primary user | Directory `local`, expected | Local groups and accounts; no Entra groups |
+| Linux, enrolled with the Intune app | Local accounts. The Entra user is only the device's primary user | Directory `local`, source `nss_files`, verified assurance and no principal (observed live) | Local groups and accounts; no Entra groups. A root Intune script maintained a local group and its profile assignment matched live |
+
+For that Linux pattern, edit and upload
+`packaging/mdm/intune/linux/sync-local-group.sh` as a separate root platform
+script. Its `MEMBERS` setting is the complete local group membership list;
+Intune enrollment alone does not synchronize Entra group membership to Linux.
 | macOS, enrolled with Company Portal | Local accounts; with Platform SSO, local accounts linked to Entra users | Directory `local`; with Platform SSO and standalone enterprise, `entra_id` and the UPN for a registered account (observed live) | macOS groups only: Platform SSO gives no Entra groups (observed live; [Entra on macOS](/docs/enterprise/identity-entra-id#4-macos-platform-sso)) |
 
-The Windows and Linux rows for the Intune test devices are what the OS setup
-implies: DefenseClaw was not installed on them, so none of it was observed
-there. The macOS row was observed on a Mac enrolled with Company Portal and
-Platform SSO. The Entra-joined
-Windows facts come from a separate test tenant, where they were run live.
+The Linux row was observed on an Intune-enrolled Ubuntu device with DefenseClaw:
+changing the local group changed `profile-explain` first and hook decisions about
+eight minutes later. The macOS row was observed on a Mac enrolled with Company
+Portal and Platform SSO. The Entra-joined Windows facts were run live in a
+separate test tenant.
 
 Put the profiles in the `config.yaml` you give the package builder (Windows), or in the
 config block of the macOS and Linux wrapper. For an Entra-joined Windows fleet,
@@ -229,6 +238,12 @@ protection policy, Local user group membership, the group **Users**, action
 Delivery through Intune has not been tested. On a single computer,
 `Add-EntraGroupToLocalGroup.ps1` in `packaging/identity/entra` makes the same
 membership with the same Windows API.
+After that mapping and the user's Entra membership are in place, sign out and
+back in. If the new token still lacks the SID, run `dsregcmd /refreshprt` in
+the user's session, wait for the refresh, then sign out and back in again. In
+two live checks, another sign-in alone still lacked the SID; the PRT refresh
+followed by a sign-in brought it into the token. Live hook decisions can then
+wait up to 15 minutes for the gateway's directory cache.
 
 A config-only change on Windows needs a new package and a detection script that
 checks the config hash; see
@@ -261,12 +276,13 @@ It reads credentials from the environment, never from arguments:
 | Command | Changes the tenant | Run on the test tenant |
 | --- | --- | --- |
 | `check`, `devices` | No | Yes |
-| `status` | No | No: nothing to read yet |
-| `groups` | With `--apply` | Preview only |
-| `assign-app` | With `--apply` | Preview reached the app lookup; the assign call not run |
-| `remediation`, `macos-script` | With `--apply` | Preview only, with the kit's scripts |
+| `status` | No | Yes, on throwaway apps and scripts |
+| `groups` | With `--apply` | Yes, create and add-device |
+| `assign-app` | With `--apply` | Required assignment ran; changing intent failed on PATCH before the delete-and-create fix, which needs re-verification |
+| `remove-assignment` | With `--apply` | Code and unit test only |
+| `remediation`, `macos-script` | With `--apply` | Yes, create, update and assign with throwaway objects |
 
-The create and assign calls follow Microsoft's Graph documentation. The helper
+The create and assign calls were run in the test tenant. The helper
 uses the `beta` Graph endpoint for Intune, which Microsoft can change. When a
 call fails, it prints Graph's error and exits 1.
 
