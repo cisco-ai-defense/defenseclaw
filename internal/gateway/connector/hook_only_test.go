@@ -3762,6 +3762,9 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 // with Retry-After before it evaluates the call. The shell hook waits and
 // sends the same call again instead of failing the tool call.
 func TestOpenHandsHookScript_RetriesBusyGateway(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows registers the defenseclaw-hook launcher for OpenHands, not this shell hook")
+	}
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")
 	}

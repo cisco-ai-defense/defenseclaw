@@ -3574,6 +3574,13 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
             "function Write-DefenseClawJsonAtomic"
         )
     ]
+    # The replacement helpers branch on the enterprise profile (Standalone
+    # retires stale replacement backups); run the probe under both profiles.
+    profile_check = module[
+        module.index("function Test-DefenseClawStandaloneProfile") : module.index(
+            "function Get-DefenseClawClaudeMinimumClientVersion"
+        )
+    ]
     probe = tmp_path / f"atomic-file-replacement-{Path(engine).stem}.ps1"
     probe.write_text(
         "Set-StrictMode -Version Latest\n"
@@ -3595,8 +3602,11 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "    param([Parameter(Mandatory)][string]$Path)\n"
         "    [void][IO.Directory]::CreateDirectory($Path)\n"
         "}\n"
+        + profile_check
         + atomic_install
         + r'''
+foreach ($profileName in @('SecureClient', 'Standalone')) {
+$script:DefenseClawEnterpriseProfile = $profileName
 $root = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
     "DefenseClaw-AtomicFile-$([Guid]::NewGuid().ToString('N'))"
@@ -3641,15 +3651,16 @@ try {
     }
     if (@([IO.Directory]::GetFiles($root, '*.new.*')).Count -ne 0 -or
         @([IO.Directory]::GetFiles($root, '*.backup.*')).Count -ne 0) {
-        throw 'atomic replacement left a staging or backup file behind'
+        throw "$profileName atomic replacement left a staging or backup file behind"
     }
-    'ok'
 }
 finally {
     if ([IO.Directory]::Exists($root)) {
         [IO.Directory]::Delete($root, $true)
     }
 }
+}
+'ok'
 ''',
         encoding="utf-8",
     )

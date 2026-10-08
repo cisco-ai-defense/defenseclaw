@@ -830,7 +830,7 @@ func TestAssignmentsIgnoreUnicodeNormalisationForm(t *testing.T) {
 // TestUnknownAssignmentGroupsAreReported pins GAP-0135: a group an assignment
 // names that the host definitely does not know (renamed or deleted in the
 // directory) is a warning; one that exists, one whose lookup failed, and
-// SIDs are not.
+// SIDs (off Windows) are not.
 func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	// The directory cache is shared by the tests of the package; other tests
 	// leave failing lookups in it, and the group check says nothing then
@@ -853,7 +853,7 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		}
 		return false, nil
 	}
-	got := unknownAssignmentGroups(context.Background(), assignments, exists, nil)
+	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, "linux")
 	if len(got) != 2 || !strings.HasPrefix(got[0], `assignment 1: group "dc-rename-me@dclab.test" is not known`) ||
 		!strings.HasPrefix(got[1], `assignment 2: group "DC-RENAME-ME@dclab.test" is not known`) {
 		t.Fatalf("warnings = %q, want the renamed group in assignments 1 and 2 only", got)
@@ -868,9 +868,16 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		return ""
 	}
 	short := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-ml-short"}}}}
-	if got := unknownAssignmentGroups(context.Background(), short, exists, qualify); len(got) != 1 ||
+	if got := unknownAssignmentGroupsForOS(context.Background(), short, exists, qualify, "linux"); len(got) != 1 ||
 		!strings.Contains(got[0], `the host knows it as "dc-ml-short@dclab.test"`) {
 		t.Fatalf("short-name warnings = %q, want the qualified name", got)
+	}
+
+	// The background pass below runs with this host's rules; Windows looks
+	// SIDs up and has no SSSD domain note
+	// (TestWindowsUnknownAssignmentChecksQualifiedNamesAndOldSIDs).
+	if runtime.GOOS == "windows" {
+		return
 	}
 
 	// A command does not wait for a slow directory: the pass runs in the
