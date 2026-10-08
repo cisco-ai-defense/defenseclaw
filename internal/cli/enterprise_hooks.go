@@ -501,6 +501,15 @@ var (
 	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
+	enterpriseHookReconcileAnySession       = enterpriseHookTargetHasAnySession
+)
+
+// errEnterpriseHookRepairAwaitsSignIn marks a previously protected deferred
+// target whose repair needs the owner's token while no active session exists.
+// The reconcile loop may report it pending only after proving the owner has
+// no session in any signed-in state.
+var errEnterpriseHookRepairAwaitsSignIn = errors.New(
+	"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
 )
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
@@ -526,9 +535,7 @@ func enterpriseHookVerifyOrRepairTarget(
 		return enterprisehooks.InstallResult{}, false, err
 	}
 	if !available {
-		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-			"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
-		)
+		return enterprisehooks.InstallResult{}, false, errEnterpriseHookRepairAwaitsSignIn
 	}
 	result, err = enterpriseHookReconcileInstaller(ctx, opts)
 	return result, err == nil, err
@@ -975,8 +982,27 @@ func enterpriseHookDeferredPendingAfterSessionError(
 	previouslyProtected bool,
 	err error,
 ) (bool, error) {
-	if err == nil || !target.IsDeferred() || previouslyProtected ||
-		!enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
+	if err == nil || !target.IsDeferred() {
+		return false, err
+	}
+	if previouslyProtected {
+		// Repair of a signed-out owner's drifted hooks can only run under their
+		// token. Leave it pending (the prior ledger row is retained) only when
+		// the owner has no session at all; a disconnected session may still be
+		// running agents, so it keeps the hard failure.
+		if !errors.Is(err, errEnterpriseHookRepairAwaitsSignIn) {
+			return false, err
+		}
+		signedIn, checkErr := enterpriseHookReconcileAnySession(target)
+		if checkErr != nil {
+			return false, errors.Join(err, checkErr)
+		}
+		if signedIn {
+			return false, err
+		}
+		return true, nil
+	}
+	if !enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
 		return false, err
 	}
 	available, checkErr := enterpriseHookDeferredTargetSessionAvailable(target)
@@ -1296,13 +1322,13 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				target.Connector,
 			)
 		}
-		if targetErr == nil && target.IsDeferred() &&
-			!previousProtection.PreviouslyProtected {
+		if targetErr == nil && target.IsDeferred() {
 			var pending bool
 			pending, targetErr = enterpriseHookVerifyAuthenticatedPendingTarget(
 				target,
 				row,
 				authenticatedPending,
+				previousProtection.PreviouslyProtected,
 			)
 			if targetErr == nil && pending {
 				row.Pending = true
@@ -1382,12 +1408,20 @@ func enterpriseHookVerifyAuthenticatedPendingTarget(
 	target enterprisehooks.ManifestTarget,
 	row enterpriseHookReconcileRow,
 	authenticated map[string]struct{},
+	previouslyProtected bool,
 ) (bool, error) {
 	if !target.IsDeferred() {
 		return false, nil
 	}
 	if _, ok := authenticated[enterpriseHookProtectedTargetKey(row)]; !ok {
 		return false, nil
+	}
+	if previouslyProtected {
+		// The Guardian (LocalSystem) proved no session exists before writing
+		// this protected pending row; verify may run without SeTcbPrivilege, so
+		// it trusts that record. A previously protected owner legitimately has
+		// a selected runtime, so the never-enrolled selector proof does not apply.
+		return true, nil
 	}
 	if err := enterpriseHookDeferredPendingStateVerifier(target); err != nil {
 		return false, err
@@ -1694,7 +1728,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		if deferredPending {
 			row.Pending = true
 			pending++
-			pendingTargets = append(pendingTargets, target)
+			// A previously protected owner keeps its staged machine policy and
+			// selected runtime; staging is only for never-enrolled targets.
+			if !previousProtection.PreviouslyProtected {
+				pendingTargets = append(pendingTargets, target)
+			}
 			rows = append(rows, row)
 			continue
 		}

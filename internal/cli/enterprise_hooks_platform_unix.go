@@ -26,6 +26,10 @@ func enterpriseHookTargetSessionAvailable(enterprisehooks.ManifestTarget) (bool,
 	return true, nil
 }
 
+func enterpriseHookTargetHasAnySession(enterprisehooks.ManifestTarget) (bool, error) {
+	return true, nil
+}
+
 func stageEnterpriseHookDeferredManagedPolicies(
 	enterprisehooks.Manifest,
 	[]enterprisehooks.ManifestTarget,

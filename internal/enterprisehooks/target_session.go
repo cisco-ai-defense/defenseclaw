@@ -43,3 +43,11 @@ func IsWindowsTargetSessionUnavailable(err error) bool {
 func RequireWindowsEnterpriseDeferredTargetPending(target ManifestTarget) error {
 	return requireWindowsEnterpriseDeferredTargetPendingPlatform(target)
 }
+
+// WindowsEnterpriseTargetHasAnySession reports whether any WTS session in a
+// signed-in state (active, connected, or disconnected) carries a user token
+// for ownerSID. Unlike the active-session check, a disconnected session
+// counts: its agents may still be running. Requires SeTcbPrivilege.
+func WindowsEnterpriseTargetHasAnySession(ownerSID string) (bool, error) {
+	return windowsEnterpriseTargetHasAnySessionPlatform(ownerSID)
+}

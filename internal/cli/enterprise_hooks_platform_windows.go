@@ -47,6 +47,10 @@ func enterpriseHookTargetSessionAvailable(
 	return false, err
 }
 
+func enterpriseHookTargetHasAnySession(target enterprisehooks.ManifestTarget) (bool, error) {
+	return enterprisehooks.WindowsEnterpriseTargetHasAnySession(strings.TrimSpace(target.SID))
+}
+
 func enterpriseHookDeferredTargetSessionAvailable(
 	target enterprisehooks.ManifestTarget,
 ) (bool, error) {

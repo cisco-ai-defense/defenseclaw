@@ -323,9 +323,99 @@ func TestEnterpriseHookVerifyPendingUsesProtectedStateProofNotSessionProbe(t *te
 	}
 	row := enterpriseHookReconcileRow{SID: target.SID, Connector: target.Connector}
 	authenticated := map[string]struct{}{enterpriseHookProtectedTargetKey(row): {}}
-	pending, err := enterpriseHookVerifyAuthenticatedPendingTarget(target, row, authenticated)
+	pending, err := enterpriseHookVerifyAuthenticatedPendingTarget(target, row, authenticated, false)
 	if err != nil || !pending || calls != 1 {
 		t.Fatalf("pending=%t calls=%d err=%v, want true/1/nil", pending, calls, err)
+	}
+
+	// A previously protected owner has a selected runtime, so the
+	// never-enrolled selector proof must not run; the Guardian's protected
+	// pending record is the proof.
+	pending, err = enterpriseHookVerifyAuthenticatedPendingTarget(target, row, authenticated, true)
+	if err != nil || !pending || calls != 1 {
+		t.Fatalf("previously protected: pending=%t calls=%d err=%v, want true/1/nil", pending, calls, err)
+	}
+
+	// Without the Guardian's authenticated pending record nothing is pending.
+	pending, err = enterpriseHookVerifyAuthenticatedPendingTarget(target, row, map[string]struct{}{}, true)
+	if err != nil || pending {
+		t.Fatalf("unauthenticated: pending=%t err=%v, want false/nil", pending, err)
+	}
+}
+
+func TestEnterpriseHookVerifyOrRepairTargetSignalsRepairAwaitingSignIn(t *testing.T) {
+	previousVerifier := enterpriseHookReconcileVerifier
+	previousInstaller := enterpriseHookReconcileInstaller
+	previousSession := enterpriseHookReconcileSessionAvailable
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier = previousVerifier
+		enterpriseHookReconcileInstaller = previousInstaller
+		enterpriseHookReconcileSessionAvailable = previousSession
+	})
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{}, errors.New("hook contract drift")
+	}
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) {
+		return false, nil
+	}
+	enterpriseHookReconcileInstaller = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		t.Fatal("repair must not run without the owner's session")
+		return enterprisehooks.InstallResult{}, nil
+	}
+	_, repaired, err := enterpriseHookVerifyOrRepairTarget(
+		context.Background(),
+		enterprisehooks.ManifestTarget{Connector: "codex"},
+		enterprisehooks.InstallOptions{ConnectorName: "codex"},
+		true,
+	)
+	if repaired || !errors.Is(err, errEnterpriseHookRepairAwaitsSignIn) {
+		t.Fatalf("repaired=%t err=%v, want false/errEnterpriseHookRepairAwaitsSignIn", repaired, err)
+	}
+}
+
+func TestEnterpriseHookPreviouslyProtectedPendsOnlyWhenOwnerHasNoSession(t *testing.T) {
+	previous := enterpriseHookReconcileAnySession
+	t.Cleanup(func() { enterpriseHookReconcileAnySession = previous })
+	deferred := enterprisehooks.ManifestTarget{
+		SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Deferred: true,
+	}
+
+	signedIn := false
+	var probeErr error
+	enterpriseHookReconcileAnySession = func(enterprisehooks.ManifestTarget) (bool, error) {
+		return signedIn, probeErr
+	}
+
+	pending, err := enterpriseHookDeferredPendingAfterSessionError(deferred, true, errEnterpriseHookRepairAwaitsSignIn)
+	if err != nil || !pending {
+		t.Fatalf("signed out: pending=%t err=%v, want true/nil", pending, err)
+	}
+
+	signedIn = true
+	pending, err = enterpriseHookDeferredPendingAfterSessionError(deferred, true, errEnterpriseHookRepairAwaitsSignIn)
+	if pending || !errors.Is(err, errEnterpriseHookRepairAwaitsSignIn) {
+		t.Fatalf("disconnected/active session: pending=%t err=%v, want hard failure", pending, err)
+	}
+
+	signedIn = false
+	probeErr = errors.New("WTSQueryUserToken: access denied")
+	pending, err = enterpriseHookDeferredPendingAfterSessionError(deferred, true, errEnterpriseHookRepairAwaitsSignIn)
+	if pending || !errors.Is(err, errEnterpriseHookRepairAwaitsSignIn) || !errors.Is(err, probeErr) {
+		t.Fatalf("session probe failure: pending=%t err=%v, want fail closed", pending, err)
+	}
+
+	probeErr = nil
+	notDeferred := deferred
+	notDeferred.Deferred = false
+	pending, err = enterpriseHookDeferredPendingAfterSessionError(notDeferred, true, errEnterpriseHookRepairAwaitsSignIn)
+	if pending || err == nil {
+		t.Fatalf("non-deferred target: pending=%t err=%v, want hard failure", pending, err)
+	}
+
+	tamper := errors.New("hook contract digest mismatch")
+	pending, err = enterpriseHookDeferredPendingAfterSessionError(deferred, true, tamper)
+	if pending || !errors.Is(err, tamper) {
+		t.Fatalf("non-session failure: pending=%t err=%v, want original error", pending, err)
 	}
 }
 
