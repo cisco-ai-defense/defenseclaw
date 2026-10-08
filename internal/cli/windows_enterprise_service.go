@@ -332,14 +332,24 @@ func runWindowsEnterpriseLifecycle(
 	if opts == nil {
 		return failPreflight(errors.New("Windows enterprise lifecycle options are unavailable"))
 	}
-	// A standard account cannot change the managed deployment whatever file
-	// it passes, so the elevation refusal comes before --config is read,
-	// parsed or compiled: it used to be told to fix a file that no fix would
-	// let it apply (GAP-0120). Uninstall too: it loaded and checked the
-	// installer module first, so a standard account got an Authenticode
-	// error and 1603 instead of this answer (GAP-0640).
+	// On a standalone host, a standard account cannot change the managed
+	// deployment whatever file it passes, so the elevation refusal comes
+	// before --config is read, parsed or compiled (GAP-0120). Uninstall
+	// likewise refuses before loading the installer module (GAP-0640).
 	if (windowsEnterpriseMutationAction(action) || action == "uninstall") && !windowsEnterpriseIsElevated() &&
 		managed.IsStandaloneProfile(opts.profile) {
+		// A trusted Secure Client record already makes this request invalid.
+		// Preserve its profile refusal before the standalone elevation check.
+		// A standalone host still refuses before reading the caller's --config.
+		if !windowsEnterpriseCertificationScope(opts) {
+			deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileSecureClient)
+			if err != nil || deployment.State == winpath.EnterpriseDeploymentInstalled ||
+				deployment.State == winpath.EnterpriseDeploymentUnknown {
+				if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
+					return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+				}
+			}
+		}
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
 			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
 	}

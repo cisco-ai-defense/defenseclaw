@@ -109,3 +109,13 @@ func TestHookColdStartRestoresTheRecordedLoginPath(t *testing.T) {
 		t.Fatalf("PATH without a record = %q", got)
 	}
 }
+
+// The watchdog checks the external config used by a per-user gateway.
+func TestWatchdogColdStartWithExternalConfig(t *testing.T) {
+	dataDir := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	if got := watchdogGatewayConfigPath(dataDir); got != configPath {
+		t.Fatalf("watchdog config path = %q, want %q", got, configPath)
+	}
+}
