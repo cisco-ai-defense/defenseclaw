@@ -262,7 +262,7 @@ func tetragonReadiness(in tetragonInputs, readyFor string, probes tetragonProbes
 				"sudo systemctl restart defenseclaw-sensor-helper", "sudo journalctl -u defenseclaw-sensor-helper -n 50")
 		}
 		if rank >= modeRank(config.TetragonModeEnforce) {
-			setEnforceKernelChecks(set, state, probes, restart)
+			setEnforceKernelChecks(set, state, probes, restart, intent.helperModeLoadsPolicies())
 		} else {
 			skip(checkKeepSensorsOnExit, "only enforce needs it")
 			skip(checkBPFLSM, "only enforce needs it")
@@ -430,10 +430,17 @@ func tetragonMinor(version string) string {
 	return parts[0] + "." + parts[1]
 }
 
-func setEnforceKernelChecks(set func(id, status, message string, fix ...string), state kernelpolicy.State, probes tetragonProbes, restart string) {
+// setEnforceKernelChecks checks the two Tetragon facts enforce needs. The
+// sensor helper reads them only in observe and enforce (measured); on a host
+// that runs consume or off an unknown fact is information, not a failure
+// with a fix: the setting may well be right, and the printed restart would
+// drop the policies added with tetra for nothing (GAP-0038).
+func setEnforceKernelChecks(set func(id, status, message string, fix ...string), state kernelpolicy.State, probes tetragonProbes, restart string, measured bool) {
 	switch keep := state.Tetragon.KeepSensorsOnExit; {
 	case keep != nil && !*keep:
 		set(checkKeepSensorsOnExit, checkPass, "Tetragon does not keep sensors on exit")
+	case keep == nil && !measured:
+		set(checkKeepSensorsOnExit, checkInfo, "the sensor helper reads Tetragon's keep-sensors-on-exit once mode observe runs; check again then (enforce needs it false)")
 	case keep == nil:
 		set(checkKeepSensorsOnExit, checkFail, "Tetragon's keep-sensors-on-exit is not known (the sensor helper has not read it; enforce stays in monitor mode); set it to false, restart Tetragon, then remove leftover pins under /sys/fs/bpf/tetragon",
 			tetragonSetting("keep-sensors-on-exit", "false"), restart)
@@ -446,6 +453,8 @@ func setEnforceKernelChecks(set func(id, status, message string, fix ...string),
 	switch {
 	case probe != nil && *probe && (listed || !probes.LSMKnown):
 		set(checkBPFLSM, checkPass, "BPF LSM is enabled")
+	case probe == nil && listed && !measured:
+		set(checkBPFLSM, checkInfo, "the kernel lists bpf as a security module; the sensor helper reads Tetragon's BPF LSM probe once mode observe runs")
 	case probe == nil && listed:
 		set(checkBPFLSM, checkWarn, "the kernel lists bpf as a security module, but Tetragon has not reported its BPF LSM probe yet")
 	default:
@@ -456,6 +465,17 @@ func setEnforceKernelChecks(set func(id, status, message string, fix ...string),
 		set(checkBPFLSM, checkFail, "BPF LSM is not enabled (the controls cannot deny; "+lsmListPath+": "+list+
 			"); add bpf to the kernel's lsm= boot parameter and reboot (see the Tetragon guide)")
 	}
+}
+
+// andList joins names as a sentence does: "a", "a and b", "a, b and c".
+func andList(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // lsmLists reports whether the comma list of security modules names module.
@@ -599,7 +619,10 @@ func setConnectorsCheck(set func(id, status, message string, fix ...string), int
 			monitorOnly++
 		}
 	}
-	observe := strings.Join(intent.ObserveCLI, ", ") + " " + plural(len(intent.ObserveCLI), "is", "are") + " in observe mode"
+	// The line starts with a word, not a connector name, so the sentence
+	// case of the output never capitalizes one name of a list.
+	observe := plural(len(intent.ObserveCLI), "the connector ", "the connectors ") + andList(intent.ObserveCLI) + " " +
+		plural(len(intent.ObserveCLI), "is", "are") + " in observe mode"
 	switch {
 	case len(intent.ActionCLI)+len(intent.ObserveCLI) == 0:
 		set(checkConnectorsAction, checkFail, "no command-line connector is enrolled (a kernel control anchors only command-line agents, so enforce would deny nothing)")

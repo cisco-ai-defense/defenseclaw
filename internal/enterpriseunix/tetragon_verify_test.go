@@ -184,6 +184,12 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		}, []want{{checkBPFLSM, checkFail, "lockdown,capability,yama,selinux"}}},
 		{"lsm probe not reported", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { in.State.Tetragon.LSM = nil },
 			[]want{{checkBPFLSM, checkWarn, "not reported"}}},
+		// GAP-0038: consume never reads these facts; no failure, no restart.
+		{"enforce facts not read in consume", "consume", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.State.Tetragon.KeepSensorsOnExit, in.State.Tetragon.LSM = nil, nil
+		}, []want{{checkKeepSensorsOnExit, checkInfo, "once mode observe runs"}, {checkBPFLSM, checkInfo, "once mode observe runs"}}},
+		{"keep sensors not read in observe", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { in.State.Tetragon.KeepSensorsOnExit = nil },
+			[]want{{checkKeepSensorsOnExit, checkFail, "is not known"}}},
 		{"listeners on every interface", "consume", "consume", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.Host.MetricsAddress, in.Host.HealthAddress = ":2112", "0.0.0.0:6789"
 		}, []want{{checkMetricsLoopback, checkWarn, "every interface (:2112)"}, {checkHealthLoopback, checkWarn, "0.0.0.0:6789"}}},
