@@ -1029,7 +1029,11 @@ func readinessNext(rep *TetragonReadiness, failed []string) []string {
 func enforceCounts(users []TetragonUserReadiness, would bool) string {
 	ready, monitorOnly, unanchored, held := 0, 0, 0, 0
 	limitSet, heldSet := map[string]bool{}, map[string]bool{}
+	var holders []string
 	for _, user := range users {
+		if user.State == kernelpolicy.UIDEnforcing {
+			holders = append(holders, userName(kernelpolicy.UIDStatus{UID: user.UID, User: user.User}))
+		}
 		switch {
 		case user.Ready && !would && user.State != kernelpolicy.UIDEnforcing:
 			held++
@@ -1075,6 +1079,13 @@ func enforceCounts(users []TetragonUserReadiness, would bool) string {
 		}
 		sort.Strings(limits)
 		text += fmt.Sprintf("; %d %s in monitor without a deny anchor (%s)", unanchored, plural(unanchored, "stays", "stay"), strings.Join(limits, ", "))
+		if limitSet[kernelpolicy.WarnBinaryScopeLimited] && len(holders) > 0 {
+			// Name who holds the one anchor: with an agent under an
+			// administrator prefix it can be an account that runs no agent
+			// (GAP-0094).
+			text += fmt.Sprintf("; %s holds the deny anchor (the lowest uid with a native agent install;"+
+				" leave other accounts out with enrollment.exclude_users to move it)", strings.Join(holders, ", "))
+		}
 	}
 	if monitorOnly > 0 {
 		text += fmt.Sprintf("; %d %s monitor-only (connector in observe mode)", monitorOnly, plural(monitorOnly, "stays", "stay"))

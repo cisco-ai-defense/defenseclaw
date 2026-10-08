@@ -767,6 +767,12 @@ Read these rules before you roll it out:
    native agent install, the lowest uid is enforced and the others stay in
    monitor (`kernel_binary_anchor_scope_limited`), and a script-hosted agent,
    such as an npm install, is never denied (`kernel_pid_anchor_monitor_only`).
+   An agent installed once under an administrator prefix
+   (`enterprise.enrollment.agent_prefixes`) is every eligible account's native
+   agent, so the lowest eligible uid holds the deny anchor, often an
+   administrator account that never runs an agent. `verify --ready-for enforce`
+   names the user who holds it; leave such accounts out with
+   `enterprise.enrollment.exclude_users` before you enforce.
    See [The kernel controls](#the-kernel-controls).
 3. **Go through the rings.** Roll out with `serial` as in the play, and gate
    each ring on `tetragon verify --ready-for enforce` (exit `0`).
@@ -1408,7 +1414,14 @@ limits of this release follow:
   stay in monitor mode, and their would-block hits still count. Status
   warns `kernel_binary_anchor_scope_limited`, which is also each such user's
   reason, and `verify --ready-for enforce` says so when more than one user is
-  ready.
+  ready and names the user who holds the anchor. With an agent installed under
+  an administrator prefix (`enterprise.enrollment.agent_prefixes`), every
+  eligible account resolves the same native binary, so the lowest eligible uid
+  is that user even if it never runs an agent (an administrator account, for
+  example). Choose who holds it by leaving the accounts that should not out of
+  enrollment with `enterprise.enrollment.exclude_users` (an excluded account
+  gets no DefenseClaw hooks or discovery at all); the helper picks the change
+  up at its next enrollment refresh.
 
 The same user's normal shell, other users, IDE terminals, containers, and
 programs that only look like an agent by name are observed, never denied.

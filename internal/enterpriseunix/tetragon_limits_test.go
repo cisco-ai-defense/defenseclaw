@@ -42,8 +42,10 @@ func TestEnforceNeverCountsAUserWithoutADenyAnchor(t *testing.T) {
 			t.Fatalf("a user without a deny anchor is not enforced: %+v", user)
 		}
 	}
+	// GAP-0094: the summary names who holds the one deny anchor.
 	want := "1 of 3 users is enforced; 2 stay in monitor without a deny anchor (" +
-		kernelpolicy.WarnBinaryScopeLimited + ", " + kernelpolicy.WarnPIDMonitorOnly + ")."
+		kernelpolicy.WarnBinaryScopeLimited + ", " + kernelpolicy.WarnPIDMonitorOnly + "); dcr-std1 (uid 1001) holds the deny anchor" +
+		" (the lowest uid with a native agent install; leave other accounts out with enrollment.exclude_users to move it)."
 	if got := enforceCounts(users, false); got != want {
 		t.Fatalf("counts:\n%s\nwant:\n%s", got, want)
 	}
