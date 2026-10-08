@@ -472,12 +472,16 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     before = _restart_only_config(app.cfg) if secure_client else ()
     path, restart_keys = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
-    # One threshold model: the policy's guardrail levels (guardrail.block_at /
-    # alert_at) apply to hook tool calls and prompts as well as the proxy.
-    click.echo(
-        "  Its guardrail levels apply to tool calls, prompts and LLM traffic on every connector "
-        "without its own level (see 'defenseclaw guardrail status' and 'guardrail block-at')."
-    )
+    if secure_client:
+        click.echo(
+            "  Its guardrail thresholds govern LLM traffic through the proxy; tool-call "
+            "blocking is unchanged (see 'defenseclaw guardrail status' and 'guardrail block-at')."
+        )
+    else:
+        click.echo(
+            "  Its guardrail levels apply to tool calls, prompts and LLM traffic on every connector "
+            "without its own level (see 'defenseclaw guardrail status' and 'guardrail block-at')."
+        )
     # A stopped gateway gets one note after the success lines, covering both
     # the skipped audit event and the reload on start (GAP-1718).
     audit_skipped = _log_policy_action(
@@ -685,11 +689,19 @@ def _admission_triple(raw: dict) -> dict:
     """A policy action in config ``admission`` triple form. Policy YAML uses
     either runtime vocabulary (enable/disable or allow/block, F-0241)."""
     runtime = str(raw.get("runtime", "enable")).strip().lower()
+    if runtime not in {"enable", "disable", "allow", "block"}:
+        raise ValueError(f"invalid runtime action {runtime!r}; expected enable, disable, allow or block")
     return {
         "install": str(raw.get("install") or "none"),
         "file": str(raw.get("file") or "none"),
         "runtime": "disable" if runtime in ("disable", "block") else "enable",
     }
+
+
+def _policy_bool(value: object, key: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
 
 
 def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, imported lazily
@@ -705,9 +717,11 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
     raw = data.get("admission") or {}
     if isinstance(raw, dict):
         if "scan_on_install" in raw:
-            adm.defaults.scan_on_install = bool(raw["scan_on_install"])
+            adm.defaults.scan_on_install = _policy_bool(raw["scan_on_install"], "admission.scan_on_install")
         if "allow_list_bypass_scan" in raw:
-            adm.defaults.allow_list_bypass_scan = bool(raw["allow_list_bypass_scan"])
+            adm.defaults.allow_list_bypass_scan = _policy_bool(
+                raw["allow_list_bypass_scan"], "admission.allow_list_bypass_scan"
+            )
     for sev, action in (data.get("skill_actions") or {}).items():
         if isinstance(action, dict) and str(sev).lower() in SEVERITIES:
             adm.defaults.actions[str(sev).lower()] = _admission_triple(action)
@@ -762,7 +776,7 @@ def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, 
 
 
 def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
-    """Apply the named policy to config.yaml in one config write.
+    """Apply a named preset to config.yaml, and to v8 OPA data on Secure Client.
 
     A named policy is a preset: its admission, guardrail threshold, watch,
     Cisco AI Defense and webhook settings become config keys. Returns the
@@ -777,8 +791,14 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
     data = _load_policy(path)
 
     watch_raw = data.get("watch", {})
-    app.cfg.admission = _admission_from_policy(data)
-    _apply_policy_guardrail(app.cfg, data)
+    if asset_lists.is_secure_client(app.cfg):
+        _sync_opa_data(app, data)
+    else:
+        try:
+            app.cfg.admission = _admission_from_policy(data)
+            _apply_policy_guardrail(app.cfg, data)
+        except (TypeError, ValueError) as exc:
+            raise click.ClickException(f"invalid policy {name!r}: {exc}") from exc
     if "rescan_enabled" in watch_raw:
         app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
     if "rescan_interval_min" in watch_raw:
@@ -945,14 +965,16 @@ def _confirm_policy_delete(label: str, path: str, assume_yes: bool) -> None:
                    "~/.defenseclaw/policies/rego; the bundled copy before init)")
 @pass_ctx
 def validate(app: AppContext, rego_dir: str | None) -> None:
-    """Check the policy rule files (Rego modules) for errors.
+    """Check policy rule files and Secure Client's legacy OPA data.
 
-    The Rego modules read only their input: admission and block/allow
+    On v9, the Rego modules read only their input: admission and block/allow
     policy come from config.yaml, which ``defenseclaw config`` validates.
     Rego compiles with defenseclaw-gateway, the loader the gateway runs, or
     with 'opa' when the gateway is not installed.
     """
     rd = rego_dir or _default_rego_dir(app)
+    if asset_lists.is_secure_client(app.cfg) and not _validate_legacy_data(rd):
+        raise SystemExit(1)
     if not _try_rego_compile(rd, app.cfg):
         raise SystemExit(1)
 
@@ -1115,7 +1137,7 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
                  install: str | None, policy_name: str | None, reload_gateway: bool) -> None:
     """Edit the severity actions of every asset type: admission.defaults,
     and admission.skill, whose scanner gate outranks the defaults."""
-    if policy_name is None:
+    if policy_name is None and not asset_lists.is_secure_client(app.cfg):
         _edit_live_actions(app, "defaults", severity, runtime, file_action, install, reload_gateway)
         return
     path, data, name = _resolve_editable_policy(app, policy_name)
@@ -1138,8 +1160,9 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         click.echo("No changes specified.")
         return
 
-    _save_draft(path, data, name)
+    synced = _save_policy_edit(app, path, data, name)
     ux.ok(f"Updated {severity.upper()} actions of {_edited_policy_label(name)}: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("scanner")
@@ -1161,7 +1184,7 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
                  file_action: str | None, install: str | None, remove: bool,
                  policy_name: str | None, reload_gateway: bool) -> None:
     """Edit one asset type's severity actions (admission.<type>.actions)."""
-    if policy_name is None:
+    if policy_name is None and not asset_lists.is_secure_client(app.cfg):
         if remove:
             actions = getattr(app.cfg.admission, scanner_type).actions
             if severity not in actions:
@@ -1184,8 +1207,9 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
             del scanner_ovr[severity]
             if not scanner_ovr:
                 del overrides[scanner_type]
-            _save_draft(path, data, name)
+            synced = _save_policy_edit(app, path, data, name)
             ux.ok(f"Removed {scanner_type}/{severity.upper()} override from {_edited_policy_label(name)}.")
+            _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
         return
@@ -1208,11 +1232,12 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
         click.echo("No changes specified. Use --runtime, --file, and/or --install.")
         return
 
-    _save_draft(path, data, name)
+    synced = _save_policy_edit(app, path, data, name)
     ux.ok(
         f"Updated scanner override {scanner_type}/{severity.upper()} in {_edited_policy_label(name)}: "
         f"{', '.join(changed)}"
     )
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("guardrail")
@@ -1233,7 +1258,7 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
     ranks 1-4). A live edit writes guardrail.block_at / alert_at and
     guardrail.cisco_trust_level in config.yaml.
     """
-    if policy_name is None:
+    if policy_name is None and not asset_lists.is_secure_client(app.cfg):
         changed = []
         if block_threshold is not None:
             app.cfg.guardrail.block_at = _RANK_NAMES[block_threshold]
@@ -1270,8 +1295,9 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
         click.echo("No changes specified.")
         return
 
-    _save_draft(path, data, name)
+    synced = _save_policy_edit(app, path, data, name)
     ux.ok(f"Guardrail of {_edited_policy_label(name)} updated: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("firewall")
@@ -1334,7 +1360,7 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
         click.echo("No changes specified.")
         return
 
-    _save_draft(path, data, name)
+    _save_policy_edit(app, path, data, name)
     ux.ok(f"Firewall of {_edited_policy_label(name)} updated: {', '.join(changed)}")
 
 
@@ -1425,7 +1451,7 @@ def _user_policy_dest(app: AppContext, name: str) -> str:
     return dest
 
 
-def _resolve_editable_policy(app: AppContext, policy_name: str) -> tuple[str, dict, str]:
+def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[str, dict, str]:
     """Resolve the named policy to edit. Returns ``(path, data, name)``.
 
     ``path`` is always a writable location under the user policy dir:
@@ -1434,6 +1460,10 @@ def _resolve_editable_policy(app: AppContext, policy_name: str) -> tuple[str, di
     which is lost on upgrade and may be read-only. Raises ``SystemExit(1)``
     when the policy can't be found.
     """
+    if policy_name is None and asset_lists.is_secure_client(app.cfg):
+        policy_name = _get_active_policy_name(app)
+        if not policy_name:
+            raise click.ClickException("Secure Client active policy not found in data.json")
     name = _sanitize_policy_name(policy_name)
     path = _find_policy(app, name)
     if not path:
@@ -1456,6 +1486,33 @@ def _resolve_editable_policy(app: AppContext, policy_name: str) -> tuple[str, di
     return path, data, name
 
 
+def _get_active_policy_name(app: AppContext) -> str | None:
+    """Secure Client stores the live preset name in its v8 OPA data."""
+    path = os.path.join(app.cfg.policy_dir, "rego", "data.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("config", {}).get("policy_name")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _save_policy_edit(app: AppContext, path: str, data: dict, name: str) -> bool:
+    """A Secure Client edit of its active preset must update the legacy OPA data."""
+    if not asset_lists.is_secure_client(app.cfg):
+        _save_draft(path, data, name)
+        return False
+    active = _get_active_policy_name(app)
+    if active == name:
+        # Check the target before saving the YAML, so a missing data file
+        # cannot leave a seemingly applied edit behind.
+        _sync_opa_data(app, data)
+        _save_policy(path, data)
+        return True
+    _save_draft(path, data, name)
+    return False
+
+
 def _save_draft(path: str, data: dict, name: str) -> None:
     """Persist an edited named policy; activation applies it to config.yaml."""
     _save_policy(path, data)
@@ -1476,6 +1533,215 @@ def _reload_after_edit(
 def _edited_policy_label(name: str) -> str:
     """"policy 'strict'": the result line of an edit names the policy it changed (GAP-1667)."""
     return f"policy '{name}'"
+
+
+def _opa_runtime_action(runtime: str) -> str:
+    """Map a policy ``runtime`` value to the OPA ``data.json`` vocabulary.
+
+    Policy YAML may use either the enforcement vocabulary
+    (``enable``/``disable``) or the OPA vocabulary (``allow``/``block``).
+    Both ``disable`` and ``block`` mean "do not allow runtime execution"
+    and must map to ``block``; ``enable``/``allow`` map to ``allow``.
+    Unknown values are rejected before activation. The previous
+    ``"block" if runtime == "disable" else "allow"`` silently rewrote an
+    existing ``runtime: block`` override to ``allow`` (F-0241), so a
+    bundled override meant to block runtime execution was synced as an
+    allow.
+    """
+    value = str(runtime).strip().lower()
+    if value not in {"disable", "block", "enable", "allow"}:
+        raise click.ClickException(f"invalid runtime action {runtime!r}")
+    return "block" if value in ("disable", "block") else "allow"
+
+
+def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
+    """Sync OPA data.json with the activated policy settings.
+
+    This performs a complete sync of all policy dimensions:
+    - config (admission settings, enforcement)
+    - actions (with install field)
+    - scanner_overrides
+    - guardrail (thresholds, HILT, patterns, severity_mappings)
+    - firewall (domains, ports, blocked destinations)
+    - audit (retention, logging flags)
+
+    Writes to the Secure Client user's policy_dir, which the gateway reads.
+    A missing file is an error because this branch no longer bundles v8 data.
+    """
+    user_rego_dir = os.path.join(app.cfg.policy_dir, "rego")
+    user_data_json = os.path.join(user_rego_dir, "data.json")
+    if os.path.isfile(user_data_json):
+        data_json_path = user_data_json
+    else:
+        raise click.ClickException(
+            f"Secure Client OPA data file not found at {user_data_json}; "
+            "run `defenseclaw policy validate` and repair before activating"
+        )
+
+    try:
+        with open(data_json_path) as f:
+            opa_data = json.load(f)
+    except OSError as exc:
+        # silently returning on read failures hid
+        # malformed/stale data.json from `policy activate`. The
+        # caller has already updated config to the new policy
+        # selection, so leaving sync skipped left the gateway
+        # running with stale OPA data that would not match the
+        # advertised activation. Surface the failure and let
+        # activate exit non-zero.
+        raise click.ClickException(
+            f"failed to read OPA data file at {data_json_path}: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"OPA data file at {data_json_path} is not valid JSON: {exc}; "
+            f"run `defenseclaw policy validate` and repair before activating"
+        ) from exc
+
+    if not isinstance(opa_data, dict):
+        raise click.ClickException(f"OPA data file at {data_json_path} must contain an object")
+    # --- config section ---
+    opa_data.setdefault("config", {})
+    opa_data["config"]["policy_name"] = policy_data.get("name", "custom")
+
+    admission = policy_data.get("admission", {})
+    if "allow_list_bypass_scan" in admission:
+        opa_data["config"]["allow_list_bypass_scan"] = admission["allow_list_bypass_scan"]
+    if "scan_on_install" in admission:
+        opa_data["config"]["scan_on_install"] = admission["scan_on_install"]
+
+    enforcement = policy_data.get("enforcement", {})
+    if "max_enforcement_delay_seconds" in enforcement:
+        opa_data["config"]["max_enforcement_delay_seconds"] = enforcement["max_enforcement_delay_seconds"]
+
+    # --- actions section (with install field) ---
+    actions = policy_data.get("skill_actions", {})
+    opa_actions = {}
+    for sev in SEVERITIES:
+        raw = actions.get(sev, {})
+        runtime = raw.get("runtime", "enable")
+        file_action = raw.get("file", "none")
+        install_action = raw.get("install", "none")
+        opa_runtime = _opa_runtime_action(runtime)
+        opa_install = install_action if install_action in ("block", "allow", "none") else "none"
+        opa_actions[sev.upper()] = {
+            "runtime": opa_runtime,
+            "file": file_action,
+            "install": opa_install,
+        }
+    opa_data["actions"] = opa_actions
+
+    # --- scanner_overrides section ---
+    overrides = policy_data.get("scanner_overrides", {})
+    opa_overrides: dict = {}
+    for scanner_type, sevs in overrides.items():
+        if not isinstance(sevs, dict):
+            continue
+        opa_scanner: dict = {}
+        for sev, action in sevs.items():
+            if not isinstance(action, dict):
+                continue
+            runtime = action.get("runtime", "enable")
+            opa_runtime = _opa_runtime_action(runtime)
+            opa_scanner[sev.upper()] = {
+                "runtime": opa_runtime,
+                "file": action.get("file", "none"),
+                "install": action.get("install", "none"),
+            }
+        if opa_scanner:
+            opa_overrides[scanner_type] = opa_scanner
+    opa_data["scanner_overrides"] = opa_overrides
+
+    # --- guardrail section ---
+    guardrail = policy_data.get("guardrail", {})
+    if guardrail:
+        opa_data.setdefault("guardrail", {})
+        for key in ("block_threshold", "alert_threshold", "cisco_trust_level",
+                     "patterns", "severity_mappings", "hilt"):
+            if key in guardrail:
+                opa_data["guardrail"][key] = guardrail[key]
+
+    # --- firewall section ---
+    firewall = policy_data.get("firewall", {})
+    if firewall:
+        opa_data.setdefault("firewall", {})
+        for key in ("default_action", "blocked_destinations", "allowed_domains", "allowed_ports"):
+            if key in firewall:
+                opa_data["firewall"][key] = firewall[key]
+
+    # --- first_party_allow_list section ---
+    yaml_fp = policy_data.get("first_party_allow_list", [])
+    if yaml_fp:
+        existing = {
+            (e["target_type"], e["target_name"]): e
+            for e in opa_data.get("first_party_allow_list", [])
+            if "target_type" in e and "target_name" in e
+        }
+        merged = []
+        for entry in yaml_fp:
+            key = (entry.get("target_type", ""), entry.get("target_name", ""))
+            base = existing.get(key, {})
+            base.update(entry)
+            if "source_path_contains" not in base:
+                prev = existing.get(key, {})
+                if "source_path_contains" in prev:
+                    base["source_path_contains"] = prev["source_path_contains"]
+            merged.append(base)
+        opa_data["first_party_allow_list"] = merged
+
+    # --- audit section ---
+    audit_cfg = policy_data.get("audit", {})
+    if audit_cfg:
+        opa_data.setdefault("audit", {})
+        for key in ("retention_days", "log_all_actions", "log_scan_results"):
+            if key in audit_cfg:
+                opa_data["audit"][key] = audit_cfg[key]
+
+    with open(data_json_path, "w") as f:
+        json.dump(opa_data, f, indent=2)
+        f.write("\n")
+
+
+def _validate_legacy_data(rego_dir: str) -> bool:
+    """Validate the Secure Client v8 OPA data that its gateway still loads."""
+    path = os.path.join(rego_dir, "data.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        ux.err(f"FAIL: data.json is missing or invalid at {path}: {exc}")
+        return False
+    if not isinstance(data, dict):
+        ux.err("FAIL: data.json must contain an object")
+        return False
+    errors = [f"missing {key}" for key in ("config", "actions", "severity_ranking") if key not in data]
+    for section in ("actions", "scanner_overrides"):
+        entries = data.get(section, {})
+        if not isinstance(entries, dict):
+            errors.append(f"{section} must be an object")
+            continue
+        if section == "scanner_overrides":
+            entries = {f"{kind}.{sev}": action for kind, group in entries.items()
+                       for sev, action in (group.items() if isinstance(group, dict) else [("", group)])}
+        for name, action in entries.items():
+            if not isinstance(action, dict):
+                errors.append(f"{section}.{name} must be an object")
+                continue
+            for field, choices in (
+                ("runtime", {"block", "allow"}),
+                ("file", {"quarantine", "none"}),
+                ("install", {"block", "allow", "none"}),
+            ):
+                if field == "install" and field not in action:
+                    continue
+                if action.get(field) not in choices:
+                    errors.append(f"{section}.{name}.{field} is invalid")
+    if errors:
+        for error in errors:
+            ux.err(f"FAIL: data.json {error}")
+        return False
+    ux.ok("data.json: OK")
+    return True
 
 
 def _has_rego_tests(rego_dir: str) -> bool:

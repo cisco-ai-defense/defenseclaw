@@ -10,7 +10,10 @@
 
 package config
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestEvaluateAssetPolicyDisabledAllows(t *testing.T) {
 	cfg := &Config{}
@@ -448,6 +451,63 @@ func TestEvaluateAssetPolicyRegistryHTTPTransportAliases(t *testing.T) {
 		})
 		if decision.Action != want {
 			t.Fatalf("transport %q: action=%q, want %q", transport, decision.Action, want)
+		}
+	}
+}
+
+func TestSecureClientAssetPolicyDeniedRespectsMode(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}, AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: "marker-skill"}}
+	in := AssetPolicyInput{TargetType: "skill", Name: "marker-skill"}
+
+	disabled := cfg.EvaluateAssetPolicy(in)
+	if disabled.Action != "allow" || disabled.WouldBlock || disabled.Enabled {
+		t.Fatalf("disabled Secure Client decision = %+v, want disabled allow", disabled)
+	}
+
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
+	observed := cfg.EvaluateAssetPolicy(in)
+	if observed.Action != "allow" || !observed.WouldBlock || observed.RawAction != "block" || observed.Mode != AssetPolicyModeObserve {
+		t.Fatalf("observe Secure Client decision = %+v, want would-block", observed)
+	}
+}
+
+func TestAllowPinCaseSibling(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Allowed = []AssetPolicyRule{{
+		Name: "Good", SourcePathContains: []string{"/home/u/.claude/skills/Good"},
+	}}
+	verdict, _ := cfg.AssetListDecision(AssetPolicyInput{
+		TargetType: "skill", Name: "Good", SourcePath: "/home/u/.claude/skills/good",
+	})
+	if runtime.GOOS != "windows" && verdict != "" {
+		t.Fatalf("case-distinct skill inherited allow: %q", verdict)
+	}
+	if runtime.GOOS == "windows" && verdict != AssetListAllow {
+		t.Fatalf("Windows case-insensitive pin did not match: %q", verdict)
+	}
+}
+
+func TestMCPAllowBindsCompleteCommandLine(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Allowed = []AssetPolicyRule{{
+		Name: "reviewed", Command: "npx", ArgsPrefix: []string{"-y", "reviewed-server"},
+	}}
+	for _, tc := range []struct {
+		command string
+		args    []string
+		want    string
+	}{
+		{"npx", []string{"-y", "reviewed-server"}, AssetListAllow},
+		{"/tmp/npx", []string{"-y", "reviewed-server"}, ""},
+		{"npx", []string{"-y", "reviewed-server", "--extra"}, ""},
+	} {
+		verdict, _ := cfg.AssetListDecision(AssetPolicyInput{
+			TargetType: "mcp", Name: "reviewed", Command: tc.command, Args: tc.args,
+		})
+		if verdict != tc.want {
+			t.Fatalf("%q %v: verdict = %q, want %q", tc.command, tc.args, verdict, tc.want)
 		}
 	}
 }

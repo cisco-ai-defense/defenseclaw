@@ -20,11 +20,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -273,5 +276,56 @@ func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {
 	}
 	if fake.calls != 3 {
 		t.Fatalf("ungated: scanner calls = %d, want 3 (one per cycle)", fake.calls)
+	}
+}
+
+func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
+	dir := t.TempDir()
+	original, err := os.ReadFile(filepath.Join("..", "..", "policies", "guardrail", "default", "suppressions.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "suppressions.yaml")
+	if err := os.WriteFile(file, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "local"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"local": {Path: dir}}
+	w := New(cfg, nil, nil, nil, nil, nil, nil)
+	evt := InstallEvent{Type: InstallMCP, Connector: "codex"}
+	before := w.scannerFingerprint(evt)
+	if err := os.WriteFile(file, append(original, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if after := w.scannerFingerprint(evt); after == before {
+		t.Fatal("MCP fingerprint did not change with the rule-pack file")
+	}
+}
+
+func TestScannerVersionChangesAfterBinaryReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture requires Unix")
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "scanner")
+	write := func(version string) {
+		t.Helper()
+		next := binary + ".next"
+		if err := os.WriteFile(next, []byte("#!/bin/sh\nprintf '"+version+"\n'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(next, binary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &InstallWatcher{}
+	write("v1")
+	if got := w.scannerBinaryVersion(binary); got != "v1" {
+		t.Fatalf("first version = %q", got)
+	}
+	write("version-two")
+	if got := w.scannerBinaryVersion(binary); !strings.EqualFold(got, "version-two") {
+		t.Fatalf("replacement version = %q, want version-two", got)
 	}
 }

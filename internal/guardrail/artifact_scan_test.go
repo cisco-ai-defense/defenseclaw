@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -115,4 +116,63 @@ func TestArtifactRulesSkipDocMentionsAndCrossLineCommands(t *testing.T) {
 	if got := scanArtifactText(pack.artifactRules(), "cleanup:\n\trm -rf /\n", "Makefile"); len(got) == 0 {
 		t.Error("a one-line rm -rf / is no longer found")
 	}
+}
+
+// A Python path match must reach a write call, including through a local
+// target variable; a mere data-list mention is not a finding.
+func TestArtifactPythonPathWriteNeedsWriteCall(t *testing.T) {
+	pack := &RulePack{RuleFiles: []*RulesFileYAML{{
+		Category: "cognitive-file",
+		Rules: []RuleDefYAML{{
+			ID: "COG-MEMORY", Pattern: `MEMORY\.md`, Title: "memory marker",
+			Severity: "HIGH", Confidence: 0.9,
+			Expression: "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE)",
+		}},
+	}}}
+	source := `from pathlib import Path
+NEVER_TRACK = {"MEMORY.md"}
+def save(note):
+    target = Path.home() / "MEMORY.md"
+    with open(target, "a") as fh:
+        fh.write(note)
+`
+	found := scanArtifactText(pack.artifactRules(), source, "writer.py")
+	if len(found) != 1 || found[0].Location != "writer.py:4" {
+		t.Fatalf("Python write findings = %+v, want writer.py:4", found)
+	}
+	if mentions := scanArtifactText(pack.artifactRules(), `NEVER_TRACK = {"MEMORY.md"}`, "notes.py"); len(mentions) != 0 {
+		t.Fatalf("data-list mention became a write: %+v", mentions)
+	}
+	if direct := scanArtifactText(pack.artifactRules(), `Path("MEMORY.md").write_text("note")`, "direct.py"); len(direct) != 1 {
+		t.Fatalf("direct Python write findings = %+v, want one", direct)
+	}
+	if unrelated := scanArtifactText(pack.artifactRules(), `open(other, "w"); print("MEMORY.md")`, "unrelated.py"); len(unrelated) != 0 {
+		t.Fatalf("unrelated write became a path write: %+v", unrelated)
+	}
+}
+
+func TestArtifactOverlayScansUTF16SkillManifest(t *testing.T) {
+	dir := t.TempDir()
+	content := "# introduction\ndc-review-marker\n"
+	encoded := []byte{0xFF, 0xFE}
+	for _, unit := range utf16.Encode([]rune(content)) {
+		encoded = append(encoded, byte(unit), byte(unit>>8))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pack := &RulePack{RuleFiles: []*RulesFileYAML{{
+		Category: "command",
+		Rules:    []RuleDefYAML{{ID: "T-MARKER", Pattern: "dc-review-marker", Severity: "HIGH"}},
+	}}}
+	result, err := NewArtifactOverlay(infoScanner{}, pack).Scan(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range result.Findings {
+		if finding.RuleID == "T-MARKER" && finding.Location == "SKILL.md:2" && finding.Severity == scanner.SeverityHigh {
+			return
+		}
+	}
+	t.Fatalf("UTF-16 SKILL.md rule-pack finding missing: %+v", result.Findings)
 }

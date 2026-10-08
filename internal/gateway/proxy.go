@@ -2305,7 +2305,11 @@ func init() {
 // runtime; concurrent readers see a consistent snapshot.
 func ReloadProviderRegistry() error {
 	if g := currentGeneration(); g != nil && g.Config != nil {
-		applyGenerationProviders(buildGenerationProviders(g.Config))
+		providers, err := buildGenerationProviders(g.Config)
+		if err != nil {
+			return err
+		}
+		applyGenerationProviders(providers)
 		return nil
 	}
 	cfg, err := configs.LoadProviders()

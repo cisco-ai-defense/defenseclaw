@@ -187,3 +187,94 @@ def test_create_and_delete_with_stopped_gateway_warn_once_without_traceback(app,
     deleted = _invoke(app, ["delete", "gap1651"])
     assert deleted.exit_code == 0, deleted.output
     assert "Policy deleted. The gateway isn't running" in deleted.output
+
+
+def _custom_policy(app, name, edit):
+    import yaml
+
+    created = _invoke(app, ["create", name, "--from-preset", "default"])
+    assert created.exit_code == 0, created.output
+    path = os.path.join(app.cfg.policy_dir, f"{name}.yaml")
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    edit(data)
+    with open(path, "w") as f:
+        yaml.safe_dump(data, f)
+
+
+def test_activate_rejects_quoted_scan_bypass_boolean(app):
+    _custom_policy(app, "quoted", lambda data: data["admission"].update(allow_list_bypass_scan="false"))
+    result = _invoke(app, ["activate", "quoted", "--no-reload"])
+    assert result.exit_code != 0
+    assert "allow_list_bypass_scan must be a boolean" in result.output
+    assert app.cfg.admission.defaults.allow_list_bypass_scan is None
+
+
+def test_activate_rejects_unknown_runtime_action(app):
+    _custom_policy(app, "misspelled", lambda data: data["skill_actions"]["high"].update(runtime="bloock"))
+    result = _invoke(app, ["activate", "misspelled", "--no-reload"])
+    assert result.exit_code != 0
+    assert "invalid runtime action" in result.output
+
+
+def test_list_skips_malformed_draft_when_matching_active_policy(app):
+    app.cfg.guardrail.block_at = "LOW"
+    _custom_policy(app, "broken", lambda data: data["guardrail"].update(block_threshold="banana"))
+    result = _invoke(app, ["list", "--json"])
+    assert result.exit_code == 0, result.output
+    assert any(p["name"] == "broken" for p in json.loads(result.output)["policies"])
+
+
+def test_secure_client_activation_and_live_edit_sync_legacy_data(app, monkeypatch):
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: True)
+    rego = os.path.join(app.cfg.policy_dir, "rego")
+    os.makedirs(rego)
+    path = os.path.join(rego, "data.json")
+    with open(path, "w") as f:
+        json.dump({"config": {}, "actions": {}, "severity_ranking": {}}, f)
+    activated = _invoke(app, ["activate", "permissive", "--no-reload"])
+    assert activated.exit_code == 0, activated.output
+    with open(path) as f:
+        data = json.load(f)
+    assert data["config"]["policy_name"] == "permissive"
+    assert data["guardrail"]["block_threshold"] == 4
+    edited = _invoke(app, ["edit", "guardrail", "--block-threshold", "LOW", "--no-reload"])
+    assert edited.exit_code == 0, edited.output
+    with open(path) as f:
+        data = json.load(f)
+    assert data["guardrail"]["block_threshold"] == 1
+
+
+@pytest.mark.parametrize("content", [None, "{"])
+def test_secure_client_validate_requires_legacy_data_with_opa(app, monkeypatch, content):
+    import subprocess
+
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: True)
+    if content is not None:
+        rego = os.path.join(app.cfg.policy_dir, "rego")
+        os.makedirs(rego, exist_ok=True)
+        with open(os.path.join(rego, "data.json"), "w") as f:
+            f.write(content)
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/opa")
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_policy.subprocess.run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+    result = _invoke(app, ["validate"])
+    assert result.exit_code == 1
+    assert "data.json" in result.output
+
+
+def test_list_matches_watch_settings_of_activated_preset(app):
+    _custom_policy(app, "mywatch", lambda data: data["watch"].update(rescan_interval_min=17))
+    activated = _invoke(app, ["activate", "mywatch", "--no-reload"])
+    assert activated.exit_code == 0, activated.output
+    result = _invoke(app, ["list", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["active"] == "mywatch"
+    assert next(p for p in payload["policies"] if p["name"] == "mywatch")["active"]

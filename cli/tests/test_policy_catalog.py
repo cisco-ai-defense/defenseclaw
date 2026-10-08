@@ -79,6 +79,9 @@ def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
     strict = pc.load_policy_yaml(pc.policy_file("strict", policy_dir))
     cfg.admission = _admission_from_policy(strict)
     _apply_policy_guardrail(cfg, strict)
+    # `policy activate` also writes the preset watch settings.
+    cfg.watch.rescan_enabled = strict["watch"]["rescan_enabled"]
+    cfg.watch.rescan_interval_min = strict["watch"]["rescan_interval_min"]
     assert [p.name for p in pc.list_named_policies(policy_dir, cfg) if p.active] == ["strict"]
     cfg.guardrail.block_at = "LOW"
     assert pc.active_policy_name(policy_dir, cfg) == ""

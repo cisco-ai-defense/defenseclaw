@@ -219,7 +219,11 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	if record == nil || record.NoStart {
 		return
 	}
-	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
+	activationTime := record.ActivatedAt
+	if activationTime == "" {
+		activationTime = record.InstalledAt
+	}
+	activated, err := time.Parse(time.RFC3339Nano, activationTime)
 	if err != nil {
 		return
 	}
@@ -239,6 +243,6 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 		}
 		l.result.AddWarning(codeAgentSessionsRestart, fmt.Sprintf(
 			"user %s runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them",
-			who, strings.Join(byUID[uid], ", "), record.InstalledAt))
+			who, strings.Join(byUID[uid], ", "), activationTime))
 	}
 }

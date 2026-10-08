@@ -1946,6 +1946,20 @@ def _scan_installed_plugin_for_connector(
         connector=connector,
     )
 
+    if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
+        if rollback:
+            rollback()
+        else:
+            _rollback_plugin_install_paths([plugin_path])
+        ux.echo(f"error: plugin {plugin_name!r} blocked for connector={connector}: "
+                f"{post_decision.reason}", err=True)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected", plugin_name,
+                f"connector={connector} source={post_decision.source} reason={post_decision.reason}",
+            )
+        raise SystemExit(1)
+
     if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
         # The admission action for the findings' severity is allow; nothing
         # is on an allow list, so this is installed like a clean plugin.
@@ -4130,6 +4144,26 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     plugin_name, hermes_path = _policy_plugin_target(app, name, connector_scope)
     runtime_name = plugin_name
     pe = PolicyEngine(app.store, app.cfg)
+
+    # A quarantined copy is absent from installed directories. Allowing it now
+    # would create a name-only rule and clear the journal needed by restore.
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+
+    quarantines = PluginEnforcer(app.cfg.quarantine_dir)
+    scopes = [connector_scope] if connector_scope else _active_plugin_connectors(app)
+    scopes = [*scopes, ""]  # Legacy/global quarantine slot.
+    journal_quarantine = any(
+        entry.target_name == plugin_name
+        and entry.actions.file == "quarantine"
+        and (not connector_scope or entry.connector in ("", connector_scope))
+        for entry in pe.list_by_type("plugin")
+    )
+    if not asset_lists.is_secure_client(app.cfg) and (
+        journal_quarantine or any(quarantines.is_quarantined(plugin_name, scope) for scope in scopes)
+    ):
+        raise click.ClickException(
+            f"{plugin_name!r} is quarantined; restore it before allowing the installed copy"
+        )
 
     if not reason:
         reason = "manual allow via CLI"

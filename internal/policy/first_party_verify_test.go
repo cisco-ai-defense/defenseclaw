@@ -61,3 +61,22 @@ func TestVerifyFirstPartyTrustsOnlyTheShippedCodeGuard(t *testing.T) {
 		t.Fatalf("folder named codeguard with other content: verdict %q, want scan", got)
 	}
 }
+
+// An oversized user-controlled file must not consume unbounded time or memory
+// while deciding whether a skill is the shipped CodeGuard copy.
+func TestSkillTreeSignatureRejectsOversizedFile(t *testing.T) {
+	root := t.TempDir()
+	file, err := os.Create(filepath.Join(root, "large.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(4<<20 + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SkillTreeSignature(root); err == nil {
+		t.Fatal("oversized skill file was accepted")
+	}
+}

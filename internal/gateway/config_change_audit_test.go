@@ -71,3 +71,18 @@ func TestConfigChangeActivityNamesTheWriter(t *testing.T) {
 		t.Fatalf("a single generation names %q, want its writer cli:carol", in.Actor)
 	}
 }
+
+// An asset-only generation rebuild reuses config.yaml bytes and must not
+// attribute another config change to the last writer.
+func TestConfigChangeActivitySkipsUnchangedConfigBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("config_version: 9\nguardrail:\n  mode: observe\n")
+	if _, err := configwrite.Locked(context.Background(), path, configwrite.Options{
+		Actor: "cli:alice", Reason: "defenseclaw config set",
+	}, func() (bool, error) { return true, os.WriteFile(path, raw, 0o600) }); err != nil {
+		t.Fatal(err)
+	}
+	if activity, _, ok := configChangeActivity(path, raw, raw, []string{configDiffAssets}, 1, true); ok {
+		t.Fatalf("asset rebuild produced config change by %q", activity.Actor)
+	}
+}

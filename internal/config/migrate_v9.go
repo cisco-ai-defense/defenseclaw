@@ -35,6 +35,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/open-policy-agent/opa/ast"
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
@@ -167,6 +168,9 @@ type MigrationRecord struct {
 	// Notes are behaviour changes the operator should know about (for
 	// example block_at now applies on every path).
 	Notes []string `json:"notes,omitempty"`
+	// Pending is true until the v9 config commit succeeds. A retry can
+	// finish a record left pending by an interruption after the commit.
+	Pending bool `json:"pending,omitempty"`
 	// Acknowledged is set by `defenseclaw config migrate --ack`.
 	Acknowledged bool `json:"acknowledged,omitempty"`
 }
@@ -241,6 +245,18 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue}
 	if already {
 		result.Record.FromVersion = ConfigVersionV9
+		if record, ok := readMigrationRecord(abs); ok && record.Pending &&
+			strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source)) {
+			record.Pending = false
+			if !in.DryRun && !in.InMemory {
+				recordPath := MigrationRecordPath(abs)
+				if err := writeMigrationRecord(recordPath, record); err != nil {
+					return result, err
+				}
+				result.Written = append(result.Written, recordPath)
+			}
+			result.Record = record
+		}
 		return result, nil
 	}
 	if err := ValidateCandidate(abs, migrated); err != nil {
@@ -341,7 +357,7 @@ func MigratedFrom(configPath, sourceSHA256, installedSHA256 string) bool {
 // records sourceSHA256 (hex) as the v8 input it migrated.
 func MigratedSource(configPath, sourceSHA256 string) bool {
 	record, ok := readMigrationRecord(configPath)
-	return ok && strings.EqualFold(record.SourceSHA256, sourceSHA256)
+	return ok && !record.Pending && strings.EqualFold(record.SourceSHA256, sourceSHA256)
 }
 
 func readMigrationRecord(configPath string) (MigrationRecord, bool) {
@@ -593,6 +609,35 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 		written = append(written, envPath)
 	}
+	// Provider CA files and the evidence record must exist before the
+	// committed config can reference them. An obstructed record path then
+	// leaves the v8 config available for a retry.
+	if err := m.writeProviderCAs(&written); err != nil {
+		return written, err
+	}
+	recordPath := MigrationRecordPath(m.configPath)
+	// The record of an earlier migration is kept next to the new one: it
+	// lists what the 0.8.x upgrade moved, which a later run cannot know. A
+	// record this source left pending (an interrupted run) is replaced.
+	if earlier, err := os.ReadFile(recordPath); err == nil {
+		var previous MigrationRecord
+		retry := json.Unmarshal(earlier, &previous) == nil && previous.Pending &&
+			strings.EqualFold(previous.SourceSHA256, m.record.SourceSHA256)
+		if !retry {
+			kept := freeSiblingPath(strings.TrimSuffix(recordPath, ".json") + "." + migrationStamp() + ".json")
+			if err := cfgtxn.WriteFileDurable(kept, earlier, 0o600); err != nil {
+				return written, err
+			}
+			written = append(written, kept)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return written, fmt.Errorf("config: read %s: %w", recordPath, err)
+	}
+	m.record.Pending = true
+	if err := writeMigrationRecord(recordPath, m.record); err != nil {
+		return written, err
+	}
+	written = append(written, recordPath)
 	if _, err := txn.Commit(migrated, mode, m.record.Actor, "config_version 9 migration"); err != nil {
 		return written, err
 	}
@@ -641,22 +686,11 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			m.note("audit.db rows were copied to asset_policy but not cleared: %v", err)
 		}
 	}
-	recordPath := MigrationRecordPath(m.configPath)
-	// The record of an earlier migration is kept next to the new one: it
-	// lists what the 0.8.x upgrade moved, which a later run cannot know.
-	if earlier, err := os.ReadFile(recordPath); err == nil {
-		kept := freeSiblingPath(strings.TrimSuffix(recordPath, ".json") + "." + migrationStamp() + ".json")
-		if err := cfgtxn.WriteFileDurable(kept, earlier, 0o600); err != nil {
-			return written, err
-		}
-		written = append(written, kept)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return written, fmt.Errorf("config: read %s: %w", recordPath, err)
-	}
+	// Mark the record committed and refresh notes from post-commit cleanup.
+	m.record.Pending = false
 	if err := writeMigrationRecord(recordPath, m.record); err != nil {
 		return written, err
 	}
-	written = append(written, recordPath)
 	return written, nil
 }
 
@@ -774,6 +808,28 @@ func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
 // evaluation input, so such a module sees nothing and fails open.
 var v9LegacyRegoData = regexp.MustCompile(`\bdata\.(config|actions|scanner_overrides|first_party_allow_list|guardrail|severity_ranking)\b`)
 
+// v9RegoReadsLegacyData inspects references in parsed rules, not comments or
+// string literals. A custom module that only mentions a v8 key in prose must
+// keep its active enforcement rules.
+func v9RegoReadsLegacyData(name string, raw []byte) (bool, error) {
+	mod, err := ast.ParseModuleWithOpts(name, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1})
+	if err != nil {
+		return false, err
+	}
+	legacy := false
+	ast.WalkRefs(mod, func(ref ast.Ref) bool {
+		if len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
+			return false
+		}
+		key, ok := ref[1].Value.(ast.String)
+		if ok && v9LegacyRegoData.MatchString("data."+string(key)) {
+			legacy = true
+		}
+		return legacy
+	})
+	return legacy, nil
+}
+
 // planRegoRefresh finds the pre-9 vendor modules left under
 // <policy_dir>/rego: init only seeded missing files, so an upgrade keeps the
 // old ones. On a per-user install they are replaced with the shipped module
@@ -794,7 +850,15 @@ func (m *v9Migrator) planRegoRefresh() error {
 	for _, name := range []string{"admission.rego", "guardrail.rego", "skill_actions.rego"} {
 		path := filepath.Join(dir, name)
 		raw, err := os.ReadFile(path)
-		if err != nil || !v9LegacyRegoData.Match(raw) {
+		if err != nil {
+			continue
+		}
+		legacy, parseErr := v9RegoReadsLegacyData(name, raw)
+		if parseErr != nil {
+			m.note("%s could not be parsed to check its data references (%v); it was left in place", path, parseErr)
+			continue
+		}
+		if !legacy {
 			continue
 		}
 		if m.in.Managed || m.leftOutsideRollbackCopy(path) {
@@ -1945,16 +2009,11 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 				dir, base, shadow, base)
 		}
 	}
+	// A protected-* folder is a concrete rule pack. Its manifest names the
+	// inputs that created it, but cannot prove its rules were not edited later.
+	// Pin the actual files so a local rule cannot disappear on upgrade.
 	if strings.HasPrefix(parent, "protected-") && v9BuiltinPacks[base] {
-		var manifest struct {
-			Protection []string `json:"protection"`
-		}
-		raw, err := os.ReadFile(filepath.Join(clean, "defenseclaw-pack.json"))
-		if err == nil && json.Unmarshal(raw, &manifest) == nil {
-			return base, manifest.Protection, nil
-		}
-		m.note("%s has no readable defenseclaw-pack.json; migrated as the %s pack without its protections", dir, base)
-		return base, nil, nil
+		m.note("%s is a composed rule pack; its current files are pinned as a custom pack to preserve local edits", dir)
 	}
 	if m.in.RulePackDigest == nil {
 		return "", nil, fmt.Errorf("custom rule pack %s needs a digest; run `defenseclaw-gateway config migrate`", dir)
@@ -2414,23 +2473,25 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 	m.providersOverlay = path
 }
 
-// retireProvidersOverlay writes the moved CA bundles and renames the legacy
-// overlay once its providers are in the committed config; the next config
-// write renders the derived file. A CA bundle that can not be written
-// leaves the overlay in place.
-func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
+// writeProviderCAs places TLS roots before the config commit. A failure must
+// abort migration while the v8 config can still use its inline CA overlay.
+func (m *v9Migrator) writeProviderCAs(written *[]string) error {
 	for _, ca := range m.providerCAs {
-		if err := func() error {
-			if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
-				return err
-			}
-			return cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600)
-		}(); err != nil {
-			m.note("could not write the provider CA bundle %s: %v; %s stays in place", ca.path, err, m.providersOverlay)
-			return
+		if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
+			return fmt.Errorf("config: create provider CA directory for %s: %w", ca.path, err)
+		}
+		if err := cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600); err != nil {
+			return fmt.Errorf("config: write provider CA bundle %s: %w", ca.path, err)
 		}
 		*written = append(*written, ca.path)
 	}
+	return nil
+}
+
+// retireProvidersOverlay renames the legacy overlay once its providers and
+// CA files are in the committed config. The next config write renders the
+// derived file.
+func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
 	if err := os.Rename(m.providersOverlay, m.providersOverlay+DataJSONMigratedSuffix); err != nil {
 		m.note("could not rename %s: %v", m.providersOverlay, err)
 		return

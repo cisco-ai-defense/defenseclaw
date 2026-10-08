@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -108,6 +109,34 @@ func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 	if code != http.StatusOK || !reflect.DeepEqual(*recorded, []configwrite.Change{{Path: "asset_policy.skill.denied", Value: []map[string]any{}}}) ||
 		out["applied"] != false || out["effective_policy_digest"] != nil {
 		t.Fatalf("unblock = %d %v %#v", code, out, *recorded)
+	}
+}
+
+func TestEnforceAllowWriterFailureDoesNotEnableRuntime(t *testing.T) {
+	received := make(chan receivedRequest, 1)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	api, _ := enforceTestAPI(t, "{}\n")
+	api.client = connectToMockGW(t, srv)
+	api.configApply = func(context.Context, string, []configwrite.Change, configwrite.Options) (configwrite.Result, error) {
+		return configwrite.Result{}, errors.New("writer rejected edit")
+	}
+	pe := enforce.NewPolicyEngine(api.store)
+	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _ := enforceRequest(t, api.handleEnforceAllow, http.MethodPost, `{"target_type":"skill","target_name":"blocked-skill"}`)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("allow status = %d, want 500", code)
+	}
+	select {
+	case rpc := <-received:
+		t.Fatalf("runtime enabled before config edit: %s", rpc.Method)
+	default:
+	}
+	disabled, err := api.store.HasAction("skill", "blocked-skill", "runtime", "disable")
+	if err != nil || !disabled {
+		t.Fatalf("runtime journal disabled = %t, %v; want true", disabled, err)
 	}
 }
 
