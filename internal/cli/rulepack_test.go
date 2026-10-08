@@ -235,3 +235,20 @@ func TestRulePackValidateMissingDirNamesTheDirectory(t *testing.T) {
 		t.Fatalf("text output does not name the directory:\n%s", output)
 	}
 }
+
+func TestRulePackValidateSecureClientTextMatchesMain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", path)
+	summary := guardrail.RulePackSummary{RuleFileCount: 2, RuleCount: 3, Digest: strings.Repeat("a", 64)}
+	output := &strings.Builder{}
+	if err := writeRulePackValidation(output, rulePackWireResponse{Valid: true, Summary: &summary}, false); err != nil {
+		t.Fatal(err)
+	}
+	want := "valid rule pack: 2 files, 3 rules, digest " + strings.Repeat("a", 64) + "\n"
+	if output.String() != want {
+		t.Fatalf("Secure Client validation = %q, want %q", output.String(), want)
+	}
+}

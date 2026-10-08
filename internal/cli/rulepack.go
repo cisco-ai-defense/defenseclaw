@@ -21,12 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -166,6 +168,11 @@ func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON 
 		return encoder.Encode(response)
 	}
 	if response.Valid && response.Summary != nil {
+		if rulePackSecureClient() {
+			_, err := fmt.Fprintf(w, "valid rule pack: %d files, %d rules, digest %s\n",
+				response.Summary.RuleFileCount, response.Summary.RuleCount, response.Summary.Digest)
+			return err
+		}
 		_, err := fmt.Fprintf(
 			w,
 			"valid rule pack: %d files, %d rules, digest %s\ncustom_packs pin: sha256:%s\n",
@@ -230,4 +237,11 @@ func safeRulePackWireText(value string, limit int, fallback string) string {
 		}
 	}
 	return value
+}
+
+// rulePackSecureClient checks the config source without starting the gateway.
+// An unreadable config keeps the ordinary standalone validation output.
+func rulePackSecureClient() bool {
+	raw, err := os.ReadFile(config.ConfigPath())
+	return err == nil && config.SecureClientSource(raw)
 }
