@@ -69,6 +69,7 @@ func (w *InstallWatcher) startAdmissionTraceV8(
 	ctx context.Context,
 	event InstallEvent,
 	targetType, policyID string,
+	snapshot ...AdmissionPolicySnapshot,
 ) (context.Context, *watcherAdmissionTraceV8) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -78,7 +79,9 @@ func (w *InstallWatcher) startAdmissionTraceV8(
 		evaluationID: uuid.NewString(), targetType: targetType, targetRef: event.Name,
 		policyID: policyID, connector: w.eventConnector(event),
 	}
-	if w.policyStamp != nil {
+	if len(snapshot) > 0 {
+		operation.policyDigest, operation.policyGeneration = snapshot[0].Digest, snapshot[0].Generation
+	} else if w.policyStamp != nil {
 		operation.policyDigest, operation.policyGeneration = w.policyStamp()
 	}
 	ctx = context.WithValue(ctx, watcherAdmissionEvaluationIDKey{}, operation.evaluationID)

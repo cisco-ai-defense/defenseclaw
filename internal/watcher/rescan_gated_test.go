@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -205,6 +206,8 @@ func TestRescanCycleGatedSkipsUnchangedTargets(t *testing.T) {
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	fake := &countingScanner{name: "skill-scanner"}
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+	pack := &guardrail.RulePack{}
+	w.SetRulePackSource(func(string) *guardrail.RulePack { return pack })
 
 	ctx := context.Background()
 
@@ -244,6 +247,41 @@ func TestRescanCycleGatedSkipsUnchangedTargets(t *testing.T) {
 	if fake.calls != 3 {
 		t.Fatalf("after fingerprint change: scanner calls = %d, want 3", fake.calls)
 	}
+
+	// An asset-only reload changes the composed pack without changing cfg or
+	// the installed skill's bytes.
+	pack = loadRescanTestPack(t, "default")
+	w.runRescanCycle(ctx)
+	if fake.calls != 4 {
+		t.Fatalf("after rule-pack change: scanner calls = %d, want 4", fake.calls)
+	}
+
+	// Fingerprints are cached within a cycle. A skill under another
+	// connector must not inherit this connector's pack fingerprint.
+	otherPack := loadRescanTestPack(t, "strict")
+	w.SetRulePackSource(func(connector string) *guardrail.RulePack {
+		if connector == "other" {
+			return otherPack
+		}
+		return pack
+	})
+	cache := make(map[string]string)
+	first := w.cachedFingerprint(InstallEvent{Type: InstallSkill, Connector: "codex"}, cache)
+	second := w.cachedFingerprint(InstallEvent{Type: InstallSkill, Connector: "other"}, cache)
+	if first == second {
+		t.Fatal("connector-specific rule packs share one cached fingerprint")
+	}
+}
+
+// loadRescanTestPack loads a shipped pack; its files digest is what the
+// rescan fingerprint records (GAP-0415, GAP-0456).
+func loadRescanTestPack(t *testing.T, name string) *guardrail.RulePack {
+	t.Helper()
+	pack, err := guardrail.LoadRulePack(filepath.Join("..", "..", "policies", "guardrail", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pack
 }
 
 func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {

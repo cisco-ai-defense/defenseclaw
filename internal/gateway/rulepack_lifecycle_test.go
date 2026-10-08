@@ -369,6 +369,25 @@ rules:
 	}
 }
 
+func TestRouterToolResultUsesPublishedGenerationPolicy(t *testing.T) {
+	pack := &guardrail.RulePack{SensitiveTools: &guardrail.SensitiveToolsConfig{
+		Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 1}},
+	}}
+	patterns, err := prepareLocalPatternsOverride(&guardrail.LocalPatterns{Secrets: []string{"dccert-block-marker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := &Generation{Config: config.DefaultConfig(), N: 2, Digest: "sha256:new",
+		active: pack, activePatterns: patterns}
+	router := NewEventRouter(nil, nil, nil, false)
+	router.generationSource = func() *Generation { return generation }
+	router.notify = NewNotificationQueue()
+	router.inspectToolResult(ToolResultPayload{Tool: "listed_tool", Output: "dccert-block-marker"})
+	if got := router.notify.ActiveNotifications(); len(got) != 1 || got[0].SkillName != "listed_tool" {
+		t.Fatalf("tool result was not inspected with published pack and patterns: %+v", got)
+	}
+}
+
 func TestConnectorRosterOnlyReloadRetiresRemovedPreviousManualConnector(t *testing.T) {
 	// This helper snapshots and restores both global and connector rule
 	// generations through t.Cleanup, including the GLOBAL-BEFORE override below.

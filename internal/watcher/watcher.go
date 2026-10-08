@@ -192,6 +192,10 @@ type InstallWatcher struct {
 	// the first generation and under the Secure Client integration).
 	policyStamp func() (digest observability.Optional[string], generation observability.Optional[int64])
 
+	// admissionPolicySource reads one generation for config, prepared policy,
+	// and its stamp. A post-scan decision takes a fresh snapshot.
+	admissionPolicySource func() AdmissionPolicySnapshot
+
 	// scannerFactory resolves the scanner for an event. Defaults to
 	// scannerFor; tests inject a fake to observe scan invocations without
 	// shelling out to the real scanner binaries.
@@ -655,6 +659,45 @@ func (w *InstallWatcher) SetPolicySource(source func() *policy.Prepared) {
 // admission decision records carry. Call it before Run.
 func (w *InstallWatcher) SetPolicyStamp(stamp func() (observability.Optional[string], observability.Optional[int64])) {
 	w.policyStamp = stamp
+}
+
+// AdmissionPolicySnapshot is the policy used for one admission decision.
+type AdmissionPolicySnapshot struct {
+	Config     *config.Config
+	Prepared   *policy.Prepared
+	Digest     observability.Optional[string]
+	Generation observability.Optional[int64]
+}
+
+// SetAdmissionPolicySource binds one atomic generation read for admission.
+func (w *InstallWatcher) SetAdmissionPolicySource(source func() AdmissionPolicySnapshot) {
+	w.admissionPolicySource = source
+}
+
+func (w *InstallWatcher) admissionPolicySnapshot() AdmissionPolicySnapshot {
+	if w.admissionPolicySource != nil {
+		return w.admissionPolicySource()
+	}
+	snapshot := AdmissionPolicySnapshot{Config: w.liveConfig()}
+	if w.policySource != nil {
+		snapshot.Prepared = w.policySource()
+	}
+	if w.policyStamp != nil {
+		snapshot.Digest, snapshot.Generation = w.policyStamp()
+	}
+	return snapshot
+}
+
+func (w *InstallWatcher) evaluateAdmissionSnapshot(ctx context.Context, input policy.AdmissionInput, snapshot AdmissionPolicySnapshot) *policy.AdmissionOutput {
+	if w.admissionPolicySource == nil {
+		return w.evaluateAdmission(ctx, input)
+	}
+	if snapshot.Prepared != nil {
+		if out, err := snapshot.Prepared.EvaluateAdmission(ctx, input); err == nil && out != nil {
+			return out
+		}
+	}
+	return policy.EvaluateAdmissionFallback(input)
 }
 
 // SetRulePackSource binds the live generation's guardrail rule pack for a
@@ -1217,7 +1260,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	targetType := string(evt.Type)
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
-	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID)
+	decisionPolicy := w.admissionPolicySnapshot()
+	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID, decisionPolicy)
 	// SLO timer: measure watcher-detection → admission-decision wall
 	// time so every run feeds defenseclaw.slo.block.latency. Blocked
 	// verdicts drive the <2000ms SLO dashboard; allowed/clean still
@@ -1233,7 +1277,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		fmt.Sprintf("type=%s name=%s", targetType, evt.Name), "detected",
 	)
 
-	cfg := w.liveConfig()
+	cfg := decisionPolicy.Config
 	connector := w.eventConnector(evt)
 	assetDecision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 		TargetType:     targetType,
@@ -1262,7 +1306,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// come from asset_policy; an allow entry pinned to a source path never
 	// transfers to another on-disk asset with the same name (F-2867).
 	input := w.admissionInputFor(cfg, evt, targetType, connector)
-	out := w.evaluateAdmission(ctx, input)
+	out := w.evaluateAdmissionSnapshot(ctx, input, decisionPolicy)
 	switch out.Verdict {
 	case "blocked":
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
@@ -1359,7 +1403,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	// Phase 3: post-scan evaluation. Re-read the live config so a block or
 	// allow added while the scan was running wins.
-	input = w.admissionInputFor(w.liveConfig(), evt, targetType, connector)
+	decisionPolicy = w.admissionPolicySnapshot()
+	admissionTrace.policyDigest, admissionTrace.policyGeneration = decisionPolicy.Digest, decisionPolicy.Generation
+	input = w.admissionInputFor(decisionPolicy.Config, evt, targetType, connector)
 	input.ScanResult = &policy.ScanResultInput{
 		MaxSeverity:   string(result.MaxSeverity()),
 		TotalFindings: len(result.Findings),
@@ -1396,7 +1442,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 
-	out = w.evaluateAdmission(ctx, input)
+	out = w.evaluateAdmissionSnapshot(ctx, input, decisionPolicy)
 	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)

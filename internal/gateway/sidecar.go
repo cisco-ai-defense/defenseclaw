@@ -283,6 +283,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: build configuration generation: %w", err)
 	}
+	bootGen.activeRules = initialRules
+	bootGen.activePatterns = initialPatterns
 	// The boot judge and proxy read the provider registry before the
 	// generation is published.
 	applyGenerationProviders(bootGen.Providers)
@@ -615,9 +617,7 @@ func (s *Sidecar) publishGeneration(g *Generation) {
 	s.generation.Store(g)
 	// Sandbox and security-action records need the applied policy stamp even
 	// when the install watcher is disabled or has no directories to watch.
-	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
-	})
+	audit.SetPolicyStamp(livePolicyStampV8)
 }
 
 // activeRulePackKey is the composed-pack key of the pack the shared scanners
@@ -2032,6 +2032,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if err != nil {
 			return err
 		}
+	}
+
+	if judgeChanged {
+		nextGen.judge = nextJudge
+	} else {
+		nextGen.judge = s.sharedJudge()
 	}
 
 	// Application-protection observer attachment must be infallible after the
@@ -3713,8 +3719,20 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		return nil
 	})
-	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
+	w.SetPolicyStamp(livePolicyStampV8)
+	// Admission reads config, prepared policy and stamp from one generation
+	// (GAP-0457).
+	w.SetAdmissionPolicySource(func() watcher.AdmissionPolicySnapshot {
+		g := s.Generation()
+		if g == nil {
+			return watcher.AdmissionPolicySnapshot{Config: s.currentConfig()}
+		}
+		snapshot := watcher.AdmissionPolicySnapshot{Config: g.Config, Prepared: g.OPA}
+		if !g.Config.SecureClientIntegration() {
+			snapshot.Digest = observability.Present(g.Digest)
+			snapshot.Generation = observability.Present(int64(g.N))
+		}
+		return snapshot
 	})
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
