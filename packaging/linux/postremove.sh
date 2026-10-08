@@ -33,6 +33,11 @@ fi
 case "${1:-}" in
     remove|purge|0)
         rmdir /opt/defenseclaw/bin /opt/defenseclaw >/dev/null 2>&1 || true
+        # The override `enterprise linux uninstall` wrote over this package's
+        # tmpfiles.d entries leaves with the package.
+        if head -n 1 /etc/tmpfiles.d/defenseclaw.conf 2>/dev/null | grep -qx '# defenseclaw-uninstall-override'; then
+            rm -f /etc/tmpfiles.d/defenseclaw.conf
+        fi
         ;;
 esac
 if [ -d /run/systemd/system ]; then

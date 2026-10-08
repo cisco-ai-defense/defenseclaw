@@ -521,6 +521,13 @@ to keep the machine state for a reinstall instead.
   `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
   before you remove the package. The MDM `uninstall.sh --purge` does this
   for you.
+- **Lifecycle uninstall with the Linux package kept.** The package's
+  `/usr/lib/tmpfiles.d/defenseclaw.conf` names the `defenseclaw` account the
+  uninstall removed, so the uninstall writes an override of the same name in
+  `/etc/tmpfiles.d`: the next boot logs no errors for the missing account and
+  recreates no DefenseClaw folders. The next install (`ensure --from-package`,
+  or a reinstall of the package) removes the override, and so does removing
+  the package.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
 - **Registrations left (Linux and macOS).** Each user's registrations are

@@ -825,6 +825,13 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
+	// The override a package-kept uninstall wrote over the package's
+	// tmpfiles.d entries goes with the next install.
+	if p.channel == ChannelPackage && env.GOOS == "linux" {
+		if data, err := readBounded(env.P(packageTmpfilesOverride), 4096); err == nil && strings.HasPrefix(string(data), packageTmpfilesOverrideMarker) {
+			p.stale = append(p.stale, packageTmpfilesOverride)
+		}
+	}
 	// Files the previous deployment wrote that this one no longer does.
 	if record != nil {
 		want := map[string]bool{}
@@ -2143,6 +2150,20 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				l.serviceAccountKept = true
 				r.AddWarning(codeAccount, fmt.Sprintf("the service account %s was not removed: %v; everything else is removed. Delete the account by hand: %s",
 					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser)))
+			} else if packageManaged {
+				// The package stays installed, and its tmpfiles.d entries
+				// name the removed account: every boot logged ten
+				// resolution errors and recreated empty root-owned state
+				// folders (GAP-0516). An override of the same name turns
+				// them off until the next install removes it.
+				override := env.P(packageTmpfilesOverride)
+				err := mkdirParents(filepath.Dir(override))
+				if err == nil {
+					err = env.writeFileAtomic(override, []byte(packageTmpfilesOverrideText), 0o644, rootOwner())
+				}
+				if err != nil {
+					r.AddWarning(codeAccount, fmt.Sprintf("could not turn off the package's tmpfiles.d entries for the removed account: %v; the next boot logs that it cannot resolve %s", err, env.Layout.ServiceUser))
+				}
 			}
 		}
 	}

@@ -210,6 +210,20 @@ var legacyLinuxUnits = []string{
 	"defenseclaw-enterprise-test.service",
 }
 
+// packageTmpfilesOverride turns off the package's tmpfiles.d entries after
+// an uninstall that removed the service account but left the package
+// installed (systemd-tmpfiles reads a file in /etc instead of the one with
+// the same name in /usr/lib). The next install and the package removal
+// delete it.
+const (
+	packageTmpfilesOverride       = "/etc/tmpfiles.d/defenseclaw.conf"
+	packageTmpfilesOverrideMarker = "# defenseclaw-uninstall-override"
+	packageTmpfilesOverrideText   = packageTmpfilesOverrideMarker + "\n" +
+		"# Written by `defenseclaw-gateway enterprise linux uninstall`: the defenseclaw\n" +
+		"# account is removed, so the package's /usr/lib/tmpfiles.d/defenseclaw.conf\n" +
+		"# stays off until the next install, which removes this file.\n"
+)
+
 // tmpfilesInstallPath and sysusersInstallPath depend on the channel: the
 // package owns /usr/lib, the payload channel writes /etc.
 func tmpfilesInstallPath(channel string) string {
