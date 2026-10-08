@@ -1308,6 +1308,24 @@ func TestLogsOfAStoppedSandbox(t *testing.T) {
 	// The pid check is the run-state script's; -f stops once the run is gone.
 	has(t, runStateScript, `kill -0 "$rs_pid"`, "/proc/$rs_pid/cmdline", "grep -q latest.exit", "run=interrupted")
 	has(t, runFollowScript, `while run_alive "$d" && [ ! -s "$d/latest.exit" ]`, `kill "$t"`)
+
+	// GAP-0318: a stop under `logs -f` ended the follower without a word; it
+	// says what stopped and how the run ended, as a later `logs` does.
+	ta = newTestApp(t, "")
+	ta.IO.TTY = false
+	ta.daemon.add(sampleSandbox("box"))
+	ta.stream.answer = func(argv []string) (int, string) {
+		if cmd := sandboxCommand(argv); len(cmd) > 2 && cmd[2] == runFollowScript {
+			stopped := sampleSandbox("box")
+			stopped.Phase = "stopped"
+			ta.daemon.add(stopped)
+			ta.daemon.runLogs["box"] = &sandboxapi.RunLog{Name: "box", State: sandboxapi.RunInterrupted, KeptAt: time.Now(), Log: "partial\n"}
+			return 0, "partial\n"
+		}
+		return 1, ""
+	}
+	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Follow: true}))
+	has(t, ta.output(), "partial", "box is stopped", "kept the log of its detached run", "the run did not finish")
 }
 
 // A detached Claude Code run streams its events, which `logs` renders; a
