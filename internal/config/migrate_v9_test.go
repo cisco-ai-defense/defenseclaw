@@ -146,6 +146,36 @@ func TestMigrateV9SeedsAMissingDefaultRulePack(t *testing.T) {
 	}
 }
 
+// A v9 config must never be committed when its referenced shipped pack
+// cannot be installed.
+func TestMigrateV9RefusesFailedRulePackSeed(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged Unix user for read-only directory permissions")
+	}
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n")
+	if err := os.WriteFile(configPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packRoot := filepath.Join(dir, "policies", "guardrail")
+	if err := os.MkdirAll(packRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(packRoot, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(packRoot, 0o700)
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+		t.Fatal("migration committed despite a failed rule-pack seed")
+	}
+	if got, err := os.ReadFile(configPath); err != nil || string(got) != string(source) {
+		t.Fatalf("config after failed migration = %q, %v", got, err)
+	}
+}
+
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()

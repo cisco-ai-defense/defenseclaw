@@ -612,6 +612,14 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 		written = append(written, dir)
 	}
+	// A committed v9 config can reference these packs immediately. Install
+	// every missing shipped pack first, and leave v8 available if any fails.
+	for _, dir := range slices.Sorted(maps.Keys(m.seedPacks)) {
+		if err := seedShippedRulePack(dir, m.seedPacks[dir]); err != nil {
+			return written, fmt.Errorf("config: seed the shipped %s rule pack at %s: %w", m.seedPacks[dir], dir, err)
+		}
+		written = append(written, dir)
+	}
 	if m.envKey != "" {
 		envPath := filepath.Join(m.dataDir(), ".env")
 		if err := appendDotEnvKey(envPath, m.envKey, m.envValue); err != nil {
@@ -675,14 +683,6 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
 		m.retireProvidersOverlay(&written)
-	}
-	for _, dir := range slices.Sorted(maps.Keys(m.seedPacks)) {
-		if err := seedShippedRulePack(dir, m.seedPacks[dir]); err != nil {
-			m.note("could not write the shipped %s rule pack to %s: %v; the gateway refuses to start until it is there "+
-				"(run defenseclaw init)", m.seedPacks[dir], dir, err)
-			continue
-		}
-		written = append(written, dir)
 	}
 	for _, path := range m.retired {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
