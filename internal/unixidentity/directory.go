@@ -213,8 +213,9 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 // that same SID in the realm's domain, asked in the domain\name form, which
 // SSSD looks up in that domain only (sidOfUserInDomain). A qualified name
 // (use_fully_qualified_names = True, what realm join writes) is asked in the
-// domain it names, which may be a trusted domain below a joined realm; a
-// short name in each joined SSSD realm. The same SID is the same account,
+// domain it names; a child domain may inherit a joined parent only if
+// SSSD resolves the same SID in the parent. A short name is asked in
+// each joined SSSD realm. The same SID is the same account,
 // so the realm, principal and groups of an account never go to another
 // account that only shares its name: a plain LDAP account of the same short
 // name, one named by an e-mail address in the joined domain, or one SSSD
@@ -246,15 +247,33 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 		}
 	}
 	for _, candidate := range candidates {
-		realm, ok := realmFor(candidate, useridentity.SourceSSSD, realms)
-		if !ok {
-			continue
-		}
 		held, err := sssd.sidOfUserInDomain(candidate, bare)
 		if err != nil {
 			return "", fmt.Errorf("unixidentity: SSSD SID of %s in %s: %w", bare, candidate, err)
 		}
 		if !strings.EqualFold(held, sid) {
+			continue
+		}
+		realm, ok := realmFor(candidate, useridentity.SourceSSSD, realms)
+		if !ok {
+			// A child DNS name alone does not prove membership in a joined
+			// parent realm: an independent LDAP domain can share its suffix.
+			// Require SSSD to resolve this same SID in the parent domain.
+			for _, parent := range realms {
+				if !strings.EqualFold(parent.ClientSoftware, "sssd") ||
+					!strings.HasSuffix(candidate, "."+parent.Domain) {
+					continue
+				}
+				parentSID, lookupErr := sssd.sidOfUserInDomain(parent.Domain, bare)
+				if lookupErr != nil {
+					return "", fmt.Errorf("unixidentity: SSSD SID of %s in %s: %w", bare, parent.Domain, lookupErr)
+				}
+				if strings.EqualFold(parentSID, sid) && len(parent.Domain) > len(realm.Domain) {
+					realm, ok = parent, true
+				}
+			}
+		}
+		if !ok {
 			continue
 		}
 		facts.Domain = candidate
