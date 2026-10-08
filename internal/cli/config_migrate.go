@@ -218,11 +218,13 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 			return err
 		}
 		input.Managed = true
-		result, err := config.MigrateV9(ctx, input)
-		if err != nil {
+		if _, err := config.MigrateV9(ctx, input); err != nil {
 			return fmt.Errorf("migrate %s to config_version 9: %w", path, err)
 		}
-		return restoreACL(append(written, result.Written...)...)
+		// Only config-owned files take config.yaml's DACL. MigrateV9 also
+		// writes .env and may touch policy files; their ACLs belong to
+		// those files, not to the readable config (GAP-0440).
+		return restoreACL(append(written, path, path+config.ConfigV8BackupSuffix, config.MigrationRecordPath(path))...)
 	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil && state.ConfigSHA256 == configwrite.SHA256Hex(raw) {
 		// Already recorded, but the record still takes the DACL of the
