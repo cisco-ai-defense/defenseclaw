@@ -13219,9 +13219,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return SetupPanelAction(
                     True, hint=f"Config not saved: {exc}. Your draft is kept: fix the file and press S again, or r to discard it."
                 )
+        original_config = self.config
         try:
+            # Stage the draft so a failed write cannot change the authoritative
+            # config that the editor uses when the operator discards edits.
+            staged_config = copy.deepcopy(original_config)
+            self.setup_model.config = staged_config
             self.setup_model.apply_changes_to_config(mark_applied=False)
-            save = getattr(self.config, "save", None)
+            save = getattr(staged_config, "save", None)
             if callable(save):
                 from defenseclaw.config_writer import ACTOR_PREFIX_TUI, current_actor
 
@@ -13230,13 +13235,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.setup_model.accept_applied_changes()
             from defenseclaw.enforce import asset_lists
 
-            secure_client = asset_lists.is_secure_client(self.config)
+            secure_client = asset_lists.is_secure_client(staged_config)
             if secure_client:
                 # A Secure Client gateway reads its policy at start, so every
                 # save keeps the restart of main (issue #1092).
                 restart_keys = None
             roster_changed, storage_changed = self._apply_config_snapshot(
-                self.config,
+                staged_config,
                 external=False,
                 refresh_disk=False,
             )
@@ -13257,6 +13262,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 )
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
+            if self.config is original_config:
+                self.setup_model.config = original_config
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
         self._schedule_config_save_audit(saved_entries)
         self._setup_cli_live_sections = _cli_live_config_sections(saved_entries) if secure_client else ""
