@@ -323,9 +323,15 @@ func (s *scanner) listDir(dir string, limit int) []os.DirEntry {
 		return nil
 	}
 	defer f.Close()
-	entries, err := f.ReadDir(limit)
+	// Read one extra entry so hitting the cap cannot look like a full listing.
+	entries, err := f.ReadDir(limit + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
+		s.full = true
 		return nil
+	}
+	if len(entries) > limit {
+		s.full = true
+		entries = entries[:limit]
 	}
 	out := entries[:0]
 	for _, e := range entries {
