@@ -544,11 +544,51 @@ func (l *lifecycle) ledgerProblem() string {
 			}
 		}
 		problem, torn := env.attestationProblem(data)
+		if torn && attempt == 5 && problem == guardianManifestNotReconciled && l.manifestJustChanged() {
+			// An apply, ensure or enumerator cycle has just rewritten
+			// targets.yaml, and the guardian reconciles it within about a
+			// minute while it keeps enforcing the targets it last reconciled.
+			// That is a wait, not a failure an automation should page for
+			// (GAP-0691); a guardian that stays behind fails again later.
+			l.noteGuardianCatchingUp()
+			return ""
+		}
 		if !torn || attempt == 5 {
 			return problem
 		}
 		time.Sleep(env.PollInterval)
 	}
+}
+
+// guardianCatchUpWindow is how long after targets.yaml changed a guardian
+// that has not reconciled it yet is waited for rather than failed: it
+// reconciles each minute.
+const guardianCatchUpWindow = 3 * time.Minute
+
+// codeGuardianReconcilePending warns that the guardian has not reconciled
+// a targets.yaml that changed moments ago.
+const codeGuardianReconcilePending = "guardian_reconcile_pending"
+
+// manifestJustChanged reports a targets.yaml written within
+// guardianCatchUpWindow.
+func (l *lifecycle) manifestJustChanged() bool {
+	info, err := os.Stat(l.env.P(l.env.Layout.ManifestPath))
+	if err != nil {
+		return false
+	}
+	age := l.env.Now().Sub(info.ModTime())
+	return age >= -time.Minute && age < guardianCatchUpWindow
+}
+
+// noteGuardianCatchingUp adds the guardian_reconcile_pending warning once.
+func (l *lifecycle) noteGuardianCatchingUp() {
+	for _, warning := range l.result.Warnings {
+		if warning.Code == codeGuardianReconcilePending {
+			return
+		}
+	}
+	l.result.AddWarning(codeGuardianReconcilePending, "targets.yaml changed moments ago and the hook guardian has not reconciled it yet; "+
+		"it does within about a minute and until then enforces the targets it last reconciled. No repair is needed: run verify again in a minute to confirm the new targets")
 }
 
 // describe fills the result's services, readiness and enrollment.
