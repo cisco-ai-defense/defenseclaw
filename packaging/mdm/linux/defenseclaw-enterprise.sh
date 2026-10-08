@@ -462,7 +462,14 @@ dc_install_package() {
             if [ "$installed" = "install ok installed $version" ]; then
                 dc_log "package $version already installed"
             else
-                if ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); then
+                attempt=1
+                while ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); do
+                    if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
+                        dc_log "package manager busy; retry $attempt of 2"
+                        attempt=$((attempt + 1))
+                        sleep 10
+                        continue
+                    fi
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
@@ -488,10 +495,17 @@ dc_install_package() {
                 previous=""
                 if rpm -q "$DC_LINUX_PACKAGE" >/dev/null 2>&1; then
                     previous=$(dc_package_release_version "$installed")
-                fi
+                done
                 # rpm -U refuses a downgrade, which keeps an older package
                 # from silently replacing a newer deployment.
-                if ! output=$(rpm -U --quiet "$file" 2>&1); then
+                attempt=1
+                while ! output=$(rpm -U --quiet "$file" 2>&1); do
+                    if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
+                        dc_log "package manager busy; retry $attempt of 2"
+                        attempt=$((attempt + 1))
+                        sleep 10
+                        continue
+                    fi
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
@@ -517,7 +531,7 @@ dc_install_package() {
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "another installation is running; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "installer failed: $output"
-                fi
+                done
                 dc_package_step "$installed" "$version"
             fi
             ;;
@@ -646,6 +660,19 @@ dc_main() {
         dc_run_lifecycle "$DC_GATEWAY" "$DC_ACTION" || status=$?
         dc_emit_result
         return "$status"
+dc_run_lifecycle_retry() {
+    attempt=1
+    while :; do
+        status=0
+        dc_run_lifecycle "$@" || status=$?
+        [ "$status" = 75 ] && [ "$attempt" -lt 3 ] || break
+        dc_log "lifecycle busy; retry $attempt of 2"
+        attempt=$((attempt + 1))
+        sleep 10
+    done
+    return "$status"
+}
+
     fi
 
     config=""
@@ -717,7 +744,7 @@ dc_main() {
     [ -z "$config" ] || set -- "$@" "--config=$config"
     [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
     status=0
-    dc_run_lifecycle "$gateway" "$@" || status=$?
+    dc_run_lifecycle_retry "$gateway" "$@" || status=$?
     [ "$status" != 0 ] || dc_annotate_package_step
     dc_emit_result
     return "$status"

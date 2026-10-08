@@ -124,14 +124,15 @@ Go to **Devices** > **Manage devices** > **Scripts and remediations** >
 | --- | --- |
 | Execution context | **Root**. The script then runs whether or not a user is signed in. The first run can ask the user for consent. |
 | Execution frequency | **Daily**. `ensure` changes nothing when the host already matches, but with `DC_SOURCE_URL` set every run downloads the artifact before it compares versions. Run more often only if that download is acceptable, or leave `DC_SOURCE_URL` empty once installed. |
-| Execution retries | **3**. Exit `75` means dpkg, rpm or another lifecycle run held a lock, and a later run succeeds. |
+| Execution retries | **No retries**. The wrapper itself retries exit `75` (busy) up to three times, 10 seconds apart. Intune may count a cached retry inside its frequency window as successful without rerunning the script. |
 | Execution script | Your edited copy of `defenseclaw-enterprise.sh` |
 
 Assign it to device groups. On each run the wrapper downloads the artifact,
 verifies it, installs the package only when its version differs from the
 installed one, runs `ensure` with the config, and exits with the lifecycle's
 code. A busy package manager, for example during unattended upgrades, exits
-`75` (`mdm_package_manager_busy`).
+`75` (`mdm_package_manager_busy`). Intune typically checks in about hourly; a failed non-busy run waits for a later frequency window.
+
 
 ## 4. Report health
 
