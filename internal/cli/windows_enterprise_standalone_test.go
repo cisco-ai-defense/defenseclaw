@@ -2158,3 +2158,50 @@ func TestWindowsSecureClientEnsureKeepsHistoricalPreflight(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0660: a config that names a protected credential nobody stored gets a
+// credential_missing warning in status, verify and the lifecycle results,
+// naming the credential and the command that stores it; a stored one, and
+// a run that did not read the deployment, get none.
+func TestWindowsEnterpriseWarnsAboutAMissingProtectedCredential(t *testing.T) {
+	dir := t.TempDir()
+	secrets := filepath.Join(dir, "secrets")
+	if err := os.Mkdir(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	body := "enterprise:\n  inspection:\n    llm:\n      credential: llm-judge\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secrets, "ai-defense-api-key"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seam := windowsEnterpriseHotConfigLayout
+	t.Cleanup(func() { windowsEnterpriseHotConfigLayout = seam })
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: configPath, ConfigDir: dir, SecretsDir: secrets}, nil
+	}
+	missing := func(action string, installed bool) []enterprisestatus.Message {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
+		result.Installed = installed
+		addWindowsEnterpriseMissingCredentialWarnings(result)
+		var found []enterprisestatus.Message
+		for _, warning := range result.Warnings {
+			if warning.Code == "credential_missing" {
+				found = append(found, warning)
+			}
+		}
+		return found
+	}
+	for _, action := range []string{"status", "verify", "ensure"} {
+		got := missing(action, true)
+		if len(got) != 1 || !strings.Contains(got[0].Message, "llm-judge (enterprise.inspection.llm.credential)") ||
+			!strings.Contains(got[0].Message, "enterprise secret set --name llm-judge") {
+			t.Fatalf("%s warnings = %+v", action, got)
+		}
+	}
+	if got := missing("status", false); len(got) != 0 {
+		t.Fatalf("a host with nothing installed warned %+v", got)
+	}
+}

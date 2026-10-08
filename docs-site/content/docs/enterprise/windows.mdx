@@ -333,7 +333,9 @@ Remove-Item 'C:\ProgramData\DefenseClaw-Staging\llm.key'
 
 The judge and the skill, MCP and plugin scanners all take their key from
 that credential. A missing credential leaves them without a key; they never
-fall back to an environment variable. Store a new key with the same command
+fall back to an environment variable. Until you store it, `status`, `verify`
+and the Setup result warn `credential_missing`, naming the credential and
+the command that stores it (the same holds for the AI Defense key). Store a new key with the same command
 to rotate it. `enterprise windows status` then prints a `Scanners:` line with
 the scanner versions, the skill scanner policy and the judge model. Without
 an `llm:` block it warns `scanner_judge_missing`: the scanners then run their
