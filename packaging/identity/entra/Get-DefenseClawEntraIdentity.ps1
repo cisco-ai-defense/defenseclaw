@@ -172,7 +172,10 @@ function Open-Registry64Key {
 }
 
 function Get-IdentityStoreAccount {
-    $base = Open-Registry64Key 'SOFTWARE\Microsoft\IdentityStore\Cache'
+    try { $base = Open-Registry64Key 'SOFTWARE\Microsoft\IdentityStore\Cache' }
+    catch {
+        return [pscustomobject]@{ Readable = $false; Message = 'The identity store cache requires an elevated Administrator prompt; sign-in and token facts are still available.'; Accounts = @() }
+    }
     if ($null -eq $base) {
         return [pscustomobject]@{ Readable = $false; Message = '64-bit identity store cache is not readable'; Accounts = @() }
     }
@@ -191,7 +194,7 @@ function Get-IdentityStoreAccount {
             } finally { $cache.Dispose() }
         }
     } catch {
-        return [pscustomobject]@{ Readable = $false; Message = $_.Exception.Message; Accounts = @() }
+        return [pscustomobject]@{ Readable = $false; Message = 'The identity store cache requires an elevated Administrator prompt; sign-in and token facts are still available.'; Accounts = @() }
     } finally { $base.Dispose() }
     [pscustomobject]@{ Readable = $true; Message = ''; Accounts = $accounts }
 }
