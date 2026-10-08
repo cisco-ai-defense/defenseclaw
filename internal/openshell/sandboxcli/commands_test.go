@@ -803,6 +803,18 @@ func TestExecSaysWhyTheSandboxEndedIt(t *testing.T) {
 	}
 	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"sleep", "600"}}), 255)
 	has(t, ta.output(), "DefenseClaw stopped box while the command ran: its harness worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)")
+	// GAP-0390: the end of the agent session that started the sandbox
+	// stopped it under a command in another terminal; the line names that
+	// and how to keep it running.
+	ta = newTestApp(t, "", sampleSandbox("box"))
+	ta.IO.TTY = false
+	ta.stream.answer = func(argv []string) (int, string) {
+		ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" })
+		return 255, ""
+	}
+	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"make"}}), 255)
+	has(t, ta.output(), "box is stopped: it stopped while the command ran (an agent session that started it ended",
+		"start it with `defenseclaw sandbox start box` before the session and the command, and it keeps running when the session ends")
 }
 
 func TestExecAndLogs(t *testing.T) {

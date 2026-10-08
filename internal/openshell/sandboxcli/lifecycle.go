@@ -643,8 +643,12 @@ func execEndedText(sb *sandboxapi.Sandbox) string {
 		return "the connection to " + sb.Name + " was lost while the command ran (the OpenShell gateway restarted, for one); `" +
 			CommandName + " status " + sb.Name + "` shows whether it runs"
 	}
-	return sb.Name + " is " + sb.Phase + ": it stopped while the command ran (`" + CommandName + " stop`, the TUI, or DefenseClaw); start it with `" +
-		CommandName + " start " + sb.Name + "`"
+	// A session that started the sandbox stops it as it ends, a command in
+	// another terminal running or not; one that found it running leaves it
+	// running (GAP-0390).
+	return sb.Name + " is " + sb.Phase + ": it stopped while the command ran (an agent session that started it ended, or `" + CommandName +
+		" stop`, the TUI, or DefenseClaw stopped it); start it with `" + CommandName + " start " + sb.Name +
+		"` before the session and the command, and it keeps running when the session ends"
 }
 
 // StopOptions are the `sandbox stop` flags.
