@@ -590,39 +590,35 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
             "finish its upload in the Intune admin center, then run this again"
         )
     group = group_by_name(graph, args.group)
-    existing = graph.get_all(f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments")
-    for assignment in existing:
-        target = assignment.get("target", {})
-        if target.get("groupId") != group["id"]:
-            continue
-        if target.get("@odata.type") == GROUP_TARGET and assignment.get("intent") == args.intent:
-            print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
-            return 0
-        if target.get("@odata.type") == "#microsoft.graph.exclusionGroupAssignmentTarget":
-            if not args.apply:
-                print(f"[plan] would replace exclusion for group {args.group}")
-                return 0
-            body = {
-                "@odata.type": "#microsoft.graph.mobileAppAssignment",
-                "intent": args.intent,
-                "target": {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
-            }
-            if "settings" in assignment:
-                body["settings"] = assignment["settings"]
-            graph.request("PATCH", f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments/{assignment['id']}", body)
-            print(f"replaced exclusion for group {args.group}")
-            return 0
+    collection = f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments"
+    existing = graph.get_all(collection)
+    matching = [a for a in existing if (a.get("target") or {}).get("groupId") == group["id"]]
+    if len(matching) > 1:
+        raise SystemExit(f"error: {len(matching)} assignments target group {args.group!r}; resolve them in Intune")
+    assignment = matching[0] if matching else None
+    included = assignment and (assignment.get("target") or {}).get("@odata.type") == GROUP_TARGET
+    if included and assignment.get("intent") == args.intent:
+        print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
+        return 0
+    action = "update" if included else "replace exclusion" if assignment else "assign"
     if not args.apply:
-        print(f"[plan] would assign app {args.app} to group {args.group} with intent {args.intent}")
+        print(f"[plan] would {action} app {args.app} for group {args.group} with intent {args.intent}")
         print("Nothing was changed. Run again with --apply to make this change.")
         return 0
+    target = dict((assignment or {}).get("target") or {})
+    target.update({"@odata.type": GROUP_TARGET, "groupId": group["id"]})
     body = {
         "@odata.type": "#microsoft.graph.mobileAppAssignment",
         "intent": args.intent,
-        "target": {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
+        "target": target,
     }
-    graph.request("POST", f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments", body)
-    print(f"assigned app {args.app} to group {args.group} as {args.intent}")
+    if assignment:
+        if "settings" in assignment:
+            body["settings"] = assignment["settings"]
+        graph.request("PATCH", f"{collection}/{assignment['id']}", body)
+    else:
+        graph.request("POST", collection, body)
+    print(f"app {args.app}: {action} completed for group {args.group} as {args.intent}")
     return 0
 
 
