@@ -223,6 +223,19 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		if path == "" && strings.EqualFold(row.Connector, "kiro") {
 			path = windowsKiroInstalled(row.UserHome)
 		}
+		if path == "" && strings.EqualFold(row.Connector, "claudecode") {
+			// A native claude.exe whose build is not recorded yet: say what
+			// is missing instead of leaving the account without a row and
+			// without a reason (GAP-0597).
+			if launcher := windowsNativeClaudeLauncher(row.UserHome); launcher != "" {
+				rowContext.unprotected(row, "", fmt.Sprintf(
+					"%s is installed, but %s holds no build that matches it, so its version could not be read; "+
+						"Claude Code records the build there the first time the user starts it (or runs claude install), "+
+						"and the next enumeration enrolls the account",
+					launcher, filepath.Join(row.UserHome, ".local", "share", "claude", "versions")))
+				return false
+			}
+		}
 		if path != "" {
 			rowContext.unprotected(row, "", fmt.Sprintf("%s is installed, but its version could not be read, so no hook contract can be selected", path))
 		}
@@ -363,6 +376,24 @@ func discoverWindowsNativeClaudeVersion(profileHome string) (string, string) {
 		return "", "native Claude launcher matches no recorded version"
 	}
 	return best, ""
+}
+
+// windowsNativeClaudeLauncher returns the native Claude launcher
+// (.local\bin\claude.exe) of the profile when it is a regular file reached
+// through a reparse-free chain, and "" otherwise.
+func windowsNativeClaudeLauncher(profileHome string) string {
+	if !filepath.IsAbs(strings.TrimSpace(profileHome)) {
+		return ""
+	}
+	binDir := filepath.Join(filepath.Clean(strings.TrimSpace(profileHome)), ".local", "bin")
+	if err := winpath.RejectReparseChain(binDir); err != nil {
+		return ""
+	}
+	launcher := filepath.Join(binDir, "claude.exe")
+	if info, err := os.Lstat(launcher); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return launcher
 }
 
 // windowsNativeClaudeVersionName accepts dotted numeric release names
