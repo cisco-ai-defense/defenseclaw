@@ -587,13 +587,10 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
-	setupDone := false
+	setupDone, setupMismatch := false, ""
 	err = enterprisehooks.RunAsTarget(enterpriseACPTargetCredentials(enrollment), func() error {
 		if !cfg.SecureClientIntegration() {
-			lock := acpContractLockPath(enrollment.dataDir, enrollment.client, enrollment.agent)
-			if info, statErr := os.Lstat(lock); statErr == nil && info.Mode().IsRegular() {
-				setupDone = true
-			}
+			setupDone, setupMismatch = enterpriseACPSetupState(enrollment.dataDir, enrollment.target.home, enrollment.client, enrollment.agent)
 		}
 		if err := safefile.ValidatePrivateFile(tokenPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) && !cfg.SecureClientIntegration() {
@@ -627,7 +624,11 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 		// for users who never ran setup (GAP-0400).
 		payload["setup_done"] = setupDone
 		payload["setup_note"] = "the user has run setup (the contract lock is present)"
-		if !setupDone {
+		switch {
+		case !setupDone && setupMismatch != "":
+			payload["setup_note"] = "the editor entry does not match this home (" + setupMismatch + "); as that user, run: " +
+				enterpriseACPSetupCommand(enrollment, tokenPath)
+		case !setupDone:
 			payload["setup_note"] = "the user has not run setup yet; as that user, run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
 		}
 	}

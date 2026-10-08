@@ -148,6 +148,22 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if verified := run(runEnterpriseACPVerify); verified["setup_done"] != false {
 		t.Fatalf("verify did not report that setup has not run: %v", verified)
 	}
+	// A lock whose editor entry was set up in another home (an account
+	// rename moved the home) is not a done setup (GAP-0693).
+	staleLock := acpContractLockPath(userData, "zed", "kiro")
+	if err := os.MkdirAll(filepath.Dir(staleLock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staleLock, []byte(`{"version":1,"client":{"id":"zed","config_path":"/home/renamed-away/.config/zed/settings.json"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if verified := run(runEnterpriseACPVerify); verified["setup_done"] != false ||
+		!strings.Contains(fmt.Sprint(verified["setup_note"]), "outside the home") {
+		t.Fatalf("verify called a stale editor entry set up: %v", verified)
+	}
+	if err := os.Remove(staleLock); err != nil {
+		t.Fatal(err)
+	}
 	restoreDescribe := enterpriseACPDescribePrincipal
 	t.Cleanup(func() { enterpriseACPDescribePrincipal = restoreDescribe })
 	enterpriseACPDescribePrincipal = func(string) (enterpriseACPAccount, error) {
