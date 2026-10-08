@@ -720,6 +720,11 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	if fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
+		if err := env.writableInstalledConfig(); err != nil {
+			return nil, &codedError{code: codeConfig, err: err}
+		}
+	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
@@ -913,6 +918,29 @@ func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 		return DefaultConfig(env.Layout), false, nil
 	}
 	return nil, false, err
+}
+
+// writableInstalledConfig refuses an installed config.yaml that is not the
+// applied config while its mode or owner lets an account other than root
+// write it: that account could have written the change. The apply trigger
+// applied a standard user's edit (guardrail mode action to observe) to a
+// config.yaml a bad profile push had left 0666, and status and verify stayed
+// green (GAP-0524). The refused edit is reverted like any rejected one.
+func (e *Env) writableInstalledConfig() error {
+	path := e.P(e.Layout.ConfigPath)
+	_, _, mode, err := statOwnerMode(path)
+	if err != nil {
+		return nil // configBytes read it; the transaction reports a file that went away
+	}
+	uid, _, err := e.OwnerOf(path)
+	if err != nil {
+		return nil
+	}
+	if mode.Perm()&0o022 == 0 && (uid == 0 || uid == os.Geteuid()) {
+		return nil
+	}
+	return fmt.Errorf("%s changed while it was %04o and owned by uid %d, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+		e.Layout.ConfigPath, mode.Perm(), uid, e.lifecycleCommand(ActionEnsure))
 }
 
 type codedError struct {
