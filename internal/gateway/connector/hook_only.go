@@ -1901,7 +1901,7 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 		// DefenseClaw setup whose data directory was removed (GAP-2064).
 		owned := cursorOwnedHookCommands(opts)
 		if cfg, err := readJSONObject(path); err == nil && structuredHookCommandReferences(cfg, owned) {
-			if err := removeJSONHookReferences(path, owned...); err != nil {
+			if err := removeJSONHookReferencesProfile(path, pluginSecureClientProfile(opts), owned...); err != nil {
 				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
 			}
 		}
@@ -2597,11 +2597,11 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 	case "hermes":
 		return removeHermesHooks(path, hookScript, nil)
 	case "cursor":
-		return removeJSONHookReferences(path, cursorOwnedHookCommands(opts)...)
+		return removeJSONHookReferencesProfile(path, pluginSecureClientProfile(opts), cursorOwnedHookCommands(opts)...)
 	case "copilot":
-		return removeCopilotHookReferences(path, hookScript)
+		return removeCopilotHookReferencesProfile(path, pluginSecureClientProfile(opts), hookScript)
 	case "openhands":
-		return removeJSONHookReferences(path, hookScript)
+		return removeJSONHookReferencesProfile(path, pluginSecureClientProfile(opts), hookScript)
 	case "devin":
 		return removeDevinHookReferences(path, devinOwnedHookCommands(opts, hookScript)...)
 	case "antigravity":
@@ -2611,7 +2611,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
 		ownedCommands = append(ownedCommands, legacyAntigravityStartProcessWindowsHookCommands()...)
-		return removeJSONHookReferences(path, ownedCommands...)
+		return removeJSONHookReferencesProfile(path, pluginSecureClientProfile(opts), ownedCommands...)
 	default:
 		return nil
 	}
@@ -5080,6 +5080,10 @@ func appendUniqueMatcherHookGroup(raw interface{}, hookScript string, group map[
 // readJSONObject reads a missing file as an empty document, so the absence is
 // checked first.
 func removeJSONHookReferences(path string, hookScripts ...string) error {
+	return removeJSONHookReferencesProfile(path, false, hookScripts...)
+}
+
+func removeJSONHookReferencesProfile(path string, secureClient bool, hookScripts ...string) error {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -5087,19 +5091,26 @@ func removeJSONHookReferences(path string, hookScripts ...string) error {
 	if err != nil {
 		return err
 	}
-	pruned, _ := removeHookScriptReferences(cfg, hookScripts...).(map[string]interface{})
+	var pruned map[string]interface{}
+	if secureClient {
+		pruned, _ = removeHookScriptReferencesLegacy(cfg, hookScripts...).(map[string]interface{})
+	} else {
+		pruned, _ = removeHookScriptReferences(cfg, hookScripts...).(map[string]interface{})
+	}
 	if pruned == nil {
 		pruned = map[string]interface{}{}
 	}
-	if reflect.DeepEqual(pruned, cfg) {
-		return nil
-	}
-	if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
-		before, _ := cfg["hooks"].(map[string]interface{})
-		pruneNewlyEmptyHookEntries(before, hooks)
-		if len(hooks) == 0 {
-			delete(pruned, "hooks")
+	if !secureClient {
+		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
+			before, _ := cfg["hooks"].(map[string]interface{})
+			pruneNewlyEmptyHookEntries(before, hooks)
+			if len(hooks) == 0 {
+				delete(pruned, "hooks")
+			}
 		}
+	}
+	if !secureClient && reflect.DeepEqual(pruned, cfg) {
+		return nil
 	}
 	return writeJSONObject(path, pruned)
 }
@@ -5111,6 +5122,10 @@ func removeJSONHookReferences(path string, hookScripts ...string) error {
 // empty document an earlier teardown wrote) is DefenseClaw's leftover and is
 // deleted; operator handlers in it are kept.
 func removeCopilotHookReferences(path, hookScript string) error {
+	return removeCopilotHookReferencesProfile(path, false, hookScript)
+}
+
+func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScript string) error {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -5118,19 +5133,26 @@ func removeCopilotHookReferences(path, hookScript string) error {
 	if err != nil {
 		return err
 	}
-	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+	var pruned map[string]interface{}
+	if secureClient {
+		pruned, _ = removeHookScriptReferencesLegacy(cfg, hookScript).(map[string]interface{})
+	} else {
+		pruned, _ = removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+	}
 	if pruned == nil {
 		pruned = map[string]interface{}{}
 	}
-	if reflect.DeepEqual(pruned, cfg) && !(strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned)) {
-		return nil
-	}
-	if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
-		before, _ := cfg["hooks"].(map[string]interface{})
-		pruneNewlyEmptyHookEntries(before, hooks)
-		if len(hooks) == 0 {
-			delete(pruned, "hooks")
+	if !secureClient {
+		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
+			before, _ := cfg["hooks"].(map[string]interface{})
+			pruneNewlyEmptyHookEntries(before, hooks)
+			if len(hooks) == 0 {
+				delete(pruned, "hooks")
+			}
 		}
+	}
+	if !secureClient && reflect.DeepEqual(pruned, cfg) && !(strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned)) {
+		return nil
 	}
 	if strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned) {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -5214,6 +5236,31 @@ func pruneNewlyEmptyHookEntries(before, after map[string]interface{}) {
 				}
 			}
 		}
+	}
+}
+
+// removeHookScriptReferencesLegacy is main's JSON hook cleanup. Secure
+// Client retains its matching and empty-container behavior until migration.
+func removeHookScriptReferencesLegacy(raw interface{}, hookScripts ...string) interface{} {
+	switch value := raw.(type) {
+	case []interface{}:
+		out := make([]interface{}, 0, len(value))
+		for _, item := range value {
+			if containsHookScript(item, hookScripts...) {
+				continue
+			}
+			out = append(out, removeHookScriptReferencesLegacy(item, hookScripts...))
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(value))
+		for key, item := range value {
+			out[key] = removeHookScriptReferencesLegacy(item, hookScripts...)
+		}
+		pruneEmptyMapArrays(out)
+		return out
+	default:
+		return raw
 	}
 }
 

@@ -3846,6 +3846,27 @@ func TestRemoveJSONHookReferencesKeepsOperatorEmptyHook(t *testing.T) {
 	}
 }
 
+func TestRemoveSecureClientJSONHookReferencesPrunesEmptyEntriesLikeMain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	opts := SetupOpts{DataDir: t.TempDir(), ManagedEnterprise: true}
+	owned := cursorOwnedHookCommands(opts)[0]
+	source := fmt.Sprintf(`{"hooks":{"PreToolUse":[{"command":%q}],"Custom":[]}}`, owned)
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := &hookOnlyConnector{name: "cursor"}
+	if err := conn.removeConfigEntries(path, owned, opts); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "{}\n" {
+		t.Fatalf("Secure Client cleanup differs from main: %s", body)
+	}
+}
+
 func TestRemoveOpenHandsHookReferencesKeepsOperatorKeysAndHooks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	source := `{"extra":{"keep":[]},"hooks":{"pre":[{"hooks":[{"command":"dc-hook"},{"command":"user-hook"}]}]}}`
