@@ -383,8 +383,20 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		var feed *sandboxapi.ActivityEvent
 		if r.Denied() && !quiet {
+			reason := r.Reason
+			if r.Port != 22 && m.modelEndpointHost(b, host) {
+				// A refusal on the sandbox's model host is a connection besides
+				// the model calls, which its provider rule carries: the feed, the
+				// session summary and the alert say so, and it does not read as
+				// the profile cutting the model off (GAP-0361).
+				reason = sandboxapi.ReasonModelHostSide
+				ev.Reason = sandboxapi.BlockedText(reason, host)
+				if token := firstNonEmpty(r.Reason, r.Message); token != "" {
+					ev.Reason = truncate(ev.Reason+" ("+token+")", 512)
+				}
+			}
 			feed = &sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
-				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (" + openShellDenialText(r.Reason, host, r.Port) + ")",
+				Source: sandboxapi.SourceOpenShell, Reason: reason, Message: "✗ " + host + " (" + openShellDenialText(reason, host, r.Port) + ")",
 				Replayed: replayed}
 		}
 		recordFolded, lineFolded := false, false
@@ -504,6 +516,19 @@ func openshellReason(r ocsf.Record, host string) string {
 		return text + " (" + token + ")"
 	}
 	return token
+}
+
+// modelEndpointHost reports whether host is one of the sandbox's model
+// endpoints (its --llm credential's), which its provider rule opens.
+func (m *Manager) modelEndpointHost(b *box, host string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, ep := range b.rec.ProviderEndpoints {
+		if ep.Role == roleLLM && strings.EqualFold(ep.Host, host) {
+			return true
+		}
+	}
+	return false
 }
 
 // dnsRefusal reports OpenShell's refusal of a name lookup ("NET:REFUSE …

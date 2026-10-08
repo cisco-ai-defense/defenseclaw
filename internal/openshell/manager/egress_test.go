@@ -881,9 +881,11 @@ func TestRecoverCredential(t *testing.T) {
 
 // fastFlush shortens the refusal fold and the flush for a test.
 func fastFlush(t *testing.T) {
-	window, interval, held := blockCoalesceWindow, sinkFlushInterval, heldBackInterval
-	blockCoalesceWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
-	t.Cleanup(func() { blockCoalesceWindow, sinkFlushInterval, heldBackInterval = window, interval, held })
+	window, lines, interval, held := blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval
+	blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() {
+		blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = window, lines, interval, held
+	})
 }
 
 func egressRecords(e *harnessEnv, sandbox string, match func(audit.SandboxEgressEvent) bool) int {
@@ -949,6 +951,37 @@ func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
 	}
 	if n := len(feed) - first; n != 1 || feed[len(feed)-1].Repeats < 1 {
 		t.Fatalf("first %d lines, then %d folded: %q", first, n, msgs)
+	}
+}
+
+// GAP-0329 (round 3): a strict session's npm retry loop, refused at 0 s,
+// 10 s and 11 s, then twice at once a minute later, printed identical lines
+// in pairs and no count. The repeats of a minute are one line with their
+// count, and a single repeat adds no line.
+func TestARetryLoopsRefusalsAreOneLineAMinute(t *testing.T) {
+	e := liveEnv(t, "loopbox", nil)
+	_, advance := e.fakeClock(time.Now())
+	refuse := func() {
+		e.ocsf("loopbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
+	}
+	refuse()
+	advance(10 * time.Second)
+	refuse()
+	advance(time.Second)
+	refuse()
+	advance(50 * time.Second)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	refuse()
+	refuse()
+	advance(time.Minute)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	var msgs []string
+	for _, l := range e.events("loopbox", sandboxapi.ActivityEgressBlocked, "") {
+		msgs = append(msgs, l.Message)
+	}
+	const line = "✗ registry.npmjs.org (no OpenShell rule allows it)"
+	if want := []string{line, line + " (and 1 more like it)", line}; !slices.Equal(msgs, want) {
+		t.Fatalf("feed %q, want %q", msgs, want)
 	}
 }
 
@@ -1201,6 +1234,27 @@ func TestModelProviderEndpointsFollowTheAdminLists(t *testing.T) {
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressBlock = []string{"api.anthropic.com"} })
 	_, err = e.m.Start(t.Context(), "llmbox", sandboxapi.StartRequest{})
 	wantCode(t, err, sandboxapi.CodeAdminViolation)
+}
+
+// GAP-0361: in a strict session one connection to the model host outside
+// its provider rule was refused, and the feed and the session summary read
+// "x bedrock-mantle... (no OpenShell rule allows this port)", as if strict
+// had cut the model off. The refusal says it was another connection.
+func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "mhbox", LLM: llm})
+	e.ocsf("mhbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> api.anthropic.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_mapping_denied]", time.Now())
+	feed := e.events("mhbox", sandboxapi.ActivityEgressBlocked, "")
+	const want = "✗ api.anthropic.com (a connection outside the model channel, which stays open; no OpenShell rule allows it)"
+	if len(feed) != 1 || feed[0].Message != want || feed[0].Reason != sandboxapi.ReasonModelHostSide {
+		t.Fatalf("feed = %+v, want %q", feed, want)
+	}
+	if n := egressRecords(e, "mhbox", func(r audit.SandboxEgressEvent) bool {
+		return r.Blocked && strings.HasPrefix(r.Reason, "a connection outside the model channel") && strings.HasSuffix(r.Reason, "(transparent_tcp_mapping_denied)")
+	}); n != 1 {
+		t.Fatalf("%d records say the model channel stays open, want 1", n)
+	}
 }
 
 // privatePack is a custom pack whose allow list opens a private address.

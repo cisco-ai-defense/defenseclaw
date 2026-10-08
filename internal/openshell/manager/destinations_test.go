@@ -91,13 +91,16 @@ func TestDestinationsAreClassified(t *testing.T) {
 	// GAP-0198: allowed uncategorised (the open profile), a host on the
 	// curated allowlist still reads as what it is.
 	proxy(egress.EventAllowed, "pypi.org", "")
+	// GAP-0347: the uv installer astral.sh serves downloads uv itself from
+	// releases.astral.sh, which is the same toolchain.
+	proxy(egress.EventAllowed, "releases.astral.sh", "")
 
 	rows := destinationKinds(t, e, "destbox")
 	for host, kind := range map[string]string{
 		"api.anthropic.com": sandboxapi.DestinationModelProvider, "claude.ai": sandboxapi.DestinationHarnessVendor,
 		"api.openai.com": sandboxapi.DestinationOtherAI, "inference.example-llm.net": sandboxapi.DestinationUnknownAI,
 		"registry.npmjs.org": string(egress.CategoryPackageRegistry), "evil.example.com": sandboxapi.DestinationBlocked,
-		"pypi.org": string(egress.CategoryPackageRegistry),
+		"pypi.org": string(egress.CategoryPackageRegistry), "releases.astral.sh": string(egress.CategoryToolchain),
 		// An ordinary REST API whose name happens to hold the letters "ai".
 		"api.mailgun.net": sandboxapi.DestinationOther,
 	} {

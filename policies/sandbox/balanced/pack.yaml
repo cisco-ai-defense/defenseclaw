@@ -76,6 +76,7 @@ egress:
     - sh.rustup.rs
     - www.python.org
     - astral.sh
+    - releases.astral.sh
     # Documentation
     - docs.python.org
     - developer.mozilla.org

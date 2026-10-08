@@ -328,9 +328,13 @@ defenseclaw sandbox policy explain
 
 `activity` is the live feed of sites, blocks, asks and findings. A burst
 of refusals of one site (a retry loop, by one program or several) is one
-line, then one more a few seconds later that counts the rest (`✗ pypi.org
-(no OpenShell rule allows it) (and 5 more like it)`); `destinations` counts
-every refusal, and the audit records keep each program's. The
+line, then, a minute later, one more that counts the repeats of that minute
+(`✗ pypi.org (no OpenShell rule allows it) (and 5 more like it)`; a single
+repeat adds no line); `destinations` counts
+every refusal, and the audit records keep each program's. A refusal on the
+sandbox's own model host is a connection besides the model calls, and its
+line says so (`a connection outside the model channel, which stays open`):
+the provider rule that carries the model calls is not changed by it. The
 `Egress` row of `status` counts the sites contacted and blocked, the
 requests that failed upstream (allowed, and the site refused or dropped
 them, or did not answer: an outage, not a block) and the bytes sent and

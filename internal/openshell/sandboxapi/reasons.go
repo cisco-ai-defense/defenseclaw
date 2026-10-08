@@ -65,7 +65,14 @@ var reasonTexts = map[string]string{
 	"harness_background_fetch": "a background fetch of the harness, which it does without",
 	"rule_limit":               "the sandbox added its limit of rules this session",
 	"too_many_pending":         "too many approvals are waiting",
+	// An OpenShell refusal on the sandbox's model host (ReasonModelHostSide).
+	"model_host_side": "a connection outside the model channel, which stays open; no OpenShell rule allows it",
 }
+
+// ReasonModelHostSide is the Reason of an OpenShell refusal on the
+// sandbox's model host: a connection besides the model calls, which the
+// sandbox's provider rule carries (GAP-0361).
+const ReasonModelHostSide = "model_host_side"
 
 // LookupReasonText is the short explanation of a reason token, and whether
 // the token has one.

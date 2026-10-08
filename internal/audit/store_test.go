@@ -592,7 +592,7 @@ func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
 	_ = file.Close()
 
 	var warn bytes.Buffer
-	recovered, err := OpenDaemonStore(dbPath, &warn)
+	recovered, err := OpenDaemonStore(dbPath, &warn, nil)
 	if err != nil {
 		t.Fatalf("OpenDaemonStore on a corrupt store: %v", err)
 	}
@@ -652,7 +652,7 @@ func TestOpenDaemonStoreReportsBlockListsLostWithAnUnreadableStore(t *testing.T)
 	_ = file.Close()
 
 	var warn bytes.Buffer
-	recovered, err := OpenDaemonStore(dbPath, &warn)
+	recovered, err := OpenDaemonStore(dbPath, &warn, nil)
 	if err != nil {
 		t.Fatalf("OpenDaemonStore: %v", err)
 	}

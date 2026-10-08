@@ -327,6 +327,20 @@ func ScanSandboxRoot(ctx context.Context, scan SandboxScan, opts SandboxScanOpti
 		if sig.LastSeen.IsZero() {
 			sig.LastSeen = seen
 		}
+		// A sandbox's files carry the image's times (the harness binary's
+		// build, a skill package's date), not the sandbox's use, and a host
+		// scan stamps a signal with none as active at every scan, long after
+		// the sandbox stopped. What a sandbox signal last did is run in the
+		// sandbox when it was read (GAP-0349). Its processes keep the start
+		// times they have; a shell-history match keeps none, as on the host.
+		switch {
+		case sig.Detector == "shell_history":
+			sig.LastActiveAt = nil
+		case sig.Detector == "process" && sig.LastActiveAt != nil:
+		default:
+			at := seen
+			sig.LastActiveAt = &at
+		}
 		out = append(out, sig)
 	}
 	if len(out) > MaxSandboxScanSignals {

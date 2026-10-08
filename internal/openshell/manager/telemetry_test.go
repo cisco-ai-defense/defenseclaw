@@ -329,8 +329,10 @@ func TestAllowedHostPortConnectionsAreRecorded(t *testing.T) {
 	if len(recs) != 2 || recs[0].Port != 8080 || recs[0].Blocked || recs[0].DecisionCode != "SANDBOX_EGRESS_ALLOWED" || recs[0].PID != 9 {
 		t.Fatalf("host port = %+v", recs)
 	}
+	// Its kind says this machine, as the feed does, not other (GAP-0370).
 	d, _ := e.m.Destinations(context.Background(), "portbox")
-	if len(d.Destinations) != 1 || d.Destinations[0].Host != openshellHostAlias || d.Destinations[0].Ports[0] != 8080 {
+	if len(d.Destinations) != 1 || d.Destinations[0].Host != openshellHostAlias || d.Destinations[0].Ports[0] != 8080 ||
+		d.Destinations[0].Kind != sandboxapi.DestinationThisMachine {
 		t.Fatalf("destinations = %+v", d.Destinations)
 	}
 }

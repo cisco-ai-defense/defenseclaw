@@ -169,7 +169,7 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	if cmd != nil && !cmd.HasParent() {
 		// The daemon owns the store: it moves a corrupt one aside and starts
 		// on a new one instead of failing.
-		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr)
+		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr, nil)
 		if err != nil {
 			return fmt.Errorf("failed to open audit store: %w", err)
 		}
