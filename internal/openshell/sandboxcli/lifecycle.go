@@ -200,7 +200,12 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	a.println(a.bold(sb.Name))
 	row("Harness", strings.TrimSpace(firstNonEmpty(sb.HarnessName, sb.Harness)+" "+sb.HarnessVersion))
-	row("Phase", phaseText(*sb))
+	phase := phaseText(*sb)
+	if sb.PhaseReason != "" && sb.Phase == "error" {
+		// Why, in words (GAP-0297): the phase alone said nothing.
+		phase += ": " + sb.PhaseReason
+	}
+	row("Phase", phase)
 	if sb.UptimeSeconds > 0 {
 		row("Uptime", humanDuration(time.Duration(sb.UptimeSeconds)*time.Second))
 	}

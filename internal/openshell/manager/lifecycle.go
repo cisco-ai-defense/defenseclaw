@@ -332,7 +332,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name, mode := b.rec.Name, b.rec.WorkdirMode
+	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -347,7 +347,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
-		if e := errorPhaseRefusal(name, mode, err); e != nil {
+		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
 			return e
 		}
 		return upstream("stop sandbox "+name, err)
@@ -395,7 +395,16 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 	b.sb = sb
 	m.mu.Unlock()
 	if phase := auditPhase(sb.Status.Phase); phase != pending && phase != audit.SandboxPhaseUnknown {
-		m.lifecycle(ctx, b, phase, trigger, false, nil, sb.Status.ExitCode)
+		// A failing condition explains an error phase (statusEvent), which
+		// the status then names (GAP-0297).
+		var cond *audit.SandboxCondition
+		for _, c := range sb.Status.Conditions {
+			if phase == audit.SandboxPhaseError && !strings.EqualFold(c.Status, "true") {
+				cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+				break
+			}
+		}
+		m.lifecycle(ctx, b, phase, trigger, false, cond, sb.Status.ExitCode)
 	}
 }
 
@@ -611,7 +620,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
-		if e := errorPhaseRefusal(rec.Name, rec.WorkdirMode, err); e != nil {
+		if e := errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
 			return e
 		}
 		return upstream("start sandbox "+rec.Name, err)
@@ -619,6 +628,10 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)
 	if err != nil {
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+		if e := overlayDiskRefusal(rec.Name, err); e != nil {
+			m.logf("sandbox %s: %v", rec.Name, err)
+			return e
+		}
 		return upstream("wait for sandbox "+rec.Name, err)
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {

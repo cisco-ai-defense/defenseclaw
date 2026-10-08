@@ -214,7 +214,10 @@ type Sandbox struct {
 	// no longer has, or "deleted" for a sandbox that is gone but whose
 	// pre-session snapshot is kept (delete --keep-snapshot, or deleted
 	// outside DefenseClaw): only undo, review and delete apply to it.
-	Phase       string `json:"phase"`
+	Phase string `json:"phase"`
+	// PhaseReason is why the sandbox is in the error phase, in words (its
+	// MicroVM's disk is full, what OpenShell says), when it is.
+	PhaseReason string `json:"phase_reason,omitempty"`
 	Pack        string `json:"pack,omitempty"`
 	PackDigest  string `json:"pack_digest,omitempty"`
 	Profile     string `json:"profile"`

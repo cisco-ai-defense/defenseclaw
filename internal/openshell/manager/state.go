@@ -174,8 +174,10 @@ type record struct {
 	EgressUser string `json:"egress_user,omitempty"`
 
 	// Phase is the last lifecycle phase recorded for the sandbox, so a
-	// restarted daemon reports the transition it observes.
-	Phase string `json:"phase,omitempty"`
+	// restarted daemon reports the transition it observes. PhaseReason is
+	// why it is in the error phase, in words (errorPhaseReason).
+	Phase       string `json:"phase,omitempty"`
+	PhaseReason string `json:"phase_reason,omitempty"`
 	// ReadyAt is when DefenseClaw saw the sandbox become ready (zero while
 	// it is not): a restarted daemon that finds it still ready reports its
 	// uptime from then. OpenShell 0.1.1 reports no transition times.
