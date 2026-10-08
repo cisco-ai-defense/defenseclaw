@@ -4131,6 +4131,26 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     runtime_name = plugin_name
     pe = PolicyEngine(app.store, app.cfg)
 
+    # A quarantined copy is absent from installed directories. Allowing it now
+    # would create a name-only rule and clear the journal needed by restore.
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+
+    quarantines = PluginEnforcer(app.cfg.quarantine_dir)
+    scopes = [connector_scope] if connector_scope else _active_plugin_connectors(app)
+    scopes = [*scopes, ""]  # Legacy/global quarantine slot.
+    journal_quarantine = any(
+        entry.target_name == plugin_name
+        and entry.actions.file == "quarantine"
+        and (not connector_scope or entry.connector in ("", connector_scope))
+        for entry in pe.list_by_type("plugin")
+    )
+    if not asset_lists.is_secure_client(app.cfg) and (
+        journal_quarantine or any(quarantines.is_quarantined(plugin_name, scope) for scope in scopes)
+    ):
+        raise click.ClickException(
+            f"{plugin_name!r} is quarantined; restore it before allowing the installed copy"
+        )
+
     if not reason:
         reason = "manual allow via CLI"
 
