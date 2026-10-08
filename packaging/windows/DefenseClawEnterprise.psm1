@@ -3757,11 +3757,16 @@ function Initialize-DefenseClawManagedRoot {
         # Never seize a user-controlled tree. First prove the existing owner
         # and all effective write ACEs are already administrator-controlled;
         # only then replace inheritance with the canonical protected DACL.
+        # Standalone: an empty folder an earlier removal left under Program
+        # Files carries the default inherit-only CREATOR OWNER entry, which
+        # grants nothing; refusing it failed /ensure with a raw S-1-3-0
+        # (GAP-0915), so it is taken over like an administrator's folder.
         Assert-DefenseClawPathAcl `
             -Path $Path `
             -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
             -AllowUsersRead:$AllowUsersRead `
-            -AllowInheritance
+            -AllowInheritance `
+            -IgnoreCreatorTemplates:(Test-DefenseClawStandaloneProfile)
     }
     else {
         throw "$Label secure creation did not produce the requested root: $Path"
@@ -4043,7 +4048,11 @@ function Assert-DefenseClawPathAcl {
         ),
         [switch]$AllowUsersRead,
         [switch]$RejectUntrustedRead,
-        [switch]$AllowInheritance
+        [switch]$AllowInheritance,
+        # Skip the inherit-only CREATOR OWNER and CREATOR GROUP templates.
+        # They grant nothing on the folder itself, only to whoever creates a
+        # child, which needs write access this check already limits.
+        [switch]$IgnoreCreatorTemplates
     )
     Assert-DefenseClawNoReparsePath -Path $Path
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
@@ -4070,6 +4079,10 @@ function Assert-DefenseClawPathAcl {
             continue
         }
         $sid = ConvertTo-DefenseClawSID -Identity $rule.IdentityReference
+        if ($IgnoreCreatorTemplates -and $sid -in @('S-1-3-0', 'S-1-3-1') -and
+            ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) {
+            continue
+        }
         if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0) {
             $currentRights = if ($grantedBySID.ContainsKey($sid)) {
                 [Security.AccessControl.FileSystemRights]$grantedBySID[$sid]

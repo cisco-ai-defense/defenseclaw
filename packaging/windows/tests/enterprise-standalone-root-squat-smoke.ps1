@@ -216,6 +216,33 @@ try {
             }
             Reset-TestRoots
 
+            # GAP-0915: an empty folder an earlier removal left under Program
+            # Files carries the default inherit-only CREATOR OWNER entry; it
+            # grants nothing, so the existing-root check takes the folder
+            # over. Without the switch (Secure Client) it is still refused.
+            $leftover = [IO.Path]::Combine($Root, 'pf-leftover')
+            [void][IO.Directory]::CreateDirectory($leftover)
+            $leftoverSecurity = [Security.AccessControl.DirectorySecurity]::new()
+            $leftoverSecurity.SetSecurityDescriptorSddlForm(
+                'O:BAG:BAD:(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)',
+                [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+            )
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $leftover -AclObject $leftoverSecurity
+            $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+            try {
+                Assert-DefenseClawPathAcl -Path $leftover -AllowedWriterSIDs $writers -AllowUsersRead -AllowInheritance -IgnoreCreatorTemplates
+            }
+            catch {
+                $failures.Add("the CREATOR OWNER template blocked a default-ACL folder: $($_.Exception.Message)")
+            }
+            try {
+                Assert-DefenseClawPathAcl -Path $leftover -AllowedWriterSIDs $writers -AllowUsersRead -AllowInheritance
+                $failures.Add('the strict check accepted the CREATOR OWNER template')
+            }
+            catch {
+            }
+            Reset-TestRoots
+
             # A junction is renamed as a link; its target is never followed.
             $target = [IO.Path]::Combine($Root, 'junction-target')
             New-TestDirectory $target 'BA'

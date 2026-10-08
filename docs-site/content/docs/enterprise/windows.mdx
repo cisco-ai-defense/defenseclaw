@@ -290,6 +290,14 @@ the lifecycle from there. See [Payload trust](#payload-trust) for how the
 lifecycle decides which files to trust. It also generates the target manifest from the
 profiles on the computer, so you never write `targets.yaml`.
 
+An empty `C:\Program Files\Cisco\DefenseClaw` an earlier removal left (it
+carries the default Program Files permissions, including the inherit-only
+`CREATOR OWNER` entry) is taken over: Setup replaces its owner and
+permissions with SYSTEM and Administrators and installs into it. A folder
+another account can write is still refused before any change, and the
+message names the account, its access and the `icacls` command that clears
+it.
+
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
 
