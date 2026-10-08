@@ -335,12 +335,12 @@ The commands are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sand
 With the feed installed and the process tree on, `sandbox ps --tree` says
 where its records come from and how many it holds:
 
-![defenseclaw sandbox ps with --tree on a Claude Code sandbox: the sandbox's init process, a login shell, the DefenseClaw supervisor and Claude Code, then the line source: kernel (Tetragon, through the sandbox kernel feed) with 331 execs and exits recorded and 295 of them with their pid in the sandbox](/images/segmentation/terminal-sandbox-ps-tree-kernel.png)
+![defenseclaw sandbox ps with --tree on a Claude Code sandbox: the sandbox's init process, a login shell, the DefenseClaw supervisor and Claude Code, then the line source: kernel (Tetragon, through the sandbox kernel feed) with 349 execs and exits recorded and 303 of them with their pid in the sandbox](/images/segmentation/terminal-sandbox-ps-tree-kernel.png)
 
 And `kernel-feed status` shows that the feed answers and its Tetragon stream is
 connected:
 
-![defenseclaw-gateway sandbox kernel-feed status: installed and active, the root copy of the helper at 1.0.42, the feed answers with build 1.0.42 and protocol 1 and its Tetragon stream is connected, and the gateway reads protocol 1 and 0](/images/segmentation/terminal-sandbox-kernel-feed-status.png)
+![defenseclaw-gateway sandbox kernel-feed status: installed and active, the root copy of the helper at the gateway's version, the feed answers with the same build and protocol 1 and its Tetragon stream is connected, and the gateway reads protocol 1 and 0](/images/segmentation/terminal-sandbox-kernel-feed-status.png)
 
 | Topic | Detail |
 | --- | --- |

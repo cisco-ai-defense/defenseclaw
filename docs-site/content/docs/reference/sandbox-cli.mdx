@@ -467,7 +467,7 @@ sudo "$(command -v defenseclaw-gateway)" sandbox kernel-feed install
 As root it checks Tetragon and Docker, installs the service and says how to
 check and remove it:
 
-![sudo defenseclaw-gateway sandbox kernel-feed install: the sandbox kernel feed is installed at version 1.0.42 with protocol 1 and Tetragon connected, Tetragon v1.7.1 on its socket and Docker Engine answering, sandboxes started with the process tree now record every exec and exit, and the check and remove commands](/images/segmentation/terminal-sandbox-kernel-feed-install.png)
+![sudo defenseclaw-gateway sandbox kernel-feed install: the sandbox kernel feed is installed at the gateway's version with protocol 1 and Tetragon connected, Tetragon v1.7.1 on its socket and Docker Engine answering, sandboxes started with the process tree now record every exec and exit, and the check and remove commands](/images/segmentation/terminal-sandbox-kernel-feed-install.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags kernel-feed install */}
 This command has no flags.
@@ -485,7 +485,7 @@ defenseclaw sandbox kernel-feed status --json
 
 Without `--json` it prints a short summary:
 
-![defenseclaw-gateway sandbox kernel-feed status: installed and active, the root copy of the helper at 1.0.42, the feed answers with build 1.0.42 and protocol 1 and its Tetragon stream is connected, and the gateway reads protocol 1 and 0](/images/segmentation/terminal-sandbox-kernel-feed-status.png)
+![defenseclaw-gateway sandbox kernel-feed status: installed and active, the root copy of the helper at the gateway's version, the feed answers with the same build and protocol 1 and its Tetragon stream is connected, and the gateway reads protocol 1 and 0](/images/segmentation/terminal-sandbox-kernel-feed-status.png)
 
 An account outside the `docker` group, or whose gateway started before it
 joined, reads the reason and the fix:
