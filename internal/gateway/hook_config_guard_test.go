@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -409,6 +410,63 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	}
 	if body, err := os.ReadFile(configPath); err != nil || !strings.Contains(string(body), `"failMode":"open"`) {
 		t.Fatalf("rendered hooks = %q (%v), want fail mode open", body, err)
+	}
+}
+
+type failOnceBakedConnector struct {
+	failModeBakedConnector
+	failClosedOnce bool
+}
+
+func (c *failOnceBakedConnector) Setup(ctx context.Context, opts connector.SetupOpts) error {
+	if opts.HookFailMode == "closed" && c.failClosedOnce {
+		c.failClosedOnce = false
+		return errors.New("temporary hook write failure")
+	}
+	return c.failModeBakedConnector.Setup(ctx, opts)
+}
+
+func TestHookConfigGuardRetriesFailedFailModeRefresh(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hooks.json")
+	conn := &failOnceBakedConnector{
+		failModeBakedConnector: failModeBakedConnector{runtimePolicyCaptureConnector{
+			stubConnector: stubConnector{name: "baked-mode"}, configPath: path,
+		}},
+		failClosedOnce: true,
+	}
+	opts := connector.SetupOpts{DataDir: root, HookFailMode: "open"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	if !guard.Start(ctx, conn, opts) {
+		t.Fatal("guard did not start")
+	}
+	defer guard.Stop()
+	sidecar := &Sidecar{}
+	sidecar.bindHookRuntimePolicyResolver(guard)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = root
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.HookFailMode = "closed"
+	sidecar.publishConfig(cfg)
+	if err := guard.RefreshPolicy(ctx); err == nil {
+		t.Fatal("expected first refresh to fail")
+	}
+	guard.mu.Lock()
+	pending := guard.pendingPolicyRefresh
+	guard.suppressUntil = time.Time{}
+	guard.mu.Unlock()
+	if !pending {
+		t.Fatal("failed refresh was not queued for the policy audit")
+	}
+	guard.processPolicyAudit()
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), `"failMode":"closed"`) {
+		t.Fatalf("hooks after retry = %q, %v; want closed", raw, err)
 	}
 }
 

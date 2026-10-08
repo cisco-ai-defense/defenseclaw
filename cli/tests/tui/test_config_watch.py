@@ -637,3 +637,30 @@ async def test_asset_policy_save_applies_without_a_restart(
     assert "after a restart" not in action.hint and "Restart the gateway" not in action.hint, action.hint
     banner = app._setup_config_body_text()  # noqa: SLF001 - the banner under test.
     assert "Saved" in banner and "restart" not in banner.lower(), banner
+
+
+@pytest.mark.asyncio
+async def test_failed_config_save_keeps_draft_for_retry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+    original_save = app.config.save
+    monkeypatch.setattr(app.config, "save", lambda **_kwargs: (_ for _ in ()).throw(OSError("read-only directory")))
+
+    action = app._save_setup_config()
+    assert "failed" in action.hint
+    assert model.has_changes()
+    assert any(entry.key == "asset_policy.mode" for entry in model.config_diff())
+
+    monkeypatch.setattr(app.config, "save", original_save)
+    assert "saved" in app._save_setup_config().hint
+    assert not model.has_changes()
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["asset_policy"]["mode"] == "action"

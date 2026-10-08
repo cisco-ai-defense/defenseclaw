@@ -219,21 +219,23 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 		return out
 	}
 	in.unicodeNames = !c.SecureClientIntegration()
-	// The explicit operator lists apply in every mode, as the audit.db
-	// actions rows they replace did (config_version 9).
-	switch verdict, rule := c.AssetListDecision(in); verdict {
-	case AssetListDeny:
-		out.Enabled, out.Mode = true, AssetPolicyModeAction
-		return assetPolicyViolation(out, AssetPolicyModeAction, ruleReason(rule, fmt.Sprintf("%s %q is denied by asset policy", targetType, name)), "admin-deny")
-	case AssetListAllow:
-		out.Enabled, out.Source = true, "admin-allow"
-		out.Mode = normalizeAssetMode(c.EffectiveAssetPolicyModeForConnector(in.Connector))
-		out.Reason = ruleReason(rule, fmt.Sprintf("%s %q is explicitly allowed", targetType, name))
-		if p, ok := c.assetPolicyFor(in.Connector, targetType); ok {
-			out.RegistryStatus = registryStatus(p.Registry, in)
-			out.RegistryConfigured = assetRegistryConfigured(p.Registry)
+	// The v9 lists replace audit.db operator actions and apply in every mode.
+	// Secure Client keeps the v8 evaluator's enabled and observe gates.
+	if !c.SecureClientIntegration() {
+		switch verdict, rule := c.AssetListDecision(in); verdict {
+		case AssetListDeny:
+			out.Enabled, out.Mode = true, AssetPolicyModeAction
+			return assetPolicyViolation(out, AssetPolicyModeAction, ruleReason(rule, fmt.Sprintf("%s %q is denied by asset policy", targetType, name)), "admin-deny")
+		case AssetListAllow:
+			out.Enabled, out.Source = true, "admin-allow"
+			out.Mode = normalizeAssetMode(c.EffectiveAssetPolicyModeForConnector(in.Connector))
+			out.Reason = ruleReason(rule, fmt.Sprintf("%s %q is explicitly allowed", targetType, name))
+			if p, ok := c.assetPolicyFor(in.Connector, targetType); ok {
+				out.RegistryStatus = registryStatus(p.Registry, in)
+				out.RegistryConfigured = assetRegistryConfigured(p.Registry)
+			}
+			return out
 		}
-		return out
 	}
 	if !c.AssetPolicy.Enabled {
 		return out
@@ -252,6 +254,18 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	out.Mode = mode
 	out.Source = "asset-policy"
 	out.RegistryConfigured = registryConfigured
+
+	if c.SecureClientIntegration() {
+		if rule, ok := findAssetRule(p.Denied, in); ok {
+			return assetPolicyViolation(out, mode, ruleReason(rule, fmt.Sprintf("%s %q is denied by asset policy", targetType, name)), "admin-deny")
+		}
+		if rule, ok := findAssetRule(p.Allowed, in); ok {
+			out.Source = "admin-allow"
+			out.RegistryStatus = registryStatus(p.Registry, in)
+			out.Reason = ruleReason(rule, fmt.Sprintf("%s %q is explicitly allowed", targetType, name))
+			return out
+		}
+	}
 
 	regStatus := registryStatus(p.Registry, in)
 	out.RegistryStatus = regStatus

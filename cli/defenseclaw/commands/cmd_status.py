@@ -1710,23 +1710,25 @@ def _status_payload(app) -> dict:
         payload["enforcement"] = None
         payload["activity"] = None
 
-    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+    config_invalid = bool(getattr(app, "config_problems", None))
+    health = None
+    if not config_invalid:
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    bind = gateway_api_client_host(cfg)
-    try:
-        client = OrchestratorClient(
-            host=bind,
-            port=cfg.gateway.api_port,
-            token=cfg.gateway.resolved_token(),
-        )
-        health = _fetch_runtime_bound_health(client, cfg)
-    except Exception:
-        health = None
-    running = health is not None
-    if getattr(app, "config_problems", None):
+        bind = gateway_api_client_host(cfg)
+        try:
+            client = OrchestratorClient(
+                host=bind,
+                port=cfg.gateway.api_port,
+                token=cfg.gateway.resolved_token(),
+            )
+            health = _fetch_runtime_bound_health(client, cfg)
+        except Exception:
+            health = None
+    if config_invalid:
         payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
     else:
-        payload["sidecar"] = {"running": running}
+        payload["sidecar"] = {"running": health is not None}
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

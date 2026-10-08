@@ -125,6 +125,16 @@ func TestGenerationAssetFilesFollowTheDigestedFiles(t *testing.T) {
 	}
 }
 
+func TestBuildGenerationRejectsUnreadableProviderCA(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLMProviders.Custom = []config.LLMCustomProvider{{
+		Name: "private", TLS: &config.LLMCustomProviderTLS{CACertFile: filepath.Join(t.TempDir(), "missing-ca.pem")},
+	}}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg}); err == nil || !strings.Contains(err.Error(), "missing-ca.pem") {
+		t.Fatalf("build with missing provider CA = %v, want failure", err)
+	}
+}
+
 // A policy directory without Rego is the managed packages' config-driven mode:
 // the generation has no OPA and no error to report (GAP-0021).
 func TestBuildGenerationTreatsMissingRegoAsNoOPA(t *testing.T) {

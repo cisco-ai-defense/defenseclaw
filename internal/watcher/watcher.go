@@ -218,7 +218,7 @@ type InstallWatcher struct {
 	// cycle, so a server is admitted once.
 	mcpMu sync.Mutex
 
-	// binaryVersions caches each scanner binary's probed --version.
+	// binaryVersions caches each scanner binary's probed --version and file identity.
 	binaryVersions sync.Map
 
 	// state publishes the assets awaiting admission (AdmissionStateFile).
@@ -538,6 +538,15 @@ func (w *InstallWatcher) SetRulePackSource(source func(connector string) *guardr
 // SetConfigSource binds the live config admission decisions read.
 func (w *InstallWatcher) SetConfigSource(source func() *config.Config) {
 	w.configSource = source
+}
+
+// scanConfig is the current scanner configuration. Secure Client retains its
+// startup scanner settings, as in the pre-v9 profile.
+func (w *InstallWatcher) scanConfig() *config.Config {
+	if w.cfg != nil && w.cfg.SecureClientIntegration() {
+		return w.cfg
+	}
+	return w.liveConfig()
 }
 
 // liveConfig is the config admission decisions read: the bound source's
@@ -1042,7 +1051,7 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 	if evt.Type != InstallMCP {
 		return w.connectorForPath(evt.Path)
 	}
-	return watcherConnectorName(w.cfg)
+	return watcherConnectorName(w.scanConfig())
 }
 
 // runAdmission applies the full admission gate: block → allow → scan.
@@ -1508,6 +1517,7 @@ func toVerdict(s string) Verdict {
 }
 
 func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
+	cfg := w.scanConfig()
 	// Each scanner kind gets its own resolved LLMConfig so
 	// ``scanners.{skill,mcp}.llm`` overrides layered on top of the
 	// global ``llm:`` block take effect. Resolving per-event (rather
@@ -1516,22 +1526,22 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	switch evt.Type {
 	case InstallSkill:
 		return w.withRulePackOverlay(scanner.NewSkillScannerFromLLM(
-			w.cfg.Scanners.SkillScanner,
-			w.cfg.ResolveLLM("scanners.skill"),
-			w.cfg.CiscoAIDefense,
+			cfg.Scanners.SkillScanner,
+			cfg.ResolveLLM("scanners.skill"),
+			cfg.CiscoAIDefense,
 		), evt)
 	case InstallMCP:
 		ms := scanner.NewMCPScannerFromLLM(
-			w.cfg.Scanners.MCPScanner,
-			w.cfg.ResolveLLM("scanners.mcp"),
-			w.cfg.CiscoAIDefense,
+			cfg.Scanners.MCPScanner,
+			cfg.ResolveLLM("scanners.mcp"),
+			cfg.CiscoAIDefense,
 		)
 		// The Windows scanner runtime applies the rule pack as the CLI does (GAP-0296).
-		ms.RulePack = scanner.MCPRulePackFor(w.cfg, w.eventConnector(evt))
+		ms.RulePack = scanner.MCPRulePackFor(cfg, w.eventConnector(evt))
 		return ms
 
 	case InstallPlugin:
-		return scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner)
+		return scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 	default:
 		return nil
 	}
@@ -1547,7 +1557,7 @@ const defaultScanTimeout = 5 * time.Minute
 // unable to stretch a scan. Plugin and MCP scans keep five minutes.
 func (w *InstallWatcher) scanTimeout(evt InstallEvent) time.Duration {
 	if evt.Type == InstallSkill {
-		return time.Duration(w.cfg.Scanners.SkillScanner.ScanTimeoutSeconds()) * time.Second
+		return time.Duration(w.scanConfig().Scanners.SkillScanner.ScanTimeoutSeconds()) * time.Second
 	}
 	return defaultScanTimeout
 }
