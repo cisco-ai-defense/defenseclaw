@@ -1622,6 +1622,64 @@ func TestHermesHookRepairReconcilesExactOwnedStateAndIsByteIdempotent(t *testing
 	}
 }
 
+// GAP-0906: an edited hook script path in config.yaml is replaced with the
+// DefenseClaw command; Setup used to refuse the repair and leave Hermes
+// unguarded. A command that only names the connector stays refused.
+func TestHermesHookRepairReplacesEditedHookPath(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	path := filepath.Join(root, "config.yaml")
+	hookScript := filepath.Join(root, ".defenseclaw", "hooks", "hermes-hook.sh")
+	command := hermesConfiguredHookCommand(hookScript, "")
+	if err := patchHermesHooks(path, hookScript, ""); err != nil {
+		t.Fatalf("install Hermes hooks: %v", err)
+	}
+	installed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.ReplaceAll(string(installed), "/.defenseclaw/hooks/", "/.defenseclaw/xhooks/")
+	if edited == string(installed) {
+		t.Fatal("fixture did not edit the hook path")
+	}
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesHooks(path, hookScript, ""); err != nil {
+		t.Fatalf("repair edited Hermes hooks: %v", err)
+	}
+	repaired, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(repaired, installed) {
+		t.Fatalf("repaired config differs from the installed one\n got %q\nwant %q", repaired, installed)
+	}
+	config, err := readYAMLObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range hermesRequiredHooks {
+		entries := config["hooks"].(map[string]interface{})[spec.event].([]interface{})
+		if len(entries) != 1 || entries[0].(map[string]interface{})["command"] != command {
+			t.Fatalf("%s entries = %#v, want one DefenseClaw entry", spec.event, entries)
+		}
+	}
+
+	foreign, err := yaml.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
+		"pre_tool_call": []interface{}{map[string]interface{}{"command": "/opt/wrapper --connector hermes"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesHooks(path, hookScript, ""); err == nil ||
+		!strings.Contains(err.Error(), "tampered DefenseClaw command") {
+		t.Fatalf("repair error = %v, want the ambiguous-command refusal", err)
+	}
+}
+
 func TestHermesSetupTamperedOwnedAllowlistRollsBackEveryFileExactly(t *testing.T) {
 	root := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(root, "hermes", "config.yaml")
@@ -3633,7 +3691,7 @@ func TestCursorHooksHighCardinalityForeignRegistrationsStayWithinLifecycleBudget
 				"timeout":    json.Number("30"),
 				"failClosed": false,
 			}
-			hooks[event] = replaceManagedCursorHooks(hooks[event], patchMatcher, entry)
+			hooks[event] = replaceManagedCursorHooks(hooks[event], patchMatcher, "cursor-hook.sh", entry)
 		}
 		verifyCommands := uniqueNonEmptyStrings(append(
 			[]string{hookScript, currentCommand},

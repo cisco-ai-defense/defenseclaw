@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -306,7 +307,7 @@ func NewHermesConnector() *hookOnlyConnector {
 		name:        "hermes",
 		description: "config.yaml hooks with MCP, skills, plugins, and hook telemetry",
 		apiPath:     "/api/v1/hermes/hook",
-		scriptName:  "hermes-hook.sh",
+		scriptName:  hermesHookScriptName,
 		configPath:  hermesConfigPath,
 		capability: func(opts SetupOpts) HookCapability {
 			configPath := hermesConfigPath(opts)
@@ -4360,6 +4361,21 @@ func preserveTrailingTopLevelYAMLTrivia(data []byte, start, end int) int {
 	return end
 }
 
+// hermesHookScriptName is the Hermes hook script Setup generates on Unix.
+const hermesHookScriptName = "hermes-hook.sh"
+
+// hermesReplaceableHookCommand reports whether Setup replaces a Hermes hook
+// handler with its own: an exact current or historical DefenseClaw command,
+// or the generated script at an edited path. Hermes hook failures are
+// fail-open, so refusing to repair an edited path left the agent unguarded
+// (GAP-0906). Other commands that only name DefenseClaw stay refused.
+func hermesReplaceableHookCommand(command string, recognizedCommands map[string]struct{}) bool {
+	if _, recognized := recognizedCommands[command]; recognized {
+		return true
+	}
+	return editedDefenseClawHookCommand(command, hermesHookScriptName)
+}
+
 func hermesRecognizedHookCommands(current string) map[string]struct{} {
 	commands := map[string]struct{}{}
 	if current = strings.TrimSpace(current); current != "" {
@@ -4414,8 +4430,7 @@ func reconcileHermesHookEntries(
 	replaced := false
 	for _, item := range list {
 		command, hasCommand := hermesHookEntryCommand(item)
-		_, recognized := recognizedCommands[command]
-		if recognized {
+		if hermesReplaceableHookCommand(command, recognizedCommands) {
 			if !replaced {
 				out = append(out, expected)
 				replaced = true
@@ -4444,7 +4459,7 @@ func removeStaleHermesHookEntries(
 	out := make([]interface{}, 0, len(list))
 	for _, item := range list {
 		command, hasCommand := hermesHookEntryCommand(item)
-		if _, recognized := recognizedCommands[command]; recognized {
+		if hermesReplaceableHookCommand(command, recognizedCommands) {
 			continue
 		}
 		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
@@ -4527,7 +4542,7 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 		// direct-native Windows command to the PowerShell adapter and refreshes
 		// failClosed when the connector moves between observe and action mode.
 		// Entries not owned by DefenseClaw are preserved in their original order.
-		hooks[event] = replaceManagedCursorHooks(hooks[event], ownedCommands, entry)
+		hooks[event] = replaceManagedCursorHooks(hooks[event], ownedCommands, filepath.Base(hookScript), entry)
 	}
 	return writeJSONObject(path, cfg)
 }
@@ -4663,11 +4678,15 @@ func cursorManagedHookCommands(hookScript, legacyShellScript string) []string {
 	))
 }
 
-func replaceManagedCursorHooks(raw interface{}, ownedCommands cursorHookCommandMatcher, entry map[string]interface{}) []interface{} {
+// replaceManagedCursorHooks drops DefenseClaw's entries, including one whose
+// scriptName path was edited (GAP-0907), and appends entry.
+func replaceManagedCursorHooks(
+	raw interface{}, ownedCommands cursorHookCommandMatcher, scriptName string, entry map[string]interface{},
+) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
 	for _, item := range list {
-		if ownedCommands.matches(item) {
+		if ownedCommands.matches(item) || editedDefenseClawHookEntry(item, scriptName) {
 			continue
 		}
 		out = append(out, item)
@@ -5043,8 +5062,9 @@ func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[stri
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
 	replaced := false
+	edited := path.Base(filepath.ToSlash(hookScript))
 	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) {
+		if managedHookCommandEntry(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
 			if !replaced {
 				out = append(out, entry)
 				replaced = true

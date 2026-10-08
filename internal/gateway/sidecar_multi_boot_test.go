@@ -2383,6 +2383,61 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 	}
 }
 
+// GAP-0905: after a hot guardrail.mode change the Guardrail status block
+// reports the mode in force, as the Connector Mode section does, instead of
+// the mode the guardrail started with.
+func TestRunGuardrailManagedEnterpriseStatusFollowsHotModeChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed enterprise hook lifecycle is rejected on native Windows")
+	}
+	prevInterval := guardrailHealthRefreshInterval
+	guardrailHealthRefreshInterval = 10 * time.Millisecond
+	t.Cleanup(func() { guardrailHealthRefreshInterval = prevInterval })
+	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	prevCodex := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexConfig
+	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
+	cfg := &config.Config{
+		DataDir:        t.TempDir(),
+		DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+		Gateway:        config.GatewayConfig{APIPort: 18970},
+		Guardrail: config.GuardrailConfig{
+			Enabled: true, Connector: "codex", Mode: "observe", HookSelfHeal: true,
+		},
+	}
+	s := &Sidecar{cfg: cfg, health: NewSidecarHealth(), router: routerWithDefaultRulePack(t)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.runGuardrail(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("runGuardrail: %v", err)
+		}
+	})
+	waitForMode := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			details := s.health.Snapshot().Guardrail.Details
+			if details["mode"] == want && details["policy_mode"] == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("guardrail status mode = %v policy_mode = %v, want %s", details["mode"], details["policy_mode"], want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitForMode("observe")
+	for _, mode := range []string{"action", "observe"} {
+		next := *cfg
+		next.Guardrail.Mode = mode
+		s.cfgCurrent.Store(&next)
+		waitForMode(mode)
+	}
+}
+
 // GAP-0369: `guardrail disable --connector X` on the only configured
 // connector must tear X down; the single-connector boot set it up again.
 func TestRunGuardrailSingleConnectorDisabledOnItsOwnTearsDown(t *testing.T) {

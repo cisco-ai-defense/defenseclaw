@@ -313,8 +313,14 @@ func patchDevinHooks(path, hookScript string, ownedHookScripts ...string) error 
 func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
+	edited := ""
+	if len(ownedHookScripts) > 0 {
+		edited = path.Base(filepath.ToSlash(ownedHookScripts[0]))
+	}
 	for _, item := range list {
-		if devinHookGroupReferences(item, ownedHookScripts...) {
+		// A group whose DefenseClaw handler path was edited is replaced too,
+		// not kept next to a second hook set (GAP-0907).
+		if devinHookGroupReferences(item, ownedHookScripts...) || editedDefenseClawHookEntry(item, edited) {
 			continue
 		}
 		out = append(out, item)
