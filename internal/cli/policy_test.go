@@ -209,6 +209,20 @@ func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 		}
 	})
 
+	// An existing but empty canonical directory is also config-only mode.
+	t.Run("empty Rego directory", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.Mkdir(filepath.Join(root, "rego"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+		setPolicyPathTestFlags(t)
+		output, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) })
+		if err != nil || !strings.Contains(output, "compiled from config.yaml alone") {
+			t.Fatalf("output = %q, error = %v", output, err)
+		}
+	})
+
 	// A Secure Client host keeps policy show, validate and evaluate of main
 	// (GAP-0114, issue #1092): each needs the data.json that no Secure
 	// Client layout ships, and there is no policy digest.
