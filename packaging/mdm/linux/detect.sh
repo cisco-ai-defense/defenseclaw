@@ -187,6 +187,9 @@ else
     gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux
 fi
 dc_trusted_path "$gateway" || dc_report 0 not-installed "$gateway is missing or not root-owned"
+# An empty binary (a power loss during a package upgrade) runs as an empty
+# script that prints nothing and exits 0 (GAP-0467).
+[ -s "$gateway" ] || dc_report 0 not-installed "$gateway is empty, likely from a power loss during a package upgrade; reinstall the package"
 
 status=$("$gateway" enterprise "$group" status --json 2>/dev/null </dev/null || true)
 dc_json_true "$status" installed || dc_report 0 not-installed "the managed deployment is not installed"

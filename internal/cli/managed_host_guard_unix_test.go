@@ -495,3 +495,26 @@ func TestEnterpriseIDEPluginsTellAStandardUserThatAnAdministratorRunsIt(t *testi
 		}
 	}
 }
+
+// The managed gateway service reads the layout's config and data directory
+// even when a unit drop-in names others in its environment (GAP-0473).
+func TestManagedUnixGatewayIgnoresConfigAndHomeFromItsEnvironment(t *testing.T) {
+	layout := unixStandaloneLayoutForTest(t)
+	withUnixManagedHostDescriptor(t)
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.ConfigPathEnv, "/etc/other/config.yaml")
+	t.Setenv("DEFENSECLAW_HOME", "/etc/other")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, "")
+	var warn strings.Builder
+	pinManagedUnixGatewayInputs(&warn)
+	if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+		t.Fatalf("%s = %q, want %q", managed.ConfigPathEnv, got, layout.ConfigPath)
+	}
+	if got := os.Getenv("DEFENSECLAW_HOME"); got != layout.DataDir {
+		t.Fatalf("DEFENSECLAW_HOME = %q, want %q", got, layout.DataDir)
+	}
+	if !strings.Contains(warn.String(), "ignores DEFENSECLAW_CONFIG=/etc/other/config.yaml") {
+		t.Fatalf("warning = %q", warn.String())
+	}
+}

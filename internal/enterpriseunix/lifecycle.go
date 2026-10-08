@@ -363,6 +363,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 				}
 			}
 			l.settleRejectedConfig()
+			l.clearSupersededUnitFailures(ctx)
 			l.describe(ctx, record, false)
 			// The host runs this package and is healthy, so what a failed
 			// package run left (its result and the kept gateway output) is
@@ -873,6 +874,13 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
+	// The override a package-kept uninstall wrote over the package's
+	// tmpfiles.d entries goes with the next install.
+	if p.channel == ChannelPackage && env.GOOS == "linux" {
+		if data, err := readBounded(env.P(packageTmpfilesOverride), 4096); err == nil && strings.HasPrefix(string(data), packageTmpfilesOverrideMarker) {
+			p.stale = append(p.stale, packageTmpfilesOverride)
+		}
+	}
 	// Files the previous deployment wrote that this one no longer does.
 	if record != nil {
 		want := map[string]bool{}
@@ -1074,6 +1082,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	l.planned = &plannedInputs{configSHA: p.config.SHA, configFromInstalled: p.configFromInstalled, secretsSHA: p.secretsSHA}
 	l.reportChanges = record != nil && (l.opts.Action == ActionRepair || l.opts.Action == ActionEnsure)
 	changesBefore := len(r.Changes)
+	if account.Created {
+		// Configuration management removed the account (GAP-0515).
+		l.noteChange("created the service account %s (uid %d), which was missing", account.Name, account.UID)
+	}
 
 	units := env.Services.Units()
 	previouslyActive := []string{}
@@ -1281,12 +1293,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 					err = fmt.Errorf("%w; %s", err, held)
 				}
 			}
-			if refusal := l.configRefusal(ctx); refusal != "" {
-				err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
-			}
-			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
-				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
-					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
+			if gatewayFailure(err) {
+				if refusal := l.configRefusal(ctx); refusal != "" {
+					err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
+				}
+				if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
+					err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
+						filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
+				}
 			}
 			return failAndRollback(codeActivate, err)
 		}
@@ -1366,6 +1380,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
 	l.clearSupersededFailures()
+	l.clearSupersededUnitFailures(ctx)
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}
@@ -1482,6 +1497,9 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 				continue
 			}
 			created = append(created, dir.Path)
+		}
+		if l.reportChanges && env.metadataDiffers(path, dir.Mode, dir.Owner) {
+			l.noteChange("restored the mode and owner of %s", dir.Path)
 		}
 		if err := env.ensureDir(path, dir.Mode, dir.Owner); err != nil {
 			return nil, err
@@ -1694,12 +1712,22 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
 	for _, unit := range ordered {
+		// systemd refuses to enable or start a masked unit; the error said
+		// neither "masked" nor how to undo it (GAP-0475).
+		if unitMasked(ctx, env.Services, unit) {
+			if err := env.Services.(maskReporter).Unmask(ctx, unit); err != nil {
+				return &unitActivationError{unit: unit, err: fmt.Errorf("unmask %s: %w", unit.Name, err)}
+			}
+			l.noteChange("unmasked %s, which was masked and could not start", unit.Name)
+		}
+	}
+	for _, unit := range ordered {
 		if !unit.Activate {
 			continue
 		}
 		wasDisabled := unitDisabled(ctx, env.Services, unit)
 		if err := env.Services.Enable(ctx, unit); err != nil {
-			return fmt.Errorf("enable %s: %w", unit.Name, err)
+			return &unitActivationError{unit: unit, err: fmt.Errorf("enable %s: %w", unit.Name, err)}
 		}
 		if wasDisabled {
 			l.noteChange("re-enabled %s, which was disabled and would not start after a reboot", unit.Name)
@@ -1729,7 +1757,7 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 			continue
 		}
 		if err := env.Services.Start(ctx, unit); err != nil {
-			return fmt.Errorf("start %s: %w", unit.Name, err)
+			return &unitActivationError{unit: unit, err: fmt.Errorf("start %s: %w", unit.Name, err)}
 		}
 		if unit.Kind == "gateway" {
 			if err := l.waitGatewayReady(ctx, unit); err != nil {
@@ -1738,6 +1766,23 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		}
 	}
 	return nil
+}
+
+// unitActivationError is an activation failure of a unit that is not the
+// gateway: the gateway's output does not say why it failed.
+type unitActivationError struct {
+	unit Unit
+	err  error
+}
+
+func (e *unitActivationError) Error() string { return e.err.Error() }
+func (e *unitActivationError) Unwrap() error { return e.err }
+
+// gatewayFailure reports whether an activation error may come from the
+// gateway, so that its output and a config refusal explain it.
+func gatewayFailure(err error) bool {
+	var unitErr *unitActivationError
+	return !errors.As(err, &unitErr) || unitErr.unit.Kind == "gateway" || unitErr.unit.Kind == "socket"
 }
 
 func (l *lifecycle) waitGatewayReady(ctx context.Context, unit Unit) error {
@@ -1961,6 +2006,16 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	}
 	if problems := l.verifyInstalled(ctx, record, false); len(problems) > 0 {
 		return false, ""
+	}
+	if !record.NoStart {
+		// A unit an administrator disabled may still run (the hook socket
+		// starts the gateway again), so verifyInstalled passes; activation
+		// re-enables it (GAP-0530).
+		for _, unit := range env.Services.Units() {
+			if unit.Activate && unitDisabled(ctx, env.Services, unit) {
+				return false, ""
+			}
+		}
 	}
 	if l.machinePolicyDrift(p) {
 		return false, ""
@@ -2240,7 +2295,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	// No config is running once the deployment is gone; a reinstall that
 	// keeps the retained config.yaml starts without an old rejection.
-	_ = removeFile(env.rejectedConfigPath())
+	env.removeRejectedConfig()
 	_ = os.RemoveAll(filepath.Join(env.P(env.Layout.LifecycleDir), snapshotsDirName))
 	env.removeSideStores("")
 
@@ -2275,6 +2330,20 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				l.serviceAccountKept = true
 				r.AddWarning(codeAccount, fmt.Sprintf("the service account %s was not removed: %v; everything else is removed. Delete the account by hand: %s",
 					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser)))
+			} else if packageManaged {
+				// The package stays installed, and its tmpfiles.d entries
+				// name the removed account: every boot logged ten
+				// resolution errors and recreated empty root-owned state
+				// folders (GAP-0516). An override of the same name turns
+				// them off until the next install removes it.
+				override := env.P(packageTmpfilesOverride)
+				err := mkdirParents(filepath.Dir(override))
+				if err == nil {
+					err = env.writeFileAtomic(override, []byte(packageTmpfilesOverrideText), 0o644, rootOwner())
+				}
+				if err != nil {
+					r.AddWarning(codeAccount, fmt.Sprintf("could not turn off the package's tmpfiles.d entries for the removed account: %v; the next boot logs that it cannot resolve %s", err, env.Layout.ServiceUser))
+				}
 			}
 		}
 	}
@@ -2365,11 +2434,11 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	if l.opts.Purge {
 		args = append(args, "--purge")
 	}
-	out, err := env.runGatewayCLI(ctx, args...)
+	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
 	if err != nil && l.opts.Purge && !json.Valid(out.Stdout) {
 		// An installed binary from before remove-all took --purge: remove
 		// the registrations, which is what the binaries are kept for.
-		out, err = env.runGatewayCLI(ctx, args[:len(args)-1]...)
+		out, err = env.runGatewayCLILong(ctx, removeAllTimeout, args[:len(args)-1]...)
 	}
 	var report struct {
 		Pending     []string `json:"pending"`

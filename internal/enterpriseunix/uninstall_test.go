@@ -376,3 +376,20 @@ func TestPurgeAfterKeepStateUninstallPurgesTheAccounts(t *testing.T) {
 		t.Fatalf("the purge does not name the account it purged: %v", purge.Changes)
 	}
 }
+
+// GAP-0516: a plain uninstall that removes the service account but leaves
+// the package installed turns off the package's tmpfiles.d entries, which
+// name that account; the next install removes the override.
+func TestPackageKeptUninstallTurnsOffTheTmpfilesEntriesUntilTheNextInstall(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	h.env.Runner = packageOwnedRunner{Runner: h.runner, passwd: "root:x:0:0:root:/root:/bin/bash\n"}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if got := h.read(packageTmpfilesOverride); !strings.HasPrefix(got, packageTmpfilesOverrideMarker) {
+		t.Fatalf("no tmpfiles.d override after the uninstall: %q", got)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	if exists(h.env.P(packageTmpfilesOverride)) {
+		t.Fatal("the next install kept the tmpfiles.d override")
+	}
+}

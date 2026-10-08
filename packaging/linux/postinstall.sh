@@ -55,6 +55,12 @@ if [ -e "$held" ]; then
     apply_path_was_active=1
 fi
 
+# Flush the payload the package manager just unpacked before anything uses
+# it: a power loss after the rename but before the data reached the disk
+# left zero-length binaries and units, and an empty hook binary runs as an
+# empty script that exits 0, so every agent's hook allowed everything
+# (GAP-0467).
+sync >/dev/null 2>&1 || true
 systemd-sysusers /usr/lib/sysusers.d/defenseclaw.conf >/dev/null 2>&1 || true
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/defenseclaw.conf >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true

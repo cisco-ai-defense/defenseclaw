@@ -217,7 +217,9 @@ func TestConfigPushedDuringAFailedInPlaceEditIsAppliedNext(t *testing.T) {
 func TestAFollowUpTransactionReportsEachWarningOnce(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.services.failed[unitVerifyService] = true
+	// The guardian reconcile oneshot: a committing run clears a failed apply
+	// or verify oneshot (GAP-0423), not this one.
+	h.services.failed[unitGuardianOneshot] = true
 	edited := []byte(strings.Replace(h.read(h.env.Layout.ConfigPath), "mode: observe", "mode: action", 1))
 	h.env.Services = &hookedServices{fakeServices: h.services, onStart: writeOnce(t, h, unitOf("linux", "gateway"), h.env.Layout.ConfigPath, edited)}
 	r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})

@@ -432,3 +432,31 @@ func TestHookSocketProbesReadTheGateway(t *testing.T) {
 		}
 	})
 }
+
+// GAP-0514: with 4 MiB free on the root filesystem, enforcement and audit
+// held, but status, verify and the journal never said the disk was full.
+func TestStatusWarnsWhenTheAuditFilesystemIsNearlyFull(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.DiskSpace = func(string) (uint64, uint64, uint64, error) { return 4 << 20, 10 << 30, 1, nil }
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDiskSpaceLow)
+	if !strings.Contains(got, h.env.Layout.DataDir+" has 4.0 MiB free") || strings.Count(got, "MiB free") != 1 {
+		t.Fatalf("status does not warn once about the nearly full filesystem: %q", got)
+	}
+}
+
+// GAP-0626: with the judge's provider unreachable, /health said
+// judge_state failing while status and verify stayed silent.
+func TestStatusWarnsWhenTheJudgeIsFailing(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"disabled"},` +
+			`"guardrail":{"state":"running","details":{"judge_state":"failing","judge_recent_calls":18,"judge_failed_calls":18,` +
+			`"judge_last_error":"Bedrock request failed","judge_last_failure_at":"2026-10-08T05:00:00Z"}}}`), nil
+	}
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeJudgeFailing)
+	if !strings.Contains(got, "failed its last 18 calls") || !strings.Contains(got, "Bedrock request failed") {
+		t.Fatalf("status does not warn about the failing judge: %q", got)
+	}
+}

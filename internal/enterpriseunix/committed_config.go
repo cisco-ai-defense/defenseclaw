@@ -60,6 +60,12 @@ func (e *Env) rejectedReasonPath() string {
 	return filepath.Join(e.P(e.Layout.LifecycleDir), rejectedReasonName)
 }
 
+// removeRejectedConfig drops the kept rejected edit and its reason.
+func (e *Env) removeRejectedConfig() {
+	_ = removeFile(e.rejectedConfigPath())
+	_ = removeFile(e.rejectedReasonPath())
+}
+
 // saveCommittedConfig records the config a committed transaction applied.
 func (e *Env) saveCommittedConfig(raw []byte) error {
 	return e.writeFileAtomic(e.committedConfigPath(), raw, 0o600, rootOwner())
@@ -189,7 +195,6 @@ func (l *lifecycle) settleRejectedConfig() {
 		return
 	}
 	if l.opts.ConfigFile != "" || env.rejectionSuperseded(rejected) {
-		_ = removeFile(env.rejectedConfigPath())
-		_ = removeFile(env.rejectedReasonPath())
+		env.removeRejectedConfig()
 	}
 }

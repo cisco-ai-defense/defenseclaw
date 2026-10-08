@@ -381,12 +381,19 @@ rules on Linux and macOS:
    `rule_pack` afterwards. Keep every file and folder owned by root,
    not writable by group or others, and readable by the gateway (for example
    `0644` files in `0755` folders). The lifecycle refuses a pack inside
-   `data_dir`, which the gateway can write.
+   `data_dir`, which the gateway can write. Before it changes anything it
+   also refuses a pack whose folder, a folder above it, or any folder or file
+   inside it is a symlink, is writable by group or others, has an ACL entry
+   that grants write, or belongs to an account other than root (a pack copied
+   with `cp -a` keeps its owner), and names the path and the reason. `status`
+   and `verify` report a pack in use that no longer passes these checks.
 2. **Choose the levels.** The pack's posture (its manifest's posture, else
    its folder name) sets the default levels: `strict` blocks findings of
    MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only
    CRITICAL findings and alerts on HIGH ones, and any other pack blocks
-   CRITICAL findings and alerts on MEDIUM and above. `guardrail.block_at` and
+   CRITICAL findings and alerts on MEDIUM and above. The manifest is part of
+   the pack's pin, so validate the pack again after you add or change it.
+   `guardrail.block_at` and
    `alert_at` (or a connector's own) override them; see
    [Thresholds](/docs/policies/thresholds).
 3. **Validate the pack** with the gateway's own loader:
@@ -414,8 +421,11 @@ rules on Linux and macOS:
    ```
 
    The lifecycle refuses a pack that does not exist or whose digest does not
-   match, and restarts the services with the new pack. If the gateway cannot load it, `ensure` fails and the previous
-   config stays in force.
+   match, and applies the new pack in the running gateway, without a restart:
+   adding, replacing or removing a `custom_packs` entry, or switching
+   `rule_pack`, raises the policy generation like any reloadable key. If the
+   gateway cannot load it, `ensure` fails and the previous config stays in
+   force.
 
 To change a pack that is in use, the safest route is the same as for a new
 one: create the edited copy in a new folder (for example

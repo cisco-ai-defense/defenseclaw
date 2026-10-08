@@ -147,6 +147,12 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 		return
 	}
 	if !state.Applied {
+		if reported == state.EffectiveDigest {
+			// The digests agree; what is not applied is the reload the
+			// gateway rejected, which policy_reload_rejected names. The
+			// warning below said "reports X but computes to X" (GAP-0587).
+			return
+		}
 		r.AddWarning(codePolicyNotApplied, fmt.Sprintf(
 			"the gateway reports effective policy %s but the installed config computes to %s; it applies the config on its next reload",
 			shortDigest(reported), shortDigest(state.EffectiveDigest)))

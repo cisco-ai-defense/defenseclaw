@@ -43,6 +43,9 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 		if reloads && strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
 			reported = digest("b")
 		}
+		if reloads && strings.Contains(h.read(h.env.Layout.ConfigPath), "rule_pack: strict") {
+			reported = digest("c")
+		}
 		return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + reported + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
 	}
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -68,6 +71,16 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 	if touched || !strings.Contains(strings.Join(r.Changes, "\n"), "it was not restarted") || r.Policy == nil || !r.Policy.Applied {
 		t.Fatalf("hot change: gateway touched = %v, changes = %q, policy = %+v", touched, r.Changes, r.Policy)
 	}
+	// GAP-0545: a change in bytes only keeps the gateway and its policy.
+	if r, touched := ensure("# edited by configuration management\n" + strings.ReplaceAll(hot, "\n", "\r\n")); touched || !strings.Contains(strings.Join(r.Changes, "\n"), "it was not restarted") {
+		t.Fatalf("a comment and CRLF restarted the gateway: changes = %q", r.Changes)
+	}
+	// GAP-0550: switching the rule pack is applied in the running gateway.
+	runner.digest = digest("c")
+	if r, touched := ensure(strings.Replace(hot, "rule_pack: default", "rule_pack: strict", 1)); touched || !strings.Contains(strings.Join(r.Changes, "\n"), "it was not restarted") {
+		t.Fatalf("a rule pack switch restarted the gateway: changes = %q", r.Changes)
+	}
+	runner.digest = digest("b")
 	if _, touched := ensure(strings.Replace(hot, "mode: action\n", "mode: action\n  hook_self_heal: false\n", 1)); !touched {
 		t.Fatal("a restart-required key (guardrail.hook_self_heal) left the gateway running")
 	}

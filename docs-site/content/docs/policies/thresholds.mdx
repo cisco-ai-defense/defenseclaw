@@ -123,7 +123,7 @@ The three built-in packs need no manifest. **A custom pack is `default` unless i
 {"posture": "strict"}
 ```
 
-The manifest is not part of the pack digest, and `defenseclaw guardrail validate-pack` accepts a pack with or without it. See [Rules and custom packs](/docs/policies/rules) for pinning a pack.
+The manifest is part of the pack digest: adding or editing it changes the `custom_packs` pin and the effective policy digest, like a rule file, so a pinned pack whose manifest changed is refused until you pin the new digest. `defenseclaw guardrail validate-pack` accepts a pack with or without it. See [Rules and custom packs](/docs/policies/rules) for pinning a pack.
 
 Because a profile or connector can select a different `rule_pack`, the default can differ per scope. Setting `block_at` explicitly at a scope removes that dependency.
 

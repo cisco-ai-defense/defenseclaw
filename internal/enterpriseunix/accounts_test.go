@@ -72,3 +72,33 @@ func TestLinuxAccountEnsureCreatesTheAccountFromInlineSysusersEntries(t *testing
 		t.Fatalf("sysusers entry = %q", sysusers[2])
 	}
 }
+
+// A pre-existing account someone can sign in to is refused as the gateway
+// service account instead of being adopted (GAP-0433).
+func TestLinuxAccountEnsureRefusesALoginAccount(t *testing.T) {
+	runner := &loginAccountRunner{}
+	accounts := &linuxAccounts{env: &Env{GOOS: "linux", Runner: runner}}
+	_, err := accounts.Ensure(context.Background(), "defenseclaw")
+	if err == nil || !strings.Contains(err.Error(), "login shell /bin/bash") || !strings.Contains(err.Error(), "userdel defenseclaw") {
+		t.Fatalf("Ensure error = %v, want a login-account refusal", err)
+	}
+	for _, call := range runner.calls {
+		if call[0] == "systemd-sysusers" || call[0] == "useradd" {
+			t.Fatalf("Ensure ran %q for an existing account", call)
+		}
+	}
+}
+
+// loginAccountRunner answers getent with an interactive account.
+type loginAccountRunner struct{ calls [][]string }
+
+func (r *loginAccountRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	r.calls = append(r.calls, append([]string{name}, args...))
+	switch {
+	case name == "getent" && len(args) == 2 && args[0] == "passwd":
+		return CommandResult{Stdout: []byte("defenseclaw:x:1008:1008:pilot account:/home/defenseclaw:/bin/bash\n")}, nil
+	case name == "getent" && len(args) == 2 && args[0] == "group":
+		return CommandResult{Stdout: []byte("defenseclaw:x:1008:\n")}, nil
+	}
+	return CommandResult{ExitCode: 1}, errors.New("exit status 1")
+}

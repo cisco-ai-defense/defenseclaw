@@ -695,7 +695,7 @@ case "$1" in
     start) : >'{self.active}' ;;
 esac""")
         _write_stub(self.bin, "systemd-run", f"""echo "systemd-run $*" >>'{self.log}'""")
-        for tool in ("systemd-sysusers", "systemd-tmpfiles"):
+        for tool in ("systemd-sysusers", "systemd-tmpfiles", "sync"):
             _write_stub(self.bin, tool, f"""echo "{tool} $*" >>'{self.log}'""")
         _write_stub(self.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{self.log}'
 cat <<'JSON'
@@ -737,6 +737,8 @@ def test_linux_postinstall_holds_the_apply_trigger_and_waits_for_the_lock(tmp_pa
     ensure = next(i for i, call in enumerate(calls) if call.startswith("gateway "))
     assert calls[ensure] == "gateway enterprise linux ensure --from-package --reason package --json --lock-wait 10m"
     stop = calls.index(f"systemctl stop {APPLY_PATH}")
+    # GAP-0467: the unpacked payload is flushed before anything uses it.
+    assert calls.index("sync ") < next(i for i, call in enumerate(calls) if call.startswith("systemd-sysusers")), calls
     for tool in ("systemd-sysusers", "systemd-tmpfiles", "systemctl daemon-reload"):
         index = next(i for i, call in enumerate(calls) if call.startswith(tool))
         assert stop < index < ensure, (tool, calls)

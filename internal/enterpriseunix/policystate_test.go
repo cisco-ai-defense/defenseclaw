@@ -82,6 +82,10 @@ func TestEnsureReportsTheAppliedPolicy(t *testing.T) {
 	if r.Policy == nil || r.Policy.Applied || r.Policy.LastReloadError != reloadError || !hasWarning(r, codePolicyReloadRejected) {
 		t.Fatalf("status with a rejected reload: policy = %+v, warnings = %+v", r.Policy, r.Warnings)
 	}
+	// GAP-0587: a change action does not add "reports X but computes to X".
+	if r = h.run(Options{Action: ActionRepair}); hasWarning(r, codePolicyNotApplied) || !hasWarning(r, codePolicyReloadRejected) {
+		t.Fatalf("repair with a rejected reload: warnings = %+v", r.Warnings)
+	}
 
 	raw, err := os.ReadFile(h.env.deploymentPath())
 	if err != nil {

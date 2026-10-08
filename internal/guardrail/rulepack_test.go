@@ -922,3 +922,21 @@ func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
 		t.Fatalf("reason = %q", packErr.Reason)
 	}
 }
+
+// GAP-0431: the manifest's posture sets the levels the gateway enforces, so
+// adding or editing defenseclaw-pack.json changes the pin and the summary
+// digest; a pack without a manifest keeps both.
+func TestPackManifestChangesThePinAndTheSummaryDigest(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	before := mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	strict := mustLoadRulePack(t, dir)
+	if strict.FilesDigest() == before.FilesDigest() || strict.Summary().Digest == before.Summary().Digest {
+		t.Fatal("adding the manifest left the pin or the summary digest unchanged")
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"permissive"}`)
+	if again := mustLoadRulePack(t, dir); again.FilesDigest() == strict.FilesDigest() {
+		t.Fatal("editing the manifest posture left the pin unchanged")
+	}
+}

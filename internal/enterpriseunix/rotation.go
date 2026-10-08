@@ -881,15 +881,19 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 			}
 		}
 	}()
-	if prepareErr == nil && ctx.Err() != nil {
+	if ctx.Err() != nil {
 		// An interrupt rolls back even when every user is ready to commit.
+		// The error it caused (a killed systemctl: "exit -1:" with no
+		// reason) is not the cause, so it is not shown (GAP-0513).
 		prepareErr = errors.New("the run was interrupted")
 	}
 	if prepareErr != nil {
-		r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; key %s stays in use", operation, prepareErr, shortKeyID(idA)))
 		if err := l.abortRotation(ctx, gateway, record, keyA, intent, selected, preflight.ManifestSHA256); err != nil {
+			r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; key %s stays in use", operation, prepareErr, shortKeyID(idA)))
 			r.AddError(codeRollbackFailed, err.Error())
+			return 0
 		}
+		r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; it was rolled back and key %s stays in use", operation, prepareErr, shortKeyID(idA)))
 		return 0
 	}
 

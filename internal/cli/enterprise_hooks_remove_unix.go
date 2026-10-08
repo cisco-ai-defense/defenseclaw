@@ -146,7 +146,8 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	if enterpriseHooksRemoveAllPurge {
 		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, accounts, cleanupFailed)...)
 	}
-	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
+	runs := retryTimedOutWorkers(cmd.Context(), runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism))
+	for _, run := range runs {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
 		for _, result := range run.Response.Targets {
 			answered[result.Index] = result
