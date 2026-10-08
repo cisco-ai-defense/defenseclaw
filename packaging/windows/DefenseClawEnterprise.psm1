@@ -9467,7 +9467,13 @@ function Remove-DefenseClawEmptyClaudeManagedSettingsFolders {
 # that leaves them (GAP-1734, GAP-2057). A purge removes every such folder
 # except the ones this run uses (its TEMP, the launching CLI's folder,
 # GAP-1853, and the folder this module was loaded from), and writes
-# "path: reason" for each one it kept.
+# "path: reason" for each one it kept. An interrupted standalone Setup leaves
+# ProgramData\DefenseClaw-Enterprise-Setup-<32 hex> with its whole payload
+# (GAP-0525). Setup's own staging folder is the one this module was loaded
+# from; another one goes once it is 30 minutes old (staging takes minutes)
+# and can be renamed (a Setup whose lifecycle still runs holds its folder as
+# the working directory), and is reported otherwise. Setup removes the same
+# folders on its next run.
 function Remove-DefenseClawStaleRunDirectories {
     param(
         [Parameter(Mandatory)][string]$ProgramData,
@@ -9481,6 +9487,7 @@ function Remove-DefenseClawStaleRunDirectories {
     foreach ($scope in @(
             @($ProgramData, 'DefenseClaw-PowerShell-', 'stale enterprise PowerShell temp'),
             @($ProgramData, 'DefenseClaw-Installer-', 'stale enterprise installer staging'),
+            @($ProgramData, 'DefenseClaw-Enterprise-Setup-', 'stale enterprise Setup staging'),
             @($WindowsTemp, 'DefenseClaw-Bootstrap-', 'stale enterprise bootstrap environment'))) {
         $parent, $prefix, $label = $scope
         foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $parent -Force -Directory -Filter ($prefix + '*') -ErrorAction SilentlyContinue)) {
@@ -9492,8 +9499,24 @@ function Remove-DefenseClawStaleRunDirectories {
                 }).Count -gt 0) {
                 continue
             }
+            if ($prefix -ceq 'DefenseClaw-Enterprise-Setup-' -and
+                $item.CreationTimeUtc -gt [DateTime]::UtcNow.AddMinutes(-30)) {
+                "${path}: created less than 30 minutes ago, so it may belong to a Setup that is still running; the next Setup run or uninstall removes it"
+                continue
+            }
             try {
                 Assert-DefenseClawPathAcl -Path $path -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID)
+                if ($prefix -ceq 'DefenseClaw-Enterprise-Setup-') {
+                    $retired = [IO.Path]::Combine($parent, $prefix + [guid]::NewGuid().ToString('N'))
+                    try {
+                        [IO.Directory]::Move($path, $retired)
+                    }
+                    catch {
+                        "${path}: in use by a running Setup; the next Setup run or uninstall removes it"
+                        continue
+                    }
+                    $path = $retired
+                }
                 Remove-DefenseClawManagedTree -Path $path -RequiredBase $parent -Label $label
             }
             catch {

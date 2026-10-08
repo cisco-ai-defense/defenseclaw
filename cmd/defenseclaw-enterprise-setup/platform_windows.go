@@ -20,6 +20,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -41,6 +43,11 @@ const (
 	enterpriseSetupScratchDirName = "scratch"
 	maximumLifecycleOutput        = 2 << 20
 	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
+	// enterpriseSetupStageStaleAge is the age after which a staging folder
+	// belongs to no Setup still staging: unpacking the payload takes
+	// seconds to minutes. A Setup whose lifecycle still runs holds its
+	// folder as the working directory, which the rename below needs free.
+	enterpriseSetupStageStaleAge = 30 * time.Minute
 )
 
 func executeEnterpriseSetup(
@@ -96,6 +103,7 @@ func executeEnterpriseSetup(
 		// Refuse a too-full volume before anything is staged. The Secure
 		// Client Setup keeps its historical behavior.
 		if programData, err := winpath.TrustedProgramData(); err == nil {
+			removeStaleEnterpriseSetupStages(programData, time.Now(), stderr)
 			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
 				return 0, err
 			}
@@ -449,6 +457,58 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 		}
 	}
 	return os.Remove(cleanStage)
+}
+
+// removeStaleEnterpriseSetupStages removes the staging folders that
+// interrupted standalone Setup runs left in ProgramData (a stopped Setup
+// cannot clean up; each holds the whole payload, GAP-0525). Only a folder
+// older than enterpriseSetupStageStaleAge that can be renamed is taken: a
+// Setup whose lifecycle still runs holds its folder as the working
+// directory, so the rename fails for it. The renamed folder keeps the stage
+// prefix, so one this run cannot clean (unexpected content) is swept by a
+// later run or by uninstall. What happened goes to diagnostics.
+func removeStaleEnterpriseSetupStages(programData string, now time.Time, diagnostics io.Writer) {
+	entries, err := os.ReadDir(programData)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		capability, found := strings.CutPrefix(name, enterpriseSetupStagePrefix)
+		if !found || !entry.IsDir() || len(capability) != 32 || strings.Trim(capability, "0123456789abcdef") != "" {
+			continue
+		}
+		path := filepath.Join(programData, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		attributes, ok := info.Sys().(*syscall.Win32FileAttributeData)
+		if !ok || now.Sub(time.Unix(0, attributes.CreationTime.Nanoseconds())) < enterpriseSetupStageStaleAge {
+			continue
+		}
+		retired := ""
+		for attempt := 0; attempt < 4 && retired == ""; attempt++ {
+			next := make([]byte, 16)
+			if _, err := rand.Read(next); err != nil {
+				return
+			}
+			candidate := filepath.Join(programData, enterpriseSetupStagePrefix+hex.EncodeToString(next))
+			if err := os.Rename(path, candidate); err == nil {
+				retired = candidate
+			} else if !errors.Is(err, os.ErrExist) {
+				break
+			}
+		}
+		if retired == "" {
+			continue
+		}
+		if err := cleanupEnterpriseSetupStage(retired, programData); err != nil {
+			fmt.Fprintf(diagnostics, "%s: kept the staging folder an interrupted Setup run left, %s: %v\n", standaloneSetupArtifactName, retired, err)
+			continue
+		}
+		fmt.Fprintf(diagnostics, "%s: removed the staging folder an interrupted Setup run left, %s\n", standaloneSetupArtifactName, path)
+	}
 }
 
 func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions) []string {

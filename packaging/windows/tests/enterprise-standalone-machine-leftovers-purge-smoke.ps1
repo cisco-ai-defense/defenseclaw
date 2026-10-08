@@ -13,7 +13,9 @@
 # PowerShell exits); one it cannot remove is reported. GAP-2057: stale
 # DefenseClaw-Installer-<32 hex> staging folders in ProgramData and
 # DefenseClaw-Bootstrap-<32 hex> folders in Windows\Temp go the same way,
-# except the bootstrap folder this run's TEMP points into. GAP-0262: the
+# except the bootstrap folder this run's TEMP points into. GAP-0525: stale
+# DefenseClaw-Enterprise-Setup-<32 hex> staging folders go too, except young
+# or busy ones, which are reported. GAP-0262: the
 # hooks' runtime selector state and lock go, so the Claude Code folders they
 # kept go too. Runs in a disposable scratch directory; no service or machine
 # root is touched.
@@ -132,6 +134,37 @@ $failures = & $module {
         [void]@(Remove-DefenseClawStaleRunDirectories -ProgramData $programData -WindowsTemp $windowsTemp)
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ownBootstrap)) {
             $failures.Add("removed this run's bootstrap folder: $ownBootstrap")
+        }
+
+        # GAP-0525: the staging folder an interrupted Setup left goes once it
+        # is 30 minutes old; a younger one, and one a running Setup holds as
+        # its working directory, stay and are reported.
+        $setupStale = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('3' * 32))
+        $setupYoung = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('4' * 32))
+        $setupBusy = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('5' * 32))
+        foreach ($path in @($setupStale, $setupYoung, $setupBusy)) {
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($path, 'scratch'))
+        }
+        foreach ($path in @($setupStale, $setupBusy)) {
+            [IO.Directory]::SetCreationTimeUtc($path, [DateTime]::UtcNow.AddHours(-2))
+        }
+        $savedDirectory = [Environment]::CurrentDirectory
+        [Environment]::CurrentDirectory = $setupBusy
+        try {
+            $left = @(Remove-DefenseClawStaleRunDirectories -ProgramData $programData -WindowsTemp $windowsTemp)
+        }
+        finally {
+            [Environment]::CurrentDirectory = $savedDirectory
+        }
+        $setupLeft = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $programData -Directory -Filter 'DefenseClaw-Enterprise-Setup-*' |
+                Microsoft.PowerShell.Core\ForEach-Object { $_.FullName } | Microsoft.PowerShell.Utility\Sort-Object)
+        if (($setupLeft -join ';') -cne (@($setupYoung, $setupBusy) -join ';')) {
+            $failures.Add("Setup staging folders left: $($setupLeft -join '; ')")
+        }
+        foreach ($expected in @("${setupYoung}: created less than 30 minutes ago", "${setupBusy}: in use by a running Setup")) {
+            if (@($left | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith($expected) }).Count -ne 1) {
+                $failures.Add("Setup staging report lacks '$expected': $($left -join '; ')")
+            }
         }
 
         # GAP-0262 (the ACL check is still replaced, as above).
