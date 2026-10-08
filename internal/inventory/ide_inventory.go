@@ -521,7 +521,6 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 	}
 	if changed || now.Sub(s.ideRecordedAt) >= ideRecordInterval {
 		inv.persist = true
-		s.ideRecordedAt = now
 		inv.savedPlugins = make([]IDEPlugin, 0, len(current))
 		for _, p := range current {
 			inv.savedPlugins = append(inv.savedPlugins, p)
