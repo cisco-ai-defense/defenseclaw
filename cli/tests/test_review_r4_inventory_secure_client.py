@@ -38,3 +38,11 @@ def test_secure_client_aibom_skips_ide_gateway_and_output() -> None:
     finally:
         cleanup_app(app, db_path, tmp_dir)
 
+def test_secure_client_aibom_does_not_stamp_plugin_or_mcp_users() -> None:
+    cfg = default_config()
+    with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"), \
+         patch("defenseclaw.inventory.claw_inventory._stamp_local_user") as stamp:
+        build_claw_aibom(cfg, live=False, categories={"plugins", "mcp"})
+        build_claw_aibom(cfg, live=True, categories=set(), connector="codex")
+    stamp.assert_not_called()
+
