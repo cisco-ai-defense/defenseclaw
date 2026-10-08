@@ -28,6 +28,7 @@ DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the co
 
 # ---- MDM settings (flags override) -------------------------------------------
 DC_MIN_VERSION=""       # detect only this version or newer
+DC_MIN_VERSION_SET=0
 DC_REQUIRE_HEALTHY=0    # 1: also require `verify` to pass
 DC_FORMAT="exit"        # exit | value | jamf
 # ---- end of settings ---------------------------------------------------------
@@ -173,7 +174,7 @@ dc_report() { # <detected 0|1> <value> <reason>
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --min-version) DC_MIN_VERSION=${2:-}; shift 2 ;;
+        --min-version) DC_MIN_VERSION=${2:-}; DC_MIN_VERSION_SET=1; shift 2 ;;
         --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
         --format) DC_FORMAT=${2:-}; shift 2 ;;
 # Intune's Linux agent may repeat its /proc/self/fd/N script descriptor.
@@ -186,6 +187,11 @@ esac
         *) printf 'defenseclaw detect: unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
+if { [ "$DC_MIN_VERSION_SET" = 1 ] || [ -n "$DC_MIN_VERSION" ]; } &&
+    ! printf '%s' "$DC_MIN_VERSION" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?(\+[A-Za-z0-9][A-Za-z0-9.-]*)?$'; then
+    printf 'defenseclaw detect: --min-version must be a dotted release version\n' >&2
+    exit 2
+fi
 case "$DC_FORMAT" in exit | value | jamf) ;; *) printf 'defenseclaw detect: --format must be exit, value or jamf\n' >&2; exit 2 ;; esac
 
 [ "$(dc_platform)" = "$DC_SCRIPT_OS" ] || dc_report 0 not-installed "this copy of detect.sh is for $DC_SCRIPT_OS"
