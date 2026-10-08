@@ -63,6 +63,8 @@ try {
             # GAP-0946: a standalone stop that the service process does not
             # answer ends that process after the stop budget and continues;
             # Secure Client keeps the plain Stop-Service failure.
+            # Windows PowerShell 5.1 loads System.ServiceProcess on first use.
+            [void](Microsoft.PowerShell.Management\Get-Service -Name 'EventLog' -ErrorAction SilentlyContinue)
             $script:ServiceStopTimeoutSeconds = 1
             $script:SmokeService = [pscustomobject]@{
                 Status = [ServiceProcess.ServiceControllerStatus]::Running
