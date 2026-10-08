@@ -14667,6 +14667,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if self._snapshot_panel_revisions.get("alerts") != snapshot.revision:
             self.alerts_model.set_events(list(snapshot.alert_events))
+            self.alerts_model.detection_only = snapshot.detection_only
             self._snapshot_panel_revisions["alerts"] = snapshot.revision
 
         self._apply_enforcement_counts(snapshot)

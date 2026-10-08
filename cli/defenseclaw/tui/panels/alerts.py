@@ -505,6 +505,9 @@ class AlertsPanelModel:
         self.audit_events: list[AlertEvent] = []
         self.scan_blocks: list[ScanBlock] = []
         self.egress_events: list[EgressEvent] = []
+        # Detection-only findings of the last 24 hours (the read snapshot's
+        # count): not alerts, so the panel only says how many (GAP-0314).
+        self.detection_only = 0
         self.expanded: set[str] = set()
         self.filter_text = ""
         self.filtering = False
@@ -1121,12 +1124,22 @@ class AlertsPanelModel:
             f"  [#9FB2CC]search:[/] {rich_escape(self.filter_text)}" if self.filter_text and not self.filtering else ""
         )
         search_prompt = f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]" if self.filtering else ""
+        # What `defenseclaw alerts` ends with, in two rows at 80 columns:
+        # rules that matched calls which then ran are not alerts, and the
+        # panel did not say there were any (GAP-0314).
+        unlisted_line = ""
+        if n := self.detection_only:
+            what = "1 detection-only finding" if n == 1 else f"{n} detection-only findings"
+            unlisted_line = (
+                f"\n[#9FB2CC]{what} (24 h) not listed: a rule matched but could not decide the call; "
+                "defenseclaw audit export --since 24h lists them[/]"
+            )
         return (
             "[bold #22D3EE]Alerts[/]  "
             f"[bold]Actionable {metrics.actionable_count}[/] · In scope {metrics.total_count} · "
             f"[#F87171]Critical {counts['CRITICAL']}[/] [#FB923C]High {counts['HIGH']}[/] "
             f"[#FBBF24]Medium {counts['MEDIUM']}[/] [#60A5FA]Low {counts['LOW']}[/]"
-            f"{selected_label}{filter_label}{search_prompt}"
+            f"{selected_label}{filter_label}{unlisted_line}{search_prompt}"
         )
 
     def data_table_columns(self) -> tuple[str, ...]:

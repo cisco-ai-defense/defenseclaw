@@ -30,7 +30,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
@@ -95,6 +95,8 @@ class TUIReadSnapshot:
     session_scan_since: datetime | None = None
     connector_hook_events: tuple[Event, ...] = ()
     connector_hook_stats: tuple[ConnectorHookStat, ...] = ()
+    # Detection-only findings of the last 24 hours, which Alerts leaves out.
+    detection_only: int = 0
 
 
 @dataclass(frozen=True)
@@ -269,11 +271,19 @@ class TUIReadRepository:
                 previous.enforcement_counts if previous else Counts(),
                 errors,
             )
+            count_detection_only = getattr(store, "count_detection_only_findings", None)
+            detection_only = self._component(
+                "detection-only findings",
+                lambda: count_detection_only(datetime.now(timezone.utc) - timedelta(hours=24)) if count_detection_only else 0,
+                previous.detection_only if previous else 0,
+                errors,
+            )
             if len(errors) == slow_error_count:
                 self._slow_components_loaded_at = now
         else:
             tool_actions = previous.tool_actions if previous else ()
             enforcement_counts = previous.enforcement_counts if previous else Counts()
+            detection_only = previous.detection_only if previous else 0
         if scan_since is None:
             session_scan_count = enforcement_counts.total_scans
         elif slow_components_due or previous is None or previous.session_scan_since != scan_since:
@@ -313,6 +323,7 @@ class TUIReadRepository:
             session_scan_since=scan_since,
             connector_hook_events=connector_hook_events,
             connector_hook_stats=connector_hook_stats,
+            detection_only=detection_only,
         )
         changed = candidate != previous
         if changed:
