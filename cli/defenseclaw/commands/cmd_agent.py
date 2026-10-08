@@ -3680,9 +3680,13 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
     secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     pins, require_pins = ai_signatures.pack_pins(cfg)
+    configured = list(cfg.ai_discovery.signature_packs)
+    if secure_client:
+        # Secure Client v8 still discovers every pack in this directory.
+        configured.insert(0, str(ai_signatures.signature_pack_dir(cfg.data_dir) / "*.json"))
     try:
         sigs, refused = ai_signatures.load_ai_signature_catalog(
-            signature_packs=cfg.ai_discovery.signature_packs,
+            signature_packs=configured,
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,

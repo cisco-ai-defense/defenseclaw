@@ -326,6 +326,10 @@ def _read_pack(path: str | Path) -> tuple[Path, bytes]:
         raise SignaturePackError(f"cannot read {pack}: {exc}") from exc
 
 
+def signature_pack_dir(data_dir: str | Path) -> Path:
+    return Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME
+
+
 def install_signature_pack(
     source: str | Path,
     *,

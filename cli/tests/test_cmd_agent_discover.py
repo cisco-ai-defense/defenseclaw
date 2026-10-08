@@ -386,6 +386,25 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         payload = json.loads(listed.output)
         self.assertIn("custom-cli-ai", {sig["id"] for sig in payload})
 
+    def test_secure_client_signature_list_includes_legacy_directory(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")
+        pack = Path(app.cfg.data_dir) / "signature-packs" / "legacy.json"
+        pack.parent.mkdir(parents=True)
+        pack.write_text(
+            json.dumps({"version": 1, "signatures": [
+                {"id": "legacy-ai", "name": "Legacy", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+                result = self.runner.invoke(agent, ["signatures", "list", "--json"], obj=app)
+            self.assertEqual(result.exit_code, 0, repr(result.exception) + result.output)
+            self.assertIn("legacy-ai", {item["id"] for item in json.loads(result.stdout)})
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
     def test_a_pack_that_fails_its_pin_is_reported_where_it_is_read(self):
         """GAP-0177: a refused pack is named with both digests by list and discovery status."""
         import hashlib
