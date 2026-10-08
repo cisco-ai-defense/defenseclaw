@@ -2857,13 +2857,11 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
 
     # A bare pack name has the same meaning here as in list-packs/use-pack.
     if not any(sep in path for sep in (os.sep, os.altsep) if sep) and not path.startswith(("~", ".")):
-        from defenseclaw import policy_catalog
+        from defenseclaw import config, policy_catalog
 
-        cfg = getattr(click.get_current_context().obj, "cfg", None)
-        if cfg is not None:
-            named = next((p.path for p in policy_catalog.discover_rule_packs(cfg) if p.name == path), None)
-            if named:
-                path = named
+        named = next((p.path for p in policy_catalog.discover_rule_packs(config.load()) if p.name == path), None)
+        if named:
+            path = named
     try:
         result = rulepack_validation.validate_rule_pack(path)
     except rulepack_validation.RulePackValidationBridgeError as exc:
