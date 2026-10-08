@@ -923,6 +923,18 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	if late := set.unknownGroupWarnings(2 * time.Second); len(late) != 2 {
 		t.Fatalf("warnings = %q after the pass finished, want 2", late)
 	}
+	// status and verify read /health right after a gateway restart: it
+	// waits for the first pass as profile-explain does (GAP-0830).
+	slow := make(chan struct{})
+	profileGroupExists = func(ctx context.Context, name string) (bool, error) {
+		<-slow
+		return exists(ctx, name)
+	}
+	set = &guardrailProfileSet{assignments: assignments}
+	time.AfterFunc(50*time.Millisecond, func() { close(slow) })
+	if got := set.healthProfileWarnings(); len(got) != 2 {
+		t.Fatalf("health warnings = %q right after start, want the 2 profile-explain lists", got)
+	}
 
 	// GAP-0229: an SSSD that is offline with a cold cache answers "no such
 	// group" for groups that exist. While lookups fail, or the explained

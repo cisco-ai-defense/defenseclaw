@@ -64,6 +64,14 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 	return warnings
 }
 
+// healthProfileWarnings is what /health serves for status and verify: the
+// assignment warnings profile-explain lists, with the first group pass
+// waited for briefly. Without the wait, a status right after a gateway
+// restart listed no unknown group while profile-explain named it (GAP-0830).
+func (set *guardrailProfileSet) healthProfileWarnings() []string {
+	return set.assignmentWarningsWithWait(true, profileGroupCheckWait)
+}
+
 // unknownConnectorWarnings points out profile selectors and overrides that
 // cannot match any built-in connector. Config is a leaf package, so it cannot
 // consult the runtime registry; plugin names remain valid, with a warning

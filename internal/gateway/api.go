@@ -1515,7 +1515,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// nobody, and the whole team falls to the default profile:
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
-			if warnings := liveGuardrailProfiles.Load().unknownGroupWarnings(0); len(warnings) > 0 {
+			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
 				body["profile_warnings"] = warnings
 			}
 			// Non-secret fingerprints of the per-user credential keys that
