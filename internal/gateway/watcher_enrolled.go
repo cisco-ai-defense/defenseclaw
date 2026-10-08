@@ -9,6 +9,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -105,6 +107,10 @@ func (e enrolledWatchSet) mcpKey() string {
 // home and folders that do not exist yet are left out (the watcher never
 // creates folders in a user's profile; the next poll picks up new ones).
 func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg config.GatewayWatcherConfig, serviceHome string) enrolledWatchSet {
+	return resolveEnrolledWatchSetWithStat(cfg, reg, wcfg, serviceHome, os.Stat)
+}
+
+func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry, wcfg config.GatewayWatcherConfig, serviceHome string, stat func(string) (os.FileInfo, error)) enrolledWatchSet {
 	set := enrolledWatchSet{roots: map[string]string{}, live: &enrolledMCPServers{}}
 	defer func() { set.live.set(set.mcp) }()
 	if cfg == nil || reg == nil || strings.TrimSpace(serviceHome) == "" {
@@ -163,8 +169,12 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 				if seen[key] {
 					continue
 				}
-				if info, err := os.Stat(userDir); err != nil || !info.IsDir() {
+				info, err := stat(userDir)
+				if errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()) {
 					continue
+				}
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[watcher] cannot stat enrolled directory %s: %v\n", userDir, err)
 				}
 				seen[key] = true
 				*out = append(*out, userDir)

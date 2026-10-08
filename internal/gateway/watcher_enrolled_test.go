@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,6 +96,17 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatalf("watched a folder that does not exist: %s", dir)
 		}
+	}
+	// A transient permission failure must retain the enrolled root.
+	rechecked := resolveEnrolledWatchSetWithStat(&config.Config{DataDir: dataDir}, connector.NewDefaultRegistry(), wcfg, serviceHome,
+		func(path string) (os.FileInfo, error) {
+			if path == aliceSkills {
+				return nil, errors.New("permission denied")
+			}
+			return os.Stat(path)
+		})
+	if !has(rechecked.skillDirs, aliceSkills) {
+		t.Fatalf("stat error dropped enrolled watcher root: %v", rechecked.skillDirs)
 	}
 	// Amp also lists ~/.claude/skills; Claude Code owns its layout.
 	if set.roots[aliceSkills] != "claudecode" || set.roots[bobSkills] != "codex" {
