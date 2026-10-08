@@ -9562,8 +9562,19 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         )
         return
     local = _local_policy_digest(cfg)
+    if local is None:
+        _emit(
+            "warn",
+            label,
+            f"{applied}; local policy digest comparison was unavailable",
+            r=r,
+            check_id="doctor.policy.comparison-unavailable",
+            reason_code="policy-comparison-unavailable",
+            remediation="Run `defenseclaw doctor` again after the local gateway policy digest command is available",
+        )
+        return
     pending = [str(key) for key in policy.get("pending_restart") or []]
-    if local is not None and local.get("effective_digest") != digest and pending:
+    if local.get("effective_digest") != digest and pending:
         # The gateway announced these keys apply only after a restart, so the
         # difference is the pending change, not a stale gateway.
         _emit(
@@ -9576,7 +9587,7 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             remediation="Run `defenseclaw-gateway restart`",
         )
         return
-    if local is not None and local.get("effective_digest") != digest:
+    if local.get("effective_digest") != digest:
         _emit(
             "fail",
             label,
