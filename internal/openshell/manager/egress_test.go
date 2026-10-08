@@ -1257,6 +1257,27 @@ func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
 	}
 }
 
+// GAP-0354 with GAP-0361: OpenShell refuses a model request whose body
+// carries a credential placeholder on the sandbox's own model host. That is
+// the model channel refusing this conversation, not a connection outside
+// it: the line and the record name the placeholder.
+func TestAPlaceholderRefusalOnTheModelHostNamesThePlaceholder(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "phbox", LLM: llm})
+	e.ocsf("phbox", "NET:TRAFFIC [HIGH] DENIED api.anthropic.com:443 [reason:POST request body credential traffic denied for api.anthropic.com:443]", time.Now())
+	feed := e.events("phbox", sandboxapi.ActivityEgressBlocked, "")
+	const want = "✗ api.anthropic.com (OpenShell forwards no request whose body carries a sandbox credential placeholder)"
+	if len(feed) != 1 || feed[0].Message != want || feed[0].Reason == sandboxapi.ReasonModelHostSide {
+		t.Fatalf("feed = %+v, want %q", feed, want)
+	}
+	if n := egressRecords(e, "phbox", func(r audit.SandboxEgressEvent) bool {
+		return strings.HasPrefix(r.Reason, "a connection outside the model channel")
+	}); n != 0 {
+		t.Fatalf("%d records call the placeholder refusal a connection outside the model channel", n)
+	}
+}
+
 // privatePack is a custom pack whose allow list opens a private address.
 const privatePack = `version: 1
 name: lanpack

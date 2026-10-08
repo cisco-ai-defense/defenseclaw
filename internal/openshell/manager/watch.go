@@ -384,11 +384,13 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		var feed *sandboxapi.ActivityEvent
 		if r.Denied() && !quiet {
 			reason := r.Reason
-			if r.Port != 22 && m.modelEndpointHost(b, host) {
+			if r.Port != 22 && !sandboxapi.PlaceholderRefusal(r.Reason) && m.modelEndpointHost(b, host) {
 				// A refusal on the sandbox's model host is a connection besides
 				// the model calls, which its provider rule carries: the feed, the
 				// session summary and the alert say so, and it does not read as
-				// the profile cutting the model off (GAP-0361).
+				// the profile cutting the model off (GAP-0361). A placeholder
+				// refusal is the model channel refusing this conversation, and
+				// keeps its own words (GAP-0354).
 				reason = sandboxapi.ReasonModelHostSide
 				ev.Reason = sandboxapi.BlockedText(reason, host)
 				if token := firstNonEmpty(r.Reason, r.Message); token != "" {
