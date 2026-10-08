@@ -846,6 +846,35 @@ def _check_destination_index(document: Any, path: str, parts: tuple[str | int, .
         )
 
 
+def _same_config_value(before: Any, after: Any) -> bool:
+    """Treat a value as unchanged only when its types match throughout."""
+    if type(before) is not type(after):
+        return False
+    if isinstance(before, dict):
+        return before.keys() == after.keys() and all(_same_config_value(before[key], after[key]) for key in before)
+    if isinstance(before, list):
+        return len(before) == len(after) and all(_same_config_value(a, b) for a, b in zip(before, after))
+    return before == after
+
+
+def _ordered_mutations(mutations: list[Any]) -> list[Any]:
+    """Apply list-item removals last, deepest and highest indexed first."""
+    from defenseclaw.observability.v8_yaml import DELETE
+
+    ordinary = []
+    indexed_deletes = {}
+    for mutation in mutations:
+        if mutation.value is DELETE and isinstance(mutation.path[-1], int):
+            indexed_deletes[mutation.path] = mutation
+        else:
+            ordinary.append(mutation)
+    return ordinary + sorted(
+        indexed_deletes.values(),
+        key=lambda mutation: (len(mutation.path), mutation.path[-1]),
+        reverse=True,
+    )
+
+
 def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -860,7 +889,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
                 continue
             mutations.append(V8YAMLMutation.delete(parts))
         else:
-            if before is not _MISSING and before == change.value:
+            if before is not _MISSING and _same_config_value(before, change.value):
                 continue
             _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
@@ -871,7 +900,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
         from defenseclaw.config import CURRENT_CONFIG_VERSION
 
         current = f"config_version: {CURRENT_CONFIG_VERSION}\n".encode()
-    prepared = prepare_v8_yaml_write(current, mutations, source_name=source_name, any_path=True)
+    prepared = prepare_v8_yaml_write(current, _ordered_mutations(mutations), source_name=source_name, any_path=True)
     return prepared.candidate, changed
 
 
