@@ -12,6 +12,7 @@ package connector
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -135,11 +136,54 @@ func WindowsCodexStandaloneManagedHookCommand(hookBinary, event, hookContract st
 // command line. The foreign-hook guard recognizes exactly these strings.
 func CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event string) string {
 	if goos == "windows" {
-		return windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
-			"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+		return windowsGuardedPowerShellHookCommand(CopilotRemovedDeploymentGuardPowerShell(hookBinary),
+			"copilot", event, hookBinary, "--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
 	}
-	return shellSingleQuote(hookBinary) + " hook --connector copilot --enterprise-managed --event " +
-		shellSingleQuote(event) + " --hook-surface " + CopilotHookSurfaceVSCodeLocal
+	return CopilotRemovedDeploymentGuardPOSIX(hookBinary) + shellSingleQuote(hookBinary) +
+		" hook --connector copilot --enterprise-managed --event " + shellSingleQuote(event) +
+		" --hook-surface " + CopilotHookSurfaceVSCodeLocal
+}
+
+// managedDeploymentMarker is the file whose presence says the managed
+// deployment that owns hookBinary is still installed: the gateway binary in
+// the same administrator-owned folder. Uninstall and package removal take
+// both away; an antivirus that quarantines the hook binary leaves the
+// gateway binary in place.
+func managedDeploymentMarker(goos, hookBinary string) string {
+	if goos == "windows" {
+		dir := ""
+		if i := strings.LastIndexAny(hookBinary, `\/`); i >= 0 {
+			dir = hookBinary[:i]
+		}
+		return dir + `\` + windowsGatewayBinaryName
+	}
+	return path.Join(path.Dir(hookBinary), "defenseclaw-gateway")
+}
+
+// CopilotRemovedDeploymentGuardPOSIX is the start of a POSIX Copilot hook
+// command: once the managed deployment is removed (neither the hook binary
+// nor the gateway binary beside it exists), the command exits 0, so the
+// registration a running Copilot process or a signed-out account keeps is
+// inert. Copilot denies every call whose hook fails, so a dangling command
+// made that session unusable (GAP-0999, GAP-1043). With the deployment
+// still installed and only the hook binary missing, the command still runs
+// it and fails, and Copilot denies: a quarantined hook never fails open
+// (GAP-0935).
+func CopilotRemovedDeploymentGuardPOSIX(hookBinary string) string {
+	return "[ -e " + shellSingleQuote(hookBinary) + " ] || [ -e " +
+		shellSingleQuote(managedDeploymentMarker("linux", hookBinary)) + " ] || exit 0; exec "
+}
+
+// CopilotRemovedDeploymentGuardPowerShell is CopilotRemovedDeploymentGuardPOSIX
+// as one PowerShell statement for the Windows Copilot commands. Constrained
+// Language mode refuses the .NET call, so it uses Test-Path there.
+func CopilotRemovedDeploymentGuardPowerShell(hookBinary string) string {
+	hook := powershellQuoteLiteral(hookBinary)
+	marker := powershellQuoteLiteral(managedDeploymentMarker("windows", hookBinary))
+	return "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { " +
+		"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath " + hook + ") -and " +
+		"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath " + marker + ")) { exit 0 } } " +
+		"elseif (-not [System.IO.File]::Exists(" + hook + ") -and -not [System.IO.File]::Exists(" + marker + ")) { exit 0 }"
 }
 
 // WindowsAwaitedHookStatements returns the PowerShell statements that start

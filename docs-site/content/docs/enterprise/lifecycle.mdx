@@ -636,7 +636,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge
 After an uninstall, and again after a reinstall (including an MDM remove and
 re-add), ask users to restart running agents. An agent reads its hooks when it
 starts: one that loaded the hook command before the uninstall may report a
-hook launch failure, and one left running through the uninstall and the
+hook launch failure (a Copilot CLI session does not: its DefenseClaw command
+exits 0 once the deployment is removed), and one left running through the uninstall and the
 reinstall keeps running without DefenseClaw until it restarts. On Linux and
 macOS, the `ensure` result, `status` and `verify` name each user whose agent
 sessions started before the deployment was activated, with the

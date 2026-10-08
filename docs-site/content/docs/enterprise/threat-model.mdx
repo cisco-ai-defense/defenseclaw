@@ -563,7 +563,7 @@ Windows repairs need a session. The guardian writes a user's files only while th
 
 #### Windows uninstall can leave per-user registrations
 
-Windows uninstall leaves the DefenseClaw per-user registrations of users who are signed out at the time, and of every user when it does not run as LocalSystem. The result lists them (`user_registrations_pending`). They are inert: enrollment is revoked and the hook binary is removed, and none of these agents blocks on a hook command that cannot start.
+Windows uninstall leaves the DefenseClaw per-user registrations of users who are signed out at the time, and of every user when it does not run as LocalSystem. The result lists them (`user_registrations_pending`). They are inert: enrollment is revoked and the hook binary is removed, and no agent blocks on them. Copilot denies a call whose hook command fails, so DefenseClaw's Copilot commands first check that the deployment is still installed (the hook binary or the gateway binary beside it exists) and exit 0 when it is not; with the deployment installed and only the hook binary missing, they still fail, and Copilot denies.
 
 **Where:** Windows, per-user agents.
 

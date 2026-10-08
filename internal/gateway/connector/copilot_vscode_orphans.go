@@ -138,8 +138,12 @@ func orphanedCopilotVSCodeLocalDocument(path string) bool {
 }
 
 // orphanCopilotVSCodeCommandBinary returns the hook binary a POSIX
-// vscode-local command runs (the single-quoted word before " hook").
+// vscode-local command runs (the single-quoted word before " hook", after
+// the removed-deployment guard's exec).
 func orphanCopilotVSCodeCommandBinary(command string) (string, bool) {
+	if _, rest, ok := strings.Cut(command, "|| exit 0; exec "); ok {
+		command = rest
+	}
 	idx := strings.Index(command, orphanCopilotVSCodeCmdMiddle)
 	if !strings.HasPrefix(command, "'") || idx < 1 {
 		return "", false

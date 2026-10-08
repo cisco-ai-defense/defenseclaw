@@ -25,6 +25,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
@@ -614,6 +615,8 @@ func ownedCommand(command, hookBinary string) bool {
 	if strings.EqualFold(command, hookBinary) {
 		return true
 	}
+	// Copilot commands start with the removed-deployment guard.
+	command = strings.TrimPrefix(command, connector.CopilotRemovedDeploymentGuardPOSIX(hookBinary))
 	rest, ok := strings.CutPrefix(command, shellQuote(hookBinary)+" hook --connector ")
 	if !ok {
 		return false

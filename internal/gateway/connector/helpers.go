@@ -688,6 +688,18 @@ func windowsNativePowerShellHookCommandForBoundEvent(connector, event, contractI
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
+// windowsGuardedPowerShellHookCommand is
+// windowsNativePowerShellHookCommandForBoundEvent with guard run before the
+// launcher starts (CopilotRemovedDeploymentGuardPowerShell).
+func windowsGuardedPowerShellHookCommand(guard, connector, event, hookBinary string, extra ...string) string {
+	script := strings.Join(append([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		guard,
+	}, windowsAwaitedHookStatements(hookBinary, nativeHookBridgeArguments(connector, event, "", extra))...), "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
 func nativeHookBridgeArguments(connector, event, contractID string, extra []string) []string {
 	arguments := []string{"hook", "--connector", connector}
 	if strings.TrimSpace(event) != "" {
