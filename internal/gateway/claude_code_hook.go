@@ -135,10 +135,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	cfg := a.decisionConfig(ctx)
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
+		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
 			count := a.scanClaudeCodeComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -211,7 +212,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "StopFailure":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
+		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
 		}
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
@@ -862,8 +863,8 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 		target = filepath.Join(req.CWD, target)
 	}
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var result *scanner.ScanResult
 	if req.sandboxView != nil {
@@ -924,8 +925,8 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
@@ -974,8 +975,8 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHookRequest) []string {
 	if req.sandboxView != nil {
 		var scanPaths []string
-		if a.scannerCfg != nil {
-			scanPaths = a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			scanPaths = cfg.ConnectorHookConfig("claudecode").ScanPaths
 		}
 		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
@@ -997,8 +998,8 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 			out = append(out, p)
 		}
 	}
-	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths {
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		for _, p := range cfg.ConnectorHookConfig("claudecode").ScanPaths {
 			add(p)
 		}
 	}
@@ -1027,7 +1028,7 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
-	if !req.ScanComponents && !a.claudeCodeComponentScanDue() {
+	if !req.ScanComponents && !a.claudeCodeComponentScanDue(ctx) {
 		return 0
 	}
 	targets := claudeCodeComponentTargets(req.CWD)
@@ -1045,10 +1046,10 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 	return count
 }
 
-func (a *APIServer) claudeCodeComponentScanDue() bool {
+func (a *APIServer) claudeCodeComponentScanDue(ctx context.Context) bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes) * time.Minute
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(cfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.claudeCodeMu.Lock()
 	defer a.claudeCodeMu.Unlock()
@@ -1202,8 +1203,8 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		rulesDir := ""
-		if a.scannerCfg != nil {
-			rulesDir = a.scannerCfg.Scanners.CodeGuard
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			rulesDir = cfg.Scanners.CodeGuard
 		}
 		cg := scanner.NewCodeGuardScanner(rulesDir)
 		result, err = cg.Scan(scanCtx, target)

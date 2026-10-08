@@ -185,7 +185,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 			Matched:    true,
 		}
 		decision := a.runtimeAssetIdentityDecision(
-			targetType, name, "claudecode", "prompt_expansion",
+			ctx, targetType, name, "claudecode", "prompt_expansion",
 		)
 		a.emitRuntimeSkillAssetPolicyDecision(
 			ctx, decision, "claudecode", req.HookEventName, probe,
@@ -558,10 +558,10 @@ func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurfac
 	}
 }
 
-func (a *APIServer) runtimeAssetIdentityDecision(targetType, name, connector, runtimeSurface string) config.AssetPolicyDecision {
+func (a *APIServer) runtimeAssetIdentityDecision(ctx context.Context, targetType, name, connector, runtimeSurface string) config.AssetPolicyDecision {
 	mode := config.AssetPolicyModeObserve
-	if a != nil && a.scannerCfg != nil && assetRuntimeModeIsAction(
-		a.scannerCfg.EffectiveAssetPolicyModeForConnector(connector),
+	if cfg := a.decisionConfig(ctx); cfg != nil && assetRuntimeModeIsAction(
+		cfg.EffectiveAssetPolicyModeForConnector(connector),
 	) {
 		mode = config.AssetPolicyModeAction
 	}

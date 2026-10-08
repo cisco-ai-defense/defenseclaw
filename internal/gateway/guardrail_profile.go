@@ -1040,7 +1040,11 @@ func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 		return a.scannerCfg
 	}
 	base := a.scannerCfg
-	if g := a.generation(); g != nil && g.Config != nil {
+	g := pinnedGeneration(ctx)
+	if g == nil {
+		g = a.generation()
+	}
+	if g != nil && g.Config != nil {
 		base = g.Config
 	}
 	return a.decisionConfigFrom(ctx, base)
