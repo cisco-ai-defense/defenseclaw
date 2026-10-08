@@ -364,7 +364,11 @@ def check_bind_user(client: Okta, report: Report, login: str) -> None:
     if user is None:
         report.problem("the user does not exist")
         return
-    report.ok(f"exists, status {user.get('status')}")
+    if user.get("status") != "ACTIVE":
+        report.problem(f"bind user is {user.get('status') or 'unknown'}, not ACTIVE",
+                       "Activate the bind user in Okta before using it for SSSD.")
+    else:
+        report.ok("exists, status ACTIVE")
     assigned = client.must("GET", f"/api/v1/users/{user['id']}/roles") or []
     if len(assigned) != 1 or assigned[0].get("type") != "CUSTOM":
         report.problem("bind user must have only one read-only custom role, with no privileged roles",
