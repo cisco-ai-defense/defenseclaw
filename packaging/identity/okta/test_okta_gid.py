@@ -25,3 +25,13 @@ def test_duplicate_group_gid_is_reported_by_check_and_assign(monkeypatch):
                               "primary_group": "strict", "primary_gid": None,
                               "group": [("lenient", None)], "gid_base": 1720000})()
     assert okta.cmd_assign_posix(client, args) == 1
+
+
+def test_group_members_need_complete_posix_profile(monkeypatch):
+    monkeypatch.setattr(okta, "find_group", lambda client, name: {
+        "id": "group", "profile": {"name": name, "gidNumber": 1720000}})
+    client = type("Client", (), {"get_all": lambda self, path: [
+        {"id": "user", "profile": {"login": "user@example.com", "uidNumber": 1710000}}]})()
+    report = okta.Report(False)
+    okta.check_group(client, report, "linux-users", 1720000)
+    assert report.problems == 1
