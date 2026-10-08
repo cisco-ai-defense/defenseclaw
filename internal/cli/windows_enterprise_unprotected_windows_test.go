@@ -325,6 +325,29 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 		t.Fatalf("holders = %+v, message %q; want this process twice and the hidden holder, not the gateway", status.APIPortHolders, message)
 	}
 
+	// GAP-1029: another process answered the readiness probe's /health, so
+	// the report says ready, but the gateway holds no listener: status
+	// still names the holder and the gateway is not ready. With its own
+	// listener present a ready gateway names none.
+	ready := &windowsEnterpriseInstallerReport{Installed: true, OK: true, GatewayReady: true,
+		GatewayService: "DefenseClawGateway", GatewayServiceState: "running"}
+	allListeners := windowsEnterpriseAPIListeners
+	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) {
+		return []daemon.Listener{{Address: "127.0.0.1:18970", PID: hiddenPID}}, nil
+	}
+	fooled := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(fooled, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
+	if len(fooled.Errors) != 1 || fooled.Errors[0].Code != "api_port_held" || fooled.Readiness.Gateway ||
+		len(fooled.APIPortHolders) != 1 || fooled.APIPortHolders[0].PID != hiddenPID {
+		t.Fatalf("probe answered by a holder: errors = %+v readiness = %+v holders = %+v", fooled.Errors, fooled.Readiness, fooled.APIPortHolders)
+	}
+	windowsEnterpriseAPIListeners = allListeners
+	served := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(served, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
+	if len(served.Errors) != 0 || !served.Readiness.Gateway {
+		t.Fatalf("a ready gateway on its own port: errors = %+v readiness = %+v", served.Errors, served.Readiness)
+	}
+
 	// A lifecycle that failed before it read the deployment (a CLI from
 	// another build, GAP-1658) names no gateway service: the installed
 	// DefenseClawGateway service is still not a holder of its own port, and

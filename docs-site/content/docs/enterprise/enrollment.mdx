@@ -18,6 +18,11 @@ work:
   registration into each enrolled user's agent config, and repairs it when
   it changes. It also re-checks every target once a minute.
 
+An agent reads DefenseClaw's hooks when it starts, so an agent session that
+started before DefenseClaw was activated on the computer runs without it
+until the user restarts it; the `ensure` or Setup result, `status` and
+`verify` name such sessions with the `agent_sessions_restart_required` warning.
+
 <Flow
   direction="TB"
   caption="Both are system services that run as root (SYSTEM on Windows), and the manifest is a file only administrators can change. The guardian writes into a user's agent config as that user: through a worker process on Linux and macOS, and under the user's own signed-in session on Windows."

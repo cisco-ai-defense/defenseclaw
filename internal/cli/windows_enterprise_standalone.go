@@ -356,7 +356,9 @@ func runWindowsEnterpriseStandaloneAction(
 		if report.CursorTargetEnabled {
 			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
 		}
-		if report.GatewayReady {
+		// Readiness, not the probe: another process on the port answers
+		// /health too (GAP-1029).
+		if result.Readiness.Gateway {
 			if body, err := windowsStandaloneGatewayHealth(); err == nil {
 				appendStandaloneGatewayWarnings(result, body)
 			}
@@ -1675,7 +1677,7 @@ func finishWindowsEnterpriseStandalone(
 	applyWindowsStandaloneScannerRuntime(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
-	addWindowsEnterpriseAgentSessionWarnings(result)
+	applyWindowsEnterpriseAgentSessions(result, opts)
 	if opts.localEnforcementEntriesIgnored > 0 {
 		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
 			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",

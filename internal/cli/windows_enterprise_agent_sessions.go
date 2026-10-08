@@ -1,98 +1,146 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
 // SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
 
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// windowsAgentSessionsRestartCode names agent sessions that started before
-// the standalone deployment was installed, as on Linux and macOS. An agent
-// reads its hooks when it starts, so a session left open through the first
-// install ran a blocked command while status was healthy (GAP-0755).
+// An agent reads its hooks when it starts. Agents already open when Setup
+// activated DefenseClaw kept running uninspected, and an action-profile user
+// ran a call the profile blocks, while status, verify and the Setup result
+// said nothing (GAP-0967). They now name each such session per account, as
+// the Linux and macOS lifecycles do (agent_sessions_restart_required).
+
 const windowsAgentSessionsRestartCode = "agent_sessions_restart_required"
 
-// windowsAgentImages are the executables of the agent CLIs DefenseClaw
-// registers hooks for.
-var windowsAgentImages = map[string]string{
-	"claude.exe": "claude", "codex.exe": "codex", "cursor-agent.exe": "cursor-agent", "copilot.exe": "copilot",
-	"opencode.exe": "opencode", "amp.exe": "amp", "devin.exe": "devin", "hermes.exe": "hermes",
-	"openhands.exe": "openhands", "omnigent.exe": "omnigent", "agy.exe": "agy", "kiro-cli.exe": "kiro-cli",
+// windowsEnterpriseActivationFileName records, beside deployment.json, when
+// this deployment was activated. deployment.json itself is not extended: an
+// earlier release decodes it strictly and must still read it after a
+// rollback.
+const windowsEnterpriseActivationFileName = "activation-state.json"
+
+type windowsEnterpriseActivationRecord struct {
+	ActivatedAt string `json:"activated_at"`
 }
 
-// windowsAgentScriptHosts run an agent CLI installed as an npm package.
-var windowsAgentScriptHosts = map[string]bool{"node.exe": true, "bun.exe": true, "deno.exe": true}
+// Seams for the deployment record and the running agents; tests replace them.
+var (
+	windowsEnterpriseActivationMetadata = func() (string, bool) {
+		deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+		if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || deployment.MetadataPath == "" {
+			return "", false
+		}
+		return deployment.MetadataPath, true
+	}
+	windowsEnterpriseAgentProcesses = inventory.RunningWindowsAgentProcesses
+)
 
-// windowsAgentPackages are the package folders those hosts run an agent from.
-var windowsAgentPackages = []struct{ fragment, agent string }{
-	{`\@anthropic-ai\claude-code\`, "claude"},
-	{`\@openai\codex\`, "codex"},
-	{`\@github\copilot\`, "copilot"},
-	{`\@sourcegraph\amp\`, "amp"},
-	{`\opencode-ai\`, "opencode"},
+// windowsEnterpriseStandaloneInstalled reports a standalone deployment that
+// is installed now; a change action reads it before it runs.
+func windowsEnterpriseStandaloneInstalled() bool {
+	_, installed := windowsEnterpriseActivationMetadata()
+	return installed
 }
 
-// windowsServiceAccountNames run services, never an agent a user opened.
-var windowsServiceAccountNames = map[string]bool{"": true, "system": true, "local service": true, "network service": true}
-
-// windowsAgentOf names the agent CLI a process runs, or "".
-func windowsAgentOf(image, commandLine string) string {
-	name := strings.ToLower(strings.TrimSpace(image))
-	if agent := windowsAgentImages[name]; agent != "" {
-		return agent
+// applyWindowsEnterpriseAgentSessions records the activation of a deployment
+// a change action just installed, and warns about each account's agent
+// sessions that started before the activation.
+func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	if result == nil || opts == nil || !result.Installed || result.TransactionPending {
+		return
 	}
-	if !windowsAgentScriptHosts[name] {
-		return ""
+	switch result.Action {
+	case "status", "verify", "install", "upgrade", "repair", "ensure":
+	default:
+		return
 	}
-	line := strings.ToLower(strings.ReplaceAll(commandLine, "/", `\`))
-	for _, known := range windowsAgentPackages {
-		if strings.Contains(line, known.fragment) {
-			return known.agent
+	metadata, ok := windowsEnterpriseActivationMetadata()
+	if !ok {
+		return
+	}
+	path := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
+	activated := readWindowsEnterpriseActivation(path)
+	// Only a run that found no deployment and started one activates it. A
+	// host upgraded from a release without the record gets none: its
+	// sessions had hooks already, and a guessed time would name them.
+	if !opts.activationStartedAt.IsZero() && !opts.installedBeforeRun && !opts.noStart && len(result.Errors) == 0 {
+		activated = opts.activationStartedAt.UTC()
+		data, err := json.Marshal(windowsEnterpriseActivationRecord{ActivatedAt: activated.Format(time.RFC3339Nano)})
+		if err == nil {
+			err = writeFileKeepingDACL(path, append(data, '\n'), metadata)
+		}
+		if err != nil {
+			result.AddWarning("activation_unrecorded", "could not record "+windowsEnterpriseActivationFileName+": "+err.Error())
 		}
 	}
-	return ""
-}
-
-// windowsAgentSessionsBefore are the agent CLI processes of user accounts
-// that started before installed.
-func windowsAgentSessionsBefore(rows []procprobe.Process, installed time.Time) map[string][]string {
+	if activated.IsZero() {
+		return
+	}
+	processes, err := windowsEnterpriseAgentProcesses()
+	if err != nil {
+		return
+	}
 	byUser := map[string][]string{}
-	for _, row := range rows {
-		agent := windowsAgentOf(row.Name, row.Cmdline)
-		if agent == "" || row.StartedAt.IsZero() || !row.StartedAt.Before(installed) ||
-			windowsServiceAccountNames[strings.ToLower(strings.TrimSpace(row.User))] ||
-			strings.HasPrefix(strings.ToLower(row.User), "defenseclaw") {
+	for _, process := range processes {
+		user := strings.TrimSpace(process.User)
+		if user == "" || process.StartedAt.IsZero() || !process.StartedAt.Before(activated) || windowsServiceIdentity(user) {
 			continue
 		}
-		byUser[row.User] = append(byUser[row.User], fmt.Sprintf("%s (pid %d)", agent, row.PID))
+		byUser[user] = append(byUser[user], fmt.Sprintf("%s (pid %d)", process.Connector, process.PID))
 	}
-	return byUser
-}
-
-// windowsAgentSessionWarnings is one agent_sessions_restart_required warning
-// per account, in account order.
-func windowsAgentSessionWarnings(byUser map[string][]string, installed time.Time) []enterprisestatus.Message {
 	users := make([]string, 0, len(byUser))
 	for user := range byUser {
 		users = append(users, user)
 	}
 	sort.Strings(users)
-	warnings := make([]enterprisestatus.Message, 0, len(users))
 	for _, user := range users {
-		warnings = append(warnings, enterprisestatus.Message{
-			Code: windowsAgentSessionsRestartCode,
-			Message: fmt.Sprintf(
-				"user %s runs %s, started before DefenseClaw was installed on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them",
-				user, strings.Join(byUser[user], ", "), installed.UTC().Format(time.RFC3339)),
-		})
+		result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+			"user %s runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them",
+			user, strings.Join(byUser[user], ", "), activated.Format(time.RFC3339)))
 	}
-	return warnings
+}
+
+func readWindowsEnterpriseActivation(path string) time.Time {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) > 4096 {
+		return time.Time{}
+	}
+	var record windowsEnterpriseActivationRecord
+	if json.Unmarshal(data, &record) != nil {
+		return time.Time{}
+	}
+	activated, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(record.ActivatedAt))
+	if err != nil {
+		return time.Time{}
+	}
+	return activated
+}
+
+// windowsServiceIdentity reports a built-in service or system account,
+// which no agent session of a user runs as.
+func windowsServiceIdentity(user string) bool {
+	domain, _, found := strings.Cut(user, `\`)
+	if !found {
+		return false
+	}
+	switch strings.ToUpper(domain) {
+	case "NT AUTHORITY", "NT SERVICE", "WINDOW MANAGER", "FONT DRIVER HOST":
+		return true
+	}
+	return false
 }

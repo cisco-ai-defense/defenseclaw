@@ -21,6 +21,9 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body []byt
 				FailureSummary string `json:"optional_destination_failure_summary"`
 			} `json:"details"`
 		} `json:"telemetry"`
+		Guardrail *struct {
+			Details enterprisestatus.JudgeHealth `json:"details"`
+		} `json:"guardrail"`
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
@@ -28,6 +31,13 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body []byt
 	for _, warning := range health.ProfileAssignmentWarnings {
 		if strings.TrimSpace(warning) != "" {
 			result.AddWarning("profile_assignment_unmatched", warning)
+		}
+	}
+	// A rejected judge key made every judge call fail while status and
+	// verify said the scanners and judge were ready (GAP-1026).
+	if g := health.Guardrail; g != nil {
+		if message, failing := g.Details.Warning(); failing {
+			result.AddWarning(enterprisestatus.CodeJudgeFailing, message)
 		}
 	}
 	if health.Telemetry.Details.OptionalState == "degraded" {

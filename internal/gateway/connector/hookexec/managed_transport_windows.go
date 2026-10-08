@@ -108,12 +108,15 @@ func managedEnterpriseHTTPClient(
 				if err != nil {
 					return nil, managedGatewayPeerError("resolve connected listener owner: %v", err)
 				}
-				if connectedPID == 0 || connectedPID != servicePID {
-					return nil, managedGatewayPeerError(
-						"connected listener PID %d does not equal service PID %d",
-						connectedPID,
-						servicePID,
-					)
+				if connectedPID == 0 {
+					return nil, managedGatewayPeerError("connected listener PID 0 does not equal service PID %d", servicePID)
+				}
+				if connectedPID != servicePID {
+					// The service runs, but another process answers on its
+					// port: the hook names the port, not a stopped service
+					// (GAP-1029).
+					return nil, fmt.Errorf("%w: %w: connected listener PID %d does not equal service PID %d",
+						errManagedGatewayPeerUnverified, errManagedGatewayPortHeld, connectedPID, servicePID)
 				}
 				recheckedPID, err := managedEnterpriseQueryServicePID(serviceName)
 				if err != nil {

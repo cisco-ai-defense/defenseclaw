@@ -72,6 +72,10 @@ var (
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
 	errManagedHookSocketSELinuxDenied = errors.New("SELinux denied this account access to the DefenseClaw hook socket")
+	// errManagedGatewayPortHeld wraps a peer-verification failure whose
+	// cause is that the gateway service runs but another process listens on
+	// its API port (Windows). The hook still fails closed.
+	errManagedGatewayPortHeld = errors.New("another process holds the enterprise managed gateway API port")
 )
 
 // managedHookSocketSELinuxDeniedReason is the hook-failure reason of a Unix
@@ -85,6 +89,12 @@ const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unve
 // standalone managed hook whose gateway service is stopped, instead of
 // managedGatewayPeerUnverifiedReason. Secure Client keeps the latter.
 const managedGatewayNotRunningReason = "enterprise_managed_gateway_not_running"
+
+// managedGatewayPortHeldReason is the hook-failure reason of a Windows
+// standalone managed hook that reached another process on the gateway API
+// port while the gateway service runs: it said the service was not running
+// (GAP-1029). Secure Client keeps managedGatewayPeerUnverifiedReason.
+const managedGatewayPortHeldReason = "enterprise_managed_gateway_port_held"
 
 const (
 	codexBoundEventHeader    = "X-DefenseClaw-Hook-Event"
@@ -1505,9 +1515,10 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	if reason == managedUIDUnregisteredReason {
 		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
 	}
-	if reason == managedGatewayNotRunningReason {
-		// Only a standalone hook gets this reason (managedPeerFailureReason,
-		// the foreign-hook guard); say the service is stopped and who starts it.
+	if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason {
+		// Only a standalone hook gets these reasons (managedPeerFailureReason,
+		// the foreign-hook guard); say the service is stopped and who starts
+		// it, or that another program holds its port.
 		text = managedStandaloneFailClosedText(opts.Event, "transport", reason)
 	}
 	message := mustJSONString(text)
@@ -1723,6 +1734,9 @@ func managedPeerFailureReason(opts Options, err error) string {
 	if managedStandaloneHook(opts) && errors.Is(err, errManagedHookSocketSELinuxDenied) {
 		return managedHookSocketSELinuxDeniedReason
 	}
+	if opts.ExplainUnenrolledAccount && errors.Is(err, errManagedGatewayPortHeld) {
+		return managedGatewayPortHeldReason
+	}
 	return managedGatewayPeerUnverifiedReason
 }
 
@@ -1740,6 +1754,27 @@ var ErrManagedGatewayNotRunning = errManagedGatewayNotRunning
 // socket.
 func ManagedGatewayNotRunning(err error) bool {
 	return errors.Is(err, errManagedGatewayNotRunning)
+}
+
+// ManagedGatewayPortHeldReason is the reason code of a Windows standalone
+// managed hook that found another process on the gateway API port.
+const ManagedGatewayPortHeldReason = managedGatewayPortHeldReason
+
+// ManagedGatewayPortHeld reports a managed hook transport error that means
+// another process holds the gateway API port while the service runs.
+func ManagedGatewayPortHeld(err error) bool {
+	return errors.Is(err, errManagedGatewayPortHeld)
+}
+
+// ManagedTransportFailureText is the plain text of a standalone hook that
+// failed closed because its gateway is stopped or its port is held, for a
+// caller that shows the guard's reason as is (the OpenCode plugin); ok is
+// false for any other reason.
+func ManagedTransportFailureText(event, reason string) (string, bool) {
+	if reason != managedGatewayNotRunningReason && reason != managedGatewayPortHeldReason {
+		return "", false
+	}
+	return managedStandaloneFailClosedText(event, "transport", reason) + " (" + reason + ")", true
 }
 
 // failManagedStandaloneClosed delivers a Unix standalone managed hook's
@@ -1807,6 +1842,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 			// The service is also stopped while a lifecycle transaction is
 			// pending, which starting it does not fix (GAP-0509).
 			"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do."
+	case reason == managedGatewayPortHeldReason:
+		cause, advice = "another program is using the DefenseClaw gateway's port on this computer, so DefenseClaw cannot check it",
+			"Ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names the program."
 	case reason == ManagedUserNamespaceReason:
 		// The setup is fine; the agent's process is the problem (GAP-0923).
 		cause, advice = "this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket",

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/spf13/cobra"
@@ -130,6 +131,11 @@ type windowsEnterpriseLifecycleOptions struct {
 	// ensure. They go to the lifecycle log, not next to the JSON result an
 	// MDM parses.
 	diagnostics []string
+	// activationStartedAt is when a standalone change action started, and
+	// installedBeforeRun whether a deployment was installed then: a run
+	// that installs one records its activation (GAP-0967).
+	activationStartedAt time.Time
+	installedBeforeRun  bool
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -391,6 +397,10 @@ func runWindowsEnterpriseLifecycle(
 		}
 		if err := windowsEnterpriseStandaloneHostValidator(); err != nil {
 			return failPreflight(err)
+		}
+		if action == "install" || action == "upgrade" || action == "repair" || action == "ensure" {
+			opts.activationStartedAt = time.Now().UTC()
+			opts.installedBeforeRun = windowsEnterpriseStandaloneInstalled()
 		}
 	}
 	// The Secure Client profile keeps its historical preflight text exactly;

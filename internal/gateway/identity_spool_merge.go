@@ -6,6 +6,7 @@ package gateway
 import (
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -161,4 +162,65 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	}
 	merged.Assurance = useridentity.AssuranceVerified
 	return merged
+}
+
+// spoolGroupsCheckInterval is how often a request re-reads an account's
+// guardian identity record to see whether its group set changed.
+const spoolGroupsCheckInterval = 5 * time.Second
+
+var spoolGroupChecks struct {
+	sync.Mutex
+	at map[string]time.Time
+}
+
+// forgetOnSpoolGroupChange drops key's cached facts when the guardian's
+// identity record lists another group set than the one they were built
+// from. On Windows the groups come from the account's sign-in token: after a
+// user signed out and in again the enumerator recorded the new groups at
+// once and `profile-explain` showed them, while hooks kept the cached old
+// ones for up to 15 more minutes (GAP-1027). A new sign-in now applies at the
+// next request, and explain and the hooks agree. The record is read at most
+// every spoolGroupsCheckInterval per account.
+func forgetOnSpoolGroupChange(cache *identityDirectoryCache, key string, now time.Time) {
+	if cache == nil || key == "" || currentIdentitySpoolDir() == "" {
+		return
+	}
+	cached, _, ok := cache.peek(key)
+	if !ok {
+		return
+	}
+	spoolGroupChecks.Lock()
+	if last, seen := spoolGroupChecks.at[key]; seen && now.Sub(last) >= 0 && now.Sub(last) < spoolGroupsCheckInterval {
+		spoolGroupChecks.Unlock()
+		return
+	}
+	if spoolGroupChecks.at == nil || len(spoolGroupChecks.at) >= identityDirectoryMax {
+		spoolGroupChecks.at = map[string]time.Time{}
+	}
+	spoolGroupChecks.at[key] = now
+	spoolGroupChecks.Unlock()
+	record, ok := readIdentitySpoolFacts(key, now)
+	if !ok {
+		return
+	}
+	if cached.GroupsPartial != record.Facts.GroupsPartial || !sameGroupSet(cached.Groups, record.Facts.Groups) {
+		cache.forget(key)
+	}
+}
+
+// sameGroupSet compares two group lists as sets, ignoring case and order.
+func sameGroupSet(a, b []string) bool {
+	set := make(map[string]bool, len(a))
+	for _, group := range a {
+		set[strings.ToLower(strings.TrimSpace(group))] = true
+	}
+	other := make(map[string]bool, len(b))
+	for _, group := range b {
+		group = strings.ToLower(strings.TrimSpace(group))
+		if !set[group] {
+			return false
+		}
+		other[group] = true
+	}
+	return len(other) == len(set)
 }

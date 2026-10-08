@@ -50,6 +50,24 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 	if err := windowsEnterpriseStandaloneConfigSource(configPath); err != nil {
 		return err
 	}
+	// A destination secret read from an environment variable never
+	// resolves in the gateway service, whose environment the lifecycle
+	// writes. It passed this check, Setup stopped the services, the gateway
+	// failed to start and the rollback ended with 1603 after almost five
+	// minutes, advising the per-user `defenseclaw keys set` (GAP-0966).
+	if raw, err := os.ReadFile(configPath); err == nil {
+		if refusal, found := config.ScanManagedEnvSecretReferences(raw).Refusal(configPath,
+			"from an elevated prompt with `defenseclaw.exe enterprise secret set --name <name> --from-file <key file>`",
+			config.EnterpriseSettingsReferenceURL); found {
+			return fmt.Errorf("%s; fix it and run again (nothing was changed)", refusal)
+		}
+	}
+	return windowsEnterpriseStandaloneConfigCompile(configPath)
+}
+
+// windowsEnterpriseStandaloneConfigCompile proves the gateway service can
+// load configPath, with the pins it starts with.
+func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()
 	if err != nil {
 		return nil
@@ -92,7 +110,13 @@ func windowsEnterpriseStandaloneKeptConfigPreflight() error {
 	if err != nil || config.NeedsMigrationV9(raw) {
 		return nil
 	}
-	return windowsEnterpriseStandaloneConfigPreflight(layout.ConfigPath)
+	// The installed config is the one the gateway runs now: only the
+	// compile is checked, so an upgrade is never refused for a reference
+	// the running gateway resolves.
+	if err := windowsEnterpriseStandaloneConfigSource(layout.ConfigPath); err != nil {
+		return err
+	}
+	return windowsEnterpriseStandaloneConfigCompile(layout.ConfigPath)
 }
 
 // windowsEnterpriseStandaloneRulePackTrust is managed.ValidateTrustedRulePackTree;
