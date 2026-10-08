@@ -132,6 +132,9 @@ type HookConfigGuard struct {
 	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
 	// every audit tick while still reporting a changed failure immediately.
 	lastPolicyFailure string
+	// A failed fail-mode re-render is retried by the policy audit even for
+	// hook-only connectors that have no periodic registration audit.
+	pendingPolicyRefresh bool
 	// supersededSince is when a newer setup selection was first seen.
 	supersededSince time.Time
 	// busyRepairs counts consecutive repairs that failed on a busy connector
@@ -642,6 +645,7 @@ func (g *HookConfigGuard) repairCurrent(
 	// installedFailMode is the hook fail mode the connector's hooks were last
 	// rendered with; the resolver below replaces it with the current one.
 	installedFailMode := strings.ToLower(strings.TrimSpace(opts.HookFailMode))
+	renderedOpts := opts
 	var releasePolicy func()
 	if policyResolver != nil {
 		policy, release, ok := policyResolver(conn.Name())
@@ -754,8 +758,15 @@ func (g *HookConfigGuard) repairCurrent(
 	} else {
 		err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
 	}
-	if err == nil && policyResolver != nil {
-		g.adoptRenderedPolicy(opts)
+	if policyResolver != nil {
+		if err == nil {
+			g.adoptRenderedPolicy(opts)
+		} else {
+			// Setup can resync watcher targets before reporting failure. Keep
+			// the recorded fail mode at the last successfully rendered value
+			// so the next audit still sees the drift.
+			g.adoptRenderedPolicy(renderedOpts)
+		}
 	}
 	outcome := hookGuardRepairOutcome{
 		connector: conn.Name(),
@@ -786,9 +797,15 @@ func (g *HookConfigGuard) RefreshPolicy(ctx context.Context) error {
 	for {
 		err := g.repairCurrent(ctx, "", "", []string{"effective hook policy changed"})
 		if !errors.Is(err, errHookRepairSuppressed) {
+			g.mu.Lock()
+			g.pendingPolicyRefresh = err != nil && g.started && !g.retiring
+			g.mu.Unlock()
 			return err
 		}
 		if err := g.waitSuppressionWindow(ctx); err != nil {
+			g.mu.Lock()
+			g.pendingPolicyRefresh = g.started && !g.retiring
+			g.mu.Unlock()
 			return err
 		}
 	}
@@ -978,6 +995,8 @@ func (g *HookConfigGuard) processPolicyAudit() {
 	g.mu.Lock()
 	conn := g.conn
 	opts := g.opts
+	ctx := g.ctx
+	pendingRefresh := g.pendingPolicyRefresh
 	suppressed := time.Now().Before(g.suppressUntil)
 	if !suppressed && conn != nil && conn.Name() == "claudecode" {
 		// Recompute targets so newly created managed/project directories and
@@ -985,7 +1004,14 @@ func (g *HookConfigGuard) processPolicyAudit() {
 		g.applyTargetsLocked(conn, opts)
 	}
 	g.mu.Unlock()
-	if suppressed || conn == nil || (conn.Name() != "claudecode" && conn.Name() != "codex") {
+	if suppressed || conn == nil {
+		return
+	}
+	if pendingRefresh {
+		_ = g.RefreshPolicy(ctx)
+		return
+	}
+	if conn.Name() != "claudecode" && conn.Name() != "codex" {
 		return
 	}
 	reason := "periodic effective-policy audit"
