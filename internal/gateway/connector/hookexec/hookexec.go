@@ -685,6 +685,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			opts.Event = resolveHookEvent("", payload)
 		}
 		return failForeignHookBlocked(opts, sp, surfaceUnverifiedText(opts))
+	case resp.StatusCode == http.StatusForbidden && managedStandaloneHook(opts) &&
+		refusalReason(body) == managedUIDUnregisteredReason:
+		// The gateway is up and refuses an account the enumerator has not
+		// enrolled yet (or the policy excludes): say so, not "HTTP 403"
+		// (GAP-0738).
+		if strings.TrimSpace(opts.Event) == "" {
+			opts.Event = resolveHookEvent("", payload)
+		}
+		return failUnenrolled(opts, sp, managedUIDUnregisteredReason)
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
@@ -1331,6 +1340,16 @@ const managedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 // account, but it has not signed in since, so it has no runtime yet.
 const managedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
 
+// managedUIDUnregisteredReason is the Unix standalone gateway refusal of an
+// account that is not enrolled (internal/gateway managedHookReasonUIDUnregistered).
+const managedUIDUnregisteredReason = "enterprise_managed_uid_unregistered"
+
+// unixUnenrolledAccountExplanation is why the call of an account the Linux or
+// macOS enumerator has not enrolled is blocked.
+const unixUnenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer yet. " +
+	"DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; " +
+	"if this continues, the policy may exclude this account, so ask your administrator"
+
 // unenrolledAccountExplanation is why an unenrolled account's call is blocked.
 const unenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer; the administrator's " +
 	"policy has not enrolled it yet or excludes it. Windows enrolls an account while it is signed in to the desktop " +
@@ -1348,8 +1367,12 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, unenrolledAccountExplanation, reason)
-	explanation := "DefenseClaw: " + unenrolledAccountExplanation
+	why := unenrolledAccountExplanation
+	if reason == managedUIDUnregisteredReason {
+		why = unixUnenrolledAccountExplanation
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, why, reason)
+	explanation := "DefenseClaw: " + why
 	if sp.connector == "codex" {
 		return emitCodexBlock(opts, explanation)
 	}
@@ -1413,6 +1436,9 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 		return 0, false
 	}
 	text := managedCopilotDenyMessage(reason)
+	if reason == managedUIDUnregisteredReason {
+		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
+	}
 	if reason == managedGatewayNotRunningReason {
 		// Only a standalone hook gets this reason (managedPeerFailureReason,
 		// the foreign-hook guard); say the service is stopped and who starts it.

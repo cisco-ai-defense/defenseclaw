@@ -186,6 +186,29 @@ func TestStandaloneHookSocketMissingSaysGatewayStopped(t *testing.T) {
 	}
 }
 
+// GAP-0738: the gateway refuses an account its enumerator has not enrolled
+// yet with 403 enterprise_managed_uid_unregistered. The hook says the
+// account is not enrolled yet and when that changes, not "HTTP 403".
+func TestStandaloneHookUnenrolledAccountSaysSo(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":"forbidden","reason":"enterprise_managed_uid_unregistered"}`)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	result := standaloneRun(t, socket, os.Getuid())
+	out := result.stdout + result.stderr
+	if result.code == 0 || !strings.Contains(out, "not enrolled in DefenseClaw on this computer yet") || strings.Contains(out, "HTTP 403") {
+		t.Fatalf("unenrolled account: exit %d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 func TestValidateStandaloneHookSocketPath(t *testing.T) {
 	dir := shortSocketDir(t)
 	regular := filepath.Join(dir, "file")

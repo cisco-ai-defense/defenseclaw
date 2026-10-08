@@ -920,6 +920,16 @@ defenseclaw_api_listener_foreign() {
 }
 
 defenseclaw_response_failure_reason() {
+  # A standalone gateway refuses an account its enumerator has not enrolled
+  # yet: say so instead of "HTTP 403" (GAP-0738). RESULT is the body.
+  if [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ]; then
+    case "$1|${RESULT:-}" in
+      *"HTTP 403"*"|"*enterprise_managed_uid_unregistered*)
+        printf '%s' 'this account is not enrolled in DefenseClaw on this computer yet. DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; if this continues, the policy may exclude this account, so ask your administrator (enterprise_managed_uid_unregistered)'
+        return 0
+        ;;
+    esac
+  fi
   case "$1" in
     *"HTTP 401"*|*"HTTP 403"*)
       if defenseclaw_own_gateway_stopped; then
