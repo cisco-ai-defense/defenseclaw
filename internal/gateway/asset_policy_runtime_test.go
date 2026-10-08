@@ -760,6 +760,34 @@ func TestCodexReadOfDeniedSkillFolderIsBlocked(t *testing.T) {
 	}
 }
 
+// GAP-0798: project skill folders (<project>\.claude\skills,
+// <project>\.agents\skills) get no install admission, inside or outside the
+// profile; a denied name is refused at the hook there too, with
+// runtime_detection off: Claude Code's Skill call in the project and Codex
+// reading the project skill's SKILL.md.
+func TestDeniedSkillInAProjectFolderIsRefused(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-two-e"}}
+	api := &APIServer{scannerCfg: cfg}
+	project := filepath.Join(t.TempDir(), "p3")
+	if err := os.MkdirAll(filepath.Join(project, ".claude", "skills", "epa-two-e"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: t.TempDir()})
+	claude := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Skill", CWD: project,
+		ToolInput: map[string]interface{}{"skill": "epa-two-e"}}
+	if decision, matched := api.claudeCodeSkillAssetDecision(ctx, claude); !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+		t.Fatalf("claude: matched=%v decision=%+v, want an admin-deny block", matched, decision)
+	}
+	for _, command := range []string{`Get-Content .agents\skills\epa-two-e\SKILL.md`, `type C:\work\pw1\p3\.claude\skills\epa-two-e\SKILL.md`} {
+		decision, matched := api.codexSkillAssetDecision(ctx, codexHookRequest{HookEventName: "PreToolUse", ToolName: "Bash", CWD: project,
+			ToolInput: map[string]interface{}{"command": command}})
+		if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+			t.Fatalf("codex %q: matched=%v decision=%+v, want an admin-deny block", command, matched, decision)
+		}
+	}
+}
+
 // GAP-0576: on a standalone gateway a url rule matches the server the
 // caller's agent configures: read in the caller's home, or, where the
 // gateway may not read it, as the standalone hook reported it.
