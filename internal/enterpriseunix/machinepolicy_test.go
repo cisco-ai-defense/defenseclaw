@@ -589,3 +589,43 @@ func TestRepairFailsOnAnUnparseableCodexRequirementsLine(t *testing.T) {
 		t.Fatalf("repair does not name the line to fix: %s", got)
 	}
 }
+
+// Under ownership verify_only a deleted requirements.toml was reported as
+// "run repair", which never writes it, and the exported file deployed by hand
+// stayed unused until a repair (GAP-0536).
+func TestVerifyOnlyCodexNamesTheExportAndEnsureAppliesItsReturn(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	exported := h.read(codexRequirements)
+	verifyOnly := strings.Replace(h.read(h.env.Layout.ConfigPath), "  profile: standalone\n",
+		"  profile: standalone\n  machine_policy:\n    connectors:\n      codex:\n        ownership: verify_only\n", 1)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(file, []byte(verifyOnly), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: file}))
+	writeFreshLedger(t, h)
+	if err := os.Remove(h.env.P(codexRequirements)); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, "missing_defenseclaw_hooks") || !strings.Contains(got, "policy export --connector codex") {
+		t.Fatalf("verify does not name the export: %s", got)
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if exists(h.env.P(codexRequirements)) {
+		t.Fatal("repair wrote a verify_only file")
+	}
+	if err := os.WriteFile(h.env.P(codexRequirements), []byte(exported), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := h.run(Options{Action: ActionStatus}); !strings.Contains(messagesOf(status.Warnings, codeMachinePolicyIncomplete), "does not use them yet") {
+		t.Fatalf("status does not say the returned hooks need ensure: %+v", status.Warnings)
+	}
+	if applied := h.run(Options{Action: ActionEnsure}); applied.Noop {
+		t.Fatal("ensure ignored the returned hooks")
+	}
+	if record, _ := h.env.loadDeployment(); !contains(record.MachinePolicyConnectors, "codex") {
+		t.Fatalf("record machine policy connectors %v", record.MachinePolicyConnectors)
+	}
+}

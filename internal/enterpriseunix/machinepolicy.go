@@ -211,6 +211,15 @@ func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, re
 		if err != nil {
 			message += ": " + err.Error()
 		}
+		for _, name := range intended {
+			if !contains(covered, name) && !contains(skip, name) {
+				for _, state := range result.States {
+					if state.Connector == name && state.Ownership == config.MachinePolicyOwnershipVerifyOnly {
+						message += fmt.Sprintf("; %s: ownership verify_only, so DefenseClaw never writes it: deploy the output of `enterprise policy export --connector %s` (missing_defenseclaw_hooks), then run ensure", name, name)
+					}
+				}
+			}
+		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
 	} else if err != nil && len(skip) == 0 {
 		r.AddWarning(codeMachinePolicyIncomplete, err.Error())
@@ -306,7 +315,11 @@ func (l *lifecycle) machinePolicyDrift(p *plan) bool {
 	if isCoded(err, codeMachinePolicy) {
 		return true
 	}
+	// A connector whose hooks came back (the administrator deployed the
+	// export of a verify_only file) is applied too, so the gateway uses them
+	// (GAP-0536).
 	return !sameStrings(coveredMachinePolicy(p.machinePolicy, result), p.machinePolicy) ||
+		!sameStrings(coveredMachinePolicy(p.intended, result), p.machinePolicy) ||
 		missingClaudeVersionFloor(result) != ""
 }
 
@@ -371,11 +384,28 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		message := fmt.Sprintf(
 			"vendor machine policy for %s no longer carries the DefenseClaw hooks the last transaction placed, so %s runs without them; run `%s` to restore them",
 			machinePolicyLabel(name, result), name, env.lifecycleCommand("repair"))
+		if export := env.verifyOnlyExport(name, result); export != "" {
+			// repair never writes a file the administrator owns (GAP-0536).
+			message = fmt.Sprintf("vendor machine policy for %s no longer carries the DefenseClaw hooks, so %s runs without them; %s",
+				machinePolicyLabel(name, result), name, export)
+		}
 		if index == 0 && verifyErr != nil {
 			message += " (" + verifyErr.Error() + ")"
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
 		gone = append(gone, message)
+	}
+	// Hooks that came back after the last transaction left the connector out
+	// (the administrator deployed the export of a verify_only file) are not
+	// used until ensure applies them (GAP-0536).
+	if record != nil && record.MachinePolicyConnectors != nil {
+		for _, name := range coveredMachinePolicy(intended, result) {
+			if !contains(record.MachinePolicyConnectors, name) {
+				r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
+					"DefenseClaw hooks are in place in vendor machine policy for %s again, but the running deployment does not use them yet; run `%s` to apply them",
+					machinePolicyLabel(name, result), env.lifecycleCommand(ActionEnsure)))
+			}
+		}
 	}
 	// DefenseClaw's entries in place protect nothing when a higher-precedence
 	// source outranks them (a com.anthropic.claudecode or com.openai.codex
@@ -473,6 +503,20 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 
 // claudeVersionFloorConflict starts every Claude Code version floor conflict.
 const claudeVersionFloorConflict = "Claude Code version floor: "
+
+// verifyOnlyExport is the remedy for a connector whose vendor file DefenseClaw
+// only verifies (ownership verify_only): the administrator deploys the
+// export, then runs ensure so the deployment uses the hooks again. It is ""
+// for a file DefenseClaw writes, which repair restores.
+func (e *Env) verifyOnlyExport(connector string, result enterprisepolicy.Result) string {
+	for _, state := range result.States {
+		if state.Connector == connector && state.Ownership == config.MachinePolicyOwnershipVerifyOnly {
+			return fmt.Sprintf("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only), so repair does not restore it; deploy the output of `%s enterprise policy export --connector %s` through your policy tool, then run `%s`",
+				filepath.Join(e.Layout.BinDir, binGateway), connector, e.lifecycleCommand(ActionEnsure))
+		}
+	}
+	return ""
+}
 
 // machinePolicyIncomplete reports whether the result warns that a vendor
 // machine policy does not protect a connector, which security_complete
