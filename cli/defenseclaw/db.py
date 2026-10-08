@@ -1497,7 +1497,7 @@ class Store:
             self._safe_json_extract(payload, f'$."defenseclaw.{key}"')
             for key in (
                 "guardrail.effective_action", "guardrail.would_block", "guardrail.mode", "acp.method", "acp.client",
-                "guardrail.raw_action",
+                "guardrail.raw_action", "sandbox.name",
             )
         )
         cur = self.db.execute(
@@ -1512,7 +1512,13 @@ class Store:
             ids,
         )
         out: dict[str, list[str]] = {}
-        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw in cur.fetchall():
+        rows = cur.fetchall()
+        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw, sandbox in rows:
+            # Only the hook decision of the request names the sandbox whose
+            # session raised the finding (GAP-0232); names hold no spaces.
+            sandbox = str(sandbox or "").strip()
+            if sandbox and not any(ch.isspace() for ch in sandbox):
+                out.setdefault(alert_id, []).append(f"sandbox={sandbox}")
             if action == "connector-hook":
                 out.setdefault(alert_id, []).append(details or "")
             elif action.startswith("inspect-tool-"):

@@ -392,6 +392,8 @@ def _finding_facts(
         "location": _readable_location(structured.get("defenseclaw.finding.location"), target),
         "route": _acp_route(hook_details.get(e.id, [])),
         "path": scanned.get("path", "") if scanned.get("path", "") != target else "",
+        # GAP-0232: a finding raised in a sandbox session names the sandbox.
+        "sandbox": next((s for raw in hook_details.get(e.id, []) if (s := _kv(raw).get("sandbox", ""))), ""),
     }
     return facts
 
