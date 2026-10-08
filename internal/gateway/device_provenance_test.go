@@ -101,7 +101,8 @@ func TestLoadOrCreateIdentityRefusesOrphanedContinuityState(t *testing.T) {
 
 	if _, err := LoadOrCreateIdentity(keyFile); err == nil {
 		t.Fatal("LoadOrCreateIdentity succeeded with orphaned continuity state")
-	} else if !strings.Contains(err.Error(), "continuity-aware recovery") {
+	} else if !strings.Contains(err.Error(), "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize") {
+		// GAP-0323: the guidance names a command that exists.
 		t.Fatalf("orphan refusal lacks recovery guidance: %v", err)
 	}
 	if _, err := os.Lstat(keyFile); !os.IsNotExist(err) {
