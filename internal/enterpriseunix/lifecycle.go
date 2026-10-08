@@ -861,7 +861,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		code := errorCode(err, codeApply)
 		r.AddError(code, err.Error())
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
-			l.revertRejectedConfig(record, committedConfig, nil)
+			l.revertRejectedConfig(record, committedConfig, nil, err.Error())
 		}
 		if record != nil {
 			// Refused before any change: the running deployment is untouched,
@@ -967,7 +967,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// The snapshot of an in-place edit holds the edited bytes; the
 			// previous deployment's config is the last applied copy. It goes
 			// back before the services restart.
-			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw) }
+			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, revertConfig)
 		if newerConfig != nil {
