@@ -344,6 +344,7 @@ def test_pre_upgrade_operator_pack_keeps_its_builtin_id(tmp_path):
         encoding="utf-8",
     )
 
-    signatures = [sig for sig in load_ai_signatures(data_dir=tmp_path) if sig.id == "jetbrains-ai"]
+    pack = str(packs / "operator-jetbrains.json")
+    signatures = [sig for sig in load_ai_signatures(signature_packs=[pack]) if sig.id == "jetbrains-ai"]
 
     assert [sig.name for sig in signatures] == ["Operator JetBrains"]
