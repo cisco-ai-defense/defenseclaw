@@ -108,8 +108,10 @@ def test_windows_reports_the_platform_limit(monkeypatch) -> None:
     monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "windows")
     result = _DoctorResult()
     _check_sandbox(_cfg(True), result)
-    assert _rows(result) == [("warn", "Sandboxes", "doctor.sandbox.platform")]
-    assert "Linux and macOS only" in result.checks[0]["detail"]
+    # GAP-0246: skipped, not a warning, whatever openshell.enabled holds.
+    assert _rows(result) == [("skip", "Sandboxes", "doctor.sandbox.platform")]
+    assert result.checks[0]["detail"].endswith("Linux and macOS only; Windows and WSL2 are not supported; "
+                                               "openshell.enabled has no effect here")
 
 
 def test_a_missing_gateway_fails_with_the_upgrade_hint(monkeypatch) -> None:

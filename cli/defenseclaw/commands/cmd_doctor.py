@@ -1193,10 +1193,13 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
     # Identity check: a stand-in config object must not read as enabled.
     enabled = getattr(openshell, "enabled", False) is True
     if host_os() == "windows":
+        # Skipped whatever openshell.enabled holds: a team config can carry
+        # it from Linux or macOS, and the platform wins (GAP-0246).
         _emit(
-            "warn" if enabled else "skip",
+            "skip",
             "Sandboxes",
-            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported",
+            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"
+            + ("; openshell.enabled has no effect here" if enabled else ""),
             r=r,
             check_id="doctor.sandbox.platform",
             reason_code="sandbox-platform-unsupported",
