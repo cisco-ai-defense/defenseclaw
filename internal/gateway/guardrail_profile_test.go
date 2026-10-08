@@ -175,6 +175,32 @@ func TestGuardrailProfileTelemetryBoundsTheMatchedGroup(t *testing.T) {
 	}
 }
 
+func TestGuardrailWaitsForAPIProfilePublication(t *testing.T) {
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	liveGuardrailProfiles.Store(nil)
+	s := &Sidecar{apiProfilesReady: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- s.waitForAPIProfilePublication(t.Context()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("guardrail started before API profile publication: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	cfg.Guardrail.DefaultProfile = "strict"
+	api := newAPIServer(nil, "127.0.0.1:0", nil, nil, nil, nil, cfg)
+	s.setAPIServer(api)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if set := liveGuardrailProfiles.Load(); set == nil || set.defaultProfile != "strict" {
+		t.Fatal("guardrail started without the action profile")
+	}
+}
+
 // The guardrail proxy scans the requests a profile selects with the
 // profile's rule pack, under the posture that pack implies, and applies its
 // HILT, as explain says it does (GAP-0313).

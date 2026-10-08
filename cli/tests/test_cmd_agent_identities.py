@@ -119,6 +119,23 @@ def test_identity_filters_name_empty_results_and_reject_invalid_inputs(monkeypat
     assert huge.exit_code != 0 and "limit too large" in huge.output
 
 
+def test_identity_no_match_reports_followup_gateway_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import requests
+
+    class RestartingClient:
+        def agent_identities_all(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"enabled": True, "identities": [], "total": 0}
+
+        def agent_identities(self, **_kwargs: Any) -> dict[str, Any]:
+            raise requests.ConnectionError("gateway restarted")
+
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: RestartingClient())
+    result = CliRunner().invoke(cli, ["agent", "identities", "--user", "unknown"])
+    assert result.exit_code != 0
+    assert "gateway is not running" in result.output.lower()
+    assert isinstance(result.exception, SystemExit)
+
+
 def test_identity_table_uses_cell_width_and_removes_control_characters() -> None:
     row = {**_ROW, "user_name": "李雷	name"}
     rendered = cmd_agent._render_agent_identities([row])
