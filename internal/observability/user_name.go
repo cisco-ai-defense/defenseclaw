@@ -5,6 +5,7 @@ package observability
 
 import (
 	"strings"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 
@@ -35,4 +36,34 @@ func OptionalUserName(name string) Optional[string] {
 		}
 	}
 	return Present(name)
+}
+
+// unicodeUserNames turns on the Unicode account-name rule for every producer
+// of defenseclaw.user.name. The gateway sets it from its identity posture: it
+// is off under the Secure Client integration, where every record keeps the
+// ASCII rule of its producer byte for byte (issue #1092).
+var unicodeUserNames atomic.Bool
+
+// SetUnicodeUserNames records whether account names in any script are kept.
+func SetUnicodeUserNames(v bool) { unicodeUserNames.Store(v) }
+
+// UserName is the one defenseclaw.user.name normaliser every producer uses
+// (GAP-0587, GAP-0822). A name with a non-ASCII character goes through
+// OptionalUserName while Unicode names are on; an ASCII name, and every name
+// while they are off, keeps the rule of the producer, so those records do not
+// change.
+func UserName(name string, ascii func(string) Optional[string]) Optional[string] {
+	if unicodeUserNames.Load() && !isASCII(name) {
+		return OptionalUserName(name)
+	}
+	return ascii(name)
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }

@@ -97,3 +97,29 @@ func TestIdentitySpoolReportsFailedAccount(t *testing.T) {
 		t.Fatal("failed account lookup was reported as a successful spool pass")
 	}
 }
+
+// GAP-0921: the gateway trusts a record by its wall-clock age, so a clock
+// step forward (records look hours old) or back (records dated in the future)
+// makes the records stale, and the guardian rewrites them at its next tick.
+func TestIdentitySpoolStaleAfterAClockStep(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "94401103.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, tc := range []struct {
+		written time.Time
+		stale   bool
+	}{{now.Add(-5 * time.Minute), false}, {now.Add(-2 * time.Hour), true}, {now.Add(2 * time.Hour), true}} {
+		if err := os.Chtimes(path, tc.written, tc.written); err != nil {
+			t.Fatal(err)
+		}
+		if _, stale := IdentitySpoolStale(dir, now, 17*time.Minute); stale != tc.stale {
+			t.Errorf("record written %s from now: stale = %v, want %v", tc.written.Sub(now).Round(time.Minute), stale, tc.stale)
+		}
+	}
+	if _, stale := IdentitySpoolStale(t.TempDir(), now, 17*time.Minute); stale {
+		t.Error("an empty spool is not stale")
+	}
+}

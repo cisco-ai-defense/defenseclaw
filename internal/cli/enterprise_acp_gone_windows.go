@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -64,6 +65,13 @@ var enterpriseACPDescribePrincipal = func(principal string) (enterpriseACPAccoun
 	}
 	return enterpriseACPAccount{exists: true, name: name, home: useridentity.HomeForID(sid), sid: sid, uid: -1, gid: -1}, nil
 }
+
+// settleEnterpriseACPListedAccounts does nothing on Windows: the LSA's
+// ERROR_NONE_MAPPED is definitive.
+func settleEnterpriseACPListedAccounts(context.Context, []enterpriseACPListedEnrollment) {}
+
+// enterpriseACPUIDMayBeHidden: --uid applies only on Linux and macOS.
+func enterpriseACPUIDMayBeHidden() bool { return false }
 
 // enterpriseACPHomeForUID: --uid applies only on Linux and macOS.
 var enterpriseACPHomeForUID = func(int) (string, bool, error) {

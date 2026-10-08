@@ -6,11 +6,14 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/spf13/cobra"
@@ -111,5 +114,31 @@ func TestEnterpriseACPServiceRepairsLegacyRootLock(t *testing.T) {
 	}
 	if got := info.Sys().(*syscall.Stat_t).Uid; got != uid {
 		t.Fatalf("lock owner=%d", got)
+	}
+}
+
+// An account that does not resolve while no directory account answers is
+// not called deleted: with the directory unreachable every directory
+// account read "account deleted" (GAP-0838).
+func TestEnterpriseACPListKeepsUnresolvedDirectoryAccounts(t *testing.T) {
+	previousLocal, previousDirectory := enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured
+	t.Cleanup(func() {
+		enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured = previousLocal, previousDirectory
+	})
+	enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) { return map[string]int{"alice": 1501}, nil }
+	enterpriseHooksEnumerateDirectoryConfigured = func() bool { return true }
+	row := func(principal, account string) enterpriseACPListedEnrollment {
+		return enterpriseACPListedEnrollment{EnterpriseEnrollment: acp.EnterpriseEnrollment{Principal: principal}, Account: account}
+	}
+	rows := []enterpriseACPListedEnrollment{row("uid:1501", "present"), row("uid:90001", "deleted")}
+	settleEnterpriseACPListedAccounts(context.Background(), rows)
+	if rows[1].Account != "unresolved" || !strings.Contains(rows[1].Note, "could not be confirmed reachable") {
+		t.Fatalf("a directory account during an outage = %+v, want unresolved", rows[1])
+	}
+	// Once another directory account resolves, the miss is definitive.
+	rows = []enterpriseACPListedEnrollment{row("uid:90002", "present"), row("uid:90001", "deleted")}
+	settleEnterpriseACPListedAccounts(context.Background(), rows)
+	if rows[1].Account != "deleted" {
+		t.Fatalf("a directory account the answering directory does not know = %+v, want deleted", rows[1])
 	}
 }

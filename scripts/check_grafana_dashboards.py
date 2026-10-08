@@ -73,7 +73,11 @@ PROMETHEUS_METRIC_LABELS = {
         "severity",
         "would_block",
     },
-    "defenseclaw_inventory_ide_plugins": {"defenseclaw_ide_plugin_ai", "defenseclaw_ide_plugin_enabled", "ide_product"},
+    "defenseclaw_inventory_ide_plugins": {
+        "defenseclaw_ide_plugin_ai",
+        "defenseclaw_ide_plugin_enabled",
+        "defenseclaw_ide_product",
+    },
     "defenseclaw_guardrail_evaluations_total": {
         "guardrail_action_taken",
         "guardrail_connector",

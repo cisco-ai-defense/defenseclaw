@@ -23,12 +23,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // Stable diagnostics returned to a standalone hook caller the gateway
@@ -494,6 +496,10 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		}
 		ctx := PromoteSessionIfAuthenticated(r.Context())
 		ctx = attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
+		if decision.Exempt {
+			ctx = withEnterpriseExemptUser(ctx)
+			a.auditEnterpriseExemptUser(ctx, peer, connectorName, route, time.Now())
+		}
 		if inspect {
 			ctx = withAuthenticatedInspectConnector(ctx, connectorName)
 		} else {
@@ -564,4 +570,56 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	return a.apiCSRFProtect(handler)
+}
+
+// enterpriseExemptUserContextKey marks a request from an account
+// enterprise.enrollment.exempt_users lists.
+type enterpriseExemptUserContextKey struct{}
+
+func withEnterpriseExemptUser(ctx context.Context) context.Context {
+	return context.WithValue(ctx, enterpriseExemptUserContextKey{}, true)
+}
+
+// enterpriseEnrollmentV8 is defenseclaw.user.enrollment for a record emitted
+// under ctx: exempt for an exempt_users account, absent otherwise, so the
+// hook_decision rows of exempt accounts are found in the audit store and a
+// SIEM, not only in the gateway log (GAP-0832).
+func enterpriseEnrollmentV8(ctx context.Context) observability.Optional[string] {
+	if exempt, _ := ctx.Value(enterpriseExemptUserContextKey{}).(bool); exempt {
+		return observability.Present("exempt")
+	}
+	return observability.Absent[string]()
+}
+
+// enterpriseExemptAuditInterval bounds the enterprise-exempt-user audit rows:
+// one per account and connector in each interval.
+const (
+	enterpriseExemptAuditInterval = 10 * time.Minute
+	enterpriseExemptAuditMaxKeys  = 4096
+)
+
+// auditEnterpriseExemptUser writes the enterprise-exempt-user audit row for
+// an exempt account's hook call, at most once per account and connector in
+// each enterpriseExemptAuditInterval. It reports whether it wrote one.
+func (a *APIServer) auditEnterpriseExemptUser(ctx context.Context, peer managedHookPeer, connectorName, route string, now time.Time) bool {
+	if a == nil || a.logger == nil {
+		return false
+	}
+	key := strconv.Itoa(peer.UID) + "/" + connectorName
+	a.exemptAuditMu.Lock()
+	if last, seen := a.exemptAuditAt[key]; seen && now.Sub(last) < enterpriseExemptAuditInterval {
+		a.exemptAuditMu.Unlock()
+		return false
+	}
+	if a.exemptAuditAt == nil || len(a.exemptAuditAt) >= enterpriseExemptAuditMaxKeys {
+		a.exemptAuditAt = make(map[string]time.Time)
+	}
+	a.exemptAuditAt[key] = now
+	a.exemptAuditMu.Unlock()
+	details := fmt.Sprintf("uid=%d user=%s connector=%s route=%s; allowed and inspected, not enrolled (enterprise.enrollment.exempt_users)",
+		peer.UID, sanitizeLLMEventUser(peer.Name), connectorName, route)
+	if err := a.logger.LogActionSeverityConnector(string(audit.ActionEnterpriseExemptUser), "uid:"+strconv.Itoa(peer.UID), details, "INFO", connectorName); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] enterprise-exempt-user audit row for uid=%d: %v\n", peer.UID, err)
+	}
+	return true
 }

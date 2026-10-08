@@ -7891,7 +7891,7 @@ groups:
     - profile: local-observability-v1
       mappings:
       - ref: defenseclaw.ide.product
-        label: ide_product
+        label: defenseclaw_ide_product
       - ref: defenseclaw.ide.plugin.ai
         label: defenseclaw_ide_plugin_ai
       - ref: defenseclaw.ide.plugin.enabled
@@ -10770,6 +10770,9 @@ producer_identity_sets:
   - event_name: legacy.audit.doctor
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.enterprise.exempt.user
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.gateway.approval.denied
     bucket: compliance.activity
     compatibility_only: true
@@ -13427,6 +13430,26 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.connector.hook.repaired
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: enterprise-exempt-user
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.enterprise.exempt.user
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action

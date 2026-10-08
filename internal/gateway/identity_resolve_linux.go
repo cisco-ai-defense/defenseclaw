@@ -47,5 +47,6 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if record, ok := readIdentitySpoolFactsForAccount(key, account.Name, now); ok {
 		facts = mergeSpoolFacts(facts, record)
 	}
+	noteGroupDomains(facts.Groups)
 	return facts, nil
 }

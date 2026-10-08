@@ -101,6 +101,30 @@ func (r *NSSResolver) LookupUIDInService(service string, uid int) (Account, erro
 	return account, nil
 }
 
+// LookupUserInService asks one NSS service, and only that one, for an
+// account by name (getent -s <service> passwd <name>).
+func (r *NSSResolver) LookupUserInService(service, name string) (Account, error) {
+	if !validServiceName(service) || validName(name) != nil || strings.HasPrefix(name, "-") {
+		return Account{}, fmt.Errorf("unixidentity: invalid service lookup %q %q", service, name)
+	}
+	result, err := r.runner(r.context(), r.path, []string{"-s", service, "passwd", name})
+	if err != nil {
+		return Account{}, err
+	}
+	switch result.exitCode {
+	case getentExitOK:
+	case getentExitNotFound:
+		return Account{}, ErrNotFound
+	default:
+		return Account{}, fmt.Errorf("unixidentity: getent -s %s passwd %s exited %d", service, name, result.exitCode)
+	}
+	lines := nonEmptyLines(string(result.stdout))
+	if len(lines) != 1 {
+		return Account{}, ErrNotFound
+	}
+	return ParsePasswdLine(lines[0])
+}
+
 func validServiceName(name string) bool {
 	if name == "" || len(name) > 32 {
 		return false
@@ -207,9 +231,22 @@ func (r *NSSResolver) LookupGroup(name string) (Group, error) {
 		return Group{}, err
 	}
 	if group.Name != name {
-		return Group{}, fmt.Errorf("unixidentity: getent group %s answered for %q", name, group.Name)
+		return Group{}, &GroupNameMismatchError{Key: name, Answered: group}
 	}
 	return group, nil
+}
+
+// GroupNameMismatchError is a getent group answer for a group whose name is
+// not the one asked: the same group in another case, or under the spelling
+// the host lists it by (SSSD with use_fully_qualified_names = False answers
+// dc-ml@corp.example.com with dc-ml).
+type GroupNameMismatchError struct {
+	Key      string
+	Answered Group
+}
+
+func (e *GroupNameMismatchError) Error() string {
+	return fmt.Sprintf("unixidentity: getent group %s answered for %q", e.Key, e.Answered.Name)
 }
 
 // LookupGroupID resolves a group by gid.

@@ -263,3 +263,13 @@ def test_list_packs_json(env):
     text = _run(app, ["list-packs"])
     assert text.exit_code == 0
     assert "team2" in text.output
+
+
+def test_validate_pack_unknown_bare_name_lists_available_packs(env, monkeypatch):
+    app, root, _custom = env
+    monkeypatch.setattr("defenseclaw.config.load", lambda: app.cfg)
+    (root / "team2" / "rules").mkdir(parents=True)
+    result = _run(app, ["validate-pack", "nosuchpack"])
+    assert result.exit_code != 0
+    assert "no pack with the name 'nosuchpack' was found" in result.output
+    assert "default" in result.output and "team2" in result.output

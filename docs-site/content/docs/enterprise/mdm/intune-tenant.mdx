@@ -20,10 +20,10 @@ Run on a test tenant: the licences, users and groups; automatic enrollment;
 the Apple push certificate; a Windows 11 and an Ubuntu 24.04 Desktop device
 enrolled and compliant; the read-only and preview modes of the helper; and its
 create, update and assign calls and `status`, with throwaway objects and no
-device reporting yet. Create-and-add-device hit Graph's 404 propagation window;
-an intent change on an existing app assignment hit Graph's read-only PATCH
-restriction. The kit now retries the add for about a minute and previews a
-delete-and-create intent change; those two fixes still need tenant re-verification.
+device reporting yet. On the test tenant, an app assignment was changed from
+required to available by deleting the old assignment and creating the new one;
+`remove-assignment` was also run. The create-and-add-device retry after Graph's
+404 propagation window remains covered by a unit test without a spare device.
 
 Not run yet: delivering DefenseClaw through Intune (the Win32 app, the
 Remediations package, the macOS shell script, the Linux platform script). The
@@ -278,8 +278,8 @@ It reads credentials from the environment, never from arguments:
 | `check`, `devices` | No | Yes |
 | `status` | No | Yes, on throwaway apps and scripts |
 | `groups` | With `--apply` | Yes, create and add-device |
-| `assign-app` | With `--apply` | Required assignment ran; changing intent failed on PATCH before the delete-and-create fix, which needs re-verification |
-| `remove-assignment` | With `--apply` | Code and unit test only |
+| `assign-app` | With `--apply` | Yes, including required-to-available intent change by delete and create |
+| `remove-assignment` | With `--apply` | Yes |
 | `remediation`, `macos-script` | With `--apply` | Yes, create, update and assign with throwaway objects |
 
 The create and assign calls were run in the test tenant. The helper

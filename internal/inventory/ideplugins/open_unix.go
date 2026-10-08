@@ -24,3 +24,7 @@ func openNonblocking(path string, follow bool) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }
+
+// resolvesToItself is the Windows check for a path whose parent folders the
+// scan may not stat; a Unix scan never needs it.
+func resolvesToItself(string) bool { return false }

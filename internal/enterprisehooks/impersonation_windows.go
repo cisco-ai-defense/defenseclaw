@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +22,14 @@ import (
 var (
 	windowsEnterpriseMutationIdentityCheck = requireWindowsEnterpriseLocalSystem
 	windowsEnterpriseTargetTokenResolver   = resolveWindowsEnterpriseTargetToken
-	windowsEnterpriseSetThreadToken        = windows.SetThreadToken
-	windowsEnterpriseRevertThreadToken     = windows.RevertToSelf
-	windowsEnterpriseLockOSThread          = runtime.LockOSThread
-	windowsEnterpriseUnlockOSThread        = runtime.UnlockOSThread
-	windowsEnterpriseEffectiveTokenCheck   = func(target *windows.SID) error {
+	// windowsEnterpriseSignedInTargetTokenResolver also accepts a
+	// disconnected session (TargetCredentials.AllowDisconnected).
+	windowsEnterpriseSignedInTargetTokenResolver = resolveWindowsEnterpriseSignedInTargetToken
+	windowsEnterpriseSetThreadToken              = windows.SetThreadToken
+	windowsEnterpriseRevertThreadToken           = windows.RevertToSelf
+	windowsEnterpriseLockOSThread                = runtime.LockOSThread
+	windowsEnterpriseUnlockOSThread              = runtime.UnlockOSThread
+	windowsEnterpriseEffectiveTokenCheck         = func(target *windows.SID) error {
 		effective := windows.GetCurrentThreadEffectiveToken()
 		return validateWindowsEnterpriseTargetToken(effective, target)
 	}
@@ -449,6 +451,17 @@ func windowsEnterpriseTokenIntegrityRID(token windows.Token) (uint32, error) {
 }
 
 func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, error) {
+	return resolveWindowsEnterpriseSessionToken(target, false)
+}
+
+// resolveWindowsEnterpriseSignedInTargetToken is
+// resolveWindowsEnterpriseTargetToken that also accepts a disconnected
+// session (TargetCredentials.AllowDisconnected).
+func resolveWindowsEnterpriseSignedInTargetToken(target *windows.SID) (windows.Token, error) {
+	return resolveWindowsEnterpriseSessionToken(target, true)
+}
+
+func resolveWindowsEnterpriseSessionToken(target *windows.SID, allowDisconnected bool) (windows.Token, error) {
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
 	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
@@ -457,15 +470,16 @@ func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, er
 	if sessions != nil {
 		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
 	}
-	sessionIDs := make([]uint32, 0, count)
+	states := make([]windowsSessionState, 0, count)
 	if count > 0 && sessions != nil {
 		for _, session := range unsafe.Slice(sessions, count) {
-			if session.State == windows.WTSActive {
-				sessionIDs = append(sessionIDs, session.SessionID)
-			}
+			states = append(states, windowsSessionState{
+				ID: session.SessionID, Active: session.State == windows.WTSActive,
+				Disconnected: session.State == windows.WTSDisconnected,
+			})
 		}
 	}
-	sort.Slice(sessionIDs, func(i, j int) bool { return sessionIDs[i] < sessionIDs[j] })
+	sessionIDs := windowsTargetSessionOrder(states, allowDisconnected)
 	var queryFailures []string
 	for _, sessionID := range sessionIDs {
 		var primary windows.Token

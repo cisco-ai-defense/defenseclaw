@@ -111,9 +111,23 @@ var enterprisePolicyUnprotectedAgents = func(string) []enterprisehooks.Unprotect
 func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	account, err := unixidentity.LookupAccountSpelling(unixidentity.Default(ctx), name, unixidentity.DirectoryFactsFunc(ctx))
+	// The hooks step checks the account again (its primary gid) before it
+	// reads the files as the user; the standalone rules let that check use
+	// NSS too, not only /etc/passwd, which is all a static build's os/user
+	// reads (GAP-0740).
+	configureEnterpriseHooksStandaloneUnix(ctx)
+	resolver := unixidentity.Default(ctx)
+	account, err := unixidentity.LookupAccountSpelling(resolver, name, unixidentity.DirectoryFactsFunc(ctx))
 	if err != nil {
-		return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+		// A uid names its account as profile-explain takes it: getent answers
+		// a uid with the account name, which is not the spelling typed.
+		uid, convErr := strconv.Atoi(name)
+		if convErr != nil || uid < 0 {
+			return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+		}
+		if account, err = resolver.LookupUID(uid); err != nil {
+			return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+		}
 	}
 	return enterprisehooks.TargetCredentials{UserHome: account.Home, UID: account.UID, GID: account.GID, Username: account.Name}, nil
 }
@@ -148,6 +162,12 @@ func enterprisePolicyLiveCredential(target enterprisehooks.TargetCredentials) fu
 						groups = append(groups, uint32(value))
 					}
 				}
+			}
+		} else if ids, err := unixidentity.Default(context.Background()).GroupIDs(unixidentity.Account{
+			Name: target.Username, UID: target.UID, GID: target.GID, Home: target.UserHome}); err == nil {
+			// A directory account os/user cannot see keeps its groups too.
+			for _, id := range ids {
+				groups = append(groups, uint32(id))
 			}
 		}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{

@@ -981,6 +981,18 @@ func TestACPManagedCredentialMustMatchThePairsResolvedProfile(t *testing.T) {
 		refusal["code"] != acp.RefusalProfileChanged || refusal["profile"] != "watch" || refusal["mode"] != "action" {
 		t.Errorf("stale guard refusal = %d %s, want 403 naming profile watch", response.Code, response.Body.String())
 	}
+	// Moved and switched off: the answer says it is off, not where it went
+	// (GAP-0834).
+	cfg.ACP.Bindings["zed/kiro"] = config.ACPBinding{Enabled: false, Profile: "watch"}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+	request = request.WithContext(withACPEnterpriseCredential(request.Context(), credential))
+	response = httptest.NewRecorder()
+	(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+	refusal = nil
+	if err := json.Unmarshal(response.Body.Bytes(), &refusal); err != nil || response.Code != http.StatusForbidden ||
+		refusal["code"] != acp.RefusalBinding || !strings.Contains(refusal["error"], "acp.bindings.zed/kiro is disabled") {
+		t.Errorf("moved and disabled pair refusal = %d %s, want the disabled binding", response.Code, response.Body.String())
+	}
 }
 
 // Resolution has to agree with the Python implementation that writes the

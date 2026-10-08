@@ -295,9 +295,12 @@ var (
 
 // bindUserScopedIdentity makes identity the only user identity downstream
 // layers see. It refuses the request (false) when an identity header names
-// another uid or SID, or another account name than the one the identity
-// resolves to. Header values are never trusted beyond that comparison: they
-// are replaced by the bound identity and its resolved account name.
+// another uid or SID, or the name of another account. A name no account has
+// now is the name the account had when its user signed in: a renamed account
+// (Rename-LocalUser) is the same SID, so it is served, not refused until its
+// user signs out (GAP-0907). Header values are never trusted beyond that:
+// they are replaced by the bound identity and its current account name,
+// which records then carry (GAP-0702).
 func bindUserScopedIdentity(r *http.Request, identity string) (*http.Request, bool) {
 	for _, header := range userScopedIdentityIDHeaders {
 		for _, value := range r.Header.Values(header) {
@@ -318,8 +321,14 @@ func bindUserScopedIdentity(r *http.Request, identity string) (*http.Request, bo
 			if value == "" || name == "" {
 				continue
 			}
-			if !userScopedNamesEqual(identity, value, name) {
-				return r, false
+			if userScopedNamesEqual(identity, value, name) {
+				continue
+			}
+			if other, known := userScopedIdentityForName(value); !known || other != identity {
+				if known {
+					return r, false
+				}
+				noteRenamedUserScopedAccount(identity, value, name)
 			}
 		}
 	}
@@ -350,6 +359,23 @@ func userScopedNamesEqual(identity, presented, resolved string) bool {
 		return strings.EqualFold(presented, resolved)
 	}
 	return presented == resolved
+}
+
+// renamedUserScopedAccounts remembers the renamed accounts already logged,
+// so their hooks leave one gateway log line, not one per call.
+var renamedUserScopedAccounts = &boundedNameSet{max: 256}
+
+// noteRenamedUserScopedAccount logs, once per identity and old name, that a
+// caller still sends a name the account no longer has.
+func noteRenamedUserScopedAccount(identity, presented, current string) {
+	key := identity + "/" + sanitizeLLMEventUser(useridentity.BareAccountName(presented))
+	if slices.Contains(renamedUserScopedAccounts.list(), key) {
+		return
+	}
+	renamedUserScopedAccounts.add(key)
+	fmt.Fprintf(os.Stderr, "[sidecar-api] per-user credential identity=%s sends the account name %q, which no account has "+
+		"now (renamed to %q?); served by its identity under the current name until its user signs in again\n",
+		identity, sanitizeLLMEventUser(presented), current)
 }
 
 // userScopedCredentialsRequired reports whether connector credentials on the

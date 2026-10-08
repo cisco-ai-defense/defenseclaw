@@ -19,7 +19,6 @@ package inventory
 import (
 	"context"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -203,11 +202,6 @@ func lifecycleTestSignal(fingerprint, user string) AISignal {
 func lifecycleStates(t *testing.T, report AIDiscoveryReport) map[string]string {
 	t.Helper()
 	if detail := report.Summary.DetectorErrors["state_store"]; detail != "" {
-		if runtime.GOOS == "windows" {
-			// An elevated Windows run owns its temp folder as
-			// Administrators, which the state store refuses.
-			t.Skipf("state store unavailable here: %s", detail)
-		}
 		t.Fatalf("state store: %s", detail)
 	}
 	states := map[string]string{}

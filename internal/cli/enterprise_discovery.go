@@ -228,6 +228,14 @@ func enterpriseGatewayGet(path string, out any) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if !secureClient && resp.StatusCode == http.StatusBadRequest {
+			var refusal struct {
+				Error string `json:"error"`
+			}
+			if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&refusal) == nil && refusal.Error != "" {
+				return "", invalidLifecycleArguments(errors.New(refusal.Error))
+			}
+		}
 		return "", fmt.Errorf("the gateway at %s answered %s", host, resp.Status)
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(out); err != nil {

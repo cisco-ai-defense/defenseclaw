@@ -54,6 +54,9 @@ func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
 	if local, err := lookupLocalProfileSubject(name); err == nil {
 		return local, nil
 	}
+	if cached, ok := profileExplainCachedSubject(name, time.Now()); ok {
+		return cached, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
 	if qualified := profileExplainQualifiedName(ctx, name); qualified != "" {
@@ -66,4 +69,27 @@ func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
 // uid carries: the account database plus the guardian identity spool.
 var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
 	return resolvePeerDirectoryFacts(id)
+}
+
+// profileExplainCachedSubject serves explain for an account the directory
+// cannot name now (SSSD stopped, a domain controller away) from what its
+// hooks apply: the facts the gateway cached for the uid whose account had
+// that name (or that uid), within the hour they are served. Explain then
+// shows the hook's profile with the age of the facts, not a spelling error
+// (GAP-0899).
+var profileExplainCachedSubject = func(name string, now time.Time) (profileSubject, bool) {
+	uid, userName, ok := managedHookPeerHomes.cachedHolder(name)
+	if !ok {
+		return profileSubject{}, false
+	}
+	id := strconv.Itoa(uid)
+	facts, fetchedAt, ok := peerDirectoryCache().peek(id)
+	if !ok || now.Sub(fetchedAt) > identityDirectoryMaxAge {
+		return profileSubject{}, false
+	}
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
+	}, identityLookupBlocking.Load())
+	subject.cachedFactsAge = max(now.Sub(fetchedAt), time.Second)
+	return subject, true
 }
