@@ -3846,6 +3846,54 @@ func TestRemoveJSONHookReferencesKeepsOperatorEmptyHook(t *testing.T) {
 	}
 }
 
+func TestRemoveOpenHandsHookReferencesPrunesOnlyNewlyEmptyMatcherGroups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	source := `{"pre_tool_use":[{"matcher":"*","hooks":[{"command":"dc-hook"}]},{"matcher":"operator","hooks":[]},{"matcher":"other","hooks":[{"command":"user-hook"}]}],"operator":[]}`
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := &hookOnlyConnector{name: "openhands"}
+	if err := conn.removeConfigEntries(path, "dc-hook", SetupOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	groups, ok := got["pre_tool_use"].([]interface{})
+	if !ok || len(groups) != 2 || !strings.Contains(string(body), "user-hook") || strings.Contains(string(body), "dc-hook") {
+		t.Fatalf("OpenHands matcher groups after cleanup: %s", body)
+	}
+	if _, ok := got["operator"]; !ok {
+		t.Fatalf("operator-owned empty event lost: %s", body)
+	}
+}
+
+func TestRemoveSecureClientJSONHookReferencesPrunesEmptyEntriesLikeMain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	opts := SetupOpts{DataDir: t.TempDir(), ManagedEnterprise: true}
+	owned := cursorOwnedHookCommands(opts)[0]
+	source := fmt.Sprintf(`{"hooks":{"PreToolUse":[{"command":%q}],"Custom":[]}}`, owned)
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := &hookOnlyConnector{name: "cursor"}
+	if err := conn.removeConfigEntries(path, owned, opts); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "{}\n" {
+		t.Fatalf("Secure Client cleanup differs from main: %s", body)
+	}
+}
+
 func TestRemoveOpenHandsHookReferencesKeepsOperatorKeysAndHooks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	source := `{"extra":{"keep":[]},"hooks":{"pre":[{"hooks":[{"command":"dc-hook"},{"command":"user-hook"}]}]}}`
