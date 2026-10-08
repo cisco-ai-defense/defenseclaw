@@ -6912,6 +6912,7 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
     interpreter = args[0].replace("\\", "/").lower()
     if "/hermes-agent/" in interpreter or "/hermes_cli/" in interpreter:
         return None  # Hermes' own environment may run a host under any name
+    hermes_python = "/.hermes/tools/" in interpreter
     index = 1
     while index < len(args):
         arg = args[index]
@@ -6937,7 +6938,9 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
                 # code argument. Its `-c import os, ... import hermes_bootstrap`
                 # therefore arrives as several tokens here.
                 code = " ".join([value, *args[index + 1 :]]).lower()
-                return None if "hermes_bootstrap" in code or "hermes_cli" in code else False
+                if "hermes_bootstrap" in code or "hermes_cli" in code:
+                    return True
+                return None if hermes_python else False
             break  # -W / -X take one value
         index += 1
     if index < len(args) and args[index] == "--":
@@ -6950,7 +6953,17 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
     lowered = script.replace("\\", "/").lower()
     if name(script).startswith("hermes_bootstrap") and "/.hermes/tools/" in lowered:
         return True
-    return None if "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
+    return None if hermes_python or "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
+
+
+def _hermes_proc_argv(pid: str) -> tuple[str, ...] | None:
+    """Read the complete argv when procps splits a multiline ``-c`` value."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as stream:
+            data = stream.read()
+    except OSError:
+        return None
+    return tuple(arg.decode("utf-8", "replace") for arg in data.rstrip(b"\0").split(b"\0")) if data else None
 
 
 def _hermes_host_running() -> bool | None:
@@ -6983,7 +6996,14 @@ def _hermes_host_running() -> bool | None:
         fields = line.split()
         if len(fields) < 3 or fields[1] != uid or fields[0] in own:
             continue
-        verdict = _hermes_argv_verdict(fields[2:])
+        args = fields[2:]
+        verdict = _hermes_argv_verdict(args)
+        # ps renders embedded newlines in Python's -c argument as separate
+        # output lines. Only /proc keeps the full argument and its boundaries.
+        if os.path.basename(args[0]).lower().startswith("python") and ("-c" in args or "/.hermes/tools/" in args[0]):
+            complete = _hermes_proc_argv(fields[0])
+            if complete:
+                verdict = _hermes_argv_verdict(complete)
         if verdict is True:
             return True
         if verdict is None:

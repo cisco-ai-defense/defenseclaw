@@ -50,11 +50,20 @@ class SandboxTeardownTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             os.mkdir(os.path.join(data_dir, "sandboxes"))
+            Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
             self.assertTrue(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "win32"))
         enabled = type("Cfg", (), {"openshell": type("OS", (), {"enabled": True, "wrappers": []})()})()
         with tempfile.TemporaryDirectory() as data_dir:
             self.assertTrue(cmd_uninstall._sandbox_state_present(enabled, data_dir, "darwin"))
+
+    def test_disabled_openshell_with_empty_state_directory_skips_teardown(self):
+        disabled = type("Cfg", (), {"openshell": type("OS", (), {"enabled": False, "wrappers": []})()})()
+        with tempfile.TemporaryDirectory() as data_dir:
+            os.makedirs(os.path.join(data_dir, "sandboxes", "manager"))
+            self.assertFalse(cmd_uninstall._sandbox_state_present(disabled, data_dir, "linux"))
+            Path(data_dir, "sandboxes", "manager", "kept.json").write_text("{}")
+            self.assertTrue(cmd_uninstall._sandbox_state_present(disabled, data_dir, "linux"))
 
     def test_rendered_plan_names_the_teardown(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, data_dir=self._tmp.name)
@@ -182,6 +191,7 @@ class SandboxTeardownTests(unittest.TestCase):
     def test_skip_sandbox_teardown(self):
         with tempfile.TemporaryDirectory() as data_dir:
             os.mkdir(os.path.join(data_dir, "sandboxes"))
+            Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
             with (
                 patch.object(cmd_uninstall.config_module, "default_data_path", return_value=Path(data_dir)),
                 patch.object(
