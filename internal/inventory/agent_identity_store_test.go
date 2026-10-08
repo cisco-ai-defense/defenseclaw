@@ -72,10 +72,13 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 	if rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "alice"}); err != nil || len(rows) != 1 || rows[0].SessionsSeen != 3 {
 		t.Fatalf("resumed chat counted again: rows = %+v, err %v", rows, err)
 	}
-	for _, qualified := range []string{"alice@DCLAB.TEST", `DCLAB\alice`} {
-		if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: qualified}); err != nil || len(rows) != 1 || rows[0].UserID != "1001" {
-			t.Fatalf("qualified user filter %q rows = %+v, err %v", qualified, rows, err)
-		}
+	// GAP-0366: a qualified filter lists only the account of that domain,
+	// not the local alice whose row carries no domain.
+	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "bob@DCLAB.TEST"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
+		t.Fatalf("qualified user filter rows = %+v, err %v", rows, err)
+	}
+	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "alice@DCLAB.TEST"}); err != nil || len(rows) != 0 {
+		t.Fatalf("qualified user filter selected a local account: rows = %+v, err %v", rows, err)
 	}
 	// GAP-0097: an SSSD account is stored by its qualified name; the bare
 	// name still selects it.
