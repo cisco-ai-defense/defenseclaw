@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -418,4 +419,27 @@ func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 			t.Errorf("the linked folder is granted: %s", g.Path)
 		}
 	}
+}
+
+func TestUnreadableVSCodeExtensionsKeepInstallationPartial(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("requires Unix directory permissions")
+	}
+	home := t.TempDir()
+	ext := filepath.Join(home, ".vscode", "extensions")
+	writeFile(t, filepath.Join(ext, "example.plugin-1.0", "package.json"), `{"name":"plugin","publisher":"example"}`)
+	if err := os.Chmod(ext, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ext, 0o755) })
+	installs := Scan(home, runtime.GOOS, Limits{})
+	for _, inst := range installs {
+		if inst.Family == FamilyVSCode && inst.Product == "vscode" && inst.Root == ext {
+			if !inst.Partial {
+				t.Fatal("unreadable extension directory reported as complete")
+			}
+			return
+		}
+	}
+	t.Fatal("visible installation was omitted")
 }
