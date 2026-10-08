@@ -65,7 +65,7 @@ def alert_disposition_timeout_seconds(target_count: int) -> int:
     )
 
 
-def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str, Any] | None:
+def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: float = 3) -> dict[str, Any] | None:
     """Ask the gateway which guardrail profile applies to the account running this.
 
     The gateway resolves the account through the OS the way it does for live
@@ -87,8 +87,11 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
             timeout=timeout,
         )
         try:
-            result = client.guardrail_profile_resolve(user=user)
-            overrides = _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+            result = client.guardrail_profile_resolve(user=user, connector=connector)
+            overrides = (
+                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+                if not connector else []
+            )
         finally:
             client.close()
     except requests.exceptions.ReadTimeout as exc:
@@ -166,7 +169,9 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
         name = str(answer.get("profile") or "")
         if name and name != profile:
             match = str(answer.get("match") or "")
-            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match})
+            effective = answer.get("effective")
+            mode = str(effective.get("mode") or "") if isinstance(effective, dict) else ""
+            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match, "mode": mode})
     return overrides
 
 

@@ -784,6 +784,8 @@ attributes:
   cardinality: high
   normalization:
     id: identifier-v1
+    overrides:
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'
     notes: NFC bounded
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.user.email
