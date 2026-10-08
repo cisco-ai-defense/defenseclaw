@@ -496,7 +496,11 @@ active (connected) session. It retries until the session is active again.
 The four services run under Automatic start, Add/Remove Programs lists
 **Cisco DefenseClaw Enterprise**, and the `DefenseClaw` event log (Event
 Viewer > Applications and Services Logs > DefenseClaw) holds one entry per
-lifecycle run. Captured on a standalone install, from an elevated prompt:
+lifecycle run. An agent reads its hooks when it starts, so an agent session
+a user opened before Setup activated DefenseClaw runs uninspected until it
+restarts: the Setup result, `status` and `verify` name each one per user with
+the `agent_sessions_restart_required` warning. Captured on a standalone
+install, from an elevated prompt:
 
 ```powershell title="Elevated PowerShell"
 Get-Service DefenseClaw* | Format-Table Name, Status, StartType
