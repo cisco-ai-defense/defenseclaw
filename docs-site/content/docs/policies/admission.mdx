@@ -84,6 +84,13 @@ Precedence, first match wins:
 5. The scan result: the action for the worst severity, or the scanner-specific
    action when `scanner_overrides` has one.
 
+The MCP scanner does not connect to a server on a loopback, private,
+link-local or multicast address, so the install scan of such a server fails
+and the verdict is `rejected` (fail-closed). An `allowed` rule with the
+`name` and `url` of the server (step 2) or `scan_on_install: false` for `mcp`
+(step 4) admits one you trust; see
+[Servers on local and internal addresses](/docs/scanning/mcp-scanner#servers-on-local-and-internal-addresses).
+
 Where it runs: the gateway's install watcher checks a skill, plugin or MCP
 server when it appears in a watched directory, and the `defenseclaw` install
 and scan commands run the same check. The watcher applies a `rejected` verdict

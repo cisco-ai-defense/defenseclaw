@@ -328,6 +328,15 @@ defenseclaw mcp unblock cisco-internal                       # remove the block 
 
 `mcp block`, `mcp allow` and `mcp unblock` write the server's entry in `asset_policy.mcp` (`denied` or `allowed`) in `config.yaml`, and the gateway applies it at once; on a managed device they are refused, and the entry goes in the administrator's config. [Admission](/docs/policies/admission) covers `asset_policy`.
 
+### Servers on local and internal addresses
+
+The scanner does not connect to loopback, private, link-local or multicast addresses: `localhost`, `127.0.0.1`, `10.x`, `172.16-31.x`, `192.168.x`, `169.254.x`, or a host name that resolves to one. `defenseclaw mcp scan --allow-private` scans such a server from your shell. The scan the gateway runs when a server is added has no such option, so a server there is not scanned: the scan fails and admission blocks the server (scanner failure, fail-closed). Its `install-scan-error` audit row says `the MCP scanner does not connect to loopback, private, link-local or multicast addresses ... so the server was not scanned` and names the two ways to admit a server you trust:
+
+- an `allowed` entry with its `name` and `url` (`defenseclaw mcp allow <name>`, or on a managed device `asset_policy.mcp.allowed` in the admin config); an allowed server is not scanned;
+- `admission.mcp.scan_on_install: false`, which admits new MCP servers without a scan.
+
+Stdio servers (a `command`) are scanned on the computer and are not affected.
+
 A block follows the name. An allow is pinned to the server you reviewed: `mcp allow` copies the server's `url`, or its `command` and `args_prefix`, from the connector's MCP config into the rule, so a different server added later under the same name is scanned again. For a server that is not configured yet, pass the definition with `--url`, or `--command` and `--args`; otherwise the rule matches the name only and the command prints a note saying so.
 
 `mcp unblock` removes a server's block or allow entry, so its scan verdict

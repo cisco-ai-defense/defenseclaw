@@ -675,8 +675,32 @@ per-user install:
   of the same name each get their own quarantine copy.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
-  user adds goes through admission within about 30 seconds, also while a
+  user adds goes through admission, usually within two minutes, also while a
   periodic rescan is running, such as the first one after an upgrade.
+- The MCP scanner does not connect to loopback, private, link-local or
+  multicast addresses. An HTTP or SSE server on `localhost`, `127.0.0.1` or an
+  internal address (`10.x`, `172.16-31.x`, `192.168.x`, or a name that
+  resolves to one) is therefore never scanned: its scan fails and it is
+  blocked like any scanner failure. The `install-scan-error` row says
+  `the MCP scanner does not connect to loopback, private, link-local or
+  multicast addresses ... so the server was not scanned`, and
+  `install-blocked reason=scanner-error` follows. A stdio server (a `command`)
+  is scanned on the computer and is not affected. To admit a local or
+  internal server you trust, pin it in the admin config with its name and
+  URL (an allowed server is not scanned):
+
+  ```yaml title="Admin config"
+  asset_policy:
+    mcp:
+      allowed:
+        - name: notes
+          url: http://127.0.0.1:28561/mcp
+          reason: reviewed internal server
+  ```
+
+  or admit new MCP servers without a scan with
+  `admission.mcp.scan_on_install: false`. There is no setting that lets the
+  scanner connect to these addresses.
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the

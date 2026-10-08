@@ -50,6 +50,20 @@ func mcpScanTargetLooksLikeURL(target string) bool {
 	return false
 }
 
+// mcpScanTargetNotScanned is the refusal of a server on a local or internal
+// address, in the words the audit rows and the block alert carry: what the
+// scanner does not do, that the server was not scanned, and the
+// administrator routes that admit one they trust. Before it read only "MCP
+// scan target IP 127.0.0.1 is loopback/private/link-local/multicast", and
+// nothing said that every local or internal HTTP server is blocked
+// (GAP-0663).
+func mcpScanTargetNotScanned(target, why string) error {
+	return fmt.Errorf("the MCP scanner does not connect to loopback, private, link-local or multicast addresses "+
+		"and %s %s, so the server was not scanned; "+
+		"to admit a server you trust, an administrator adds it to asset_policy.mcp.allowed by name and url "+
+		"(an allowed server is not scanned) or sets admission.mcp.scan_on_install: false", target, why)
+}
+
 // validateMCPScanTargetURL refuses MCP scan URLs that point at
 // loopback / private / link-local / cloud metadata destinations, or
 // that embed inline credentials. The check is opt-out via
@@ -74,7 +88,7 @@ func validateMCPScanTargetURL(target string) error {
 		lowerHost == "ip6-localhost" ||
 		lowerHost == "ip6-loopback" ||
 		strings.HasSuffix(lowerHost, ".localhost") {
-		return fmt.Errorf("MCP scan target %q points at loopback host", host)
+		return mcpScanTargetNotScanned(target, fmt.Sprintf("names the loopback host %s", host))
 	}
 	if lowerHost == "metadata.google.internal" {
 		return fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
@@ -86,7 +100,7 @@ func validateMCPScanTargetURL(target string) error {
 			literal.IsLinkLocalMulticast() ||
 			literal.IsUnspecified() ||
 			literal.IsMulticast() {
-			return fmt.Errorf("MCP scan target IP %s is loopback/private/link-local/multicast", literal)
+			return mcpScanTargetNotScanned(target, fmt.Sprintf("is on %s, %s", literal, mcpScanAddressClass(literal)))
 		}
 		// AWS / Oracle / DO IMDS literals.
 		if literal.String() == "169.254.169.254" || literal.String() == "fd00:ec2::254" {
@@ -110,10 +124,26 @@ func validateMCPScanTargetURL(target string) error {
 			ip.IsMulticast() ||
 			ip.String() == "169.254.169.254" ||
 			ip.String() == "fd00:ec2::254" {
-			return fmt.Errorf("MCP scan target %q resolves to private/loopback IP %s", host, ip)
+			return mcpScanTargetNotScanned(target, fmt.Sprintf("resolves to %s, %s", ip, mcpScanAddressClass(ip)))
 		}
 	}
 	return nil
+}
+
+// mcpScanAddressClass names the class of a refused address.
+func mcpScanAddressClass(ip net.IP) string {
+	switch {
+	case ip.IsLoopback():
+		return "a loopback address"
+	case ip.IsPrivate():
+		return "a private address"
+	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+		return "a link-local address"
+	case ip.IsUnspecified():
+		return "the unspecified address"
+	default:
+		return "a multicast address"
+	}
 }
 
 // MCPScanner shells out to the SDK-backed Python CLI

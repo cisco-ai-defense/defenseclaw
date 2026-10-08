@@ -188,6 +188,17 @@ func TestValidateMCPScanTargetURL_Default(t *testing.T) {
 	}
 }
 
+// GAP-0663: the refusal of a local or internal server says it was not
+// scanned and names the administrator routes that admit one.
+func TestValidateMCPScanTargetURL_NamesTheAdminRoutes(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS", "")
+	err := validateMCPScanTargetURL("http://127.0.0.1:28561/mcp")
+	if err == nil || !strings.Contains(err.Error(), "not scanned") ||
+		!strings.Contains(err.Error(), "asset_policy.mcp.allowed") || !strings.Contains(err.Error(), "admission.mcp.scan_on_install") {
+		t.Fatalf("err = %v, want the refusal to say the server was not scanned and how to admit it", err)
+	}
+}
+
 func TestValidateMCPScanTargetURL_AllowLocalOptIn(t *testing.T) {
 	// With the opt-out engaged, even the worst cases must pass —
 	// inline credentials, loopback, and IMDS. This pins exactly how
