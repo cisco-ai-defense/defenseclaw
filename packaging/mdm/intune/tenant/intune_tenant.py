@@ -547,11 +547,20 @@ def cmd_status(graph: Graph, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- groups
 
 
+def group_mail_nickname(name: str) -> str:
+    nickname = re.sub(r"[^A-Za-z0-9_-]", "", name)[:64]
+    if nickname:
+        return nickname
+    if any(char.isalnum() for char in name):
+        return "group-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:20]
+    raise SystemExit(f"error: group name {name!r} has no letters or digits for a mail nickname")
+
+
 def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
     if not args.name and not args.add_device:
         raise SystemExit("error: name at least one --name GROUP or --add-device DEVICE:GROUP")
-    tag = plan_tag(args.apply)
-    known_groups: dict[str, dict] = {}
+    # Resolve and validate every requested group before changing the tenant.
+    planned_groups: list[tuple[str, dict | None, str | None]] = []
     for name in args.name:
         if len(name) > GROUP_NAME_MAX_CHARS:
             raise SystemExit(f"error: group name is {len(name)} characters; the limit is {GROUP_NAME_MAX_CHARS}")
@@ -561,17 +570,21 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
             found = graph.wait_for_named_object(path)
         if len(found) > 1:
             raise SystemExit(f"error: {len(found)} groups are named {name!r}; use a unique name")
+        if found and (
+            not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or [])
+        ):
+            raise SystemExit(f"error: group {name!r} exists but is not a static security group")
+        nickname = group_mail_nickname(name) if not found else None
+        planned_groups.append((name, found[0] if found else None, nickname))
+    tag = plan_tag(args.apply)
+    known_groups: dict[str, dict] = {}
+    for name, found, nickname in planned_groups:
         if found:
-            if not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or []):
-                raise SystemExit(f"error: group {name!r} exists but is not a static security group")
-            known_groups[name] = found[0]
+            known_groups[name] = found
             print(f"{tag}group {name}: exists")
         elif not args.apply:
             print(f"{tag}group {name}: would create a static security group")
         else:
-            nickname = re.sub(r"[^A-Za-z0-9_-]", "", name)[:64]
-            if not nickname:
-                raise SystemExit(f"error: group name {name!r} has no letters or digits for a mail nickname")
             body = {
                 "displayName": name,
                 "description": "DefenseClaw MDM kit device group",
