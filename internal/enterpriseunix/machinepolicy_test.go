@@ -629,3 +629,28 @@ func TestVerifyOnlyCodexNamesTheExportAndEnsureAppliesItsReturn(t *testing.T) {
 		t.Fatalf("record machine policy connectors %v", record.MachinePolicyConnectors)
 	}
 }
+
+// A CIS-style chmod 0700 of managed-settings.d made Claude Code skip every
+// managed setting while policy verify, verify, status and repair all said the
+// deployment was healthy (GAP-0913).
+func TestVerifyFailsAndRepairRestoresAnUnreadableClaudeDropInDirectory(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	writeFreshLedger(t, h)
+	dir := h.env.P(path.Dir(claudeDropIn))
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, "users cannot read") {
+		t.Fatalf("verify does not report the unreadable directory: %s", got)
+	}
+	if status := h.run(Options{Action: ActionStatus}); status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status reads complete with the drop-in directory unreadable: %+v", status.Warnings)
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("repair left %s at %v (%v)", dir, info.Mode(), err)
+	}
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}

@@ -384,6 +384,12 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		message := fmt.Sprintf(
 			"vendor machine policy for %s no longer carries the DefenseClaw hooks the last transaction placed, so %s runs without them; run `%s` to restore them",
 			machinePolicyLabel(name, result), name, env.lifecycleCommand("repair"))
+		if drift := driftConflicts(name, result); len(drift) > 0 {
+			// The entries are in place, but agents cannot use them (a
+			// directory users cannot read, a file mode) (GAP-0913).
+			message = fmt.Sprintf("DefenseClaw hooks are in place in vendor machine policy for %s but do not protect %s: %s; run `%s` to restore them",
+				machinePolicyLabel(name, result), name, strings.Join(drift, "; "), env.lifecycleCommand("repair"))
+		}
 		if export := env.verifyOnlyExport(name, result); export != "" {
 			// repair never writes a file the administrator owns (GAP-0536).
 			message = fmt.Sprintf("vendor machine policy for %s no longer carries the DefenseClaw hooks, so %s runs without them; %s",
@@ -499,6 +505,17 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		r.SecurityComplete = false
 	}
 	return append(gone, drift...)
+}
+
+// driftConflicts are the conflicts of a connector whose DefenseClaw entries
+// are in its vendor file but drifted from what a publish writes.
+func driftConflicts(connector string, result enterprisepolicy.Result) []string {
+	for _, state := range result.States {
+		if state.Connector == connector && state.Drift && state.OwnedEntries > 0 {
+			return state.Conflicts
+		}
+	}
+	return nil
 }
 
 // claudeVersionFloorConflict starts every Claude Code version floor conflict.

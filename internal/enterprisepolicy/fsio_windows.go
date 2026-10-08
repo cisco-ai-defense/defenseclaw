@@ -914,6 +914,12 @@ func systemBoundFile(string, os.FileInfo) bool { return false }
 // protected DACL on every write, and mode bits do not apply.
 func publishedFileProblem(Options, string) string { return "" }
 
+// publishedDirProblem and restorePublishedDirs are unix only: a vendor
+// directory's protected DACL already lets every user read it.
+func publishedDirProblem(Options, string) string { return "" }
+
+func restorePublishedDirs(Options, string) ([]string, error) { return nil, nil }
+
 // adminOwnedLink is never true on Windows, where no file is bound by kind
 // only (adminOwnedFile).
 func adminOwnedLink(os.FileInfo) bool { return false }
