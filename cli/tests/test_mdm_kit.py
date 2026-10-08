@@ -422,6 +422,54 @@ def test_generic_windows_wrapper_checks_every_folder_above_config_and_secret(tmp
     assert verdicts["link"]["ancestors"] is False, verdicts
 
 
+_REMEDIATION_PROBE = r"""
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+__FUNCTIONS__
+$guardianDown = '{"errors":[{"code":"lifecycle_error","message":"guardian not running"}],"services":[' +
+    '{"name":"DefenseClawGateway","kind":"gateway","state":"running","required":true},' +
+    '{"name":"DefenseClawHookGuardian","kind":"guardian","state":"stopped","start_mode":"disabled","required":true},' +
+    '{"name":"DefenseClawHookEnumerator","kind":"enumerator","state":"running","required":true},' +
+    '{"name":"DefenseClawSensorHelper","kind":"sensor_helper","state":"running","required":true}]}'
+$gatewayDown = $guardianDown.Replace('"DefenseClawGateway","kind":"gateway","state":"running"', '"DefenseClawGateway","kind":"gateway","state":"stopped"')
+$busy = '{"errors":[{"code":"lifecycle_busy","message":"another run"}],"services":[]}'
+@{
+    detect = (Format-DefenseClawVerifyFailure -Json $guardianDown)
+    busy = ($null -eq (Format-DefenseClawVerifyFailure -Json $busy))
+    fix = @(Get-DefenseClawStoppedSideServices -Json $guardianDown)
+    fix_gateway_down = @(Get-DefenseClawStoppedSideServices -Json $gatewayDown).Count
+} | ConvertTo-Json -Compress
+"""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs the Intune remediation helpers")
+def test_intune_remediation_names_the_stopped_service_and_restarts_only_it(tmp_path: Path) -> None:
+    # GAP-0574: Detect named only lifecycle_error, and Fix re-applied the
+    # whole deployment for a stopped guardian, so every user's hooks failed
+    # closed for 99 seconds. Detect names the service; Fix starts only the
+    # stopped guardian or enumerator while the gateway runs.
+    engine = shutil.which("powershell.exe") or _pwsh7()
+    assert engine, "Windows CI must provide Windows PowerShell 5.1 or PowerShell 7"
+    functions = []
+    for name, function in (("Remediate-Detect.ps1", "Format-DefenseClawVerifyFailure"),
+                           ("Remediate-Fix.ps1", "Get-DefenseClawStoppedSideServices")):
+        text = _text(MDM / "intune" / "windows" / name)
+        start = text.index(f"function {function} {{")
+        functions.append(text[start : text.index("\ntry {", start)])
+    probe = tmp_path / "remediation-probe.ps1"
+    probe.write_text(_REMEDIATION_PROBE.replace("__FUNCTIONS__", "\n".join(functions)), encoding="utf-8")
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    verdicts = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "DefenseClawHookGuardian is stopped (start disabled)" in verdicts["detect"], verdicts
+    assert verdicts["busy"] is True, verdicts
+    assert verdicts["fix"] == ["DefenseClawHookGuardian"] or verdicts["fix"] == "DefenseClawHookGuardian", verdicts
+    assert verdicts["fix_gateway_down"] == 0, verdicts
+
+
 @pytest.mark.skipif(os.name != "nt", reason="runs the Windows wrapper")
 def test_generic_windows_wrapper_refuses_a_product_version_pin_for_a_staged_setup(tmp_path: Path) -> None:
     # Setup takes no version pin; a -ProductVersion given with -SetupPath

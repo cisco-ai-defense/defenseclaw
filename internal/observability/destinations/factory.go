@@ -16,6 +16,7 @@ package destinations
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -148,6 +149,7 @@ type Options struct {
 type Factory struct {
 	secureClient     bool
 	console          io.Writer
+	stderr           io.Writer
 	secrets          config.ObservabilityV8SecretResolver
 	caLoader         CAFileLoader
 	resolver         netguard.V8Resolver
@@ -181,7 +183,7 @@ func NewFactory(options Options) (*Factory, error) {
 	}
 	return &Factory{
 		secureClient: options.SecureClient,
-		console:      console, secrets: options.Secrets, caLoader: options.CALoader,
+		console:      console, stderr: options.Stderr, secrets: options.Secrets, caLoader: options.CALoader,
 		resolver: options.Resolver, dialer: options.Dialer, warnings: options.Warnings,
 		redaction: options.RedactionEngine, deliveryObserver: options.DeliveryObserver,
 		otlpObserver: options.OTLPCanonicalObserver, galileoObserver: options.GalileoObserver,
@@ -227,6 +229,13 @@ func (factory *Factory) PrepareDestination(
 		})
 		if err != nil {
 			return nil, cleanup, newError(ErrorAdapterPrepare)
+		}
+		if adapter.OpenDeferred() && !nilInterface(factory.stderr) {
+			// The administrator's own destination name and file path: the one
+			// line that says why this destination delivers nothing.
+			_, _ = fmt.Fprintf(factory.stderr,
+				"defenseclaw: observability destination %q cannot open %s for writing; the gateway runs without it and retries the file on every delivery\n",
+				destination.Name, destination.Transport.Path)
 		}
 		cleanup = retryableCleanup(adapter.Close)
 		if err := ctx.Err(); err != nil {

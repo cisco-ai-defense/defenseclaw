@@ -177,6 +177,51 @@ try {
                 }
             }
 
+            # GAP-0743, GAP-0772: Windows renames but does not delete a
+            # program that is running, so the copy File.Replace keeps of a
+            # running defenseclaw-acp.exe stays. The upgrade still succeeds,
+            # the copy is deleted at the next restart, and the uninstall
+            # sweep removes what an earlier upgrade left.
+            $restartDeletes = [Collections.Generic.List[string]]::new()
+            function Request-DefenseClawDeleteAtRestart {
+                param([string]$Path)
+                $restartDeletes.Add($Path)
+            }
+            $busy = New-TestLayout 'busy'
+            $guard = [IO.Path]::Combine($busy.BinDirectory, 'defenseclaw-acp.exe')
+            [IO.File]::Copy([IO.Path]::Combine([Environment]::SystemDirectory, 'PING.EXE'), $guard)
+            $busy.ACPPath = $guard
+            $newer = [IO.Path]::Combine($Root, 'newer-guard.exe')
+            [IO.File]::WriteAllText($newer, 'newer guard')
+            $running = Microsoft.PowerShell.Management\Start-Process `
+                -FilePath $guard `
+                -ArgumentList @('-n', '120', '127.0.0.1') `
+                -WindowStyle Hidden `
+                -PassThru
+            try {
+                Install-DefenseClawFileAtomic -Source $newer -Destination $guard
+            }
+            catch {
+                $failures.Add("replacing a running program failed: $($_.Exception.Message)")
+            }
+            finally {
+                Microsoft.PowerShell.Management\Stop-Process -Id $running.Id -Force
+                $running.WaitForExit()
+            }
+            if ([IO.File]::ReadAllText($guard) -cne 'newer guard') {
+                $failures.Add('the running program was not replaced')
+            }
+            $copies = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $busy.BinDirectory -Force -Filter 'defenseclaw-acp.exe.backup.*')
+            if ($copies.Count -ne 1 -or $restartDeletes.Count -ne 1 -or $restartDeletes[0] -ne $copies[0].FullName) {
+                $failures.Add("the running program's copy was not left for deletion at restart: $($copies.Count) copies, $($restartDeletes -join ', ')")
+            }
+            Test-Refused 'tree with an earlier upgrade copy (walk)' { Assert-DefenseClawManagedInstallTree -Layout $busy } 'unexpected file'
+            Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $busy
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $busy.BinDirectory -Force -Filter 'defenseclaw-acp.exe.backup.*').Count -ne 0) {
+                $failures.Add('the uninstall sweep left the earlier upgrade copy')
+            }
+            Test-Accepted 'tree after the uninstall sweep' $busy
+
             $sibling = New-TestLayout 'sibling'
             [void](New-Plugin $sibling)
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($sibling.InstallRoot, 'share', 'policies'))

@@ -15,8 +15,10 @@
 # DefenseClaw-Bootstrap-<32 hex> folders in Windows\Temp go the same way,
 # except the bootstrap folder this run's TEMP points into. GAP-0262: the
 # hooks' runtime selector state and lock go, so the Claude Code folders they
-# kept go too. Runs in a disposable scratch directory; no service or machine
-# root is touched.
+# kept go too. GAP-0575, GAP-0562: without a deployment record, the hook
+# machine state that names this scope's hook executable and the public
+# policy summary go. Runs in a disposable scratch directory; no service or
+# machine root is touched.
 
 [CmdletBinding()]
 param()
@@ -149,6 +151,55 @@ $failures = & $module {
         )
         if ($left.Count -ne 0 -or (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($selector, 'ClaudeCode')))) {
             $failures.Add("the runtime selector state kept ClaudeCode\managed-settings.d: $($left -join '; ')")
+        }
+
+        # GAP-0575, GAP-0562: with no deployment record, the hook machine
+        # state that names this scope's hook executable goes (the Claude Code
+        # policy, its state, lock and floor, and the runtime selectors), one
+        # that names another hook stays and is named, and the public policy
+        # summary goes with its empty HookRuntime folder.
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $orphanFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'orphan-pf'
+            $orphanData = Microsoft.PowerShell.Management\Join-Path $Scratch 'orphan-pd'
+            $hook = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe'
+            $named = '"' + $hook.Replace('\', '\\') + '"'
+            $claudeDropIns = [IO.Path]::Combine($orphanFiles, 'ClaudeCode', 'managed-settings.d')
+            $codexPolicy = [IO.Path]::Combine($orphanData, 'OpenAI', 'Codex')
+            foreach ($directory in @($claudeDropIns, $codexPolicy)) {
+                [void][IO.Directory]::CreateDirectory($directory)
+            }
+            foreach ($entry in @(
+                    @('90-defenseclaw.json', ('{"hooks":{"Stop":[{"hooks":[{"command":' + $named + '}]}]}}')),
+                    @('.defenseclaw-managed-hooks.state', ('{"hook_executable":' + $named + '}')),
+                    @('.defenseclaw-managed-hooks.lock', ''),
+                    @('00-defenseclaw-version-floor.json', '{}'),
+                    @('.defenseclaw-managed-runtime-selector.state', ('{"targets":[{"hook_executable":' + $named + '}]}')),
+                    @('.defenseclaw-managed-runtime-selector.lock', ''))) {
+                [IO.File]::WriteAllText([IO.Path]::Combine($claudeDropIns, $entry[0]), $entry[1])
+            }
+            $otherSelector = [IO.Path]::Combine($codexPolicy, '.defenseclaw-managed-runtime-selector.state')
+            [IO.File]::WriteAllText($otherSelector, '{"targets":[{"hook_executable":"C:\\Other\\defenseclaw-hook.exe"}]}')
+            $orphanLayout = @{ HookPath = $hook; CodexMachinePolicyDirectory = $codexPolicy }
+            $left = @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $orphanLayout -ProgramFiles $orphanFiles -ProgramData $orphanData)
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($orphanFiles, 'ClaudeCode'))) {
+                $failures.Add('the orphaned Claude Code hook machine state was not removed')
+            }
+            if (-not [IO.File]::Exists($otherSelector) -or $left.Count -ne 1 -or
+                -not ([string]$left[0]).StartsWith("${otherSelector}: kept")) {
+                $failures.Add("another hook's selector was not kept and named: $($left -join '; ')")
+            }
+            $hookRuntime = [IO.Path]::Combine($orphanData, 'Cisco', 'DefenseClaw-HookRuntime')
+            [void][IO.Directory]::CreateDirectory($hookRuntime)
+            [IO.File]::WriteAllText([IO.Path]::Combine($hookRuntime, 'machine-policy.json'), '{}')
+            $left = @(Remove-DefenseClawStandaloneHookRuntimeLeftovers -Directory $hookRuntime)
+            if ($left.Count -ne 0 -or [IO.Directory]::Exists($hookRuntime)) {
+                $failures.Add("the HookRuntime folder and its machine-policy.json stayed: $($left -join '; ')")
+            }
+        }
+        finally {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
         }
     }
     finally {

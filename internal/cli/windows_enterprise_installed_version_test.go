@@ -262,3 +262,51 @@ func TestWindowsEnterpriseEnsureUpgradesAfterARecoveryDeferredActivation(t *test
 		}
 	}
 }
+
+// The installed standalone CLI asked for a changed config cannot apply it
+// (it has no payload): ensure says to hand the file to Setup /ensure, not
+// to pass four internal binary flags it can never have (GAP-0682).
+func TestWindowsEnterpriseInstalledCLIEnsureConfigPointsAtSetup(t *testing.T) {
+	originalDrift := windowsEnterpriseEnsureDriftDetector
+	t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = originalDrift })
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
+	status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: "1.0.921"}
+	opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", productVersion: "1.0.921", configPath: `C:\dc-test\cfg.yaml`}
+	_, err := planWindowsEnterpriseEnsure(status, opts, "")
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "/ensure CONFIG=") ||
+		strings.Contains(err.Error(), "--gateway-binary") {
+		t.Fatalf("installed CLI ensure --config = %v", err)
+	}
+	opts.resolvedProfile = "secure_client"
+	if _, err := planWindowsEnterpriseEnsure(status, opts, ""); err == nil || !strings.Contains(err.Error(), "--gateway-binary") {
+		t.Fatalf("Secure Client ensure --config = %v", err)
+	}
+}
+
+// A config with connectors: {} for a deployment that protects agents is
+// refused before anything changes, so one config push cannot silently take
+// DefenseClaw off every user (GAP-0602).
+func TestWindowsEnterpriseEnsureRefusesAConnectorlessConfigForAProtectedDeployment(t *testing.T) {
+	originalStaged, originalInstalled := windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors
+	originalDrift := windowsEnterpriseEnsureDriftDetector
+	t.Cleanup(func() {
+		windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors = originalStaged, originalInstalled
+		windowsEnterpriseEnsureDriftDetector = originalDrift
+	})
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "config", nil }
+	windowsEnterpriseStagedConnectors = func(string) ([]string, error) { return nil, nil }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"claudecode", "codex"}, nil }
+	status := &windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: "1.0.921"}
+	opts := &windowsEnterpriseLifecycleOptions{
+		resolvedProfile: "standalone", productVersion: "1.0.921", configPath: `C:\stage\cfg-e7f.yaml`,
+		gatewayBinary: "g", acpBinary: "a", hookBinary: "h", sensorHelperBinary: "s",
+	}
+	_, err := planWindowsEnterpriseEnsure(status, opts, "")
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "claudecode, codex") {
+		t.Fatalf("connectorless config for a protected deployment = %v", err)
+	}
+	windowsEnterpriseStagedConnectors = func(string) ([]string, error) { return []string{"claudecode"}, nil }
+	if plan, err := planWindowsEnterpriseEnsure(status, opts, ""); err != nil || plan.Action != "upgrade" {
+		t.Fatalf("config with a connector = %+v, %v", plan, err)
+	}
+}

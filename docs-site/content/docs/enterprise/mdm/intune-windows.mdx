@@ -178,9 +178,19 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
 - `Remediate-Detect.ps1` runs the installed CLI's
   `enterprise windows verify --profile standalone --json`. It exits `0` on a
   healthy host, and also on a host without the deployment, because installing
-  is the Win32 app's job. Otherwise it exits `1`, which starts the remediation.
-- `Remediate-Fix.ps1` runs `enterprise windows ensure --profile standalone --json`,
-  which verifies and repairs from the installed payload, or does nothing. It
+  is the Win32 app's job, and while another DefenseClaw lifecycle run holds
+  the lock (the next scheduled run checks again). Otherwise it exits `1`,
+  which starts the remediation. Its line names the failing check: each
+  DefenseClaw service that is not running, with its start mode, or else the
+  first error.
+- `Remediate-Fix.ps1` first checks the same way. When the only problem is a
+  stopped or disabled hook guardian or enumerator while the gateway runs, it
+  sets that service back to automatic start, starts it and verifies again,
+  without touching the gateway. Otherwise it runs
+  `enterprise windows ensure --profile standalone --json`, which verifies
+  and repairs from the installed payload, or does nothing. A repair
+  re-applies the deployment and stops every DefenseClaw service, so the
+  gateway is down for one to two minutes and hooks fail closed meanwhile. It
   exits with the lifecycle's code.
 
 Both print one short line, because Intune keeps 2,048 characters of output.

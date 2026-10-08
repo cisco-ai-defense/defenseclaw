@@ -192,6 +192,7 @@ $script:DefenseClawUninstallPurgeUserState = $false
 # its bootstrap folder (GAP-1853). The CLI removes it when PowerShell exits,
 # so the stale-temp sweep must keep it. Set per lifecycle run.
 $script:DefenseClawLauncherTemp = ''
+$script:DefenseClawRemoveLifecycleLockOnExit = $false
 
 function Set-DefenseClawEnterpriseProfile {
     param(
@@ -928,6 +929,22 @@ namespace $nativeNamespace
             {
                 CloseHandle(handle);
             }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "MoveFileExW")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveFileExDelete(
+            string existingFileName,
+            IntPtr newFileName,
+            uint flags);
+
+        public static void DeleteFileAtRestart(string path)
+        {
+            const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004;
+            if (!MoveFileExDelete(path, IntPtr.Zero, MOVEFILE_DELAY_UNTIL_REBOOT))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "schedule delete at restart failed: " + path);
         }
 
         public static uint GetRegularFileLinkCountNoFollow(string path)
@@ -3410,6 +3427,50 @@ function Test-DefenseClawStandaloneVendorDirectory {
     )
 }
 
+# A vendor directory that already existed when standalone Setup first ran
+# (left by an earlier DefenseClaw, or by other Cisco software) kept a DACL
+# without that Users read entry, so every hook of every user failed closed
+# with enterprise_machine_policy_summary_untrusted while status and verify
+# reported ok (GAP-0577). Install, upgrade and repair add the one entry to an
+# existing vendor directory that SYSTEM, Administrators or TrustedInstaller
+# owns; nothing else on it changes, and a directory another principal owns
+# is left to the root-squat checks. The Secure Client profile never takes
+# this path.
+function Grant-DefenseClawStandaloneVendorDirectoryUsersRead {
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $vendor = [IO.Path]::GetDirectoryName(
+        [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).StateRoot
+    )
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $vendor -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or -not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return
+    }
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor
+    $owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+        return
+    }
+    $read = 0x1200a9
+    foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+        if ([string]$rule.IdentityReference.Value -ceq $script:UsersSID -and
+            $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ([int]$rule.FileSystemRights -band $read) -eq $read) {
+            return
+        }
+    }
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+        [Security.AccessControl.FileSystemRights]$read,
+        [Security.AccessControl.InheritanceFlags]::None,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $vendor -AclObject $acl
+}
+
 # Directories strictly between the required base and a managed root. The base
 # is an OS directory and the root carries its own canonical DACL, so neither is
 # returned.
@@ -4013,6 +4074,7 @@ function Install-DefenseClawFileAtomic {
     )
     Assert-DefenseClawNoReparsePath -Path $Source
     Assert-DefenseClawNoReparsePath -Path $Destination -AllowMissingLeaf
+    [void]@(Remove-DefenseClawStaleReplacementBackups -Destination $Destination)
     if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {
         $sourceItem = Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $Source `
@@ -4099,9 +4161,14 @@ function Install-DefenseClawFileAtomic {
         }
         if (-not [string]::IsNullOrWhiteSpace($backup)) {
             Assert-DefenseClawNoReparsePath -Path $backup
-            Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $backup `
-                -Force
+            if (Test-DefenseClawStandaloneProfile) {
+                [void](Remove-DefenseClawReplacementBackup -Path $backup)
+            }
+            else {
+                Microsoft.PowerShell.Management\Remove-Item `
+                    -LiteralPath $backup `
+                    -Force
+            }
             $backup = ''
         }
     }
@@ -4109,6 +4176,134 @@ function Install-DefenseClawFileAtomic {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
         }
+        # A replacement that failed after File.Replace leaves its backup. The
+        # transaction snapshot restores the file, so the backup goes too,
+        # unless it is the only copy left (the destination is missing).
+        if ((Test-DefenseClawStandaloneProfile) -and
+            -not [string]::IsNullOrWhiteSpace($backup) -and
+            [IO.File]::Exists($Destination)) {
+            try {
+                [void](Remove-DefenseClawReplacementBackup -Path $backup)
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Verbose "replacement backup stays: $backup"
+            }
+        }
+    }
+}
+
+# Install-DefenseClawFileAtomic keeps the file it replaces as
+# <Destination>.backup.<32 hex> until the new bytes are verified. Windows
+# lets a running program's file be renamed but not deleted, so the backup of
+# a defenseclaw-acp.exe that an editor's ACP thread still runs could not be
+# removed, the upgrade failed with Access to the path is denied and rolled
+# back, and the backup stayed in bin (GAP-0743), where the next uninstall
+# refused it as unexpected content (GAP-0772). Standalone now deletes such a
+# backup at the next restart instead, and every later replacement of the
+# file and every uninstall removes what an earlier run left. Secure Client
+# is unchanged.
+function Test-DefenseClawReplacementBackupName {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Leaf
+    )
+    $prefix = $Leaf + '.backup.'
+    if (-not $Name.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    return ($Name.Substring($prefix.Length) -cmatch '^[0-9a-f]{32}$')
+}
+
+function Remove-DefenseClawReplacementBackup {
+    # Returns $true once the backup is gone and $false when a running
+    # program still uses it; Windows then deletes it at the next restart.
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-DefenseClawNoReparsePath -Path $Path -AllowMissingLeaf
+    if (-not [IO.File]::Exists($Path)) {
+        return $true
+    }
+    try {
+        [IO.File]::Delete($Path)
+        return $true
+    }
+    catch [UnauthorizedAccessException], [IO.IOException] {
+        Request-DefenseClawDeleteAtRestart -Path $Path
+        return $false
+    }
+}
+
+function Request-DefenseClawDeleteAtRestart {
+    param([Parameter(Mandatory)][string]$Path)
+    $nativeSecurityType = Initialize-DefenseClawNativeSecurity
+    $nativeSecurityType::DeleteFileAtRestart($Path)
+}
+
+function Remove-DefenseClawStaleReplacementBackups {
+    # Standalone: removes the replacement backups of Destination that an
+    # earlier run left, and writes each one a running program still uses.
+    param([Parameter(Mandatory)][string]$Destination)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $directory = [IO.Path]::GetDirectoryName($Destination)
+    $leaf = [IO.Path]::GetFileName($Destination)
+    if ([string]::IsNullOrWhiteSpace($leaf) -or -not [IO.Directory]::Exists($directory)) {
+        return
+    }
+    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath $directory `
+            -Force `
+            -File `
+            -Filter ($leaf + '.backup.*'))) {
+        if (-not (Test-DefenseClawReplacementBackupName -Name ([string]$item.Name) -Leaf $leaf) -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        if (-not (Remove-DefenseClawReplacementBackup -Path ([string]$item.FullName))) {
+            [string]$item.FullName
+        }
+    }
+}
+
+function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
+    # Uninstall removes the replacement backups an earlier upgrade left
+    # beside the installed files before it checks the install tree. One a
+    # running program still uses keeps the folder, so the uninstall says
+    # which and what to do.
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $kept = [Collections.Generic.List[string]]::new()
+    $files = @(
+        $Layout.BrokerPath,
+        $Layout.GatewayPath,
+        $Layout.ACPPath,
+        $Layout.HookPath,
+        $Layout.SensorHelperPath,
+        $Layout.CLIPath,
+        $Layout.InstallerPath,
+        $Layout.ModulePath
+    )
+    $openCodePlugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
+    if ($null -ne $openCodePlugin) {
+        $files += [string]$openCodePlugin.PluginPath
+    }
+    foreach ($path in $files) {
+        if ([string]::IsNullOrWhiteSpace([string]$path)) {
+            continue
+        }
+        foreach ($left in @(Remove-DefenseClawStaleReplacementBackups -Destination ([IO.Path]::GetFullPath([string]$path)))) {
+            $kept.Add([string]$left)
+        }
+    }
+    if ($kept.Count -gt 0) {
+        throw (
+            'a program started before the last DefenseClaw upgrade still runs the earlier copy kept beside ' +
+            'the installed file, so the install folder cannot be removed yet: ' + ($kept -join ', ') +
+            '. Close the programs that use it (for example an editor thread that uses DefenseClaw ACP) or ' +
+            'restart the computer, which deletes the copy, then run the uninstall again'
+        )
     }
 }
 
@@ -9437,6 +9632,206 @@ function Remove-DefenseClawEmptyClaudeManagedSettingsFolders {
             "${directory}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
             return
         }
+    }
+}
+
+# A deployment that is gone (its StateRoot was removed, or a fresh install
+# rolled back onto files an earlier one left) can leave DefenseClaw's Claude
+# Code drop-ins in managed-settings.d: the policy (90-defenseclaw.json), its
+# state and lock and the version floor, and the hooks' runtime selector
+# state in the Claude Code, Codex and Cursor policy folders. They keep each
+# account they name on a runtime nothing serves, and the next fresh ensure
+# refused those accounts ("deferred target already has a selected runtime
+# without protected Guardian authorization", GAP-0575). A file belongs to
+# this deployment scope only when it names the scope's exact hook
+# executable; the floor and the locks go with the policy. Standalone only.
+# Writes "path: reason" for each file it keeps.
+function Remove-DefenseClawStandaloneOrphanedHookMachineState {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [string]$ProgramFiles = $script:ProgramFiles,
+        [string]$ProgramData = $script:ProgramData
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $escapedHook = [IO.Path]::GetFullPath([string]$Layout.HookPath).Replace('\', '\\')
+    $namesThisHook = {
+        param([string]$Path)
+        $info = [IO.FileInfo]::new($Path)
+        if (-not $info.Exists) {
+            return $null
+        }
+        if ($info.Length -gt 4MB -or ($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $false
+        }
+        return ([IO.File]::ReadAllText($Path).IndexOf($escapedHook, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    }
+    $claude = [IO.Path]::Combine($ProgramFiles, 'ClaudeCode', 'managed-settings.d')
+    $removals = [Collections.Generic.List[string]]::new()
+    $claudeOwned = $true
+    foreach ($leaf in @('90-defenseclaw.json', '.defenseclaw-managed-hooks.state')) {
+        $path = [IO.Path]::Combine($claude, $leaf)
+        try {
+            $named = & $namesThisHook $path
+        }
+        catch {
+            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            $claudeOwned = $false
+            continue
+        }
+        if ($false -eq $named) {
+            "${path}: kept: it names another DefenseClaw hook executable"
+            $claudeOwned = $false
+        }
+        elseif ($true -eq $named) {
+            $removals.Add($path)
+        }
+    }
+    if ($claudeOwned) {
+        $removals.Add([IO.Path]::Combine($claude, '00-defenseclaw-version-floor.json'))
+        $removals.Add([IO.Path]::Combine($claude, '.defenseclaw-managed-hooks.lock'))
+    }
+    else {
+        $removals.Clear()
+    }
+    foreach ($directory in @($claude, [string]$Layout.CodexMachinePolicyDirectory, [IO.Path]::Combine($ProgramData, 'Cursor'))) {
+        if ([string]::IsNullOrWhiteSpace($directory)) {
+            continue
+        }
+        $state = [IO.Path]::Combine($directory, '.defenseclaw-managed-runtime-selector.state')
+        try {
+            $named = & $namesThisHook $state
+        }
+        catch {
+            "${state}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            continue
+        }
+        if ($false -eq $named) {
+            "${state}: kept: it names another DefenseClaw hook executable"
+            continue
+        }
+        $removals.Add($state)
+        $removals.Add([IO.Path]::Combine($directory, '.defenseclaw-managed-runtime-selector.lock'))
+    }
+    foreach ($path in $removals) {
+        try {
+            Remove-DefenseClawManagedHooksSerializationLock -Path $path -Label 'orphaned DefenseClaw hook machine state'
+        }
+        catch {
+            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+        }
+    }
+    Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $ProgramFiles
+}
+
+# The public machine policy summary (machine-policy.json) lives in
+# ProgramData\Cisco\DefenseClaw-HookRuntime beside the per-user connector
+# folders. A teardown removes it with the policy, but a purge that had no
+# deployment record to tear down, or that recovered a failed fresh install,
+# left it and the folder (GAP-0562). A purge removes the summary, then the
+# folder once it is empty. Standalone only. Writes "path: reason" for what
+# stays.
+function Remove-DefenseClawStandaloneHookRuntimeLeftovers {
+    param([string]$Directory)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
+        $roots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+        $Directory = [IO.Path]::Combine(
+            [IO.Path]::GetDirectoryName([string]$roots.StateRoot),
+            'DefenseClaw-HookRuntime'
+        )
+    }
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Directory -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+        return
+    }
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        "${Directory}: kept: it is not a plain folder"
+        return
+    }
+    try {
+        Remove-DefenseClawManagedHooksSerializationLock `
+            -Path ([IO.Path]::Combine($Directory, 'machine-policy.json')) `
+            -Label 'public machine policy summary'
+        if ($null -ne (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Directory -Force |
+                Microsoft.PowerShell.Utility\Select-Object -First 1)) {
+            "${Directory}: kept: it still holds per-user connector folders"
+            return
+        }
+        [IO.Directory]::Delete($Directory, $false)
+    }
+    catch {
+        "${Directory}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+    }
+}
+
+# A standalone uninstall with purge that ends without a committed teardown
+# (a recovered fresh install, or exact-scope recovery after StateRoot was
+# removed) also removes the hook machine state this scope left and the
+# public policy summary, names what stays in machine_state_remaining, and
+# drops the lifecycle lock once it is released (GAP-0562, GAP-0575).
+function Add-DefenseClawStandalonePurgeMachineLeftovers {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Result
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $Result
+    }
+    $remaining = [string[]]@(
+        @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $Layout) +
+        @(Remove-DefenseClawStandaloneHookRuntimeLeftovers)
+    )
+    $existing = $Result.PSObject.Properties['machine_state_remaining']
+    if ($null -ne $existing -and $null -ne $existing.Value) {
+        $remaining = [string[]]@(@($existing.Value) + @($remaining))
+    }
+    $Result |
+        Microsoft.PowerShell.Utility\Add-Member `
+            -MemberType NoteProperty `
+            -Name machine_state_remaining `
+            -Value $remaining `
+            -Force
+    $script:DefenseClawRemoveLifecycleLockOnExit = $true
+    return $Result
+}
+
+# The lifecycle lock outlives every run. After a standalone purge it goes,
+# with its folder once empty, but only when no other lifecycle holds it: the
+# exclusive open fails then, and the file is deleted when it closes.
+function Remove-DefenseClawStandaloneLifecycleLockLeftover {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    try {
+        $path = [string]$Layout.LifecycleLockPath
+        if ([IO.File]::Exists($path)) {
+            Assert-DefenseClawNoReparsePath -Path $path
+            $stream = [IO.FileStream]::new(
+                $path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None,
+                1,
+                [IO.FileOptions]::DeleteOnClose
+            )
+            $stream.Dispose()
+        }
+        $directory = [string]$Layout.LifecycleLockDirectory
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and $item.PSIsContainer -and
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+            $null -eq (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force |
+                Microsoft.PowerShell.Utility\Select-Object -First 1)) {
+            [IO.Directory]::Delete($directory, $false)
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "lifecycle lock stays: $($_.Exception.Message)"
     }
 }
 
@@ -21633,8 +22028,11 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             # uninstall result's warnings.
             $machineStateRemaining = [string[]]@(
                 @($machineStateRemaining) +
-                @(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData -WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp')))
+                @(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData -WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp'))) +
+                @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $Layout) +
+                @(Remove-DefenseClawStandaloneHookRuntimeLeftovers)
             )
+            $script:DefenseClawRemoveLifecycleLockOnExit = $true
             $result |
                 Microsoft.PowerShell.Utility\Add-Member `
                     -MemberType NoteProperty `
@@ -22287,6 +22685,7 @@ function Invoke-DefenseClawPreLayoutRecovery {
                         -Name purged `
                         -Value $true `
                         -Force
+                $result = Add-DefenseClawStandalonePurgeMachineLeftovers -Layout $Layout -Result $result
                 return [pscustomobject]@{
                     handled = $true
                     result = (Add-DefenseClawUninstallContractResult `
@@ -22323,6 +22722,7 @@ function Invoke-DefenseClawPreLayoutRecovery {
                     -Name purged `
                     -Value $true `
                     -Force
+            $result = Add-DefenseClawStandalonePurgeMachineLeftovers -Layout $Layout -Result $result
             $result = Add-DefenseClawUninstallContractResult -Result $result
             return [pscustomobject]@{
                 handled = $true
@@ -22464,6 +22864,7 @@ function Invoke-DefenseClawPreLayoutRecovery {
                     -Sources $Sources `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName
+                $sweepResult = Add-DefenseClawStandalonePurgeMachineLeftovers -Layout $Layout -Result $sweepResult
                 return [pscustomobject]@{
                     handled = $true
                     result = $sweepResult
@@ -23433,6 +23834,7 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -AnyStartMode
+    Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
     Assert-DefenseClawManagedInstallTree -Layout $Layout
     Assert-DefenseClawRecordedArtifactHashes `
         -Metadata $metadata `
@@ -24382,6 +24784,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
+    $script:DefenseClawRemoveLifecycleLockOnExit = $false
     $script:DefenseClawUninstallPurgeUserState = (
         $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
     )
@@ -24830,6 +25233,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -KeepProtectedAcl:(Test-DefenseClawStandaloneProfile))
         }
         New-DefenseClawLayoutDirectories -Layout $layout
+        if ($Action -in @('Install', 'Upgrade', 'Repair')) {
+            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
+        }
         $pendingRecovery = Recover-DefenseClawPendingTransaction `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
@@ -24851,6 +25257,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         -Name purged `
                         -Value $true `
                         -Force
+                $result = Add-DefenseClawStandalonePurgeMachineLeftovers -Layout $layout -Result $result
                 return Add-DefenseClawUninstallContractResult -Result $result
             }
             if ($Action -ne 'Install') {
@@ -24898,6 +25305,25 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             New-DefenseClawLayoutDirectories -Layout $layout
         }
 
+        if ($Action -eq 'Install' -and (Test-DefenseClawStandaloneProfile) -and
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $layout.PendingPath)) {
+            # A fresh install first removes the hook machine state an earlier
+            # deployment of this scope left, before its snapshot can make a
+            # rollback restore it (GAP-0575).
+            $priorDeployment = $null
+            try {
+                $priorDeployment = Get-DefenseClawDeploymentMetadata -Layout $layout
+            }
+            catch {
+                $priorDeployment = $false
+            }
+            if ($null -eq $priorDeployment -or
+                ($false -ne $priorDeployment -and -not (Test-DefenseClawMetadataInstalled -Metadata $priorDeployment))) {
+                foreach ($kept in @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $layout)) {
+                    Microsoft.PowerShell.Utility\Write-Verbose "orphaned hook machine state stays: $kept"
+                }
+            }
+        }
         if ($Action -in @('Upgrade', 'Repair', 'Uninstall')) {
             [void](Sync-DefenseClawStandaloneManagedHooksActivationBinding `
                 -Layout $layout `
@@ -24932,6 +25358,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     finally {
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock
+        if ($script:DefenseClawRemoveLifecycleLockOnExit) {
+            $script:DefenseClawRemoveLifecycleLockOnExit = $false
+            Remove-DefenseClawStandaloneLifecycleLockLeftover -Layout $layout
+        }
     }
 }
 

@@ -72,6 +72,15 @@ type JSONL struct {
 	size     int64
 	closed   bool
 	sequence atomic.Uint64
+	// openDeferred records that the file could not be opened when the
+	// destination was prepared.
+	openDeferred bool
+}
+
+// OpenDeferred reports that the file could not be opened when the
+// destination was prepared; deliveries retry it.
+func (adapter *JSONL) OpenDeferred() bool {
+	return adapter != nil && adapter.openDeferred
 }
 
 // NewJSONL performs path preparation, secure owner-only open, and bounded
@@ -89,17 +98,23 @@ func NewJSONL(config JSONLConfig) (*JSONL, error) {
 		return nil, newError(ErrorOpenFailed)
 	}
 	file, identity, size, err := secureOpenAppend(config.Path)
-	if err != nil {
-		if isUnsafeFailure(err) {
-			return nil, newError(ErrorUnsafePath)
-		}
-		return nil, newError(ErrorOpenFailed)
+	if err != nil && isUnsafeFailure(err) {
+		return nil, newError(ErrorUnsafePath)
 	}
+	// A file the gateway cannot open yet (an access list without write for
+	// its account, a full or offline volume) disables only this destination:
+	// every delivery reopens it and fails transiently until it can be
+	// written. Refusing here stopped the whole gateway at start, so every
+	// hook failed closed (GAP-0703).
 	adapter := &JSONL{
 		config: config, maxBytes: int64(config.MaxSizeMB) * 1024 * 1024,
 		gate: make(chan struct{}, 1), file: file, identity: identity, size: size,
+		openDeferred: err != nil,
 	}
 	adapter.gate <- struct{}{}
+	if adapter.openDeferred {
+		return adapter, nil
+	}
 	if err := adapter.cleanupBackups(context.Background(), time.Now().UTC()); err != nil {
 		_ = file.Close()
 		if isUnsafeFailure(err) {

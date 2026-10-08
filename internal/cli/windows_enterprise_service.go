@@ -335,8 +335,10 @@ func runWindowsEnterpriseLifecycle(
 	// A standard account cannot change the managed deployment whatever file
 	// it passes, so the elevation refusal comes before --config is read,
 	// parsed or compiled: it used to be told to fix a file that no fix would
-	// let it apply (GAP-0120).
-	if windowsEnterpriseMutationAction(action) && !windowsEnterpriseIsElevated() &&
+	// let it apply (GAP-0120). Uninstall too: it loaded and checked the
+	// installer module first, so a standard account got an Authenticode
+	// error and 1603 instead of this answer (GAP-0640).
+	if (windowsEnterpriseMutationAction(action) || action == "uninstall") && !windowsEnterpriseIsElevated() &&
 		managed.IsStandaloneProfile(opts.profile) {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
 			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
