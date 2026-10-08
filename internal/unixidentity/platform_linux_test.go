@@ -65,13 +65,14 @@ func init() { hostRealms = func(context.Context) ([]Realm, error) { return nil, 
 // stays local: it was reported as the AD account lee@CORP.EXAMPLE.COM. A
 // winbind account of the realm reports its DNS domain, as Windows does, not
 // the NetBIOS name CORP; the NetBIOS domain of a trusted domain gets no
-// realm facts.
+// realm facts. An nss_ldap account named by an e-mail address gets none
+// either: it took the principal of an AD account of that name (GAP-0730).
 func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
 	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
 	nsswitchPath = filepath.Join(t.TempDir(), "nsswitch.conf")
 	localPasswdPath = filepath.Join(t.TempDir(), "passwd")
-	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files winbind systemd\n"), 0o644); err != nil {
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files winbind ldap systemd\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(localPasswdPath, []byte("lee:x:1000:70000::/home/lee:/bin/bash\n"), 0o644); err != nil {
@@ -89,16 +90,17 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		1000:  "lee",
 		70005: `CORP\erin`,
 		70006: `EMEA\frank`,
+		70007: "gina@corp.example.com",
 	}
-	winbind := map[int]bool{70005: true, 70006: true}
+	services := map[int]string{70005: "winbind", 70006: "winbind", 70007: "ldap"}
 	startFakeSSSD(t, nil)
 	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
 		line := commandResult{stdout: []byte(name + ":*:" + strconv.Itoa(uid) + ":70000::/home/" + name + ":/bin/bash\n")}
 		f.results["passwd "+strconv.Itoa(uid)] = line
-		service := "sss"
-		if winbind[uid] {
-			service = "winbind"
+		service := services[uid]
+		if service == "" {
+			service = "sss"
 		}
 		f.results["-s "+service+" passwd "+strconv.Itoa(uid)] = line
 		f.results["-s "+service+" passwd "+name] = line
@@ -117,6 +119,7 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
 		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@corp.example.com"},
 		70006: {ad, useridentity.SourceWinbind, "emea", "", ""},
+		70007: {useridentity.DirectoryLDAP, useridentity.SourceNSSLDAP, "", "", ""},
 	}
 	r := newFakeNSS(f)
 	for uid, expected := range want {

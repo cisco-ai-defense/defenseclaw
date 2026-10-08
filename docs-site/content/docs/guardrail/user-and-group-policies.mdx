@@ -143,8 +143,9 @@ How the keys combine:
 - **On Linux a principal needs the account's SID.** A principal-only
   assignment (`alice@CORP.EXAMPLE.COM`) matches an SSSD account only when SSSD
   holds a SID for its uid and the joined domain holds `alice` with that same
-  SID. An account of another SSSD domain, such as plain LDAP, never gets the AD
-  principal, whatever its name. While SSSD does not answer (stopped,
+  SID. An account of another SSSD domain, such as plain LDAP, or an `nss_ldap`
+  account never gets the AD principal, whatever its name. While SSSD does not
+  answer (stopped,
   restarting, or no answer within 2 seconds) the lookup fails and the account
   keeps its last facts for up to an hour; with none, it gets the default
   profile with `default_lookup_failed`. Add the uid to the assignment when the
