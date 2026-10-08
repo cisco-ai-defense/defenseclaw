@@ -1016,6 +1016,17 @@ Windows handles machine policy differently from Linux and macOS. See
 [Machine policy](/docs/enterprise/machine-policy) and
 [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
 
+### ACP agents in an editor
+
+The [ACP guard](/docs/acp-guard#managed-enterprise-enrollment) runs an agent
+for Zed or JetBrains behind DefenseClaw. Enroll each user as LocalSystem while
+the user is signed in (a disconnected RDP session counts); the user then runs
+the reported `defenseclaw.exe enterprise acp setup ...` command. Before the
+first guarded thread, the user runs the agent once in a terminal: Hermes asks
+its first-run questions there, which the editor cannot show, and Kiro needs
+`kiro-cli login` once. A guard that cannot start shows its reason in the
+editor, not only in `%LOCALAPPDATA%\Zed\logs\Zed.log`.
+
 ## Upgrades and downgrades
 
 Run `/ensure` with the newer Setup. It upgrades in place and keeps the
