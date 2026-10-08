@@ -360,6 +360,7 @@ def test_entra_apply_adds_existing_dotted_user_to_group(tmp_path: Path) -> None:
     assert calls == [("group-id", "user-id", "team")]
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
 def test_himmelblau_configure_preserves_existing_allowlist(tmp_path: Path) -> None:
     source = (ENTRA.parent / "setup-himmelblau.sh").read_text(encoding="ascii")
     config = tmp_path / "himmelblau.conf"
