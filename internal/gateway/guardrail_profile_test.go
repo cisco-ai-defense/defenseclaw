@@ -832,6 +832,23 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	}
 }
 
+func TestUnknownAssignmentGroupsReportsIncompleteCheck(t *testing.T) {
+	groups := make([]string, profileGroupCheckMax+1)
+	for i := range groups {
+		groups[i] = fmt.Sprintf("group-%d", i)
+	}
+	assignments := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: groups}}}
+	checked := 0
+	exists := func(context.Context, string) (bool, error) {
+		checked++
+		return true, nil
+	}
+	warnings := unknownAssignmentGroups(context.Background(), assignments, exists, nil)
+	if checked != profileGroupCheckMax || len(warnings) != 1 || !strings.Contains(warnings[0], "not checked") {
+		t.Fatalf("checked = %d, warnings = %q; want a warning that later groups were not checked", checked, warnings)
+	}
+}
+
 // TestExplainShowsTheProfileRequestsStillGet pins GAP-0134: explain resolves
 // the account's fresh groups, but requests keep the gateway's cached facts
 // for up to 15 minutes, so explain reports their age and the profile they
