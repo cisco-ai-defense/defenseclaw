@@ -855,6 +855,38 @@ func TestConfigChangeIsEnforcedAfterAnEgressRefresh(t *testing.T) {
 // The first denied connection to a declared --host-port becomes an ask
 // (OpenShell drafts none for the host alias) whose approval opens the port;
 // one the organization closes gets the refusal on the feed, and no ask.
+// TestDeclaredHostPortThroughTheProxyAsks (GAP-0233): after a daemon
+// restart lost the pending ask, the agent retried 198.18.0.2:8765 through
+// the egress proxy, which read "(this machine)", and the agent told the
+// user to relaunch with the --host-port it had. The proxy's refusal of a
+// declared port raises the ask, and the agent hears that it waits.
+func TestDeclaredHostPortThroughTheProxyAsks(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "hpbox", HostPorts: []int{38830}})
+	b := e.binding("hpbox")
+	proxy := func(host string, port int) {
+		ev := egress.Event{Kind: egress.EventBlocked, Time: time.Now(), BindingID: b.ID, SandboxName: "hpbox", Method: "CONNECT",
+			Host: host, Port: port, Category: egress.CategoryHostInternal}
+		e.m.refusals.note(ev, ev.Time)
+		e.m.egressEvent(t.Context(), ev, 0)
+	}
+	proxy("198.18.0.2", 38830)
+	if asks, _ := e.m.Approvals(t.Context(), "hpbox"); len(asks) != 1 || asks[0].Port != 38830 {
+		t.Fatalf("asks = %+v; want the declared port's", asks)
+	}
+	if got := e.events("hpbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 0 {
+		t.Fatalf("the declared port read as blocked: %+v", got)
+	}
+	if got := e.m.EgressRefusals(b.ID, "hpbox"); len(got) != 1 || got[0].Note != NoteAsked || got[0].Host != openshellHostAlias {
+		t.Fatalf("agent notes = %+v; want the ask's", got)
+	}
+	// A port the run did not declare is the plain refusal.
+	proxy("198.18.0.2", 5999)
+	if got := e.events("hpbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 1 {
+		t.Fatalf("an undeclared port: %+v", got)
+	}
+}
+
 func TestDeclaredHostPortAsks(t *testing.T) {
 	e := newEnv(t, nil)
 	e.live(sandboxapi.CreateRequest{Name: "hpbox", HostPorts: []int{38830}})

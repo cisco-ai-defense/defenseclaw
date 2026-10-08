@@ -809,6 +809,9 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	switch e.Kind {
 	case egress.EventAllowed, egress.EventBlocked:
 		blocked := e.Kind == egress.EventBlocked
+		if blocked && e.Category == egress.CategoryHostInternal && m.declaredHostPortAsk(ctx, b, e) {
+			return
+		}
 		reason, more := e.Reason, ""
 		if repeats > 0 {
 			// Refusals folded into this one (egressSink.admitBlocked).

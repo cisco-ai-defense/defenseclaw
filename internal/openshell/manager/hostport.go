@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
@@ -227,6 +229,35 @@ func (m *Manager) hostPortAsk(ctx context.Context, b *box, port int, binary stri
 		Kind: sandboxapi.ActivityApprovalRequested, Sandbox: name, Host: openshellHostAlias, Port: port,
 		ApprovalID: id, Reason: string(d.Reason), Message: d.Message,
 	})
+}
+
+// declaredHostPortAsk turns the egress proxy's refusal of a --host-port the
+// run declared (host.openshell.internal, or its synthetic address, on that
+// port) into the ask a direct connection to it raises. After a daemon
+// restart lost the pending ask, the agent's retries of 198.18.0.2:8765
+// through the proxy read "✗ … (this machine)", and the agent told the user
+// to relaunch with the --host-port it had (GAP-0233). It reports whether it
+// did.
+func (m *Manager) declaredHostPortAsk(ctx context.Context, b *box, e egress.Event) bool {
+	if triage.NormalizeHost(m.namedHost(b, e.Host, e.Port)) != openshellHostAlias {
+		return false
+	}
+	m.mu.Lock()
+	declared, eff, ident, name := slices.Contains(b.rec.Flags.HostPorts, e.Port), b.eff, b.identity(), b.rec.Name
+	m.mu.Unlock()
+	if !declared || eff == nil || eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: e.Port}) != nil {
+		return false
+	}
+	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: openshellHostAlias, Port: e.Port, Blocked: true,
+		DecisionCode: "SANDBOX_EGRESS_HOST_PORT_ASK", Timestamp: e.Time,
+		Reason: fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d): answer it with defenseclaw sandbox approvals", e.Port, e.Port),
+	})
+	// The agent hears of the ask, not of "this machine".
+	m.refusals.forgetNote(e.BindingID, strings.TrimSuffix(strings.ToLower(e.Host), "."), e.Port, "")
+	m.hostPortAsk(ctx, b, e.Port, "")
+	m.refusals.noteDirect(e.BindingID, name, openshellHostAlias, e.Port, NoteAsked, m.now())
+	return true
 }
 
 // hostPortApplyTimeout bounds applying an approved host port.
