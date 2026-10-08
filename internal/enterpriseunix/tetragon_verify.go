@@ -719,8 +719,11 @@ func setAgentsCheck(set func(id, status, message string, fix ...string), in tetr
 		return
 	}
 	if len(over) > 0 {
-		set(checkAgents, failing, fmt.Sprintf("%s run more than %d agent sessions at once; the monitor controls measure %d,"+
-			" so covered time is paused until fewer run", strings.Join(over, ", "), kernelpolicy.MaxPIDs, kernelpolicy.MaxPIDs))
+		// The line starts with a word, not an account name: the sentence
+		// case of the output would change the name (GAP-0096).
+		set(checkAgents, failing, fmt.Sprintf("%s %s %s more than %d agent sessions at once; the monitor controls measure %d,"+
+			" so covered time is paused until fewer run", plural(len(over), "the user", "the users"), andList(over),
+			plural(len(over), "runs", "run"), kernelpolicy.MaxPIDs, kernelpolicy.MaxPIDs))
 		return
 	}
 	var with, without []string

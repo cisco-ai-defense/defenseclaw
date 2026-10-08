@@ -1574,14 +1574,14 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 		for _, observed := range rep.Roots.ObservedOnly {
 			count += observed.Count
 		}
-		fmt.Fprintf(w, "  Observed, not enforced: %d session(s)\n", count)
+		fmt.Fprintf(w, "  Observed, not enforced: %d %s\n", count, plural(count, "session", "sessions"))
 		for _, observed := range rep.Roots.ObservedOnly {
 			fmt.Fprintf(w, "    %s: %d, %s%s\n", userLabel(observed.UID), observed.Count, observedReason(observed.Reason),
 				parenthesized(strings.TrimSpace(observed.Connector+" "+observed.Identity)))
 		}
 	}
 	if rep.Roots.OverLimit > 0 {
-		fmt.Fprintf(w, "  Over the pid limit: %d live root(s) observed only\n", rep.Roots.OverLimit)
+		fmt.Fprintf(w, "  Over the pid limit: %d %s observed only\n", rep.Roots.OverLimit, plural(rep.Roots.OverLimit, "live root", "live roots"))
 	}
 	if len(rep.CustomerPolicies) > 0 {
 		fmt.Fprintln(w, "  Your Tetragon policies (DefenseClaw reads their events and never changes them):")
@@ -1698,6 +1698,17 @@ func defaultStr(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// sessionCount is a count warning's detail with the noun phrase that agrees
+// with it ("1 agent session is", "3 agent sessions are"), and the count, -1
+// when the detail is not one ("some ... are"); GAP-0096.
+func sessionCount(detail, one, many string) (string, int) {
+	n, err := strconv.Atoi(strings.TrimSpace(detail))
+	if err != nil || n < 0 {
+		return defaultStr(detail, "some") + " " + many, -1
+	}
+	return strconv.Itoa(n) + " " + plural(n, one, many), n
 }
 
 func parenthesized(value string) string {

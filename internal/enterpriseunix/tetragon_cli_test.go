@@ -868,7 +868,10 @@ func TestTetragonStatusFollowsTheSchema(t *testing.T) {
 		"  Override:        connect deleted by an operator at ",
 		"defenseclaw-controls-0a1b2c3d", "dcr-std1 (1001)", "reset by a hit", "12.0h of 168h (7%)",
 		"      dcr-std1 (1001): would block ssh_private_key_read 1x, last ", "        ~/.ssh/id_ed25519 by /usr/bin/cat\n",
-		"Observed, not enforced: 1 session(s)", "    dcr-std1 (uid 1001): 1, looks like an agent by name only (heuristic_root) (langchain)",
+		"Observed, not enforced: 1 session\n", "    dcr-std1 (uid 1001): 1, looks like an agent by name only (heuristic_root) (langchain)",
+		"  Over the pid limit: 1 live root observed only\n",
+		// GAP-0096: the count and the verb agree for one session.
+		"1 live agent session is over the 8-session limit of the monitor controls (the controls do not count its opens, and its user's burn-in",
 		kernelpolicy.WarnOperatorOverride + ":connect",
 	} {
 		if !strings.Contains(text.String(), want) {

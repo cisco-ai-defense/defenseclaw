@@ -351,12 +351,15 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" (it did not restart into this build)" + next
 	}},
 	kernelpolicy.WarnRootsOverLimit: {Message: func(f tetragonFacts) string {
-		return defaultStr(f.Detail, "some") + fmt.Sprintf(" live agent sessions are over the %d-session limit of the monitor controls", kernelpolicy.MaxPIDs) +
-			" (the controls do not count their opens, and their users' burn-in pauses until fewer sessions run); nothing to do, the count is reported"
+		count, n := sessionCount(f.Detail, "live agent session is", "live agent sessions are")
+		return count + fmt.Sprintf(" over the %d-session limit of the monitor controls", kernelpolicy.MaxPIDs) +
+			" (the controls do not count " + plural(n, "its", "their") + " opens, and " + plural(n, "its user's", "their users'") +
+			" burn-in pauses until fewer sessions run); nothing to do, the count is reported"
 	}},
 	kernelpolicy.WarnSessionPolicyPending: {Message: func(f tetragonFacts) string {
-		return defaultStr(f.Detail, "some") + " agent session(s) are waiting for an enabled controls policy that includes their process ids" +
-			" (their users accrue no covered time while this lasts); check " + gwStatus + " if it persists"
+		count, n := sessionCount(f.Detail, "agent session is", "agent sessions are")
+		return count + " waiting for an enabled controls policy that includes " + plural(n, "its process id", "their process ids") +
+			" (" + plural(n, "its user accrues", "their users accrue") + " no covered time while this lasts); check " + gwStatus + " if it persists"
 	}},
 	kernelpolicy.WarnPIDMonitorOnly: {Message: func(tetragonFacts) string {
 		return "agent sessions matched only by their process id, such as a script-hosted agent run by node, are monitored in enforce mode" +
@@ -365,10 +368,11 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" which only the observe policy records; the Tetragon guide lists this limit"
 	}},
 	kernelpolicy.WarnSessionsPredateControls: {Message: func(f tetragonFacts) string {
-		return defaultStr(f.Detail, "some") + " agent session(s) of enforced users started before the kernel controls loaded" +
-			" (Tetragon marks an agent's processes when the agent starts, so these are monitored, not denied);" +
-			" restart them to be denied: after enforce starts, and after a Tetragon restart. " + gwStatus + " lists them" +
-			" under Observed, not enforced"
+		count, n := sessionCount(f.Detail, "agent session of an enforced user", "agent sessions of enforced users")
+		return count + " started before the kernel controls loaded" +
+			" (Tetragon marks an agent's processes when the agent starts, so " + plural(n, "it is", "these are") + " monitored, not denied);" +
+			" restart " + plural(n, "it", "them") + " to be denied: after enforce starts, and after a Tetragon restart. " + gwStatus +
+			" lists " + plural(n, "it", "them") + " under Observed, not enforced"
 	}},
 	kernelpolicy.WarnBinaryScopeLimited: {Message: func(tetragonFacts) string {
 		return "more than one user of a controls policy has a native agent install" +
