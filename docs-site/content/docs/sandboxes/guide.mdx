@@ -402,11 +402,11 @@ it copies anything, and the first start of an image says it takes longer:
 
 ### The banner, line by line
 
-A real banner from a Mac (copy mode, the `balanced` pack, the process tree on).
-Note the two `Model` lines: the credential and the only host it works at, then
-how that host is reached.
+A real banner from Linux: a live mount of a project with a repository policy,
+started with `--host-port 8765`. Note the two `Model` lines: the credential and
+the only host it works at, then how that host is reached.
 
-![The banner of defenseclaw sandbox run claude on a Mac: the sandbox and its permission mode, the project copy, the model credential bound to its endpoint, the line saying OpenShell opens that endpoint to the harness's own program around the egress proxy, and where asks appear](/images/sandboxes/screens/terminal-run-banner.png)
+![The banner of defenseclaw sandbox run claude --host-port 8765 on Linux: the sandbox and its permission mode, the live project with its undo point, the hidden secret files, the protected git internals, the model credential bound to its endpoint and the line saying OpenShell opens that endpoint to the harness's own program around the egress proxy, the host port that opens on approval, the repository policy that tightened one setting, and where asks appear](/images/sandboxes/screens/terminal-run-banner-linux.png)
 
 | Line | What it tells you |
 | --- | --- |
@@ -545,7 +545,9 @@ The feed shows events as they happen. `defenseclaw sandbox destinations NAME`
 shows the list: every site the sandbox reached or tried to reach, through the
 egress proxy or around it, and what each one is. The KIND column says whether
 it is the sandbox's model provider, another AI provider the harness does not
-use (shadow AI), a site that was only ever refused, or an ordinary site. A row
+use (shadow AI), a site that was only ever refused (`blocked (paste site)`), or
+an ordinary site, named by its category when DefenseClaw knows it
+(`source hosting`, `package registry`). A row
 also counts the requests (the refused ones and the model calls too), the bytes
 sent and received, the program that made the connection and when it was last
 seen. The line under the table counts the shadow AI destinations and names the
@@ -557,17 +559,16 @@ deleted with the sandbox. The TUI shows the same rows in the sandbox's details
   cwd="~/code/myapp"
   speed={1.5}
   height={300}
-  ariaLabel="Animated terminal replay of defenseclaw sandbox destinations for a Claude Code sandbox: the model provider, one shadow AI destination, one blocked site and three ordinary sites, each with its requests, bytes and the program that connected."
-  caption="Recorded from a real Claude Code sandbox named `myapp-claude` under the `open` pack, with a model key from Amazon Bedrock. `api.openai.com` is shadow AI, `pastebin.com` was refused by the blocklist, and the other rows are ordinary sites."
+  ariaLabel="Animated terminal replay of defenseclaw sandbox destinations for a Claude Code sandbox on Linux with the process tree on: one shadow AI destination, the model provider, a site the blocklist refused, a source host and a package registry, each with its requests, bytes and the program that connected with its parents."
+  caption="Recorded from a real Claude Code sandbox named `myapp-claude` on Linux, with the process tree on and a model key from Amazon Bedrock. `api.openai.com` is shadow AI, `pastebin.com` was refused by the blocklist, and the BINARY column shows the program that connected and its parents (`curl ← bash ← claude ← …`)."
   frames={[
     { type: 'cmd', text: 'defenseclaw sandbox destinations myapp-claude', pauseMs: 700 },
-    { type: 'dim', text: 'DESTINATION                       KIND            PROVIDER        REQUESTS            UP / DOWN          BINARY                                    LAST SEEN' },
-    { type: 'out', text: 'api.openai.com                    shadow AI       OpenAI          1                   808 B / 4.3 KiB    /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'bedrock-mantle.us-east-1.api.aws  model provider  Amazon Bedrock  15, 13 model calls  0 B / 0 B          /opt/defenseclaw-harness/claudecode/bin…  10-07 20:25' },
-    { type: 'out', text: 'pastebin.com                      blocked         paste_site      0 (1 refused)       0 B / 0 B          /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'github.com                        other           -               1                   780 B / 581.7 KiB  /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'registry.npmjs.org                other           -               1                   790 B / 25.9 KiB   /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'pypi.org                          other           -               1                   789 B / 109.9 KiB  /usr/bin/curl                             10-07 20:24' },
+    { type: 'dim', text: 'DESTINATION                       KIND                  PROVIDER        REQUESTS            UP / DOWN         BINARY                                    LAST SEEN' },
+    { type: 'out', text: 'api.openai.com                    shadow AI             OpenAI          1                   808 B / 4.2 KiB   curl ← bash ← claude ← python3 ← opensh…  10-08 08:03' },
+    { type: 'out', text: 'bedrock-mantle.us-east-1.api.aws  model provider        Amazon Bedrock  15, 13 model calls  0 B / 0 B         …fenseclaw-harness/claudecode/bin/claude  10-08 08:06' },
+    { type: 'out', text: 'pastebin.com                      blocked (paste site)  -               0 (1 refused)       0 B / 0 B         /usr/bin/curl                             10-08 08:04' },
+    { type: 'out', text: 'api.github.com                    source hosting        -               1                   783 B / 6.9 KiB   curl ← bash ← claude ← python3 ← opensh…  10-08 08:03' },
+    { type: 'out', text: 'registry.npmjs.org                package registry      -               1                   790 B / 25.8 KiB  curl ← bash ← claude ← python3 ← opensh…  10-08 08:03' },
     { type: 'warn', text: '  ⚠ 1 AI destination the harness does not use (shadow AI); block one with `defenseclaw sandbox policy block HOST`' },
   ]}
 />

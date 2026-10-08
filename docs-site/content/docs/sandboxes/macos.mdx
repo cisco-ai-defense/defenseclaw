@@ -311,9 +311,9 @@ does not change while the agent works. With an Amazon Bedrock key the
 `Model` line names the model and the key, for example
 `anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)`.
 
-A real run on a Mac, under the `balanced` pack with the process tree on:
+A real run on a Mac, for a Python project under the default `open` pack:
 
-![defenseclaw sandbox run claude on a Mac: the copy-mode note, the copy with .env held back, the banner with the project copy, the model credential and how its endpoint is reached, and where asks appear, before Claude Code starts](/images/sandboxes/screens/terminal-run-banner.png)
+![defenseclaw sandbox run claude on a Mac: the copy-mode note, the copy with secrets held back and the test caches left out, the banner with the project copy, the model credential and how its endpoint is reached, and where to watch for asks, before Claude Code starts](/images/sandboxes/screens/terminal-run-banner.png)
 
 The first start of each image takes about a minute while the driver prepares
 its MicroVM disk. It keeps that disk, so later starts take a few seconds.
@@ -342,10 +342,10 @@ Session ended · 14 tool calls · 2 new sites contacted · 3 files changed (+41 
 Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
 ```
 
-A real session end, with three sites blocked and a changed file that can run
-code:
+A real session end, with one site blocked and unblocked later, a flagged
+fetch and one changed file:
 
-![End of a sandbox session on a Mac: 5 tool calls with 1 blocked, 3 new sites contacted, 3 sites blocked, 2 files changed, shadow AI warnings with their unblock commands, a warning about the changed .mcp.json, and the question to bring the changes back](/images/sandboxes/screens/terminal-session-summary.png)
+![End of a sandbox session on a Mac: the work being pulled, 8 tool calls, 4 new sites contacted, 1 site blocked, 1 file changed, a flagged fetch, the blocked webhook site that was unblocked since, and the question to bring the changes back](/images/sandboxes/screens/terminal-session-summary.png)
 
 | Answer | What happens |
 | --- | --- |
