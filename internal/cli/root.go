@@ -121,6 +121,7 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 			return err
 		}
+		pinManagedUnixGatewayInputs(os.Stderr)
 	}
 	// Enterprise hook commands also use this initializer so they receive the
 	// same authenticated v8 runtime context as the root sidecar command.
