@@ -15,6 +15,11 @@ class IdentityGuideExamplesTest(unittest.TestCase):
             re.search(r"(?m)^\s*export OKTA_(?:API_TOKEN|BIND_PASSWORD)\s*=", text)
         )
 
+    def test_macos_klist_subprocess_is_described_consistently(self):
+        text = (DOCS / "identity-sources.mdx").read_text()
+        self.assertIn("/usr/bin/klist --json", text)
+        self.assertNotIn("`klist` is never run", text)
+
 
 if __name__ == "__main__":
     unittest.main()

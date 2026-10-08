@@ -27,9 +27,9 @@ For the supported identity types and the task guides, see
 - It never contacts an identity provider, a domain controller or a directory
   API of its own. A lookup is a call to the host's own account database
   (`getent`, SSSD, the Windows token and registry, Open Directory).
-- It holds no identity credentials: no passwords, tokens, tickets or keys. The
-  Kerberos ticket is never read, only the principal name in the ticket cache
-  header, and `klist` is never run.
+- It holds no identity credentials: no passwords, tokens, tickets or keys. It
+  records the Kerberos principal name, not the ticket contents. On macOS, it may
+  run `/usr/bin/klist --json` to read the default API cache.
 - It adds no sign-in step and changes no identity setting on the host.
 
 ## Verified and claimed
