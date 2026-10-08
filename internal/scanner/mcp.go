@@ -240,6 +240,9 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 	}{entry.Name, entry.Command, entry.Args, entry.Env, entry.CWD})
 }
 
+// runMCPScannerCommand owns the runtime process and its Python descendants.
+var runMCPScannerCommand = processutil.RunTree
+
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
 	exitCode := 0
@@ -297,7 +300,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := runMCPScannerCommand(cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 
