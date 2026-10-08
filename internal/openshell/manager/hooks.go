@@ -85,11 +85,12 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 	case sandboxauth.RouteNotify:
 		box.hooks.lastNotify = now
 	case sandboxauth.RouteOTLP:
-		// Not a sign of work for the reachability check: the Codex TUI
-		// exports OTLP from its start, before the first prompt that fires
-		// its hooks. A model call is (watch.go).
+		// No sign of work, for the reachability check or the silence one:
+		// the Codex TUI exports OTLP from its start, before the first prompt
+		// that fires its hooks, and on and on while it waits at its prompt,
+		// which made an idle session's hooks "silent" (GAP-0220). Its model
+		// calls are its work (watch.go).
 		box.hooks.lastOTLP = now
-		box.noteActiveLocked(now)
 	}
 	name := box.rec.Name
 	m.mu.Unlock()
@@ -583,7 +584,8 @@ func (b *box) noteActiveLocked(at time.Time) {
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
 // harness has been at work (OCSF network events of the harness's own
-// binaries, its connections to the egress proxy among them, native OTLP;
+// binaries, its connections to the egress proxy among them, and its model
+// calls, but not its OTLP exports, which an idle harness makes too;
 // OCSF process events of those binaries count too, but OpenShell 0.1
 // reports only the processes its supervisor starts, never the ones a
 // harness runs, so work without network traffic goes unseen) for the
