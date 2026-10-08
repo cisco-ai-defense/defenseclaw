@@ -386,20 +386,31 @@ func TestSandboxHintsNameCommandsThatExist(t *testing.T) {
 			t.Errorf("%s: suggests `defenseclaw sandbox%s`, which is no command", where, lits[0])
 			continue
 		}
+		// The words after "--" are the inner command's, up to the backtick
+		// that ends the suggestion (`exec NAME -- df -h /`).
+		inner := false
 		for _, lit := range lits {
-			for _, tok := range strings.FieldsFunc(lit, func(r rune) bool { return r == ' ' || r == '|' || r == '`' || r == '(' || r == ')' }) {
-				if !strings.HasPrefix(tok, "-") || tok == "-" || tok == "--" || strings.HasPrefix(tok, "--help") {
-					continue
+			for i, part := range strings.Split(lit, "`") {
+				if i > 0 {
+					inner = false
 				}
-				name := strings.TrimLeft(strings.SplitN(tok, "=", 2)[0], "-")
-				var f *pflag.Flag
-				if strings.HasPrefix(tok, "--") {
-					f = cmd.Flags().Lookup(name)
-				} else if len(name) == 1 {
-					f = cmd.Flags().ShorthandLookup(name)
-				}
-				if f == nil {
-					t.Errorf("%s: suggests `%s %s`, which takes no %s", where, cmd.CommandPath(), tok, tok)
+				for _, tok := range strings.FieldsFunc(part, func(r rune) bool { return r == ' ' || r == '|' || r == '(' || r == ')' }) {
+					if tok == "--" {
+						inner = true
+					}
+					if inner || !strings.HasPrefix(tok, "-") || tok == "-" || strings.HasPrefix(tok, "--help") {
+						continue
+					}
+					name := strings.TrimLeft(strings.SplitN(tok, "=", 2)[0], "-")
+					var f *pflag.Flag
+					if strings.HasPrefix(tok, "--") {
+						f = cmd.Flags().Lookup(name)
+					} else if len(name) == 1 {
+						f = cmd.Flags().ShorthandLookup(name)
+					}
+					if f == nil {
+						t.Errorf("%s: suggests `%s %s`, which takes no %s", where, cmd.CommandPath(), tok, tok)
+					}
 				}
 			}
 		}
