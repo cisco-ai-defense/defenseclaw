@@ -228,14 +228,14 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		return config.AssetPolicyDecision{}, false
 	}
 	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor("mcp")
-	if !runtimeDetection.Enabled {
-		return config.AssetPolicyDecision{}, false
-	}
 	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
 		return config.AssetPolicyDecision{}, false
 	}
+	if !runtimeDetection.Enabled && cfg.SecureClientIntegration() {
+		return config.AssetPolicyDecision{}, false
+	}
 	probe = a.resolveMCPProbeEndpoint(connector, probe)
-	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	input := config.AssetPolicyInput{
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
 		Connector:      connector,
@@ -244,7 +244,11 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		Args:           probe.Args,
 		Transport:      probe.Transport,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
-	})
+	}
+	if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
+		return config.AssetPolicyDecision{}, false
+	}
+	decision := cfg.EvaluateAssetPolicy(input)
 	// when MCP.Default is "deny" and the asset
 	// policy is itself in action mode, an unknown terminal MCP
 	// command MUST NOT be silently downgraded to allow just
@@ -335,20 +339,18 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
-	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor(targetType)
-	if !runtimeDetection.Enabled {
-		return config.AssetPolicyDecision{}, false
-	}
-	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
-		return config.AssetPolicyDecision{}, false
-	}
-	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	input := config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           probe.SkillName,
 		Connector:      connector,
 		SourcePath:     probe.SourcePath,
 		RuntimeSurface: runtimeSurface,
-	})
+	}
+	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor(targetType)
+	if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
+		return config.AssetPolicyDecision{}, false
+	}
+	decision := cfg.EvaluateAssetPolicy(input)
 	// a Claude Code agent can pass a crafted
 	// skill_name like "/tmp/attacker/trusted-skill/SKILL.md" and
 	// the previous code stripped it down to the basename
@@ -439,6 +441,26 @@ func (a *APIServer) evaluateNativeRuntimeSkillSelection(
 		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 	}
 	return decision, matched
+}
+
+// runtimeAssetPolicyApplies reports whether a hook evaluates asset_policy
+// for an asset it identified. runtime_detection (enabled, terminal_commands)
+// governs the default, registry and approval rules; an explicit denied entry
+// applies whatever it says, as it does on the install watcher and the policy
+// API (GAP-0566). Secure Client keeps the runtime_detection gate of main for
+// every rule (issue #1092).
+func runtimeAssetPolicyApplies(cfg *config.Config, detection config.AssetRuntimeDetection, surface string, in config.AssetPolicyInput) bool {
+	if surface == "terminal" && !detection.TerminalCommands {
+		return false
+	}
+	if detection.Enabled {
+		return true
+	}
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	verdict, _ := cfg.AssetListDecision(in)
+	return verdict == config.AssetListDeny
 }
 
 func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {

@@ -101,6 +101,21 @@ func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *test
 	if matched {
 		t.Fatalf("matched=%v decision=%+v, want runtime detection disabled to skip skill policy", matched, decision)
 	}
+
+	// GAP-0566: an explicit denied entry applies whatever runtime_detection
+	// says, for skills and for plugin commands.
+	cfg.AssetPolicy.Enabled = false
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-deny"}}
+	cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "epa-plug-deny"}}
+	for _, probe := range []skillRuntimeProbe{
+		{SkillName: "epa-deny", ToolName: "Skill", Surface: "hook", Matched: true},
+		{TargetType: "plugin", SkillName: "epa-plug-deny", Surface: "prompt_expansion", Matched: true},
+	} {
+		decision, matched := api.runtimeSkillAssetPolicyDecision("claudecode", probe)
+		if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+			t.Fatalf("%s %s: matched=%v decision=%+v, want an admin-deny block", probe.TargetType, probe.SkillName, matched, decision)
+		}
+	}
 }
 
 func TestEvaluateRuntimeSkillAssetPolicyRuntimeDisableWinsOverAllow(t *testing.T) {

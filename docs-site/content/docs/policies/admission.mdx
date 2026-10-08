@@ -467,6 +467,11 @@ rule records that it would have blocked and lets the asset through; with
 `mode: action` it blocks. See [Registries](/docs/scanning/registries) for the
 approved-catalog rules.
 
+`asset_policy.<type>.runtime_detection` works the same way. With
+`runtime_detection.enabled: false` (the default for skills and plugins) an
+agent hook still refuses a skill, plugin command or MCP server on the `denied`
+list; only the default, registry and approval rules are skipped at the hook.
+
 ### Tool lists
 
 `asset_policy.tool.denied` and `asset_policy.tool.allowed` hold rules with a
