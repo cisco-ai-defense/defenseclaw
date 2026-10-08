@@ -16,9 +16,16 @@ import (
 
 // flakyForeignGuard is a stand-in for the administrator-owned hook binary
 // whose foreign-hook check cannot run the first time (for example while an
-// upgrade replaces it) and answers allow afterwards.
+// upgrade replaces it) and answers allow afterwards. The plugins also run
+// this binary for "hook session-facts", synchronously and at a time that
+// depends on scheduling; that call gets no answer and leaves the state
+// alone, so only the load-time check can take the one failure.
 const flakyForeignGuard = `#!/bin/sh
 cat >/dev/null
+case " $* " in
+  *" --foreign-hook-check "*) ;;
+  *) exit 1 ;;
+esac
 if [ ! -f "$0.ran" ]; then
   : > "$0.ran"
   echo "hook binary unavailable" >&2
