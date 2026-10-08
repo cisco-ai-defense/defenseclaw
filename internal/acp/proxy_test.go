@@ -111,9 +111,47 @@ func TestCopyFramesObserveFailsClosedOnRuntimeModeMismatch(t *testing.T) {
 		Mode: ModeObserve, Profile: "p", Evaluator: modeMismatchEvaluator{}, Stderr: &stderr, Managed: true,
 		SetupCommand: "/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp setup --client zed --agent kiro --profile p",
 	}, state, ClientToAgent, bytes.NewBufferString(frame), &forwarded, &rejected)
-	if !errors.Is(err, ErrModeMismatch) || !strings.Contains(err.Error(), "changed the ACP mode of profile p to action") ||
+	// An entry set up without --activate is not told that the administrator
+	// changed the mode (GAP-0924).
+	if !errors.Is(err, ErrModeMismatch) || !strings.Contains(err.Error(), "profile p is in action mode, but this editor entry is set up for observe mode") ||
+		!strings.Contains(err.Error(), "set up without --activate") ||
 		!strings.Contains(err.Error(), "enterprise acp setup --client zed --agent kiro --profile p --activate") {
 		t.Fatalf("mode drift message = %v", err)
+	}
+}
+
+// chanWriter hands every write to the test.
+type chanWriter chan []byte
+
+func (w chanWriter) Write(p []byte) (int, error) {
+	w <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+// A prompt the agent does not answer gets a notice, once: Hermes waiting for
+// its first-run questions on a terminal left the thread on a spinner with no
+// text (GAP-0870). Any agent frame cancels it.
+func TestSilentAgentPromptGetsAWaitNotice(t *testing.T) {
+	previous := agentSilenceNotice
+	agentSilenceNotice = 20 * time.Millisecond
+	t.Cleanup(func() { agentSilenceNotice = previous })
+	client := make(chanWriter, 4)
+	state := &proxyState{peerProtocolFixes: true}
+	state.armSilenceNotice(ProxyOptions{AgentID: "hermes"}, "s1", client)
+	select {
+	case frame := <-client:
+		if !strings.Contains(string(frame), `"sessionId":"s1"`) || !strings.Contains(string(frame), "run hermes once in a terminal") {
+			t.Fatalf("notice = %s", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no notice for a silent agent")
+	}
+	state.armSilenceNotice(ProxyOptions{AgentID: "hermes"}, "s2", client)
+	state.agentSpoke()
+	select {
+	case frame := <-client:
+		t.Fatalf("a notice after the agent answered: %s", frame)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

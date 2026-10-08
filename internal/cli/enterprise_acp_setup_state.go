@@ -15,12 +15,15 @@ import (
 )
 
 // enterpriseACPSetupState reports, as the enrolled user, whether the
-// editor entry of an enrollment is set up for this home: its contract lock
-// exists, the editor file it pins is in the home, and the entry there points
-// at this home's token copy and lock. After an account rename that moved the
-// home, list and verify said setup was done while the entry pointed at the
-// old home and could not start (GAP-0693). note says what does not match.
-func enterpriseACPSetupState(dataDir, home, client, agent string) (done bool, note string) {
+// editor entry of an enrollment is set up for this home and enrollment: its
+// contract lock exists for the enrolled profile and its central mode, the
+// editor file it pins is in the home, and the entry there points at this
+// home's token copy and lock. After an account rename that moved the home,
+// list and verify said setup was done while the entry pointed at the old
+// home and could not start (GAP-0693); after a re-enrollment under another
+// profile they said so while the entry still had the replaced profile
+// (GAP-0833). note says what does not match.
+func enterpriseACPSetupState(dataDir, home, client, agent, profile, mode string) (done bool, note string) {
 	lockPath := acpContractLockPath(dataDir, client, agent)
 	if info, err := os.Lstat(lockPath); err != nil || !info.Mode().IsRegular() {
 		return false, ""
@@ -37,6 +40,9 @@ func enterpriseACPSetupState(dataDir, home, client, agent string) (done bool, no
 	if relative, relErr := filepath.Rel(filepath.Clean(home), configPath); relErr != nil || relative == ".." ||
 		strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
 		return false, fmt.Sprintf("the editor entry was set up in %s, outside the home %s", configPath, home)
+	}
+	if lock.Profile != profile {
+		return false, fmt.Sprintf("the editor entry is set up for profile %s, not the enrolled profile %s", lock.Profile, profile)
 	}
 	document, _, err := readACPClientConfig(configPath)
 	if err != nil {
@@ -67,6 +73,9 @@ func enterpriseACPSetupState(dataDir, home, client, agent string) (done bool, no
 	}
 	if len(want) > 0 {
 		return false, "the editor entry in " + configPath + " is not a managed DefenseClaw entry"
+	}
+	if mode != "" && lock.Mode != mode {
+		return false, fmt.Sprintf("the editor entry is set up for %s mode, but profile %s is in %s mode", lock.Mode, profile, mode)
 	}
 	return true, ""
 }

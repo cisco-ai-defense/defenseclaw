@@ -9,6 +9,18 @@ import (
 	"testing"
 )
 
+// A disconnected session counts when the caller allows it, after the
+// active ones; the guardian keeps acting only in active sessions (GAP-0835).
+func TestWindowsTargetSessionOrderCountsDisconnectedWhenAllowed(t *testing.T) {
+	sessions := []windowsSessionState{{ID: 7, Disconnected: true}, {ID: 3, Active: true}, {ID: 1}, {ID: 2, Disconnected: true}}
+	if got := fmt.Sprint(windowsTargetSessionOrder(sessions, true)); got != "[3 2 7]" {
+		t.Fatalf("signed-in order = %s, want [3 2 7]", got)
+	}
+	if got := fmt.Sprint(windowsTargetSessionOrder(sessions, false)); got != "[3]" {
+		t.Fatalf("active-only order = %s, want [3]", got)
+	}
+}
+
 func TestIsWindowsTargetSessionUnavailableRequiresTypedCause(t *testing.T) {
 	typed := &WindowsTargetSessionUnavailableError{
 		SID: "S-1-5-21-1-2-3-1001",
