@@ -6,12 +6,17 @@
 package cli
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
@@ -42,6 +47,51 @@ const (
 	standaloneRuntimeReasonDescriptorMissing = "enterprise_managed_runtime_descriptor_missing"
 	standaloneRuntimeReasonHookSocketMissing = "enterprise_managed_hook_socket_missing"
 )
+
+// standaloneHookInUserNamespace reports a hook that runs in a Linux user
+// namespace other than the host's (its uid_map is not the identity map).
+var standaloneHookInUserNamespace = func() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	data, err := os.ReadFile("/proc/self/uid_map")
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(data))
+	return len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295"
+}
+
+// reportStandaloneHookRefusal tells the gateway, over the hook socket, that
+// this hook refused its agent, so the refusal is in the audit log and the
+// gateway log as a refused unenrolled account is (GAP-0923). From a private
+// user namespace the listener's owner cannot be checked (it reads as the
+// overflow uid), so the report carries only the connector and the reason;
+// it is best effort and bounded.
+var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
+	if strings.TrimSpace(socket) == "" {
+		return
+	}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", socket)
+		},
+	}}
+	request, err := http.NewRequest(http.MethodPost, "http://defenseclaw-hook/api/v1/inspect/tool", strings.NewReader("{}"))
+	if err != nil {
+		return
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-DefenseClaw-Connector", connectorName)
+	request.Header.Set(hookexec.ClientRefusalHeader, reason)
+	response, err := client.Do(request)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	_ = response.Body.Close()
+}
 
 // Test seams.
 var (
@@ -103,6 +153,11 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 		}
 	default:
 		reason = standaloneRuntimeReasonInvalid
+		if standaloneHookInUserNamespace() {
+			// The root-owned files read as owned by the overflow uid here,
+			// so they fail their checks; say why (GAP-0923).
+			reason = hookexec.ManagedUserNamespaceReason
+		}
 	}
 	standaloneHookRuntime.Lock()
 	standaloneHookRuntime.prepared = true
@@ -177,6 +232,9 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	if opts.ManagedRuntimeFailure != "" {
 		if prepared && failed && !secureClientHost {
 			opts.ManagedStandalone = true
+			if opts.ManagedRuntimeFailure == hookexec.ManagedUserNamespaceReason {
+				reportStandaloneHookRefusal(layout.HookSocketPath, connectorName, opts.ManagedRuntimeFailure)
+			}
 		}
 		return
 	}

@@ -477,6 +477,18 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
+		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
+			// A hook in a private user namespace refused its agent before it
+			// could check the runtime state; the refusal left no audit row or
+			// log line, unlike a refused unenrolled account (GAP-0923).
+			connectorName, _ := a.managedHookRouteScope(r)
+			fmt.Fprintf(os.Stderr,
+				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent runs in a private user namespace\n",
+				peer.UID, connectorName, route, hookexec.ManagedUserNamespaceReason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, hookexec.ManagedUserNamespaceReason, connectorName)
+			writeManagedHookRefusal(w, http.StatusForbidden, hookexec.ManagedUserNamespaceReason)
+			return
+		}
 		connectorName, inspect := a.managedHookRouteScope(r)
 		decision := authorizer.decide(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader))
 		if !decision.Allow {

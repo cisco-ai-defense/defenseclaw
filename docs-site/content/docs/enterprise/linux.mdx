@@ -471,6 +471,14 @@ use bubblewrap, which needs user namespaces:
 DefenseClaw's hooks inspect each tool call whether or not the agent's own
 sandbox runs.
 
+An agent started inside a private user namespace that was not given such a
+view (for example with `unshare -Ur`) fails closed: its prompts and tool
+calls are blocked with "this agent runs in a private user namespace ...
+Start the agent from your normal login session", and the gateway records the
+refusal as an `api-auth-failure` audit row with reason
+`enterprise_managed_user_namespace` and a `hook socket refused` line in its
+journal, as it does for an account that is not enrolled.
+
 ## Per-user installs
 
 On a computer with `/etc/defenseclaw/managed-runtime.json`, the per-user
