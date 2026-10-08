@@ -562,7 +562,7 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 			if !strings.Contains(message, cfg) || strings.Contains(message, h.env.Layout.ConfigPath) {
 				t.Fatalf("the error does not name the --config file: %q", message)
 			}
-			if !strings.Contains(message, "config_version_required") || !strings.Contains(message, "`config_version: 9`") || strings.Contains(message, "defenseclaw migrate") {
+			if !strings.Contains(message, "config_version is required") || !strings.Contains(message, "`config_version: 9`") || strings.Contains(message, "defenseclaw migrate") {
 				t.Fatalf("the error does not say how to fix the file on this host: %q", message)
 			}
 		})
