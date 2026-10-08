@@ -60,5 +60,8 @@ func TestPinnedGenerationDecidesARequestWhileReloadsPublish(t *testing.T) {
 		if rules != want.activeRules {
 			t.Fatalf("request %d stamped %s but scanned with another generation's rules", i, digest)
 		}
+		if requestPolicyConfig(ctx) != want.Config {
+			t.Fatalf("request %d stamped %s but decided with another generation's configuration", i, digest)
+		}
 	}
 }
