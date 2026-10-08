@@ -1272,7 +1272,11 @@ If you change or delete a DefenseClaw policy with `tetra` (for example
 `tetra tracingpolicy set-mode <name> monitor` or `delete <name>`), the helper
 treats it as your decision. It does not put the policy back after a helper or
 Tetragon restart; it warns `kernel_policy_operator_override:<family>`. A new
-`enforce_ack` or mode in the config clears the override.
+`enforce_ack` or mode in the config clears the override. The helper notices the
+change at its next pass, within a minute; until then `status` shows the state
+before it. From then on the users the controls would deny show as monitor
+only, "an operator changed the controls policy in Tetragon", and `verify` does
+not count them as enforced.
 
 ### Your Tetragon policies
 

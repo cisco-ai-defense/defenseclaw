@@ -198,6 +198,15 @@ func MakePlan(in PlanInput) Plan {
 			status(uid, UIDMonitor, WarnEnforcePaused)
 		}
 	}
+	if hasOverride(FamilyControls, OverrideMonitor) || hasOverride(FamilyControls, OverrideDeleted) {
+		// An operator moved the controls policy to monitor or deleted it:
+		// nothing is denied for the ready users until the intent changes.
+		// They read "no agent installed" (no anchor once the policy was
+		// gone) or "not in enforce mode yet" before (GAP-0055).
+		for _, uid := range ready {
+			status(uid, UIDMonitor, WarnOperatorOverride)
+		}
+	}
 	controls(Scope{Mode: mode, UIDs: ready, Connectors: enforceSet})
 	if len(waiting) > 0 {
 		burnin(Scope{Mode: PolicyMonitor, UIDs: waiting, Connectors: enforceSet})

@@ -457,4 +457,5 @@ var monitorReasonWords = map[string]string{
 	kernelpolicy.WarnBinaryScopeLimited: "another user's native agent holds the one deny anchor",
 	kernelpolicy.WarnPolicyLoadError:    "the controls policy did not load in Tetragon",
 	kernelpolicy.WarnPolicyNotApplied:   "the controls policy is not in enforce mode yet",
+	kernelpolicy.WarnOperatorOverride:   "an operator changed the controls policy in Tetragon",
 }

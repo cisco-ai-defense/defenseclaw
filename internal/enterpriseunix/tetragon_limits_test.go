@@ -54,6 +54,26 @@ func TestEnforceNeverCountsAUserWithoutADenyAnchor(t *testing.T) {
 	}
 }
 
+// GAP-0055: running enforce, a user who finished burn-in counts as enforced
+// only while the helper says it denies for them; one held in monitor by an
+// operator's change or a pause is named with why.
+func TestEnforceCountsOnlyUsersTheHelperEnforces(t *testing.T) {
+	users := []TetragonUserReadiness{
+		{UID: 1001, Ready: true, State: kernelpolicy.UIDMonitor, Reason: kernelpolicy.WarnOperatorOverride},
+		{UID: 1002, Ready: true, State: kernelpolicy.UIDEnforcing},
+		{UID: 1003, State: kernelpolicy.UIDBurnIn},
+	}
+	want := "1 of 3 users is enforced; 1 finished burn-in and is not enforced now (an operator changed the controls policy in Tetragon);" +
+		" 1 stays in monitor until its burn-in completes."
+	if got := enforceCounts(users, false); got != want {
+		t.Fatalf("counts:\n%s\nwant:\n%s", got, want)
+	}
+	// Ready for enforce (from observe) still counts who would be enforced.
+	if got := enforceCounts(users, true); !strings.HasPrefix(got, "2 of 3 users finished burn-in") {
+		t.Fatalf("would: %s", got)
+	}
+}
+
 func TestReadyForEnforceSaysOneOfSeveralReadyUsersIsDenied(t *testing.T) {
 	users := []TetragonUserReadiness{
 		{UID: 1001, Ready: true}, {UID: 1002, Ready: true}, {UID: 1003},

@@ -641,6 +641,21 @@ func TestTetragonVerifyExitCodesAndSchema(t *testing.T) {
 	}
 }
 
+// GAP-0055: with burn_in 0 a hit holds nobody in monitor, so the hit text
+// does not say "until 0h pass".
+func TestHitTextWithBurnInZero(t *testing.T) {
+	stubTetragonAccounts(t)
+	in := withUsers(readyInputs("enforce"))
+	rep := tetragonReadiness(in, "enforce", readyProbes, readinessNow)
+	for i := range rep.Users {
+		rep.Users[i].NeededHours = 0
+	}
+	text := readinessText(t, rep)
+	if strings.Contains(text, "until 0h") || !strings.Contains(text, "With burn_in 0 a hit does not hold this user") {
+		t.Fatalf("hit text with burn_in 0:\n%s", text)
+	}
+}
+
 // Plane C as the gateway's /health reports it (ai_runtime.details.planes.c).
 func TestPlaneCFromHealth(t *testing.T) {
 	down := `{"api":{"state":"running"},"ai_runtime":{"state":"running","details":{"planes":{

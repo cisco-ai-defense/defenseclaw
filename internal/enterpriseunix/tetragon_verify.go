@@ -957,11 +957,18 @@ func readinessNext(rep *TetragonReadiness, failed []string) []string {
 // user but the lowest uid when several have a native agent install, stay in
 // monitor. Running enforce, the helper names them (noDenyAnchor); in observe
 // the count says that enforce denies for one of several ready users.
+//
+// Running enforce, a user counts as enforced only while the helper says it
+// denies for them: one who finished burn-in is held in monitor by a pause or
+// an operator's change to the controls policy, and is named so (GAP-0055).
 func enforceCounts(users []TetragonUserReadiness, would bool) string {
-	ready, monitorOnly, unanchored := 0, 0, 0
-	limitSet := map[string]bool{}
+	ready, monitorOnly, unanchored, held := 0, 0, 0, 0
+	limitSet, heldSet := map[string]bool{}, map[string]bool{}
 	for _, user := range users {
 		switch {
+		case user.Ready && !would && user.State != kernelpolicy.UIDEnforcing:
+			held++
+			heldSet[defaultStr(monitorReasonWords[user.Reason], defaultStr(user.Reason, "see tetragon status"))] = true
 		case user.Ready:
 			ready++
 		case user.MonitorOnly:
@@ -985,7 +992,15 @@ func enforceCounts(users []TetragonUserReadiness, would bool) string {
 	default:
 		text = fmt.Sprintf("%d of %d %s %s", ready, len(users), plural(len(users), "user", "users"), verb)
 	}
-	if waiting := len(users) - ready - monitorOnly - unanchored; waiting > 0 {
+	if held > 0 {
+		reasons := make([]string, 0, len(heldSet))
+		for reason := range heldSet {
+			reasons = append(reasons, reason)
+		}
+		sort.Strings(reasons)
+		text += fmt.Sprintf("; %d finished burn-in and %s not enforced now (%s)", held, plural(held, "is", "are"), strings.Join(reasons, ", "))
+	}
+	if waiting := len(users) - ready - monitorOnly - unanchored - held; waiting > 0 {
 		text += fmt.Sprintf("; %d %s in monitor until %s burn-in completes", waiting, plural(waiting, "stays", "stay"), plural(waiting, "its", "their"))
 	}
 	if unanchored > 0 {
@@ -1197,8 +1212,13 @@ func writeBurnInTable(w io.Writer, rep *TetragonReadiness) {
 				what += " by " + hit.Binary
 			}
 			fmt.Fprintf(w, "      %s\n", what)
-			writeWrapped(w, "        ", "        ", "last "+hit.Last+". Stays in monitor until "+trimHours(user.NeededHours)+
-				"h pass with no hit. If the tool is expected, this user cannot be enforced for this control in this release;"+
+			hold := "Stays in monitor until " + trimHours(user.NeededHours) + "h pass with no hit."
+			if user.NeededHours <= 0 {
+				// burn_in 0: a hit holds nobody in monitor (GAP-0055).
+				hold = "With burn_in 0 a hit does not hold this user in monitor: in enforce this open is denied."
+			}
+			writeWrapped(w, "        ", "        ", "last "+hit.Last+". "+hold+
+				" If the tool is expected, this user cannot be enforced for this control in this release;"+
 				" other users are not affected.", 80)
 		}
 	}
