@@ -112,6 +112,12 @@ security findings may result. An asset scan records the scan operation; findings
 remain in `security.finding`. An asset lifecycle transition also produces an
 `enforcement.action` only when a policy action is attempted.
 
+OpenShell sandboxes write their records into these buckets too: phase changes,
+egress decisions with bytes and duration, asks, policy changes, findings such as
+shadow AI, process activity and the integration's health, each tagged with the
+sandbox's name. [Sandbox telemetry](/docs/observability/sandbox-telemetry) lists
+them.
+
 ## Destination capabilities and fan-out
 
 | Destination kind | Signals it can receive |

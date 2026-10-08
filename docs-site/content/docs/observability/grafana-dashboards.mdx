@@ -114,7 +114,9 @@ The **Sandboxes** board (`defenseclaw-sandboxes`) shows what the
 The Sandbox list and every log filter read `defenseclaw.sandbox.name` as Loki
 structured metadata. The local Collector copies the name from each record's body
 onto the record (`transform/sandbox-identity`), so no panel parses every log line
-to find a sandbox. A record that names no sandbox has no such metadata.
+to find a sandbox. A record that names no sandbox has no such metadata. The
+records behind the panels, and the health codes of the integration row, are
+listed in [Sandbox telemetry](/docs/observability/sandbox-telemetry).
 
 | Row | Panels | What they show |
 | --- | --- | --- |

@@ -58,7 +58,7 @@ to filter.
 | Key | Panel | What it shows |
 | --- | --- | --- |
 | `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied policy generation and digest](#policy-generation-and-digest), at-a-glance health |
-| `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them |
+| `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them. The details of an alert raised in an OpenShell sandbox name it in a **Sandbox** fact |
 | `3` | Skills | Scanned skill inventory, with [block and allow actions](#block-and-allow-from-the-panels) |
 | `4` | MCPs | Scanned MCP servers, with block and allow actions |
 | `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others), with block and allow actions |
@@ -79,6 +79,12 @@ rows so a large model cache cannot hide agent activity. Open **AI Discovery**
 with `V` for the full model inventory; model rows add Model, Model status, and
 Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
+
+What AI discovery finds inside an
+[OpenShell sandbox](/docs/ai-discovery#inside-openshell-sandboxes) is listed
+there too, as its own rows tagged `Product (sandbox NAME)`: the same product on
+your machine and in a sandbox are separate rows, and the detail names the
+sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
 
 ### IDE plugins
 

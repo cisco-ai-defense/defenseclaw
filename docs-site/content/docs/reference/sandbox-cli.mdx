@@ -163,7 +163,13 @@ daemon serves sandboxes, it also checks that the hooks of running sandboxes
 reach DefenseClaw, and fails when a sandbox's hooks don't. Each failed check
 names its fix. `--fix` applies the fixes it can make as your user, after
 asking. Doctor exits `1` when a check fails. With `--output json` it prints the
-result and exits `0`, so read the `ok` field instead. When sandboxes are on
+result and exits `0`, so read the `ok` field instead. The JSON holds `ok`,
+`ready` (`ok`, with sandboxes turned on), `openshell_install` (setup would offer
+to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
+supported OpenShell older than 0.1.2 in place) and `openshell_install_version`
+(the release setup installs), then every check with its id, title, status,
+detail and fix, the OpenShell and Docker versions found, and the compute driver;
+the TUI's Setup wizard reads these fields. When sandboxes are on
 (`openshell.enabled: true`), `defenseclaw doctor` shows the same checks in its
 Sandbox section; otherwise that section is one skipped row.
 
