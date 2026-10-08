@@ -267,13 +267,24 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
     """The named policy ``cfg`` runs ("" when none matches or there is no config).
 
     Since config_version 9 a named policy is a preset: ``policy activate``
-    writes its admission, guardrail levels and Cisco trust level as config
-    keys and records nothing else, so the active policy is the one whose
+    writes its admission, guardrail levels, watch settings and Cisco trust
+    level as config keys and records nothing else, so the active policy is the one whose
     values the config holds now. A config that sets none of them runs the
-    shipped defaults, which is the ``default`` policy.
+    shipped defaults, which is the ``default`` policy. Secure Client
+    instead keeps the active name in its v8 OPA data.json.
     """
     if cfg is None or getattr(cfg, "guardrail", None) is None:
         return ""
+    from defenseclaw.enforce import asset_lists
+
+    if asset_lists.is_secure_client(cfg):
+        path = os.path.join(os.fspath(policy_dir), "rego", "data.json") if policy_dir else ""
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            return str(data.get("config", {}).get("policy_name") or "")
+        except (OSError, ValueError, AttributeError):
+            return ""
     import copy
 
     from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
@@ -287,11 +298,13 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
             level_value(getattr(g, "block_at", "")),
             level_value(getattr(g, "alert_at", "")),
             trust,
+            getattr(config.watch, "rescan_enabled", None),
+            getattr(config.watch, "rescan_interval_min", None),
         )
 
     current = keys(cfg)
     sources = _policy_sources(policy_dir)
-    if current == (AdmissionConfig(), "", "", "full") and "default" in sources:
+    if current == (AdmissionConfig(), "", "", "full", True, 60) and "default" in sources:
         return "default"
     for stem, (path, _bundled) in sorted(sources.items()):
         data = load_policy_yaml(path)
@@ -299,8 +312,19 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
             continue
         preset = copy.copy(cfg)
         preset.guardrail = copy.copy(cfg.guardrail)
-        preset.admission = _admission_from_policy(data)
-        _apply_policy_guardrail(preset, data)
+        preset.watch = copy.copy(cfg.watch)
+        try:
+            preset.admission = _admission_from_policy(data)
+            _apply_policy_guardrail(preset, data)
+            watch = data.get("watch") or {}
+            if not isinstance(watch, dict):
+                continue
+            if "rescan_enabled" in watch:
+                preset.watch.rescan_enabled = watch["rescan_enabled"]
+            if "rescan_interval_min" in watch:
+                preset.watch.rescan_interval_min = watch["rescan_interval_min"]
+        except (TypeError, ValueError):
+            continue
         if keys(preset) == current:
             return stem
     return ""
