@@ -9319,9 +9319,14 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     if not ok and getattr(llm, "base_url", ""):
         from urllib.parse import urlsplit, urlunsplit
 
-        parsed = urlsplit(llm.base_url)
-        safe_url = urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
-        msg += f" (configured llm.base_url: {safe_url})"
+        try:
+            parsed = urlsplit(llm.base_url)
+        except ValueError:
+            # A malformed authority may contain credentials; do not echo it.
+            msg += " (configured llm.base_url is malformed)"
+        else:
+            safe_url = urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
+            msg += f" (configured llm.base_url: {safe_url})"
     if ok:
         _emit("pass", "LLM reachable", prefix + msg, r=r)
     elif bool(getattr(judge, "enabled", False)) and f" {_llm._PING_FAILURE_WORDS['auth_failed']}:" in msg:
