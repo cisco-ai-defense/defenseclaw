@@ -2641,6 +2641,7 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 		"adapter_result_invalid", "adapter_input_invalid", "projection_invalid", "envelope_encode_failed",
 		"envelope_size_invalid", "request_build_failed", "endpoint_prohibited", "resolution_failed",
 		"connection_failed", "request_canceled", "request_timeout", "acknowledgement_lost", "transport_failed",
+		"file_write_failed", "no_space",
 		"http_authentication", "http_retryable", "http_rejected", "hec_ack_invalid",
 		"hec_ack_authentication", "hec_ack_retryable", "hec_ack_rejected")
 	retentionStates := allowed("", "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped")

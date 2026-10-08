@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -184,9 +185,9 @@ func (adapter *JSONL) Deliver(ctx context.Context, batch delivery.Batch) deliver
 			// all make final delivery ambiguous. A successfully removed first
 			// fragment is a clean pre-delivery transient failure.
 			if wroteAny || n == len(line) || n > 0 && !rolledBack {
-				return localResult(delivery.OutcomeAmbiguous)
+				return delivery.DeliveryResult{Outcome: delivery.OutcomeAmbiguous, FailureCode: jsonlWriteFailureCode(writeErr)}
 			}
-			return localResult(delivery.OutcomeTransient)
+			return delivery.DeliveryResult{Outcome: delivery.OutcomeTransient, FailureCode: jsonlWriteFailureCode(writeErr)}
 		}
 		wroteAny = true
 	}
@@ -596,11 +597,19 @@ func compressSecureFile(ctx context.Context, sourcePath string) error {
 }
 
 func localFileFailure(err error, wroteAny bool) delivery.DeliveryResult {
+	code := jsonlWriteFailureCode(err)
 	if wroteAny {
-		return localResult(delivery.OutcomeAmbiguous)
+		return delivery.DeliveryResult{Outcome: delivery.OutcomeAmbiguous, FailureCode: code}
 	}
 	if isUnsafeFailure(err) {
-		return localResult(delivery.OutcomePermanentPayload)
+		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload, FailureCode: code}
 	}
-	return localResult(delivery.OutcomeTransient)
+	return delivery.DeliveryResult{Outcome: delivery.OutcomeTransient, FailureCode: code}
+}
+
+func jsonlWriteFailureCode(err error) delivery.FailureCode {
+	if errors.Is(err, syscall.ENOSPC) {
+		return delivery.FailureCodeNoSpace
+	}
+	return delivery.FailureCodeFileWriteFailed
 }
