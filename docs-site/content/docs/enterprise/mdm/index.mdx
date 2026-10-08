@@ -430,15 +430,42 @@ your MDM payload into the administrator policy folder. Replace `PACK_SOURCE`
 with the staged payload path:
 
 ```sh
+set -eu
 PACK_SOURCE=/path/to/mdm-payload/acme
 PACK_DEST=/opt/cisco/defenseclaw/etc/policies/guardrail/acme
 test -d "$PACK_SOURCE" || exit 1
-rm -rf "$PACK_DEST"
-install -d -o root -g wheel -m 0755 "$PACK_DEST"
-cp -R "$PACK_SOURCE/." "$PACK_DEST/"
-chown -R root:wheel "$PACK_DEST"
-find "$PACK_DEST" -type d -exec chmod 0755 {} +
-find "$PACK_DEST" -type f -exec chmod 0644 {} +
+PACK_PARENT=$(dirname "$PACK_DEST")
+PACK_NAME=$(basename "$PACK_DEST")
+install -d -o root -g wheel -m 0755 "$PACK_PARENT"
+STAGE=$(mktemp -d "$PACK_PARENT/.$PACK_NAME.stage.XXXXXXXX")
+BACKUP=
+PUBLISHED=0
+cleanup() {
+  result=$?
+  trap - 0
+  if [ "$PUBLISHED" -eq 0 ] && [ -n "$BACKUP" ] &&
+     [ -e "$BACKUP/$PACK_NAME" ]; then
+    if [ -e "$PACK_DEST" ] || ! mv "$BACKUP/$PACK_NAME" "$PACK_DEST"; then
+      echo "Pack publish failed; previous pack is in $BACKUP" >&2
+      exit 1
+    fi
+  fi
+  rm -rf "$STAGE"
+  [ -z "$BACKUP" ] || rm -rf "$BACKUP"
+  exit "$result"
+}
+trap cleanup 0
+trap 'exit 1' HUP INT TERM
+cp -R "$PACK_SOURCE/." "$STAGE/"
+chown -R root:wheel "$STAGE"
+find "$STAGE" -type d -exec chmod 0755 {} +
+find "$STAGE" -type f -exec chmod 0644 {} +
+BACKUP=$(mktemp -d "$PACK_PARENT/.$PACK_NAME.backup.XXXXXXXX")
+if [ -e "$PACK_DEST" ]; then
+  mv "$PACK_DEST" "$BACKUP/$PACK_NAME"
+fi
+mv "$STAGE" "$PACK_DEST"
+PUBLISHED=1
 ```
 
 Validate the pack on a reference Mac with
@@ -455,8 +482,9 @@ guardrail:
 ```
 
 Re-run the stage script and update the pin before applying an edited pack.
-The script replaces the destination directory, so files removed from the MDM
-payload do not remain in the pack or change its digest. An uninstall removes
+The script stages a complete replacement before publishing it. A failed copy
+leaves the previous pack in place and returns a nonzero exit. Files removed
+from the MDM payload do not remain in the published pack or change its digest. An uninstall removes
 the policy folder; re-stage the pack before a reinstall.
 
 ## Detection

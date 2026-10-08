@@ -1,5 +1,6 @@
 """Regression checks for enterprise guide commands and examples."""
 
+import os
 import shlex
 import subprocess
 import tempfile
@@ -30,7 +31,7 @@ class EnterpriseGuideDocsTest(unittest.TestCase):
             ).replace("install -d -o root -g wheel -m 0755", "install -d -m 0755")
             script = "\n".join(
                 line for line in script.splitlines()
-                if not line.startswith(("chown ", "find "))
+                if not line.startswith("chown ")
             )
             subprocess.run(["sh", "-eu", "-c", script], check=True)
             self.assertTrue((dest / "removed.yaml").exists())
@@ -38,6 +39,18 @@ class EnterpriseGuideDocsTest(unittest.TestCase):
             subprocess.run(["sh", "-eu", "-c", script], check=True)
             self.assertFalse((dest / "removed.yaml").exists())
             self.assertEqual((dest / "kept.yaml").read_text(), "kept")
+            failing_bin = Path(root) / "bin"
+            failing_bin.mkdir()
+            fake_cp = failing_bin / "cp"
+            fake_cp.write_text(
+                '#!/bin/sh\nmkdir -p "$2"\nprintf partial > "$2/partial.yaml"\nexit 1\n'
+            )
+            fake_cp.chmod(0o755)
+            env = {**os.environ, "PATH": f"{failing_bin}{os.pathsep}{os.environ['PATH']}"}
+            failed = subprocess.run(["sh", "-c", script], env=env, check=False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual((dest / "kept.yaml").read_text(), "kept")
+            self.assertFalse((dest / "partial.yaml").exists())
 
     def test_windows_allow_rule_uses_site_specific_placeholders(self):
         guide = (DOCS / "windows.mdx").read_text()
