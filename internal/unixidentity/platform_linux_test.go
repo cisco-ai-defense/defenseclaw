@@ -260,12 +260,13 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM",
 			ServerSoftware: "active-directory", ClientSoftware: "sssd"}}, nil
 	}
-	const corp, other, emea = "S-1-5-21-1-2-3", "S-1-5-21-7-8-9", "S-1-5-21-4-5-6"
+	const corp, other, emea, ldapChild = "S-1-5-21-1-2-3", "S-1-5-21-7-8-9", "S-1-5-21-4-5-6", "S-1-5-21-8-9-10"
 	sssd := startFakeSSSD(t, map[string]string{
 		"uid:80001": corp + "-1101", `name:corp.example.com\alice`: corp + "-1101", "sid:" + corp + "-1101": "80001",
 		`name:corp.example.com\carol`: corp + "-1103",
 		"uid:80006":                   other + "-1104", `name:corp.example.com\dave`: corp + "-1104",
-		"uid:80007": emea + "-1107", `name:emea.corp.example.com\gail`: emea + "-1107", "sid:" + emea + "-1107": "80007",
+		"uid:80007": emea + "-1107", `name:emea.corp.example.com\gail`: emea + "-1107", `name:corp.example.com\gail`: emea + "-1107", "sid:" + emea + "-1107": "80007",
+		`name:ldap.corp.example.com\alice`: ldapChild + "-1109", "uid:80009": ldapChild + "-1109", "sid:" + ldapChild + "-1109": "80009",
 		"uid:80008": corp + "-1108", `name:corp.example.com\hank`: corp + "-1108", "sid:" + corp + "-1108": "90008",
 		"gid:5000": corp + "-513", "gid:5300": other + "-1201",
 	})
@@ -280,7 +281,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 		"group 5100 80003":                   {stdout: []byte("ldap-devs:*:5100:\ncarol:*:80003:\n")},
 	}}
 	accounts := map[int]string{80001: "alice", 80002: "bob", 80003: "carol", 80004: "frank", 80005: "erin@corp.example.com",
-		80006: "dave", 80007: "gail@emea.corp.example.com", 80008: "hank"}
+		80006: "dave", 80007: "gail@emea.corp.example.com", 80008: "hank", 80009: "alice@ldap.corp.example.com"}
 	for uid, name := range accounts {
 		f.results["passwd "+strconv.Itoa(uid)] = line(name, uid)
 		f.results["-s sss passwd "+strconv.Itoa(uid)] = line(name, uid)
@@ -294,7 +295,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	ad := useridentity.DirectoryActiveDirectory
 	for uid, want := range map[int]useridentity.DirectoryFacts{
 		80001: {Directory: ad, Domain: "corp.example.com", Realm: "CORP.EXAMPLE.COM", Principal: "alice@corp.example.com"},
-		80002: {}, 80003: {}, 80004: {}, 80005: {}, 80006: {}, 80008: {},
+		80002: {}, 80003: {}, 80004: {}, 80005: {}, 80006: {}, 80008: {}, 80009: {},
 		80007: {Directory: ad, Domain: "emea.corp.example.com", Realm: "EMEA.CORP.EXAMPLE.COM", Principal: "gail@emea.corp.example.com"},
 	} {
 		facts, err := r.DirectoryFactsWithoutGroupsForUID(uid, time.Now())
@@ -315,7 +316,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	// does a name that carries another domain.
 	for _, tc := range []struct {
 		name, domain, realm string
-	}{{"bob", "corp.example.com", "CORP.EXAMPLE.COM"}, {"bob", "ldaplab", ""}, {"erin@example.org", "corp.example.com", ""}} {
+	}{{"bob", "corp.example.com", "CORP.EXAMPLE.COM"}, {"bob", "ldaplab", ""}, {"erin@example.org", "corp.example.com", ""}, {"alice@ldap.corp.example.com", "ldap.corp.example.com", ""}} {
 		var facts useridentity.DirectoryFacts
 		if err := ApplyHeldSSSDDomain(context.Background(), &facts, tc.name, tc.domain, ""); err != nil || facts.Realm != tc.realm {
 			t.Errorf("ApplyHeldSSSDDomain(%s in %s) = %+v, %v; want realm %q", tc.name, tc.domain, facts, err, tc.realm)
