@@ -239,11 +239,18 @@ func (r *NSSResolver) sssdAccountInDomain(account Account, domain string) bool {
 // whether it answers with this account: the same name, uid, primary group,
 // home and shell. Another account, or none, is false; err is a lookup that
 // failed or ran past sssdDomainCheckTimeout.
+//
+// The lookup skips SSSD's memory cache (SSS_NSS_USE_MEMCACHE=NO), which
+// answers a name with the entry last stored under it: right after the uid
+// lookup that is this account, whichever account the SSSD responder, and so
+// initgroups, resolves the name to. On SSSD 2.9 the cache answered both
+// dcad-carol and dcad-bob@dclab.test with the LDAP accounts while the
+// responder answered with the AD ones.
 func (r *NSSResolver) sssdResolvesTo(account Account, name string) (bool, error) {
 	if validName(name) != nil || strings.HasPrefix(name, "-") {
 		return false, nil
 	}
-	ctx, cancel := context.WithTimeout(r.context(), sssdDomainCheckTimeout)
+	ctx, cancel := context.WithTimeout(withCommandEnv(r.context(), "SSS_NSS_USE_MEMCACHE=NO"), sssdDomainCheckTimeout)
 	defer cancel()
 	result, err := r.runner(ctx, r.path, []string{"-s", "sss", "passwd", name})
 	if err != nil {

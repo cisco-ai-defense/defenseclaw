@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,7 +138,9 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 // account named by an e-mail address in the joined domain, which SSSD
 // resolves to the AD account of that short name (GAP-0568). The LDAP carol,
 // whose short name SSSD resolves to the AD carol, does not get the AD
-// carol's groups either (GAP-0563).
+// carol's groups either (GAP-0563). Each name is asked of the SSSD
+// responder: SSSD's memory cache answers a name with the entry the uid
+// lookup just stored under it, the account itself.
 func TestBareSSSDAccountTakesOnlyTheRealmSSSDConfirms(t *testing.T) {
 	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
 	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
@@ -157,15 +161,23 @@ func TestBareSSSDAccountTakesOnlyTheRealmSSSDConfirms(t *testing.T) {
 		return commandResult{stdout: []byte(name + ":*:" + id + ":" + id + "::/home/" + name + ":/bin/bash\n")}
 	}
 	f := &fakeRun{results: map[string]commandResult{}, errs: map[string]error{}}
+	memcache := map[string]commandResult{}
 	for uid, name := range map[int]string{80001: "alice", 80002: "bob", 80003: "carol", 80004: "dave", 80005: "erin@corp.example.com"} {
 		f.results["passwd "+strconv.Itoa(uid)] = line(name, uid)
 		f.results["-s sss passwd "+strconv.Itoa(uid)] = line(name, uid)
+		memcache["-s sss passwd "+name] = line(name, uid)
 	}
 	f.results["-s sss passwd alice@corp.example.com"] = line("alice", 80001)
 	f.results["-s sss passwd carol@corp.example.com"] = line("carol", 90003)
 	f.errs["-s sss passwd dave@corp.example.com"] = context.DeadlineExceeded
 	f.results["-s sss passwd erin@corp.example.com"] = line("erin", 90005)
 	r := newFakeNSS(f)
+	r.runner = func(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error) {
+		if cached, ok := memcache[strings.Join(args, " ")]; ok && !slices.Contains(commandEnv(ctx), "SSS_NSS_USE_MEMCACHE=NO") {
+			return cached, nil
+		}
+		return f.run(ctx, path, args, filters...)
+	}
 	for uid, principal := range map[int]string{80001: "alice@corp.example.com", 80002: "", 80003: "", 80004: "", 80005: ""} {
 		facts, err := r.DirectoryFactsWithoutGroupsForUID(uid, time.Now())
 		if err != nil {
