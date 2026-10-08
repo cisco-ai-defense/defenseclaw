@@ -307,6 +307,13 @@ func TestApprovalsAndDecisions(t *testing.T) {
 		Reason: "a door into your machine", Status: sandboxapi.ApprovalPending}}
 	ta.ok(t, ta.Approvals(bg, ApprovalsOptions{}))
 	has(t, ta.output(), "ap-1", "127.0.0.1:5432", "risky")
+	// The whole reason shows, not 60 characters of it (GAP-0304).
+	ta.out.Reset()
+	long := "the sandbox asks to reach port 8765 on your machine (--host-port 8765), which serves dccert-block-marker to it"
+	ta.daemon.approvals[0].Reason = long
+	ta.ok(t, ta.Approvals(bg, ApprovalsOptions{}))
+	has(t, ta.output(), long)
+	ta.daemon.approvals[0].Reason = "a door into your machine"
 	// An ask for several ports shows every one approving opens.
 	ta.out.Reset()
 	ta.daemon.approvals[0].Endpoints = []sandboxapi.ApprovalEndpoint{{Host: "127.0.0.1", Port: 5432}, {Host: "127.0.0.1", Port: 6379}}

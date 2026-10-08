@@ -267,6 +267,9 @@ type ApprovalsOptions struct {
 	Output  OutputFormat
 }
 
+// maxAskReason is the most of an ask's reason the approvals list prints.
+const maxAskReason = 400
+
 // Approvals lists the rare asks waiting for the user.
 func (a *App) Approvals(ctx context.Context, o ApprovalsOptions) error {
 	api, err := a.api()
@@ -295,7 +298,9 @@ func (a *App) Approvals(ctx context.Context, o ApprovalsOptions) error {
 			if ap.Risky {
 				risk = "risky"
 			}
-			rows = append(rows, []string{ap.ID, ap.Sandbox, ap.Kind, dest, firstNonEmpty(ap.Binary, "-"), risk, truncate(ap.Reason, 60)})
+			// The reason, the last column, is cut only at maxAskReason: cut
+			// at 60 characters it hid what a host-port ask is (GAP-0304).
+			rows = append(rows, []string{ap.ID, ap.Sandbox, ap.Kind, dest, firstNonEmpty(ap.Binary, "-"), risk, truncate(ap.Reason, maxAskReason)})
 		}
 		a.table([]string{"ID", "SANDBOX", "KIND", "DESTINATION", "BINARY", "RISK", "REASON"}, rows)
 		a.note("approve: " + CommandName + " approve <sandbox> <id> [--always]   reject: " + CommandName + " reject <sandbox> <id>")
