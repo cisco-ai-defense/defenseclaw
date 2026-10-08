@@ -378,9 +378,11 @@ rules on Linux and macOS:
    not writable by group or others, and readable by the gateway (for example
    `0644` files in `0755` folders). The lifecycle refuses a pack inside
    `data_dir`, which the gateway can write. Before it changes anything it
-   also refuses a pack whose folder, or a folder above it, is a symlink, is
-   writable by group or others, has an ACL entry that grants write, or
-   belongs to an account other than root, and names the path and the reason.
+   also refuses a pack whose folder, a folder above it, or any folder or file
+   inside it is a symlink, is writable by group or others, has an ACL entry
+   that grants write, or belongs to an account other than root (a pack copied
+   with `cp -a` keeps its owner), and names the path and the reason. `status`
+   and `verify` report a pack in use that no longer passes these checks.
 2. **Choose the levels.** The pack's posture (its manifest's posture, else
    its folder name) sets the default levels: `strict` blocks findings of
    MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only

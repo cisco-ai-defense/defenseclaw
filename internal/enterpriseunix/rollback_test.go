@@ -313,3 +313,28 @@ func TestLifecycleTestFaultRollsBackOnlyWhenRootOwned(t *testing.T) {
 		t.Fatalf("the previous gateway was not restored: %q", got)
 	}
 }
+
+// GAP-0552: a pack copied with cp -a keeps a standard user's file owner;
+// that user could switch the pack's posture or break its digest for every
+// user. Every folder and file of the pack must be root's and not writable by
+// group or others.
+func TestRulePackTreeTrustRefusesAForeignOwnedOrWritableFile(t *testing.T) {
+	pack := t.TempDir()
+	manifest := filepath.Join(pack, "defenseclaw-pack.json")
+	if err := os.WriteFile(manifest, []byte(`{"posture":"strict"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	me := uint32(os.Getuid())
+	if err := rulePackTreeTrust(pack, func(uid uint32) bool { return uid == me }); err != nil {
+		t.Fatalf("a trusted pack was refused: %v", err)
+	}
+	if err := rulePackTreeTrust(pack, func(uid uint32) bool { return uid != me }); err == nil || !strings.Contains(err.Error(), " is owned by uid") {
+		t.Fatalf("a foreign-owned file was accepted: %v", err)
+	}
+	if err := os.Chmod(manifest, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := rulePackTreeTrust(pack, func(uid uint32) bool { return uid == me }); err == nil || !strings.Contains(err.Error(), "group/other writable") {
+		t.Fatalf("a writable file was accepted: %v", err)
+	}
+}
