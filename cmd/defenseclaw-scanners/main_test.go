@@ -115,10 +115,7 @@ func TestClearRuntimeDirRetriesThenMovesAside(t *testing.T) {
 // The embedded Windows plugin entry point must carry configured rule-pack
 // findings into the JSON consumed by the Go scanner.
 func TestPluginRuntimeAppliesRulePackOverlay(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 unavailable")
-	}
+	python := runnablePython(t)
 	const stubs = `import sys,types
 for name in ("defenseclaw", "defenseclaw.config", "defenseclaw.scanner",
              "defenseclaw.scanner.plugin_scanner", "defenseclaw.scanner.plugin_scanner.types",
@@ -163,4 +160,21 @@ sys.modules["defenseclaw.scanner.rulepack"].overlay_findings=lambda cfg,connecto
 		!slices.Contains(result.Findings[0].Tags, "analyzer:rule-pack") {
 		t.Fatalf("rule-pack finding missing: %s", output)
 	}
+}
+
+// runnablePython returns a Python 3 that runs a script. On Windows
+// python3.exe can be the App Execution Alias, which prints nothing.
+func runnablePython(t *testing.T) string {
+	t.Helper()
+	for _, name := range []string{"python3", "python"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		if out, err := exec.Command(path, "-c", "print(3)").Output(); err == nil && strings.TrimSpace(string(out)) == "3" {
+			return path
+		}
+	}
+	t.Skip("no runnable Python 3")
+	return ""
 }
