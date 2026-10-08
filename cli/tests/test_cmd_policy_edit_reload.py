@@ -107,6 +107,18 @@ def test_rejected_reload_exits_1(app, monkeypatch) -> None:
     assert "defenseclaw policy validate" in result.output and "compilation failed" in result.output
 
 
+def test_edit_scanner_preserves_allow_verdict(app) -> None:
+    from defenseclaw.enforce.admission import compile_admission
+
+    app.cfg.admission.plugin.actions["high"] = "allow"
+    result = _invoke(app, [
+        "edit", "scanner", "--type", "plugin", "--severity", "high",
+        "--runtime", "enable", "--no-reload",
+    ])
+    assert result.exit_code == 0, result.output
+    assert compile_admission(app.cfg, "plugin").actions["HIGH"][1] is True
+
+
 def test_a_watch_change_restarts_only_a_secure_client_gateway(app, monkeypatch) -> None:
     # The gateway reloads watch hot (GAP-0056); a Secure Client gateway reads
     # it at start, so there activate keeps the restart of main (GAP-1236).
