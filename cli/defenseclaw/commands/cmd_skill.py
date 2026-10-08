@@ -5571,6 +5571,17 @@ def _scan_installed_skill_for_connector(
         connector=connector,
     )
 
+    if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
+        _rollback_skill_install_paths(rollback_paths or [skill_path])
+        ux.echo(f"error: skill {skill_name!r} blocked for connector={connector}: "
+                f"{post_decision.reason}", err=True)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected", skill_name,
+                f"connector={connector} source={post_decision.source} reason={post_decision.reason}",
+            )
+        raise SystemExit(1)
+
     if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
         # The admission action for the findings' severity is allow; nothing
         # is on an allow list.

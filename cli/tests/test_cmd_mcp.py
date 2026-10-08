@@ -1425,6 +1425,25 @@ class TestMCPScan(MCPCommandTestBase):
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_set_post_scan_policy_block_refuses_write(self, mock_admit, mock_scan, mock_set):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner", target="ctx7", timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        mock_admit.side_effect = [
+            AdmissionDecision("scan", "scan required"),
+            AdmissionDecision("blocked", "launcher path denied", source="asset-policy-deny"),
+        ]
+        result = self.invoke(["set", "ctx7", "--command", "npx", "--connector", "codex"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("launcher path denied", result.output)
+        mock_set.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.commands.cmd_mcp._run_scan")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_set_scan_rejection_records_connector_scoped_block(
         self, mock_admit, mock_run_scan, mock_set,
     ):

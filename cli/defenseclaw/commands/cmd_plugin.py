@@ -1946,6 +1946,20 @@ def _scan_installed_plugin_for_connector(
         connector=connector,
     )
 
+    if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
+        if rollback:
+            rollback()
+        else:
+            _rollback_plugin_install_paths([plugin_path])
+        ux.echo(f"error: plugin {plugin_name!r} blocked for connector={connector}: "
+                f"{post_decision.reason}", err=True)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected", plugin_name,
+                f"connector={connector} source={post_decision.source} reason={post_decision.reason}",
+            )
+        raise SystemExit(1)
+
     if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
         # The admission action for the findings' severity is allow; nothing
         # is on an allow list, so this is installed like a clean plugin.
