@@ -55,12 +55,19 @@ func (a *APIServer) contextWithSessionAgentV8(ctx context.Context, connector str
 	if envelope.AgentID != "" || envelope.SessionID == "" {
 		return ctx
 	}
-	if meta, found := a.hookLifecycleSnapshot(connector, envelope.SessionID, ""); found && meta.AgentID != "" {
+	if meta, found := a.hookLifecycleSnapshot(connector, envelope.SessionID, ""); found && meta.AgentID != "" && sameVerifiedRelationshipUser(ctx, meta) {
 		envelope.AgentID = meta.AgentID
 	} else {
 		envelope.AgentID = agentNodeID(nativeSessionAgentScopeV8(ctx, connector, envelope.SessionID), connector, envelope.SessionID, "root")
 	}
 	return audit.ContextWithEnvelope(ctx, envelope)
+}
+
+// A native conversation ID is caller-controlled and may be shared by users.
+// Only an authenticated user can claim a retained hook agent for that session.
+func sameVerifiedRelationshipUser(ctx context.Context, meta llmEventMeta) bool {
+    subject, ok := verifiedSubjectFromContext(ctx)
+    return ok && meta.UserID != "" && meta.UserID == subject.UserID
 }
 
 func emitCorrelationRelationshipsV8WithEmitter(

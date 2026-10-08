@@ -131,7 +131,7 @@ func TestCommittedCorrelationRelationshipBuildsExplainableExportLog(t *testing.T
 func TestCorrelationRelationshipContextTakesSessionAgent(t *testing.T) {
 	InstallSharedAgentRegistry("", "")
 	api := &APIServer{}
-	sessionOnly := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{SessionID: "session-1"})
+	sessionOnly := audit.ContextWithEnvelope(withVerifiedSubject(t.Context(), VerifiedSubject{UserID: "1001"}), audit.CorrelationEnvelope{SessionID: "session-1"})
 	got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(sessionOnly, "codex")).AgentID
 	// The root agent the session's hooks record, scoped by the agent
 	// identity the hook path derives (GAP-0232).
@@ -140,9 +140,25 @@ func TestCorrelationRelationshipContextTakesSessionAgent(t *testing.T) {
 		t.Fatalf("no hook snapshot: agent=%q want conversation root %q", got, root)
 	}
 	api.rememberHookSessionState(t.Context(), llmEventMeta{
-		Source: "codex", SessionID: "session-1", AgentID: "agent-live", LifecycleEvent: "session_start",
+		Source: "codex", SessionID: "session-1", AgentID: "agent-live", UserID: "1001", LifecycleEvent: "session_start",
 	})
 	if got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(sessionOnly, "codex")).AgentID; got != "agent-live" {
 		t.Fatalf("hook snapshot: agent=%q want agent-live", got)
 	}
+}
+
+
+func TestCorrelationRelationshipRejectsAnotherUsersRetainedAgent(t *testing.T) {
+    InstallSharedAgentRegistry("", "")
+    api := &APIServer{}
+    api.rememberHookSessionState(t.Context(), llmEventMeta{
+        Source: "codex", SessionID: "shared-session", AgentID: "user-one-agent",
+        UserID: "1001", LifecycleEvent: "session_start",
+    })
+    ctx := withVerifiedSubject(t.Context(), VerifiedSubject{UserID: "1002"})
+    ctx = audit.ContextWithEnvelope(ctx, audit.CorrelationEnvelope{SessionID: "shared-session"})
+    got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(ctx, "codex")).AgentID
+    if got == "user-one-agent" || got == "" {
+        t.Fatalf("agent for user 1002 = %q", got)
+    }
 }
