@@ -777,6 +777,12 @@ says so. Until the transaction is recovered, users' agents block with
 `enterprise_managed_gateway_not_running`; starting the gateway service by
 hand does not help.
 
+Every lifecycle stops the DefenseClaw services before it changes anything.
+A service whose process does not answer the stop request within 30 seconds
+(a hung or suspended process) is ended the way Windows ends a stuck stop,
+and the lifecycle continues; the result names each such process in a
+`service_process_terminated` warning.
+
 The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
 that it cannot prove DefenseClaw wrote: a file or folder it did not create,
 a file other than a DefenseClaw hook file whose owner or permissions changed,

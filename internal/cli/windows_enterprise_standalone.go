@@ -116,6 +116,9 @@ type windowsEnterpriseInstallerReport struct {
 	// CursorAdapterRestored is set when the lifecycle wrote this release's
 	// Cursor enterprise adapter back over a changed or deleted one (GAP-2480).
 	CursorAdapterRestored bool `json:"cursor_adapter_restored"`
+	// TerminatedServiceProcesses names each service process the lifecycle
+	// ended because it did not answer a stop ("<service> (pid <n>)").
+	TerminatedServiceProcesses []string `json:"terminated_service_processes"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -923,6 +926,14 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
 				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
 				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
+	if len(report.TerminatedServiceProcesses) != 0 {
+		// A hung or suspended service process held up the stop (GAP-0946).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "service_process_terminated",
+			Message: "these DefenseClaw service processes did not answer a stop request within 30 seconds, so the lifecycle ended them " +
+				"(as Windows does for a stuck stop) and continued: " + windowsEnterpriseBoundedLabels(report.TerminatedServiceProcesses),
 		})
 	}
 	if report.CursorAdapterRestored {

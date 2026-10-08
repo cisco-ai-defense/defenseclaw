@@ -4436,8 +4436,114 @@ function Stop-DefenseClawService {
         [ServiceProcess.ServiceControllerStatus]::Stopped) {
         return
     }
-    Microsoft.PowerShell.Management\Stop-Service -Name $Name -ErrorAction Stop
-    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        Microsoft.PowerShell.Management\Stop-Service -Name $Name -ErrorAction Stop
+        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        return
+    }
+    # A hung or suspended service process never answers the stop request:
+    # Stop-Service failed after the SCM's own timeout, ensure failed 1603 and
+    # left the guardian and the enumerator stopped with the transaction
+    # pending (GAP-0946). Standalone gives a stop the SCM's 30-second
+    # budget, then ends the service's own process as the SCM does for a
+    # stuck stop, and continues. Every caller has disabled the service first,
+    # so its failure actions cannot restart it.
+    $budget = [TimeSpan]::FromSeconds($script:ServiceStopTimeoutSeconds)
+    $elapsed = [Diagnostics.Stopwatch]::StartNew()
+    $stopError = $null
+    try {
+        Microsoft.PowerShell.Management\Stop-Service -Name $Name -NoWait -ErrorAction Stop
+    }
+    catch {
+        $stopError = $_
+    }
+    if (Wait-DefenseClawServiceStopped -Service $service -Timeout ($budget - $elapsed.Elapsed)) {
+        return
+    }
+    $running = @($service.DependentServices | Microsoft.PowerShell.Core\Where-Object {
+            $_.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped
+        })
+    if ($running.Count -gt 0) {
+        if ($null -ne $stopError) {
+            throw $stopError
+        }
+        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds while $($running[0].ServiceName) depends on it"
+    }
+    Stop-DefenseClawUnresponsiveServiceProcess -Name $Name
+    if (-not (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget)) {
+        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds after its process was ended"
+    }
+}
+
+# How long a standalone stop waits before it ends a service process that
+# does not answer (the SCM's own stop budget).
+$script:ServiceStopTimeoutSeconds = 30
+
+# Each service process a standalone lifecycle ended because it did not
+# answer a stop, as "<service> (pid <n>)", for the result.
+$script:DefenseClawTerminatedServiceProcesses = @()
+
+function Wait-DefenseClawServiceStopped {
+    param(
+        [Parameter(Mandatory)]$Service,
+        [Parameter(Mandatory)][TimeSpan]$Timeout
+    )
+    $deadline = [DateTime]::UtcNow + $Timeout
+    while ($true) {
+        $Service.Refresh()
+        if ($Service.Status -eq [ServiceProcess.ServiceControllerStatus]::Stopped) {
+            return $true
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            return $false
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+    }
+}
+
+function Get-DefenseClawServiceProcessId {
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-DefenseClawServiceName -Name $Name
+    $lines = @(Invoke-DefenseClawNative -File $script:ScExe -Arguments @('queryex', $Name) -Capture)
+    $match = [regex]::Match(($lines -join "`n"), '(?m)^\s*PID\s*:\s*([0-9]+)\s*$')
+    if (-not $match.Success) {
+        return [uint32]0
+    }
+    return [uint32]$match.Groups[1].Value
+}
+
+function Stop-DefenseClawUnresponsiveServiceProcess {
+    <#
+        Ends the process of a DefenseClaw service that did not answer a stop
+        request in time, only when it is the service's own executable (its
+        ImagePath); anything else is refused with the process id and image so
+        the administrator can end it. A process TerminateProcess ends while
+        suspended or hung reports the service stopped to the SCM.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    $processId = Get-DefenseClawServiceProcessId -Name $Name
+    if ($processId -eq 0) {
+        return
+    }
+    if ($processId -eq [uint32]$PID) {
+        throw "service $Name did not stop and runs in this lifecycle's own process $processId; not ending it"
+    }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $imagePath = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ImagePath -ErrorAction Stop)
+    $expected = if ($imagePath.StartsWith('"')) {
+        $imagePath.Substring(1, [Math]::Max(0, $imagePath.IndexOf('"', 1) - 1))
+    }
+    else {
+        ($imagePath -split ' ', 2)[0]
+    }
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $image = [string]$nativeSecurity::GetProcessImagePath($processId)
+    if ([string]::IsNullOrWhiteSpace($expected) -or
+        -not [string]::Equals([IO.Path]::GetFullPath($image), [IO.Path]::GetFullPath($expected), [StringComparison]::OrdinalIgnoreCase)) {
+        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds, and its process $processId runs $image, not the service executable $expected; end process $processId, then run the command again"
+    }
+    Microsoft.PowerShell.Management\Stop-Process -Id ([int]$processId) -Force -ErrorAction Stop
+    $script:DefenseClawTerminatedServiceProcesses += "$Name (pid $processId)"
 }
 
 function Start-DefenseClawService {
@@ -19050,6 +19156,9 @@ function Get-DefenseClawLifecycleStatus {
         if (@($script:DefenseClawQuarantinedRoots).Count -gt 0) {
             $status['quarantined_paths'] = @($script:DefenseClawQuarantinedRoots)
         }
+        if (@($script:DefenseClawTerminatedServiceProcesses).Count -gt 0) {
+            $status['terminated_service_processes'] = [string[]]@($script:DefenseClawTerminatedServiceProcesses)
+        }
         # Which gateway this run's pending-transaction recovery ran, and why.
         $recoveryRuns = @(Get-DefenseClawRecoveryGatewayRunRecords)
         if ($recoveryRuns.Count -gt 0) {
@@ -25265,6 +25374,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawAdministrator
     }
     $script:DefenseClawQuarantinedRoots = @()
+    $script:DefenseClawTerminatedServiceProcesses = @()
     Set-DefenseClawRecoveryGatewayCandidate `
         -GatewayBinary $GatewayBinary `
         -InstallerSource $InstallerSource `
