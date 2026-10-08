@@ -79,39 +79,75 @@ func (osWindowsDirectoryReader) ComputerName() string {
 	return name
 }
 
-func (osWindowsDirectoryReader) DNSDomain() string {
-	var size uint32 = 256
-	buf := make([]uint16, size)
-	if err := windows.GetComputerNameEx(windows.ComputerNameDnsDomain, &buf[0], &size); err != nil {
+// LSA policy reports the joined AD domain independently of the computer's
+// primary DNS suffix. Its DNS domain is empty on a workgroup computer.
+type lsaUnicodeString struct {
+	Length        uint16
+	MaximumLength uint16
+	Buffer        *uint16
+}
+
+func (s lsaUnicodeString) value() string {
+	if s.Buffer == nil || s.Length == 0 || s.Length%2 != 0 ||
+		s.Length > s.MaximumLength || s.Length > 1024 {
 		return ""
 	}
-	return windows.UTF16ToString(buf[:size])
+	return windows.UTF16ToString(unsafe.Slice(s.Buffer, int(s.Length/2)))
+}
+
+type lsaObjectAttributes struct {
+	Length                   uint32
+	RootDirectory            uintptr
+	ObjectName               uintptr
+	Attributes               uint32
+	SecurityDescriptor       uintptr
+	SecurityQualityOfService uintptr
+}
+
+type lsaDNSDomainInfo struct {
+	Name          lsaUnicodeString
+	DNSDomainName lsaUnicodeString
+	DNSForestName lsaUnicodeString
+	DomainGUID    [16]byte
+	SID           uintptr
 }
 
 var (
-	modNetapi32               = windows.NewLazySystemDLL("netapi32.dll")
-	procNetGetJoinInformation = modNetapi32.NewProc("NetGetJoinInformation")
-	procNetAPIBufferFree      = modNetapi32.NewProc("NetApiBufferFree")
+	modAdvapi32                   = windows.NewLazySystemDLL("advapi32.dll")
+	procLsaOpenPolicy             = modAdvapi32.NewProc("LsaOpenPolicy")
+	procLsaQueryInformationPolicy = modAdvapi32.NewProc("LsaQueryInformationPolicy")
+	procLsaFreeMemory             = modAdvapi32.NewProc("LsaFreeMemory")
+	procLsaClose                  = modAdvapi32.NewProc("LsaClose")
 )
 
-// netSetupDomainName is NETSETUP_JOIN_STATUS NetSetupDomainName.
-const netSetupDomainName = 3
+const (
+	policyViewLocalInformation = 0x00000001
+	policyDnsDomainInformation = 12
+)
 
-func (osWindowsDirectoryReader) DomainJoin() (string, bool) {
-	if procNetGetJoinInformation.Find() != nil {
-		return "", false
+func (osWindowsDirectoryReader) DomainJoin() (string, string, bool) {
+	attributes := lsaObjectAttributes{Length: uint32(unsafe.Sizeof(lsaObjectAttributes{}))}
+	var policy uintptr
+	status, _, _ := procLsaOpenPolicy.Call(0, uintptr(unsafe.Pointer(&attributes)),
+		policyViewLocalInformation, uintptr(unsafe.Pointer(&policy)))
+	if status != 0 || policy == 0 {
+		return "", "", false
 	}
-	var name *uint16
-	var status uint32
-	rc, _, _ := procNetGetJoinInformation.Call(0, uintptr(unsafe.Pointer(&name)), uintptr(unsafe.Pointer(&status)))
-	if rc != 0 || name == nil {
-		return "", false
+	defer procLsaClose.Call(policy)
+
+	var info *lsaDNSDomainInfo
+	status, _, _ = procLsaQueryInformationPolicy.Call(policy, policyDnsDomainInformation,
+		uintptr(unsafe.Pointer(&info)))
+	if status != 0 || info == nil {
+		return "", "", false
 	}
-	defer procNetAPIBufferFree.Call(uintptr(unsafe.Pointer(name)))
-	if status != netSetupDomainName {
-		return "", false
+	defer procLsaFreeMemory.Call(uintptr(unsafe.Pointer(info)))
+	domain := strings.TrimSpace(info.Name.value())
+	dnsDomain := strings.TrimSpace(info.DNSDomainName.value())
+	if domain == "" || dnsDomain == "" {
+		return "", "", false
 	}
-	return windows.UTF16PtrToString(name), true
+	return domain, dnsDomain, true
 }
 
 var adUPNs = newADUPNCache(translateNameToUPN)
