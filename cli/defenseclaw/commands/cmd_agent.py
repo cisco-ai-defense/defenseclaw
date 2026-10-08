@@ -3682,8 +3682,11 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
     pins, require_pins = ai_signatures.pack_pins(cfg)
     configured = list(cfg.ai_discovery.signature_packs)
     if secure_client:
-        # Secure Client v8 still discovers every pack in this directory.
-        configured.insert(0, str(ai_signatures.signature_pack_dir(cfg.data_dir) / "*.json"))
+        # Secure Client v8 still discovers every pack in this directory. An
+        # empty or absent directory is not an error there, so list the files
+        # that exist instead of a pattern that must match.
+        pack_dir = ai_signatures.signature_pack_dir(cfg.data_dir)
+        configured[:0] = [str(path) for path in sorted(pack_dir.glob("*.json")) if path.is_file()]
     try:
         sigs, refused = ai_signatures.load_ai_signature_catalog(
             signature_packs=configured,
