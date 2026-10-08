@@ -49,8 +49,8 @@ non-zero exit code when something is wrong.
 ## Quick start
 
 Prepare the tenant and read a group's SID. Use an app registration with the application
-permissions `Group.ReadWrite.All` and `User.ReadWrite.All` (`Group.Read.All` and
-`User.Read.All` to only read), admin-consented:
+permissions `Group.ReadWrite.All`, `User.ReadWrite.All` and `Organization.Read.All`
+(`Group.Read.All`, `User.Read.All` and `Organization.Read.All` to only read), admin-consented:
 
 ```sh
 export AZURE_TENANT_ID=...; export AZURE_CLIENT_ID=...

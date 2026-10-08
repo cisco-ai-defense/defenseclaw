@@ -28,7 +28,7 @@ Credentials come from the environment, never from arguments:
 
 Permissions: check needs Organization.Read.All (and Policy.Read.All for security
 defaults); sids needs Group.Read.All and User.Read.All; apply needs
-Group.ReadWrite.All and User.ReadWrite.All.
+Group.ReadWrite.All, User.ReadWrite.All, and Organization.Read.All.
 
 Exit codes: 0 success, 1 a Graph call or the plan failed, 2 bad usage, input file or
 credentials. Only the Python standard library is used.
@@ -226,6 +226,8 @@ def find_group(graph: Graph, name: str) -> dict | None:
     found = graph.get_all(query)
     if len(found) > 1:
         raise GraphError(409, "AmbiguousName", f"{len(found)} groups are named {name!r}; use a unique name")
+    if found and found[0].get("securityEnabled") is not True:
+        raise GraphError(400, "NotSecurityGroup", f"group {name!r} is not a security group; use a security group")
     return found[0] if found else None
 
 
@@ -401,6 +403,13 @@ def _record_password(path: str, upn: str, password: str) -> None:
 
 def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
     plan = _load_plan(args.config)
+    orgs = graph.get_all("/v1.0/organization?$select=id,verifiedDomains")
+    domain = plan["domain"].casefold()
+    if not any(
+        str(item.get("name", "")).casefold() == domain
+        for org in orgs for item in org.get("verifiedDomains", [])
+    ):
+        raise SystemExit(f"error: {plan['domain']!r} is not a verified domain of the authenticated tenant")
     apply = args.apply
     tag = "" if apply else "[plan] "
     usage = plan.get("usage_location", "US")
