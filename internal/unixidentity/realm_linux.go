@@ -27,9 +27,10 @@ import (
 
 // The realms the host is joined to, from realmd.
 //
-// SSSD serves Active Directory, IPA and plain LDAP domains alike, so its
-// NSS answer does not say which directory owns an account. realmd, the
-// root system service behind `realm join` and `realm list`, does. Only
+// realmd, the root system service behind `realm join` and `realm list`,
+// says which Active Directory or IPA realms the host is joined to and which
+// client (sssd or winbind) serves each; which realm holds an SSSD account
+// comes from its SID (applySSSDDomain). Only
 // root may own its system-bus name, and any account may read its realm
 // properties, so a per-user gateway gets the same answer as the root
 // guardian: no privilege, no tool to run and no call to the directory.
@@ -186,13 +187,9 @@ func netBIOSName(formats []string) string {
 // account. A DNS domain names its realm, or the nearest parent realm (an
 // Active Directory child domain). A winbind NetBIOS domain names the realm
 // of that NetBIOS name, and an unqualified winbind name the only winbind
-// realm. An SSSD name without a DNS domain is ambiguous: SSSD serves AD,
-// IPA and plain LDAP domains side by side, and with
-// use_fully_qualified_names = False it names the accounts of each without
-// their domain. Its realm is the one SSSD itself confirms (inDomain: SSSD
-// resolves the name in that realm's domain to this account), and none when
-// SSSD confirms none, or more than one.
-func realmFor(domain, source string, realms []Realm, inDomain func(string) bool) (Realm, bool) {
+// realm. An SSSD domain without a DNS name names no realm: which SSSD domain
+// holds an account comes from its SID (applySSSDDomain).
+func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	client := "sssd"
 	if source == useridentity.SourceWinbind {
@@ -205,26 +202,17 @@ func realmFor(domain, source string, realms []Realm, inDomain func(string) bool)
 		}
 	}
 	if !strings.Contains(domain, ".") {
-		if client == "winbind" {
-			for _, realm := range candidates {
-				if domain != "" && strings.EqualFold(domain, realm.NetBIOS) {
-					return realm, true
-				}
-			}
-			// Only an unqualified winbind name can use its sole default realm.
-			if domain == "" && len(candidates) == 1 {
-				return candidates[0], true
-			}
+		if client != "winbind" {
 			return Realm{}, false
 		}
-		var confirmed []Realm
 		for _, realm := range candidates {
-			if inDomain != nil && realm.Domain != "" && inDomain(realm.Domain) {
-				confirmed = append(confirmed, realm)
+			if domain != "" && strings.EqualFold(domain, realm.NetBIOS) {
+				return realm, true
 			}
 		}
-		if len(confirmed) == 1 {
-			return confirmed[0], true
+		// Only an unqualified winbind name can use its sole default realm.
+		if domain == "" && len(candidates) == 1 {
+			return candidates[0], true
 		}
 		return Realm{}, false
 	}
@@ -240,13 +228,25 @@ func realmFor(domain, source string, realms []Realm, inDomain func(string) bool)
 	return best, found
 }
 
-// applyRealm adds the facts of the realm that serves an SSSD or winbind
-// account: its DNS domain when the name carries none or only a NetBIOS
-// domain (CORP\alice), as Windows reports the same account; the Kerberos
-// realm; the directory type of an Active Directory or IPA realm; and the
+// realmDirectory is the directory type of a realm: active_directory for an
+// Active Directory realm, ldap for an IPA realm, none for any other.
+func realmDirectory(realm Realm) useridentity.Directory {
+	switch strings.ToLower(realm.ServerSoftware) {
+	case "active-directory":
+		return useridentity.DirectoryActiveDirectory
+	case "ipa":
+		return useridentity.DirectoryLDAP
+	}
+	return ""
+}
+
+// applyRealm adds the facts of the realm that serves a winbind account: its
+// DNS domain when the name carries none or only a NetBIOS domain
+// (CORP\alice), as Windows reports the same account; the Kerberos realm; the
+// directory type of an Active Directory or IPA realm; and the
 // sAMAccountName@REALM principal, in the UPN form, when there is none yet.
-func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm, inDomain func(string) bool) {
-	realm, ok := realmFor(facts.Domain, facts.Source, realms, inDomain)
+func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {
+	realm, ok := realmFor(facts.Domain, facts.Source, realms)
 	if !ok {
 		return
 	}
@@ -256,14 +256,50 @@ func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms [
 	if facts.Realm == "" {
 		facts.Realm = realm.Name
 	}
-	switch strings.ToLower(realm.ServerSoftware) {
-	case "active-directory":
-		facts.Directory = useridentity.DirectoryActiveDirectory
-	case "ipa":
-		facts.Directory = useridentity.DirectoryLDAP
+	if directory := realmDirectory(realm); directory != "" {
+		facts.Directory = directory
 	}
 	if facts.Principal == "" && facts.Realm != "" {
 		bare, _ := useridentity.SplitQualifiedName(accountName)
 		facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
 	}
+}
+
+// ApplyHeldSSSDDomain gives an SSSD account without a realm the joined
+// realm of the SSSD domain that a lookup by its uid places it in: InfoPipe
+// Users.FindByID, which only root may call. The domain names its realm by
+// its DNS name or a parent's, or by its Kerberos realm (kerberosRealm). It is
+// how the guardian attributes an account that has no SID, such as one of an
+// IPA domain without an AD trust; the gateway has no such lookup. A name
+// that carries another domain (an e-mail style name) gets nothing.
+func ApplyHeldSSSDDomain(ctx context.Context, facts *useridentity.DirectoryFacts, accountName, domain, kerberosRealm string) error {
+	bare, nameDomain := useridentity.SplitQualifiedName(accountName)
+	if facts.Realm != "" || bare == "" || strings.ContainsAny(bare, `@\`) {
+		return nil
+	}
+	realms, err := hostRealms(ctx)
+	if err != nil {
+		return err
+	}
+	dnsDomain := strings.ToLower(strings.TrimSpace(domain))
+	realm, ok := realmFor(dnsDomain, useridentity.SourceSSSD, realms)
+	if !ok && kerberosRealm != "" {
+		for _, candidate := range realms {
+			if strings.EqualFold(candidate.ClientSoftware, "sssd") && strings.EqualFold(candidate.Name, kerberosRealm) {
+				realm, ok, dnsDomain = candidate, true, candidate.Domain
+				break
+			}
+		}
+	}
+	if !ok || (strings.Contains(nameDomain, ".") && !strings.EqualFold(nameDomain, dnsDomain)) {
+		return nil
+	}
+	facts.Domain = dnsDomain
+	facts.Realm = strings.ToUpper(dnsDomain)
+	if dnsDomain == realm.Domain && realm.Name != "" {
+		facts.Realm = realm.Name
+	}
+	facts.Directory = realmDirectory(realm)
+	facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
+	return nil
 }

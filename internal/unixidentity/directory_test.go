@@ -36,15 +36,14 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 	orig := nsswitchPath
 	nsswitchPath = nss
 	t.Cleanup(func() { nsswitchPath = orig })
+	startFakeSSSD(t, nil)
 	const account = "alice@corp.example.com:*:1001:1001::/home/alice:/bin/bash\n"
 	const owns, initgroups, groups = "-s sss passwd 1001", "initgroups alice@corp.example.com", "group 1001 5001 5002"
 	fake := func() *fakeRun {
 		return &fakeRun{errs: map[string]error{}, results: map[string]commandResult{
 			"passwd 1001": {stdout: []byte(account)},
 			owns:          {stdout: []byte(account)},
-			// SSSD resolves the qualified name to the account (GAP-0568).
-			"-s sss passwd alice@corp.example.com": {stdout: []byte(account)},
-			initgroups:                             {stdout: []byte("alice@corp.example.com 1001 5001 5002\n")},
+			initgroups:    {stdout: []byte("alice@corp.example.com 1001 5001 5002\n")},
 			// getent exits 2 with the groups it found when one id has none.
 			groups: {exitCode: getentExitNotFound, stdout: []byte("alice@corp.example.com:*:1001:\nml-team@corp.example.com:*:5001:\n")},
 		}}

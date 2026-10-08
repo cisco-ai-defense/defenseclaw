@@ -131,10 +131,10 @@ install does, never falls back to its own account.
 | --- | --- | --- |
 | Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user or enterprise ACP credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
 | Account name and the backend that owns it | NSS through `getent passwd`; each service on the `passwd` line of `nsswitch.conf` is asked for the uid in turn (`sss`, `winbind`, `ldap`, `himmelblau`, `aad`). An account no directory service knows is `local`, and so is an account `/etc/passwd` holds under its name and uid, which the SSSD files provider (the implicit files domain on RHEL 8) also answers for | Verified |
-| Domain | The fully qualified name SSSD (`alice@corp.example.com`) or winbind (`CORP\alice`) reports, in lower case. A winbind NetBIOS domain is reported by the DNS name of its realm (realmd gives the NetBIOS name in the login format `CORP\%U`), as Windows reports it; the NetBIOS domain of a trusted domain is reported as is | Verified |
-| Groups | `initgroups` plus a group lookup through NSS. An SSSD account whose name SSSD resolves to another account keeps only its primary group ([When Linux attributes a principal](#when-linux-attributes-a-principal)) | Verified |
-| Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, the winbind realm whose NetBIOS name the domain is, the only winbind realm for an unqualified winbind name, or, for an SSSD name without a DNS domain, the realm SSSD confirms ([When Linux attributes a principal](#when-linux-attributes-a-principal)). A winbind realm never takes another NetBIOS domain, which is a trusted domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
-| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `Users.FindByID` for the SSSD domain that holds the uid, `GetUserAttr` for the `userPrincipalName` of the name in that domain, and, when realmd names no realm for the account, the id provider of that domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@REALM`. An Entra ID account the `aad` module names, or Himmelblau with `cn_name_mapping = false`, is named by its UPN, which is reported as its UPN and principal on every install. Himmelblau's default (`cn_name_mapping = true`) names it by the short name, which carries no UPN or domain | Verified |
+| Domain | For SSSD, the joined domain that holds the account by its SID ([When Linux attributes a principal](#when-linux-attributes-a-principal)). For winbind, the domain its name reports (`CORP\alice`), in lower case: a NetBIOS domain is reported by the DNS name of its realm (realmd gives the NetBIOS name in the login format `CORP\%U`), as Windows reports it; the NetBIOS domain of a trusted domain is reported as is | Verified |
+| Groups | `initgroups` plus a group lookup through NSS. An SSSD account keeps only the groups inside the domain of its SID, its local groups and its primary group ([When Linux attributes a principal](#when-linux-attributes-a-principal)) | Verified |
+| Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, the winbind realm whose NetBIOS name the domain is, the only winbind realm for an unqualified winbind name. An SSSD account gets the joined realm whose domain holds a user of its name with the SID of its uid ([When Linux attributes a principal](#when-linux-attributes-a-principal)). A winbind realm never takes another NetBIOS domain, which is a trusted domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
+| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `Users.FindByID` for the SSSD domain that holds the uid and the `userPrincipalName` of that user, and, when realmd names no realm for the account, the id provider of that domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@REALM`. An Entra ID account the `aad` module names, or Himmelblau with `cn_name_mapping = false`, is named by its UPN, which is reported as its UPN and principal on every install. Himmelblau's default (`cn_name_mapping = true`) names it by the short name, which carries no UPN or domain | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
 | Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
 
@@ -146,8 +146,8 @@ names the qualified group the host knows. An answer with a group that is only a
 number (a directory that did not answer for it) is kept 2 minutes instead of
 15, and the next request after that waits for a fresh lookup.
 
-The NSS and realmd lookups run on every Linux install, without privilege and
-without a call to the directory. The root guardian adds the InfoPipe facts on
+The NSS, SSSD SID and realmd lookups run on every Linux install, without
+privilege. The root guardian adds the InfoPipe facts on
 the standalone enterprise profile only. SSSD serves AD, IPA and plain LDAP
 domains alike, so the directory type comes from realmd. A plain LDAP domain
 that SSSD serves without realmd, such as the Okta LDAP Interface, gets the
@@ -156,57 +156,78 @@ has no directory type, because InfoPipe answers root only.
 
 #### When Linux attributes a principal
 
-An SSSD account gets a realm and a principal (`alice@corp.example.com`) only
-for a domain that SSSD confirms the account belongs to:
+SSSD serves Active Directory, IPA and plain LDAP domains side by side, and the
+name it gives an account does not say which domain holds it. So DefenseClaw
+decides the domain of an SSSD account from its uid, not from its name:
 
-- **Fully qualified names** (`use_fully_qualified_names = True`, what
-  `realm join` writes): SSSD names the account `alice@corp.example.com`. The
-  gateway asks SSSD for that name (`getent -s sss passwd
-  alice@corp.example.com`) and takes the realm and the principal from its
-  domain when SSSD answers with the same account.
-- **Short names** (`use_fully_qualified_names = False`): SSSD names the
-  account `alice`, and it may serve a plain LDAP domain next to the joined AD
-  domain under the same kind of name. The gateway asks SSSD for the name in
-  the joined domain (`getent -s sss passwd alice@corp.example.com`, which
-  needs no privilege) and takes the realm and the principal only when SSSD
-  answers with the same account: the same name, uid, primary group, home and
-  shell. An account of the LDAP domain, or one that shares its short name
-  with an AD account, gets no realm and no principal. The SSSD domain must
-  carry the name of the joined domain, as `realm join` names it
-  (`[domain/corp.example.com]`).
-- **Names that only look qualified.** With short names, a plain LDAP domain
-  whose account names are e-mail addresses (`ldap_user_name = mail`) can name
-  an account `bob@corp.example.com`. SSSD looks that name up in the joined
-  domain and answers with the AD account `bob`, so the LDAP account gets no
-  realm and no principal.
-- **Groups of a shared name.** `initgroups` looks the account up by name, and
-  with short names SSSD answers a name that two domains hold with the account
-  of the first one: an LDAP `carol` would get the groups of the AD `carol`.
-  The gateway takes the groups by name only when SSSD resolves the account's
-  name to the same account (`getent -s sss passwd carol`). Otherwise the
-  account keeps only the primary group of its own entry, and a group
-  assignment matches it only through that group.
-- **When SSSD does not confirm.** The lookup in the joined domain gets 2
-  seconds. When SSSD is stopped, cannot answer, or does not answer in time, a
-  short name gets no realm and no principal. A per-user install keeps that
-  answer for the 15 minutes it keeps any directory answer. Standalone
-  enterprise keeps the facts of an SSSD account that has no UPN for 2 minutes,
-  then asks again. Neither falls back to the only realm of the host.
+- **The SID of the uid.** The gateway asks the SSSD NSS responder which SID it
+  holds for the uid, the call `libsss_nss_idmap` makes
+  (`sss_nss_getsidbyuid`). Any account may make it, so a per-user install gets
+  the same answer as the root guardian. An Active Directory account has a SID,
+  and so has an IPA account of a domain with an AD trust. An account of a plain
+  LDAP domain has none.
+- **The joined domain confirms it.** The account gets the realm of a joined
+  domain (realmd, client `sssd`), the directory type of that realm and the
+  principal `account@REALM` only when that domain holds a user of the
+  account's name with the same SID, and SSSD maps the SID back to the same uid.
+  The name is asked in the `domain\account` form, which SSSD looks up in that
+  domain only. With fully qualified names (`alice@corp.example.com`, what
+  `realm join` writes) the domain is the one the name gives, which may be a
+  trusted domain below the joined one. With short names
+  (`use_fully_qualified_names = False`) each joined domain is asked. The SSSD
+  domain must carry the name of the joined domain, as `realm join` names it
+  (`[domain/corp.example.com]`), and keep the default AD or IPA name
+  expression, which reads `domain\account`.
+- **No SID, no realm.** An account of a plain LDAP domain gets no realm,
+  principal or directory type from the joined domain, whatever its name: a
+  short `bob` that shares its name with an AD account, a `frank` whose e-mail
+  address is in the AD domain, or a `bob@corp.example.com` that an LDAP domain
+  names by its e-mail address (`ldap_user_name = mail`). A lookup by name
+  cannot tell these apart, because SSSD looks a `name@domain` that the domain
+  lacks up as a UPN or e-mail address in every domain. Nor does an account of
+  another domain with its own SIDs get the realm of an AD account it shares a
+  name with.
+- **Names that only look qualified.** An SSSD name with a DNS domain that the
+  facts do not confirm, such as the LDAP `bob@corp.example.com`, gets no
+  domain, and no `users` entry selects it by name: its short part is the name
+  of the AD `bob` and the whole name is his principal. Select such an account
+  by its uid.
+- **Groups inside the account's domain.** `initgroups` looks an account up by
+  name, and two SSSD domains may hold the same short name. The gateway keeps
+  the groups SSSD holds a SID for in the domain of the account's SID; for an
+  account without a SID, the groups without one; and, for every account, the
+  groups of the host's `/etc/group` and its primary group. A confirmed
+  account's groups are listed by its `domain\account` name. Groups of another
+  domain of the forest do not count. Two plain LDAP domains that hold the same
+  short name are not told apart; give them fully qualified names.
+- **When SSSD does not answer.** Each call gets 2 seconds. When SSSD is stopped
+  or restarting (its memory cache may still answer for the account) or does
+  not answer in time, the lookup fails as a whole. The gateway keeps the
+  account's last facts for up to an hour and retries every 15 seconds, instead
+  of keeping facts without the realm, principal or groups. With no earlier
+  facts, requests get the default profile with `default_lookup_failed`.
 - **Standalone enterprise.** The root guardian asks InfoPipe which SSSD domain
-  holds the uid (`Users.FindByID`) and reads the UPN of the name in that
-  domain, so the UPN of an AD account never reaches an LDAP account of the
-  same short name. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing
-  from `services` in `sssd.conf`) the principal of a confirmed account is
-  `account@REALM`. When InfoPipe holds the uid in another domain than the
-  realm the account was given, the guardian drops that realm and its
-  principal.
+  holds the uid (`Users.FindByID`, by uid, never by name) and reads the UPN of
+  that user (`userPrincipalName`, listed in the `[ifp]` `user_attributes`).
+  When that domain is not the one the account's SID was confirmed in, as for a
+  domain that copies another domain's SIDs, the guardian's record and the
+  gateway drop that domain, realm and principal. An account without a SID
+  that InfoPipe holds in an AD or IPA domain (`id_provider = ad` or `ipa`) of
+  a joined realm, such as one of an IPA domain without an AD trust, gets that
+  realm and `account@REALM` on standalone enterprise only. Two SSSD domains
+  that hold the same SID confuse SSSD itself: a per-user install then takes the
+  account the first domain SSSD searches answers with, while standalone
+  enterprise drops a realm that InfoPipe places in another domain. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing from
+  `services` in `sssd.conf`) the principal of a confirmed account is
+  `account@REALM`. Standalone enterprise keeps the facts of an SSSD account
+  that has no UPN for 2 minutes, then asks again.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with
 `defenseclaw guardrail profile explain --user alice --json`: `subject.principal`
-is the principal the gateway attributed, and is empty when SSSD confirmed no
-domain. Add the uid to the assignment when the account must match even while
-SSSD cannot confirm its domain; a short account name also matches a local or
+is the principal the gateway attributed, and is empty when no joined domain
+confirms the account's SID. Add the uid to the assignment when the account must
+match while SSSD does not answer; a short account name also matches a local or
 LDAP account of that name.
 
 ### Windows
@@ -250,7 +271,7 @@ standalone enterprise profile.
 | --- | --- | --- |
 | Account, name, uid or SID | Gateway | Gateway |
 | Linux groups, domain, source | Gateway, through NSS | Gateway, through NSS |
-| Linux directory type and realm | Gateway, through realmd (a short SSSD name only when SSSD confirms its domain) | Gateway, through realmd (a short SSSD name only when SSSD confirms its domain) |
+| Linux directory type and realm | Gateway, through realmd (an SSSD account only when the joined domain holds it by the SID of its uid) | Gateway, through realmd and the SID of the uid; the root guardian drops a realm when InfoPipe holds the uid in another SSSD domain |
 | Linux UPN, and the directory type of a domain no realm covers | Only the UPN of an Entra account (`aad`, or Himmelblau with `cn_name_mapping = false`) | Root guardian; the UPN of an Entra account from the gateway |
 | Windows groups | Not available | SYSTEM enumerator |
 | Windows AD UPN, Entra UPN and tenant | Gateway | Gateway |
