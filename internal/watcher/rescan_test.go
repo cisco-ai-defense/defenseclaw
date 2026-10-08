@@ -560,6 +560,9 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(skillDir, "watched-skill"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(skillDir, "watched-skill", "SKILL.md"), []byte("# watched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(pluginDir, "watched-plugin"), 0o700); err != nil {
 		t.Fatal(err)
 	}
