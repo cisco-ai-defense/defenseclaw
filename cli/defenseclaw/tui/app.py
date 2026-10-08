@@ -2923,6 +2923,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
         if panel == "sandboxes":
+            self.sandbox_model.shown()
             self._schedule_sandbox_poll()
         if panel == "policies":
             model = self.policy_model

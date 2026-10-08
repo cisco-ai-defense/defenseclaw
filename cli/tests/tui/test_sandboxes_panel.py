@@ -2656,6 +2656,20 @@ def test_a_key_is_refused_once_when_its_ask_went_away() -> None:
     assert model.handle_key("x") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-3")
 
 
+def test_an_ask_that_went_away_while_its_view_was_hidden_is_no_lost_selection() -> None:
+    """GAP-0328: 7, then t to Asks with one ask listed: a said "The ask the
+    cursor was on is no longer waiting" for an ask the user never saw."""
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1)])
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-2", 2)])  # while the Sandboxes view was shown
+    assert model.handle_key("t").kind == "view" and model.handle_key("t").kind == "view" and model.view == "asks"
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-2")
+    # The same while another panel was shown: opening panel 7 shows the row.
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-3", 3)])
+    model.shown()
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-3")
+
+
 def test_the_activity_selection_follows_its_event() -> None:
     model = _model()
     model.add_events([BLOCKED])

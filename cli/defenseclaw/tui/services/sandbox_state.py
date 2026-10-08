@@ -1462,6 +1462,10 @@ class SandboxesPanelModel:
                 self._selection_lost.add(view)
         self._clamp()
 
+    def shown(self) -> None:
+        """The panel came into view: the rows under the cursors are what the user sees now (GAP-0328)."""
+        self._selection_lost.clear()
+
     def _take_lost_selection(self) -> str:
         """The refusal for an action key whose selected item went away, once."""
         if self.view not in self._selection_lost:
@@ -1604,6 +1608,10 @@ class SandboxesPanelModel:
         if key == "t":
             index = SANDBOX_VIEWS.index(self.view)
             self.view = SANDBOX_VIEWS[(index + 1) % len(SANDBOX_VIEWS)]
+            # The row under the cursor of the view just opened is what the
+            # user sees: one that went away while the view was hidden is no
+            # selection of theirs (GAP-0328).
+            self._selection_lost.discard(self.view)
             return SandboxPanelAction("view")
         if key == "enter":
             if self._view_len(self.view):
