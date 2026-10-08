@@ -27,7 +27,7 @@ import (
 
 // These are the command rendered into Claude's root-owned managed settings
 // and the script copied into the sandbox image by the connector.
-const sandboxClaudeHook = "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"
+const sandboxClaudeHook = sandboxfeed.ClaudeHookScript
 
 type hookRole uint8
 

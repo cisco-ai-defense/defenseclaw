@@ -154,6 +154,16 @@ func (a *App) processSourceNote(list *sandboxapi.ProcessList) {
 		if k.Dropped > 0 {
 			a.warn(fmt.Sprintf("the kernel feed lost %d records (Tetragon's rate limit or a slow reader)", k.Dropped))
 		}
+		if k.UnfoldedHookCalls > 0 {
+			// GAP-0098: the feed folds the calls of a sandbox whose start
+			// it saw; a feed install, update or restart, or a Tetragon
+			// restart, starts it over.
+			a.note(fmt.Sprintf("%d of DefenseClaw's own hook calls are shown in full, with their tools:", k.UnfoldedHookCalls))
+			a.note("the sandbox was running when the feed last connected to Tetragon (a feed")
+			a.note("install, update or restart, or a Tetragon restart); stop and start it to")
+			a.note("fold them (its agent session restarts):")
+			a.note(fmt.Sprintf("  %s stop %s && %s start %s", CommandName, list.Name, CommandName, list.Name))
+		}
 		if k.UpdateCommand != "" {
 			a.note("the kernel feed is older than this gateway; update it:")
 			a.note("  " + k.UpdateCommand)

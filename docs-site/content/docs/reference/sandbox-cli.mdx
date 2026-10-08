@@ -456,8 +456,11 @@ Installs or updates the feed, as root. It copies this install's
 Tetragon serves a root-owned unix socket (a TCP API is refused) and that Docker
 answers, then writes and starts `defenseclaw-sandbox-feed.service`. Run it
 again after `defenseclaw upgrade`, which says so when the feed is older than
-the new release. Run as yourself, it prints the exact `sudo` command for this
-install. It is refused on a managed host, where sandboxes are not supported.
+the new release. An install or update restarts the feed: a sandbox that was
+already running then shows DefenseClaw's own hook calls in full until you stop
+and start it (`sandbox ps` counts them and prints the two commands). Run as
+yourself, it prints the exact `sudo` command for this install. It is refused on
+a managed host, where sandboxes are not supported.
 
 ```bash
 defenseclaw sandbox kernel-feed install

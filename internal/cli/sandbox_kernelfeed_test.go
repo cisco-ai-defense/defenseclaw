@@ -117,6 +117,11 @@ func TestSandboxKernelFeedInstallStatusUninstall(t *testing.T) {
 	if err != nil || !strings.Contains(out, "the sandbox kernel feed is installed") || !strings.Contains(out, "Tetragon connected") {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
+	// GAP-0098: an install or update restarts the feed, which then folds the
+	// hook calls only of sandboxes it saw start.
+	if !strings.Contains(out, "a sandbox that was already running shows DefenseClaw's own hook calls in\n  full until it is stopped and started\n") {
+		t.Fatalf("install does not say what a running sandbox shows:\n%s", out)
+	}
 	if !slices.Contains(*calls, "systemctl restart "+sandboxfeed.UnitName) {
 		t.Fatalf("calls = %q", *calls)
 	}

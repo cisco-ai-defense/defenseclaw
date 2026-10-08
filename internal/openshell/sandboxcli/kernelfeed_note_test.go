@@ -35,6 +35,14 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 		notSent     int64
 		want, never []string
 	}{
+		// GAP-0098: a sandbox the feed did not see start shows its hook
+		// calls in full, and ps says how to fold them.
+		"unfolded hook calls": {
+			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "connected", Execs: 300, UnfoldedHookCalls: 13},
+			want: []string{"13 of DefenseClaw's own hook calls are shown in full, with their tools:\n",
+				"the sandbox was running when the feed last connected to Tetragon",
+				"  defenseclaw sandbox stop box && defenseclaw sandbox start box\n"},
+		},
 		// GAP-0097: the records over the audit trail's rate are counted.
 		"records not sent": {
 			kernel:  &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "connected", Execs: 17705},
@@ -45,7 +53,7 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 		"connected": {
 			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "connected", Execs: 120, Pinned: 9, Dropped: 2},
 			want:   []string{"source: kernel", "120 so far (9 with their pid in the sandbox)", "lost 2 records"},
-			never:  []string{"sampled every"},
+			never:  []string{"sampled every", "shown in full"},
 		},
 		"older feed": {
 			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "connected", UpdateCommand: "sudo /x/defenseclaw-gateway sandbox kernel-feed install"},

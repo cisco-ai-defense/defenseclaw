@@ -122,6 +122,12 @@ type ProcessKernelFeed struct {
 	// Dropped counts records the feed lost (Tetragon's rate limit or
 	// throttle, or this gateway reading too slowly).
 	Dropped int64 `json:"dropped,omitempty"`
+	// UnfoldedHookCalls counts the runs of DefenseClaw's hook script the
+	// feed showed in full, with their tools, since it last folded one: a
+	// sandbox that was running when the feed connected to Tetragon (after a
+	// feed install, update or restart, or a Tetragon restart) shows every
+	// call in full until it is stopped and started (GAP-0098).
+	UnfoldedHookCalls int64 `json:"unfolded_hook_calls,omitempty"`
 	// UpdateCommand updates a feed that is older than this gateway or
 	// speaks a protocol it does not read.
 	UpdateCommand string `json:"update_command,omitempty"`

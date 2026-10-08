@@ -137,6 +137,9 @@ func runSandboxKernelFeedInstall(cmd *cobra.Command) error {
 		fmt.Fprintf(out, "  %s\n", result.Check)
 	}
 	fmt.Fprintf(out, "  sandboxes started with --process-tree (or a pack's observe.process_tree)\n  now record every exec and exit\n")
+	// GAP-0098: the feed folds the hook calls of a sandbox whose start it
+	// saw; an install or update restarts it.
+	fmt.Fprintf(out, "  a sandbox that was already running shows DefenseClaw's own hook calls in\n  full until it is stopped and started\n")
 	fmt.Fprintf(out, "  check:  %s sandbox kernel-feed status\n  remove: sudo %s sandbox kernel-feed uninstall\n", gateway, gateway)
 	return nil
 }

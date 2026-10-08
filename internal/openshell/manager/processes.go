@@ -149,10 +149,11 @@ type hookCall struct {
 }
 
 // kernelCounts are what one sandbox's tree took from the kernel feed: execs
-// (pinned: with the in-sandbox pid), its supervisor's summarized execs, and
-// DefenseClaw's own collector's execs, which are left out.
+// (pinned: with the in-sandbox pid), its supervisor's summarized execs,
+// DefenseClaw's own collector's execs, which are left out, and the runs of
+// DefenseClaw's hook script shown in full since the feed last folded one.
 type kernelCounts struct {
-	execs, pinned, supervisor, collector int64
+	execs, pinned, supervisor, collector, unfolded int64
 }
 
 func newProcTree() *procTree {
@@ -584,6 +585,13 @@ func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started,
 	if node.PID > 0 {
 		t.kernel.pinned++
 	}
+	if binary == sandboxfeed.ClaudeHookScript {
+		if f.Hook {
+			t.kernel.unfolded = 0
+		} else {
+			t.kernel.unfolded++
+		}
+	}
 	if fresh || claimed {
 		started = append(started, node)
 	}
@@ -935,6 +943,7 @@ func (m *Manager) Processes(_ context.Context, name string) (*sandboxapi.Process
 	if out.Kernel != nil {
 		out.Kernel.Execs, out.Kernel.Pinned = t.kernel.execs, t.kernel.pinned
 		out.Kernel.SupervisorExecs, out.Kernel.CollectorExecs = t.kernel.supervisor, t.kernel.collector
+		out.Kernel.UnfoldedHookCalls = t.kernel.unfolded
 	}
 	for _, node := range t.live {
 		out.Processes = append(out.Processes, node.view())

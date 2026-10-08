@@ -156,7 +156,11 @@ says otherwise. Per-user installs never connect to Tetragon.
   trees of each user's docker sandboxes (`sandbox ps` says `source: kernel`;
   `sandbox.process_tree` records gain `source=tetragon`, `host_pid` and
   `exec_id`). A Claude Code hook call, DefenseClaw's hook script and the short
-  system tools it starts, is one row with its tool count. It reads only
+  system tools it starts, is one row with its tool count; a sandbox that was
+  already running when the feed connected shows its calls in full until it
+  is stopped and started, and `sandbox ps` says so. `sandbox ps` also counts
+  the `sandbox.process_tree` records held back past 10 a second per sandbox.
+  It reads only
   container process events, serves members of the `docker` group their own
   sandboxes, and loads no policy.
   `sandbox kernel-feed status|uninstall` check and remove it. See

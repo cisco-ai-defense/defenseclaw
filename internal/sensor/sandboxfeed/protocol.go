@@ -78,6 +78,12 @@ const (
 	DockerGroup = "docker"
 )
 
+// ClaudeHookScript is DefenseClaw's Claude Code hook script in a sandbox
+// image (the connector copies it there and renders it into Claude's
+// root-owned managed settings). The feed folds a verified call of it into
+// one row; the gateway counts the calls it shows in full.
+const ClaudeHookScript = "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"
+
 // Frame kinds.
 const (
 	FrameExec    = "exec"
