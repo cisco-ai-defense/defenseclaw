@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -373,6 +374,31 @@ func TestEnterpriseACPEnrollReplacesTheOtherProfile(t *testing.T) {
 	if err != nil || len(enrollments) != 1 || enrollments[0].Profile != "act" {
 		t.Fatalf("enrollments = %+v, err = %v; want only the act enrollment", enrollments, err)
 	}
+	// The user copy belongs to act after the replacement. A stale or
+	// mistyped profile revoke must not remove it.
+	for _, stale := range []string{"obs", "missing"} {
+		t.Run(stale, func(t *testing.T) {
+			pin("act")
+			tokenPath, _ := enroll()["token_file"].(string)
+			enterpriseACPProfile = stale
+			var output bytes.Buffer
+			command := &cobra.Command{}
+			command.SetOut(&output)
+			if err := runEnterpriseACPRevoke(command, nil); err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["found"] != false {
+				t.Fatalf("missing profile %s reported found: %v", stale, payload)
+			}
+			if _, err := os.Stat(tokenPath); err != nil {
+				t.Fatalf("active profile token after revoking %s: %v", stale, err)
+			}
+		})
+	}
 }
 
 // The Windows refusals named hook mutation and gave no next step; they now
@@ -467,5 +493,22 @@ func TestEnterpriseACPSetupPathQuotesForPowerShell(t *testing.T) {
 	got := enterpriseACPQuotePath(`C:\Program Files\DefenseClaw\bin\gateway.exe`, true)
 	if got != `'C:\Program Files\DefenseClaw\bin\gateway.exe'` {
 		t.Fatalf("PowerShell path = %q", got)
+	}
+}
+
+// A setup command is pasted into a POSIX shell, which expands dollar signs
+// inside double quotes and needs apostrophes escaped inside single quotes.
+func TestEnterpriseACPSetupPathQuotesForUnixShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	path := "/home/person$group/O'Brien data/.defenseclaw"
+	quoted := enterpriseACPQuotePath(path, false)
+	output, err := exec.Command("sh", "-c", "set -- "+quoted+"; printf %s \"$1\"").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != path {
+		t.Fatalf("shell parsed %q as %q, want %q", quoted, output, path)
 	}
 }
