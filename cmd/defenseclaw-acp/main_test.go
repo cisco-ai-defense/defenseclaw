@@ -154,6 +154,25 @@ func TestSecureClientGuardStartupKeepsMainErrorBytes(t *testing.T) {
 	}
 }
 
+// A guard that cannot start stays to answer: Zed showed only "Server exited
+// with status exit code: 1" when the guard exited right after its answer
+// (GAP-0901).
+func TestStartupRefusalAnswersUntilTheEditorCloses(t *testing.T) {
+	reader, writer := io.Pipe()
+	var out bytes.Buffer
+	done := make(chan bool, 1)
+	go func() { done <- answerUntilClosed(reader, &out, "refused", time.Second, 5*time.Second) }()
+	for id := 0; id < 2; id++ {
+		if _, err := fmt.Fprintf(writer, `{"jsonrpc":"2.0","id":%d,"method":"session/new"}`+"\n", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = writer.Close()
+	if !<-done || strings.Count(out.String(), `"message":"refused"`) != 2 {
+		t.Fatalf("the editor did not get the refusal for every request: %q", out.String())
+	}
+}
+
 func TestAnswerFirstRequestGivesUpWithoutARequest(t *testing.T) {
 	reader, writer := io.Pipe()
 	defer writer.Close()

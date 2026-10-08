@@ -38,13 +38,21 @@ const firstRequestWait = 10 * time.Second
 // startupErrorCode is the JSON-RPC "internal error" code.
 const startupErrorCode = -32603
 
+// startupLinger bounds how long a guard that cannot start stays to answer
+// the editor after its first request.
+const startupLinger = 30 * time.Second
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		var startup *startupError
 		if errors.As(err, &startup) {
 			fmt.Fprintf(os.Stderr, "defenseclaw-acp: %s\n", startup.message)
 			if stdinIsPipe() {
-				answerFirstRequest(os.Stdin, os.Stdout, startup.message, firstRequestWait)
+				if guardKeepsMainBehaviour() {
+					answerFirstRequest(os.Stdin, os.Stdout, startup.message, firstRequestWait)
+				} else {
+					answerUntilClosed(os.Stdin, os.Stdout, startup.message, firstRequestWait, startupLinger)
+				}
 			}
 			os.Exit(1)
 		}
@@ -253,6 +261,12 @@ func contractLockManagedCustody(path string) bool {
 	return json.Unmarshal(body, &lock) == nil && lock.Guard.ManagedCustody
 }
 
+// guardKeepsMainBehaviour reports a Secure Client host, whose guard keeps
+// the behaviour of main (issue #1092).
+func guardKeepsMainBehaviour() bool {
+	return managed.IsSecureClientProfile(os.Getenv(managed.EnterpriseProfileEnv)) || acp.SecureClientHost()
+}
+
 func stdinIsPipe() bool {
 	info, err := os.Stdin.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice == 0
@@ -286,6 +300,54 @@ func answerFirstRequest(in io.Reader, out io.Writer, message string, wait time.D
 		return err == nil
 	case <-timer.C:
 		return false
+	}
+}
+
+// answerUntilClosed answers the editor's first request, and every later one,
+// with message, until the editor closes the pipe or linger passes after the
+// first answer. Zed waits 250 ms after a failed initialize and, when the
+// agent has exited by then, shows only "Server exited with status exit code:
+// 1": the refusal of a guard that exited at once reached Zed.log, not the
+// user (GAP-0901). It reports whether a response was written.
+func answerUntilClosed(in io.Reader, out io.Writer, message string, firstWait, linger time.Duration) bool {
+	ids := make(chan json.RawMessage)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		defer close(ids)
+		scanner := bufio.NewScanner(in)
+		scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+		for scanner.Scan() {
+			msg, err := acp.ParseMessage(scanner.Bytes())
+			if err != nil || !msg.IsRequest() {
+				continue
+			}
+			select {
+			case ids <- append(json.RawMessage(nil), msg.ID...):
+			case <-stop:
+				return
+			}
+		}
+	}()
+	answered := false
+	timer := time.NewTimer(firstWait)
+	defer timer.Stop()
+	for {
+		select {
+		case id, ok := <-ids:
+			if !ok {
+				return answered
+			}
+			if _, err := out.Write(append(acp.ErrorResponse(id, startupErrorCode, message), '\n')); err != nil {
+				return answered
+			}
+			if !answered {
+				answered = true
+				timer.Reset(linger)
+			}
+		case <-timer.C:
+			return answered
+		}
 	}
 }
 
