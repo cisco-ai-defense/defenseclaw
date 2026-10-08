@@ -335,14 +335,14 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) {
 		return []daemon.Listener{{Address: "127.0.0.1:18970", PID: hiddenPID}}, nil
 	}
-	fooled := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	fooled := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
 	applyWindowsEnterpriseInstallerReport(fooled, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
 	if len(fooled.Errors) != 1 || fooled.Errors[0].Code != "api_port_held" || fooled.Readiness.Gateway ||
 		len(fooled.APIPortHolders) != 1 || fooled.APIPortHolders[0].PID != hiddenPID {
 		t.Fatalf("probe answered by a holder: errors = %+v readiness = %+v holders = %+v", fooled.Errors, fooled.Readiness, fooled.APIPortHolders)
 	}
 	windowsEnterpriseAPIListeners = allListeners
-	served := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	served := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
 	applyWindowsEnterpriseInstallerReport(served, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
 	if len(served.Errors) != 0 || !served.Readiness.Gateway {
 		t.Fatalf("a ready gateway on its own port: errors = %+v readiness = %+v", served.Errors, served.Readiness)
