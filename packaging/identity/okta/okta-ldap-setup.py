@@ -276,6 +276,9 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
             elif not self_read_only(have[name]):
                 report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
                                "Change the attribute permission in Okta Profile Editor.")
+            elif kind == "user" and name == "unixUsername" and have[name].get("unique") != "UNIQUE_VALIDATED":
+                report.problem("user attribute unixUsername must have UNIQUE_VALIDATED uniqueness",
+                               "Set uniqueness in Okta Profile Editor before using it as the Linux account name.")
             else:
                 report.ok(f"{kind} attribute {name}")
 
@@ -285,12 +288,19 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
         check_group(client, report, name, gid)
     check_duplicate_group_gids(client, report)
     uid_owners: dict[int, str] = {}
+    name_owners: dict[str, str] = {}
     for user in client.get_all("/api/v1/users?limit=200"):
-        value = user.get("profile", {}).get("uidNumber")
+        profile = user.get("profile", {})
+        login = str(profile.get("login", user.get("id")))
+        name = profile.get("unixUsername")
+        if name:
+            if name in name_owners and name_owners[name] != login:
+                report.problem(f"unixUsername {name} is shared by {name_owners[name]} and {login}")
+            name_owners[name] = login
+        value = profile.get("uidNumber")
         if value is None:
             continue
         uid = int(value)
-        login = str(user.get("profile", {}).get("login", user.get("id")))
         if uid in uid_owners and uid_owners[uid] != login:
             report.problem(f"uidNumber {uid} is shared by {uid_owners[uid]} and {login}")
         uid_owners[uid] = login
@@ -309,6 +319,19 @@ def password_only_method(method: dict[str, Any]) -> bool:
         and constraints[0]["knowledge"].get("types") == ["password"]
         and constraints[0]["knowledge"].get("required") is not False
     )
+
+def unrestricted_signon_conditions(conditions: dict[str, Any]) -> bool:
+    """Accept only absent conditions or Okta's explicit match-everywhere defaults."""
+    if set(conditions) - {"people", "network", "riskScore", "userType"}:
+        return False
+    if conditions.get("network") not in (None, {"connection": "ANYWHERE"}):
+        return False
+    if conditions.get("riskScore") not in (None, {"level": "ANY"}):
+        return False
+    user_type = conditions.get("userType") or {}
+    return (set(user_type) <= {"include", "exclude"}
+            and not user_type.get("include") and not user_type.get("exclude"))
+
 
 def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
                         bind_login: str | None, group_names: list[str]) -> None:
@@ -337,7 +360,9 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
         action = (rule.get("actions") or {}).get("appSignOn") or {}
         method = action.get("verificationMethod") or {}
         factor = method.get("factorMode", "?")
-        people = ((rule.get("conditions") or {}).get("people") or {})
+        conditions = rule.get("conditions") or {}
+        people = conditions.get("people") or {}
+        unrestricted = unrestricted_signon_conditions(conditions)
         users = people.get("users") or {}
         scoped_groups = people.get("groups") or {}
         user_ids = set(users.get("include") or [])
@@ -358,14 +383,18 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
             if ((not user_ids or bind["id"] in user_ids)
                     and (not group_ids or bool(group_ids & (bind_groups or set())))
                     and not excluded_groups & (bind_groups or set())):
-                bind_covered = password_allow
-                bind_decided = True
+                # A conditional allow cannot establish coverage in every context. A conditional
+                # deny or stronger challenge may preempt a later unrestricted allow.
+                if unrestricted or not password_allow:
+                    bind_covered = password_allow and unrestricted
+                    bind_decided = True
         for name, group in groups.items():
             if group and not group_decided[name] and not user_ids and not excluded_users:
                 if ((not group_ids or group["id"] in group_ids)
                         and group["id"] not in excluded_groups):
-                    group_covered[name] = password_allow
-                    group_decided[name] = True
+                    if unrestricted or not password_allow:
+                        group_covered[name] = password_allow and unrestricted
+                        group_decided[name] = True
     if bind and bind_covered:
         report.ok(f"password-only sign-on covers bind user {bind_login}")
     elif bind:
@@ -474,6 +503,10 @@ def ensure_attributes(client: Okta, report: Report, kind: str, wanted: dict[str,
         elif name in have and not self_read_only(have[name]):
             report.problem(f"{kind} attribute {name} must be READ_ONLY for SELF",
                            "Change the attribute permission in Okta Profile Editor.")
+        elif (kind == "user" and name == "unixUsername" and name in have
+              and have[name].get("unique") != "UNIQUE_VALIDATED"):
+            report.problem("user attribute unixUsername must have UNIQUE_VALIDATED uniqueness",
+                           "Set uniqueness in Okta Profile Editor before assigning Unix names.")
         elif name in have:
             report.ok(f"{kind} attribute {name} exists")
     if not missing:
@@ -592,8 +625,12 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
     if report.problems:
         return report.finish()
     primary, primary_gid = ensure_group(client, report, args.primary_group, args.primary_gid, used_gids, args.gid_base)
+    if report.problems:
+        return report.finish()
     for name, gid in args.group or []:
         ensure_group(client, report, name, gid, used_gids, args.gid_base)
+    if report.problems:
+        return report.finish()
 
     print("Users")
     used_uids: set[int] = set()
@@ -806,7 +843,8 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
     method = action.get("verificationMethod") or {}
     password_only = password_only_method(method)
     same = (
-        all(
+        unrestricted_signon_conditions(rule.get("conditions") or {})
+        and all(
             set((have.get(kind) or {}).get("include") or []) == set((people.get(kind) or {}).get("include") or [])
             and not (have.get(kind) or {}).get("exclude")
             for kind in ("users", "groups")
@@ -815,8 +853,6 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
         and action.get("access") == "ALLOW"
         and password_only
     )
-    method = (rule.get("actions") or {}).get("appSignOn", {}).get("verificationMethod") or {}
-    same = same and rule.get("status") == "ACTIVE" and method.get("factorMode") == "1FA"
     if same:
         report.ok(f"rule '{name}' already does this: {purpose}")
         return
