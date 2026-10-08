@@ -144,6 +144,12 @@ func TestCommandLineRedactsScriptsAndHeaders(t *testing.T) {
 		{strings.Fields(`curl -H "Authorization: Bearer dccertvalue" https://example.invalid/`), `" https://example.invalid/`},
 		{strings.Fields(`curl -H "X-Api-Key: dccertvalue dccertvalue" https://example.invalid/`), `" https://example.invalid/`},
 		{strings.Fields(`mysqladmin "--password dccertvalue" status`), `" status`},
+		// A header name after a flag or key that carries it (TS-r3).
+		{[]string{"curl", "--header=X-Api-Key: dccertvalue", "https://example.invalid/"}, "--header=X-Api-Key: <redacted"},
+		{[]string{"curl", "--header=Authorization: Bearer dccertvalue"}, "--header=Authorization: Bearer <redacted"},
+		{[]string{"curl", "--header=X-Api-Key:dccertvalue"}, "--header=X-Api-Key:<redacted"},
+		{strings.Fields(`tool header=X-Api-Key: dccertvalue next`), " next"},
+		{strings.Fields(`tool "header=Authorization: Bearer dccertvalue" next`), `Bearer <redacted`},
 	} {
 		if got := CommandLine(tc.argv, 1024); strings.Contains(got, "dccertvalue") || !strings.Contains(got, tc.kept) {
 			t.Errorf("cmdline %q of %q, want %q kept", got, tc.argv, tc.kept)

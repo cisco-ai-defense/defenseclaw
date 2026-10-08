@@ -41,14 +41,17 @@ import (
 //     value, the next word, starts (a header: "Authorization: Bearer ...",
 //     "X-Api-Key: ..."), and cmdlineAuthScheme the scheme word an
 //     Authorization value starts with.
+//
+// cmdlineSecretArg and cmdlineSecretKey also take the name after a flag or
+// key that carries it (--header=X-Api-Key: ..., header=Authorization: ...).
 var (
-	cmdlineSecretArg   = regexp.MustCompile(`(?i)^(-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
+	cmdlineSecretArg   = regexp.MustCompile(`(?i)^((?:-{0,2}[a-z0-9_.-]+=)?-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
 	cmdlineSecretFlag  = regexp.MustCompile(`(?i)^-{1,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*$`)
 	cmdlineLongToken   = regexp.MustCompile(`^[A-Za-z0-9_\-+/=.]{32,}$`)
 	cmdlineUserFlag    = regexp.MustCompile(`^(?:-u|-U|--user|--proxy-user)$`)
 	cmdlineUserArg     = regexp.MustCompile(`^(-u|-U|--user=|--proxy-user=)([^:]*:)(.+)$`)
 	cmdlineURLPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://(?:<redacted[^<>]{0,90}>|[^/@:\s])*:)((?:<redacted[^<>]{0,90}>|[^/@\s])+)@`)
-	cmdlineSecretKey   = regexp.MustCompile(`(?i)^[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:]$`)
+	cmdlineSecretKey   = regexp.MustCompile(`(?i)^(?:-{0,2}[a-z0-9_.-]+=)?[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:]$`)
 	cmdlineAuthScheme  = regexp.MustCompile(`(?i)^(?:bearer|basic|token|digest|negotiate)$`)
 )
 
