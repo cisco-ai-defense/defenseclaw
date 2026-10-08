@@ -8,7 +8,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -114,5 +116,83 @@ func TestAdmitAddedMCPServerMatchesAllowPinnedToItsURL(t *testing.T) {
 	w.admitAddedMCPServers(context.Background())
 	if len(admitted) != 1 || admitted[0].Verdict != VerdictAllowed || scans.calls != 0 {
 		t.Fatalf("admitted %#v after %d scans, want ctx7 allowed by its pinned rule without a scan", admitted, scans.calls)
+	}
+}
+
+// heldScanner holds every scan until release closes.
+type heldScanner struct {
+	started, release chan struct{}
+	once             sync.Once
+}
+
+func (s *heldScanner) Name() string               { return "mcp-scanner" }
+func (s *heldScanner) Version() string            { return "fake-1" }
+func (s *heldScanner) SupportedTargets() []string { return []string{"mcp"} }
+func (s *heldScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	s.once.Do(func() { close(s.started) })
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+	}
+	return &scanner.ScanResult{Scanner: s.Name(), Target: target, Timestamp: time.Now().UTC()}, nil
+}
+
+// GAP-0254: a server added while the first rescan cycle after an upgrade is
+// still scanning is admitted at once: discovery waited for the whole cycle
+// (about 19 minutes on a managed host), and admission waited for the scan of
+// any other server the cycle was running.
+func TestMCPServerAddedDuringFirstCycleIsAdmittedAtOnce(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	off := false
+	cfg.Admission.MCP.ScanOnInstall = &off
+	cfg.Watch.RescanContentGated = true
+	var mu sync.Mutex
+	servers := []config.MCPServerEntry{{Name: "slow", URL: "https://slow.example.test/mcp", Connector: "codex", Home: "/home/u1"}}
+	var admitted []string
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) {
+		mu.Lock()
+		admitted = append(admitted, r.Event.Name)
+		mu.Unlock()
+	})
+	slow := &heldScanner{started: make(chan struct{}), release: make(chan struct{})}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return slow }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]config.MCPServerEntry(nil), servers...), nil
+	})
+	cycle := make(chan struct{})
+	go func() { defer close(cycle); w.runRescanCycle(context.Background()) }()
+	select {
+	case <-slow.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first cycle never scanned the existing server")
+	}
+	mu.Lock()
+	servers = append(servers, config.MCPServerEntry{Name: "added", URL: "https://added.example.test/mcp", Connector: "codex", Home: "/home/u2"})
+	mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.discoverAddedMCPServers()
+		w.admitAddedMCPServers(context.Background())
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("admission waited for the running cycle")
+	}
+	mu.Lock()
+	got := append([]string(nil), admitted...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "added" {
+		t.Fatalf("admitted %v while the cycle scanned slow, want [added]", got)
+	}
+	close(slow.release)
+	<-cycle
+	w.runRescanCycle(context.Background())
+	if len(admitted) != 1 {
+		t.Fatalf("admitted %v, want added once and slow only baselined", admitted)
 	}
 }

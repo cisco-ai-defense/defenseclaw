@@ -127,6 +127,9 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		defer func() { w.startupAdmitRoots = nil }()
 	}
 	targets := w.enumerateTargets()
+	if !w.startupRescanDone {
+		w.recordStartupMCP(targets)
+	}
 	if len(targets) == 0 {
 		w.markWatchRoots()
 		return
@@ -664,8 +667,10 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 // without invoking the scanner or writing a scan_results row.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[string]string) rescanOutcome {
 	if evt.Type == InstallMCP {
-		w.mcpMu.Lock()
-		defer w.mcpMu.Unlock()
+		if !w.claimMCP(evt.Path) {
+			return rescanSkipped // admitted by the added-server loop
+		}
+		defer w.releaseMCP(evt.Path)
 	}
 	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
 		return rescanSkipped

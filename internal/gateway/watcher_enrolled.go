@@ -92,8 +92,15 @@ func (e enrolledWatchSet) dirsKey() string {
 	return strings.Join(parts, "\n")
 }
 
+// mcpKey changes only when a server changes: the entries are sorted, as
+// the Codex reader lists them in map order, which asked for a rescan on
+// almost every poll.
 func (e enrolledWatchSet) mcpKey() string {
-	raw, _ := json.Marshal(e.mcp)
+	entries := append([]config.MCPServerEntry(nil), e.mcp...)
+	sort.SliceStable(entries, func(i, j int) bool {
+		return watcher.MCPEventPath(entries[i]) < watcher.MCPEventPath(entries[j])
+	})
+	raw, _ := json.Marshal(entries)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -266,10 +273,6 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 	ticker := time.NewTicker(enrolledWatchPollInterval)
 	defer ticker.Stop()
 	dirs, mcp := current.dirsKey(), current.mcpKey()
-	known := map[string]bool{}
-	for _, entry := range current.mcp {
-		known[entry.Name] = true
-	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -283,20 +286,12 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 			if key := next.mcpKey(); key != mcp {
 				mcp = key
 				current.live.set(next.mcp)
-				var added []string
-				for _, entry := range next.mcp {
-					if !known[entry.Name] {
-						added = append(added, entry.Name)
-					}
-				}
-				known = map[string]bool{}
-				for _, entry := range next.mcp {
-					known[entry.Name] = true
-				}
 				if w != nil {
 					// Admit a server the user added within this poll, not
-					// after the running rescan cycle (GAP-0254).
-					w.AdmitAddedMCPServers(added)
+					// after the running rescan cycle: every server without a
+					// baseline, so a second user adding a server named like
+					// another user is admitted too (GAP-0254).
+					w.DiscoverAddedMCPServers()
 					w.RequestRescan()
 				}
 			}

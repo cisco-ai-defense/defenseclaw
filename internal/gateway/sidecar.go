@@ -3609,6 +3609,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
 		w.SetMCPServerSource(enrolled.live.list)
+		// Retries a server whose admission could not run at the poll.
+		w.SetMCPDiscoveryPoll(true)
 	} else {
 		if len(conns) > 1 {
 			// Each folder belongs to the connector that lists it, so its

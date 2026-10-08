@@ -207,9 +207,18 @@ type InstallWatcher struct {
 	addedMCPMu  sync.Mutex
 	addedMCP    map[string]bool
 	admitMCPNow chan struct{}
-	// mcpMu serializes MCP admission between that loop and the rescan
-	// cycle, so a server is admitted once.
-	mcpMu sync.Mutex
+	// mcpClaims are the MCP servers (event paths) that loop or the rescan
+	// cycle is handling: the other one leaves a claimed server alone, so a
+	// server is admitted once and its admission never waits for the scan of
+	// another server (GAP-0254).
+	mcpClaimMu sync.Mutex
+	mcpClaims  map[string]bool
+	// mcpStartup are the MCP servers the first rescan cycle listed: that
+	// cycle records their baselines, so discovery skips them until it ends
+	// and admits every other server at once (GAP-0254).
+	mcpStartupMu     sync.Mutex
+	mcpStartup       map[string]bool
+	mcpStartupListed atomic.Bool
 
 	// binaryVersions caches each scanner binary's probed --version.
 	binaryVersions sync.Map
@@ -230,8 +239,8 @@ type InstallWatcher struct {
 	fpMu sync.Mutex
 
 	// pollMCP has Run look for MCP servers added outside `mcp set` every
-	// mcpDiscoveryInterval (SetMCPDiscoveryPoll); firstCycleDone gates it
-	// until the first rescan cycle recorded the existing servers.
+	// mcpDiscoveryInterval (SetMCPDiscoveryPoll); firstCycleDone says the
+	// first rescan cycle ended (mcpStartup applies until then).
 	pollMCP        bool
 	firstCycleDone atomic.Bool
 }
@@ -348,6 +357,9 @@ func (w *InstallWatcher) addedMCPLoop(ctx context.Context) {
 }
 
 // admitAddedMCPServers admits each queued server that has no baseline yet.
+// A server the rescan cycle is handling is left to it; a server whose
+// baseline could not be read is queued again for the next discovery. Both
+// say so in gateway.log, so a missed admission is never silent.
 func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 	w.addedMCPMu.Lock()
 	names := w.addedMCP
@@ -355,6 +367,7 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 	w.addedMCPMu.Unlock()
 	servers, err := w.readMCPServers()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[watch] list mcp servers for admission: %v\n", err)
 		return
 	}
 	for _, server := range servers {
@@ -365,19 +378,88 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 			continue
 		}
 		evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector, Timestamp: time.Now().UTC()}
-		w.mcpMu.Lock()
-		if _, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path); errors.Is(err, sql.ErrNoRows) {
-			if snap, err := w.snapshotForEvent(evt); err == nil {
-				fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
-				res := w.runAdmission(ctx, evt)
-				w.notifyAdmission(res)
-				if !res.Interrupted {
-					w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
-				}
-			}
+		if !w.claimMCP(evt.Path) {
+			continue // the rescan cycle is admitting or scanning it
 		}
-		w.mcpMu.Unlock()
+		w.admitAddedMCPServer(ctx, evt)
+		w.releaseMCP(evt.Path)
 	}
+}
+
+func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEvent) {
+	_, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	if err == nil {
+		return // admitted or baselined already
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; its baseline could not be read, retrying: %v\n", evt.Name, err)
+		w.queueAddedMCP(evt.Name)
+		return
+	}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; reading its definition failed: %v\n", evt.Name, err)
+		}
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	if !res.Interrupted {
+		w.persistSnapshot(evt, snap, res.ScanID, w.cachedFingerprint(evt, nil))
+	}
+}
+
+// queueAddedMCP queues name for the next admission pass without waking it.
+func (w *InstallWatcher) queueAddedMCP(name string) {
+	w.addedMCPMu.Lock()
+	if w.addedMCP == nil {
+		w.addedMCP = map[string]bool{}
+	}
+	w.addedMCP[name] = true
+	w.addedMCPMu.Unlock()
+}
+
+// claimMCP marks the MCP server at path as handled by the caller; it fails
+// while another admission or the rescan cycle holds it.
+func (w *InstallWatcher) claimMCP(path string) bool {
+	w.mcpClaimMu.Lock()
+	defer w.mcpClaimMu.Unlock()
+	if w.mcpClaims[path] {
+		return false
+	}
+	if w.mcpClaims == nil {
+		w.mcpClaims = map[string]bool{}
+	}
+	w.mcpClaims[path] = true
+	return true
+}
+
+func (w *InstallWatcher) releaseMCP(path string) {
+	w.mcpClaimMu.Lock()
+	delete(w.mcpClaims, path)
+	w.mcpClaimMu.Unlock()
+}
+
+// recordStartupMCP keeps the MCP servers the first rescan cycle lists and
+// lets discovery start at once instead of after that cycle (GAP-0254).
+func (w *InstallWatcher) recordStartupMCP(targets []InstallEvent) {
+	w.mcpStartupMu.Lock()
+	w.mcpStartup = map[string]bool{}
+	for _, evt := range targets {
+		if evt.Type == InstallMCP {
+			w.mcpStartup[evt.Path] = true
+		}
+	}
+	w.mcpStartupMu.Unlock()
+	w.mcpStartupListed.Store(true)
+}
+
+func (w *InstallWatcher) listedAtStartup(path string) bool {
+	w.mcpStartupMu.Lock()
+	defer w.mcpStartupMu.Unlock()
+	return w.mcpStartup[path]
 }
 
 // mcpDiscoveryInterval is how often a per-user watcher looks for MCP
@@ -405,10 +487,23 @@ func (w *InstallWatcher) mcpDiscoveryLoop(ctx context.Context) {
 	}
 }
 
+// DiscoverAddedMCPServers admits now every MCP server without a baseline. A
+// managed gateway calls it when its enrolled users servers change.
+func (w *InstallWatcher) DiscoverAddedMCPServers() {
+	if w == nil || !w.admitNewMCP {
+		return
+	}
+	w.discoverAddedMCPServers()
+}
+
 // discoverAddedMCPServers queues for admission the MCP servers that have no
-// baseline yet, once the first rescan cycle recorded the existing ones.
+// baseline yet. It starts once the first rescan cycle listed the existing
+// servers, which that cycle baselines; it does not wait for the cycle to
+// end, which after an upgrade rescans every skill for many minutes
+// (GAP-0254).
 func (w *InstallWatcher) discoverAddedMCPServers() {
-	if !w.firstCycleDone.Load() || w.store == nil {
+	firstCycle := !w.firstCycleDone.Load()
+	if (firstCycle && !w.mcpStartupListed.Load()) || w.store == nil {
 		return
 	}
 	servers, err := w.readMCPServers()
@@ -420,7 +515,13 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		if strings.TrimSpace(server.Name) == "" || server.Bundled {
 			continue
 		}
-		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), MCPEventPath(server)); errors.Is(err, sql.ErrNoRows) {
+		path := MCPEventPath(server)
+		if firstCycle && w.listedAtStartup(path) {
+			continue
+		}
+		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), path); err != nil {
+			// A read error other than no rows is retried by admission,
+			// which says so.
 			added = append(added, server.Name)
 		}
 	}
