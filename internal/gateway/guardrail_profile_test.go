@@ -13,6 +13,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -881,6 +882,26 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		!strings.Contains(got[0], `the host knows it as "dc-ml-short@dclab.test"`) {
 		t.Fatalf("short-name warnings = %q, want the qualified name", got)
 	}
+	// GAP-0916: after a switch to short names the qualified group still
+	// resolves, but as dc-ml-team, the name group lists carry: it is warned.
+	switched := func(_ context.Context, name string) string {
+		if name == "dc-ml-team@dclab.test" {
+			return "dc-ml-team"
+		}
+		return ""
+	}
+	qualified := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}}}
+	if got := unknownAssignmentGroupsForOS(context.Background(), qualified, exists, switched, "linux"); len(got) != 1 ||
+		!strings.Contains(got[0], `assignment 1: group "dc-ml-team@dclab.test" is listed by this host as "dc-ml-team"`) ||
+		!strings.Contains(got[0], "use_fully_qualified_names = False") {
+		t.Fatalf("qualified-to-short warnings = %q, want the short spelling named", got)
+	}
+	// GAP-0332: the domain of a seen account group (an SSSD domain realmd
+	// does not list) is offered for the short-name hint.
+	noteGroupDomains([]string{"dc-okta-users@okta", "wheel"})
+	if !slices.Contains(observedGroupDomains.list(), "okta") {
+		t.Fatalf("observed group domains = %q, want okta", observedGroupDomains.list())
+	}
 
 	// The background pass below runs with this host's rules; Windows looks
 	// SIDs up and has no SSSD domain note
@@ -924,8 +945,10 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	// GAP-0255: the gateway's own lookups work (a local account, or at start
 	// before the first failure) but no group of dclab.test is known, Domain
 	// Users included: one note, no group reported as renamed or deleted.
-	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not confirm group names written for dclab.test") || strings.Contains(got[0], "SSSD") {
-		t.Fatalf("warnings = %q while the directory does not answer, want one note", got)
+	// The note names each assignment and group it cannot confirm (GAP-0928).
+	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not confirm group names written for dclab.test") ||
+		strings.Contains(got[0], "SSSD") || !strings.Contains(got[0], `assignment 1: group "dc-rename-me@dclab.test"`) {
+		t.Fatalf("warnings = %q while the directory does not answer, want one note naming the groups", got)
 	}
 	profileGroupExists = func(_ context.Context, name string) (bool, error) { return name == "domain users@dclab.test", nil }
 	set = &guardrailProfileSet{assignments: assignments}

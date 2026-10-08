@@ -757,6 +757,11 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.AddWarning(codeDirectoryLookups, message+". "+check+"; `"+
 			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
 	}
+	// profile_warnings repeats the group warnings profile_assignment_warnings
+	// already lists; each is listed once (GAP-0928).
+	health.ProfileWarnings = slices.DeleteFunc(health.ProfileWarnings, func(warning string) bool {
+		return slices.Contains(health.ProfileAssignmentWarnings, warning)
+	})
 	for i, warning := range health.ProfileWarnings {
 		if i == profileWarningsMax {
 			l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d more guardrail profile assignment warnings", len(health.ProfileWarnings)-i))
