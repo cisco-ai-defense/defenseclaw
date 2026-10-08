@@ -744,11 +744,10 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
         "detectionScriptContent": b64(detect),
         "remediationScriptContent": b64(remediate),
     }
-    body = {}
-    if args.detect is not None:
-        body["detectionScriptContent"] = b64(detect)
-    if args.remediate is not None:
-        body["remediationScriptContent"] = b64(remediate)
+    body = {
+        "detectionScriptContent": b64(detect),
+        "remediationScriptContent": b64(remediate),
+    }
     collection = f"{BETA}/deviceManagement/deviceHealthScripts"
     group = group_by_name(graph, args.group) if args.group else None
     script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package", create_body)
@@ -918,10 +917,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remediation.add_argument("--name", default="DefenseClaw Enterprise health", metavar="NAME")
     remediation.add_argument(
-        "--detect", metavar="FILE", help="detection script (kit default on create)"
+        "--detect", metavar="FILE", help="detection script (kit default on every run)"
     )
     remediation.add_argument(
-        "--remediate", metavar="FILE", help="remediation script (kit default on create)"
+        "--remediate", metavar="FILE", help="remediation script (kit default on every run)"
     )
     remediation.add_argument("--group", metavar="NAME", help="assign it to this group")
     remediation.add_argument(

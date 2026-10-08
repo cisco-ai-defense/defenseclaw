@@ -1316,3 +1316,28 @@ def test_intune_expired_apple_push_certificate_fails_readiness(monkeypatch: pyte
     rows = intune.check_items(Graph(), ["macos"], [])
     certificate = next(row for row in rows if row["item"] == "Apple push certificate")
     assert certificate["status"] == intune.FAIL
+
+
+def test_intune_remediation_rerun_uploads_changed_default_scripts(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    writes = []
+    scripts = {"Remediate-Detect.ps1": b"new detection", "Remediate-Fix.ps1": b"new remediation"}
+    monkeypatch.setattr(intune, "read_script", lambda path, _limit: scripts[Path(path).name])
+
+    class Graph:
+        def get_all(self, path):
+            return [{"id": "script-1"}]
+
+        def get(self, _path):
+            return {"detectionScriptContent": intune.b64(b"old detection"),
+                    "remediationScriptContent": intune.b64(b"old remediation")}
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args(["remediation", "--apply"])
+    assert intune.cmd_remediation(Graph(), args) == 0
+    assert writes == [("PATCH", "/beta/deviceManagement/deviceHealthScripts/script-1",
+                       {"detectionScriptContent": intune.b64(scripts["Remediate-Detect.ps1"]),
+                        "remediationScriptContent": intune.b64(scripts["Remediate-Fix.ps1"])})]
