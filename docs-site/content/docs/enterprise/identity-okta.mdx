@@ -213,8 +213,10 @@ It:
    leaves `sssd.conf` as it was;
 3. installs `/etc/sssd/sssd.conf` (root, mode 0600), keeping the previous file as
    `sssd.conf.bak-<time>`. It will not replace an `sssd.conf` that it did not
-   write unless you pass `--force`, so it cannot overwrite an Active Directory
-   join by accident;
+   write unless you pass `--force`. A rerun also refuses to replace a marked
+   file that contains another SSSD domain (for example, one added by an Active
+   Directory join). Merge the updated Okta settings into that file manually,
+   or pass `--force` if replacing every domain is intentional;
 4. selects the authselect `sssd` profile with home directories (`with-mkhomedir`)
    and enables `oddjobd`;
 5. writes `/etc/ssh/sshd_config.d/45-okta-ldap.conf`, so members of the allowed
