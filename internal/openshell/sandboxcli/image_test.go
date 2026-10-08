@@ -528,6 +528,15 @@ func TestDoctorImagesCoverEveryBuiltHarness(t *testing.T) {
 	if c := ta.runDoctor(bg).Get(CheckIDImages); c.Status != "pass" || c.Detail != "hook-verified: claudecode 2.1.156, codex 0.146.0, kiro 2.24.1, openhands 1.16.0" {
 		t.Fatalf("images check = %+v", c)
 	}
+	// GAP-0320: after an upgrade, a harness with an image of the earlier
+	// build only is not "not built yet".
+	old := ready("codex", "0.146.0")
+	old.DefenseClawVersion = "earlier-build"
+	ta.images.recs = []image.Record{ready("claudecode", "2.1.156"), old}
+	if c := ta.runDoctor(bg).Get(CheckIDImages); c.Status != "warn" ||
+		!strings.HasPrefix(c.Detail, "built by an earlier DefenseClaw build only: codex (the next run builds it for this one") {
+		t.Fatalf("images check = %+v", c)
+	}
 }
 
 // On a MicroVM gateway the doctor's image check covers every built

@@ -273,9 +273,16 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	// Docker unreachable: the Docker check says so, and the records stand.
 	gone, _ := a.Images.Gone(ctx, recs)
 	newest := map[string]image.Record{}
+	// earlier are the harnesses with an image only another DefenseClaw build
+	// made: after an upgrade they read "not built yet" (GAP-0320).
+	earlier := map[string]bool{}
 	for _, r := range recs {
 		if r.HookFireVerified && r.MicroVM == microVM && r.UID == os.Getuid() && !gone[r.Tag] &&
-			r.DefenseClawVersion == manager.ImageVersion() && (a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
+			(a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
+			if r.DefenseClawVersion != manager.ImageVersion() {
+				earlier[r.Connector] = true
+				continue
+			}
 			if cur, ok := newest[r.Connector]; !ok || r.BuiltAt.After(cur.BuiltAt) {
 				newest[r.Connector] = r
 			}
@@ -316,9 +323,20 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	for _, spec := range others {
 		verdict(spec.Name)
 	}
-	var notes []string
-	if len(missing) > 0 {
-		notes = append(notes, "not built yet: "+strings.Join(missing, ", ")+" (the first run builds it, which takes a while)")
+	var notes, never, rebuild []string
+	for _, name := range missing {
+		if earlier[name] {
+			rebuild = append(rebuild, name)
+		} else {
+			never = append(never, name)
+		}
+	}
+	if len(never) > 0 {
+		notes = append(notes, "not built yet: "+strings.Join(never, ", ")+" (the first run builds it, which takes a while)")
+	}
+	if len(rebuild) > 0 {
+		notes = append(notes, "built by an earlier DefenseClaw build only: "+strings.Join(rebuild, ", ")+
+			" (the next run builds it for this one, which takes a while; then `"+CommandName+" image prune` frees the old one)")
 	}
 	if len(refused) > 0 {
 		notes = append(notes, "cannot start in an OpenShell MicroVM: "+strings.Join(refused, ", ")+

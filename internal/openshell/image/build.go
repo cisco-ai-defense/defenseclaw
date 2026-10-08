@@ -303,6 +303,13 @@ type PruneOptions struct {
 	// names. Unset (a docker gateway, or one whose driver is not known),
 	// the newest images of both kinds are kept.
 	MicroVMGateway bool
+	// DefenseClawVersion is the DefenseClaw build new sandboxes start with
+	// (manager.ImageVersion). An image another build made is never current
+	// again (Store.Current matches the build), so it is superseded unless
+	// Keep names it: after an upgrade, prune called the earlier build's
+	// images current and kept them, with their MicroVM disks (GAP-0320).
+	// Empty, every build's newest image is kept.
+	DefenseClawVersion string
 }
 
 // PruneReport lists what Prune did.
@@ -399,6 +406,9 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 		if opts.MicroVMGateway && !r.MicroVM {
 			// The gateway never boots it again: Store.Current selects
 			// only a MicroVM image for its sandboxes.
+			continue
+		}
+		if opts.DefenseClawVersion != "" && r.DefenseClawVersion != opts.DefenseClawVersion {
 			continue
 		}
 		id := identity{r.Connector, r.UID, r.GID, r.IngressPort, r.MicroVM}

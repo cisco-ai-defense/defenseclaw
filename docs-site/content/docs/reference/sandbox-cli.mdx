@@ -238,7 +238,11 @@ recorded before DefenseClaw built MicroVM images are `docker`. A gateway boots
 only the images for its driver, and when the list can tell which driver that
 is, a note names the images the gateway does not use. The doctor does not
 count those as built, and on a MicroVM gateway `sandbox image prune` removes
-them. With `--output json` every recorded image is listed, with
+them. After an upgrade, a note names the images another DefenseClaw build
+made: no new sandbox uses them, the next run of each harness builds its image
+for this build (which takes a while; the doctor's **Harness images** check
+says `built by an earlier DefenseClaw build only`), and `sandbox image prune`
+removes the old ones. With `--output json` every recorded image is listed, with
 `"microvm": true` for a MicroVM image, and one Docker no longer has carries
 `"missing": true`.
 
@@ -258,8 +262,9 @@ defenseclaw sandbox image list --output json
 Removes superseded harness images.
 
 - **What it keeps.** The current images and the images the daemon's
-  sandboxes run. It leaves images that another DefenseClaw data directory
-  recorded, or that nothing recorded.
+  sandboxes run. An image another DefenseClaw build made (before an upgrade)
+  is not current, so it goes unless a sandbox runs it. It leaves images that
+  another DefenseClaw data directory recorded, or that nothing recorded.
 - **Stale records.** It forgets, and names, the records of images Docker no
   longer has.
 - **On a MicroVM (vm) gateway**, and only while the daemon answers (without
