@@ -87,6 +87,19 @@ func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
 	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "action" {
 		t.Fatalf("reloaded unmatched hook mode = %q, want action", got)
 	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?connector=opencode", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var explained struct {
+		Effective map[string]any `json:"effective"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &explained); err != nil {
+		t.Fatalf("decode profile explain: %v", err)
+	}
+	if got := explained.Effective["mode"]; got != "action" {
+		t.Fatalf("explain mode = %v, live hook mode = action", got)
+	}
 }
 
 // A reload during a request must attribute records to the profile enforced
@@ -1231,6 +1244,9 @@ func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
 // account named DCLAB\\dcad-bob that no directory confirms (nslcd, a plain
 // LDAP domain of SSSD) is selected by its uid only (GAP-0456, GAP-0814).
 func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
 	subject := profileSubjectFromVerified(VerifiedSubject{
 		UserID: "1201", UserName: `CONTOSO\alice`,
 		Directory: useridentity.DirectoryFacts{

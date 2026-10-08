@@ -123,3 +123,27 @@ func TestIdentitySpoolStaleAfterAClockStep(t *testing.T) {
 		t.Error("an empty spool is not stale")
 	}
 }
+
+// One account can stop refreshing while another still succeeds. Status must
+// notice the account whose gateway record will age out.
+func TestIdentitySpoolStaleWhenOneAccountStopsRefreshing(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	for name, age := range map[string]time.Duration{
+		"1001.json": 2 * time.Hour,
+		"1002.json": 5 * time.Minute,
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		written := now.Add(-age)
+		if err := os.Chtimes(path, written, written); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldest, stale := IdentitySpoolStale(dir, now, 30*time.Minute)
+	if !stale || now.Sub(oldest) < time.Hour {
+		t.Fatalf("oldest record = %s, stale = %v; want the stale account reported", oldest, stale)
+	}
+}

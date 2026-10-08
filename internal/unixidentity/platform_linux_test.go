@@ -9,6 +9,7 @@ package unixidentity
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -155,11 +156,16 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 // holds, and "sid:SID" to the uid SSSD maps the SID to; it answers any other
 // object as SSSD answers one without a SID.
 type fakeSSSD struct {
-	ln   net.Listener
-	sids map[string]string
+	ln     net.Listener
+	sids   map[string]string
+	errors map[string]uint32
 }
 
 func startFakeSSSD(t *testing.T, sids map[string]string) *fakeSSSD {
+	return startFakeSSSDWithErrors(t, sids, nil)
+}
+
+func startFakeSSSDWithErrors(t *testing.T, sids map[string]string, statuses map[string]uint32) *fakeSSSD {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "nss")
 	ln, err := net.Listen("unix", path)
@@ -168,7 +174,7 @@ func startFakeSSSD(t *testing.T, sids map[string]string) *fakeSSSD {
 	}
 	orig := sssdNSSSocket
 	sssdNSSSocket = path
-	f := &fakeSSSD{ln: ln, sids: sids}
+	f := &fakeSSSD{ln: ln, sids: sids, errors: statuses}
 	t.Cleanup(func() { sssdNSSSocket = orig; ln.Close() })
 	go func() {
 		for {
@@ -215,6 +221,8 @@ func (f *fakeSSSD) serve(conn net.Conn) {
 		switch sid, ok := f.sids[key]; {
 		case cmd == sssCmdGetVersion:
 			reply = binary.NativeEndian.AppendUint32(nil, sssNSSProtocolVersion)
+		case f.errors[key] != 0:
+			status = f.errors[key]
 		case ok:
 			reply = binary.NativeEndian.AppendUint32(nil, 1)
 			reply = binary.NativeEndian.AppendUint32(reply, 0)
@@ -384,5 +392,67 @@ func TestFailedRealmdQueryDoesNotCacheEmptyRealms(t *testing.T) {
 	}}
 	if facts, err := newFakeNSS(f).DirectoryFactsForUID(80001, time.Now()); err == nil {
 		t.Fatalf("realmd failure produced cacheable facts: %+v", facts)
+	}
+}
+
+// A failed flat-domain lookup cannot produce verified facts without the
+// account domain used by a DOMAIN\user profile assignment.
+func TestWinbindAccountDomainLookupFailure(t *testing.T) {
+	dir := t.TempDir()
+	oldNSS, oldPasswd, oldRealms := nsswitchPath, localPasswdPath, hostRealms
+	t.Cleanup(func() { nsswitchPath, localPasswdPath, hostRealms = oldNSS, oldPasswd, oldRealms })
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files winbind\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM", ClientSoftware: "winbind",
+			ServerSoftware: "active-directory", NetBIOS: "CORP"}}, nil
+	}
+	const account = "alice:*:80001:80001::/home/alice:/bin/bash\n"
+	lookupErr := syscall.EIO
+	f := &fakeRun{results: map[string]commandResult{
+		"passwd 80001":            {stdout: []byte(account)},
+		"-s winbind passwd 80001": {stdout: []byte(account)},
+	}, errs: map[string]error{`-s winbind passwd CORP\alice`: lookupErr}}
+	facts, err := newFakeNSS(f).DirectoryFactsWithoutGroupsForUID(80001, time.Now())
+	if !errors.Is(err, lookupErr) || facts.Assurance == useridentity.AssuranceVerified {
+		t.Fatalf("failed NetBIOS lookup: facts = %+v, err = %v", facts, err)
+	}
+}
+
+// SSSD may confirm the account's DNS realm and then fail the flat-domain
+// lookup. That partial answer must not become cacheable verified facts.
+func TestSSSDAccountDomainLookupFailure(t *testing.T) {
+	dir := t.TempDir()
+	oldNSS, oldPasswd, oldRealms := nsswitchPath, localPasswdPath, hostRealms
+	t.Cleanup(func() { nsswitchPath, localPasswdPath, hostRealms = oldNSS, oldPasswd, oldRealms })
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: "corp.example.com", Name: "CORP.EXAMPLE.COM", ClientSoftware: "sssd",
+			ServerSoftware: "active-directory", NetBIOS: "CORP"}}, nil
+	}
+	const sid = "S-1-5-21-1-2-3-1101"
+	startFakeSSSDWithErrors(t, map[string]string{
+		"uid:80001": sid, "sid:" + sid: "80001",
+		`name:corp.example.com\alice`: sid,
+	}, map[string]uint32{`name:CORP\alice`: uint32(syscall.EIO)})
+	const account = "alice:*:80001:80001::/home/alice:/bin/bash\n"
+	f := &fakeRun{results: map[string]commandResult{
+		"passwd 80001":        {stdout: []byte(account)},
+		"-s sss passwd 80001": {stdout: []byte(account)},
+	}}
+	facts, err := newFakeNSS(f).DirectoryFactsWithoutGroupsForUID(80001, time.Now())
+	if err == nil || facts.Assurance == useridentity.AssuranceVerified {
+		t.Fatalf("failed SSSD flat-domain lookup: facts = %+v, err = %v", facts, err)
 	}
 }

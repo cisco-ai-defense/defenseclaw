@@ -1332,7 +1332,23 @@ def _sandbox_state_present(cfg, data_dir: str, platform_name: str) -> bool:
     openshell = getattr(cfg, "openshell", None) if cfg is not None else None
     if openshell is not None and (getattr(openshell, "enabled", False) or getattr(openshell, "wrappers", None)):
         return True
-    return os.path.isdir(os.path.join(data_dir, "sandboxes"))
+    root = os.path.join(data_dir, "sandboxes")
+    if not os.path.isdir(root):
+        return False
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                # The manager creates its directory before any sandbox. An
+                # empty directory is not a teardown receipt.
+                if entry.name == "manager" and entry.is_dir(follow_symlinks=False):
+                    with os.scandir(entry.path) as records:
+                        if any(records):
+                            return True
+                else:
+                    return True
+    except OSError:
+        return True  # let teardown report inaccessible state instead of deleting it
+    return False
 
 
 def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
@@ -2537,17 +2553,21 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
             # The gateway hint is for its teardown command, not uninstall.
             hint = line.replace("rerun with --keep-images", "rerun uninstall with --skip-sandbox-teardown")
             ux.echo(f"  {ux.dim('·')} {hint.strip()}")
-    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    detail = (proc.stderr or "").strip().splitlines()
     # GAP-0282: teardown goes on past a failed step, so the last line is the
     # last step that worked. The failures are the lines it marks with a cross.
-    failed = [line.lstrip("✗ ").strip() for line in (proc.stdout or "").splitlines() if line.strip().startswith("✗")]
+    failed = [
+        line.strip().removeprefix("✗").strip()
+        for line in ((proc.stdout or "") + "\n" + (proc.stderr or "")).splitlines()
+        if line.strip().startswith("✗")
+    ]
     undone = sum(1 for line in (proc.stdout or "").splitlines() if line.strip().startswith("✓"))
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
-        reason = detail[-1].lstrip("✗ ").strip() if detail else "OpenShell sandboxes are not supported here"
+        reason = failed[-1] if failed else (detail[-1] if detail else "OpenShell sandboxes are not supported here")
         ux.subhead(f"sandbox teardown skipped: {reason}")
         return
     if proc.returncode != 0:
-        reason = "; ".join(failed) or (detail[-1] if detail else "")
+        reason = "; ".join(failed) or (detail[-1] if detail else f"gateway exited with status {proc.returncode}")
         raise click.ClickException(
             "aborting uninstall: sandbox teardown failed"
             + (f" ({reason})" if reason else "")

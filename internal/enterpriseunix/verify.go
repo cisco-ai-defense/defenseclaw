@@ -1034,7 +1034,7 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 // older than the guardian keeps them by the wall clock (GAP-0921).
 const codeIdentityRecordsStale = "identity_records_stale"
 
-// identityRecordsFreshFor is how old the newest guardian identity record may
+// identityRecordsFreshFor is how old any guardian identity record may
 // look: the guardian rewrites them every 15 minutes, and within about a
 // minute after a clock step.
 const identityRecordsFreshFor = 30 * time.Minute
@@ -1046,15 +1046,15 @@ const identityRecordsFreshFor = 30 * time.Minute
 func (l *lifecycle) describeIdentityRecords() {
 	env := l.env
 	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
-	newest, stale := enterprisehooks.IdentitySpoolStale(dir, env.Now(), identityRecordsFreshFor)
+	oldest, stale := enterprisehooks.IdentitySpoolStale(dir, env.Now(), identityRecordsFreshFor)
 	if !stale {
 		return
 	}
-	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's identity records were last written at %s by "+
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record was last written at %s by "+
 		"this host's clock (the clock was stepped, or the guardian has not refreshed them); records over an hour old are "+
 		"ignored, and accounts a guardrail profile assignment selects by UPN then get the default profile. The guardian "+
 		"rewrites them within about a minute of a clock step; if this persists, restart the hook guardian",
-		newest.UTC().Format(time.RFC3339)))
+		oldest.UTC().Format(time.RFC3339)))
 }
 
 // codeProfileAssignment warns that a guardrail profile assignment selects

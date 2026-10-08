@@ -1421,7 +1421,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if set == nil {
 		out["profile"] = ""
 		out["match"] = ""
-		out["effective"] = profileEffectiveView(a.scannerCfg, connectorName)
+		out["effective"] = profileEffectiveView(base, connectorName)
 		a.writeJSON(w, http.StatusOK, out)
 		return
 	}

@@ -1578,3 +1578,18 @@ func TestRemoveAllRetriesATimedOutWorkerOnceWithALongerDeadline(t *testing.T) {
 		t.Fatalf("outcomes after the retry: %v / %v", runs[1].Err, runs[2].Err)
 	}
 }
+
+// A home-only manifest target has a verified uid after reconciliation but
+// no User field. The macOS identity collector needs the uid's account name.
+func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
+	t.Cleanup(func() { enterprisehooks.SetStandaloneResolver(nil) })
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: 4242, GID: 4242, Home: "/Users/alice"},
+	}})
+	accounts, _ := enterpriseHookIdentityAccounts(enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{{UID: 4242, UserHome: "/Users/alice", Connector: "codex", OK: true}},
+	}, io.Discard)
+	if len(accounts) != 1 || accounts[0].UID != 4242 || accounts[0].User != "alice" {
+		t.Fatalf("identity spool accounts = %+v; want alice for uid 4242", accounts)
+	}
+}

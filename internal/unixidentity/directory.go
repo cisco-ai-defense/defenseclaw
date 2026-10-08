@@ -212,7 +212,10 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: realmd lookup: %w", realmErr)
 		}
 		applyRealm(&facts, account.Name, realms)
-		facts.AccountDomain = r.winbindAccountDomain(account, realms)
+		facts.AccountDomain, err = r.winbindAccountDomain(account, realms)
+		if err != nil {
+			return useridentity.DirectoryFacts{}, err
+		}
 	}
 	return facts, nil
 }
@@ -224,24 +227,31 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 // answers with the same uid when asked as NETBIOS\name. A NetBIOS name no
 // directory confirms is not taken: the NetBIOS domain of corp.example.com
 // may be EXAMPLE, and a guess may name a trusted domain (GAP-0456).
-func (r *NSSResolver) winbindAccountDomain(account Account, realms []Realm) string {
+func (r *NSSResolver) winbindAccountDomain(account Account, realms []Realm) (string, error) {
 	bare, domain := useridentity.SplitQualifiedName(account.Name)
 	if strings.Contains(account.Name, `\`) {
-		return domain
+		return domain, nil
 	}
 	if domain != "" {
-		return ""
+		return "", nil
 	}
 	realm, ok := realmFor("", useridentity.SourceWinbind, realms)
 	if !ok {
-		return ""
+		return "", nil
 	}
 	for _, candidate := range netBIOSCandidates(realm.NetBIOS, realm.Domain) {
-		if held, err := r.LookupUserInService("winbind", candidate+`\`+bare); err == nil && held.UID == account.UID {
-			return candidate
+		held, err := r.LookupUserInService("winbind", candidate+`\`+bare)
+		if err != nil {
+			if IsNotFound(err) {
+				continue
+			}
+			return "", fmt.Errorf("unixidentity: winbind account domain of %s: %w", account.Name, err)
+		}
+		if held.UID == account.UID {
+			return candidate, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // sssdAccountDomain is the NetBIOS (flat) name of the Active Directory
@@ -250,18 +260,22 @@ func (r *NSSResolver) winbindAccountDomain(account Account, realms []Realm) stri
 // domain of the account own name (full_name_format = %3$s\%1$s), the
 // realm NetBIOS name, the Samba workgroup and the first label of the DNS
 // domain; only the answer of SSSD confirms one (GAP-0456).
-func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string) string {
+func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string) (string, error) {
 	bare, nameDomain := useridentity.SplitQualifiedName(name)
 	var candidates []string
 	if strings.Contains(name, `\`) && !strings.Contains(nameDomain, ".") {
 		candidates = append(candidates, nameDomain)
 	}
 	for _, candidate := range append(candidates, netBIOSCandidates(netBIOS, dnsDomain)...) {
-		if held, err := sssd.sidOfUserInDomain(candidate, bare); err == nil && held != "" && strings.EqualFold(held, sid) {
-			return candidate
+		held, err := sssd.sidOfUserInDomain(candidate, bare)
+		if err != nil {
+			return "", fmt.Errorf("unixidentity: SSSD account domain of %s in %s: %w", bare, candidate, err)
+		}
+		if held != "" && strings.EqualFold(held, sid) {
+			return candidate, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // netBIOSCandidates lists the NetBIOS names a joined domain may have, to be
@@ -386,7 +400,10 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 		}
 		facts.Directory = realmDirectory(realm)
 		facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
-		facts.AccountDomain = sssdAccountDomain(sssd, name, candidate, realm.NetBIOS, sid)
+		facts.AccountDomain, err = sssdAccountDomain(sssd, name, candidate, realm.NetBIOS, sid)
+		if err != nil {
+			return "", err
+		}
 		return candidate, nil
 	}
 	return "", nil
