@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
@@ -4899,11 +4900,10 @@ func patchAntigravityHooks(path, hookScript string) error {
 }
 
 func patchAntigravityHooksForOS(path, hookScript, goos string) error {
-	if goos != "windows" && posixHookCommandWord(hookScript) != hookScript {
-		// Antigravity splits the command at spaces and runs it without a shell,
-		// so no quoting can carry this path; refuse instead of registering a
-		// hook that never runs (GAP-0382).
-		return fmt.Errorf("antigravity cannot run a hook from %s: it splits hook commands at spaces and runs them without a shell; set DEFENSECLAW_HOME to a directory whose path has no spaces or shell characters, then run: defenseclaw setup antigravity", hookScript)
+	if goos != "windows" && strings.IndexFunc(hookScript, unicode.IsSpace) >= 0 {
+		// Antigravity splits the command on whitespace and runs it directly.
+		// Shell metacharacters and Unicode letters do not need shell quoting.
+		return fmt.Errorf("antigravity cannot run a hook from %s: it splits hook commands at whitespace and runs them without a shell; set DEFENSECLAW_HOME to a directory whose path has no whitespace, then run: defenseclaw setup antigravity", hookScript)
 	}
 	cfg, err := readJSONObject(path)
 	if err != nil {

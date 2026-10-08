@@ -125,9 +125,11 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
         if document["exit_code"] == 0:
             problems.append("exit_code is 0, want a failure")
         reported = {message["code"] for message in document["errors"]}
-        for code in args.expect_error:
-            if code not in reported:
-                problems.append(f"error {code} was not reported")
+        expected = set(args.expect_error)
+        for code in expected - reported:
+            problems.append(f"error {code} was not reported")
+        for code in reported - expected:
+            problems.append(f"unexpected error {code}")
     else:
         if document["ok"] is not True:
             problems.append("ok is false")

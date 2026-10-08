@@ -456,11 +456,18 @@ required; any other `target_type` gets `400`. `connector` scopes the rule to one
 connector, and `source_path` (allow only) pins an allow to one install path. Each
 write goes through the same config writer as `defenseclaw config set`, with the
 actor `api:<identity>`, and the gateway applies it without a restart. A write
-returns the new policy generation:
+returns the new config writer generation in `generation`:
 
 ```json
 {"effective_policy_digest":"sha256:8e6d614e5be0460109785e8e0d532aa980ab41dd87babf936d2675c4726f0c4b","generation":17,"status":"blocked"}
 ```
+
+`generation` is the writer counter from `config.generation.json`, not
+`/health.policy.generation`. The latter counts policy rebuilds in the current
+gateway process and can reset on restart. To confirm enforcement, compare
+`effective_policy_digest` with `/health.policy.effective_digest`; if the
+reload fails, the response has `applied: false` and `reload_error` instead of
+the digest.
 
 `status` is `blocked`, `unblocked` or `allowed`. The `GET` routes return a list
 of `{id, target_type, target_name, reason, updated_at, connector?}`.

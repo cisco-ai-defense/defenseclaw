@@ -3802,3 +3802,18 @@ func TestRemoveOpenHandsHookReferencesKeepsOperatorKeysAndHooks(t *testing.T) {
 		t.Fatalf("hook cleanup changed operator hook or retained managed hook: %s", body)
 	}
 }
+
+func TestAntigravityAcceptsUnicodeHookPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	hook := filepath.Join(t.TempDir(), "élise", "hook.sh")
+	if err := patchAntigravityHooksForOS(path, hook, "linux"); err != nil {
+		t.Fatalf("register Unicode hook path: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), hook) {
+		t.Fatalf("registered hook does not contain path %q", hook)
+	}
+}

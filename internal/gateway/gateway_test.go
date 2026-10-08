@@ -43,6 +43,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -3515,6 +3516,35 @@ func TestAPIEnforceAllowSkillReenablesRuntimeDisable(t *testing.T) {
 	}
 }
 
+func TestAPIEnforceAllowWriterFailureKeepsSkillDisabled(t *testing.T) {
+	received := make(chan receivedRequest, 1)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	api, _ := enforceTestAPI(t, "{}\n")
+	api.client = connectToMockGW(t, srv)
+	api.configApply = func(context.Context, string, []configwrite.Change, configwrite.Options) (configwrite.Result, error) {
+		return configwrite.Result{}, errors.New("invalid config")
+	}
+	pe := enforce.NewPolicyEngine(api.store)
+	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	api.handleEnforceAllow(w, httptest.NewRequest(http.MethodPost, "/enforce/allow",
+		bytes.NewBufferString(`{"target_type":"skill","target_name":"blocked-skill"}`)))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+	select {
+	case rpc := <-received:
+		t.Fatalf("gateway mutation after failed policy write: %s", rpc.Method)
+	default:
+	}
+	disabled, err := api.store.HasAction("skill", "blocked-skill", "runtime", "disable")
+	if err != nil || !disabled {
+		t.Fatalf("runtime disabled = %v, err = %v", disabled, err)
+	}
+}
+
 func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
 	srv := startMockGW(t, func(t *testing.T, conn *websocket.Conn) {
 		for {
@@ -3549,8 +3579,11 @@ func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusBadGateway)
 	}
 
-	if len(*recorded) != 0 {
-		t.Fatalf("skill should not become allowed when gateway re-enable fails: %#v", *recorded)
+	if len(*recorded) == 0 || (*recorded)[len(*recorded)-1].Path != "asset_policy.skill.allowed" {
+		t.Fatalf("allow rule should be committed before gateway re-enable: %#v", *recorded)
+	}
+	if !strings.Contains(w.Body.String(), "policy_written") {
+		t.Fatalf("response should report the committed rule: %s", w.Body.String())
 	}
 
 	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
@@ -3799,6 +3832,42 @@ func TestAPIPolicyReload_OTelMetrics_Success(t *testing.T) {
 	}
 	if count := countStoredCanonicalEventsV8(t, capture.store.DatabasePath(), observability.TelemetryEventPolicyUpdated, true); count != 1 {
 		t.Fatalf("generated successful policy reload events=%d", count)
+	}
+}
+
+func TestAPIPolicyDirHotReloadUsesLiveGeneration(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: &config.Config{}}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+
+	policyDir := filepath.Join("..", "..", "policies")
+	prepared, err := policy.Prepare(context.Background(), policyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{Config: &config.Config{PolicyDir: policyDir}, OPA: prepared}
+	})
+	api.SetPolicyReloader(func() error { return nil })
+
+	high := &policy.GuardrailScanResult{Action: "block", Severity: "HIGH", Reason: "marker"}
+	input := policy.GuardrailInput{
+		Mode: "action", LocalResult: high,
+		Thresholds: &policy.ThresholdsInput{Block: 3, Alert: 2, CiscoTrustLevel: "full"},
+	}
+	out, err := api.evaluateGuardrailPolicy(context.Background(), input)
+	if err != nil || out.Action != "block" {
+		t.Fatalf("live policy verdict = %+v, %v; want block", out, err)
+	}
+	w := httptest.NewRecorder()
+	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+	var body struct {
+		PolicyDir string `json:"policy_dir"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &body) != nil || body.PolicyDir != policyDir {
+		t.Fatalf("reload = %d %s; want live policy_dir %q", w.Code, w.Body.String(), policyDir)
 	}
 }
 
@@ -4955,6 +5024,37 @@ func TestHandleGuardrailEvaluate_CleanInput(t *testing.T) {
 	}
 	if resp.Severity != "NONE" {
 		t.Errorf("severity = %q, want NONE", resp.Severity)
+	}
+}
+
+func TestHandleGuardrailEvaluateEmptyRegoUsesFallback(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "rego"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(guardrailEvaluateRequest{
+		EvaluationID: "eval-empty-rego", Direction: "prompt", Mode: "action",
+		ScannerMode: "local", LocalResult: &policy.GuardrailScanResult{Severity: "NONE"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, generation := range []bool{false, true} {
+		api, _ := newGuardrailEventV8TestAPI(t)
+		api.scannerCfg = &config.Config{PolicyDir: root}
+		if generation {
+			api.SetGenerationSource(func() *Generation { return &Generation{} })
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body))
+		response := httptest.NewRecorder()
+		api.handleGuardrailEvaluate(response, request)
+		var out policy.GuardrailOutput
+		if err := json.Unmarshal(response.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != http.StatusOK || out.Action != "allow" || out.Severity != "NONE" {
+			t.Fatalf("generation=%v: status=%d, verdict=%+v", generation, response.Code, out)
+		}
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -942,9 +944,9 @@ func (w *InstallWatcher) findingDrift(baseline *audit.SnapshotRow, current *scan
 // it (and caching) on first use within a cycle. The fingerprint depends only on
 // the scanner kind + config + binary version, not the individual target.
 func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[string]string) string {
-	// A skill's fingerprint includes its connector's rule pack.
+	// Skill and MCP fingerprints include the connector's rule pack.
 	key := string(evt.Type)
-	if evt.Type == InstallSkill {
+	if evt.Type == InstallSkill || evt.Type == InstallMCP {
 		key += "\x00" + w.eventConnector(evt)
 	}
 	if cache == nil {
@@ -974,12 +976,13 @@ func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[string]st
 // Secrets (API keys) are deliberately excluded — only non-sensitive routing
 // fields (model, provider, base URL) feed the fingerprint.
 func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
+	cfg := w.scanConfig()
 	parts := []string{"kind=" + string(evt.Type)}
 
 	switch evt.Type {
 	case InstallSkill:
-		c := w.cfg.Scanners.SkillScanner
-		llm := w.cfg.ResolveLLM("scanners.skill")
+		c := cfg.Scanners.SkillScanner
+		llm := cfg.ResolveLLM("scanners.skill")
 		parts = append(parts,
 			"binary="+c.Binary,
 			"binver="+w.scannerBinaryVersion(c.Binary),
@@ -1000,8 +1003,8 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 			"rulepack="+w.rulePackDigest(evt),
 		)
 	case InstallMCP:
-		c := w.cfg.Scanners.MCPScanner
-		llm := w.cfg.ResolveLLM("scanners.mcp")
+		c := cfg.Scanners.MCPScanner
+		llm := cfg.ResolveLLM("scanners.mcp")
 		parts = append(parts,
 			"binary="+c.Binary,
 			"binver="+w.scannerBinaryVersion(c.Binary),
@@ -1013,9 +1016,12 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 			"llm_provider="+llm.Provider,
 			"llm_base_url="+llm.BaseURL,
 		)
+		if !cfg.SecureClientIntegration() {
+			parts = append(parts, "rulepack="+mcpRulePackFingerprint(scanner.MCPRulePackFor(cfg, w.eventConnector(evt))))
+		}
 	case InstallPlugin:
-		bin := scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner).BinaryPath
-		llm := w.cfg.ResolveLLM("scanners.plugin")
+		bin := scanner.NewPluginScanner(cfg.Scanners.PluginScanner).BinaryPath
+		llm := cfg.ResolveLLM("scanners.plugin")
 		parts = append(parts,
 			"binary="+bin,
 			"binver="+w.scannerBinaryVersion(bin),
@@ -1035,23 +1041,64 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// scannerBinaryVersion best-effort probes `<binary> --version` so the
-// fingerprint changes when the (external) scanner is upgraded independently of
-// DefenseClaw. Failures (missing binary, no --version support, timeout) are
-// non-fatal and yield "" so the rest of the fingerprint still applies.
+// scannerVersionCache retains a version only while the resolved binary's
+// identity, size, and modification time remain the same.
+type scannerVersionCache struct {
+	info    os.FileInfo
+	version string
+}
+
+// scannerBinaryVersion best-effort probes `<binary> --version`. Replacements
+// at the same path invalidate the cache, including binaries found on PATH.
 func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	binary = strings.TrimSpace(binary)
 	if binary == "" {
 		return ""
 	}
-	// One probe per binary for the watcher's life (a config change starts a
-	// new watcher): it was a Python start per admission and per cycle.
-	if cached, ok := w.binaryVersions.Load(binary); ok {
-		return cached.(string)
+	if w.cfg != nil && w.cfg.SecureClientIntegration() {
+		if cached, ok := w.binaryVersions.Load(binary); ok {
+			return cached.(string)
+		}
+		probed := w.probeScannerBinaryVersion(binary)
+		w.binaryVersions.Store(binary, probed)
+		return probed
 	}
-	probed := w.probeScannerBinaryVersion(binary)
-	w.binaryVersions.Store(binary, probed)
+	resolved, err := exec.LookPath(binary)
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return ""
+	}
+	if cached, ok := w.binaryVersions.Load(binary); ok {
+		entry := cached.(scannerVersionCache)
+		if os.SameFile(entry.info, info) && entry.info.Size() == info.Size() &&
+			entry.info.ModTime().Equal(info.ModTime()) {
+			return entry.version
+		}
+	}
+	probed := w.probeScannerBinaryVersion(resolved)
+	w.binaryVersions.Store(binary, scannerVersionCache{info: info, version: probed})
 	return probed
+}
+
+// mcpRulePackFingerprint includes both the effective rule layers and the
+// pack's on-disk content. The runtime reads those same inputs for every scan.
+func mcpRulePackFingerprint(pack scanner.MCPRulePack) string {
+	rules, err := json.Marshal(pack.Rules)
+	if err != nil {
+		return "rules-error:" + err.Error()
+	}
+	digest := ""
+	if pack.Dir != "" {
+		digest, err = guardrail.RulePackDigest(pack.Dir)
+		if err != nil {
+			digest = "pack-error:" + err.Error()
+		}
+	}
+	sum := sha256.Sum256([]byte(pack.Dir + "\x00" + digest + "\x00" + string(rules)))
+	return hex.EncodeToString(sum[:])
 }
 
 // rulePackDigest is the files digest of the rule pack evt's connector adds

@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bytes"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,9 @@ const unattributedConfigActor = "unattributed"
 // writers too: that event says unattributed and gives the generation range
 // and the last writer instead (GAP-0318). generation is the applied one.
 func configChangeActivity(path string, previous, raw []byte, sections []string, last uint64, lastKnown bool) (in audit.ActivityInput, generation uint64, ok bool) {
+	if len(previous) > 0 && bytes.Equal(previous, raw) {
+		return audit.ActivityInput{}, 0, false
+	}
 	state, err := configwrite.ReadGenerationState(path)
 	sum := configwrite.SHA256Hex(raw)
 	if err != nil || strings.TrimSpace(state.Actor) == "" ||
