@@ -115,6 +115,23 @@ def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
     assert "required_pack" not in text and "config_version: 9" in text
 
 
+def test_unset_multiple_list_indexes_uses_original_positions(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(
+        tmp_path,
+        "asset_policy:\n  skill:\n    allowed:\n"
+        "      - {name: a}\n      - {name: b}\n      - {name: c}\n",
+    )
+    result = config_writer.apply(
+        [Change("asset_policy.skill.allowed[0]", unset=True), Change("asset_policy.skill.allowed[1]", unset=True)],
+        "cli:test",
+        "t",
+        path=path,
+    )
+    assert result.changed == ["asset_policy.skill.allowed[0]", "asset_policy.skill.allowed[1]"]
+    assert yaml.safe_load(open(path, encoding="utf-8"))["asset_policy"]["skill"]["allowed"] == [{"name": "c"}]
+
+
 def test_removed_scanner_keys_are_ignored_on_load_and_refused_by_config_set(tmp_path, monkeypatch):
     # GAP-0295/GAP-0301: no scan read scanners.mcp_scanner.api or .timeouts
     # or skill_scanner.timeouts.llm_s. A file a pre-release build wrote with
