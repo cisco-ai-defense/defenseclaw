@@ -6909,7 +6909,11 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
                     return None  # python -m hermes_cli may be a host
                 return False
             if flag == "c":
-                return None if "hermes" in value.lower() else False
+                # `ps -o args` loses the shell quoting around Python's one
+                # code argument. Its `-c import os, ... import hermes_bootstrap`
+                # therefore arrives as several tokens here.
+                code = " ".join([value, *args[index + 1 :]]).lower()
+                return None if "hermes_bootstrap" in code or "hermes_cli" in code else False
             break  # -W / -X take one value
         index += 1
     if index < len(args) and args[index] == "--":
