@@ -1601,9 +1601,7 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 		t.Fatal(err)
 	}
 	fixture.sidecar.publishConfig(initial)
-	activePack := mustLoadRulePack(t, "")
 	fixture.sidecar.router = NewEventRouter(nil, nil, nil, false)
-	fixture.sidecar.router.SetRulePack(activePack)
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, initialRaw)
 	if err != nil || !bound {
 		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
@@ -1640,6 +1638,7 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 	}
 	// A config_version 8 candidate meets the invalid pack in its in-memory
 	// migration, which refuses it before the preflight.
+	publishedBefore := currentGeneration()
 	reloadErr := mgr.Reload(t.Context(), "test")
 	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "rule pack yaml_invalid") {
 		t.Fatalf("invalid rule-pack reload error = %v", reloadErr)
@@ -1665,8 +1664,8 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 			mgr.gen.Load(),
 		)
 	}
-	if fixture.sidecar.router.rulePack() != activePack {
-		t.Fatal("invalid rule-pack reload replaced the active router pack")
+	if currentGeneration() != publishedBefore {
+		t.Fatal("invalid rule-pack reload published a generation")
 	}
 }
 

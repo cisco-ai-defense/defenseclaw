@@ -2318,6 +2318,36 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertNotIn("rollback was incomplete", message)
         self.assertIn("gateway still cannot start for the same reason", message)
 
+    def test_missing_hook_launcher_rollback_names_the_installer(self):
+        # GAP-0549: the restored config needs the missing launcher too, so the
+        # same readiness failure is not an incomplete rollback.
+        prior_path = os.path.abspath(os.path.join(self.tmp_dir, "registrations", "prior-a.json"))
+        atomic_write_private_bytes(prior_path, b"prior-a\n")
+        snapshot, _lock = self._snapshot_with_registration_lock(
+            {"codex": {"locations": {"hook_config_paths": [prior_path]}}}
+        )
+        cause = cmd_setup._GatewayRestartFailed(
+            "gateway restart/readiness failed for: connector runtime readiness. "
+            f"{cmd_setup._LAUNCHER_MISSING_RESTART_TEXT}: run the DefenseClaw installer again."
+        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
+                side_effect=cmd_setup._GatewayRestartFailed(cause.message),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._verify_restored_setup_runtime",
+                return_value=["connector codex: lock identity changed"],
+            ),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = str(raised.exception)
+        self.assertNotIn("rollback was incomplete", message)
+        self.assertIn("run the DefenseClaw installer again", message)
+        self.assertIn("lock identity changed", message)
+
     def test_gateway_start_failure_ends_with_one_next_step(self):
         # GAP-1808: one cause and one next step after the restored config.
         snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)

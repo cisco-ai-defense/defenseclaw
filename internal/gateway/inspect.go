@@ -1346,7 +1346,8 @@ func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *gu
 // failure/timeout is logged LOUDLY to stderr; the lane never silently
 // substitutes a clean pass.
 func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
-	if a == nil || a.hookJudge == nil || content == "" {
+	judge := a.judgeFor(ctx)
+	if judge == nil || content == "" {
 		return nil
 	}
 	// Gate on the live configuration, like every other decision site. A hot
@@ -1413,9 +1414,9 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	var v *ScanVerdict
 	resume := yieldHookRunSlot(ctx)
 	if strings.EqualFold(strategyDirection, "tool_call") {
-		v = a.hookJudge.RunToolJudge(jctx, toolName, content)
+		v = judge.RunToolJudge(jctx, toolName, content)
 	} else {
-		v = a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
+		v = judge.RunJudges(jctx, judgeDirection, content, toolName)
 	}
 	resume()
 	if v == nil || v.JudgeFailed {

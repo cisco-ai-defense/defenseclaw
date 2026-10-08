@@ -425,9 +425,6 @@ type v9Migrator struct {
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
 	globalPackPosture string
-	// v9Shaped is set when the config_version 8 source carries keys only
-	// config_version 9 writes (a v9 file relabelled 8 by hand).
-	v9Shaped bool
 }
 
 type v9RegoRefresh struct {
@@ -465,7 +462,6 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: the config_version 9 migration reads config_version 8, not %d", version)
 	}
 
-	m.v9Shaped = v9ShapedSource(root)
 	data, err := readV9DataJSON(m.in.DataJSONPath)
 	if err != nil {
 		return nil, false, err
@@ -574,18 +570,30 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		return nil, errors.New("config: config.yaml changed while the config_version 9 migration ran; run it again")
 	}
 	var written []string
+	// config.yaml.v8.bak is written once: it holds the config the first
+	// migration replaced, the 0.8.x file a rollback restores. A later
+	// config_version 8 source (a v9 file relabelled 8 by hand, which no key
+	// test can tell from a 0.8.x file, or a 0.8.x file edited after a
+	// rollback) is saved next to it instead (GAP-0307, GAP-0544).
 	backup := m.configPath + ConfigV8BackupSuffix
-	if earlier, err := os.ReadFile(backup); err == nil && m.v9Shaped && !bytes.Equal(earlier, source) {
-		// A v9 file relabelled config_version 8 is no 0.8.x source: replacing
-		// the backup with it left "going back to 0.8.x" a file 0.8.x refuses
-		// (GAP-0352). The 0.8.x file the backup holds stays.
-		m.note("%s keeps the 0.8.x config it holds: config.yaml said config_version 8 but carries keys only "+
-			"config_version 9 writes", backup)
-	} else {
+	earlier, err := os.ReadFile(backup)
+	switch {
+	case err == nil && bytes.Equal(earlier, source):
+	case err == nil:
+		kept := freeSiblingPath(backup + "." + migrationStamp())
+		if err := cfgtxn.WriteFileDurable(kept, source, mode); err != nil {
+			return written, err
+		}
+		written = append(written, kept)
+		m.note("%s keeps the config the first config_version 9 migration replaced; this migration's "+
+			"config_version 8 source is saved as %s", backup, kept)
+	case errors.Is(err, fs.ErrNotExist):
 		if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
 			return written, err
 		}
 		written = append(written, backup)
+	default:
+		return written, fmt.Errorf("config: read %s: %w", backup, err)
 	}
 	// Before the config that pins them.
 	for _, dir := range slices.Sorted(maps.Keys(m.rebasedPacks)) {
@@ -608,6 +616,23 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		return written, err
 	}
 	recordPath := MigrationRecordPath(m.configPath)
+	// The record of an earlier migration is kept next to the new one: it
+	// lists what the 0.8.x upgrade moved, which a later run cannot know. A
+	// record this source left pending (an interrupted run) is replaced.
+	if earlier, err := os.ReadFile(recordPath); err == nil {
+		var previous MigrationRecord
+		retry := json.Unmarshal(earlier, &previous) == nil && previous.Pending &&
+			strings.EqualFold(previous.SourceSHA256, m.record.SourceSHA256)
+		if !retry {
+			kept := freeSiblingPath(strings.TrimSuffix(recordPath, ".json") + "." + migrationStamp() + ".json")
+			if err := cfgtxn.WriteFileDurable(kept, earlier, 0o600); err != nil {
+				return written, err
+			}
+			written = append(written, kept)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return written, fmt.Errorf("config: read %s: %w", recordPath, err)
+	}
 	m.record.Pending = true
 	if err := writeMigrationRecord(recordPath, m.record); err != nil {
 		return written, err
@@ -667,6 +692,23 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		return written, err
 	}
 	return written, nil
+}
+
+// migrationStamp names the copies a migration keeps beside an earlier one's
+// files (UTC, second resolution).
+func migrationStamp() string {
+	return time.Now().UTC().Format("20060102T150405Z")
+}
+
+// freeSiblingPath is path, or path with the first free ".N" suffix.
+func freeSiblingPath(path string) string {
+	candidate := path
+	for n := 2; ; n++ {
+		if _, err := os.Lstat(candidate); errors.Is(err, fs.ErrNotExist) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s.%d", path, n)
+	}
 }
 
 // leftOutsideRollbackCopy reports whether the migration must leave path as it is. The
@@ -1887,16 +1929,6 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 		}
 	}
 	return nil
-}
-
-// v9ShapedSource reports whether a config_version 8 document carries keys
-// only config_version 9 writes: guardrail.custom_packs, a guardrail.rule_pack
-// without rule_pack_dir, or the update block (0.8.x had none of them).
-func v9ShapedSource(root *yaml.Node) bool {
-	guardrail := v8YAMLMapValue(root, "guardrail")
-	return v8YAMLMapValue(guardrail, "custom_packs") != nil ||
-		(v8YAMLMapValue(guardrail, "rule_pack") != nil && v8YAMLMapValue(guardrail, "rule_pack_dir") == nil) ||
-		v8YAMLMapValue(root, "update") != nil
 }
 
 // embeddedPackDropped reports whether dropping an empty rule_pack_dir changes

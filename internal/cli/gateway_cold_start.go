@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ const (
 )
 
 var errHookColdStartUnsupported = errors.New(
-	"hook cold start is only for a per-user Linux or macOS gateway")
+	"hook cold start is only for a per-user gateway")
 
 func gatewayStoppedMarkerPath(dataDir string) string {
 	return filepath.Join(dataDir, gatewayStoppedMarkerName)
@@ -72,7 +73,7 @@ func hookColdStartRequested(cmdFlags interface {
 // markGatewayStopped records an operator stop. Best effort: a data directory
 // that cannot take the marker only loses the suppression, never the stop.
 func markGatewayStopped(dataDir string) {
-	if !hookColdStartSupported {
+	if !hookColdStartSupported() {
 		return
 	}
 	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
@@ -93,7 +94,7 @@ func clearGatewayColdStartState(dataDir string) {
 // recordGatewayLoginPath saves this process's PATH for later hook cold starts.
 // Best effort: only absolute entries are kept.
 func recordGatewayLoginPath(dataDir string) {
-	if !hookColdStartSupported {
+	if !hookColdStartSupported() {
 		return
 	}
 	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
@@ -193,7 +194,7 @@ func recordHookColdStartFailure(dataDir string, cause error) {
 // hookColdStartRefusal returns why a hook may not start the gateway now, or
 // nil when it may.
 func hookColdStartRefusal(dataDir string, now time.Time) error {
-	if !hookColdStartSupported {
+	if !hookColdStartSupported() {
 		return errHookColdStartUnsupported
 	}
 	if _, err := os.Lstat(gatewayStoppedMarkerPath(dataDir)); err == nil {
@@ -224,7 +225,10 @@ var watchdogGatewayStarter func(dataDir string) (bool, error)
 // failed start leave the gateway stopped. A gateway that runs but does not
 // answer is reported, not restarted. It returns whether it ran a start.
 func startCrashedGatewayFromWatchdog(dataDir string) (bool, error) {
-	if !hookColdStartSupported || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+	// The Windows watchdog keeps reporting a crashed gateway; the next hook
+	// call or the user starts it there.
+	if runtime.GOOS == "windows" || !hookColdStartSupported() ||
+		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return false, nil
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "config.yaml")); err != nil {

@@ -493,6 +493,13 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()
+		if opts.GatewayRecovery == nil && !enterpriseManaged {
+			// A PowerShell (install.ps1) per-user install publishes no
+			// protected hook runtime, so its hook had no cold start and a
+			// gateway that ended with the sign-in session stayed down
+			// (GAP-0377). Managed and Secure Client hooks never get here.
+			opts.GatewayRecovery = perUserGatewayRecovery()
+		}
 	}
 	if enterpriseManaged {
 		opts.ManagedEnterprise = true

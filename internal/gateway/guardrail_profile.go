@@ -406,8 +406,18 @@ type profileRouteConnectorKey struct{}
 // after authentication, and stores it on ctx. routeConnector is the
 // connector the server-side route serves (never a payload value). It is a
 // no-op when no profiles are configured.
+// It also pins the API server's published generation on ctx, so the rules,
+// judge, profiles and policy stamp of the request come from one generation
+// (GAP-0455).
 func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConnector string) context.Context {
-	return withGuardrailProfile(ctx, a.guardrailProfileSet(), routeConnector)
+	if g := a.generation(); g.published() {
+		ctx = withPinnedGeneration(ctx, g)
+	}
+	set := a.guardrailProfileSet()
+	if g := pinnedGeneration(ctx); g.published() {
+		set = g.Profiles
+	}
+	return withGuardrailProfile(ctx, set, routeConnector)
 }
 
 // withGuardrailProfile is withGuardrailProfileDecision for set. The LLM
@@ -447,6 +457,8 @@ func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Ha
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.guardrailProfileSet() != nil {
 			r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
+		} else {
+			r = a.pinRequestGeneration(r)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -1001,7 +1013,7 @@ func (a *APIServer) decisionConfigFrom(ctx context.Context, base *config.Config)
 // its thresholds and its rule pack come from the same profile (GAP-0311).
 func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
 	resolved := resolvedGuardrailProfileFrom(ctx)
-	if set := liveGuardrailProfiles.Load(); set != nil && (resolved == nil || resolved.set != set) {
+	if set := pinnedProfileSet(ctx); set != nil && (resolved == nil || resolved.set != set) {
 		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
 	if resolved != nil && resolved.derived != nil {
@@ -1009,7 +1021,7 @@ func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *c
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration(connectorName)
+	return pinnedRuleGeneration(ctx, connectorName)
 }
 
 // scanAllRulesFor is ScanAllRules with the request's profile rule pack.
@@ -1060,7 +1072,7 @@ func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
 	if ctx != nil && ctx.Value(unverifiedProxyCallerKey{}) == true {
 		return nil
 	}
-	set := liveGuardrailProfiles.Load()
+	set := pinnedProfileSet(ctx)
 	if set == nil {
 		return nil
 	}
@@ -1098,7 +1110,7 @@ func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration(connectorName)
+	return pinnedRuleGeneration(ctx, connectorName)
 }
 
 // proxyGuardrailProfileTelemetryFor describes only a profile actually used
@@ -1122,7 +1134,7 @@ type guardrailProfileTelemetry struct {
 // emitted under ctx. All are absent when no profiles are configured, so
 // records stay unchanged for every deployment without them.
 func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry {
-	set := liveGuardrailProfiles.Load()
+	set := pinnedProfileSet(ctx)
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if set == nil {
 		if resolved == nil || resolved.set != nil {

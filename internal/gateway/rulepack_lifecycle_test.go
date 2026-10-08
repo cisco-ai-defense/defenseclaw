@@ -294,8 +294,8 @@ rules:
 	if err := ApplyRulePackOverrides(oldPack); err != nil {
 		t.Fatalf("apply old scoped rule pack: %v", err)
 	}
-	fixture.sidecar.router = routerWithDefaultRulePack(t)
-	fixture.sidecar.router.SetRulePack(oldPack)
+	fixture.sidecar.router = NewEventRouter(nil, nil, nil, false)
+	fixture.sidecar.router.generationSource = fixture.sidecar.Generation
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, oldRaw)
 	if err != nil || !bound {
 		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
