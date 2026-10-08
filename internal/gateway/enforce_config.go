@@ -132,11 +132,16 @@ func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Chang
 		nextAllowed = nil
 	}
 	rule := config.AssetPolicyRule{Name: edit.Name, Connector: edit.Connector, Reason: edit.Reason}
-	if edit.Op == assetListOpBlock {
-		if listed, ok := listedUnnamedRule(p.Allowed, edit); ok {
-			rule = listed
-			rule.Connector, rule.Reason = edit.Connector, edit.Reason
-		}
+	var prior []config.AssetPolicyRule
+	switch edit.Op {
+	case assetListOpBlock:
+		prior = p.Allowed
+	case assetListOpAllow:
+		prior = p.Denied
+	}
+	if listed, ok := listedUnnamedRule(prior, edit); ok {
+		rule = listed
+		rule.Connector, rule.Reason = edit.Connector, edit.Reason
 	}
 	if edit.SourcePath != "" {
 		rule.SourcePathContains = []string{edit.SourcePath}
