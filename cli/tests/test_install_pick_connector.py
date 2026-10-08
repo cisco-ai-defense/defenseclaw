@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 
+
+# scripts/install.sh is the POSIX installer; Windows installs with install.ps1. On Windows runners
+# "bash" is the WSL launcher, which fails without a distro, so this contract cannot run there.
+@pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None, reason="POSIX installer")
 def test_shell_installer_reprompts_after_unknown_connector() -> None:
     source = (Path(__file__).resolve().parents[2] / "scripts" / "install.sh").read_text()
     function = source.split("pick_connector() {", 1)[1].split("\n}\n", 1)[0]

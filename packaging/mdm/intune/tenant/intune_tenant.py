@@ -736,7 +736,8 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
     if not content.startswith(b"#!"):
         raise SystemExit("error: macOS script must start with a #! interpreter line")
     settings = re.search(
-        rb"(?ms)^dc_inline_config\(\) \{\n\s*cat <<'DEFENSECLAW_CONFIG'\n(.*?)^DEFENSECLAW_CONFIG$",
+        # Accept CRLF: a wrapper saved by a Windows editor must not skip the empty-block check.
+        rb"(?ms)^dc_inline_config\(\) \{\r?\n\s*cat <<'DEFENSECLAW_CONFIG'\r?\n(.*?)^DEFENSECLAW_CONFIG\r?$",
         content,
     )
     if settings is not None and not settings.group(1).strip():
