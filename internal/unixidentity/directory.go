@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,9 +32,11 @@ import (
 // service named on the passwd line of nsswitch.conf for the uid with
 // `getent -s <service>`; the first that answers owns it, and an account no
 // directory service knows, or one /etc/passwd holds, is local. The domain
-// comes from the fully-qualified name winbind (CORP\alice) or another
-// directory module reports, a NetBIOS domain by the DNS name of its realm,
-// and groups from initgroups plus group lookups for all of their ids. The
+// comes from the fully-qualified name winbind (CORP\alice) or an Entra ID
+// module reports, a NetBIOS domain by the DNS name of its realm, and groups
+// from initgroups plus group lookups for all of their ids. An nss_ldap
+// (nslcd) name gives no domain: nslcd names an account by its uid
+// attribute, which may be an e-mail address (GAP-0730). The
 // realm and directory type of a winbind account come from realmd, which any
 // account may ask (realm_linux.go).
 //
@@ -154,6 +157,12 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 					if inDomain, err = r.applySSSDDomain(&facts, sssd, account.Name, sid); err != nil {
 						return useridentity.DirectoryFacts{}, err
 					}
+				case known.source == useridentity.SourceNSSLDAP:
+					// nslcd names an account by its uid attribute, which is an
+					// e-mail address for the Okta LDAP Interface and for
+					// directories that name accounts by mail, so the name gives
+					// no domain, realm or principal: an LDAP bob@corp.example.com
+					// took the principal of the AD bob (GAP-0730).
 				case domain == "":
 				case known.directory == useridentity.DirectoryEntraID:
 					// The aad module, and Himmelblau with cn_name_mapping =
@@ -167,9 +176,9 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 					facts.UPN = useridentity.NormalizeUPN(account.Name)
 					facts.Principal = facts.UPN
 				default:
-					// Lower case, as Windows reports a NetBIOS domain it knows
-					// no DNS name for; applyRealm gives the DNS name of the
-					// realm a NetBIOS domain names.
+					// winbind: lower case, as Windows reports a NetBIOS domain
+					// it knows no DNS name for; applyRealm gives the DNS name
+					// of the realm a NetBIOS domain names.
 					facts.Domain = strings.ToLower(domain)
 					if strings.Contains(domain, ".") {
 						facts.Realm = strings.ToUpper(domain)
@@ -294,12 +303,27 @@ func sssdAccountSID(sssd *sssdNSS, uid int) (string, error) {
 // account a joined domain confirmed is asked for in the domain\name form,
 // which SSSD looks up in that domain only: by its short name SSSD may find
 // another domain's account of that name and list its groups (GAP-0563).
+// The files module matches no /etc/group member to that form, so the
+// /etc/group groups that list the account by its passwd name, the groups the
+// OS gives it at login, are read from /etc/group (GAP-0729). Its name
+// qualified with the domain is not matched: under short names that is the
+// passwd name of an account a domain names by e-mail address, and a group
+// listing it is that account's.
 func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, error) {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
 	if inDomain != "" {
 		ids, err := r.GroupIDs(Account{Name: inDomain + `\` + bare, GID: account.GID})
 		if !IsNotFound(err) {
-			return ids, err
+			if err != nil {
+				return nil, err
+			}
+			local, err := localGroupsListing(account.Name)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, local...)
+			slices.Sort(ids)
+			return slices.Compact(ids), nil
 		}
 	}
 	return r.GroupIDs(account)
@@ -349,6 +373,31 @@ func localGroupIDs() (map[int]bool, error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		if gid, _, ok := parseGroupName(line); ok {
 			ids[gid] = true
+		}
+	}
+	return ids, nil
+}
+
+// localGroupsListing returns the gids of the /etc/group entries whose member
+// list names name, compared as the files module compares them. A missing
+// file holds none.
+func localGroupsListing(name string) ([]int, error) {
+	data, err := readSmallFile(localGroupPath, 16<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ids []int
+	for _, line := range strings.Split(string(data), "\n") {
+		gid, _, ok := parseGroupName(line)
+		if !ok {
+			continue
+		}
+		members := strings.Split(strings.TrimRight(line, "\r"), ":")[3]
+		if slices.Contains(strings.Split(members, ","), name) {
+			ids = append(ids, gid)
 		}
 	}
 	return ids, nil
