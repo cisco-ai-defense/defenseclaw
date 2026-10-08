@@ -79,6 +79,8 @@ type identityCache[T any] struct {
 	// refreshed as soon as a lookup may retry, so a sign-in shows within
 	// about one enumerator cycle.
 	partial func(T) bool
+	// A definitive missing account is not evidence of an unreachable directory.
+	definitiveMissing func(error) bool
 	// logf, when set, reports a key's first failure and its recovery.
 	logf func(format string, args ...any)
 	// maxAge, when set, is the age past which facts are no longer served.
@@ -98,6 +100,7 @@ type identityCacheEntry[T any] struct {
 	// succeeds) and lastErr the reason last logged for it.
 	failedSince time.Time
 	lastErr     string
+	missing     bool
 	// lastFailedAt is when a lookup of the key last failed.
 	lastFailedAt time.Time
 }
@@ -105,6 +108,7 @@ type identityCacheEntry[T any] struct {
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
 	cache := newIdentityCache(resolve)
 	cache.maxAge = identityDirectoryMaxAge
+	cache.definitiveMissing = definitiveMissingAccount
 	cache.logf = func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
 	}
@@ -263,6 +267,7 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 // its recovery. A key that keeps failing for the same reason logs nothing more.
 func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntry[T], err error, now time.Time) string {
 	if err == nil {
+		entry.missing = false
 		if entry.failedSince.IsZero() {
 			return ""
 		}
@@ -271,6 +276,7 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 		return fmt.Sprintf("directory lookup for %s works again after %s", key, down)
 	}
 	entry.lastFailedAt = now
+	entry.missing = c.definitiveMissing != nil && c.definitiveMissing(err)
 	reason := err.Error()
 	if len(reason) > 300 {
 		reason = reason[:300] + "..."
@@ -332,7 +338,7 @@ func (c *identityCache[T]) health() identityCacheHealth {
 	defer c.mu.Unlock()
 	now := c.now()
 	for _, entry := range c.entries {
-		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
+		if entry.failedSince.IsZero() || entry.missing || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
 			continue
 		}
 		h.Failing++

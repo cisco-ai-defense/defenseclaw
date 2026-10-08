@@ -18,6 +18,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+func TestDefinitiveMissingAccountIsNotDirectoryOutage(t *testing.T) {
+	missing := errors.New("no such account")
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, missing
+	})
+	cache.definitiveMissing = func(err error) bool { return errors.Is(err, missing) }
+	cache.logf = func(string, ...any) {}
+	if _, ok := cache.get("1001", true); ok {
+		t.Fatal("missing account returned facts")
+	}
+	if got := cache.health().Failing; got != 0 {
+		t.Fatalf("directory failures = %d for definitive missing account", got)
+	}
+}
+
 // TestIdentityDirectoryCacheWaitsForColdLookup pins the cold-cache budget: a
 // blocking caller gets facts from a lookup slower than a fast local one, as a
 // cold SSSD lookup is, instead of default_lookup_failed.
