@@ -175,7 +175,9 @@ func (a *App) processSourceNote(list *sandboxapi.ProcessList) {
 		a.warn("the sandbox kernel feed is not used (" + k.Reason + "); update it:")
 		a.note("  " + k.UpdateCommand)
 	case k.Reason == sandboxfeed.ReasonUnavailable:
-		a.warn("the sandbox kernel feed does not answer (" + k.Reason + "); start it:")
+		// Stopped, or running and silent: the gateway cannot tell which, and
+		// a restart fixes both (GAP-0101).
+		a.warn("the sandbox kernel feed does not answer (" + k.Reason + "); restart it:")
 		a.note("  " + sandboxfeed.StartCommand)
 	default:
 		a.warn("the sandbox kernel feed is not used (" + k.Reason + ")")

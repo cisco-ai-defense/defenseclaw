@@ -71,7 +71,7 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 		// GAP-0091: a stopped feed names the command that starts it.
 		"stopped feed": {
 			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Reason: "kernel_feed_unavailable"},
-			want:   []string{"does not answer (kernel_feed_unavailable); start it:\n", "  sudo systemctl restart defenseclaw-sandbox-feed.service", "sampled every 5s"},
+			want:   []string{"does not answer (kernel_feed_unavailable); restart it:\n", "  sudo systemctl restart defenseclaw-sandbox-feed.service", "sampled every 5s"},
 			never:  []string{"source: kernel"},
 		},
 		"no feed": {want: []string{"sampled every 5s"}, never: []string{"kernel", "not sent"}},
