@@ -910,7 +910,7 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 	w.mu.Unlock()
 
 	for _, path := range ready {
-		if _, err := os.Stat(path); err != nil {
+		if _, err := os.Stat(path); err != nil && !w.admitsLinkedAsset(path) {
 			w.endAdmission(path)
 			continue
 		}
@@ -1786,6 +1786,33 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	return nil
 }
 
+// admitsLinkedAsset reports a skill or plugin that is a symlink or Windows
+// junction, which admission scans through its target and, when blocked,
+// takes out of the folder. The Secure Client profile keeps the earlier
+// behaviour.
+func (w *InstallWatcher) admitsLinkedAsset(path string) bool {
+	return !w.secureClientActive() && enforce.IsLinkedAsset(path)
+}
+
+// linkedAssetTarget is the folder a linked skill or plugin points to: the
+// scanners do not follow a link at the root of what they scan, so a link to
+// a skill with a critical finding was scanned as an empty folder and
+// allowed (GAP-0394). An unresolvable link keeps its own path, whose scan
+// then fails closed.
+func linkedAssetTarget(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != filepath.Clean(path) {
+		return resolved
+	}
+	target, err := os.Readlink(path) // a Windows junction
+	if err != nil || strings.TrimSpace(target) == "" {
+		return path
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return filepath.Clean(target)
+}
+
 // removeLinkedAsset takes a skill or plugin that is a symlink or Windows
 // junction out of the watched folder: the link is removed and the folder it
 // points to is never touched (GAP-0394). Before, quarantine refused the link
@@ -2086,7 +2113,9 @@ func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit
 // directory under a skill dir.
 func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
+	// A link whose target the gateway cannot read is still admitted: its
+	// scan fails closed and the link is taken out (GAP-0394).
+	if (err != nil && !w.admitsLinkedAsset(path)) || (err == nil && !info.IsDir()) {
 		return false
 	}
 

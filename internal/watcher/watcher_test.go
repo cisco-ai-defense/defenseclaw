@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1372,5 +1373,63 @@ func TestBlockReasonNamesTheDecidingFinding(t *testing.T) {
 	if err != nil || entry == nil || !strings.Contains(entry.Reason, "LOW_ANALYZABILITY Critically low analyzability score") ||
 		strings.Contains(entry.Reason, "DATA-READ") {
 		t.Fatalf("journal %+v (err %v), want the reason to name only the HIGH finding", entry, err)
+	}
+}
+
+// targetOnlyScanner finds a critical issue only when it scans real content:
+// like the skill scanner, it does not follow a link at the root.
+type targetOnlyScanner struct {
+	countingScanner
+	link string
+}
+
+func (s *targetOnlyScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	result, err := s.countingScanner.Scan(ctx, target)
+	if err == nil && target != s.link {
+		result.Findings = []scanner.Finding{{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"}}
+	}
+	return result, err
+}
+
+// GAP-0394: a symlinked skill reached verdict allowed because the scanner
+// scanned the link, not the folder the agent loads, and the rescan never
+// listed it. It is scanned through its target, listed by the rescan, and the
+// link is taken out.
+func TestLinkedSkillIsScannedThroughItsTarget(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	target := filepath.Join(t.TempDir(), "linked-high-src")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(skillDir, "linked-high")
+	if runtime.GOOS == "windows" {
+		// A junction needs no privilege.
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v %s", err, out)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &targetOnlyScanner{countingScanner: countingScanner{name: "skill-scanner"}, link: link}
+	}
+	listed := false
+	for _, evt := range w.enumerateTargets() {
+		listed = listed || evt.Path == link
+	}
+	if !listed {
+		t.Fatal("the rescan does not list the linked skill")
+	}
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "linked-high", Path: link, Timestamp: time.Now()})
+	if res.Verdict == VerdictAllowed {
+		t.Fatalf("verdict %s (%s), want the critical target blocked", res.Verdict, res.Reason)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("the link stayed in the skills folder (lstat err %v)", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the link target was touched: %v", err)
 	}
 }

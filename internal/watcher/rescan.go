@@ -339,10 +339,13 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			if strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())
+			if !e.IsDir() && !w.admitsLinkedAsset(path) {
+				continue
+			}
 			if isBundledSkillWatchPath(path) {
 				continue
 			}
@@ -1370,10 +1373,14 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 	case InstallMCP:
 		return w.snapshotMCPServer(evt)
 	default:
-		if _, err := os.Stat(evt.Path); err != nil {
+		path := evt.Path
+		if w.admitsLinkedAsset(path) {
+			path = linkedAssetTarget(path)
+		}
+		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(evt.Path)
+		return SnapshotTarget(path)
 	}
 }
 
@@ -1439,6 +1446,9 @@ func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEnt
 
 func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 	if evt.Type != InstallMCP {
+		if w.admitsLinkedAsset(evt.Path) {
+			return linkedAssetTarget(evt.Path)
+		}
 		return evt.Path
 	}
 	entry, err := w.lookupMCPServer(evt)
