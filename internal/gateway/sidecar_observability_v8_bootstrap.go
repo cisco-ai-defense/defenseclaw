@@ -299,6 +299,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		s.observeObservabilityV8Delivery(transition)
 	})
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
+		SecureClient:  s.currentConfig().SecureClientIntegration(),
 		ConsoleStream: destinations.ConsoleStderr,
 		Stdout:        os.Stdout, Stderr: os.Stderr,
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
@@ -340,7 +341,8 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		ctx,
 		runtimegraph.ConfigFromPlan(compiled.Plan, retainJudgeBodies),
 		observabilityruntime.Options{
-			Store: s.store, Engine: engine, Signer: signer,
+			SecureClient: s.currentConfig().SecureClientIntegration(),
+			Store:        s.store, Engine: engine, Signer: signer,
 			RecordBuilder: failureBuilder, Reporter: reporter,
 			EventHistoryHealthReporter: sidecarV8EventHistoryObserver{s: s},
 			RetentionController:        retention,

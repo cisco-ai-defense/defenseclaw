@@ -119,6 +119,7 @@ func (function CAFileLoaderFunc) LoadObservabilityCA(ctx context.Context, path s
 // resolved until PrepareDestination, so a new generation observes legitimate
 // rotation without the factory caching prior material.
 type Options struct {
+	SecureClient  bool
 	ConsoleStream ConsoleStream
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -145,6 +146,7 @@ type Options struct {
 // Factory owns no generation resource. Every successful preparation returns a
 // distinct adapter and retryable, idempotent cleanup closure.
 type Factory struct {
+	secureClient     bool
 	console          io.Writer
 	secrets          config.ObservabilityV8SecretResolver
 	caLoader         CAFileLoader
@@ -178,7 +180,8 @@ func NewFactory(options Options) (*Factory, error) {
 		return nil, newError(ErrorInvalidDependencies)
 	}
 	return &Factory{
-		console: console, secrets: options.Secrets, caLoader: options.CALoader,
+		secureClient: options.SecureClient,
+		console:      console, secrets: options.Secrets, caLoader: options.CALoader,
 		resolver: options.Resolver, dialer: options.Dialer, warnings: options.Warnings,
 		redaction: options.RedactionEngine, deliveryObserver: options.DeliveryObserver,
 		otlpObserver: options.OTLPCanonicalObserver, galileoObserver: options.GalileoObserver,
