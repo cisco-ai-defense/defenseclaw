@@ -116,6 +116,32 @@ func TestAdmissionRegoAndFallbackAgree(t *testing.T) {
 	}
 }
 
+// TestAdmissionQuarantineOnlyRejects ensures a configured file action reaches
+// the watcher even when install and runtime actions allow the asset.
+func TestAdmissionQuarantineOnlyRejects(t *testing.T) {
+	eng := repoEngine(t)
+	in := AdmissionInput{
+		TargetType: "skill",
+		TargetName: "s",
+		ScanResult: &ScanResultInput{MaxSeverity: "HIGH", TotalFindings: 1, ScannerName: "skill-scanner"},
+		Admission: &CompiledAdmission{
+			Actions: map[string]CompiledAction{
+				"HIGH": {Install: "none", File: "quarantine", Runtime: "allow"},
+			},
+		},
+	}
+	opa, err := eng.Evaluate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if opa.Verdict != "rejected" || opa.FileAction != "quarantine" || opa.InstallAction != "none" || opa.RuntimeAction != "allow" {
+		t.Fatalf("rego output = %+v, want rejected quarantine with install none and runtime allow", opa)
+	}
+	if fallback := EvaluateAdmissionFallback(in); !reflect.DeepEqual(fallback, opa) {
+		t.Fatalf("fallback = %+v, rego = %+v", fallback, opa)
+	}
+}
+
 // TestCompileAdmissionLayers pins the resolution order: the type's own
 // value, then (skill) the scanner gate, then admission.defaults, then the
 // built-in default; and an empty first_party_allow_list clears the list.
