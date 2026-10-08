@@ -46,6 +46,10 @@ in the trusted PowerShell 7, never inside the Intune host.
 - **Devices**: Windows x64 enrolled in Intune. The lifecycle refuses ARM64 and
   32-bit Windows. Intune cannot enroll Windows Server, so test on Windows 10 or
   11 clients.
+- **WDAC/AppLocker**: allow or sign the DefenseClaw Intune launcher, detection,
+  and Remediations scripts so they run in PowerShell `FullLanguage`. Under
+  `ConstrainedLanguage` they stop before calling Setup or checking health;
+  install reports failure, and detection reports not detected.
 - **Release**: download `DefenseClawSetup-Enterprise-Standalone-x64.exe`,
   verify `checksums.txt` with cosign, and read the Setup's SHA-256 pin, as in
   [What you deliver](/docs/enterprise/mdm#what-you-deliver).

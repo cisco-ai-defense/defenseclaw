@@ -42,6 +42,7 @@ OpenClaw, never against the other adapters — calling
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import errno
 import glob
 import json
@@ -1986,6 +1987,12 @@ def _windows_developer_removal(files: list[str]) -> str:
     )
 
 
+def _windows_oem_encoding() -> str:
+    if sys.platform != "win32":
+        return "utf-8"  # Unit tests on non-Windows hosts use UTF-8 fixtures.
+    return f"cp{ctypes.WinDLL('kernel32').GetOEMCP()}"
+
+
 def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
     """Require the installer-authored CLI shim before removing paired artifacts."""
     existing = [path for path in plan.binary_targets if os.path.lexists(path)]
@@ -1998,7 +2005,9 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
             raise click.ClickException(f"refusing Windows binary removal: {_windows_developer_removal(developer)}")
         raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
     try:
-        with open(shim, encoding="utf-8-sig", errors="strict") as stream:
+        # install.ps1 writes .cmd in the Windows OEM code page used by cmd.exe.
+        # A Unicode profile path can therefore contain bytes invalid in UTF-8.
+        with open(shim, encoding=_windows_oem_encoding(), errors="strict") as stream:
             contents = stream.read(16_385)
     except (OSError, UnicodeError) as exc:
         raise click.ClickException(f"could not verify Windows CLI shim ownership: {exc}") from exc

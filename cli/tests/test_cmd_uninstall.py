@@ -494,6 +494,25 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             self.assertIn(f"'{root / '.defenseclaw-source-root'}'", message)
             self.assertTrue((root / "defenseclaw-gateway.exe").is_file())
 
+    def test_installer_oem_shim_in_unicode_profile_passes_ownership_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "dcw-w7é"
+            root = home / "bin"
+            root.mkdir(parents=True)
+            managed_venv = home / ".defenseclaw" / ".venv"
+            cli = managed_venv / "Scripts" / "defenseclaw.exe"
+            shim = root / "defenseclaw.cmd"
+            shim.write_bytes(f'@echo off\r\n"{cli}" %*\r\n'.encode("cp850"))
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="win32",
+                install_root=str(root),
+                managed_venv=str(managed_venv),
+                binary_targets=(str(shim),),
+                remove_binaries=True,
+            )
+            with patch.object(cmd_uninstall, "_windows_oem_encoding", return_value="cp850"):
+                cmd_uninstall._validate_windows_binary_ownership(plan)
+
     def test_same_named_unrelated_windows_files_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "bin"

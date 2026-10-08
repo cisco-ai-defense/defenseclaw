@@ -159,6 +159,22 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 	if err := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); err != nil {
 		return err
 	}
+	if !rulePackValidateJSON {
+		count := 0
+		for _, file := range rp.RuleFiles {
+			if file == nil {
+				continue
+			}
+			for _, rule := range file.Rules {
+				if rule.ToolCallOnly && rule.Expression == "" && (rule.Enabled == nil || *rule.Enabled) {
+					count++
+				}
+			}
+		}
+		if count > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "warning: %d enabled tool_call_only rules have no expression; their tool-call pattern matches are detection-only and cannot block\n", count)
+		}
+	}
 	if problem != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
 	}
