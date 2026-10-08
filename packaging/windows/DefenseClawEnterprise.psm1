@@ -21124,6 +21124,44 @@ function Invoke-DefenseClawSelfUninstallRecovery {
     }
 }
 
+# The standalone install root sits in C:\Program Files\Cisco, which the
+# install creates. A CLI uninstall still runs from the install root when it
+# finishes, so the empty parent can go only once this finalizer has removed
+# the retired root (GAP-0526). A parent that holds anything else (other
+# Cisco software) or is a reparse point stays. The Secure Client profile
+# shares the folder with Secure Client and is unchanged.
+function Remove-DefenseClawEmptyStandaloneInstallParent {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $root = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
+    $parent = [IO.Path]::GetDirectoryName($root)
+    if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) -or
+        -not [string]::Equals([IO.Path]::GetFileName($parent), 'Cisco', [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals(
+            [IO.Path]::GetDirectoryName($parent).TrimEnd('\'),
+            ([string]$script:ProgramFiles).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        return
+    }
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $parent -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or -not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        return
+    }
+    if ($null -ne (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $parent -Force | Microsoft.PowerShell.Utility\Select-Object -First 1)) {
+        return
+    }
+    try {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $parent -Force -ErrorAction Stop
+    }
+    catch {
+        # Best effort: the next Setup uninstall removes an empty parent.
+        return
+    }
+}
+
 function Complete-DefenseClawSelfUninstallRetirement {
     param(
         [Parameter(Mandatory)][string]$ReceiptPath,
@@ -21252,6 +21290,7 @@ function Complete-DefenseClawSelfUninstallRetirement {
                 Remove-DefenseClawSelfUninstallEvidence `
                     -Layout $layout `
                     -Receipt $receipt
+                Remove-DefenseClawEmptyStandaloneInstallParent -Layout $layout
                 return
             }
             catch {

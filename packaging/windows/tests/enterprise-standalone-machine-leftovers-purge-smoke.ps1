@@ -167,6 +167,31 @@ $failures = & $module {
             }
         }
 
+        # GAP-0526: once a CLI uninstall's finalizer removed the install
+        # root, the empty C:\Program Files\Cisco it sat in goes; a Cisco
+        # folder that holds anything else stays.
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        $savedProgramFiles = $script:ProgramFiles
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF'
+            $vendor = [IO.Path]::Combine($script:ProgramFiles, 'Cisco')
+            [void][IO.Directory]::CreateDirectory($vendor)
+            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $vendor) {
+                $failures.Add('an empty Program Files\Cisco was kept after the install root went')
+            }
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendor, 'Other'))
+            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($vendor, 'Other')))) {
+                $failures.Add('a Program Files\Cisco holding another folder was removed')
+            }
+        }
+        finally {
+            $script:ProgramFiles = $savedProgramFiles
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
         # GAP-0262 (the ACL check is still replaced, as above).
         $selector = Microsoft.PowerShell.Management\Join-Path $Scratch 'selector'
         $selectorDropIns = [IO.Path]::Combine($selector, 'ClaudeCode', 'managed-settings.d')

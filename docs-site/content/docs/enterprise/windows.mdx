@@ -856,9 +856,16 @@ Each user keeps `%USERPROFILE%\.defenseclaw` and the per-user binaries. To
 remove those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
 uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
-parent keys and `C:\Program Files\Cisco` when nothing else is left in them.
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. On a computer without DefenseClaw,
-uninstall succeeds and changes nothing.
+parent keys and `C:\Program Files\Cisco` when nothing else is left in them
+(after a CLI uninstall, once its cleanup finishes).
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. So does the empty,
+administrator-only lock file
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, and with it
+`C:\ProgramData\Cisco`: the lock serializes every lifecycle run, including
+the next install's, so the uninstall keeps it in place. To leave nothing,
+delete `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`, and
+`C:\ProgramData\Cisco` if it is then empty, after the uninstall. On a
+computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
 such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
