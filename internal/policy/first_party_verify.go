@@ -21,7 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,6 +77,12 @@ func ownFirstPartyContent(targetType, name, path string) bool {
 	return true
 }
 
+const (
+	maxSkillTreeEntries   = 1024
+	maxSkillTreeFileBytes = 4 << 20
+	maxSkillTreeBytes     = 16 << 20
+)
+
 // SkillTreeSignature is the content signature of the folder at root, the
 // one cli/defenseclaw/codeguard_skill.py computes (_dir_signature with
 // skip_bytecode): SHA-256 over each file's slash-separated relative path and
@@ -91,53 +97,94 @@ func SkillTreeSignature(root string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("policy: %s is not a folder", root)
 	}
-	type entry struct {
-		rel     string
-		content []byte
-	}
-	var entries []entry
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+
+	// Only a small, byte-identical shipped skill can bypass the scan.
+	// Bound directory enumeration and bytes read before the scan timer starts.
+	sum := sha256.New()
+	entries := 0
+	var totalBytes int64
+	var walk func(string) error
+	walk = func(dir string) error {
+		folder, err := os.Open(dir)
+		if err != nil {
+			return err
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("policy: %s is a link", path)
-		}
-		if d.IsDir() {
-			if path != root && d.Name() == "__pycache__" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return fmt.Errorf("policy: %s is not a regular file", path)
-		}
-		if strings.HasSuffix(d.Name(), ".pyc") {
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
+		limit := maxSkillTreeEntries - entries
+		names, readErr := folder.Readdirnames(limit + 1)
+		closeErr := folder.Close()
+		if readErr != nil && readErr != io.EOF {
 			return readErr
 		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
+		if closeErr != nil {
+			return closeErr
 		}
-		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-		data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
-		entries = append(entries, entry{rel: filepath.ToSlash(rel), content: bytes.Trim(data, " \t\n\r\v\f")})
+		if len(names) > limit {
+			return fmt.Errorf("policy: skill tree has too many entries")
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			path := filepath.Join(dir, name)
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("policy: %s is a link", path)
+			}
+			entries++
+			if entries > maxSkillTreeEntries {
+				return fmt.Errorf("policy: skill tree has too many entries")
+			}
+			if info.IsDir() && name == "__pycache__" {
+				continue
+			}
+			if !info.IsDir() && !info.Mode().IsRegular() {
+				return fmt.Errorf("policy: %s is not a regular file", path)
+			}
+			if !info.IsDir() && strings.HasSuffix(name, ".pyc") {
+				continue
+			}
+			if info.IsDir() {
+				if err := walk(path); err != nil {
+					return err
+				}
+				continue
+			}
+			remaining := min(int64(maxSkillTreeFileBytes), int64(maxSkillTreeBytes)-totalBytes)
+			if info.Size() > remaining {
+				return fmt.Errorf("policy: %s exceeds skill signature size limit", path)
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			data, readErr := io.ReadAll(io.LimitReader(file, remaining+1))
+			closeErr := file.Close()
+			if readErr != nil {
+				return readErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if int64(len(data)) > remaining {
+				return fmt.Errorf("policy: %s exceeds skill signature size limit", path)
+			}
+			totalBytes += int64(len(data))
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+			data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
+			sum.Write([]byte(filepath.ToSlash(rel)))
+			sum.Write([]byte{0})
+			sum.Write(bytes.Trim(data, " \t\n\r\v\f"))
+			sum.Write([]byte{0})
+		}
 		return nil
-	})
-	if err != nil {
-		return "", err
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
-	sum := sha256.New()
-	for _, e := range entries {
-		sum.Write([]byte(e.rel))
-		sum.Write([]byte{0})
-		sum.Write(e.content)
-		sum.Write([]byte{0})
+	if err := walk(root); err != nil {
+		return "", err
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }
