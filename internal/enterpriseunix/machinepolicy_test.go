@@ -531,6 +531,43 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	}
 }
 
+// outrankedPolicy reports one connector the way enterprise policy verify sees
+// a higher-precedence managed-preferences profile without DefenseClaw hooks:
+// the entries are in place, but the connector is not covered.
+type outrankedPolicy struct {
+	MachinePolicyManager
+	connector string
+}
+
+func (p *outrankedPolicy) Verify(cfg *config.Config) (enterprisepolicy.Result, error) {
+	result, err := p.MachinePolicyManager.Verify(cfg)
+	for index := range result.States {
+		if state := &result.States[index]; state.Connector == p.connector {
+			state.Covered = false
+			state.HigherPrecedence = []string{"/Library/Managed Preferences/com.anthropic.claudecode.plist"}
+			state.Conflicts = append(state.Conflicts, "/Library/Managed Preferences/com.anthropic.claudecode.plist has higher precedence than file-based managed settings and does not include DefenseClaw's hooks")
+		}
+	}
+	return result, err
+}
+
+// enterprise policy verify failed on such a profile while status and verify
+// stayed green, and Claude Code ran without enforcement (GAP-0534).
+func TestStatusAndVerifyFailWhenAHigherPrecedenceSourceOutranksTheHooks(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	writeFreshLedger(t, h)
+	h.env.MachinePolicy = &outrankedPolicy{MachinePolicyManager: h.env.MachinePolicy, connector: "claudecode"}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, "com.anthropic.claudecode.plist has higher precedence") {
+		t.Fatalf("verify does not name the outranking profile: %s", got)
+	}
+	if status := h.run(Options{Action: ActionStatus}); status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status reads complete while the hooks are outranked: %+v", status.Warnings)
+	}
+}
+
 // An administrator line outside DefenseClaw's block that does not parse made
 // verify say "run repair", while repair exited 0 and changed nothing
 // (GAP-0531). repair now fails and names the line to fix.

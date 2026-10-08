@@ -373,6 +373,35 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
 	}
+	// DefenseClaw's entries in place protect nothing when a higher-precedence
+	// source outranks them (a com.anthropic.claudecode or com.openai.codex
+	// managed-preferences profile without the hooks) or the file carries a
+	// conflicting value (Codex allow_managed_hooks_only flipped to false).
+	// enterprise policy verify reports such a connector not covered; status
+	// and verify said nothing while the agent ran without enforcement
+	// (GAP-0534, GAP-0531). Version floor conflicts stay
+	// claude_version_floor_missing, which verify does not fail on.
+	inPlace := coveredMachinePolicy(intended, result)
+	for _, state := range result.States {
+		if state.Route != enterprisepolicy.RouteMachinePolicy || state.Covered || !contains(inPlace, state.Connector) {
+			continue
+		}
+		var reasons []string
+		for _, conflict := range state.Conflicts {
+			if !strings.HasPrefix(conflict, claudeVersionFloorConflict) {
+				reasons = append(reasons, conflict)
+			}
+		}
+		if len(reasons) == 0 && len(state.HigherPrecedence) > 0 {
+			reasons = append(reasons, strings.Join(state.HigherPrecedence, ", ")+" outranks them")
+		}
+		if len(reasons) == 0 {
+			continue
+		}
+		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
+			"DefenseClaw hooks are in place in vendor machine policy for %s but do not protect %s: %s",
+			machinePolicyLabel(state.Connector, result), state.Connector, strings.Join(reasons, "; ")))
+	}
 	for _, name := range unwanted {
 		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
 			"vendor machine policy for %s still carries DefenseClaw hooks, but the installed config.yaml no longer asks for them; run `%s` to apply the config",
@@ -436,6 +465,16 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		r.SecurityComplete = false
 	}
 	return drift
+}
+
+// claudeVersionFloorConflict starts every Claude Code version floor conflict.
+const claudeVersionFloorConflict = "Claude Code version floor: "
+
+// machinePolicyIncomplete reports whether the result warns that a vendor
+// machine policy does not protect a connector, which security_complete
+// cannot be while it is so.
+func machinePolicyIncomplete(r *enterprisestatus.Result) bool {
+	return hasMessageCode(r.Warnings, codeMachinePolicyIncomplete)
 }
 
 // codeGuardianUserFilePending names enrolled users whose guardian-owned
