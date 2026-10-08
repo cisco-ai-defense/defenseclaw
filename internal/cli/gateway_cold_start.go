@@ -216,6 +216,15 @@ func hookColdStartRefusal(dataDir string, now time.Time) error {
 // drives, so no test reads or starts a gateway of the account running it.
 var watchdogGatewayStarter func(dataDir string) (bool, error)
 
+// watchdogGatewayConfigPath follows the same external config override as a
+// gateway start while retaining the data directory default.
+func watchdogGatewayConfigPath(dataDir string) string {
+	if configured := os.Getenv(managed.ConfigPathEnv); configured != "" {
+		return configured
+	}
+	return filepath.Join(dataDir, "config.yaml")
+}
+
 // startCrashedGatewayFromWatchdog runs `defenseclaw-gateway start
 // --hook-cold-start` for a per-user Linux or macOS gateway whose process is
 // gone. A gateway with no connector hooks had nothing that started it again,
@@ -227,7 +236,7 @@ func startCrashedGatewayFromWatchdog(dataDir string) (bool, error) {
 	if !hookColdStartSupported || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return false, nil
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "config.yaml")); err != nil {
+	if _, err := os.Stat(watchdogGatewayConfigPath(dataDir)); err != nil {
 		return false, nil
 	}
 	if running, _ := daemon.New(dataDir).IsRunning(); running {
