@@ -935,7 +935,12 @@ Shows the activity feed of every sandbox, or one: destinations reached (✓)
 and blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
 calls, findings such as hooks that stopped reaching DefenseClaw, lifecycle
 changes (a sandbox being created, becoming ready, stopping, or being deleted),
-and workspace events such as an undo or a copy-mode upload. A destination
+and workspace events such as an undo or a copy-mode upload. The feed lives
+in the DefenseClaw daemon's memory: after the daemon restarts it starts
+over, and for a sandbox older than that, `activity` says so first (`the
+feed starts when the DefenseClaw daemon last started (HH:MM:SS); what
+happened before is in defenseclaw-gateway audit export …`). The audit store
+keeps every event. A destination
 shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
 `example.com:80`, so an HTTPS and an HTTP request refused at the same host
 are two different lines. An IPv6 address with its port is bracketed:

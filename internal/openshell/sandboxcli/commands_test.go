@@ -264,6 +264,28 @@ func TestActivityRendering(t *testing.T) {
 // skipping the new feed's events, numbered from one again under another
 // epoch. The follower waits for the daemon, follows its new feed from the
 // start and says so; what it replays of a feed already shown is skipped.
+// TestActivitySaysWhereTheFeedStarts (GAP-0283): after a daemon restart
+// sandbox activity showed only the new feed's events, without a word that
+// the earlier ones (lifecycle, shadow AI, egress) were gone or where they
+// are. A sandbox older than the daemon's start gets that line; a newer one
+// does not.
+func TestActivitySaysWhereTheFeedStarts(t *testing.T) {
+	old := sampleSandbox("old")
+	old.CreatedAt = time.Now().Add(-time.Hour)
+	fresh := sampleSandbox("fresh")
+	fresh.CreatedAt = time.Now().Add(time.Minute)
+	ta := newTestApp(t, "", old, fresh)
+	ta.daemon.mu.Lock()
+	ta.daemon.status.StartedAt = time.Now()
+	ta.daemon.mu.Unlock()
+	const line = "the feed starts when the DefenseClaw daemon last started ("
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "old"}))
+	has(t, ta.output(), line, "`defenseclaw-gateway audit export`")
+	ta.out.Reset()
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "fresh"}))
+	lacks(t, ta.output(), line)
+}
+
 func TestActivityFollowsTheDaemonsNextFeed(t *testing.T) {
 	ta := newTestApp(t, "")
 	at := ta.Now()

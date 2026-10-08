@@ -61,6 +61,9 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 		}
 		return writeJSON(a.IO.Out, map[string]any{"events": events})
 	}
+	if o.Output != OutputJSON {
+		a.feedStartNote(ctx, api, o.Sandbox)
+	}
 	enc := json.NewEncoder(a.IO.Out)
 	enc.SetEscapeHTML(false)
 	n := 0
@@ -112,6 +115,28 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 		a.note("no activity yet")
 	}
 	return nil
+}
+
+// feedStartNote says where the feed starts when it holds less than the
+// sandbox's life (any sandbox's, without name): the feed lives in the
+// daemon's memory, so after a restart its earlier events showed nowhere in
+// `sandbox activity`, and nothing said where they went (GAP-0283).
+func (a *App) feedStartNote(ctx context.Context, api API, name string) {
+	st, err := api.Status(ctx)
+	if err != nil || st.StartedAt.IsZero() {
+		return
+	}
+	older := false
+	if name != "" {
+		sb, err := api.Get(ctx, name)
+		older = err == nil && !sb.CreatedAt.IsZero() && sb.CreatedAt.Before(st.StartedAt)
+	} else if list, err := api.List(ctx); err == nil {
+		older = slices.ContainsFunc(list, func(sb sandboxapi.Sandbox) bool { return !sb.CreatedAt.IsZero() && sb.CreatedAt.Before(st.StartedAt) })
+	}
+	if older {
+		a.note("the feed starts when the DefenseClaw daemon last started (" + a.clock(st.StartedAt) + "); what happened before is in " +
+			"`defenseclaw-gateway audit export` (and Grafana, with observability on)")
+	}
 }
 
 // followRetry bounds how long `activity -f` waits for the daemon to answer
