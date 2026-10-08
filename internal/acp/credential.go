@@ -389,6 +389,10 @@ func removeEnterpriseCredential(dataDir, principal, clientID, agentID, profile s
 	if err != nil {
 		return err
 	}
+	if !secureClientHost() {
+		// Best effort: it only names the account on later failure rows.
+		_ = recordRevokedEnterpriseCredential(dataDir, credential, time.Now())
+	}
 	// Remove the only bearer-derived lookup first. A stale user copy has no
 	// authority from this point even if record cleanup is interrupted.
 	if err := removeEnterpriseCredentialFile(indexPath); err != nil {

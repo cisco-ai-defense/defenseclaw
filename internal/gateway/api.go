@@ -3605,7 +3605,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
-				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}

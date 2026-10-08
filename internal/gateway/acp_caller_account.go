@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -121,6 +122,34 @@ func (a *APIServer) acpCallerAccountRefusal(r *http.Request) string {
 		return acpCallerAccountMismatchReason
 	}
 	return ""
+}
+
+// withRevokedACPCredential names, on an authentication failure row no
+// kernel answer attributed (Windows), the account a revoked managed
+// credential was issued to, by the non-secret key ID the guard presented:
+// the row named no one, so an administrator could not tell who still ran a
+// revoked guard (GAP-0354). Secure Client keeps its rows.
+func (a *APIServer) withRevokedACPCredential(ctx context.Context, r *http.Request) context.Context {
+	if a == nil || a.scannerCfg == nil || !managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) ||
+		a.scannerCfg.SecureClientIntegration() || !identityFactsEnabled.Load() {
+		return ctx
+	}
+	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+		return ctx
+	}
+	revoked, ok := acp.RevokedEnterpriseCredentialForKeyID(a.scannerCfg.DataDir, r.Header.Get(acp.AuthKeyIDHeader))
+	if !ok {
+		return ctx
+	}
+	identity := acpPrincipalIdentity(revoked.Principal)
+	if identity == "" {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	agent := AgentIdentityFromContext(ctx)
+	agent.UserID, agent.UserIDKind = identity, useridentity.KindForID(identity)
+	agent.UserName = sanitizeLLMEventUser(userScopedIdentityName(identity))
+	return ContextWithAgentIdentity(ctx, agent)
 }
 
 // withACPCallerAccount names the kernel-verified account of a refused ACP

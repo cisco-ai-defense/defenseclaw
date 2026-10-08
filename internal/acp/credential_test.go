@@ -61,6 +61,30 @@ func TestEnterpriseCredentialIsStableScopedAndRevocable(t *testing.T) {
 	}
 }
 
+// A revoked credential's key ID still names whose it was, for the
+// authentication failure rows of a guard that keeps presenting it (GAP-0354).
+func TestRevokedEnterpriseCredentialNamesItsEnrollment(t *testing.T) {
+	requireDirectEnterpriseCredentialTest(t)
+	dataDir := t.TempDir()
+	credential, err := EnsureEnterpriseCredential(dataDir, "sid:S-1-5-21-1-2-3-1001", "zed", "hermes", "w2w-obs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := RevokedEnterpriseCredentialForKeyID(dataDir, HTTPAuthKeyID(credential.Token)); ok {
+		t.Fatal("a live credential is listed as revoked")
+	}
+	if err := RemoveEnterpriseCredential(dataDir, "sid:S-1-5-21-1-2-3-1001", "zed", "hermes", "w2w-obs"); err != nil {
+		t.Fatal(err)
+	}
+	revoked, ok := RevokedEnterpriseCredentialForKeyID(dataDir, HTTPAuthKeyID(credential.Token))
+	if !ok || revoked.Principal != "sid:S-1-5-21-1-2-3-1001" || revoked.AgentID != "hermes" {
+		t.Fatalf("revoked = %+v, %v", revoked, ok)
+	}
+	if EnterpriseCredentialsReady(dataDir) {
+		t.Fatal("an inventory with no enrollment reported ready")
+	}
+}
+
 func TestEnterpriseCredentialRevocationTombstoneFailsInventoryClosed(t *testing.T) {
 	requireDirectEnterpriseCredentialTest(t)
 	dataDir := t.TempDir()
