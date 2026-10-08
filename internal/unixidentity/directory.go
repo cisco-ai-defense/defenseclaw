@@ -404,8 +404,11 @@ func localGroupIDs() (map[int]bool, error) {
 }
 
 // localGroupsListing returns the gids of the /etc/group entries whose member
-// list names name, compared as the files module compares them. A missing
-// file holds none.
+// list names name, split and compared as the glibc files module does, so
+// DefenseClaw and id(1) agree: white space before each member is skipped,
+// and only the newline ends the line, so the CR of a CRLF line stays in its
+// last member, which then names no account (GAP-0815). A missing file holds
+// none.
 func localGroupsListing(name string) ([]int, error) {
 	data, err := readSmallFile(localGroupPath, 16<<20)
 	if errors.Is(err, os.ErrNotExist) {
@@ -420,8 +423,10 @@ func localGroupsListing(name string) ([]int, error) {
 		if !ok {
 			continue
 		}
-		members := strings.Split(strings.TrimRight(line, "\r"), ":")[3]
-		if slices.Contains(strings.Split(members, ","), name) {
+		members := strings.Split(line, ":")[3]
+		if slices.ContainsFunc(strings.Split(members, ","), func(member string) bool {
+			return strings.TrimLeft(member, " \t\n\v\f\r") == name
+		}) {
 			ids = append(ids, gid)
 		}
 	}
