@@ -283,7 +283,15 @@ func readArtifactText(path string) (string, bool) {
 		return "", false
 	}
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) > artifactMaxFileBytes || !utf8.Valid(data) {
+	if err != nil || len(data) > artifactMaxFileBytes {
+		return "", false
+	}
+	// The skill scanner stages UTF-16 manifests as UTF-8. Apply the same
+	// decoded content to the rule-pack overlay (GAP-0642).
+	if strings.EqualFold(filepath.Base(path), "SKILL.md") {
+		data, _ = scanner.DecodeSkillText(data)
+	}
+	if !utf8.Valid(data) {
 		return "", false
 	}
 	return string(data), true

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -148,4 +149,30 @@ def save(note):
 	if unrelated := scanArtifactText(pack.artifactRules(), `open(other, "w"); print("MEMORY.md")`, "unrelated.py"); len(unrelated) != 0 {
 		t.Fatalf("unrelated write became a path write: %+v", unrelated)
 	}
+}
+
+func TestArtifactOverlayScansUTF16SkillManifest(t *testing.T) {
+	dir := t.TempDir()
+	content := "# introduction\ndc-review-marker\n"
+	encoded := []byte{0xFF, 0xFE}
+	for _, unit := range utf16.Encode([]rune(content)) {
+		encoded = append(encoded, byte(unit), byte(unit>>8))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pack := &RulePack{RuleFiles: []*RulesFileYAML{{
+		Category: "command",
+		Rules:    []RuleDefYAML{{ID: "T-MARKER", Pattern: "dc-review-marker", Severity: "HIGH"}},
+	}}}
+	result, err := NewArtifactOverlay(infoScanner{}, pack).Scan(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range result.Findings {
+		if finding.RuleID == "T-MARKER" && finding.Location == "SKILL.md:2" && finding.Severity == scanner.SeverityHigh {
+			return
+		}
+	}
+	t.Fatalf("UTF-16 SKILL.md rule-pack finding missing: %+v", result.Findings)
 }
