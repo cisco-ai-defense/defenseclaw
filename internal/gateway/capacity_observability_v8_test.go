@@ -190,7 +190,7 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	if len(drops) != 4 {
 		t.Fatalf("destination loss observations=%d want=4", len(drops))
 	}
-	wantLoss := map[string][]int64{"retry_exhausted": {4, 3}, "rejected": {1, 2}}
+	wantLoss := map[string][]int64{"dropped": {4, 3}, "rejected": {1, 2}}
 	for _, drop := range drops {
 		attrs := drop.Attributes()
 		if attrs["defenseclaw.metric.queue"] != "destination.capture.metrics" {
@@ -219,6 +219,29 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	}
 	if wrapper.snapshotCalls != 3 {
 		t.Fatalf("destination snapshots=%d want=3", wrapper.snapshotCalls)
+	}
+}
+
+func TestSecureClientOmitsDestinationLossMetrics(t *testing.T) {
+	old := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(old) })
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	graph := runtime.Active()
+	wrapper := &capacityHealthRuntime{Runtime: runtime}
+	wrapper.snapshot = observabilityruntime.DestinationHealthSnapshot{
+		Generation: graph.Generation(), PlanDigest: graph.Digest(),
+		Destinations: []observabilityruntime.DestinationHealth{{
+			Name: "capture", Enabled: true, Signals: []observability.Signal{observability.SignalMetrics},
+			Sources: []delivery.HealthSnapshot{{
+				Destination: "capture", Generation: graph.Generation(), Signal: string(observability.SignalMetrics),
+				Counters: delivery.Counters{Dropped: 2, Rejected: 1},
+			}},
+		}},
+	}
+	(&Sidecar{}).recordExporterHealthMetricsV8(t.Context(), time.Now().UTC(), wrapper, wrapper.snapshot)
+	if drops := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawQueueDrops); len(drops) != 0 {
+		t.Fatalf("Secure Client exported %d destination loss metrics", len(drops))
 	}
 }
 
