@@ -910,7 +910,7 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 	w.mu.Unlock()
 
 	for _, path := range ready {
-		if _, err := os.Stat(path); err != nil && !w.admitsLinkedAsset(path) {
+		if _, err := os.Stat(addressablePath(path)); err != nil && !w.admitsLinkedAsset(path) {
 			w.endAdmission(path)
 			continue
 		}
@@ -2112,7 +2112,7 @@ func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit
 // subdirectories inside a skill are ignored — a skill is always a top-level
 // directory under a skill dir.
 func (w *InstallWatcher) isDirectChildDir(path string) bool {
-	info, err := os.Stat(path)
+	info, err := os.Stat(addressablePath(path))
 	// A link whose target the gateway cannot read is still admitted: its
 	// scan fails closed and the link is taken out (GAP-0394).
 	if (err != nil && !w.admitsLinkedAsset(path)) || (err == nil && !info.IsDir()) {

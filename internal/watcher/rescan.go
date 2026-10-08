@@ -1373,9 +1373,9 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 	case InstallMCP:
 		return w.snapshotMCPServer(evt)
 	default:
-		path := evt.Path
-		if w.admitsLinkedAsset(path) {
-			path = linkedAssetTarget(path)
+		path := addressablePath(evt.Path)
+		if w.admitsLinkedAsset(evt.Path) {
+			path = linkedAssetTarget(evt.Path)
 		}
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
@@ -1449,7 +1449,7 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 		if w.admitsLinkedAsset(evt.Path) {
 			return linkedAssetTarget(evt.Path)
 		}
-		return evt.Path
+		return addressablePath(evt.Path)
 	}
 	entry, err := w.lookupMCPServer(evt)
 	if err != nil {
