@@ -101,6 +101,14 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	r.Installed = true
 	r.InstalledVersion = record.ProductVersion
+	if failure := env.lastPackageInstallFailure(); failure != "" {
+		// A package reinstall or upgrade the lifecycle refused (a full disk,
+		// a config it rejected) printed Complete and left status and verify
+		// green; only last-package-result.json said so (GAP-0469). The
+		// result stays until a later run succeeds.
+		r.AddWarning(codePackageInstallFailed, "the last package install, reinstall or upgrade did not apply: "+failure+
+			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
+	}
 	strict := l.opts.Action == ActionVerify
 	problems := l.verifyInstalled(ctx, record, strict)
 	dropInProblems, dropIns := l.unitDropIns(ctx, record)

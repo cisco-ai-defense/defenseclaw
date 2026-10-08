@@ -190,3 +190,18 @@ func TestRecoveringRunClearsTheFailedPackageResult(t *testing.T) {
 		t.Fatal("a recovering run left the failed package result or the kept activation output in place")
 	}
 }
+
+// GAP-0469: a package reinstall the lifecycle refused (a full disk) printed
+// Complete and left status and verify green on the running deployment.
+func TestStatusWarnsThatTheLastPackageRunDidNotApply(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"apply_failed","message":"create snapshot: no space left on device"}]}`)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := messagesOf(h.run(Options{Action: action}).Warnings, codePackageInstallFailed)
+		if !strings.Contains(got, "did not apply: apply_failed: create snapshot: no space left on device") || !strings.Contains(got, "--from-package`") {
+			t.Fatalf("%s does not warn about the refused package run: %q", action, got)
+		}
+	}
+}
