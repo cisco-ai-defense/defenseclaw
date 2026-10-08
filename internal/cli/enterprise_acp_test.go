@@ -240,6 +240,16 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "done" {
 		t.Fatalf("list row = %v, want the custom directory token and setup lock", row)
 	}
+	// A pair the central policy moved to another profile is flagged with
+	// the profile to enroll under (GAP-0911).
+	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "moved"}, config.ACPBinding{Enabled: true, Profile: "moved"}
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	verified := run(runEnterpriseACPVerify)
+	if row, _ := listed[0].(map[string]any); !strings.Contains(fmt.Sprint(row["note"]), "now binds zed/kiro to profile moved") ||
+		!strings.Contains(fmt.Sprint(verified["central_note"]), "enroll the user again with --profile moved") {
+		t.Fatalf("a moved pair is not flagged: list %v, verify %v", row, verified)
+	}
+	cfg.ACP.Clients["zed"], cfg.ACP.Agents["kiro"] = config.ACPBinding{Enabled: true, Profile: "locked"}, config.ACPBinding{Enabled: true, Profile: "locked"}
 
 	enrollment, err := resolveEnterpriseACPEnrollment(true)
 	if err != nil {

@@ -554,6 +554,31 @@ func enterpriseACPQuotePath(path string, windows bool) string {
 	return fmt.Sprintf("%q", path)
 }
 
+// enterpriseACPCentralNote says why the central policy no longer admits an
+// enrollment, or "": ACP is off, the pair is switched off, or the pair now
+// resolves to another profile. verify answered OK and list showed setup done
+// for an enrollment the guard refused (GAP-0911).
+func enterpriseACPCentralNote(client, agent, profile string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	if !cfg.ACP.Enabled {
+		return "ACP checking is switched off centrally (acp.enabled is false), so the guard refuses every session"
+	}
+	if disabled := cfg.ACP.ACPPairDisabled(client, agent); disabled != "" {
+		return fmt.Sprintf("central ACP policy switches %s/%s off (%s), so the guard refuses it", client, agent, disabled)
+	}
+	resolved := cfg.ACP.ACPProfileForPair(client, agent)
+	if resolved == "" {
+		resolved = "default"
+	}
+	if resolved != profile {
+		return fmt.Sprintf("central ACP policy now binds %s/%s to profile %s, so the guard refuses this %s enrollment; "+
+			"enroll the user again with --profile %s", client, agent, resolved, profile, resolved)
+	}
+	return ""
+}
+
 // enterpriseACPProfileMode is the mode of profile in the central policy, as
 // the gateway resolves it.
 func enterpriseACPProfileMode(profile string) string {
@@ -670,6 +695,9 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 				enterpriseACPSetupCommand(enrollment, tokenPath)
 		case !setupDone:
 			payload["setup_note"] = "the user has not run setup yet; as that user, run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
+		}
+		if note := enterpriseACPCentralNote(enrollment.client, enrollment.agent, enrollment.profile); note != "" {
+			payload["central_note"] = note
 		}
 	}
 	return enterpriseACPResult(cmd, payload, nil)
@@ -841,6 +869,9 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 	fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential verified\n", Style(enterpriseACPCheck(), "fg=green", "bold"))
 	if note, _ := payload["setup_note"].(string); note != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", note)
+	}
+	if note, _ := payload["central_note"].(string); note != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), note)
 	}
 	return nil
 }

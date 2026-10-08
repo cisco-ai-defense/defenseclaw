@@ -53,6 +53,8 @@ type enterpriseACPListedEnrollment struct {
 	// "unknown" when the user's files could not be read.
 	TokenCopy string `json:"token_copy"`
 	Setup     string `json:"setup"`
+	// Note says why the enrollment cannot work as listed.
+	Note string `json:"note,omitempty"`
 }
 
 // runEnterpriseACPList answers who is enrolled: an administrator could see
@@ -96,6 +98,15 @@ func runEnterpriseACPList(cmd *cobra.Command, _ []string) error {
 		}
 		_ = table.Flush()
 	}
+	for _, row := range rows {
+		if row.Note != "" {
+			who := row.Principal
+			if row.User != "" {
+				who = row.User
+			}
+			fmt.Fprintf(out, "  %s %s %s/%s (%s): %s\n", Style("!", "fg=yellow", "bold"), who, row.ClientID, row.AgentID, row.Profile, row.Note)
+		}
+	}
 	if len(invalid) > 0 {
 		fmt.Fprintf(out, "  %s %d record(s) in the enrollment directory could not be read: %s\n",
 			Style("!", "fg=yellow", "bold"), len(invalid), strings.Join(invalid, ", "))
@@ -108,6 +119,7 @@ func runEnterpriseACPList(cmd *cobra.Command, _ []string) error {
 func describeEnterpriseACPEnrollment(enrollment acp.EnterpriseEnrollment) enterpriseACPListedEnrollment {
 	row := enterpriseACPListedEnrollment{EnterpriseEnrollment: enrollment, Account: "unknown", TokenCopy: "unknown", Setup: "unknown"}
 	row.Created = row.Created.Truncate(time.Second)
+	row.Note = enterpriseACPCentralNote(enrollment.ClientID, enrollment.AgentID, enrollment.Profile)
 	account, err := enterpriseACPDescribePrincipal(enrollment.Principal)
 	switch {
 	case err != nil:
