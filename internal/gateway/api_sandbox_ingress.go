@@ -38,6 +38,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -909,9 +910,14 @@ func sandboxModelError(req agentHookRequest) (string, int) {
 	}
 	status := 0
 	for _, key := range []string{"error_details", "last_assistant_message"} {
-		if m := sandboxModelStatus.FindStringSubmatch(payloadString(req.Payload, key)); m != nil {
+		text := payloadString(req.Payload, key)
+		if strings.Contains(strings.ToLower(text), "credential placeholder in the request body") {
+			// OpenShell refused the conversation's request, not the model
+			// its key (GAP-0354).
+			class = sandboxapi.ModelErrorPlaceholder
+		}
+		if m := sandboxModelStatus.FindStringSubmatch(text); m != nil && status == 0 {
 			status, _ = strconv.Atoi(m[1])
-			break
 		}
 	}
 	return class, status

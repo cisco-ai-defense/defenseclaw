@@ -240,6 +240,17 @@ func TestCopyKeepsAnUninitializedSubmodule(t *testing.T) {
 	}
 }
 
+// GAP-0353: a folder that ignores its own content (.venv, .pytest_cache)
+// is named once, without the folders git lists inside it.
+func TestLeftOutWarningFoldsNestedFolders(t *testing.T) {
+	got := leftOutWarning(map[string]bool{".venv/": true, ".venv/bin/": true, ".venv/lib/python3.12/": true,
+		".pytest_cache/": true, ".pytest_cache/v/": true, "build/": true, "build-notes.txt": true})
+	want := "not copied (git ignores them, or they are package caches): .pytest_cache/, .venv/, build/, build-notes.txt; install the dependencies inside the sandbox"
+	if got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
 // GAP-0248: --unmask on a copy was silent both ways: a shared secret-looking
 // file got no line, and a pattern that matched only a git-ignored file
 // (never copied) said nothing. The record names both.
@@ -250,10 +261,14 @@ func TestStageNamesWhatUnmaskShared(t *testing.T) {
 	e.commit("ignore")
 	writeFile(t, e.project, ".env", "TOKEN=dccert-decoy\n")
 	writeFile(t, e.project, "local.env", "TOKEN=dccert-decoy\n")
+	// A template of names the pack shares by default, under the pack's .env.*
+	// mask, is no secret the run shared (GAP-0351).
+	writeFile(t, e.project, ".env.sample", "DATABASE_URL=\nSTRIPE_API_KEY=\n")
 	opts := e.stageOpts("c1")
+	opts.Masks = append(opts.Masks, ".env.*")
 	// .env.example is a pack default the project lacks: no warning for it,
 	// only for what the run asked (GAP-0308).
-	opts.Unmask = []string{".env", "local.env", ".env.example"}
+	opts.Unmask = []string{".env", "local.env", ".env.example", ".env.sample"}
 	opts.UnmaskAsked = []string{".env", "local.env"}
 	rec, err := Stage(bg, opts)
 	if err != nil {
@@ -624,6 +639,22 @@ func TestCopyPullFlagsAZeroFilledTail(t *testing.T) {
 	}
 	if len(flagged) != 1 || flagged[0] != "notes.txt" || pr.Review.Sensitive() {
 		t.Fatalf("zero-filled flags = %v (sensitive %v), want notes.txt only", flagged, pr.Review.Sensitive())
+	}
+
+	// GAP-0367: in a sandbox that went down without a flush, a file that
+	// came back empty is flagged too; elsewhere an empty file is just that.
+	fs.write(remoteRepo+"/draft.txt", "")
+	for _, unflushed := range []bool{false, true} {
+		pr, err := Pull(bg, PullOptions{DataDir: e.data, Name: "c1", Exec: fs, Unflushed: unflushed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty := slices.ContainsFunc(pr.Review.Flags, func(f Flag) bool {
+			return f.Path == "draft.txt" && f.Kind == RiskZeroFilled && strings.HasPrefix(f.Detail, "is empty, which a MicroVM stopped without a flush")
+		})
+		if empty != unflushed {
+			t.Fatalf("unflushed %v: flags = %+v", unflushed, pr.Review.Flags)
+		}
 	}
 }
 

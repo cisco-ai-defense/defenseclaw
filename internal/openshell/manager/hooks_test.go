@@ -1139,6 +1139,46 @@ func TestHookReachRefusedConnections(t *testing.T) {
 	}
 }
 
+// GAP-0354, GAP-0355: once a conversation printed a credential placeholder
+// (an `env` output), OpenShell refuses its model requests and its hook posts
+// ("POST request body credential traffic denied for HOST:PORT"). That is
+// neither a refused ingress nor a rejected key: the feed says once what it
+// is, the status keeps it until a turn ends normally, the model host's line
+// names it, and Claude Code's StopFailure for it sets no key rejection.
+func TestAPlaceholderRefusalIsNamed(t *testing.T) {
+	r := newReachEnv(t)
+	ingress := "host.openshell.internal:" + strconv.Itoa(testIngressPort)
+	refused := func(dest string) string {
+		return "NET:TRAFFIC [HIGH] DENIED " + dest + " [reason:POST request body credential traffic denied for " + dest + "]"
+	}
+	r.line(refused(ingress))
+	r.line(refused("bedrock-mantle.us-east-1.api.aws:443"))
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); h.Unreachable || h.IngressRefused != 0 || h.PlaceholderRefusedAt.IsZero() {
+		t.Fatalf("hooks = %+v", h)
+	}
+	want := "⚠ " + sandboxapi.PlaceholderConversationText(r.name)
+	if got := r.feed(sandboxapi.ReasonPlaceholderRefused); len(got) != 1 || got[0].Message != want || got[0].Severity != "HIGH" {
+		t.Fatalf("feed = %+v, want one %q", got, want)
+	}
+	if got := r.events(r.name, sandboxapi.ActivityEgressBlocked, ""); len(got) != 1 ||
+		got[0].Message != "✗ bedrock-mantle.us-east-1.api.aws (OpenShell forwards no request whose body carries a sandbox credential placeholder)" {
+		t.Fatalf("blocked lines = %+v", got)
+	}
+	decide := func(event, class string, status int) {
+		r.m.ObserveHookDecision(HookDecision{BindingID: r.binding.ID, SandboxName: r.name, Event: event, Action: "allow", ModelError: class, ModelStatus: status})
+	}
+	decide("StopFailure", sandboxapi.ModelErrorPlaceholder, 403)
+	if h := r.hooks(); h.ModelKeyRejected != "" || len(r.feed(sandboxapi.ReasonPlaceholderRefused)) != 1 {
+		t.Fatalf("a placeholder refusal read as a rejected key: %q", h.ModelKeyRejected)
+	}
+	decide("Stop", "", 0)
+	if h := r.hooks(); !h.PlaceholderRefusedAt.IsZero() {
+		t.Fatalf("a turn that ended normally kept the refusal at %v", h.PlaceholderRefusedAt)
+	}
+}
+
 // A hook connection cut by a policy reload (a HIGH alarm live) is no refusal
 // but an attempt: like an answered one, it is flagged only when no request
 // authenticates within the grace period. So is a mapping denial of the

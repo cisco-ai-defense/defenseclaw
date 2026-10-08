@@ -2079,6 +2079,12 @@ def test_unreachable_hooks_are_an_alert_and_a_toast() -> None:
     )
     refused = decode_sandbox({**RUNNING, "hooks": {"ingress_refused": 2}})
     assert refused is not None and any("refused 2 hook request(s)" in alert for alert in refused.alerts)
+    # GAP-0354: a conversation that holds a credential placeholder is named, with the way on.
+    placeholder = decode_sandbox({**RUNNING, "hooks": {"placeholder_refused_at": "2026-10-08T12:51:06Z"}})
+    assert placeholder is not None and any(
+        "holds a sandbox credential placeholder" in alert and f"connect {placeholder.name}, without --continue" in alert
+        for alert in placeholder.alerts
+    )
 
 
 def test_the_alerts_cell_fits_a_narrow_table() -> None:

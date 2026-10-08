@@ -186,10 +186,11 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 		if dir, err := filepath.EvalSymlinks(filepath.Dir(written)); err == nil {
 			written = filepath.Join(dir, filepath.Base(written))
 		}
-		if project, err := a.project(); err == nil && workspace.Overlaps(project, written) {
+		if project := a.packOutProject(ctx, api, s.Sandboxes, written); project != "" {
 			// A run that mounts the project refuses a pack inside it: the
 			// agent could change its own policy.
-			a.warn(o.PackOut + " is inside the project folder, where a run that mounts the project refuses a pack (the agent could change its own policy)")
+			a.warn(o.PackOut + " is inside the project folder " + a.tildePath(project) +
+				", where a run that mounts the project refuses a pack (the agent could change its own policy)")
 			a.note("review it, then move it to " + home + " and lock the project to it: " + CommandName + " run --pack " + s.PackName +
 				" (or run with --copy --pack " + o.PackOut + ")")
 			break
@@ -204,6 +205,28 @@ func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
 		a.printSuggestionDiff(s.Diff, s.PackName)
 	}
 	return nil
+}
+
+// packOutProject is the project folder of one of the suggestion's sandboxes
+// that holds the written pack, or "": a run that mounts that project
+// refuses the pack. The shell's folder is no project of theirs: run from the
+// home folder, every pack path under it, ~/.defenseclaw/policies/sandbox
+// too, read as inside the project (GAP-0357).
+func (a *App) packOutProject(ctx context.Context, api API, sandboxes []string, written string) string {
+	for _, name := range sandboxes {
+		sb, err := api.Get(ctx, name)
+		if err != nil || sb.Project == "" {
+			continue
+		}
+		project := sb.Project
+		if real, err := filepath.EvalSymlinks(project); err == nil {
+			project = real
+		}
+		if workspace.Overlaps(project, written) {
+			return project
+		}
+	}
+	return ""
 }
 
 // recordDestinations reads the destinations views of one sandbox, or of

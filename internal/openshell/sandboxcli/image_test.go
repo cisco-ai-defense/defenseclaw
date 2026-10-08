@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -425,6 +426,22 @@ func TestImageListNamesImagesGoneFromDocker(t *testing.T) {
 		strings.Contains(out, "nothing to prune") {
 		t.Fatalf("image prune --dry-run:\n%s", out)
 	}
+}
+
+// GAP-0358: images an earlier DefenseClaw build made are named as not used
+// by this build, with the build that made them.
+func TestImageListNamesImagesOfAnotherBuild(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.images.recs = []image.Record{
+		{Tag: "defenseclaw/sandbox:claudecode-old-u1000", Connector: "claudecode", HarnessVersion: "2.1.156", HookFireVerified: true, UID: 1000,
+			BuiltAt: ta.Now(), DefenseClawVersion: "1.0.30"},
+		{Tag: "defenseclaw/sandbox:codex-new-u1000", Connector: "codex", HarnessVersion: "0.146.0", HookFireVerified: true, UID: 1000,
+			BuiltAt: ta.Now(), DefenseClawVersion: manager.ImageVersion()},
+	}
+	ta.ok(t, ta.ImageList(bg, OutputText))
+	has(t, ta.output(), "not used by this DefenseClaw build ("+manager.ImageVersion()+"): defenseclaw/sandbox:claudecode-old-u1000, built by DefenseClaw 1.0.30, "+
+		"so no new sandbox uses it; the next run of each harness builds its image for this build")
+	lacks(t, ta.output(), "codex-new-u1000, built by")
 }
 
 // FIN-A-3: the list says which compute driver each image is for, and on a

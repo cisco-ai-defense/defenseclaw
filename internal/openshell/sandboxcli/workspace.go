@@ -666,7 +666,18 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		if err != nil {
 			return err
 		}
-		if res, err = a.pull(ctx, api, a.cli(gateway), sb, true); err != nil {
+		// A Ctrl-C while the work is read ends the read, not the command:
+		// the sandbox it started is stopped again, and the line says what
+		// was left, where only ^C showed (GAP-0365).
+		pullCtx, done := a.interruptible(ctx)
+		res, err = a.pull(pullCtx, api, a.cli(gateway), sb, true)
+		interrupted := a.intr != nil && a.intr.fired.Load()
+		done()
+		if err != nil {
+			if interrupted || killedByInterrupt(err) {
+				a.warn("interrupted: nothing was brought back, and the work is still in " + o.Name + " (`" + CommandName + " pull " + o.Name + "` reads it again)")
+				return &ExitError{Code: exitInterrupted, Err: &Silent{Err: errors.New("interrupted")}}
+			}
 			return err
 		}
 	}
@@ -875,7 +886,8 @@ func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace
 	if st == nil || st.Pulled == "" {
 		return nil, nil
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Reuse: st.Pulled, SensitiveGlobs: a.reviewGlobs(ctx, sb)})
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Reuse: st.Pulled, SensitiveGlobs: a.reviewGlobs(ctx, sb),
+		Unflushed: !sb.UnflushedAt.IsZero()})
 	if errors.Is(err, workspace.ErrNoReusablePull) {
 		return nil, nil
 	}
@@ -893,7 +905,8 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 	if announce {
 		a.note("Pulling " + sb.Name + "'s work…")
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(ctx, sb)})
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(ctx, sb),
+		Unflushed: !sb.UnflushedAt.IsZero()})
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))
 	}
@@ -910,19 +923,23 @@ const lowDiskBytes = 64 << 20
 // on a driver that gives each sandbox a disk of its own (a MicroVM's
 // overlay) the hint names that disk and its size setting instead.
 func (a *App) sandboxDiskHint(ctx context.Context, api API, err error) string {
-	hint := a.diskFullHint(err)
-	if hint == "" || isNoSpace(err) {
-		return hint
+	if disk := a.ownDiskFull(ctx, api, err); disk != "" {
+		return "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by " + disk +
+			"; free some space in the sandbox, or raise that size for new sandboxes (`" + CommandName + " doctor` shows it)"
+	}
+	return a.diskFullHint(err)
+}
+
+// ownDiskFull names the setting that sizes the sandbox's own disk when err
+// is that disk running full (sandboxDiskHint), and is "" otherwise.
+func (a *App) ownDiskFull(ctx context.Context, api API, err error) string {
+	if a.diskFullHint(err) == "" || isNoSpace(err) {
+		return ""
 	}
 	if free, known := freeBytes(a.dataDir()); !known || free < lowDiskBytes {
-		return hint
+		return ""
 	}
-	disk := sandboxDisk(statusDriver(context.WithoutCancel(ctx), api))
-	if disk == "" {
-		return hint
-	}
-	return "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by " + disk +
-		"; free some space in the sandbox, or raise that size for new sandboxes (`" + CommandName + " doctor` shows it)"
+	return sandboxDisk(statusDriver(context.WithoutCancel(ctx), api))
 }
 
 // diskFullHint names a full disk as the cause of a workspace failure (no

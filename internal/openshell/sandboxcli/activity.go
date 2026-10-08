@@ -218,6 +218,8 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		case ev.Category == sandboxapi.CategoryLargeUpload:
 			// The proxy's reason names the threshold the upload crossed.
 			b.WriteString(" (" + sandboxapi.LargeUploadBlockedText(ev.Reason) + ")")
+		case hostPortClosedWhy(ev) != "":
+			b.WriteString(": " + hostPortClosedWhy(ev))
 		case why != "":
 			b.WriteString(" (" + sandboxapi.BlockedText(why, ev.Host) + ")")
 		}
@@ -306,6 +308,22 @@ func largeUploadText(dest string, ev sandboxapi.ActivityEvent) string {
 // its port shows unless that is 443.
 func hostPort(ev sandboxapi.ActivityEvent) string {
 	return sandboxapi.HostPort(ev.Host, ev.Port)
+}
+
+// hostPortClosedWhy is the daemon's words for a refused port on this
+// machine (its line after "✗ host:port: "): why the port is closed and what
+// opens it, if anything. The reason token alone, "host port closed", read
+// the same for a port --host-port opens and for one DefenseClaw never opens
+// to a sandbox (its own API, the OpenShell gateway) (GAP-0356).
+func hostPortClosedWhy(ev sandboxapi.ActivityEvent) string {
+	if ev.Reason != sandboxapi.ReasonHostPortClosed {
+		return ""
+	}
+	why, _ := strings.CutPrefix(ev.Message, "✗ "+hostPort(ev)+": ")
+	if why == ev.Message {
+		return ""
+	}
+	return why
 }
 
 // ApprovalsOptions are the `sandbox approvals` flags.

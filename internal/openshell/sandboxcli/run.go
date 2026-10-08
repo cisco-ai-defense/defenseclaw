@@ -1460,15 +1460,39 @@ func (a *App) stageHint(err error, d openshell.Driver) string {
 // discardStagedCopy removes the copy staged for a sandbox the daemon did
 // not create, unless a sandbox of that name exists (its copy is not this
 // run's to remove).
+//
+// A create a Ctrl-C cut off is rolled back by the daemon a moment later,
+// and a sandbox of the name reads as creating meanwhile: the discard waits
+// for it, up to discardWait, or the stage outlived it as leftover data that
+// teardown listed (GAP-0360).
 func (a *App) discardStagedCopy(ctx context.Context, api API, name string) {
 	ctx = context.WithoutCancel(ctx)
-	if _, err := api.Get(ctx, name); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-		return
+	for waited := time.Duration(0); ; waited += discardInterval {
+		sb, err := api.Get(ctx, name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			break
+		}
+		if err != nil || !passingPhase(sb.Phase) || waited >= discardWait {
+			return
+		}
+		if waited == 0 {
+			a.note("waiting for the daemon to undo the create of " + name + " before removing its staged copy…")
+		}
+		if a.Sleep(ctx, discardInterval) != nil {
+			return
+		}
 	}
 	if err := a.Workspace.Discard(a.dataDir(), name); err != nil {
 		a.warn("could not remove the staged copy of " + name + ": " + err.Error())
 	}
 }
+
+// discardWait and discardInterval pace discardStagedCopy's wait for a
+// create the daemon rolls back.
+const (
+	discardWait     = 30 * time.Second
+	discardInterval = time.Second
+)
 
 // copyStageOptions stages flags.Project for sandbox name with the effective
 // workspace policy: masks, exceptions, history depth and the size cap.

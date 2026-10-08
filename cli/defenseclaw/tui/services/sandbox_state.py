@@ -494,6 +494,9 @@ class SandboxRow:
     hooks_unreachable: bool = False
     unreachable_reason: str = ""
     ingress_refused: int = 0
+    # OpenShell refused the session's requests because its conversation holds
+    # a credential placeholder (GAP-0354): a new conversation is the way on.
+    placeholder_refused: bool = False
     # Hook posts DefenseClaw answered with an error (a refused route, the
     # rate limit): each failed closed, so the harness did not do it.
     hook_failed: int = 0
@@ -586,6 +589,11 @@ class SandboxRow:
             out.append(f"{HOOKS_UNREACHABLE_WARNING}{why}. Run: defenseclaw sandbox doctor")
         elif self.ingress_refused:
             out.append(f"OpenShell refused {self.ingress_refused} hook request(s) to DefenseClaw")
+        if self.placeholder_refused:
+            out.append(
+                "OpenShell refuses this conversation's requests: it holds a sandbox credential placeholder; "
+                f"start a new conversation (defenseclaw sandbox connect {self.name}, without --continue)"
+            )
         if self.hook_failed:
             out.append(self.hook_failure_alert)
         if self.hooks_silent:
@@ -695,6 +703,7 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         hooks_unreachable=bool(hooks.get("unreachable")),
         unreachable_reason=_text(hooks.get("unreachable_reason")),
         ingress_refused=_int(hooks.get("ingress_refused")),
+        placeholder_refused=bool(hooks.get("placeholder_refused_at")),
         hook_failed=_int(hooks.get("hook_failed")),
         last_hook_failure=_text(hooks.get("last_hook_failure")),
         orphaned=bool(item.get("orphaned")),

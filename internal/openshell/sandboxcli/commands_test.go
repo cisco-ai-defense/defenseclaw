@@ -50,9 +50,11 @@ import (
 func TestListAndStatus(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("b-box"))
 	ta.daemon.add(sampleSandbox("a-box"))
+	// GAP-0359: a profile other than its pack's names the pack as such.
+	ta.daemon.edit("b-box", func(sb *sandboxapi.Sandbox) { sb.Pack, sb.Profile = "open", "balanced" })
 	ta.ok(t, ta.List(bg, OutputText))
 	out := ta.output()
-	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m")
+	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m", "balanced (pack open)")
 	if strings.Index(out, "a-box") > strings.Index(out, "b-box") {
 		t.Fatalf("list is not sorted:\n%s", out)
 	}
@@ -973,6 +975,17 @@ func TestRunTailScript(t *testing.T) {
 	run("dangling link", runNoLog, "")
 	writeFile(t, filepath.Join(dir, "gone.log"), "one\ntwo\nthree\n")
 	run("with a log", 0, "two\nthree\n")
+}
+
+// GAP-0365: a pull a Ctrl-C interrupted says what it left and exits 130,
+// and the sandbox it started is stopped again.
+func TestAnInterruptedPullSaysWhatItLeft(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, pullErr: fmt.Errorf("workspace: receive the result bundle: openshell: %w", openshell.ErrInterrupted)}
+	wantExit(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}), exitInterrupted)
+	has(t, ta.output(), "interrupted: nothing was brought back, and the work is still in copybox (`defenseclaw sandbox pull copybox` reads it again)",
+		"stopped copybox again")
+	lacks(t, ta.output(), "exit -1")
 }
 
 func TestPullCopyModeToBranch(t *testing.T) {

@@ -77,9 +77,12 @@ func phaseText(sb sandboxapi.Sandbox) string {
 	return p
 }
 
+// profileText is the PROFILE cell: the profile the sandbox runs, and the
+// pack when it is another one, named as the pack: "balanced (open)" left the
+// reader to guess what the parenthesis held (GAP-0359).
 func profileText(sb sandboxapi.Sandbox) string {
 	if sb.Pack != "" && sb.Pack != sb.Profile {
-		return sb.Profile + " (" + sb.Pack + ")"
+		return sb.Profile + " (pack " + sb.Pack + ")"
 	}
 	return sb.Profile
 }
@@ -311,6 +314,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	if sb.Hooks.ModelKeyRejected != "" {
 		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
 	}
+	if at := sb.Hooks.PlaceholderRefusedAt; !at.IsZero() {
+		row("Conversation", a.style(sandboxapi.PlaceholderConversationText(sb.Name)+" (last refused "+at.Local().Format("15:04:05")+")", ansiRed))
+	}
 	failed := ""
 	if n := sb.Egress.UpstreamFailed; n > 0 {
 		// Allowed, and the host did not take them: an outage, not a block.
@@ -337,6 +343,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	for _, w := range sb.Warnings {
 		a.warn(w)
+	}
+	if !sb.UnflushedAt.IsZero() {
+		a.warn(sandboxapi.UnflushedText(sb.Name, sb.UnflushedAt))
 	}
 	if sb.Hooks.Unreachable {
 		a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
