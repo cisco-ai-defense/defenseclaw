@@ -1141,6 +1141,23 @@ def test_overview_config_reads_per_type_admission_actions() -> None:
     assert "mcp" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
 
 
+def test_overview_and_status_include_inherited_admission_actions() -> None:
+    from defenseclaw.commands.cmd_status import _scanner_overrides_summary
+    from defenseclaw.config import AdmissionConfig
+
+    cfg = _roster_config(lambda: ["codex"], _RosterGuardrail())
+    cfg.admission = AdmissionConfig()
+    cfg.admission.defaults.actions = {"high": "allow"}
+    overview = _overview_config(cfg)
+
+    for asset_type in ("mcp", "plugin"):
+        assert (asset_type, "HIGH", "install", "none") in overview.scanner_overrides
+    summary = OverviewPanelModel(overview, version="test").scanner_overrides_summary()
+    assert "mcp: HIGH" in summary
+    assert "plugin: HIGH" in summary
+    assert "verdict=allow" in summary
+    assert _scanner_overrides_summary(cfg) == summary
+
 def test_overview_body_renders_scanner_override_summary() -> None:
     cfg = OverviewConfig(
         data_dir="/tmp/dc",
