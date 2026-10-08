@@ -242,6 +242,7 @@ type profileRulePackRetry struct {
 	cfg     *config.Config
 	scope   rulePackScope
 	loaded  atomic.Pointer[compiledRulePackCategories]
+	pack    atomic.Pointer[guardrail.RulePack]
 
 	mu      sync.Mutex
 	lastErr string
@@ -271,6 +272,7 @@ func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories 
 		r.lastErr = err.Error()
 		return nil
 	}
+	r.pack.Store(rp)
 	r.loaded.Store(compiled)
 	fmt.Fprintf(os.Stderr, "[guardrail] profile %s: rule pack %s loaded; it did not load when the gateway started\n", r.profile, r.scope.key())
 	return compiled

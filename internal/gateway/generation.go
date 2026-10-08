@@ -45,7 +45,11 @@ type Generation struct {
 	// conn:<c>, prof:<p> or prof:<p>/<c>.
 	RulePacks map[string]*guardrail.RulePack
 	Profiles  *guardrailProfileSet
-	OPA       *policy.Prepared
+	// The hook judge is published with its policy so reload cannot pair a new
+	// judge gate with a nil or previous judge.
+	hookJudge      *LLMJudge
+	hookJudgeBound bool
+	OPA            *policy.Prepared
 	// Admission is keyed by config.AdmissionType* (skill, mcp, plugin, tool).
 	Admission   map[string]policy.CompiledAdmission
 	AssetPolicy *config.AssetPolicyConfig

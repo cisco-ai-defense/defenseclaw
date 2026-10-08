@@ -537,6 +537,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	router.SetRulePack(rp)
 	router.SetHealth(sidecar.health)
 	sidecar.setEventRouter(router)
+	bootGen.hookJudge, bootGen.hookJudgeBound = hookJudge, true
 	bootGen.Config = sidecar.publishConfig(cfg)
 	sidecar.publishGeneration(bootGen)
 	// Publish the process-global managed carve-out only after every fallible
@@ -2059,6 +2060,10 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		appliedCfg = s.publishConfig(&next)
 	}
 	nextGen.Config = appliedCfg
+	nextGen.hookJudge, nextGen.hookJudgeBound = s.sharedJudge(), true
+	if judgeChanged {
+		nextGen.hookJudge = nextJudge
+	}
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
 	if privateUpstreamsReload {

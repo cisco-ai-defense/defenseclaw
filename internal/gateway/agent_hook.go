@@ -438,8 +438,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withAgentHost(ctx, r.Header)
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
-		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {
-			a.hookJudge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
+		if judge := a.hookJudge.Load(); judge != nil && shouldResetToolJudgeSession(req) {
+			judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
 		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -2117,8 +2117,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if a.hookJudge != nil && isToolJudgeIntentEvent(req.HookEventName) {
-			a.hookJudge.ObserveSessionPrompt(ctx, req.Content)
+		if judge := a.hookJudge.Load(); judge != nil && isToolJudgeIntentEvent(req.HookEventName) {
+			judge.ObserveSessionPrompt(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):

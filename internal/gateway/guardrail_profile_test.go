@@ -606,6 +606,15 @@ rules:
     confidence: 0.99
     tags: [test]
 `)
+	writeRulePackFixtureFile(t, packDir, "suppressions.yaml", `version: 1
+pre_judge_strips: []
+finding_suppressions:
+  - id: PROFILE-SUPPRESSION
+    finding_pattern: "PROFILE-MARKER"
+    entity_pattern: "profile_marker_token"
+    reason: allowed in this profile
+tool_suppressions: []
+`)
 	for _, retry := range set.missing {
 		retry.mu.Lock()
 		retry.nextTry = time.Time{}
@@ -616,6 +625,13 @@ rules:
 	}
 	if note := set.pendingRulePackNote("strict", set.profiles["strict"].Config, "codex"); note != "" {
 		t.Fatalf("explain note = %q after the pack loaded", note)
+	}
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx = api.withGuardrailProfileDecision(ctx, "codex")
+	pack := api.connectorRulePack(ctx, "codex")
+	if pack == nil || pack.Suppressions == nil || len(pack.Suppressions.FindingSupps) != 1 ||
+		pack.Suppressions.FindingSupps[0].ID != "PROFILE-SUPPRESSION" {
+		t.Fatalf("retry did not supply the profile judge suppression: %+v", pack)
 	}
 }
 
