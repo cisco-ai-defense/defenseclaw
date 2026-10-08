@@ -333,6 +333,29 @@ func TestVerifyStartsTheApplyTriggerForAnInterruptedTransaction(t *testing.T) {
 	}
 }
 
+// GAP-0468: after a reset in a config transaction, status blamed a manual
+// edit of config.yaml and named a plain ensure; it now names the
+// interrupted transaction and the commands that finish it.
+func TestStatusNamesAnInterruptedTransactionInsteadOfAnEdit(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	snap, err := h.env.takeSnapshot("reset", []string{h.env.Layout.ConfigPath}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.env.savePending(&Pending{Action: ActionEnsure, StartedAt: "2026-10-08T00:10:00Z", SnapshotDir: snap.Dir, Phase: "activate"}); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, h.env.Layout.ConfigPath, strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Errors, codeVerify)
+	if !strings.Contains(got, "ensure that started at 2026-10-08T00:10:00Z was interrupted in its activate phase") || !strings.Contains(got, " repair` rolls it back") {
+		t.Fatalf("status does not name the interrupted transaction: %s", got)
+	}
+	if strings.Contains(got, "changed since it was applied") || strings.Contains(got, "was modified after install") {
+		t.Fatalf("status still blames an edit: %s", got)
+	}
+}
+
 func TestInstallRefusals(t *testing.T) {
 	h := newTestHost(t, "linux")
 	payload := h.payload("1.0.0")

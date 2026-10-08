@@ -72,7 +72,8 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
-	if pending, _ := env.loadPending(); pending != nil {
+	pending, _ := env.loadPending()
+	if pending != nil {
 		r.TransactionPending = true
 	}
 	if statusBusy {
@@ -136,6 +137,11 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			}
 		}
 	}
+	if pending != nil {
+		// Mid-transaction files differ from the record because the run was
+		// interrupted, not because someone edited them (GAP-0468).
+		problems = append([]string{env.interruptedTransactionProblem(pending)}, withoutTransactionDrift(problems)...)
+	}
 	// A problem either action finds makes the deployment unhealthy, and
 	// both exit 1 for it; status leaves out verify's stricter checks.
 	for _, problem := range problems {
@@ -153,6 +159,37 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddError(codeVerify, "a lifecycle transaction is pending; "+l.recoverPendingFromVerify(ctx))
 	}
 	return 0
+}
+
+// interruptedTransactionProblem names a transaction a reset or a killed run
+// left pending, and the commands that finish it.
+func (e *Env) interruptedTransactionProblem(pending *Pending) string {
+	action, phase, started := pending.Action, pending.Phase, pending.StartedAt
+	if action == "" {
+		action = "change"
+	}
+	if phase == "" {
+		phase = "unknown"
+	}
+	if started == "" {
+		started = "an unknown time"
+	}
+	return fmt.Sprintf("a lifecycle %s that started at %s was interrupted in its %s phase (a reset or a killed run), so files differ from the deployment record; "+
+		"`%s` rolls it back to the last committed deployment, and to apply the config it was applying run `%s --config <file>` again",
+		action, started, phase, e.lifecycleCommand("repair"), e.lifecycleCommand(ActionEnsure))
+}
+
+// withoutTransactionDrift drops the file and config drift an interrupted
+// transaction explains.
+func withoutTransactionDrift(problems []string) []string {
+	kept := problems[:0:0]
+	for _, problem := range problems {
+		if strings.HasSuffix(problem, " was modified after install") || strings.Contains(problem, "changed since it was applied") {
+			continue
+		}
+		kept = append(kept, problem)
+	}
+	return kept
 }
 
 // recoverPendingFromVerify starts the apply trigger for a transaction a
