@@ -151,6 +151,9 @@ type AssetPolicyInput struct {
 	// (NormalizeAssetName, GAP-0432). EvaluateAssetPolicy and
 	// AssetListDecision set it outside Secure Client.
 	unicodeNames bool
+	// Secure Client keeps the pre-v9 trimmed, case-insensitive connector
+	// comparison instead of matching connector aliases.
+	legacyConnectorMatch bool
 }
 
 type AssetPolicyDecision struct {
@@ -220,6 +223,7 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 		return out
 	}
 	in.unicodeNames = !c.SecureClientIntegration()
+	in.legacyConnectorMatch = c.SecureClientIntegration()
 	// The v9 lists replace audit.db operator actions and apply in every mode.
 	// Secure Client keeps the v8 evaluator's enabled and observe gates.
 	if !c.SecureClientIntegration() {
@@ -542,7 +546,11 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.Connector != "" {
 		hasConstraint = true
-		if !SameConnector(rule.Connector, in.Connector) {
+		if in.legacyConnectorMatch {
+			if !strings.EqualFold(strings.TrimSpace(rule.Connector), strings.TrimSpace(in.Connector)) {
+				return false
+			}
+		} else if !SameConnector(rule.Connector, in.Connector) {
 			return false
 		}
 	}

@@ -507,6 +507,29 @@ func TestSecureClientAssetPolicyDeniedRespectsMode(t *testing.T) {
 	}
 }
 
+func TestSecureClientAssetRuleConnectorKeepsLegacyNames(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}, AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeAction
+	cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: "reviewed", Connector: "claude-code"}}
+	in := AssetPolicyInput{TargetType: "skill", Name: "reviewed", Connector: "claudecode"}
+	if got := cfg.EvaluateAssetPolicy(in); got.Action != "allow" || got.Source != "default-allow" {
+		t.Fatalf("alias-scoped denial changed Secure Client decision: %+v", got)
+	}
+
+	cfg.AssetPolicy.Skill.Denied = nil
+	cfg.AssetPolicy.Skill.Allowed = []AssetPolicyRule{{Name: "reviewed", Connector: "claude-code"}}
+	cfg.AssetPolicy.Skill.Default = "deny"
+	if got := cfg.EvaluateAssetPolicy(in); got.Action != "block" || got.Source != "default-deny" {
+		t.Fatalf("alias-scoped allow changed Secure Client decision: %+v", got)
+	}
+
+	in.Connector = " CLAUDE-CODE "
+	if got := cfg.EvaluateAssetPolicy(in); got.Action != "allow" || got.Source != "admin-allow" {
+		t.Fatalf("legacy case and whitespace match lost: %+v", got)
+	}
+}
+
 func TestAllowPinCaseSibling(t *testing.T) {
 	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
 	cfg.AssetPolicy.Skill.Allowed = []AssetPolicyRule{{
