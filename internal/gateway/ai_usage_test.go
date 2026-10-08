@@ -224,6 +224,7 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 		inventory.AIDiscoveryOptions{
 			Enabled:                 true,
 			Mode:                    "enhanced",
+			ProcessInterval:         50 * time.Millisecond,
 			DataDir:                 filepath.Join(tmp, "data"),
 			HomeDir:                 home,
 			ScanRoots:               []string{home},
@@ -253,6 +254,15 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	scanCancel()
 	if err != nil {
 		t.Fatalf("ScanNow: %v", err)
+	}
+	// The process tick replaces the general snapshot while keeping the
+	// full scan's IDE inventory. The endpoint must name the latter.
+	deadline := time.Now().Add(10 * time.Second)
+	for svc.Snapshot().Summary.ScanID == report.Summary.ScanID && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if svc.Snapshot().Summary.ScanID == report.Summary.ScanID {
+		t.Fatal("process tick did not replace the general snapshot")
 	}
 	cancel()
 	select {
@@ -293,6 +303,7 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	w = httptest.NewRecorder()
 	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?limit=1", nil))
 	var page struct {
+		ScanID        string                       `json:"scan_id"`
 		Total         int                          `json:"total"`
 		NextCursor    string                       `json:"next_cursor"`
 		Counts        inventory.IDEInventoryCounts `json:"counts"`
@@ -302,7 +313,7 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != http.StatusOK {
 		t.Fatalf("ide-plugins = %d %s", w.Code, w.Body.String())
 	}
-	if page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
+	if page.ScanID != report.Summary.ScanID || page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
 		t.Fatalf("ide-plugins page = %s", w.Body.String())
 	}
 	w = httptest.NewRecorder()

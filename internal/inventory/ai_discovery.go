@@ -1855,6 +1855,9 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 	sortAISignals(out)
 	report := AIDiscoveryReport{Summary: summary, Signals: out}
 	report.IDEInventory = s.finishIDEInventory(stats.ideInventory, full, now)
+	if full && report.IDEInventory != nil {
+		report.IDEInventory.ScanID = scanID
+	}
 	// Best-effort SQL persistence of the scan + computed
 	// confidence snapshots. Failures are logged via stderr but
 	// never fail the scan: the JSON state file remains the

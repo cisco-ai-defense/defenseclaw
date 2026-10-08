@@ -213,9 +213,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	}
 	resp["installations"] = installs
 	resp["plugins"] = plugins[offset:end]
-	if snap := discovery.Snapshot(); snap.Summary.ScanID != "" {
-		resp["scan_id"] = snap.Summary.ScanID
-	}
+	resp["scan_id"] = inv.ScanID
 	a.writeJSON(w, http.StatusOK, resp)
 }
 
