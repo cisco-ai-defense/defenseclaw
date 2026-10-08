@@ -502,6 +502,11 @@ class SandboxRow:
     # rate limit): each failed closed, so the harness did not do it.
     hook_failed: int = 0
     last_hook_failure: str = ""
+    # The last failure was a hook post of a conversation OpenShell refuses for
+    # its credential placeholder, not DefenseClaw's answer; hooks_answered_at
+    # is the first verdict after it (GAP-0377).
+    hook_failure_placeholder: bool = False
+    hooks_answered_at: datetime | None = None
     orphaned: bool = False
     undo_available: bool = False
     # The user kept the last session's changes (the daemon's accept): the
@@ -576,7 +581,12 @@ class SandboxRow:
         else:
             line = f"{self.hook_failed} hook calls failed, so the harness's actions were blocked (hooks fail closed)"
             answered = "DefenseClaw last answered"
-        return line + (f"; {answered} {self.last_hook_failure}" if self.last_hook_failure else "")
+        if self.hook_failure_placeholder:
+            answered = "the last was a hook post of a conversation OpenShell refuses for its credential placeholder:"
+        line += f"; {answered} {self.last_hook_failure}" if self.last_hook_failure else ""
+        if self.hooks_answered_at:
+            line += f"; hooks answered again since {self.hooks_answered_at.astimezone().strftime('%H:%M:%S')}"
+        return line
 
     @property
     def alerts(self) -> tuple[str, ...]:
@@ -707,6 +717,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         placeholder_refused=bool(hooks.get("placeholder_refused_at")),
         hook_failed=_int(hooks.get("hook_failed")),
         last_hook_failure=_text(hooks.get("last_hook_failure")),
+        hook_failure_placeholder=_text(hooks.get("last_hook_failure_cause")) == "credential_placeholder_refused",
+        hooks_answered_at=_time(hooks.get("hooks_answered_at")),
         orphaned=bool(item.get("orphaned")),
         undo_available=bool(snapshot) and _time(snapshot.get("undone_at")) is None,
         undo_accepted=bool(snapshot) and _time(snapshot.get("accepted_at")) is not None,

@@ -37,6 +37,11 @@ var (
 	// their count. Folded for only blockCoalesceWindow, a retry loop with a
 	// few seconds between tries printed each try again (GAP-0329).
 	feedFoldWindow = time.Minute
+	// findingFoldWindow folds OpenShell's repeats of one finding of a
+	// sandbox's session (foldFinding): the first is recorded and shown at
+	// once, the repeats of the window only count, and the next one after it
+	// is recorded with their count.
+	findingFoldWindow = 10 * time.Minute
 	// sinkFlushInterval is how often folded refusals are recorded.
 	sinkFlushInterval = 2 * time.Second
 	// heldBackInterval is how often the counts of the events a sandbox's

@@ -105,6 +105,8 @@ type box struct {
 	// procs is the sandbox's process tree (processes.go), made once its
 	// process tree is on.
 	procs *procTree
+	// findings folds OpenShell's repeats of one finding (foldFinding).
+	findings map[string]*findingFold
 
 	hooks hookStats
 	// activeAt is the harness's latest activity and activeSince the start
@@ -234,6 +236,11 @@ type hookStats struct {
 	lastFailureAt   time.Time
 	failureNoticeAt time.Time
 	unnoticed       int64
+	// failureCause and answeredAt are what the status says of the last
+	// failure (sandboxapi.HookCoverage.LastHookFailureCause,
+	// HooksAnsweredAt; notePlaceholderFailureLocked, noteHookAnsweredLocked).
+	failureCause string
+	answeredAt   time.Time
 	// modelRejected says the model API rejected the sandbox's model
 	// credential, and how to hand it a fresh one; modelRejectedAt is the
 	// last rejection (observeModelAnswerLocked).
@@ -874,6 +881,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
+		LastHookFailureCause: b.hooks.failureCause, HooksAnsweredAt: b.hooks.answeredAt,
 		ModelKeyRejected: b.hooks.modelRejected, ModelKeyRejectedAt: b.hooks.modelRejectedAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,

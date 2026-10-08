@@ -376,6 +376,14 @@ type HookCoverage struct {
 	HookFailed        int64     `json:"hook_failed,omitempty"`
 	LastHookFailure   string    `json:"last_hook_failure,omitempty"`
 	LastHookFailureAt time.Time `json:"last_hook_failure_at,omitzero"`
+	// LastHookFailureCause is ReasonPlaceholderRefused when the last failure
+	// came as OpenShell refused the requests of a conversation that holds a
+	// credential placeholder (PlaceholderRefusedAt): a hook post of that
+	// conversation, not DefenseClaw refusing a hook. HooksAnsweredAt is
+	// DefenseClaw's first verdict after the last failure, outside such a
+	// conversation: the hooks work again.
+	LastHookFailureCause string    `json:"last_hook_failure_cause,omitempty"`
+	HooksAnsweredAt      time.Time `json:"hooks_answered_at,omitzero"`
 	// ModelKeyRejected says the model API rejected the sandbox's model
 	// credential (Claude Code's StopFailure hook reported it) and how to
 	// hand the sandbox a fresh key, until a turn ends normally or a start

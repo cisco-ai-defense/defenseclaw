@@ -2132,6 +2132,15 @@ def test_failed_hook_calls_are_an_alert() -> None:
         "DefenseClaw last answered HTTP 429 Too Many Requests"
     ) in row.alerts
     assert "hook errors" in row.alert_badge
+    # GAP-0377: a placeholder conversation's hook post is not DefenseClaw's answer.
+    held = decode_sandbox({**RUNNING, "hooks": {
+        "hook_failed": 2, "last_hook_failure": "HTTP 400 Bad Request",
+        "last_hook_failure_cause": "credential_placeholder_refused", "hooks_answered_at": "2026-10-08T18:26:02Z",
+    }})
+    assert "OpenShell refuses for its credential placeholder: HTTP 400 Bad Request; hooks answered again since" in (
+        held.hook_failure_alert
+    )
+    assert "DefenseClaw" not in held.hook_failure_alert
     one = decode_sandbox({**RUNNING, "hooks": {"hook_failed": 1}})
     assert "1 hook call failed, so the harness's action was blocked (hooks fail closed)" in one.alerts
     assert decode_sandbox(RUNNING).hook_failed == 0

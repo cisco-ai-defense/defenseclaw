@@ -1179,6 +1179,47 @@ func TestAPlaceholderRefusalIsNamed(t *testing.T) {
 	}
 }
 
+// GAP-0377: a hook post of a conversation that held a credential placeholder
+// failed (HTTP 400) as OpenShell refused the conversation's requests; status
+// read "DefenseClaw answered HTTP 400" and kept it after a new conversation
+// worked. The failure is marked as the conversation's, a verdict while the
+// conversation goes on does not say the hooks work again, and the first
+// verdict after a turn ended normally does. A failure on its own is not
+// marked, and the next verdict answers it.
+func TestAHookFailureOfAPlaceholderConversationIsNamed(t *testing.T) {
+	r := newReachEnv(t)
+	fail := func() { r.m.ObserveHookFailure(HookFailure{BindingID: r.binding.ID, SandboxName: r.name, Status: 400}) }
+	decide := func(event string) {
+		r.m.ObserveHookDecision(HookDecision{BindingID: r.binding.ID, SandboxName: r.name, Event: event, Action: "allow"})
+	}
+	fail()
+	r.advance(time.Second)
+	r.line("NET:TRAFFIC [HIGH] DENIED bedrock-mantle.us-east-1.api.aws:443 [reason:POST request body credential traffic denied for bedrock-mantle.us-east-1.api.aws:443]")
+	if h := r.hooks(); h.LastHookFailureCause != sandboxapi.ReasonPlaceholderRefused || !h.HooksAnsweredAt.IsZero() {
+		t.Fatalf("hooks = %+v, want the failure marked as the conversation's", h)
+	}
+	r.advance(time.Second)
+	decide("Notification")
+	if h := r.hooks(); !h.HooksAnsweredAt.IsZero() {
+		t.Fatalf("a verdict while the conversation goes on said the hooks work again at %v", h.HooksAnsweredAt)
+	}
+	r.advance(time.Second)
+	decide("Stop")
+	if h := r.hooks(); !h.HooksAnsweredAt.Equal(r.m.now()) || h.LastHookFailureCause != sandboxapi.ReasonPlaceholderRefused {
+		t.Fatalf("hooks after a turn ended normally = %+v", h)
+	}
+	r.advance(time.Minute)
+	fail()
+	if h := r.hooks(); h.LastHookFailureCause != "" || !h.HooksAnsweredAt.IsZero() {
+		t.Fatalf("a failure with no placeholder refusal near it = %+v", h)
+	}
+	r.advance(time.Second)
+	decide("UserPromptSubmit")
+	if h := r.hooks(); !h.HooksAnsweredAt.Equal(r.m.now()) {
+		t.Fatalf("the next verdict did not answer the failure: %+v", h)
+	}
+}
+
 // A hook connection cut by a policy reload (a HIGH alarm live) is no refusal
 // but an attempt: like an answered one, it is flagged only when no request
 // authenticates within the grace period. So is a mapping denial of the

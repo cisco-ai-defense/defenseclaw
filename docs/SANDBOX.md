@@ -2037,7 +2037,13 @@ Requests`). `sandbox list` ("4 calls, 1 blocked, 2 failed"), `sandbox status`
 hook call failed (blocked)") show them, and the feed gets a `hook.failed`
 entry at once and then at most one every 10 seconds per sandbox, summing up
 the failures in between. Tool calls and blocks count only verdicts, so a
-failed pre-tool hook is not among them.
+failed pre-tool hook is not among them. A failure within 5 seconds of
+OpenShell refusing a request that carried a credential placeholder is a hook
+post of that conversation (`last_hook_failure_cause:
+credential_placeholder_refused`), and the "Hook error" row says so instead of
+"DefenseClaw answered". `hooks_answered_at` is DefenseClaw's first verdict
+after the last failure, outside such a conversation, and the row adds "hooks
+answered again since".
 
 The hook coverage also counts the verdicts per hook event, under the name
 the harness sends (`PreToolUse`, `preToolUse`, `tool.execute.before`,

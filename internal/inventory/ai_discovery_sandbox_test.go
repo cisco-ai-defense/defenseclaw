@@ -272,8 +272,11 @@ func TestScanSandboxRootDatesSignalsByTheScanNotTheImage(t *testing.T) {
 				t.Errorf("shell history match last active %v, want none", sig.LastActiveAt)
 			}
 		case "process":
-			if sig.LastActiveAt == nil || !sig.LastActiveAt.Before(before) {
-				t.Errorf("process last active %v, want its start", sig.LastActiveAt)
+			// GAP-0392: a running process is active when it was read; its
+			// start stays in Runtime.
+			if sig.LastActiveAt == nil || sig.LastActiveAt.Before(before) || sig.Runtime == nil ||
+				sig.Runtime.StartedAt == nil || !sig.Runtime.StartedAt.Equal(started) {
+				t.Errorf("process last active %v, runtime %+v; want the scan's time and its start", sig.LastActiveAt, sig.Runtime)
 			}
 		default:
 			if sig.LastActiveAt == nil || sig.LastActiveAt.Before(before) {
