@@ -363,3 +363,20 @@ func TestHookJudge_DefaultTimeoutFitsSlowProviders(t *testing.T) {
 		}
 	}
 }
+
+// The generation publishes its judge with its config before legacy setters
+// finish, so an in-flight request must still judge under the new policy.
+func TestHookJudgeUsesGenerationJudgeDuringReload(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t, config.JudgeConfig{}, "regex_only", mock)
+	a.SetHookJudge(nil)
+	cfg := &config.Config{}
+	cfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}}
+	cfg.Guardrail.DetectionStrategy = "judge_first"
+	gen := &Generation{Config: cfg, hookJudge: &LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: mock, rp: &guardrail.RulePack{}}, hookJudgeBound: true}
+	a.generationSource = func() *Generation { return gen }
+	got := a.runHookJudge(t.Context(), "prompt", "prompt", "hermes", "hello there, lovely weather today", "", nil)
+	if got == nil || len(mock.captured) == 0 {
+		t.Fatal("new generation was served before its hook judge")
+	}
+}

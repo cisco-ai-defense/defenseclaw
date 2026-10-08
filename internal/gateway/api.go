@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -318,13 +319,14 @@ type APIServer struct {
 	// nil unless guardrail.judge.enabled; wired by the sidecar at
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
-	hookJudge *LLMJudge
+	hookJudge atomic.Pointer[LLMJudge]
 	// hookJudgeSem bounds concurrent hook-lane judge executions,
 	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
 	// the judge is skipped (fail-open to the regex/AID verdict)
 	// rather than queued — a queued hook would stall the agent past
 	// the hook scripts' curl --max-time budget.
-	hookJudgeSem chan struct{}
+	hookJudgeSem     chan struct{}
+	hookJudgeSemOnce sync.Once
 
 	// sandboxIngress is the OpenShell sandbox hook listener configured by
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
@@ -360,10 +362,7 @@ func (a *APIServer) SetCiscoInspector(c Inspector) {
 // guardrail.judge.hook_connectors. Pass nil to disable (the default
 // when guardrail.judge is off).
 func (a *APIServer) SetHookJudge(j *LLMJudge) {
-	a.hookJudge = j
-	if j != nil && a.hookJudgeSem == nil {
-		a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges)
-	}
+	a.hookJudge.Store(j)
 }
 
 // otlpPathTokenEntry holds only the last securely loaded value. Once the
