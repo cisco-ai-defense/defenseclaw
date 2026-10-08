@@ -560,8 +560,12 @@ enabled destination references is stored and passes the file checks in
 Otherwise it refuses the config, names the credential and the destination
 field, and keeps the running config. `enterprise secret remove` likewise
 refuses a credential that an enabled destination of the installed config
-still references, because the gateway could not start without it: remove
-the reference and apply the config first. To rotate a credential,
+still references, because the gateway could not start without it, and one
+that `enterprise.inspection.llm.credential` (or an enabled
+`enterprise.inspection.ai_defense.credential`) names, because the judge and
+the scanners would run without their key: remove the reference and apply the
+config first. On Windows, status and verify report `credential_missing`
+while the config names a credential that is not stored. To rotate a credential,
 run `enterprise secret set` again with the same name. Outside the standalone
 profile a credential reference never resolves, so a config with an enabled
 destination that uses one is refused.

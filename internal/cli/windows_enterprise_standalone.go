@@ -220,6 +220,9 @@ func runWindowsEnterprisePowerShell7(
 		if detail := windowsEnterpriseStderrCode(stderr.buffer.Bytes()); detail != "" {
 			return run, fmt.Errorf("%s (%w)", detail, runErr)
 		}
+		if detail := windowsEnterpriseExecutionPolicyRefusal(stderr.buffer.Bytes()); detail != "" {
+			return run, fmt.Errorf("%s (%w)", detail, runErr)
+		}
 		return run, runErr
 	}
 	return run, nil
@@ -289,6 +292,12 @@ func runWindowsEnterpriseStandaloneAction(
 	}
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+		if action == "status" || action == "verify" {
+			// The lifecycle never ran, so it changed nothing: report the
+			// recorded deployment and the service states instead of
+			// installed:false for a running deployment (GAP-0770).
+			applyWindowsEnterpriseRecordedDeployment(result)
+		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	if action == "uninstall" && windowsEnterpriseRecoveredFailedInstall(report) {
@@ -820,6 +829,7 @@ func applyWindowsEnterpriseInstallerReport(
 				message = text
 			}
 			message += windowsEnterprisePerUserDataDirNextStep(original, message)
+			message += windowsEnterpriseCommittedJournalNextStep(original, report.Installed)
 			message += windowsEnterpriseInvalidRuntimeBundleNextStep(original)
 			message += windowsEnterpriseMissingArtifactNextStep(original, opts != nil && strings.TrimSpace(opts.hookBinary) != "")
 		}
@@ -1615,6 +1625,7 @@ func finishWindowsEnterpriseStandalone(
 	applyWindowsStandaloneScannerRuntime(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
+	addWindowsEnterpriseAgentSessionWarnings(result)
 	if opts.localEnforcementEntriesIgnored > 0 {
 		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
 			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",
@@ -2125,6 +2136,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	statusReport, statusRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+		// Nothing ran: keep the recorded deployment in the result (GAP-0770).
+		applyWindowsEnterpriseRecordedDeployment(result)
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	plan, planErr := planWindowsEnterpriseEnsure(statusReport, opts, script)
@@ -2162,6 +2175,17 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// drift:config upgrade replaces the edited file instead.
 	if plan.Action == "upgrade" && plan.Reason != "drift:config" && windowsEnterpriseKeepsInstalledConfig(opts) {
 		if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
+	// A repair restarts the gateway on the installed config: refuse one whose
+	// rule packs the gateway would not load, before anything stops (GAP-0672).
+	if plan.Action == "repair" && plan.Reason == "verify_failed" {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
@@ -2208,6 +2232,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		cleanupManifest = cleanup
 		actionOpts.manifestPath = manifestPath
+		if err := windowsEnterpriseStandaloneProfilesPreflight(manifestPath); err != nil {
+			cleanup()
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
 	}
 	if cleanupManifest != nil {
 		defer cleanupManifest()
@@ -2290,6 +2319,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 					result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 					return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 				}
+			} else if !deferredActivation {
+				// The recovery rolled the deployment back and this release
+				// cannot finish the change it interrupted: say so and name the
+				// next step instead of a plain "repaired" (GAP-0767).
+				result.AddWarning("recovered_pending_transaction", windowsEnterpriseRolledBackMessage(followStatus.InstalledVersion))
 			}
 		}
 	}
@@ -2307,6 +2341,34 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterpriseStandaloneProfilesPreflight refuses a first install, in
+// seconds and before it changes anything, when a target profile holds a
+// .defenseclaw folder the install plan would refuse (a per-user install
+// left it). The refusal names the folder and the next step. Any other
+// inspection failure is left to the install, which reports it. Tests
+// replace it.
+var windowsEnterpriseStandaloneProfilesPreflight = func(manifestPath string) error {
+	manifest, _, err := loadWindowsTargetRuntimeManifest(manifestPath)
+	if err != nil {
+		return nil
+	}
+	return windowsEnterpriseProfilesPreflightRefusal(enterprisehooks.PreflightWindowsManagedRuntimeRoots(manifest))
+}
+
+// windowsEnterpriseProfilesPreflightRefusal turns the profile inspection
+// into the preflight refusal, or nil.
+func windowsEnterpriseProfilesPreflightRefusal(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		return nil
+	}
+	original := err.Error()
+	message := original
+	if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
+		message = text
+	}
+	return errors.New(message + windowsEnterprisePerUserDataDirNextStep(original, message) + " Nothing was changed.")
 }
 
 // planWindowsEnterpriseEnsure chooses the converging action from the

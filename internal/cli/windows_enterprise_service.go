@@ -452,6 +452,11 @@ func runWindowsEnterpriseLifecycle(
 			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
 		}
 	}
+	if windowsEnterpriseStandalone(opts) && action == "repair" {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
+		}
+	}
 	opts.resolvedInstaller = script
 	if action == "ensure" {
 		return runWindowsEnterpriseStandaloneEnsure(ctx, cmd, opts, script)

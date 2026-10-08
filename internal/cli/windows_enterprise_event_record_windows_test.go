@@ -158,3 +158,27 @@ func TestWindowsEnterpriseEventCheckRejectsAReusedRecord(t *testing.T) {
 		t.Fatalf("genuine entries report = %+v", report)
 	}
 }
+
+// GAP-0676: a purge that did not run as LocalSystem fails for the per-user
+// folders it left, but it removed the machine deployment, so the marker and
+// the Add/Remove Programs entry go with it; any other failure keeps them.
+func TestWindowsEnterprisePurgeRemovedMachineDeploymentDropsTheRegistration(t *testing.T) {
+	seam := windowsEnterpriseInstallRootGone
+	t.Cleanup(func() { windowsEnterpriseInstallRootGone = seam })
+	gone := true
+	windowsEnterpriseInstallRootGone = func() bool { return gone }
+	result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "1.0.951")
+	result.AddError("per_user_state_remaining", "--purge did not run as LocalSystem")
+	if !windowsEnterprisePurgeRemovedMachineDeployment(result) {
+		t.Fatal("a purge that removed the machine deployment keeps its registration")
+	}
+	gone = false
+	if windowsEnterprisePurgeRemovedMachineDeployment(result) {
+		t.Fatal("registration dropped while the install root exists")
+	}
+	gone = true
+	result.AddError("lifecycle_error", "the services could not be removed")
+	if windowsEnterprisePurgeRemovedMachineDeployment(result) {
+		t.Fatal("registration dropped after another uninstall failure")
+	}
+}
