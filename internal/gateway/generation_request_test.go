@@ -27,6 +27,7 @@ func TestPinnedGenerationDecidesARequestWhileReloadsPublish(t *testing.T) {
 	// GAP-0455: a reload published the next generation's digest before the
 	// enforcement components switched packs, so a record could carry one
 	// generation's digest for a decision another generation's rules made.
+	resetConnectorRuleCategories(t) // an earlier test may have registered codex rules
 	before := liveGeneration.Load()
 	t.Cleanup(func() { liveGeneration.Store(before) })
 	generations := [2]*Generation{

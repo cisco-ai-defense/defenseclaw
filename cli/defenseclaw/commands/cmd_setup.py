@@ -2863,13 +2863,13 @@ def _apply_scanner_llm_flags(llm, provider: str | None, model: str | None, base_
     server's URL.
     """
     if provider == "openai-compatible":
-        if not (base_url or llm.base_url):
+        if not base_url:
             raise click.UsageError("--llm-provider openai-compatible needs --llm-base-url")
         llm.provider = "openai"
     elif provider is not None:
         llm.provider = provider
-        if provider == "vllm" and not (base_url or llm.base_url):
-            base_url = _LOCAL_LLM_DEFAULT_BASE_URL["vllm"]
+        if base_url is None:
+            base_url = _LOCAL_LLM_DEFAULT_BASE_URL.get(provider, "")
     if model is not None:
         llm.model = model
     if base_url is not None:

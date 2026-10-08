@@ -1718,7 +1718,7 @@ def _build_skill_scanner(
         app.cfg,
         connector,
         pack_cache=pack_cache,
-        default_pack=True,
+        default_pack=not asset_lists.is_secure_client(app.cfg),
     )
 
 

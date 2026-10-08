@@ -402,10 +402,10 @@ func compileModules(modules map[string]string) error {
 		if parseErr != nil {
 			return fmt.Errorf("policy: parse %s: %w", name, parseErr)
 		}
-		if err := checkNoLegacyData(name, mod); err != nil {
-			return err
-		}
 		parsed[name] = mod
+	}
+	if err := checkNoLegacyData(parsed); err != nil {
+		return err
 	}
 
 	compiler := ast.NewCompiler()
@@ -416,36 +416,101 @@ func compileModules(modules map[string]string) error {
 	return nil
 }
 
-// checkNoLegacyData refuses an admission or guardrail module that reads
-// data.* outside data.defenseclaw: a pre-9 module that still expects
-// data.json (data.config, data.actions, data.guardrail, ...). Since 9 every
-// such value is evaluation input, so a stale module would see none of them
-// and fail open (admission "warning", guardrail "allow"); refusing it sends
-// the gateway to the config-driven fallback instead.
-func checkNoLegacyData(name string, mod *ast.Module) error {
-	if mod == nil || mod.Package == nil {
-		return nil
+// checkNoLegacyData refuses the bundle when the admission or guardrail
+// module, or a module they reach through a data.defenseclaw reference, reads
+// data.* outside data.defenseclaw: a pre-9 module or helper that still
+// expects data.json (data.config, data.actions, data.guardrail, ...). Since 9
+// every such value is evaluation input, so a stale read sees nothing and can
+// fail open; refusing the bundle selects the config-driven fallback. Modules
+// neither query reaches, such as policy tests or the firewall and audit
+// modules an upgraded 0.8 install keeps, cannot change a verdict.
+func checkNoLegacyData(modules map[string]*ast.Module) error {
+	names := make([]string, 0, len(modules))
+	for name := range modules {
+		names = append(names, name)
 	}
-	pkg := mod.Package.Path.String()
-	if pkg != admissionQuery && pkg != guardrailQuery {
-		return nil
+	sort.Strings(names)
+	reached := make(map[string]bool, len(names))
+	var queue []string
+	for _, name := range names {
+		if pkg := modules[name].Package.Path.String(); pkg == admissionQuery || pkg == guardrailQuery {
+			reached[name] = true
+			queue = append(queue, name)
+		}
 	}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		refs, legacy := moduleDataRefs(modules[name])
+		if legacy != "" {
+			return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
+				"(the data.json values moved into config.yaml); replace it with the shipped module "+
+				"(defenseclaw-gateway config migrate --to 9 refreshes it)", name, legacy)
+		}
+		for _, other := range names {
+			if reached[other] {
+				continue
+			}
+			for _, ref := range refs {
+				if dataRefOverlaps(ref, modules[other].Package.Path) {
+					reached[other] = true
+					queue = append(queue, other)
+					break
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// moduleDataRefs returns the data references in the imports and rules of mod
+// and the first one outside data.defenseclaw. The package clause names the
+// document of the module itself and a with target replaces a document for one
+// expression; neither reads one, so only a with value is inspected.
+func moduleDataRefs(mod *ast.Module) ([]ast.Ref, string) {
+	var refs []ast.Ref
 	var legacy string
-	ast.WalkRefs(mod, func(ref ast.Ref) bool {
-		if legacy != "" || len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
-			return legacy != ""
+	var walk *ast.GenericVisitor
+	walk = ast.NewGenericVisitor(func(node any) bool {
+		if legacy != "" {
+			return true
+		}
+		if with, ok := node.(*ast.With); ok {
+			walk.Walk(with.Value)
+			return true
+		}
+		ref, ok := node.(ast.Ref)
+		if !ok || len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
+			return false
 		}
 		if key, ok := ref[1].Value.(ast.String); ok && string(key) != "defenseclaw" {
 			legacy = "data." + string(key)
+			return true
 		}
-		return legacy != ""
+		refs = append(refs, ref)
+		return false
 	})
-	if legacy != "" {
-		return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
-			"(the data.json values moved into config.yaml); replace it with the shipped module "+
-			"(defenseclaw-gateway config migrate --to 9 refreshes it)", name, legacy)
+	for _, imp := range mod.Imports {
+		walk.Walk(imp)
 	}
-	return nil
+	for _, rule := range mod.Rules {
+		walk.Walk(rule)
+	}
+	return refs, legacy
+}
+
+// dataRefOverlaps reports whether ref can read the document of the package
+// at path: one is a prefix of the other, and a variable key matches any key.
+func dataRefOverlaps(ref, path ast.Ref) bool {
+	for i := 1; i < len(ref) && i < len(path); i++ {
+		if _, ok := ref[i].Value.(ast.String); !ok {
+			return true
+		}
+		if !ref[i].Equal(path[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func toMap(v interface{}) (map[string]interface{}, error) {

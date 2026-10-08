@@ -96,6 +96,17 @@ def test_protection_enable_and_disable_write_rules_keys(env) -> None:
     assert "next reload" in result.output or "isn't running" in result.output
 
 
+def test_scoped_disable_refuses_inherited_global_protection(env) -> None:
+    app, _root, writes = env
+    app.cfg.guardrail.rules = GuardrailRulesConfig(protections=[DB])
+    result = _run(app, "protection", "disable", DB, "--connector", "codex", "--json")
+    body = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert body["ok"] is False
+    assert "global" in body["message"] and "still active" in body["message"]
+    assert not writes
+
+
 def test_protection_list_reads_config(env) -> None:
     app, _root, _writes = env
     app.cfg.guardrail.rules = GuardrailRulesConfig(protections=[DB])

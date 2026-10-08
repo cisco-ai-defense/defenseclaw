@@ -570,7 +570,8 @@ tools:
   - filesystem.read
   - network.post
 install_state: quarantined` },
-      { id: 'skill-actions', label: 'config.yaml', language: 'yaml', source: `admission:
+      { id: 'skill-actions', label: 'config.yaml', language: 'yaml', source: `config_version: 9
+admission:
   skill:
     actions:
       critical:
@@ -600,9 +601,9 @@ install_state: quarantined` },
     steps: [
       step('skill-appears', 'Detect', 'A new skill appears in a configured connector directory.', 'skill-manifest', ['skill-detected'], [{ tabId: 'skill-manifest', start: 1, end: 5, tone: 'info' }]),
       step('skill-scan', 'Scan statically', 'Not on a block or allow list, so the watcher scans it in place: manifest, tool declarations, paths, and instructions.', 'skill-file', ['skill-detected', 'skill-first', 'skill-static'], [{ tabId: 'skill-file', start: 3, end: 6, tone: 'danger' }]),
-      step('skill-llm', 'Optional intent check', 'Optional LLM analysis evaluates instruction intent.', 'skill-actions', ['skill-static', 'skill-intent'], [{ tabId: 'skill-actions', start: 8, end: 8, tone: 'info' }]),
+      step('skill-llm', 'Optional intent check', 'Optional LLM analysis evaluates instruction intent.', 'skill-actions', ['skill-static', 'skill-intent'], [{ tabId: 'skill-actions', start: 9, end: 9, tone: 'info' }]),
       step('skill-score', 'Consolidate', 'Static and optional findings consolidate to CRITICAL.', 'skill-result', ['skill-intent', 'skill-critical'], [{ tabId: 'skill-result', start: 2, end: 4, tone: 'danger' }]),
-      step('skill-policy', 'Resolve policy', 'admission.skill.actions for CRITICAL: quarantine the files, disable runtime, block install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 1, end: 7, tone: 'danger' }]),
+      step('skill-policy', 'Resolve policy', 'admission.skill.actions for CRITICAL: quarantine the files, disable runtime, block install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 2, end: 8, tone: 'danger' }]),
       step('skill-quarantine', 'Quarantine', 'The watcher moves the skill out of the agent\'s skill folder into quarantine.', 'skill-manifest', ['skill-map'], [{ tabId: 'skill-manifest', start: 6, end: 6, tone: 'warning' }]),
       step('skill-record', 'Record', 'The final action and reason enter the audit trail.', 'skill-result', ['skill-map', 'skill-audit'], [{ tabId: 'skill-result', start: 4, end: 7, tone: 'success' }], 'skill-retained'),
     ],

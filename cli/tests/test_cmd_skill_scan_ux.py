@@ -126,6 +126,17 @@ class _SkillScanUXBase(unittest.TestCase):
 
 
 class TestSingleTargetUX(_SkillScanUXBase):
+    def test_secure_client_scanner_does_not_select_default_pack(self) -> None:
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+
+        with (
+            patch("defenseclaw.commands.cmd_skill.asset_lists.is_secure_client", return_value=True),
+            patch("defenseclaw.scanner.skill.SkillScannerWrapper"),
+            patch("defenseclaw.scanner.rulepack.maybe_wrap") as wrap,
+        ):
+            _build_skill_scanner(self.app, use_llm=False)
+        self.assertFalse(wrap.call_args.kwargs["default_pack"])
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_preamble_lists_categories_and_source(self, mock_cls, _mock_info) -> None:

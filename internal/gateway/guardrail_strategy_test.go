@@ -259,6 +259,11 @@ func TestInspectDispatch_RegexOnlyBlocks(t *testing.T) {
 }
 
 func TestInspectDispatch_RegexJudge_HighSignalAlertsWithoutPolicy(t *testing.T) {
+	// No published generation: an earlier test that started a gateway leaves
+	// its OPA module and thresholds live, which would decide instead.
+	previous := liveGeneration.Load()
+	liveGeneration.Store(nil)
+	t.Cleanup(func() { liveGeneration.Store(previous) })
 	inspector := NewGuardrailInspector("local", nil, nil)
 	inspector.SetDetectionStrategy("regex_judge", "", "", "", false)
 

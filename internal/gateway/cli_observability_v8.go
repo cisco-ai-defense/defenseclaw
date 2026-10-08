@@ -148,6 +148,10 @@ func (a *APIServer) handleCLIObservabilityV8(w http.ResponseWriter, r *http.Requ
 	}
 	request, err := decodeCLIObservabilityV8Request(r.Body)
 	if err != nil {
+		if cfg := a.decisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
+			http.Error(w, `{"error":"invalid canonical observability request"}`, http.StatusBadRequest)
+			return
+		}
 		// The reason is one of this file's fixed strings (never source
 		// payload text), so the CLI can tell the operator what was invalid.
 		body, _ := json.Marshal(map[string]string{

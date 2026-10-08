@@ -3830,7 +3830,8 @@ def protection() -> None:
 
     The gateway layers a scope's protection packs on its rule pack in memory
     (a pack's rules replace base rules with the same id). Global ones apply
-    to every connector. A pack asserts something about the connector's
+    to every connector; disable a global pack at the global scope. A pack
+    asserts something about the connector's
     environment (for example that its cloud credentials reach production);
     DefenseClaw takes that as the operator's word and never infers it from
     resource names.
@@ -3971,6 +3972,29 @@ def _change_protection(
     path = f"{_scope_key(connector_key, profile_name)}.rules.protections"
     with _config_lock(app, _fail):
         on_now = _listed_ids(_listed_now(app, path, _rule_ids(rules, "protections")))
+        if not enable:
+            wider_scopes = [("guardrail", "global", None, None)]
+            if connector_key:
+                wider_scopes.append(
+                    (_scope_key(connector_key, None), _scope_words(connector_key, None), connector_key, None)
+                )
+            if profile_name:
+                wider_scopes.append(
+                    (_scope_key(None, profile_name), _scope_words(None, profile_name), None, profile_name)
+                )
+            for wider_path, wider_words, wider_connector, wider_profile in wider_scopes:
+                if wider_path == _scope_key(connector_key, profile_name):
+                    continue
+                wider_rules = _scope_rules(app.cfg, wider_connector, wider_profile)
+                inherited = _listed_ids(
+                    _listed_now(app, f"{wider_path}.rules.protections", _rule_ids(wider_rules, "protections"))
+                )
+                if name in inherited:
+                    _fail(
+                        1,
+                        f"{pack.title} is still active for {where} because it is enabled at the "
+                        f"{wider_words} scope. Disable it there to turn it off; nothing was changed.",
+                    )
         if (name in on_now) == enable:
             state = "on" if enable else "off"
             _finish(

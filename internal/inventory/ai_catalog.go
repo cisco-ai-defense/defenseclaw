@@ -239,13 +239,13 @@ func CheckSignaturePackPins(cfg *config.Config) error {
 	if err != nil {
 		return nil // reported when the catalog loads
 	}
-	pins := pinnedDigests(cfg.AIDiscovery.SignaturePackDigests, home)
+	pins := pinnedDigests(cfg.AIDiscovery.SignaturePackDigests, home, !cfg.SecureClientIntegration())
 	for _, pack := range packs {
 		raw, err := readAISignaturePackBytes(pack, defaultMaxSignatureBytes)
 		if err != nil {
 			continue
 		}
-		if refusal := pinRefusal(pins[filepath.Clean(pack)], raw, true); refusal != "" {
+		if refusal := pinRefusal(pins[signaturePinPath(pack, !cfg.SecureClientIntegration())], raw, true); refusal != "" {
 			return &config.V8SemanticError{
 				Path:     "$.ai_discovery.signature_pack_digests",
 				Summary:  "signature pack " + pack + " would not load: " + refusal,
@@ -343,13 +343,13 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxSignatureBytes
 	}
-	pins := pinnedDigests(opts.PackDigests, opts.HomeDir)
+	pins := pinnedDigests(opts.PackDigests, opts.HomeDir, !opts.SecureClient)
 	for _, packPath := range packs {
 		raw, err := readAISignaturePackBytes(packPath, maxBytes)
 		if err != nil {
 			return nil, err
 		}
-		if refusal := pinRefusal(pins[filepath.Clean(packPath)], raw, opts.RequireDigests); refusal != "" {
+		if refusal := pinRefusal(pins[signaturePinPath(packPath, !opts.SecureClient)], raw, opts.RequireDigests); refusal != "" {
 			// A pack that is not the one the administrator pinned is not
 			// loaded; the rest of the catalog still is.
 			fmt.Fprintf(os.Stderr, "[ai-discovery] signature pack %s not loaded: %s\n", packPath, refusal)
@@ -410,18 +410,35 @@ func parseAISignatureCatalog(source string, raw []byte) ([]AISignature, error) {
 	return cat.Signatures, nil
 }
 
-// pinnedDigests keys ai_discovery.signature_pack_digests by cleaned,
-// home-expanded path.
-func pinnedDigests(pins map[string]string, home string) map[string]string {
+// pinnedDigests keys ai_discovery.signature_pack_digests by resolved path
+// outside Secure Client. Secure Client keeps the legacy cleaned-path lookup.
+func pinnedDigests(pins map[string]string, home string, resolve bool) map[string]string {
 	out := make(map[string]string, len(pins))
 	for path, digest := range pins {
 		path = strings.TrimSpace(path)
 		if strings.HasPrefix(path, "~/") && home != "" {
 			path = filepath.Join(home, path[2:])
 		}
-		out[filepath.Clean(path)] = strings.ToLower(strings.TrimSpace(digest))
+		out[signaturePinPath(path, resolve)] = strings.ToLower(strings.TrimSpace(digest))
 	}
 	return out
+}
+
+// signaturePinPath matches Python Path.resolve for existing pack files and
+// relative keys, including symlinked directories.
+func signaturePinPath(path string, resolve bool) string {
+	path = filepath.Clean(path)
+	if !resolve {
+		return path
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	return abs
 }
 
 // pinRefusal is why raw may not load under the pinned digest want ("" when

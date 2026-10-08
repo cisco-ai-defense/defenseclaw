@@ -267,13 +267,18 @@ var skillScannerEnvPassthrough = map[string]bool{
 
 var skillScannerEnvPassthroughPrefixes = []string{"AWS_", "AZURE_"}
 
+// Botocore reads endpoint_url from environment variables and shared AWS
+// profiles. Scans keep the credential chain but ignore both endpoint sources,
+// so only the resolved config judge can select a non-default endpoint.
+
 // scanEnv builds the scanner environment from config: the allowlisted
 // process variables plus the derived scanner settings. Nothing else from
 // the gateway's environment (SKILL_SCANNER_*, VIRUSTOTAL_*, AI_DEFENSE_*,
 // ENABLE_*_ANALYZER, ...) reaches the scanner.
 func (s *SkillScanner) scanEnv() []string {
 	env := make([]string, 0, 32)
-	derived := map[string]string{"NO_COLOR": "1", "TERM": "dumb"}
+	derived := map[string]string{"NO_COLOR": "1", "TERM": "dumb",
+		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true"}
 	if s.Config.UseLLM {
 		if j, ok := s.judge(); ok {
 			derived["SKILL_SCANNER_LLM_MODEL"] = j.model
@@ -296,6 +301,9 @@ func (s *SkillScanner) scanEnv() []string {
 			continue
 		}
 		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
+			continue
+		}
 		if v, set := derived[upper]; set && v != "" {
 			continue // config wins over the inherited value
 		}

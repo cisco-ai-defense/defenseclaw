@@ -400,8 +400,8 @@ func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectiveP
 
 // generationRulePacks is the rule-pack set a generation digests: the reload
 // preflight's (global, every enabled connector's and sandbox harness's
-// pack), else the boot set (global and the active pack) when a connector
-// pack fails, as boot tolerates.
+// pack), else the boot set with valid connector packs retained when one
+// connector pack fails, as boot tolerates.
 func generationRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) {
 	if candidate, err := preflightSidecarRulePacks(cfg); err == nil {
 		return candidate, nil
@@ -409,6 +409,9 @@ func generationRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) 
 	global, active, cache, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if candidate, err := preflightSidecarRulePacksWithCacheMode(cache, cfg, true); err == nil {
+		return candidate, nil
 	}
 	return &sidecarRulePackCandidate{cache: cache, global: global, active: active}, nil
 }

@@ -219,3 +219,19 @@ func TestFallbackVerdict_SecureClientKeepsThresholdOnlyAnswer(t *testing.T) {
 		t.Errorf("HIGH with HILT on = %q, want the 1.0 answer alert", got.Action)
 	}
 }
+
+// A Cisco verdict excluded by the local trust policy cannot supply reported findings.
+func TestFallbackVerdictExcludesUntrustedCiscoMetadata(t *testing.T) {
+	cfg := &config.Config{}
+	previous := liveGeneration.Load()
+	liveGeneration.Store(&Generation{Config: cfg})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	local := &ScanVerdict{Action: "allow", Severity: "NONE"}
+	merged := &ScanVerdict{Action: "block", Severity: "CRITICAL", Findings: []string{"cloud-only"}}
+	cisco := &ScanVerdict{Action: "block", Severity: "CRITICAL", Findings: []string{"cloud-only"}}
+	thresholds := policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium, CiscoTrustLevel: "none"}
+	got := NewGuardrailInspector("local", nil, nil).fallbackVerdict(t.Context(), local, merged, cisco, thresholds, "action")
+	if got.Action != "allow" || got.Severity != "NONE" || len(got.Findings) != 0 {
+		t.Fatalf("untrusted Cisco result leaked into fallback: %+v", got)
+	}
+}

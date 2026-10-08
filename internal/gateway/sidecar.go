@@ -276,7 +276,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// The connector packs a reload would compose are digested too, so the
 	// boot digest equals the one a reload or `policy digest` computes.
 	bootPacks := &sidecarRulePackCandidate{cache: startRulePacks, global: globalPack, active: rp}
-	if preflight, preflightErr := preflightSidecarRulePacksWithCache(startRulePacks, cfg); preflightErr == nil {
+	if preflight, preflightErr := preflightSidecarRulePacksWithCacheMode(startRulePacks, cfg, true); preflightErr == nil {
 		bootPacks.connectors = preflight.connectors
 	}
 	bootGen, err := buildGeneration(context.Background(), generationInputs{
@@ -618,6 +618,11 @@ func (s *Sidecar) publishGeneration(g *Generation) {
 	}
 	publishGeneration(g)
 	s.generation.Store(g)
+	// Sandbox and security-action records need the applied policy stamp even
+	// when the install watcher is disabled or has no directories to watch.
+	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return livePolicyDigestV8(), livePolicyGenerationV8()
+	})
 }
 
 // activeRulePackKey is the composed-pack key of the pack the shared scanners
@@ -1696,9 +1701,16 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 // rule packs cache already holds: the boot generation shares the cache of the
 // cold-start load, which read the same files a moment before (GAP-0264).
 func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *config.Config) (*sidecarRulePackCandidate, error) {
+	return preflightSidecarRulePacksWithCacheMode(cache, cfg, false)
+}
+
+// Boot isolates invalid connector packs so valid peers remain available.
+// Reload remains atomic and rejects the entire candidate on any error.
+func preflightSidecarRulePacksWithCacheMode(cache *guardrail.RulePackCache, cfg *config.Config, boot bool) (*sidecarRulePackCandidate, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config reload rule pack candidate is unavailable")
 	}
+	boot = boot && !cfg.SecureClientIntegration()
 	global, err := loadGlobalRulePack(cache, cfg, "global")
 	if err != nil {
 		return nil, err
@@ -1721,7 +1733,11 @@ func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *con
 			}
 			rp, loadErr := loadConnectorRulePack(cache, cfg, name, "connector "+name)
 			if loadErr != nil {
-				return nil, loadErr
+				if !boot {
+					return nil, loadErr
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid connector rule pack: %v\n", loadErr)
+				continue
 			}
 			candidate.connectors[name] = rp
 			enabledManual = append(enabledManual, name)
@@ -1735,7 +1751,11 @@ func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *con
 	for _, name := range sandboxHarnessRulePackConnectors(cfg) {
 		rp, loadErr := loadSandboxHarnessRulePack(cache, cfg, name)
 		if loadErr != nil {
-			return nil, loadErr
+			if !boot {
+				return nil, loadErr
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid sandbox harness rule pack: %v\n", loadErr)
+			continue
 		}
 		candidate.connectors[name] = rp
 	}
@@ -1746,7 +1766,10 @@ func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *con
 		// connector entry currently names it.
 		if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
 			if _, loadErr := loadScopedRulePack(cache, cfg, overlay, "application protection"); loadErr != nil {
-				return nil, loadErr
+				if !boot {
+					return nil, loadErr
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid application protection rule pack: %v\n", loadErr)
 			}
 		}
 		autoNames := make(map[string]struct{}, len(cfg.ApplicationProtection.Connectors)+len(cfg.ApplicationProtection.IncludeConnectors))
@@ -1767,7 +1790,10 @@ func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *con
 				continue
 			}
 			if _, loadErr := loadConnectorRulePack(cache, cfg, name, "application protection connector "+name); loadErr != nil {
-				return nil, loadErr
+				if !boot {
+					return nil, loadErr
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid application protection connector rule pack: %v\n", loadErr)
 			}
 		}
 	}
@@ -1782,7 +1808,12 @@ func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *con
 	for name, rp := range candidate.connectors {
 		compiled, compileErr := compileRulePackCategories(rp)
 		if compileErr != nil {
-			return nil, fmt.Errorf("connector %s rule pack activation: %w", name, compileErr)
+			if !boot {
+				return nil, fmt.Errorf("connector %s rule pack activation: %w", name, compileErr)
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid connector rule pack activation for %s: %v\n", name, compileErr)
+			delete(candidate.connectors, name)
+			continue
 		}
 		candidate.connectorRules[name] = compiled
 	}
@@ -3688,9 +3719,6 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		return nil
 	})
 	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
-	})
-	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
 		return livePolicyDigestV8(), livePolicyGenerationV8()
 	})
 	if enrolled != nil {
