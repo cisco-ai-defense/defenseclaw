@@ -514,3 +514,16 @@ def test_secure_client_v8_scanner_defaults_stay_on_previous_policy(tmp_path, mon
     scanner = config_module.load(data_dir=str(tmp_path)).scanners.skill_scanner
     assert scanner.use_llm is False
     assert scanner.policy == "permissive"
+
+
+def test_secure_client_v8_plaintext_virustotal_key_is_resolved(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("VIRUSTOTAL_API_KEY", raising=False)
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\nenterprise: {profile: secure_client}\n"
+        "scanners: {skill_scanner: {use_virustotal: true, virustotal_api_key: sample-key}}\n"
+    )
+    scanner = config_module.load(data_dir=str(tmp_path)).scanners.skill_scanner
+    assert scanner.resolved_virustotal_api_key() == "sample-key"
