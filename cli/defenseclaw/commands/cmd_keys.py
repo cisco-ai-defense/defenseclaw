@@ -130,6 +130,26 @@ def required_removal_warning(cfg, env_name: str) -> str:
     marks such a key "● REQUIRED <feature>"; ``keys remove`` and the TUI
     confirm repeat that before the key is deleted.
     """
+    import yaml
+
+    from defenseclaw.config import config_path_for_data_dir
+
+    try:
+        with open(config_path_for_data_dir(cfg.data_dir), encoding="utf-8") as stream:
+            source = yaml.safe_load(stream) or {}
+        destinations = ((source.get("observability") or {}).get("destinations") or [])
+        for destination in destinations:
+            if isinstance(destination, dict) and env_name in (
+                destination.get("token_env"), destination.get("bearer_env")
+            ):
+                name = destination.get("name") or "this destination"
+                return (
+                    f"{env_name} is still used by observability destination {name}; removing it will stop "
+                    f"that destination until the key is restored. Remove the destination first with: "
+                    f"defenseclaw setup observability remove {name} --yes."
+                )
+    except (OSError, ValueError, AttributeError, yaml.YAMLError):
+        pass  # Best effort: removal still warns for credentials the registry marks required.
     try:
         statuses = classify(cfg)
     except Exception:  # noqa: BLE001 - a partial config must not block a remove.
