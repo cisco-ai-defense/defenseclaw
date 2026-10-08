@@ -215,6 +215,28 @@ func TestColdStartDefersMultiConnectorRulePacksToIsolatedSetup(t *testing.T) {
 	}
 }
 
+func TestColdStartKeepsValidConnectorPackWhenAnotherIsInvalid(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.RulePackDir = ""
+	validDir := installDefaultRulePackForDataDir(t, t.TempDir())
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {RulePackDir: validDir},
+		"codex":      {RulePackDir: invalidRulePackDir(t)},
+	}
+
+	candidate, err := generationRulePacks(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.connectors["claudecode"] == nil {
+		t.Fatal("valid connector pack was dropped by an invalid peer")
+	}
+	if candidate.connectors["codex"] != nil {
+		t.Fatal("invalid connector pack was published")
+	}
+}
+
 func TestRulePackCandidatePreflightChecksOnlyEnabledConnectorOverrides(t *testing.T) {
 	disabled := false
 	enabled := true

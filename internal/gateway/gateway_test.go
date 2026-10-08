@@ -3516,6 +3516,48 @@ func TestAPIEnforceAllowSkillReenablesRuntimeDisable(t *testing.T) {
 	}
 }
 
+func TestAPIEnforceAllowClearsConnectorScopedRuntimeDisable(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	api, _ := enforceTestAPI(t, "{}\n")
+	api.client = connectToMockGW(t, srv)
+	if err := api.store.SetActionFieldForConnector("skill", "blocked-skill", "codex", "runtime", "disable", "runtime blocked"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	api.handleEnforceAllow(w, httptest.NewRequest(http.MethodPost, "/enforce/allow",
+		bytes.NewBufferString(`{"target_type":"skill","target_name":"blocked-skill","connector":"Codex"}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if rpc := drainRPC(t, received); rpc.Method != "skills.update" {
+		t.Fatalf("runtime mutation = %q, want skills.update", rpc.Method)
+	}
+	disabled, err := api.store.HasActionForConnector("skill", "blocked-skill", "codex", "runtime", "disable")
+	if err != nil || disabled {
+		t.Fatalf("connector runtime disabled = %v, err = %v", disabled, err)
+	}
+
+	if err := api.store.SetActionFieldForConnector("plugin", "probe", "codex", "runtime", "disable", "runtime blocked"); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	api.handleEnforceAllow(w, httptest.NewRequest(http.MethodPost, "/enforce/allow",
+		bytes.NewBufferString(`{"target_type":"plugin","target_name":"probe-plugin","connector":"Codex"}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("plugin allow status = %d: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{"config.get", "config.patch"} {
+		if rpc := drainRPC(t, received); rpc.Method != want {
+			t.Fatalf("plugin runtime mutation = %q, want %s", rpc.Method, want)
+		}
+	}
+	disabled, err = api.store.HasActionForConnector("plugin", "probe", "codex", "runtime", "disable")
+	if err != nil || disabled {
+		t.Fatalf("plugin connector runtime disabled = %v, err = %v", disabled, err)
+	}
+}
+
 func TestAPIEnforceAllowWriterFailureKeepsSkillDisabled(t *testing.T) {
 	received := make(chan receivedRequest, 1)
 	srv := startMockGW(t, rpcRecordingLoop(received))
