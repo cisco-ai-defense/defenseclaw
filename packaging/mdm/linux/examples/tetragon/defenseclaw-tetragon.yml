@@ -18,13 +18,15 @@
   serial: "{{ defenseclaw_serial | default(5) }}"
   any_errors_fatal: true
   vars:
-    defenseclaw_version: "1.0.0"
+    # The release you deploy. It must include the Tetragon integration: it
+    # reads config_version 9 and enterprise.tetragon, which 1.0.0 refuses.
+    defenseclaw_version: "<version>"
     # SHA-256 values from the release's cosign-verified checksums.txt
     defenseclaw_pins:
-      defenseclaw-enterprise-1.0.0-linux-amd64.deb: "<sha256>"
-      defenseclaw-enterprise-1.0.0-linux-amd64.rpm: "<sha256>"
-      defenseclaw-enterprise-1.0.0-linux-arm64.deb: "<sha256>"
-      defenseclaw-enterprise-1.0.0-linux-arm64.rpm: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-amd64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-amd64.rpm: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.rpm: "<sha256>"
     defenseclaw_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
     defenseclaw_format: "{{ 'deb' if ansible_facts['pkg_mgr'] == 'apt' else 'rpm' }}"
     defenseclaw_package: "defenseclaw-enterprise-{{ defenseclaw_version }}-linux-{{ defenseclaw_arch }}.{{ defenseclaw_format }}"

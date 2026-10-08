@@ -56,7 +56,7 @@ How this fits with hooks, sandboxes and the egress proxy is on
 
 | Need | Detail |
 | --- | --- |
-| DefenseClaw | The standalone enterprise package installed with the [Linux configuration management recipes](/docs/enterprise/mdm/linux-config-management), or the lifecycle in [Linux](/docs/enterprise/linux). Users and agents enrolled |
+| DefenseClaw | The standalone enterprise package installed with the [Linux configuration management recipes](/docs/enterprise/mdm/linux-config-management), or the lifecycle in [Linux](/docs/enterprise/linux). Users and agents enrolled. The examples on this page need a release with the Tetragon integration: it reads `config_version: 9` and `enterprise.tetragon`. A computer that runs 1.0.0 refuses this config (`config_version_unsupported`), so upgrade it with its current config (`config_version: 8`) first, then push this one |
 | Tetragon | 1.7.x on RHEL 9 x86_64 supports `consume`, `observe` and `enforce`. 1.6.x supports `consume` only. Ubuntu 22.04 and 24.04 and arm64: `consume` only. All of these are expected to work and not verified yet. RHEL 8 (kernel 4.18) is not supported. Other versions fall back to `cn_proc` and `fanotify` and report `tetragon_unsupported_version` |
 | Kernel | `consume` works wherever Tetragon runs. `enforce` needs BPF LSM: `bpf` in the kernel's `lsm=` list |
 | Root | Every command below runs as root. The DefenseClaw binaries are not on `PATH`, so the commands spell out `/opt/defenseclaw/bin` |
@@ -296,13 +296,15 @@ variables go in `group_vars`, as the play's header shows.
   serial: "{{ defenseclaw_serial | default(5) }}"
   any_errors_fatal: true
   vars:
-    defenseclaw_version: "1.0.0"
+    # The release you deploy. It must include the Tetragon integration: it
+    # reads config_version 9 and enterprise.tetragon, which 1.0.0 refuses.
+    defenseclaw_version: "<version>"
     # SHA-256 values from the release's cosign-verified checksums.txt
     defenseclaw_pins:
-      defenseclaw-enterprise-1.0.0-linux-amd64.deb: "<sha256>"
-      defenseclaw-enterprise-1.0.0-linux-amd64.rpm: "<sha256>"
-      defenseclaw-enterprise-1.0.0-linux-arm64.deb: "<sha256>"
-      defenseclaw-enterprise-1.0.0-linux-arm64.rpm: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-amd64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-amd64.rpm: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.rpm: "<sha256>"
     defenseclaw_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
     defenseclaw_format: "{{ 'deb' if ansible_facts['pkg_mgr'] == 'apt' else 'rpm' }}"
     defenseclaw_package: "defenseclaw-enterprise-{{ defenseclaw_version }}-linux-{{ defenseclaw_arch }}.{{ defenseclaw_format }}"
