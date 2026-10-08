@@ -2750,19 +2750,32 @@ func loadConfigSourceChecked(
 
 	setDefaults(dataDir)
 
-	if err := viper.ReadConfig(bytes.NewReader(sourceBytes)); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "read_config")
-		}
-		return nil, fmt.Errorf("config: read %s: %w", configFile, err)
-	}
-
 	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "unmarshal")
+	read := false
+	if split := splitProfileSubtrees(sourceBytes); split != nil {
+		// Secure Client and a source the direct decode refuses keep the
+		// whole-source viper read.
+		if read = split.load(&cfg) && !resolvesToSecureClient(&cfg, pinnedDeploymentMode); !read {
+			cfg = Config{}
+			viper.Reset()
+			viper.SetConfigFile(configFile)
+			viper.SetConfigType("yaml")
+			setDefaults(dataDir)
 		}
-		return nil, fmt.Errorf("config: unmarshal: %w", err)
+	}
+	if !read {
+		if err := viper.ReadConfig(bytes.NewReader(sourceBytes)); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "read_config")
+			}
+			return nil, fmt.Errorf("config: read %s: %w", configFile, err)
+		}
+		if err := viper.Unmarshal(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "unmarshal")
+			}
+			return nil, fmt.Errorf("config: unmarshal: %w", err)
+		}
 	}
 	foldV8ScannerKeys(&cfg)
 	cleanCustomPackPaths(&cfg)
@@ -2976,6 +2989,115 @@ func loadConfigSourceChecked(
 	}
 
 	return &cfg, nil
+}
+
+// profileSubtrees are the guardrail.profiles and guardrail.profile_assignments
+// values of a configuration source, taken from its shared parse, and the rest
+// of the document.
+type profileSubtrees struct {
+	rest        *yaml.Node
+	profiles    *yaml.Node
+	assignments *yaml.Node
+}
+
+// splitProfileSubtrees finds guardrail.profiles and
+// guardrail.profile_assignments in the shared parse of raw (sourceYAMLNode).
+// Viper flattened every key of every profile and assignment, looked each one
+// up again and mapstructure decoded them one by one: with 1,000 profiles that
+// was half of every config load, paid twice by gateway start (the start
+// command and the gateway) and by every command that loads the config
+// (GAP-0276). The load gives viper the rest of the document and decodes the
+// two values straight into their types. It returns nil, so viper reads the
+// whole source as before, unless both are plain values whose keys are all
+// lower case (viper lower-cases keys; the rule IDs under rules are restored
+// from the source either way).
+func splitProfileSubtrees(raw []byte) *profileSubtrees {
+	doc, err := sourceYAMLNode(raw)
+	if err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	root := doc.Content[0]
+	at := -1
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if strings.EqualFold(root.Content[i].Value, "guardrail") {
+			if at >= 0 || root.Content[i].Value != "guardrail" {
+				return nil
+			}
+			at = i + 1
+		}
+	}
+	if at < 0 || root.Content[at].Kind != yaml.MappingNode {
+		return nil
+	}
+	guardrail := root.Content[at]
+	split := &profileSubtrees{}
+	kept := make([]*yaml.Node, 0, len(guardrail.Content))
+	for i := 0; i+1 < len(guardrail.Content); i += 2 {
+		key, value := guardrail.Content[i].Value, guardrail.Content[i+1]
+		var slot **yaml.Node
+		switch {
+		case key == "profiles":
+			slot = &split.profiles
+		case key == "profile_assignments":
+			slot = &split.assignments
+		case strings.EqualFold(key, "profiles") || strings.EqualFold(key, "profile_assignments"):
+			return nil
+		default:
+			kept = append(kept, guardrail.Content[i], value)
+			continue
+		}
+		if *slot != nil || !lowerCaseYAMLKeys(value) {
+			return nil
+		}
+		*slot = value
+	}
+	if split.profiles == nil && split.assignments == nil {
+		return nil
+	}
+	restGuardrail, restRoot, rest := *guardrail, *root, *doc
+	restGuardrail.Content = kept
+	restRoot.Content = append([]*yaml.Node(nil), root.Content...)
+	restRoot.Content[at] = &restGuardrail
+	rest.Content = []*yaml.Node{&restRoot}
+	split.rest = &rest
+	return split
+}
+
+// lowerCaseYAMLKeys reports whether n holds no alias and every mapping key
+// under it, outside rules, is lower case.
+func lowerCaseYAMLKeys(n *yaml.Node) bool {
+	switch n.Kind {
+	case yaml.AliasNode:
+		return false
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i].Value
+			if key != strings.ToLower(key) || (key != "rules" && !lowerCaseYAMLKeys(n.Content[i+1])) {
+				return false
+			}
+		}
+	case yaml.SequenceNode:
+		for _, child := range n.Content {
+			if !lowerCaseYAMLKeys(child) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// load reads the rest of the document through viper into cfg and decodes the
+// profiles and assignments directly. false means the caller reads the whole
+// source through viper instead (a value viper decodes more leniently).
+func (s *profileSubtrees) load(cfg *Config) bool {
+	rest := map[string]any{}
+	if s.rest.Decode(&rest) != nil || viper.MergeConfigMap(rest) != nil || viper.Unmarshal(cfg) != nil {
+		return false
+	}
+	if s.profiles != nil && s.profiles.Decode(&cfg.Guardrail.Profiles) != nil {
+		return false
+	}
+	return s.assignments == nil || s.assignments.Decode(&cfg.Guardrail.ProfileAssignments) == nil
 }
 
 // restoreEmptyGuardrailProfiles preserves profile and connector override entries
