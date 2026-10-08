@@ -20,6 +20,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -298,5 +300,32 @@ func TestMCPFingerprintChangesWithRulePackFile(t *testing.T) {
 	}
 	if after := w.scannerFingerprint(evt); after == before {
 		t.Fatal("MCP fingerprint did not change with the rule-pack file")
+	}
+}
+
+func TestScannerVersionChangesAfterBinaryReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture requires Unix")
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "scanner")
+	write := func(version string) {
+		t.Helper()
+		next := binary + ".next"
+		if err := os.WriteFile(next, []byte("#!/bin/sh\nprintf '"+version+"\n'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(next, binary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &InstallWatcher{}
+	write("v1")
+	if got := w.scannerBinaryVersion(binary); got != "v1" {
+		t.Fatalf("first version = %q", got)
+	}
+	write("version-two")
+	if got := w.scannerBinaryVersion(binary); !strings.EqualFold(got, "version-two") {
+		t.Fatalf("replacement version = %q, want version-two", got)
 	}
 }

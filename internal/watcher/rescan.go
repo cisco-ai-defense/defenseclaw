@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1019,22 +1020,45 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// scannerBinaryVersion best-effort probes `<binary> --version` so the
-// fingerprint changes when the (external) scanner is upgraded independently of
-// DefenseClaw. Failures (missing binary, no --version support, timeout) are
-// non-fatal and yield "" so the rest of the fingerprint still applies.
+// scannerVersionCache retains a version only while the resolved binary's
+// identity, size, and modification time remain the same.
+type scannerVersionCache struct {
+	info    os.FileInfo
+	version string
+}
+
+// scannerBinaryVersion best-effort probes `<binary> --version`. Replacements
+// at the same path invalidate the cache, including binaries found on PATH.
 func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	binary = strings.TrimSpace(binary)
 	if binary == "" {
 		return ""
 	}
-	// One probe per binary for the watcher's life (a config change starts a
-	// new watcher): it was a Python start per admission and per cycle.
-	if cached, ok := w.binaryVersions.Load(binary); ok {
-		return cached.(string)
+	if w.cfg != nil && w.cfg.SecureClientIntegration() {
+		if cached, ok := w.binaryVersions.Load(binary); ok {
+			return cached.(string)
+		}
+		probed := w.probeScannerBinaryVersion(binary)
+		w.binaryVersions.Store(binary, probed)
+		return probed
 	}
-	probed := w.probeScannerBinaryVersion(binary)
-	w.binaryVersions.Store(binary, probed)
+	resolved, err := exec.LookPath(binary)
+	if err != nil {
+		return ""
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return ""
+	}
+	if cached, ok := w.binaryVersions.Load(binary); ok {
+		entry := cached.(scannerVersionCache)
+		if os.SameFile(entry.info, info) && entry.info.Size() == info.Size() &&
+			entry.info.ModTime().Equal(info.ModTime()) {
+			return entry.version
+		}
+	}
+	probed := w.probeScannerBinaryVersion(resolved)
+	w.binaryVersions.Store(binary, scannerVersionCache{info: info, version: probed})
 	return probed
 }
 
