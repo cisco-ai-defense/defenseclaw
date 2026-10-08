@@ -314,9 +314,11 @@ func profileRulePackDirs(cfg *config.Config, tuned []string) []string {
 	for _, name := range tuned {
 		add(cfg.EffectiveRulePackDirForConnector(name))
 	}
-	add(cfg.ApplicationProtection.Guardrail.RulePackDir)
-	for _, pc := range cfg.ApplicationProtection.Connectors {
-		add(pc.Guardrail.RulePackDir)
+	if cfg.ApplicationProtection.Enabled {
+		add(cfg.ApplicationProtection.Guardrail.RulePackDir)
+		for _, pc := range cfg.ApplicationProtection.Connectors {
+			add(pc.Guardrail.RulePackDir)
+		}
 	}
 	sort.Strings(dirs)
 	return dirs

@@ -533,11 +533,12 @@ rules:
     confidence: 0.99
     tags: [test]
 `)
+	disabledDir := filepath.Join(t.TempDir(), "disabled-app-protection-pack")
 	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
 	raw := func(strict string) []byte {
 		return []byte(fmt.Sprintf(
-			"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  profiles:\n    strict: %s\n    watch: {mode: observe}\n  profile_assignments:\n    - {profile: strict, match: {users: [\"1001\"]}}\n  default_profile: watch\nobservability: {}\n",
-			fixture.dataDir, strict,
+			"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  profiles:\n    strict: %s\n    watch: {mode: observe}\n  profile_assignments:\n    - {profile: strict, match: {users: [\"1001\"]}}\n  default_profile: watch\napplication_protection:\n  enabled: false\n  guardrail: {rule_pack_dir: %q}\n  connectors:\n    cursor: {guardrail: {rule_pack_dir: %q}}\nobservability: {}\n",
+			fixture.dataDir, strict, disabledDir, disabledDir,
 		))
 	}
 	oldRaw := raw(`{mode: action}`)
