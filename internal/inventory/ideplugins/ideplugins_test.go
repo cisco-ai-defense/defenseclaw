@@ -419,3 +419,22 @@ func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 		}
 	}
 }
+
+func TestZedDirectoryCapMarksPartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".local", "share", "zed", "extensions", "installed")
+	for i := 0; i <= zedMaxExtensions; i++ {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("extension-%04d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, inst := range Scan(home, "linux", Limits{}) {
+		if inst.Family == FamilyZed {
+			if len(inst.Plugins) != zedMaxExtensions || !inst.Partial {
+				t.Fatalf("Zed directory cap: plugins=%d partial=%v", len(inst.Plugins), inst.Partial)
+			}
+			return
+		}
+	}
+	t.Fatal("Zed installation missing")
+}
