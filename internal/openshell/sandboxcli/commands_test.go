@@ -573,6 +573,20 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	}
 }
 
+// A copy's review and pull said nothing of a MicroVM that went down without
+// a flush, which only `sandbox status` named: a write the MicroVM lost
+// leaves no file to flag, so the list read clean (GAP-0367).
+func TestACopysReviewNamesAnUnflushedStop(t *testing.T) {
+	sb := copySandbox("vmbox")
+	sb.UnflushedAt = time.Date(2026, 10, 8, 18, 31, 5, 0, time.UTC)
+	ta := newTestApp(t, "", sb)
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "vmbox"}))
+	has(t, ta.output(), "vmbox: 1 file changed", sandboxapi.UnflushedText("vmbox", sb.UnflushedAt))
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	lacks(t, ta.output(), "went down without")
+}
+
 // TestReviewKeepsAHostileFileNameOnOneLine (GAP-0291): a copy's review
 // printed a file name with a newline in it raw, so the name split into a
 // second line of the list a user trusts before bringing the work back. A

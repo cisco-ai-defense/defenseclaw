@@ -703,6 +703,12 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	for _, b := range res.Blocking {
 		a.warn(b)
 	}
+	if !sb.UnflushedAt.IsZero() {
+		// A write the MicroVM lost leaves no file for the review to flag:
+		// the pull and the review say what the status says, for whoever
+		// reads only them, after the feed scrolled past it (GAP-0367).
+		a.warn(sandboxapi.UnflushedText(sb.Name, sb.UnflushedAt))
+	}
 	nothing := func() error {
 		if stdout == nil {
 			return nil
