@@ -140,9 +140,19 @@ type enterpriseACPEnrollment struct {
 	client    string
 	agent     string
 	profile   string
-	// accountGone marks a --uid no account has any more: verify and revoke
-	// act on its service record only (GAP-0367).
+	// accountGone marks a --uid no account has any more, or a --sid with
+	// no profile on this computer: verify and revoke act on its service
+	// record only (GAP-0367).
 	accountGone bool
+}
+
+// enterpriseACPGoneAccount says what is gone of an accountGone enrollment's
+// account, and the selector that revokes it.
+func enterpriseACPGoneAccount(enrollment enterpriseACPEnrollment) (what, selector string) {
+	if sid := strings.TrimSpace(enrollment.target.sid); sid != "" {
+		return enrollment.principal + " has no profile on this computer any more", "--sid " + sid
+	}
+	return enrollment.principal + " no longer exists", fmt.Sprintf("--uid %d", enrollment.target.uid)
 }
 
 func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnrollment, error) {
@@ -224,6 +234,21 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 			return enterpriseACPEnrollment{
 				target:    enterpriseHookTarget{uid: enterpriseACPUID, gid: enterpriseACPGID},
 				principal: fmt.Sprintf("uid:%d", enterpriseACPUID), client: client, agent: agent, profile: profile,
+				accountGone: true,
+			}, nil
+		}
+	}
+	if !cfg.SecureClientIntegration() && runtime.GOOS == "windows" && !requireAuthorization &&
+		strings.TrimSpace(enterpriseACPSID) != "" && strings.TrimSpace(enterpriseACPUser) == "" && strings.TrimSpace(userHome) == "" {
+		// --sid alone names an account whose profile may be gone with it:
+		// verify and revoke act on its service record, as --uid does on
+		// Linux and macOS. The profile lookup used to fail, so no command
+		// could revoke the credential of a deleted account (GAP-0367).
+		sid := strings.ToUpper(strings.TrimSpace(enterpriseACPSID))
+		if _, profileErr := enterpriseHookSIDProfilePath(sid); errors.Is(profileErr, os.ErrNotExist) {
+			return enterpriseACPEnrollment{
+				target:    enterpriseHookTarget{uid: -1, gid: -1, sid: sid},
+				principal: "sid:" + sid, client: client, agent: agent, profile: profile,
 				accountGone: true,
 			}, nil
 		}
@@ -476,10 +501,11 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 		return enterpriseACPResult(cmd, nil, err)
 	}
 	if enrollment.accountGone {
+		what, selector := enterpriseACPGoneAccount(enrollment)
 		return enterpriseACPResult(cmd, nil, fmt.Errorf(
-			"enterprise acp: %s no longer exists, but its ACP enrollment for %s/%s in profile %s is still valid; revoke it with enterprise acp revoke --uid %d --client %s --agent %s --profile %s",
-			enrollment.principal, enrollment.client, enrollment.agent, enrollment.profile,
-			enrollment.target.uid, enrollment.client, enrollment.agent, enrollment.profile))
+			"enterprise acp: %s, but its ACP enrollment for %s/%s in profile %s is still valid; revoke it with enterprise acp revoke %s --client %s --agent %s --profile %s",
+			what, enrollment.client, enrollment.agent, enrollment.profile,
+			selector, enrollment.client, enrollment.agent, enrollment.profile))
 	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(enrollment.dataDir, enrollment.client, enrollment.agent)
 	if err != nil {
@@ -559,10 +585,11 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	if enrollment.accountGone {
 		// No account, so no home to clean.
+		what, _ := enterpriseACPGoneAccount(enrollment)
 		return enterpriseACPResult(cmd, enterpriseACPRevokePayload(map[string]any{
 			"ok": true, "principal": enrollment.principal, "client": enrollment.client,
 			"agent": enrollment.agent, "profile": enrollment.profile, "centrally_revoked": true,
-			"note": enrollment.principal + " no longer exists; its home was not touched",
+			"note": what + "; its home was not touched",
 		}, notFound), nil)
 	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(enrollment.dataDir, enrollment.client, enrollment.agent)
