@@ -320,6 +320,7 @@ func (s *scanner) listDir(dir string, limit int) []os.DirEntry {
 	}
 	f, err := os.Open(dir)
 	if err != nil {
+		s.full = true
 		return nil
 	}
 	defer f.Close()

@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -318,4 +319,28 @@ func withoutMachineIDEs(t *testing.T) {
 	previous := programFilesDirs
 	programFilesDirs = func() []string { return nil }
 	t.Cleanup(func() { programFilesDirs = previous })
+}
+
+func TestUserPluginCapPreservesLaterInstallationBaseline(t *testing.T) {
+	now := time.Now().UTC()
+	first := IDEInstallation{InstallID: "first", Family: ideplugins.FamilyVSCode, Product: "vscode", PathHash: hashPath("/first")}
+	later := IDEInstallation{InstallID: "later", Family: ideplugins.FamilyJetBrains, Product: "intellij", PathHash: hashPath("/later")}
+	inv := &IDEInventory{Scope: config.IDEInventoryAll, Installations: []IDEInstallation{first, later}}
+	for i := 0; i < MaxIDEPluginsPerUser; i++ {
+		inv.Plugins = append(inv.Plugins, IDEPlugin{Fingerprint: fmt.Sprintf("first-%d", i), InstallID: first.InstallID, Family: first.Family, Product: first.Product, PluginID: fmt.Sprintf("example.%d", i), Enabled: ideplugins.EnabledOn})
+	}
+	old := IDEPlugin{Fingerprint: "later-plugin", InstallID: later.InstallID, Family: later.Family, Product: later.Product, PluginID: "example.plugin", Enabled: ideplugins.EnabledOn}
+	inv.Plugins = append(inv.Plugins, old)
+	boundUserScanIDE(inv)
+	svc := &ContinuousDiscoveryService{ideBaseline: map[string]IDEPlugin{old.Fingerprint: old}, opts: AIDiscoveryOptions{IDEInventory: config.IDEInventoryAll}}
+	got := svc.finishIDEInventory(inv, true, now)
+	if len(got.Removed) != 0 || !got.Installations[1].Partial {
+		t.Fatalf("capped later installation: removed=%v partial=%v", got.Removed, got.Installations[1].Partial)
+	}
+	for _, p := range got.savedPlugins {
+		if p.Fingerprint == old.Fingerprint {
+			return
+		}
+	}
+	t.Fatal("later installation baseline missing from saved snapshot")
 }

@@ -5,6 +5,7 @@ package inventory
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -12,10 +13,11 @@ import (
 func TestMacOSPrivacySkipCarriesPreviousManifest(t *testing.T) {
 	oldOS, oldFDA := discoveryGOOS, macOSFullDiskAccess
 	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = oldOS, oldFDA })
-	discoveryGOOS = "linux"
-	macOSFullDiskAccess = func() bool { return false }
+	discoveryGOOS = "darwin"
+	macOSFullDiskAccess = func() bool { return true }
 	home := t.TempDir()
 	mustWrite(t, filepath.Join(home, "Documents", "project", "package.json"), `{"dependencies":{"ai":"^3.0.0"}}`)
+	mustWrite(t, filepath.Join(home, "work", "package.json"), `{"dependencies":{"ai":"^3.0.0"}}`)
 	catalog, err := LoadAISignatures()
 	if err != nil {
 		t.Fatal(err)
@@ -39,12 +41,15 @@ func TestMacOSPrivacySkipCarriesPreviousManifest(t *testing.T) {
 	if !found {
 		t.Fatal("first scan found no package manifest")
 	}
-	discoveryGOOS = "darwin"
+	if err := os.Remove(filepath.Join(home, "work", "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	macOSFullDiskAccess = func() bool { return false }
 	second, err := svc.runScan(context.Background(), true, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Summary.Result != "partial" || second.Summary.GoneSignals != 0 {
+	if second.Summary.Result != "partial" || second.Summary.GoneSignals != 1 {
 		t.Fatalf("privacy-skipped scan = %+v", second.Summary)
 	}
 }
