@@ -412,7 +412,15 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
   payload.
 - **Linux package installs.** To restore the binaries, reinstall the package:
   `sudo apt install --reinstall ./<package>.deb` or
-  `sudo dnf reinstall ./<package>.rpm`.
+  `sudo dnf reinstall ./<package>.rpm`. A power loss or reset during a
+  package upgrade can leave the binaries and units the package was writing
+  empty: `rpm -V defenseclaw-enterprise` flags them, the units show as masked,
+  and an empty `defenseclaw-gateway` prints nothing. Reinstall the package the
+  upgrade was installing, which also finishes the interrupted lifecycle
+  transaction (`recovered_interrupted_transaction`). The package flushes what
+  it unpacked to disk before its own install run starts, the MDM detection
+  script reports a host with empty binaries as not installed, and the MDM
+  wrapper reinstalls the same package version on such a host.
 - **Deleted accounts (Linux and macOS).** `repair` also removes the guardian
   targets of accounts that no longer exist. Otherwise they stay until the
   enumerator removes them, 10 to 15 minutes after the account is deleted:

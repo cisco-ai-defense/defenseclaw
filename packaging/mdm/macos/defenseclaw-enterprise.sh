@@ -353,6 +353,19 @@ dc_validate_args() {
     fi
 }
 
+# dc_binaries_damaged: the installed gateway or hook binary is empty, which
+# a power loss during a package upgrade leaves behind (GAP-0467). The same
+# package version then counts as not installed, so it is installed again.
+dc_binaries_damaged() {
+    bin_dir=$(dirname "$DC_GATEWAY")
+    for name in defenseclaw-gateway defenseclaw-hook; do
+        if [ -e "$bin_dir/$name" ] && [ ! -s "$bin_dir/$name" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 dc_layout() {
     if [ "$DC_SCRIPT_OS" = darwin ]; then
         DC_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
@@ -479,7 +492,7 @@ dc_install_package() {
             [ "$arch" = "$(dpkg --print-architecture)" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .deb is for $arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(dpkg-query -W -f='${Status} ${Version}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
-            if [ "$installed" = "install ok installed $version" ]; then
+            if [ "$installed" = "install ok installed $version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
                 if ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); then
@@ -502,16 +515,18 @@ dc_install_package() {
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
             dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
-            if [ "$installed" = "$version" ]; then
+            if [ "$installed" = "$version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
                 previous=""
+                replace=""
+                [ "$installed" != "$version" ] || replace=--replacepkgs
                 if rpm -q "$DC_LINUX_PACKAGE" >/dev/null 2>&1; then
                     previous=$(dc_package_release_version "$installed")
                 fi
                 # rpm -U refuses a downgrade, which keeps an older package
                 # from silently replacing a newer deployment.
-                if ! output=$(rpm -U --quiet "$file" 2>&1); then
+                if ! output=$(rpm -U --quiet $replace "$file" 2>&1); then
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
@@ -529,7 +544,7 @@ dc_install_package() {
             [ -n "$version" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the package does not contain $DC_MACOS_PACKAGE_ID"
             dc_require_product_version "$version"
             installed=$(pkgutil --pkg-info "$DC_MACOS_PACKAGE_ID" 2>/dev/null | sed -n 's/^version: //p')
-            if [ "$installed" = "$version" ]; then
+            if [ "$installed" = "$version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
                 if ! output=$(installer -pkg "$file" -target / 2>&1); then
@@ -719,6 +734,8 @@ dc_main() {
         gateway=$DC_PAYLOAD_GATEWAY
     elif ! dc_trusted_path "$gateway"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned"
+    elif dc_binaries_damaged; then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "the installed DefenseClaw binaries are empty, likely from a power loss during a package upgrade; run this script with the package as --source, or reinstall the package"
     fi
 
     # The credential is stored first: a config that references it (the AI
