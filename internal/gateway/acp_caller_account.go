@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/user"
 	"runtime"
 	"strconv"
 	"strings"
@@ -124,6 +123,17 @@ func (a *APIServer) acpCallerAccountRefusal(r *http.Request) string {
 	return ""
 }
 
+// writeACPSignedOtherAccountRefusal answers an ACP request whose valid
+// credential belongs to another account with a refusal signed by that
+// credential.
+func writeACPSignedOtherAccountRefusal(w http.ResponseWriter, r *http.Request, token, nonce string) {
+	body := []byte(`{"error":"unauthorized","code":"` + acp.RefusalOtherAccount + `"}` + "\n")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(acp.AuthResponseMACHeader, acp.HTTPResponseMAC(token, r.Header.Get(acp.AuthKeyIDHeader), nonce, http.StatusUnauthorized, body))
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write(body)
+}
+
 // withRevokedACPCredential names, on an authentication failure row no
 // kernel answer attributed (Windows), the account a revoked managed
 // credential was issued to, by the non-secret key ID the guard presented:
@@ -167,9 +177,10 @@ func (a *APIServer) withACPCallerAccount(ctx context.Context, r *http.Request) c
 	id := strconv.Itoa(uid)
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, id)
 	identity := AgentIdentityFromContext(ctx)
-	identity.UserID, identity.UserIDKind, identity.UserName = id, useridentity.KindPOSIXUID, ""
-	if account, lookupErr := user.LookupId(id); lookupErr == nil {
-		identity.UserName = sanitizeLLMEventUser(account.Username)
-	}
+	// The account database the hook socket uses names directory accounts
+	// too; os/user in this cgo-free build reads only /etc/passwd, so an AD
+	// borrower's row carried only its uid (GAP-0690).
+	identity.UserID, identity.UserIDKind = id, useridentity.KindPOSIXUID
+	identity.UserName = sanitizeLLMEventUser(userScopedIdentityName(id))
 	return ContextWithAgentIdentity(ctx, identity)
 }

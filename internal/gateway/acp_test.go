@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -515,8 +516,10 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := copiedEvaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err == nil {
-		t.Fatal("a bearer presented by another account was accepted")
+	if _, err := copiedEvaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); !errors.Is(err, acp.ErrCredentialOtherAccount) {
+		// The borrower is told whose credential it is, not "revoked"
+		// (GAP-0690).
+		t.Fatalf("a bearer presented by another account: err = %v, want ErrCredentialOtherAccount", err)
 	}
 	peer = 4301
 	unbound := evaluate("home:" + strings.Repeat("ab", 32))

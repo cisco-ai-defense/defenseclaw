@@ -555,6 +555,9 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 	case errors.Is(err, ErrACPDisabled):
 		return prefix + "the ACP guard is turned off (acp.enabled is false), so it was not delivered. " +
 			"Turn it on again with defenseclaw acp setup, or remove this editor entry."
+	case errors.Is(err, ErrCredentialOtherAccount):
+		return prefix + "the ACP credential this editor entry uses was issued to another account, not to you, " +
+			"so it was not delivered. Ask your administrator to enroll you for this editor and agent."
 	case errors.Is(err, ErrCredentialRejected) && opts.Managed:
 		return prefix + "the gateway did not accept this editor's ACP credential: your administrator may have revoked " +
 			"your access. It was not delivered. Contact your administrator."
@@ -579,7 +582,7 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 // after the refusal with an agent message in that prompt's session.
 func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg Message, err error, client io.Writer) {
 	if !s.peerProtocolFixes || direction != ClientToAgent || msg.Method != "session/prompt" ||
-		!(errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrACPDisabled)) {
+		!(errors.Is(err, ErrCredentialRejected) || errors.Is(err, ErrACPDisabled) || errors.Is(err, ErrCredentialOtherAccount)) {
 		return
 	}
 	session := promptSessionID(msg)
@@ -604,11 +607,16 @@ func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg
 	switch {
 	case errors.Is(err, ErrACPDisabled):
 		why = "ACP checking is switched off"
+	case errors.Is(err, ErrCredentialOtherAccount):
+		why = "the ACP credential this editor entry uses was issued to another account"
 	case opts.Managed:
 		why = "the gateway did not accept this editor's ACP credential (your administrator may have revoked your access)"
 	}
 	next := "Contact your administrator."
-	if !opts.Managed && opts.SetupCommand != "" {
+	switch {
+	case errors.Is(err, ErrCredentialOtherAccount):
+		next = "Ask your administrator to enroll you for this editor and agent."
+	case !opts.Managed && opts.SetupCommand != "":
 		next = "Run '" + opts.SetupCommand + "' again."
 	}
 	_, _ = client.Write(agentMessageChunk(session, "DefenseClaw is not checking this session: "+why+
@@ -748,7 +756,8 @@ func logf(w io.Writer, format string, args ...any) {
 // timeout on a busy host) ended the whole agent session (GAP-1834).
 func evaluate(ctx context.Context, opts ProxyOptions, in Evaluation) (Verdict, error) {
 	verdict, err := opts.Evaluator.Evaluate(ctx, in)
-	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || errors.Is(err, ErrBindingRefused) || ctx.Err() != nil {
+	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || errors.Is(err, ErrBindingRefused) ||
+		errors.Is(err, ErrCredentialOtherAccount) || ctx.Err() != nil {
 		return verdict, err
 	}
 	if errors.Is(err, ErrGatewayNotReady) {

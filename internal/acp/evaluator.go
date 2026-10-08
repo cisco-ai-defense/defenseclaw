@@ -71,6 +71,23 @@ func refusalName(value string) string {
 	return value
 }
 
+// ErrCredentialOtherAccount is an authenticated HTTP 401: the credential is
+// valid, but was issued to another account than the one running the guard.
+// It read as a revoked credential (GAP-0690).
+var ErrCredentialOtherAccount = errors.New("ACP credential was issued to another account")
+
+// RefusalOtherAccount is the code of that refusal.
+const RefusalOtherAccount = "acp_credential_other_account"
+
+// otherAccountRefusal reports a signed 401 that says the credential belongs
+// to another account.
+func otherAccountRefusal(status int, payload []byte) bool {
+	var refusal struct {
+		Code string `json:"code"`
+	}
+	return status == http.StatusUnauthorized && json.Unmarshal(payload, &refusal) == nil && refusal.Code == RefusalOtherAccount
+}
+
 // ErrACPDisabled is an authenticated HTTP 503 that says the ACP guard is
 // turned off in the configuration. It is also ErrGatewayNotReady, as it was.
 var ErrACPDisabled = errors.New("ACP guard is not enabled")
@@ -224,6 +241,9 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 	if resp.StatusCode == http.StatusConflict {
 		return Verdict{}, ErrModeMismatch
 	}
+	if otherAccountRefusal(resp.StatusCode, payload) {
+		return Verdict{}, ErrCredentialOtherAccount
+	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		var refusal struct {
 			Error string `json:"error"`
@@ -301,6 +321,9 @@ func (e *HTTPEvaluator) authenticateGateway(ctx context.Context, keyID string) (
 			return "", "", ErrCredentialRejected
 		}
 		return "", "", errors.New("ACP gateway challenge authentication failed")
+	}
+	if otherAccountRefusal(resp.StatusCode, payload) {
+		return "", "", ErrCredentialOtherAccount
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("ACP gateway challenge returned HTTP %d", resp.StatusCode)

@@ -3611,6 +3611,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
 				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
+				if reason == acpCallerAccountMismatchReason {
+					// The caller holds the credential, so the refusal can be
+					// signed and the guard can tell the borrower whose it is
+					// instead of "revoked" (GAP-0690).
+					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
+					return
+				}
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
