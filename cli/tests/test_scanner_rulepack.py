@@ -574,9 +574,11 @@ class TestWindowsRuntimeMCPScan(unittest.TestCase):
         clean = ScanResult(scanner="mcp-scanner", target=url, timestamp=datetime.now(timezone.utc), findings=[])
         pack = json.dumps({"dir": _write_pack(tmp), "rules": [{"disable": ["SEC-TOOL-ONLY"]}]})
         out = io.StringIO()
+        payload = json.dumps({"settings": {}, "rule_pack": json.loads(pack)})
         with (
             patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan", return_value=clean),
-            patch.object(sys, "argv", ["mcp-scan", "--settings", "{}", "--rule-pack", pack, url]),
+            patch.object(sys, "argv", ["mcp-scan", "--input-stdin", url]),
+            patch.object(sys, "stdin", io.StringIO(payload)),
             contextlib.redirect_stdout(out),
         ):
             exec(compile(script, "mcpScanScript", "exec"), {"__name__": "__main__"})
