@@ -701,18 +701,41 @@ per-user install:
   guardian removes the original as that user, after checking that it is in a
   watched folder and matches the copy. A folder that an administrator or a
   SYSTEM job copied into the profile, and so owns, is removed the same way,
-  as long as the user may delete it. For a signed-out user it uses an S4U
-  logon; a Microsoft Entra ID account has none, so the guardian removes the
-  folder when that user next signs in, and `hook-guardian.log` says so
-  (`deferred: ... removes the folder when that user next signs in`, then
-  `removed now that the user is signed in`). Two users with a skill or plugin
-  of the same name each get their own quarantine copy.
+  as long as the user may delete it. A user with a disconnected session
+  counts as signed in. For a signed-out user it uses an S4U logon: MSV1_0 for
+  a local account, Kerberos for an Active Directory account (by its user
+  principal name, through a domain controller). A Microsoft Entra ID account
+  has no S4U logon, and Windows can refuse one, for example when no domain
+  controller answers; the guardian then removes the folder when that user
+  next signs in. `hook-guardian.log` says why (`deferred: ... the owner of
+  <user> is signed out, and ...`, then `removed now that the user is signed
+  in`), and until then `enterprise windows status` and `verify` warn with
+  `asset_removal_deferred`. Two users with a skill or plugin of the same name
+  each get their own quarantine copy.
+- A scan that fails (the scanner exits, or the gateway service cannot read
+  the folder) blocks the asset and disables it at runtime, as a rejected
+  verdict does: a blocked MCP server's tool calls are refused and a blocked
+  skill does not load. A folder moved into a watched folder (`Move-Item` from
+  elsewhere in the profile) keeps the access list of where it came from,
+  which has no entry for the gateway service. The gateway asks the hook
+  guardian for read access, which adds, as the user, the entry the agent
+  folders carry, and scans the folder again.
+- A quarantine that cannot finish, for example because the disk is full,
+  leaves the asset blocked and disabled in place. The copy is staged as
+  `<name>.pending-<id>` beside its quarantine slot, and the stage is removed
+  when the copy fails. The gateway admits such an asset, and one it could not
+  scan, again after 2 minutes, then 4, and so on up to every 30 minutes, until
+  admission finishes. While the folder is still there, `enterprise windows
+  status` and `verify` warn with `asset_not_scanned` or
+  `asset_not_quarantined`, naming the account and the path.
 - With `gateway.watcher.<type>.take_action: false` a rejected asset is only
   recorded (`verdict=rejected (take_action disabled, no gateway action)`) and
   stays usable. When an `ensure` turns `take_action` back on, the first rescan
   admits each such asset again and blocks or quarantines it as for a new
   install. The `watcher-block` row ends with `rejected while take_action was
-  off, enforced once it was turned on`.
+  off, enforced once it was turned on`. Until then `enterprise windows status`
+  and `verify` warn with `asset_rejected_not_enforced` for a skill or plugin
+  still in its folder.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
   user adds goes through admission, usually within two minutes, also while a
@@ -756,6 +779,11 @@ per-user install:
   `claude mcp add` (any scope) reaches admission within about a minute.
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
+- Only the skill and plugin folders of the agents in each profile are
+  watched. Project folders (`<project>\.claude\skills`,
+  `<project>\.agents\skills`), inside or outside the profile, get no install
+  admission; the agent hooks still refuse a denied skill name there (see
+  [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
 - The audit rows of these scans name the user whose profile holds the asset:
   the `scan` and `scan-finding` rows carry `user.id` (the SID) and
   `defenseclaw.user.name`, the `scan` row ends with `judge=<model>` when the

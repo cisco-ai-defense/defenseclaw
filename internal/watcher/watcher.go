@@ -260,6 +260,9 @@ type InstallWatcher struct {
 	// movedOut are the paths whose asset admission quarantined or whose link
 	// it removed: they get no rescan baseline (forgetMovedAsset).
 	movedOut sync.Map
+	// admissionNotes are what an admission running on a path could not
+	// finish (an AdmissionIssue), for settleAdmissionIssue.
+	admissionNotes sync.Map
 	// fpMu guards a rescan cycle's fingerprint cache.
 	fpMu sync.Mutex
 
@@ -960,6 +963,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
+			// Admit again what a failed scan or quarantine left in place.
+			for _, issue := range w.state.dueIssues(time.Now(), AdmissionUnscanned, AdmissionNotQuarantined) {
+				w.queuePending(issue.Path)
+			}
 			w.processPending(ctx)
 		}
 	}
@@ -1190,6 +1197,8 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // When the OPA engine is available it delegates the verdict decision to
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
+	w.admissionNotes.Delete(evt.Path)
+	defer func() { w.settleAdmissionIssue(evt, res) }()
 	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
 		return AdmissionResult{
 			Event:   evt,
@@ -1304,6 +1313,17 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	if err == nil && !w.secureClientActive() {
 		err = scanner.JudgeFailure(result)
 	}
+	if err != nil && ctx.Err() == nil && !w.secureClientActive() {
+		if retry, unreadable := w.readableAfterGrant(evt); retry {
+			retryCtx, cancelRetry := context.WithTimeout(ctx, w.scanTimeout(evt))
+			defer cancelRetry()
+			if result, err = s.Scan(retryCtx, w.scanTargetFor(evt)); err == nil {
+				err = scanner.JudgeFailure(result)
+			}
+		} else if unreadable != "" {
+			err = fmt.Errorf("%s: %w", unreadable, err)
+		}
+	}
 	if err != nil && ctx.Err() != nil && !w.secureClientActive() {
 		// The watcher itself is stopping (a config reload restarts it, or
 		// the gateway stops), not the scanner failing: the scan was cut off
@@ -1331,10 +1351,16 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		// Treat scanner failures as fail-closed: enforce a block
 		// (which quarantines + disables per fallback policy) before
 		// surfacing the verdict to the sidecar.
-		reason := fmt.Sprintf("scanner failure (fail-closed): %v", err)
-		if w.secureClientActive() {
+		reason := scanFailureReason + err.Error()
+		secureClient := w.secureClientActive()
+		if secureClient {
 			w.enforceBlock(ctx, evt)
 		} else {
+			// Block and disable it at runtime as a rejected verdict does,
+			// before the move that may fail: a blocked MCP server stayed
+			// callable and a skill the gateway could not read or move
+			// still loaded (GAP-0662, GAP-0825).
+			w.recordScanFailureBlock(evt, targetType, reason)
 			// The reason goes on the quarantine record (skill info) and
 			// in an alert, not only in gateway.log (GAP-0376).
 			w.enforceBlockWith(ctx, evt, true, reason)
@@ -1354,8 +1380,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			Reason:        reason,
 			InstallAction: "block",
 		}
+		if !secureClient {
+			res.RuntimeAction = "block"
+		}
 		return res
 	}
+	w.releaseScanFailureBlock(evt, targetType)
 
 	// Phase 3: post-scan evaluation. Re-read the live config so a block or
 	// allow added while the scan was running wins.
@@ -1790,6 +1820,99 @@ func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	w.enforceBlockWith(ctx, evt, true, "")
 }
 
+// readableAfterGrant looks, after a skill or plugin scan failed, for an
+// entry of the folder the gateway may not read. It asks for read access
+// (enforce.GrantAssetRead: the hook guardian on a managed Windows computer)
+// and reports whether the folder is readable now, so the scan runs again;
+// otherwise it says what stays unreadable (GAP-0825).
+func (w *InstallWatcher) readableAfterGrant(evt InstallEvent) (bool, string) {
+	if (evt.Type != InstallSkill && evt.Type != InstallPlugin) || w.admitsLinkedAsset(evt.Path) {
+		return false, ""
+	}
+	denied := unreadableAssetEntry(addressablePath(evt.Path))
+	if denied == "" {
+		return false, ""
+	}
+	grantErr := enforce.GrantAssetRead(string(evt.Type), evt.Path)
+	if grantErr == nil {
+		if denied = unreadableAssetEntry(addressablePath(evt.Path)); denied == "" {
+			fmt.Fprintf(os.Stderr, "[watch] %s %s: the gateway could not read it; read access granted, scanning again\n", evt.Type, evt.Path)
+			return true, ""
+		}
+	}
+	why := "the gateway service cannot read " + denied +
+		" (a folder moved into a watched folder keeps the access list of where it came from)"
+	if grantErr != nil && !errors.Is(grantErr, enforce.ErrNoAssetReadGranter) {
+		why += "; read grant: " + grantErr.Error()
+	}
+	return false, why
+}
+
+// unreadableAssetEntry returns the first folder or file below root this
+// process may not read, or "" (after at most 4096 entries).
+func unreadableAssetEntry(root string) string {
+	seen, denied := 0, ""
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				denied = path
+				return filepath.SkipAll
+			}
+			return nil
+		}
+		if seen++; seen > 4096 {
+			return filepath.SkipAll
+		}
+		if entry.Type().IsRegular() {
+			file, openErr := os.Open(path)
+			if errors.Is(openErr, fs.ErrPermission) {
+				denied = path
+				return filepath.SkipAll
+			}
+			if openErr == nil {
+				_ = file.Close()
+			}
+		}
+		return nil
+	})
+	return denied
+}
+
+// scanFailureReason leads the journal reason of an asset blocked and
+// disabled because its scan failed; the next scan that succeeds releases
+// that block and its verdict decides (releaseScanFailureBlock).
+const scanFailureReason = "scanner failure (fail-closed): "
+
+// recordScanFailureBlock journals the install block and runtime disable of
+// an asset whose scan failed, for the connector that holds it.
+func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, reason string) {
+	if w.store == nil {
+		return
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", reason)
+	_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "runtime", "disable", reason)
+	_ = w.store.SetSourcePathForConnector(targetType, evt.Name, scope, evt.Path)
+}
+
+// releaseScanFailureBlock clears the block and runtime disable a failed scan
+// of this asset left, once a scan of it succeeds. The Secure Client profile
+// journals no such block.
+func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType string) {
+	if w.secureClientActive() || w.store == nil {
+		return
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	entry, err := w.store.GetActionForConnector(targetType, evt.Name, scope)
+	if err != nil || entry == nil || !strings.HasPrefix(entry.Reason, scanFailureReason) ||
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
+		return
+	}
+	for _, field := range []string{"runtime", "install"} {
+		_ = w.store.ClearActionFieldForConnector(targetType, evt.Name, scope, field)
+	}
+}
+
 // quarantineFailedReason and errLinkRemoved lead the journal reason of a
 // blocked asset the watcher could not move into quarantine storage, and of a
 // linked one it took out of the folder; skill list and skill info show them
@@ -1892,6 +2015,9 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 				fmt.Sprintf("type=%s restore in progress; physical files retained", evt.Type))
 			return nil
 		}
+	}
+	if !w.secureClientActive() {
+		enforce.RemoveStaleQuarantineStages(plan, record.ID)
 	}
 	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
 		// Roll back only an unmaterialized journal. A verified destination is
@@ -2184,11 +2310,12 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 		if entry.Actions.File != "" {
 			return false
 		}
-		// A block whose quarantine move failed, or whose link the watcher
-		// removed, was never restored by an operator: a copy that shows up
-		// again is quarantined (GAP-0394 keeps file=quarantine off the
-		// journal until the move succeeds).
-		if strings.HasPrefix(entry.Reason, quarantineFailedReason) || strings.HasPrefix(entry.Reason, errLinkRemoved.Error()) {
+		// A block whose quarantine move failed, whose link the watcher
+		// removed, or whose scan failed was never restored by an operator: a
+		// copy that shows up again is quarantined (GAP-0394 keeps
+		// file=quarantine off the journal until the move succeeds).
+		if strings.HasPrefix(entry.Reason, quarantineFailedReason) || strings.HasPrefix(entry.Reason, errLinkRemoved.Error()) ||
+			strings.HasPrefix(entry.Reason, scanFailureReason) {
 			return false
 		}
 		if entry.SourcePath != "" && sameWatcherPath(entry.SourcePath, evt.Path) {
@@ -2327,11 +2454,52 @@ func watcherPathAtOrBelow(path, root string) bool {
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
+// settleAdmissionIssue records what the admission of evt could not finish
+// (its scan failed, or its files could not be moved to quarantine), so the
+// watcher admits it again and status reports it, and a rejection take_action
+// left unenforced; a finished admission forgets the earlier problem
+// (GAP-0825, GAP-0826, GAP-0774). The Secure Client profile records none.
+func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionResult) {
+	noted, hasNote := w.admissionNotes.LoadAndDelete(evt.Path)
+	if res.Interrupted || w.secureClientActive() {
+		return
+	}
+	if _, err := os.Lstat(addressablePath(evt.Path)); err != nil && evt.Type != InstallMCP {
+		w.state.clearIssue(evt.Path) // moved to quarantine or removed
+		return
+	}
+	issue := AdmissionIssue{Type: string(evt.Type), Name: evt.Name, Path: evt.Path, Connector: w.eventConnector(evt)}
+	if owner, ok := w.ownerOf(evt.Path); ok {
+		issue.Account = owner.Name
+	}
+	switch {
+	case strings.HasPrefix(res.Reason, scanFailureReason):
+		issue.Kind, issue.Detail = AdmissionUnscanned, strings.TrimPrefix(res.Reason, scanFailureReason)
+	case hasNote:
+		note, _ := noted.(AdmissionIssue)
+		issue.Kind, issue.Detail = note.Kind, note.Detail
+	case res.Unenforced:
+		// Status reports it until take_action is on again and the rescan
+		// enforces it (GAP-0774).
+		issue.Kind = AdmissionNotEnforced
+		issue.Detail = fmt.Sprintf("%s findings while gateway.watcher.%s.take_action is false", res.MaxSeverity, evt.Type)
+	default:
+		w.state.clearIssue(evt.Path)
+		return
+	}
+	w.state.setIssue(issue)
+}
+
 // emitQuarantineFailure reports an asset the verdict blocked but the watcher
 // could not move: it stays in place, so besides the log line and the metric
 // the audit log records an enforcement failure the administrator can find
 // (GAP-0133).
 func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallEvent, err error) {
+	// A removal the hook guardian deferred to the user's next sign-in is the
+	// guardian's to finish; status reports it from the guardian's list.
+	if w != nil && !w.secureClientActive() && !errors.Is(err, enforce.ErrQuarantineRemovalDeferred) {
+		w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotQuarantined, Detail: err.Error()})
+	}
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
 		_ = w.logger.LogEventCtx(ctx, audit.Event{

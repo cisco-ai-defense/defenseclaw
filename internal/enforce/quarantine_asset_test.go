@@ -68,6 +68,39 @@ func TestAssetQuarantineAndRestorePreserveHashAndOwnership(t *testing.T) {
 	}
 }
 
+// GAP-0826: a quarantine copy that failed (the disk was full) could leave its
+// .pending stage beside the destination; the next attempt, under another
+// journal id, removes it first.
+func TestAssetQuarantineRemovesTheStageOfAnEarlierAttempt(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "skills")
+	source := filepath.Join(skillsRoot, "crit-k")
+	if err := os.MkdirAll(source, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte("marker\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := NewAssetQuarantinePlan(filepath.Join(root, "quarantine"), []string{skillsRoot}, "skill", "crit-k", "claudecode", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := plan.QuarantinePath + ".pending-rec-earlier"
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "pad6.dat"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	RemoveStaleQuarantineStages(plan, "rec-retry")
+	if err := ExecuteAssetQuarantine(plan, "rec-retry"); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("the earlier stage is still there: %v", err)
+	}
+}
+
 func TestAssetRestoreCompletesCrashWithBothVerifiedCopies(t *testing.T) {
 	root := t.TempDir()
 	skillsRoot := filepath.Join(root, "skills")
@@ -299,6 +332,10 @@ func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
 		!strings.Contains(result.Error, "deferred") {
 		t.Fatalf("deferred answer = %+v, %v", result, err)
 	}
+	// GAP-0795: the deferred request keeps why, for enterprise windows status.
+	if deferred := channel.DeferredRemovals(); len(deferred) != 1 || deferred[0].Deferred != "the owner is signed out" {
+		t.Fatalf("deferred removals %+v, want one saying why", deferred)
+	}
 	if err := os.Remove(requestPath); err != nil { // the gateway collected its answer
 		t.Fatal(err)
 	}
@@ -321,7 +358,7 @@ func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
 	channel.ServeDeferred(retry)
 	channel.ServeDeferred(retry)
 	channel.ServeDeferred(retry)
-	if retries != 3 {
+	if retries != 3 || len(channel.DeferredRemovals()) != 0 {
 		t.Fatalf("deferred removal ran %d times, want 3 (kept after transient error, dropped once removed)", retries)
 	}
 }

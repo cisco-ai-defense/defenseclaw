@@ -461,6 +461,15 @@ func resolveWindowsEnterpriseSignedInTargetToken(target *windows.SID) (windows.T
 	return resolveWindowsEnterpriseSessionToken(target, true)
 }
 
+// withWindowsEnterpriseSessionImpersonation is
+// withWindowsEnterpriseTargetImpersonation under the token of an active or
+// disconnected session: a disconnected user is still signed in. The guardian
+// deferred a quarantine removal for a user with a disconnected RDP session as
+// if that user were signed out (GAP-0795).
+func withWindowsEnterpriseSessionImpersonation(target *windows.SID, expectedHome string, fn func() error) error {
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseSignedInTargetTokenResolver, fn)
+}
+
 func resolveWindowsEnterpriseSessionToken(target *windows.SID, allowDisconnected bool) (windows.Token, error) {
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32

@@ -100,7 +100,9 @@ stays in place. When `take_action` is turned back on, the watcher restarts, and
 its first rescan runs admission again for each asset rejected while it was off
 and applies the actions, as for a new install. The `watcher-block` row ends
 with `rejected while take_action was off, enforced once it was turned on`. This
-needs the periodic rescan (`watch.rescan_enabled`, on by default).
+needs the periodic rescan (`watch.rescan_enabled`, on by default). Until then
+a managed computer's `status` and `verify` warn with
+`asset_rejected_not_enforced`.
 
 ## The admission block
 
@@ -512,6 +514,14 @@ working folder. Two things stay out of reach of a hook:
   own skill index before any hook runs;
 - a command that builds the path at run time, for example from a variable, a
   glob, or a `cd` into the skills folder followed by a relative path.
+
+Project skill folders (`<project>/.claude/skills`, `<project>/.agents/skills`)
+are not watched, so install admission never scans what they hold. The hooks
+cover them as they cover every other folder: a denied name is refused at the
+Skill call, the `$name` selection and the folder read, wherever the skill
+lives. With `runtime_detection.enabled: true`, `mode: action` and a
+`default: deny` or an approved registry, the Skill call and `$name` selection
+of any project skill that is not approved are refused too.
 
 Take a denied skill off the device to remove it from that index. Where the
 install watcher runs (per-user installs and managed Windows), a config change

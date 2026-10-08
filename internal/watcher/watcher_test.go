@@ -1298,6 +1298,136 @@ func TestScanCutOffByTheWatcherStoppingDoesNotQuarantine(t *testing.T) {
 	}
 }
 
+// failingScanner fails every scan the way a crashed scanner does.
+type failingScanner struct{ countingScanner }
+
+func (s *failingScanner) Scan(context.Context, string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return nil, fmt.Errorf("%s exited 1", s.name)
+}
+
+// GAP-0662, GAP-0825: a scan that fails blocks the asset and disables it at
+// runtime for its connector, as a rejected verdict does: the hook refuses a
+// blocked MCP server, and a skill the gateway could not move out does not
+// load. The next scan that succeeds releases it.
+func TestScanFailureDisablesTheAssetAtRuntime(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
+	evt := InstallEvent{Type: InstallMCP, Name: "notes", Path: "mcp:codex:notes", Connector: "codex", Timestamp: time.Now()}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked || res.RuntimeAction != "block" {
+		t.Fatalf("failed scan: result %+v, want blocked with a runtime block", res)
+	}
+	entry, err := store.GetActionForConnector("mcp", "notes", "codex")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" {
+		t.Fatalf("journal %+v (err %v), want install block and runtime disable for codex", entry, err)
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+	if res := w.runAdmission(context.Background(), evt); res.Verdict == VerdictBlocked {
+		t.Fatalf("clean scan: result %+v, want the block released", res)
+	}
+	if entry, err := store.GetActionForConnector("mcp", "notes", "codex"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
+		t.Fatalf("journal after a clean scan %+v (err %v), want no block", entry, err)
+	}
+}
+
+// readingScanner fails a scan of a folder it may not list, as the skill
+// scanner exits 1 on one the gateway service cannot read.
+type readingScanner struct{ countingScanner }
+
+func (s *readingScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	if _, err := os.ReadDir(target); err != nil {
+		return nil, err
+	}
+	return s.countingScanner.Scan(ctx, target)
+}
+
+// GAP-0825: a skill folder moved into a watched folder keeps the access list
+// of where it came from, so the gateway could not read it, the scan failed
+// and the CRITICAL skill stayed. The watcher asks for read access (the hook
+// guardian on a managed Windows computer) and scans again.
+func TestUnreadableSkillIsScannedAfterReadGrant(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions that bind the test user")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &readingScanner{countingScanner{name: "skill-scanner"}} }
+	moved := filepath.Join(skillDir, "moved-in")
+	if err := os.MkdirAll(moved, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(moved, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(moved, 0o700) })
+	grants := 0
+	enforce.SetAssetReadGranter(func(targetType, path string) error {
+		grants++
+		if targetType != "skill" || path != moved {
+			return fmt.Errorf("unexpected grant %s %s", targetType, path)
+		}
+		return os.Chmod(path, 0o700)
+	})
+	t.Cleanup(func() { enforce.SetAssetReadGranter(nil) })
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "moved-in", Path: moved, Timestamp: time.Now()})
+	if grants != 1 || res.Verdict == VerdictBlocked {
+		t.Fatalf("grants=%d result %+v, want one grant and the scan admitted", grants, res)
+	}
+}
+
+// GAP-0826: a quarantine that failed (the disk was full) left the CRITICAL
+// skill in its folder with nothing retrying it. The watcher records the
+// unfinished admission with its account, admits it again once due, and
+// forgets it when the quarantine completes.
+func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a quarantine folder the test user may not write")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.SetAssetOwners([]AssetOwner{{Home: filepath.Dir(skillDir), Name: "dcw-std1"}})
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+			{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
+		}}
+	}
+	if err := os.MkdirAll(cfg.QuarantineDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+	path := filepath.Join(skillDir, "crit-k")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	evt := InstallEvent{Type: InstallSkill, Name: "crit-k", Path: path, Timestamp: time.Now()}
+	w.runAdmission(context.Background(), evt)
+	issues, err := ReadAdmissionIssues(cfg.DataDir)
+	if err != nil || len(issues) != 1 || issues[0].Kind != AdmissionNotQuarantined || issues[0].Account != "dcw-std1" {
+		t.Fatalf("issues %+v (err %v), want one not-quarantined issue of dcw-std1", issues, err)
+	}
+	if due := w.state.dueIssues(time.Now(), AdmissionNotQuarantined); len(due) != 0 {
+		t.Fatalf("due at once: %+v", due)
+	}
+	due := w.state.dueIssues(time.Now().Add(admissionRetryFirst), AdmissionNotQuarantined)
+	if len(due) != 1 || due[0].Path != path {
+		t.Fatalf("due after the first delay: %+v", due)
+	}
+	if err := os.Chmod(cfg.QuarantineDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.runAdmission(context.Background(), evt)
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("the retried quarantine left the skill in place: %v", err)
+	}
+	if issues, err := ReadAdmissionIssues(cfg.DataDir); err != nil || len(issues) != 0 {
+		t.Fatalf("issues after the quarantine completed: %+v (err %v)", issues, err)
+	}
+}
+
 // gateScanner holds every scan until release is closed and records the
 // largest number of scans that ran at once.
 type gateScanner struct {
@@ -1591,9 +1721,16 @@ func TestSkillRejectedWithTakeActionOffIsEnforcedOnceItIsOn(t *testing.T) {
 	if _, err := os.Lstat(path); res.Verdict != VerdictRejected || err != nil || scans.calls != before {
 		t.Fatalf("take_action off: verdict %s, lstat err %v, rescan scans %d (was %d)", res.Verdict, err, scans.calls, before)
 	}
+	// Status reports the unenforced rejection until it is enforced.
+	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 1 || issues[0].Kind != AdmissionNotEnforced {
+		t.Fatalf("take_action off: issues %+v, want the rejection recorded as not enforced", issues)
+	}
 	watch(true).runRescanCycle(ctx)
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("take_action on: the rejected skill was not quarantined (lstat err %v)", err)
+	}
+	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 0 {
+		t.Fatalf("take_action on: issues %+v after enforcement", issues)
 	}
 }
 

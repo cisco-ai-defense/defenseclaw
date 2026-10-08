@@ -8,17 +8,72 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows"
 )
 
 // ErrEnrolledUserSignedOut is RemoveEnrolledUserAsset finding no token to act
-// as the user: no session, and no S4U logon either, which a Microsoft Entra
-// ID account does not have ("No credentials are available in the security
-// package"). RemoveEnrolledUserAssetInSession succeeds once the user signs
-// in (GAP-0414).
-var ErrEnrolledUserSignedOut = errors.New("the user is signed out and the account has no S4U logon")
+// as the user: no session, and Windows refused an S4U logon too, as it does
+// for a Microsoft Entra ID account ("No credentials are available in the
+// security package"). RemoveEnrolledUserAssetInSession succeeds once the user
+// signs in (GAP-0414).
+var ErrEnrolledUserSignedOut = errors.New("the user is signed out and Windows gave no S4U logon for the account")
+
+// enrolledUserSignedOutError is ErrEnrolledUserSignedOut with what Windows
+// answered to the S4U logon.
+type enrolledUserSignedOutError struct{ s4u error }
+
+func (e *enrolledUserSignedOutError) Error() string {
+	return ErrEnrolledUserSignedOut.Error() + " (" + e.s4u.Error() + ")"
+}
+
+func (e *enrolledUserSignedOutError) Is(target error) bool { return target == ErrEnrolledUserSignedOut }
+
+func (e *enrolledUserSignedOutError) Unwrap() error { return e.s4u }
+
+// SignedOutRemovalReason says why the guardian waits for user to sign in
+// before it removes a quarantined folder: the kind of account and what
+// Windows answered to the S4U logon. Every signed-out user was called a
+// Microsoft Entra ID account, also an on-prem Active Directory one with its
+// domain controller reachable (GAP-0795).
+func SignedOutRemovalReason(sid, user string, err error) string {
+	var signedOut *enrolledUserSignedOutError
+	answer := ""
+	if errors.As(err, &signedOut) && signedOut.s4u != nil {
+		answer = ": " + signedOut.s4u.Error()
+	}
+	const next = "; the guardian removes the folder when that user next signs in"
+	switch kind, domain := windowsAccountKind(sid); kind {
+	case "entra":
+		return "the owner of " + user + " is signed out, and a Microsoft Entra ID account has no S4U logon" + next
+	case "domain":
+		return "the owner of " + user + " is signed out, and Windows refused an S4U logon for this Active Directory account of domain " +
+			domain + " (Kerberos, through a domain controller)" + answer + next
+	default:
+		return "the owner of " + user + " is signed out, and Windows refused an S4U logon for this local account" + answer + next
+	}
+}
+
+// windowsAccountKind is "entra" for a Microsoft Entra ID account (its SID
+// starts S-1-12-1-), "local" for an account of this computer, and "domain"
+// with the domain name for another one.
+func windowsAccountKind(sid string) (string, string) {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sid)), "S-1-12-1-") {
+		return "entra", ""
+	}
+	target, err := windows.StringToSid(sid)
+	if err != nil {
+		return "local", ""
+	}
+	_, domain, _, err := target.LookupAccount("")
+	computer, computerErr := windows.ComputerName()
+	if err != nil || computerErr != nil || strings.EqualFold(domain, computer) {
+		return "local", ""
+	}
+	return "domain", domain
+}
 
 // RemoveEnrolledUserAsset deletes a quarantined skill or plugin folder in an
 // enrolled user's profile for the hook guardian (GAP-0202). It runs as that
@@ -37,13 +92,55 @@ func RemoveEnrolledUserAsset(sid, home, path string) error {
 		ran = true
 		return purgeWindowsEnrolledAsset(path, target)
 	}
-	err = withWindowsEnterpriseTargetImpersonation(target, home, remove)
+	err = withWindowsEnterpriseSessionImpersonation(target, home, remove)
 	if err != nil && !ran {
 		// No session token for a signed-out user: use an S4U logon.
 		err = withWindowsEnterpriseS4UTargetImpersonation(target, home, remove)
 		if err != nil && !ran {
-			return fmt.Errorf("%w (%v)", ErrEnrolledUserSignedOut, err)
+			return &enrolledUserSignedOutError{s4u: err}
 		}
+	}
+	return err
+}
+
+// GrantGatewayAssetRead gives the gateway service the read access of the
+// agent folders (inventoryReadACE, inherited) on one skill or plugin folder
+// of an enrolled user, for the hook guardian. A folder moved into a watched
+// folder keeps the access control list of where it came from, which has no
+// entry for the service, so its scan and quarantine copy failed and the
+// asset stayed (GAP-0825). It runs as the user (the session token, else an
+// S4U logon) on a pinned handle that refuses links below the profile, so it
+// changes only what the user could change.
+func GrantGatewayAssetRead(sid, home, path string) error {
+	target, err := windows.StringToSid(sid)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: invalid enrolled user SID %q: %w", sid, err)
+	}
+	home = filepath.Clean(strings.TrimSpace(home))
+	rel, err := filepath.Rel(home, filepath.Clean(path))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) || filepath.IsAbs(rel) {
+		return fmt.Errorf("enterprise hooks: %s is not in the profile of %s", path, sid)
+	}
+	name, err := discoverGatewayServiceName()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: discover gateway service name: %w", err)
+	}
+	if !gatewayServiceNamePattern.MatchString(name) && name != productionGatewayServiceName {
+		return fmt.Errorf("enterprise hooks: refusing untrusted gateway service name %q", name)
+	}
+	gatewaySID, _, _, err := windows.LookupSID("", `NT SERVICE\`+name)
+	if err != nil || !sidIsNTServiceInventory(gatewaySID) {
+		return fmt.Errorf("enterprise hooks: resolve the gateway service account %q: %v", name, err)
+	}
+	ran := false
+	grant := func() error {
+		ran = true
+		_, err := ensureInventoryACEPinned(home, rel, gatewaySID, inventoryReadACE)
+		return err
+	}
+	err = withWindowsEnterpriseSessionImpersonation(target, home, grant)
+	if err != nil && !ran {
+		err = withWindowsEnterpriseS4UTargetImpersonation(target, home, grant)
 	}
 	return err
 }
@@ -58,7 +155,7 @@ func RemoveEnrolledUserAssetInSession(sid, home, path string) error {
 		return fmt.Errorf("enterprise hooks: invalid enrolled user SID %q: %w", sid, err)
 	}
 	ran := false
-	err = withWindowsEnterpriseTargetImpersonation(target, home, func() error {
+	err = withWindowsEnterpriseSessionImpersonation(target, home, func() error {
 		ran = true
 		return purgeWindowsEnrolledAsset(path, target)
 	})
