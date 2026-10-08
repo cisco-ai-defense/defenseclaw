@@ -638,7 +638,9 @@ check every tool call. A blocked call appears in the feed and counts in the
 end-of-session summary, and the harness shows the reason.
 
 The sandbox hooks fail closed: a hook that cannot reach DefenseClaw blocks
-the tool call. If none of the session's hooks gets through (the daemon is
+the tool call, and its block message, which the harness shows, says the
+daemon on your machine does not answer and to run `defenseclaw-gateway
+start` there. If none of the session's hooks gets through (the daemon is
 stopped, or the ingress is unreachable), every tool call is blocked. The
 run tells you three times:
 

@@ -366,7 +366,16 @@ myapp-7f3a is stopped; this is the log of its detached run started 07:15, kept w
 ## If the hooks cannot reach DefenseClaw
 
 The sandbox hooks fail closed. If DefenseClaw's daemon stops during a
-session, every tool call is blocked, and your terminal says so:
+session, every tool call is blocked, and the harness shows why with each
+blocked call:
+
+```text
+defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there (`defenseclaw sandbox doctor` says what is wrong)
+```
+
+The terminal's title says so too, and the bell rings (Claude Code keeps the
+title for itself). When not one hook of the session got through, the run
+also prints:
 
 ```text
 [defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor
