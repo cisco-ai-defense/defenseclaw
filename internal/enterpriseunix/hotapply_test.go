@@ -89,3 +89,34 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 		t.Fatal("a gateway that did not apply the change was not restarted")
 	}
 }
+
+// GAP-0941: configuration management that installs the same config.yaml
+// again with another group (install -o root -g root -m 0640) gets a no-op:
+// the managed owner comes back, and the gateway is neither stopped nor
+// restarted.
+func TestEnsureOfAnUnchangedConfigWithAnotherOwnerIsANoop(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	config := h.env.P(h.env.Layout.ConfigPath)
+	_, serviceGID, err := h.env.OwnerOf(config)
+	if err != nil || serviceGID == 0 {
+		t.Fatalf("installed config group = %d, %v", serviceGID, err)
+	}
+	if err := h.env.Lchown(config, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	from := len(h.services.calls)
+	r := h.run(Options{Action: ActionEnsure})
+	requireOK(t, r)
+	for _, call := range h.services.calls[from:] {
+		if strings.HasSuffix(call, " "+unitGateway) && !strings.HasPrefix(call, "enable ") {
+			t.Fatalf("the gateway was touched (%s); changes = %q", call, r.Changes)
+		}
+	}
+	if !r.Noop || !hasWarning(r, codeConfigMetadataRestored) {
+		t.Fatalf("noop = %v, warnings = %+v, changes = %q", r.Noop, r.Warnings, r.Changes)
+	}
+	if _, gid, _ := h.env.OwnerOf(config); gid != serviceGID {
+		t.Fatalf("config group = %d, want the service group %d", gid, serviceGID)
+	}
+}
