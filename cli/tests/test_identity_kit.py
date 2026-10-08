@@ -331,6 +331,55 @@ def test_entra_plan_rejects_repeated_group_names_before_graph_calls(tmp_path: Pa
         entra.cmd_apply(object(), argparse.Namespace(config=str(plan), apply=True, password_file=None))
 
 
+def test_entra_apply_adds_existing_dotted_user_to_group(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.test", "groups": [{"name": "team"}],
+                                "users": [{"name": "Jane.Doe", "groups": ["team"]}]}))
+    calls = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/organization?" in path:
+                return [{"verifiedDomains": [{"name": "example.test"}]}]
+            if "/groups?" in path:
+                return [{"id": "group-id", "displayName": "team", "securityEnabled": True}]
+            return []
+
+        def get(self, path):
+            assert "/users/jane.doe@example.test?" in path
+            return {"id": "user-id", "userPrincipalName": "jane.doe@example.test"}
+
+        def add_member(self, group_id, user_id, group_name):
+            calls.append((group_id, user_id, group_name))
+            return True
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply",
+                                            "--password-file", str(tmp_path / "passwords.txt")])
+    assert entra.cmd_apply(Graph(), args) == 0
+    assert calls == [("group-id", "user-id", "team")]
+
+
+def test_himmelblau_configure_preserves_existing_allowlist(tmp_path: Path) -> None:
+    source = (ENTRA.parent / "setup-himmelblau.sh").read_text(encoding="ascii")
+    config = tmp_path / "himmelblau.conf"
+    allowlist = "11111111-1111-1111-1111-111111111111"
+    config.write_text(f"[global]\ndomain = old.example.test\npam_allow_groups = {allowlist}\n")
+    script = tmp_path / "setup-himmelblau.sh"
+    script.write_text(source.replace("CONF=/etc/himmelblau/himmelblau.conf", f"CONF={config}"))
+    result = subprocess.run(["bash", str(script), "configure", "--domain", "new.example.test"],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert f"pam_allow_groups = {allowlist}" in result.stdout
+
+
+def test_entra_mac_bridge_guide_requires_intune_schedule() -> None:
+    guide = (ROOT / "docs-site/content/docs/enterprise/identity-entra-id.mdx").read_text()
+    bridge = (ENTRA.parent / "macos-entra-group-bridge.sh").read_text()
+    assert "Script frequency" in guide and "Max number of times to retry if script fails" in guide
+    assert "runs this script again later" not in bridge
+
+
 def test_entra_ssh_apply_example_grants_previewed_group() -> None:
     doc = (ROOT / "docs-site/content/docs/enterprise/identity-entra-id.mdx").read_text()
     # Read the first command block under the SSH heading.

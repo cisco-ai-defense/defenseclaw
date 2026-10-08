@@ -169,7 +169,9 @@ Lint: `ruff` (line length 120), `shellcheck` and PSScriptAnalyzer (including the
 - `entra_setup.py` uses the commercial Microsoft cloud (`graph.microsoft.com`).
 
 `setup-himmelblau.sh configure` replaces its managed config and reports the
-unmanaged setting names it will remove. It keeps a timestamped backup on each
+unmanaged setting names it will remove. An omitted `--allow-group` preserves
+the existing `pam_allow_groups` sign-in allowlist; `--allow-all` removes it
+explicitly. It keeps a timestamped backup on each
 run; review that backup before discarding site-specific settings.
 
 To remove Himmelblau from a host, see the guide's **Remove Himmelblau** section:

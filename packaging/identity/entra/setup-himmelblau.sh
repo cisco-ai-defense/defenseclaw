@@ -16,8 +16,8 @@
 # It changes the host, so it only PRINTS the plan unless you pass --apply.
 #
 # Usage:
-#   setup-himmelblau.sh install   --domain DOMAIN [--allow-group ID]... [--short-names] [--apply]
-#   setup-himmelblau.sh configure --domain DOMAIN [--allow-group ID]... [--short-names] [--apply]
+#   setup-himmelblau.sh install   --domain DOMAIN [--allow-group ID]... [--allow-all] [--short-names] [--apply]
+#   setup-himmelblau.sh configure --domain DOMAIN [--allow-group ID]... [--allow-all] [--short-names] [--apply]
 #   setup-himmelblau.sh restart   [--apply]
 #   setup-himmelblau.sh check     [--user NAME]
 #
@@ -33,8 +33,9 @@
 # Options:
 #   --domain DOMAIN     the tenant domain, for example contoso.onmicrosoft.com
 #   --allow-group ID    object id of an Entra group whose members may sign in
-#                       (pam_allow_groups; repeatable). Without one, every user
-#                       of the tenant can sign in.
+#                       (pam_allow_groups; repeatable). If omitted, preserve an
+#                       existing allowlist. On a new host, all tenant users can sign in.
+#   --allow-all         explicitly remove an existing sign-in allowlist.
 #   --short-names       keep Himmelblau's default cn_name_mapping = true: accounts
 #                       are named by the short name and carry no UPN, so a
 #                       DefenseClaw users entry written as a UPN cannot match.
@@ -81,6 +82,7 @@ user_name=""
 apply=0
 short_names=0
 allow_groups=()
+allow_all=0
 
 [ "$#" -gt 0 ] || { usage; exit 2; }
 case "$1" in
@@ -92,6 +94,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --domain) [ "$#" -ge 2 ] || die "--domain needs a value" 2; domain=$2; shift 2 ;;
     --allow-group) [ "$#" -ge 2 ] || die "--allow-group needs a value" 2; allow_groups+=("$2"); shift 2 ;;
+    --allow-all) allow_all=1; shift ;;
     --short-names) short_names=1; shift ;;
     --user) [ "$#" -ge 2 ] || die "--user needs a value" 2; user_name=$2; shift 2 ;;
     --apply) apply=1; shift ;;
@@ -101,6 +104,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ "$allow_all" -eq 0 ] || [ "${#allow_groups[@]}" -eq 0 ] || die "--allow-all and --allow-group cannot be combined" 2
 guid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 for id in "${allow_groups[@]}"; do
   [[ $id =~ $guid_re ]] || die "--allow-group takes a group object id (a GUID), not a name: $id" 2
@@ -108,6 +112,12 @@ done
 if [ "$command" = install ] || [ "$command" = configure ]; then
   [ -n "$domain" ] || die "--domain is required (see --help)" 2
   [[ $domain =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "--domain is not a DNS domain: $domain" 2
+fi
+
+# Preserve the existing login restriction unless a replacement or --allow-all is explicit.
+old_allow_groups=
+if [ "${#allow_groups[@]}" -eq 0 ] && [ "$allow_all" -eq 0 ] && [ -r "$CONF" ]; then
+  old_allow_groups=$(grep -E "^[[:space:]]*pam_allow_groups[[:space:]]*=" "$CONF" || true)
 fi
 
 # run prints a step, and runs it with --apply.
@@ -134,6 +144,8 @@ config_text() {
     local joined
     joined=$(IFS=,; printf '%s' "${allow_groups[*]}")
     printf 'pam_allow_groups = %s\n' "$joined"
+  elif [ -n "$old_allow_groups" ]; then
+    printf '%s\n' "$old_allow_groups"
   fi
   printf 'home_attr = CN\nhome_alias = CN\nuse_etc_skel = true\n'
 }
@@ -154,7 +166,11 @@ do_configure() {
   echo "Write $CONF:"
   config_text | sed 's/^/    /'
   if [ "${#allow_groups[@]}" -eq 0 ]; then
-    echo "  note: no --allow-group, so every user of the tenant can sign in to this host"
+    if [ -n "$old_allow_groups" ]; then
+      echo "  note: preserving the existing pam_allow_groups allowlist"
+    else
+      echo "  note: no pam_allow_groups, so every user of the tenant can sign in to this host"
+    fi
   fi
   if [ -r "$CONF" ]; then
     echo "  unmanaged settings in the old file will be removed; a timestamped backup preserves them:"
