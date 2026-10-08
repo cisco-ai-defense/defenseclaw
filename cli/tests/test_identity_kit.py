@@ -223,6 +223,7 @@ def test_graph_add_member_names_the_step_after_retry_timeout(monkeypatch: pytest
         graph.add_member("group", "device", "Example group")
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
 def test_okta_group_verifier_uses_complete_case_insensitive_name(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
