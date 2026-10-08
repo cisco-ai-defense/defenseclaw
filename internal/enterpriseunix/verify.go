@@ -35,6 +35,9 @@ const ledgerFreshness = 5 * time.Minute
 // codeUnitFailed names a DefenseClaw oneshot unit systemd reports failed.
 const codeUnitFailed = "unit_failed"
 
+// codeNotStarted names a deployment installed with --no-start.
+const codeNotStarted = "not_started"
+
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
@@ -114,6 +117,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.describe(ctx, record, true)
 	problems = append(problems, l.describeMachinePolicy(record)...)
+	if machinePolicyIncomplete(r) {
+		r.SecurityComplete = false
+	}
 	if strict {
 		l.warnUnprivilegedUserNamespaces()
 	}
@@ -134,8 +140,19 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	// A problem either action finds makes the deployment unhealthy, and
 	// both exit 1 for it; status leaves out verify's stricter checks.
+	reported := map[string]bool{}
 	for _, problem := range problems {
-		r.AddError(codeVerify, problem)
+		if !reported[problem] {
+			reported[problem] = true
+			r.AddError(codeVerify, problem)
+		}
+	}
+	if record.NoStart {
+		// Nothing runs, so no agent is protected; ensure reported it as a
+		// warning, and status and verify read ok with every service
+		// not_loaded (GAP-0542).
+		r.AddError(codeNotStarted, "the deployment was installed with --no-start, so its services are not running and agents are not protected; run `"+
+			env.lifecycleCommand(ActionRepair)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to start them")
 	}
 	if !record.NoStart && !r.Readiness.Gateway {
 		// A gateway that is down because the installed binary refuses the
@@ -217,6 +234,10 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 				if packageDrift != "" {
 					continue // one message below, not one per binary
 				}
+			}
+			if record.Channel == ChannelPackage && filepath.Dir(path) == env.Layout.BinDir {
+				add("%s was modified after install; %s", path, env.packageReinstallStep(record.ProductVersion))
+				continue
 			}
 			add("%s was modified after install", path)
 		}
@@ -731,7 +752,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()

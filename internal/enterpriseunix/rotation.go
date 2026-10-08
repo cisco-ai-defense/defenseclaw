@@ -97,6 +97,10 @@ import (
 // ActionRotateCredentials rotates the per-user credential key.
 const ActionRotateCredentials = "rotate-credentials"
 
+// NoopNoCredentials is the noop reason of a rotation on a host where no
+// enrolled user holds a per-user credential yet.
+const NoopNoCredentials = "no_credentials"
+
 const (
 	codeRotation           = "rotation_failed"
 	codeRotationRecovered  = "rotation_recovered"
@@ -767,7 +771,13 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	case err != nil:
 		return refuse("the per-user credential key is not trusted: %v", err)
 	case !present:
-		return refuse("there is no per-user credential key to rotate yet; the hook guardian creates it when it enrolls the first user")
+		// No user holds a credential yet: hooks use the peer-authorized hook
+		// socket, and the guardian creates the key only when it first gives
+		// a user one (agent telemetry, an in-agent plugin or ACP). There is
+		// nothing to rotate, which is not a failure on a healthy host
+		// (GAP-0541).
+		r.Noop, r.NoopReason = true, NoopNoCredentials
+		return 0
 	}
 	if intent, err := env.loadRotationIntent(); err != nil || intent != nil {
 		return refuse("an earlier credential rotation is still rolling back; rotate again once `enterprise %s status` no longer reports it", platformName(env.GOOS))

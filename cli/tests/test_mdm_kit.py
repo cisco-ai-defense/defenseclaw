@@ -251,6 +251,62 @@ echo installed-ok
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("failure", ["disk_full", "downgrade"])
+def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path: Path) -> None:
+    # The Installer only says "The upgrade failed": a full data volume is
+    # refused before it runs (GAP-0539), and a refused downgrade reports the
+    # result the preinstall wrote, naming both versions (GAP-0538).
+    text = _text(MDM / "macos" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(
+        _shell_function(text, name)
+        for name in ("dc_busy_output", "dc_require_product_version", "dc_require_free_space",
+                     "dc_package_script_result", "dc_install_package")
+    )
+    stubs = dict(_PACKAGE_TOOL_STUBS)
+    stubs["pkgutil"] = """case "$1" in
+    --expand) mkdir -p "$3/x.pkg" && printf '<pkg-ref id="com.cisco.defenseclaw.enterprise" version="1.0.2" onConclusion="none">x.pkg</pkg-ref>\\n' >"$3/Distribution"
+        echo '<payload numberOfFiles="4" installKBytes="300000"/>' >"$3/x.pkg/PackageInfo" ;;
+    *) exit 1 ;;
+esac"""
+    stubs["df"] = 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/disk3 9000000 8000000 %s 90%% /\\n" "$DC_TEST_FREE"'
+    stubs["installer"] = """echo "installer -pkg" >>"$DC_TEST_LOG"
+printf '{"ok":false,"errors":[{"code":"downgrade_refused","message":"DefenseClaw 1.0.3 is installed; refusing to downgrade to 1.0.2"}]}\\n' >"$DC_TEST_RESULT"
+echo "installer: The upgrade failed."
+exit 1"""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in stubs.items():
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        stub.chmod(0o755)
+    log, result_file = tmp_path / "install.log", tmp_path / "last-package-result.json"
+    script = f"""
+DC_SCRIPT_OS=darwin
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
+DC_LINUX_PACKAGE=defenseclaw-enterprise DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
+DC_PRODUCT_VERSION='' DC_STAGE='{tmp_path}' DC_STAGED_SOURCE='{tmp_path / "defenseclaw-enterprise.pkg"}'
+DC_INSTALL_ROOT='{tmp_path / "opt" / "cisco" / "defenseclaw"}' DC_PACKAGE_RESULT='{result_file}' DC_RESULT=''
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+dc_log() {{ :; }}
+dc_extract_payload() {{ :; }}
+dc_emit_result() {{ cat "$DC_RESULT"; }}
+{functions}
+dc_install_package
+echo installed-ok
+"""
+    free = "150000" if failure == "disk_full" else "9000000"
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_FREE": free, "DC_TEST_LOG": str(log),
+           "DC_TEST_RESULT": str(result_file)}
+    result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    if failure == "disk_full":
+        assert "FAIL mdm_disk_full" in result.stdout and "MB is free" in result.stdout, result.stdout
+        assert not log.exists(), "the installer ran on a full volume"
+    else:
+        assert "downgrade_refused" in result.stdout and "refusing to downgrade to 1.0.2" in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_formats_without_an_installation() -> None:
     if os.geteuid() == 0 and Path("/opt/defenseclaw/bin/defenseclaw-gateway").exists():
         pytest.skip("a deployment is installed on this host")

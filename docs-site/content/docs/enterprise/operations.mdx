@@ -561,6 +561,12 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux rotate-credential
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos rotate-credentials --json
 ```
 
+If no enrolled user holds a credential yet, there is nothing to rotate: the
+command exits `0` with `"noop": true` and `"noop_reason": "no_credentials"`
+and changes nothing. That is the normal state on Linux and macOS while users
+run only hook-based agents and the config enables no agent telemetry. The
+guardian creates the per-machine key when it first gives a user a credential.
+
 The rotation moves every user to the new key before the key takes effect:
 
 1. **Check.** Nothing changes until the gateway reports that it serves the

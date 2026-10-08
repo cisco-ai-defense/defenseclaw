@@ -365,7 +365,12 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			}
 		default:
 			state.HigherPrecedence = append(state.HigherPrecedence, source.name)
-			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format claude-hklm-json` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, claudeMergeMinimumVersion)
+			// A macOS managed-preferences profile takes the plist export.
+			format := "claude-hklm-json"
+			if opts.goos() == "darwin" {
+				format = "plist"
+			}
+			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format %s` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, claudeMergeMinimumVersion, format)
 			if policy.HigherPrecedenceSources == config.HigherPrecedenceWarn {
 				state.detail("%s", message)
 				state.HigherPrecedence = state.HigherPrecedence[:len(state.HigherPrecedence)-1]

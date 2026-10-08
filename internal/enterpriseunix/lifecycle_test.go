@@ -1414,3 +1414,25 @@ func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
 		t.Fatalf("vendor rule mode %04o under umask 077", got)
 	}
 }
+
+// A refused first install left /opt/cisco/defenseclaw/lifecycle/lifecycle.lock
+// (and the service account) behind, and after ensure --no-start status and
+// verify read ok while nothing ran (GAP-0542).
+func TestRefusedFirstInstallLeavesNothingAndNoStartIsUnhealthy(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	bad := h.payload("1.0.0")
+	if err := os.Remove(filepath.Join(bad, binSensorHelper)); err != nil {
+		t.Fatal(err)
+	}
+	requireError(t, h.run(Options{Action: ActionEnsure, PayloadDir: bad}), codePayload)
+	if exists(h.env.P("/opt/cisco")) {
+		t.Fatal("the refused install left /opt/cisco behind")
+	}
+	if _, ok, _ := h.accounts.Lookup(t.Context(), h.env.Layout.ServiceUser); ok {
+		t.Fatal("the refused install left the service account behind")
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0"), NoStart: true}))
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		requireError(t, h.run(Options{Action: action}), codeNotStarted)
+	}
+}

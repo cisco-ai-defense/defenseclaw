@@ -98,11 +98,12 @@ Create each script in **Settings** > **Computer management** > **Scripts** >
 ### DefenseClaw stage config
 
 This script holds your administrator config. It writes the config to a
-root-only staging folder, which the ensure script reads. On a Mac with no
-DefenseClaw config yet, it also writes the config to the layout path
+root-only staging folder, which the ensure script reads. Until the package is
+installed (no pkg receipt yet, which includes a first install that failed), it
+also writes the config to the layout path
 `/opt/cisco/defenseclaw/etc/config.yaml`, so the package applies it on the
-first install. It ignores the values Jamf Pro passes. Set its priority to
-**Before**.
+first install and a re-run after you fix a rejected config installs the fixed
+one. It ignores the values Jamf Pro passes. Set its priority to **Before**.
 
 ```bash
 #!/bin/sh
@@ -134,7 +135,7 @@ DEFENSECLAW_CONFIG
 chown root:wheel "$tmp"
 chmod 0600 "$tmp"
 mv -f "$tmp" "$stage/config.yaml"
-if [ ! -e "$layout/config.yaml" ]; then
+if [ ! -e "$layout/config.yaml" ] || ! pkgutil --pkg-info com.cisco.defenseclaw.enterprise >/dev/null 2>&1; then
     mkdir -p "$layout"
     tmp=$(mktemp "$layout/.config.yaml.XXXXXX")
     cat "$stage/config.yaml" >"$tmp"

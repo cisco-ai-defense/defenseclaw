@@ -137,3 +137,39 @@ func TestVerifyReportsInstalledModeDriftAndRepairNamesTheRemedy(t *testing.T) {
 		})
 	}
 }
+
+// A hook binary replaced after the macOS package install (root copied
+// /usr/bin/true over it) was recorded as the deployment by repair and by
+// ensure --from-package, so verify turned green while agents ran without
+// enforcement. Any run but the package's own install refuses it until the
+// package is reinstalled (GAP-0522).
+func TestRepairRefusesAPackageBinaryReplacedAfterInstall(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	bin := h.env.P(h.env.Layout.BinDir)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := h.payload("1.0.0")
+	for _, name := range []string{binGateway, binHook, binSensorHelper} {
+		if err := h.env.copyFileAtomic(filepath.Join(staged, name), filepath.Join(bin, name), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"}))
+	hook := filepath.Join(bin, binHook)
+	if err := os.WriteFile(hook, []byte("replaced\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, opts := range []Options{{Action: ActionRepair}, {Action: ActionEnsure, FromPackage: true}} {
+		r := h.run(opts)
+		requireError(t, r, codePayload)
+		if got := messagesOf(r.Errors, codePayload); !strings.Contains(got, "installer -pkg defenseclaw-enterprise-1.0.0-darwin-arm64.pkg") {
+			t.Fatalf("%s refusal names no reinstall: %s", opts.Action, got)
+		}
+	}
+	requireError(t, h.run(Options{Action: ActionVerify}), codeVerify)
+	if err := h.env.copyFileAtomic(filepath.Join(staged, binHook), hook, 0o755, rootOwner()); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+}

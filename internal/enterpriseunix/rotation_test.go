@@ -447,3 +447,15 @@ func TestOnKeyTakesOnlyThisPhasesBoundProof(t *testing.T) {
 		}
 	}
 }
+
+// On a healthy macOS host whose users run only hook-based agents no user
+// holds a credential, and rotate-credentials failed rotation_failed (GAP-0541).
+func TestRotateCredentialsWithoutAKeyIsANoop(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	r := h.run(Options{Action: ActionRotateCredentials})
+	requireOK(t, r)
+	if !r.Noop || r.NoopReason != NoopNoCredentials {
+		t.Fatalf("rotation without a key: noop=%v reason=%q", r.Noop, r.NoopReason)
+	}
+}

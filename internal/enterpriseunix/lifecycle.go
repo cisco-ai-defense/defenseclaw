@@ -149,6 +149,9 @@ type lifecycle struct {
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
+	// machinePolicyErr is the error of the last vendor machine policy
+	// publish: a file DefenseClaw could not write its hooks into.
+	machinePolicyErr error
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -231,9 +234,16 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.readOnly(ctx)
 	}
 
+	// A run on a host with no DefenseClaw tree creates the lifecycle folder
+	// (and /opt/cisco/defenseclaw above it) for its lock. A run that commits
+	// nothing, a refused first install, takes them away again (GAP-0542).
+	created := env.missingDirs(env.Layout.LifecycleDir)
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
 		return 0
+	}
+	if len(created) > 0 {
+		defer env.removeUncommittedDirs(created)
 	}
 	lock, err := env.acquireLock(ctx)
 	if err != nil {
@@ -377,6 +387,35 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// missingDirs lists dir and its missing ancestors (canonical paths), deepest
+// first.
+func (e *Env) missingDirs(dir string) []string {
+	var missing []string
+	for dir = filepath.Clean(dir); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(e.P(dir)); !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		missing = append(missing, dir)
+	}
+	return missing
+}
+
+// removeUncommittedDirs removes the lock and the directories this run
+// created for it, when the run committed no deployment and left nothing
+// else there.
+func (e *Env) removeUncommittedDirs(created []string) {
+	if exists(e.deploymentPath()) {
+		return
+	}
+	dir := e.P(e.Layout.LifecycleDir)
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
+		_ = os.Remove(filepath.Join(dir, lockFileName))
+	}
+	for _, path := range created {
+		_ = removeDirIfEmpty(e.P(path))
+	}
 }
 
 // pauseApplyTrigger stops the Linux apply path unit while a protected-state
@@ -684,6 +723,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err != nil {
 			return nil, &codedError{code: codePayload, err: env.installedPayloadError(err, ChannelPackage)}
 		}
+		if err := l.replacedPackageBinary(record, pay); err != nil {
+			return nil, &codedError{code: codePayload, err: err}
+		}
 		p.payload = pay
 	default:
 		// Repair or ensure without a payload keeps the installed binaries,
@@ -717,6 +759,11 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	if fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
+		if err := env.writableInstalledConfig(); err != nil {
+			return nil, &codedError{code: codeConfig, err: err}
+		}
+	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
@@ -732,6 +779,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	if migrated != nil {
+		l.warnConfigV8(migrated.Record)
 		v9, err := env.validateConfigSource(migrated.Migrated, l.opts.ConfigFile)
 		if err != nil {
 			return nil, &codedError{code: codeConfig, err: fmt.Errorf("the config_version 9 migration of the config does not validate: %w", err)}
@@ -844,6 +892,65 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	return p, nil
 }
 
+// replacedPackageBinary refuses installed package binaries that differ from
+// the deployment record while the package version is still the recorded one.
+// Only the package's own install run (--reason package) puts new binaries of
+// the same version in place; any other difference is a file replaced after
+// install. Recording it made verify green on a binary the package never
+// shipped: repair, ensure --from-package and the apply trigger re-recorded a
+// hook replaced by /usr/bin/true, and agents ran without enforcement
+// (GAP-0522).
+func (l *lifecycle) replacedPackageBinary(record *Deployment, pay *payload) error {
+	if record == nil || l.opts.Reason == "package" || pay.Version != record.ProductVersion {
+		return nil
+	}
+	recorded := recordBinaries(l.env, record)
+	if len(recorded) == 0 {
+		return nil
+	}
+	for _, name := range append(append([]string{}, requiredBinaries...), optionalBinaries...) {
+		if recorded[name] != pay.Digests[name] {
+			return fmt.Errorf("installed %s does not match the deployment record although the package is still version %s, so it was replaced after install; %s",
+				name, pay.Version, l.env.packageReinstallStep(pay.Version))
+		}
+	}
+	return nil
+}
+
+// packageReinstallStep is how an administrator puts back the binaries of
+// the package version.
+func (e *Env) packageReinstallStep(version string) string {
+	if e.GOOS == "darwin" {
+		return fmt.Sprintf("reinstall the package (sudo installer -pkg defenseclaw-enterprise-%s-darwin-arm64.pkg -target /) to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
+	}
+	return fmt.Sprintf("reinstall the defenseclaw-enterprise %s package with your package manager to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
+}
+
+// codeConfigV8 warns that the config a run read is still config_version 8.
+const codeConfigV8 = "config_version_8"
+
+// warnConfigV8 tells the administrator, on every run that reads a
+// config_version 8 file, that the file should be replaced and which values
+// the migration resolved differently. An MDM that keeps delivering the v8
+// file saw green results while two values were dropped, the first run
+// listing the migration only among its changes (GAP-0540).
+func (l *lifecycle) warnConfigV8(record config.MigrationRecord) {
+	source := l.opts.ConfigFile
+	if source == "" {
+		source = l.env.Layout.ConfigPath
+	}
+	message := fmt.Sprintf("the config this run read (%s) is config_version 8; DefenseClaw applies its config_version 9 migration. Deliver a config_version 9 file instead, for example the migrated %s",
+		source, l.env.Layout.ConfigPath)
+	var conflicts []string
+	for _, conflict := range record.Conflicts {
+		conflicts = append(conflicts, fmt.Sprintf("%s kept %s, dropped %s (%s)", conflict.To, conflict.Kept, conflict.Lost, conflict.Reason))
+	}
+	if len(conflicts) > 0 {
+		message += fmt.Sprintf("; %d value(s) conflicted and the migration resolved them: %s", len(conflicts), strings.Join(conflicts, "; "))
+	}
+	l.result.AddWarning(codeConfigV8, message)
+}
+
 func recordBinaries(env *Env, record *Deployment) map[string]string {
 	out := map[string]string{}
 	if record == nil {
@@ -876,6 +983,29 @@ func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 		return DefaultConfig(env.Layout), false, nil
 	}
 	return nil, false, err
+}
+
+// writableInstalledConfig refuses an installed config.yaml that is not the
+// applied config while its mode or owner lets an account other than root
+// write it: that account could have written the change. The apply trigger
+// applied a standard user's edit (guardrail mode action to observe) to a
+// config.yaml a bad profile push had left 0666, and status and verify stayed
+// green (GAP-0524). The refused edit is reverted like any rejected one.
+func (e *Env) writableInstalledConfig() error {
+	path := e.P(e.Layout.ConfigPath)
+	_, _, mode, err := statOwnerMode(path)
+	if err != nil {
+		return nil // configBytes read it; the transaction reports a file that went away
+	}
+	uid, _, err := e.OwnerOf(path)
+	if err != nil {
+		return nil
+	}
+	if mode.Perm()&0o022 == 0 && (uid == 0 || uid == os.Geteuid()) {
+		return nil
+	}
+	return fmt.Errorf("%s changed while it was %04o and owned by uid %d, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+		e.Layout.ConfigPath, mode.Perm(), uid, e.lifecycleCommand(ActionEnsure))
 }
 
 type codedError struct {
@@ -924,6 +1054,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err != nil {
 		code := errorCode(err, codeApply)
 		r.AddError(code, err.Error())
+		if record == nil && account.Created {
+			// Refused before any change: the service account this run
+			// created goes too (GAP-0542).
+			_ = env.Accounts.Remove(ctx, serviceName)
+		}
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
 			l.revertRejectedConfig(record, committedConfig, nil, err.Error())
 		}
@@ -1172,7 +1307,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 				_ = env.Services.Disable(ctx, unit)
 			}
 		}
-		r.AddWarning("not_started", "installed without starting the services (--no-start); run repair or ensure to activate")
+		r.AddWarning(codeNotStarted, "installed without starting the services (--no-start); run repair or ensure to activate")
 	}
 
 	activatedAt := ""
@@ -1250,6 +1385,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The change that leaves the eligible users without a connector says so
 	// at once, as on Windows, not only at the next status (GAP-0266).
 	l.warnNoConnectorsEnabled(p.config)
+	if l.opts.Action == ActionRepair && l.machinePolicyErr != nil {
+		// repair exists to put the deployment back; a vendor file it could not
+		// put the hooks into (an administrator line that does not parse) is
+		// not repaired, and the next verify fails on it again (GAP-0531).
+		r.AddError(codeMachinePolicyIncomplete, "repair could not put DefenseClaw hooks back in vendor machine policy: "+
+			l.machinePolicyErr.Error()+"; the rest of the deployment is repaired")
+	}
 	return 0
 }
 
@@ -1885,7 +2027,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		// the package removal runs this uninstall, which found no deployment
 		// and kept all of it (GAP-0421). It is removed as the state of a
 		// committed deployment is. State a --keep-state uninstall kept stays.
-		l.failedInstallLeftovers = env.GOOS == "linux" && failure != "" && !l.opts.KeepState && len(env.loadRetainedState()) == 0
+		// A failed first macOS pkg install records no receipt, so its
+		// binaries, the rejected config.yaml and the lifecycle result are
+		// leftovers too, which the MDM uninstall script left in place
+		// (GAP-0567).
+		l.failedInstallLeftovers = failure != "" && !l.opts.KeepState && len(env.loadRetainedState()) == 0
 		if !l.failedInstallLeftovers {
 			r.Noop = true
 			r.NoopReason = "not_installed"

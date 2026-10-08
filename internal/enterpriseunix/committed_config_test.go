@@ -58,6 +58,22 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 			t.Fatalf("ensure after the revert is not a no-op: %+v %+v", again.Errors, again.Warnings)
 		}
 	})
+	// A bad profile push left config.yaml 0666 and a standard user switched
+	// enforcement to observe; the apply trigger applied it (GAP-0524).
+	t.Run("writable by other accounts", func(t *testing.T) {
+		h := newTestHost(t, "darwin")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		applied := h.read(h.env.Layout.ConfigPath)
+		if err := os.Chmod(h.env.P(h.env.Layout.ConfigPath), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		editConfigInPlace(t, h, "mode: observe", "mode: action")
+		r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+		requireError(t, r, codeConfig)
+		if got := h.read(h.env.Layout.ConfigPath); got != applied || h.mode(h.env.Layout.ConfigPath) != 0o640 {
+			t.Fatalf("the edit written while config.yaml was 0666 was applied (%04o):\n%s", h.mode(h.env.Layout.ConfigPath), got)
+		}
+	})
 	t.Run("activation fails", func(t *testing.T) {
 		h := newTestHost(t, "linux")
 		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -112,8 +128,13 @@ func TestReassertedV8ConfigIsNotRewritten(t *testing.T) {
 	if got := h.read(h.env.Layout.ConfigPath); got != v8 {
 		t.Fatalf("the re-asserted v8 config was rewritten:\n%s", got)
 	}
-	if r := h.run(Options{Action: ActionEnsure, Reason: "path"}); !r.Noop {
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	if !r.Noop {
 		t.Fatalf("the kept v8 config does not settle: %+v", r.Changes)
+	}
+	// The settled run still says the file is version 8 (GAP-0540).
+	if !hasWarning(r, codeConfigV8) {
+		t.Fatalf("a run that read a config_version 8 file does not say so: %+v", r.Warnings)
 	}
 }
 
