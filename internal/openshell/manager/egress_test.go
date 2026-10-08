@@ -881,9 +881,11 @@ func TestRecoverCredential(t *testing.T) {
 
 // fastFlush shortens the refusal fold and the flush for a test.
 func fastFlush(t *testing.T) {
-	window, interval, held := blockCoalesceWindow, sinkFlushInterval, heldBackInterval
-	blockCoalesceWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
-	t.Cleanup(func() { blockCoalesceWindow, sinkFlushInterval, heldBackInterval = window, interval, held })
+	window, lines, interval, held := blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval
+	blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() {
+		blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = window, lines, interval, held
+	})
 }
 
 func egressRecords(e *harnessEnv, sandbox string, match func(audit.SandboxEgressEvent) bool) int {
@@ -949,6 +951,37 @@ func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
 	}
 	if n := len(feed) - first; n != 1 || feed[len(feed)-1].Repeats < 1 {
 		t.Fatalf("first %d lines, then %d folded: %q", first, n, msgs)
+	}
+}
+
+// GAP-0329 (round 3): a strict session's npm retry loop, refused at 0 s,
+// 10 s and 11 s, then twice at once a minute later, printed identical lines
+// in pairs and no count. The repeats of a minute are one line with their
+// count, and a single repeat adds no line.
+func TestARetryLoopsRefusalsAreOneLineAMinute(t *testing.T) {
+	e := liveEnv(t, "loopbox", nil)
+	_, advance := e.fakeClock(time.Now())
+	refuse := func() {
+		e.ocsf("loopbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
+	}
+	refuse()
+	advance(10 * time.Second)
+	refuse()
+	advance(time.Second)
+	refuse()
+	advance(50 * time.Second)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	refuse()
+	refuse()
+	advance(time.Minute)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	var msgs []string
+	for _, l := range e.events("loopbox", sandboxapi.ActivityEgressBlocked, "") {
+		msgs = append(msgs, l.Message)
+	}
+	const line = "✗ registry.npmjs.org (no OpenShell rule allows it)"
+	if want := []string{line, line + " (and 1 more like it)", line}; !slices.Equal(msgs, want) {
+		t.Fatalf("feed %q, want %q", msgs, want)
 	}
 }
 

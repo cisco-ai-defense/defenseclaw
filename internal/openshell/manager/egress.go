@@ -530,7 +530,8 @@ const maxOpenShellRefusals = 4096
 // seconds made seven MEDIUM alerts and seven feed lines (GAP-0199).
 //
 // The record folds by destination and program, the feed line by its text
-// (openshellLineKey): record and line report whether each only counted.
+// (openshellLineKey) within feedFoldWindow: record and line report whether
+// each only counted.
 func (s *egressSink) foldOpenShell(sandbox string, ev audit.SandboxEgressEvent, feed *sandboxapi.ActivityEvent) (record, line bool) {
 	now := s.m.now()
 	k := openshellRefusalKey{sandbox: sandbox, host: ev.Host, binary: ev.Executable, port: ev.Port}
@@ -551,7 +552,7 @@ func (s *egressSink) foldOpenShell(sandbox string, ev audit.SandboxEgressEvent, 
 		return record, false
 	}
 	lk := openshellLineKey{sandbox: sandbox, message: feed.Message}
-	if l := s.openshellLines[lk]; l != nil && now.Sub(l.since) < blockCoalesceWindow {
+	if l := s.openshellLines[lk]; l != nil && now.Sub(l.since) < feedFoldWindow {
 		l.repeats++
 		l.last, line = *feed, true
 	} else {
@@ -581,10 +582,12 @@ func (s *egressSink) flushOpenShell(ctx context.Context, now time.Time) {
 		delete(s.openshell, k)
 	}
 	for k, l := range s.openshellLines {
-		if now.Sub(l.since) < blockCoalesceWindow {
+		if now.Sub(l.since) < feedFoldWindow {
 			continue
 		}
-		if l.repeats > 0 {
+		// A single repeat says nothing the first line did not: printed, it
+		// read as the same line twice (GAP-0329).
+		if l.repeats > 1 {
 			lines = append(lines, l)
 		}
 		delete(s.openshellLines, k)
@@ -601,10 +604,8 @@ func (s *egressSink) flushOpenShell(ctx context.Context, now time.Time) {
 	sort.Slice(lines, func(i, j int) bool { return lines[i].last.Time.Before(lines[j].last.Time) })
 	for _, l := range lines {
 		line := l.last
-		if l.repeats > 1 {
-			line.Message += fmt.Sprintf(" (and %d more like it)", l.repeats-1)
-			line.Repeats = l.repeats - 1
-		}
+		line.Message += fmt.Sprintf(" (and %d more like it)", l.repeats-1)
+		line.Repeats = l.repeats - 1
 		s.m.publishEgress(line)
 	}
 }
