@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -382,6 +383,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		if request.AIDiscovery == nil {
 			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)
 		}
+		limitEnterpriseHookScanWorkerMemory()
 		// End with a partial report rather than be killed at the timeout.
 		scanCtx, cancel := context.WithTimeout(ctx, enterpriseHookWorkerTimeout*3/4)
 		defer cancel()
@@ -435,6 +437,22 @@ func applyEnterpriseHookWorkerLimits() {
 	_ = syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: 0})
 	lowerRlimit(syscall.RLIMIT_FSIZE, 256<<20)
 	lowerRlimit(syscall.RLIMIT_NOFILE, 1024)
+}
+
+// enterpriseHookScanWorkerMemoryLimit is the memory ceiling of a per-user
+// scan worker. The scan's own bounds keep it far below; a home that defeats
+// them ends that user's worker, never the host (GAP-0694: one worker grew to
+// 14.7 GB and the kernel's OOM killer took other services down with it).
+const enterpriseHookScanWorkerMemoryLimit = 1 << 30
+
+// limitEnterpriseHookScanWorkerMemory caps the scan worker's data segment,
+// which on Linux counts the Go heap, so an allocation past the ceiling ends
+// the worker with an out-of-memory error. The soft Go limit makes the
+// collector work harder before that. The scan runs only ps, which inherits
+// the ceiling and stays far below it.
+func limitEnterpriseHookScanWorkerMemory() {
+	debug.SetMemoryLimit(enterpriseHookScanWorkerMemoryLimit * 3 / 4)
+	lowerRlimit(syscall.RLIMIT_DATA, enterpriseHookScanWorkerMemoryLimit)
 }
 
 func lowerRlimit(resource int, limit uint64) {

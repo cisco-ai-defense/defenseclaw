@@ -488,6 +488,15 @@ Every scan is bounded: at most 4,096 plugins per IDE installation, 16,384
 files and 64 MiB of metadata per home, and 1 MiB per file. An IDE that
 exceeds a bound is reported as a partial installation rather than read further.
 
+The scan reads regular files only: it skips a FIFO, a device, a socket or a
+folder it cannot open without waiting on it, and a manifest it walks to is read
+as the file itself, never through a link. On a managed Linux host, each
+user's scan runs in a worker with a 1 GiB memory ceiling, so a home that
+defeats these bounds ends that user's worker, not the host. On managed Linux
+and macOS, when a user's scan fails three passes in a row, the guardian
+pauses that home for an hour (then two, up to a day) and keeps the user's
+last inventory meanwhile.
+
 Most IDE rows describe plugin data found in each user profile; Windows Visual
 Studio also has machine-wide rows. Removing an IDE
 application can leave those folders behind, so an `enabled` plugin row means

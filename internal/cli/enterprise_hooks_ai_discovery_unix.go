@@ -45,6 +45,71 @@ var enterpriseHookAIDiscoveryState struct {
 	fingerprint string
 }
 
+// enterpriseHookAIDiscoveryBreaker pauses the scans of an account whose
+// worker failed three passes in a row (timed out, ended at its memory
+// ceiling or crashed), so one home that cannot be scanned does not cost a
+// worker on every pass (GAP-0694). The pause starts at an hour and doubles
+// up to a day; the pass after a pause tries once, and a good scan closes the
+// breaker. The account keeps its last record meanwhile.
+var enterpriseHookAIDiscoveryBreaker = newEnterpriseHookScanBreaker(3, time.Hour, 24*time.Hour)
+
+type enterpriseHookScanBreaker struct {
+	mu        sync.Mutex
+	threshold int
+	base, max time.Duration
+	accounts  map[int]*enterpriseHookScanBreakerState
+}
+
+type enterpriseHookScanBreakerState struct {
+	failures int
+	pause    time.Duration
+	until    time.Time
+}
+
+func newEnterpriseHookScanBreaker(threshold int, base, max time.Duration) *enterpriseHookScanBreaker {
+	return &enterpriseHookScanBreaker{threshold: threshold, base: base, max: max, accounts: map[int]*enterpriseHookScanBreakerState{}}
+}
+
+// allow reports whether uid's home may be scanned at now.
+func (b *enterpriseHookScanBreaker) allow(uid int, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	state := b.accounts[uid]
+	return state == nil || !now.Before(state.until)
+}
+
+// record notes one scan of uid and returns the pause a failure opened, or 0.
+func (b *enterpriseHookScanBreaker) record(uid int, now time.Time, failed bool) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !failed {
+		delete(b.accounts, uid)
+		return 0
+	}
+	state := b.accounts[uid]
+	if state == nil {
+		state = &enterpriseHookScanBreakerState{}
+		b.accounts[uid] = state
+	}
+	if state.failures++; state.failures < b.threshold {
+		return 0
+	}
+	state.pause = min(max(state.pause*2, b.base), b.max)
+	state.until = now.Add(state.pause)
+	return state.pause
+}
+
+// keep forgets the accounts that are no longer enrolled.
+func (b *enterpriseHookScanBreaker) keep(enrolled map[int]bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for uid := range b.accounts {
+		if !enrolled[uid] {
+			delete(b.accounts, uid)
+		}
+	}
+}
+
 func init() {
 	enterpriseHookAfterWatchReconcile = func(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 		run.Rows = enterpriseHookEnrolledAccountRows(stderr, run)
@@ -146,15 +211,18 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		return
 	}
 	enrolled := map[string]bool{inventory.UserScanPassName: true}
+	enrolledUIDs := map[int]bool{}
 	accounts := []enterpriseHookWorkerAccount{}
 	resolver := enterprisehooks.StandaloneResolver()
+	breaker := enterpriseHookAIDiscoveryBreaker
 	for _, row := range rows {
 		uid := strconv.Itoa(row.UID)
 		if row.UID <= 0 || enrolled[uid+".json"] {
 			continue
 		}
 		enrolled[uid+".json"] = true
-		if row.Pending {
+		enrolledUIDs[row.UID] = true
+		if row.Pending || !breaker.allow(row.UID, time.Now()) {
 			continue
 		}
 		account, err := resolver.LookupUID(row.UID)
@@ -167,6 +235,7 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		}
 		accounts = append(accounts, enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.Name, Home: home})
 	}
+	breaker.keep(enrolledUIDs)
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, entry := range entries {
 			if !enrolled[entry.Name()] {
@@ -214,6 +283,10 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		err := outcome.Err
 		if err == nil && outcome.Response.AIDiscovery == nil {
 			err = errors.New("the worker returned no report")
+		}
+		if pause := breaker.record(outcome.Job.Account.UID, time.Now(), err != nil); pause > 0 {
+			fmt.Fprintf(stderr, "[hook-guardian] ai discovery for %s: the scan failed %d times in a row; the next scan of this home is in %s\n",
+				outcome.Job.Account.User, breaker.threshold, pause)
 		}
 		if err == nil {
 			report := *outcome.Response.AIDiscovery

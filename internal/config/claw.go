@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -475,14 +476,6 @@ func ReadMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
 // a JSON file with a top-level `mcpServers` map.
 func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return readMCPFromClaudeSettings(path)
-}
-
-// ReadMCPFromClaudeJSONProjects is the exported wrapper around the
-// per-project local-scope Claude Code MCP reader; input is a path to
-// ~/.claude.json, and the returned entries flatten every
-// projects.<path>.mcpServers subtree.
-func ReadMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
-	return readMCPFromClaudeJSONProjects(path)
 }
 
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
@@ -1025,22 +1018,6 @@ func sameClaudeWorkspace(left, right string) bool {
 	return left == right
 }
 
-// readMCPFromClaudeJSONProjects extracts per-project local-scope MCP servers
-// from the projects.<path>.mcpServers subtrees of ~/.claude.json. Each
-// project's servers ship as a single flat list — the parent-path prefix is
-// intentionally not appended so downstream de-dup by name works across scopes.
-func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	_, projectEntries, err := parseClaudeJSONScopes(data)
-	if err != nil {
-		return nil, err
-	}
-	return projectEntries, nil
-}
-
 // claudeJSONScopes is the union shape of ~/.claude.json we care about: the
 // user-scope `mcpServers` block and the per-project local-scope
 // `projects.<path>.mcpServers` blocks. Split out so one read+unmarshal of the
@@ -1103,7 +1080,7 @@ func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err er
 // ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
 // each read and decode the (often multi-megabyte) conversation-state file.
 func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxClaudeJSONConfigBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1162,6 +1139,44 @@ func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 }
 
 const maxCodexInventoryConfigBytes = 1 << 20
+
+// Bounds of one MCP config read. Claude Code's ~/.claude.json carries its
+// conversation state and runs to tens of MiB; the other files are small.
+const (
+	maxMCPConfigFileBytes    = 16 << 20
+	maxClaudeJSONConfigBytes = 256 << 20
+)
+
+// readMCPConfigFile reads one agent MCP config. A link is followed, as
+// dotfile managers link these files, but only a regular file within limit is
+// read and a FIFO never blocks the open: AI discovery reads these files in
+// every user's home, and a config linked to /dev/zero would grow the scan
+// until the host ran out of memory (GAP-0694).
+func readMCPConfigFile(path string, limit int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- agent MCP config path
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("MCP config %s is not a regular file", path)
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("MCP config %s exceeds %d bytes", path, limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("MCP config %s exceeds %d bytes", path, limit)
+	}
+	return data, nil
+}
 
 // readMCPFromCodexConfigTOML parses the [mcp_servers] table out of
 // ~/.codex/config.toml. Codex's documented schema is:
@@ -1397,7 +1412,7 @@ func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, erro
 }
 
 func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1451,7 +1466,7 @@ func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
 }
 
 func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1704,7 +1719,7 @@ func readJSONObjectJSONC(path string) (map[string]any, error) {
 }
 
 func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
