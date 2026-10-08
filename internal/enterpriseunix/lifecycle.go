@@ -122,6 +122,11 @@ const (
 	codeConfigMetadataRestored = "config_metadata_restored"
 )
 
+// maxMetadataRechecks bounds how often one ensure restores the config.yaml
+// owner again and re-checks for a no-op after an install of the same bytes
+// replaced it during the check.
+const maxMetadataRechecks = 3
+
 type lifecycle struct {
 	env    *Env
 	opts   Options
@@ -356,7 +361,16 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddWarning(codeWSL, wslDeploymentWarning)
 		}
 		l.restoreUnchangedConfigMetadata(ctx, record)
-		if noop, reason := l.ensureNoop(ctx, record); noop {
+		noop, reason := l.ensureNoop(ctx, record)
+		// Configuration management that installs the same config.yaml
+		// again while this run checks (two installs seconds apart) replaced
+		// the owner the restore above put back, and the run restarted the
+		// gateway for that owner alone (GAP-1030). Restore and check again
+		// while the installed bytes are still the applied config.
+		for retry := 0; !noop && retry < maxMetadataRechecks && l.restoreUnchangedConfigMetadata(ctx, record); retry++ {
+			noop, reason = l.ensureNoop(ctx, record)
+		}
+		if noop {
 			r.Noop = true
 			r.NoopReason = reason
 			if !exists(env.committedConfigPath()) {
@@ -1963,33 +1977,35 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 // a no-op. Configuration management that installs the same file again
 // (install -o root -g root -m 0640) changed only its group: the run restored
 // it and restarted the gateway to load a change that was none, on every run
-// (GAP-0941). A --config run brings its own bytes and is left alone.
-func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *Deployment) {
+// (GAP-0941). A --config run brings its own bytes and is left alone. It
+// reports whether it restored them.
+func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *Deployment) bool {
 	env := l.env
 	if l.opts.ConfigFile != "" || record == nil {
-		return
+		return false
 	}
 	path := env.P(env.Layout.ConfigPath)
 	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
-		return
+		return false
 	}
 	raw, err := readBounded(path, maxInputBytes)
 	if err != nil || sha256Bytes(raw) != record.ConfigSHA256 {
-		return
+		return false
 	}
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
 	if err != nil || !ok || account.GID != record.ServiceGID {
-		return
+		return false
 	}
 	owner := fileOwner{UID: 0, GID: account.GID}
-	if !env.metadataDiffers(path, 0o640, owner) {
-		return
+	if !env.metadataDiffers(path, 0o640, owner) || env.fixMetadata(path, 0o640, owner) != nil {
+		return false
 	}
-	if err := env.fixMetadata(path, 0o640, owner); err == nil {
+	if !hasMessageCode(l.result.Warnings, codeConfigMetadataRestored) {
 		l.result.AddWarning(codeConfigMetadataRestored, fmt.Sprintf(
 			"restored the mode and owner of %s (0640, root and the service group); its content is the applied config, so nothing else changed",
 			env.Layout.ConfigPath))
 	}
+	return true
 }
 
 // ensureNoop reports whether the installed deployment already matches the
