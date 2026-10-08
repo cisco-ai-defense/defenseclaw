@@ -1102,19 +1102,22 @@ def _validate_private_upstream_allowlist(guardrail: dict[str, Any], source_name:
 
 
 def _validate_profile_references(observability: dict[str, Any], known: set[str], source_name: str) -> None:
+    def unknown(profile: str) -> str:
+        return f"profile {profile!r} is not defined; defined: {', '.join(sorted(known))}"
+
     defaults = observability.get("defaults", {})
     if defaults.get("redaction_profile", "none") not in known:
         _semantic_error(
             source_name,
             "observability.defaults.redaction_profile",
-            "select a built-in or defined custom profile",
+            unknown(defaults["redaction_profile"]),
         )
     for bucket, policy in observability.get("buckets", {}).items():
         if "redaction_profile" in policy and policy["redaction_profile"] not in known:
             _semantic_error(
                 source_name,
                 f"observability.buckets.{bucket}.redaction_profile",
-                "select a built-in or defined custom profile",
+                unknown(policy["redaction_profile"]),
             )
     for index, destination in enumerate(observability.get("destinations", [])):
         if "send" in destination:
@@ -1128,7 +1131,7 @@ def _validate_profile_references(observability: dict[str, Any], known: set[str],
                 _semantic_error(
                     source_name,
                     f"observability.destinations[{index}].{suffix}.redaction_profile",
-                    "select a built-in or defined custom profile",
+                    unknown(policy["redaction_profile"]),
                 )
 
 

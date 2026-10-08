@@ -916,3 +916,12 @@ def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
     assert "(codex): already open" not in result.output
     assert "(cursor): stays closed" in result.output
     assert "Cursor action mode keeps hook failures closed" in result.output
+
+
+def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("guardrail: {}")
+    snapshot = fail_mode_runtime.FileSnapshot(path=path, existed=True, data=path.read_bytes(), mode=0o644)
+    with patch.object(fail_mode_runtime.os, "replace", side_effect=PermissionError("immutable")) as replace:
+        fail_mode_runtime.restore_fail_mode_transaction((snapshot,))
+    replace.assert_not_called()

@@ -90,3 +90,34 @@ func TestWatchdogDownStateMovesToDegradedWhenGatewayAnswers(t *testing.T) {
 		t.Fatalf("watchdog state = %s (err %v), want degraded", state, err)
 	}
 }
+
+// GAP-0386: once the gateway is down for debounce probes, the watchdog asks
+// the starter to bring a crashed per-user gateway back.
+func TestWatchdogStartsAGatewayThatStoppedRunning(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	srv.Close() // nothing listens: the gateway process is gone
+
+	var starts atomic.Int32
+	original := watchdogGatewayStarter
+	watchdogGatewayStarter = func(string) (bool, error) {
+		starts.Add(1)
+		return true, nil
+	}
+	t.Cleanup(func() { watchdogGatewayStarter = original })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() {
+		for starts.Load() < 1 && ctx.Err() == nil {
+			time.Sleep(2 * time.Millisecond)
+		}
+		cancel()
+	}()
+	runWatchdogLoop(ctx, srv.URL+"/health", 5*time.Millisecond, 2, watchdogHealthRequirements{requireGuardrail: true}, nil, nil)
+	if starts.Load() < 1 {
+		t.Fatal("the watchdog never tried to start the stopped gateway")
+	}
+}

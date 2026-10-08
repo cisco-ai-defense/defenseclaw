@@ -880,8 +880,17 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		// GAP-0480: Claude Code hides the stderr of a hook that exits 0, so a
+		// per-user fail-open hook says on screen that nothing is checked.
+		if !strings.HasPrefix(r.stdout, `{"systemMessage":"DefenseClaw is not checking this session`) ||
+			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
+			t.Errorf("stdout = %q, want the gateway-down systemMessage", r.stdout)
+		}
+		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
+			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
+		})
+		if managed.stdout != "" {
+			t.Errorf("socket hook stdout = %q, want no per-user notice", managed.stdout)
 		}
 	})
 
@@ -1974,6 +1983,10 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	}
 	if !strings.Contains(errb.String(), "this account is not enrolled") || strings.Contains(errb.String(), "gateway unreachable") {
 		t.Fatalf("stderr = %q, want the enrollment explanation", errb.String())
+	}
+	// GAP-0388: an SSH-only account waited for an enrollment that cannot happen.
+	if !strings.Contains(errb.String(), "Remote Desktop") || !strings.Contains(errb.String(), "SSH") {
+		t.Fatalf("stderr = %q, want the desktop sign-in requirement", errb.String())
 	}
 	// Codex shows its structured denial, not stderr, so the denial names
 	// the reason too instead of the generic failed-closed text.

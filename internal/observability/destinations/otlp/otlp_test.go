@@ -1104,7 +1104,7 @@ func TestLogFailureClassificationAndMalformedProjection(t *testing.T) {
 			dispatcher := newOTLPDispatcher(t, factory.config.Destination, adapter)
 			enqueueOTLP(t, dispatcher, "failure-record", `{"message":"bounded"}`)
 			drainOTLP(t, dispatcher)
-			if got := dispatcher.Counters(); got.Rejected != 1 || got.Retried != test.retried || got.Delivered != 0 {
+			if got := dispatcher.Counters(); got.Rejected != uint64(1-test.retried/2) || got.Dropped != test.retried/2 || got.Retried != test.retried || got.Delivered != 0 {
 				t.Fatalf("counters = %+v", got)
 			}
 			// The failure code names the cause in alerts and destination
@@ -1331,7 +1331,7 @@ func TestHTTPLogAcknowledgementAndPostWriteFailureClassification(t *testing.T) {
 		dispatcher := newOTLPDispatcher(t, "pre-write", adapter)
 		enqueueOTLP(t, dispatcher, "pre-write-record", `{"message":"retry"}`)
 		drainOTLP(t, dispatcher)
-		if got := dispatcher.Counters(); got.Retried != 2 || got.Rejected != 1 {
+		if got := dispatcher.Counters(); got.Retried != 2 || got.Dropped != 1 || got.Rejected != 0 {
 			t.Fatalf("pre-write counters = %+v", got)
 		}
 		if calls := dialer.calls.Load(); calls < 1 || calls > 3 {
@@ -1389,7 +1389,7 @@ func TestHTTPLogAcknowledgementAndPostWriteFailureClassification(t *testing.T) {
 			dispatcher := newOTLPDispatcher(t, "bad-ack", adapter)
 			enqueueOTLP(t, dispatcher, "bad-ack-record", `{"message":"ambiguous"}`)
 			drainOTLP(t, dispatcher)
-			if got := dispatcher.Counters(); got.Retried != 2 || got.Rejected != 1 {
+			if got := dispatcher.Counters(); got.Retried != 2 || got.Dropped != 1 || got.Rejected != 0 {
 				t.Fatalf("bad ack counters = %+v", got)
 			}
 			_ = adapter.Close(context.Background())
@@ -1414,7 +1414,7 @@ func TestHTTPLogAcknowledgementAndPostWriteFailureClassification(t *testing.T) {
 		dispatcher := newOTLPDispatcher(t, "truncated-ack", adapter)
 		enqueueOTLP(t, dispatcher, "truncated-ack-record", `{"message":"ambiguous"}`)
 		drainOTLP(t, dispatcher)
-		if got := dispatcher.Counters(); got.Retried != 2 || got.Rejected != 1 {
+		if got := dispatcher.Counters(); got.Retried != 2 || got.Dropped != 1 || got.Rejected != 0 {
 			t.Fatalf("truncated response counters = %+v", got)
 		}
 		_ = adapter.Close(context.Background())
@@ -1446,7 +1446,7 @@ func TestHTTPLogAcknowledgementAndPostWriteFailureClassification(t *testing.T) {
 		dispatcher := newOTLPDispatcher(t, "post-write", adapter)
 		enqueueOTLP(t, dispatcher, "post-write-record", `{"message":"ambiguous"}`)
 		drainOTLP(t, dispatcher)
-		if got := dispatcher.Counters(); got.Retried != 2 || got.Rejected != 1 {
+		if got := dispatcher.Counters(); got.Retried != 2 || got.Dropped != 1 || got.Rejected != 0 {
 			t.Fatalf("post-write counters = %+v", got)
 		}
 		_ = adapter.Close(context.Background())

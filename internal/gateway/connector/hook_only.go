@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -5084,6 +5085,16 @@ func removeJSONHookReferences(path string, hookScripts ...string) error {
 	if pruned == nil {
 		pruned = map[string]interface{}{}
 	}
+	if reflect.DeepEqual(pruned, cfg) {
+		return nil
+	}
+	if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
+		before, _ := cfg["hooks"].(map[string]interface{})
+		pruneNewlyEmptyHookEntries(before, hooks)
+		if len(hooks) == 0 {
+			delete(pruned, "hooks")
+		}
+	}
 	return writeJSONObject(path, pruned)
 }
 
@@ -5104,6 +5115,16 @@ func removeCopilotHookReferences(path, hookScript string) error {
 	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
 	if pruned == nil {
 		pruned = map[string]interface{}{}
+	}
+	if reflect.DeepEqual(pruned, cfg) && !(strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned)) {
+		return nil
+	}
+	if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
+		before, _ := cfg["hooks"].(map[string]interface{})
+		pruneNewlyEmptyHookEntries(before, hooks)
+		if len(hooks) == 0 {
+			delete(pruned, "hooks")
+		}
 	}
 	if strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned) {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -5134,7 +5155,11 @@ func removeHookScriptReferences(raw interface{}, hookScripts ...string) interfac
 	case []interface{}:
 		out := make([]interface{}, 0, len(v))
 		for _, item := range v {
-			if containsHookScript(item, hookScripts...) {
+			owned := false
+			for _, command := range hookScripts {
+				owned = owned || managedHookCommandEntry(item, command)
+			}
+			if owned {
 				continue
 			}
 			out = append(out, removeHookScriptReferences(item, hookScripts...))
@@ -5145,7 +5170,6 @@ func removeHookScriptReferences(raw interface{}, hookScripts ...string) interfac
 		for key, value := range v {
 			out[key] = removeHookScriptReferences(value, hookScripts...)
 		}
-		pruneEmptyMapArrays(out)
 		return out
 	default:
 		return raw
@@ -5162,6 +5186,29 @@ func removeOwnedFlatHooks(raw interface{}, hookScript string) []interface{} {
 		out = append(out, item)
 	}
 	return out
+}
+
+// pruneNewlyEmptyHookEntries removes only containers emptied by removing an
+// owned hook. Operator-owned empty lists and mappings are left untouched.
+func pruneNewlyEmptyHookEntries(before, after map[string]interface{}) {
+	for key, value := range after {
+		previous := before[key]
+		switch current := value.(type) {
+		case []interface{}:
+			old, ok := previous.([]interface{})
+			if ok && len(old) > 0 && len(current) == 0 {
+				delete(after, key)
+			}
+		case map[string]interface{}:
+			old, ok := previous.(map[string]interface{})
+			if ok {
+				pruneNewlyEmptyHookEntries(old, current)
+				if len(old) > 0 && len(current) == 0 {
+					delete(after, key)
+				}
+			}
+		}
+	}
 }
 
 func pruneEmptyMapArrays(obj map[string]interface{}) {

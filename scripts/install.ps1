@@ -1532,11 +1532,18 @@ function Select-Connector {
     for ($index = 0; $index -lt $ConnectorChoices.Count; $index++) {
         Write-Host ("    {0,2}) {1}" -f ($index + 1), $ConnectorChoices[$index])
     }
-    try { $choice = Read-Host "  Choice [default 1=codex]" } catch { $choice = "" }
-    $number = 0
-    $picked = "codex"
-    if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
-        $picked = $ConnectorChoices[$number - 1]
+    while ($true) {
+        try { $choice = Read-Host "  Choice [default 1=codex]" } catch { $choice = "" }
+        $choice = $choice.Trim()
+        if (-not $choice) { $picked = "codex"; break }
+        $number = 0
+        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
+            $picked = $ConnectorChoices[$number - 1]
+            break
+        }
+        $named = $ConnectorChoices | Where-Object { $_ -eq $choice } | Select-Object -First 1
+        if ($named) { $picked = $named; break }
+        Write-Warn "Choose a listed number or connector name."
     }
     Write-Ok "Connector: $picked"
     return $picked

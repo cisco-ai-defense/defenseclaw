@@ -30,8 +30,8 @@ Run it as the user you want to inspect for the token sections (a per-user view),
 as SYSTEM (for example an Intune platform script, or a scheduled task that runs as SYSTEM) for section 2. The
 script changes nothing. Tested on Windows Server 2025 in Windows PowerShell 5.1 and
 PowerShell 7, and against a saved dsregcmd output. The registry values and token
-groups it reads were captured on an Entra-joined Windows 11 computer during the live
-tests, but this script itself has not run on one yet.
+groups it reads were captured on an Entra-joined Windows 11 computer. Run the
+user and SYSTEM checks on the target computer before relying on a group verdict.
 
 .PARAMETER GroupSid
 Entra group SIDs to check (S-1-12-1-<a>-<b>-<c>-<d>). Read a SID with
@@ -130,21 +130,17 @@ namespace DcIdentityKit
 '@
 }
 
-function Get-PropertyValue {
-    param($Object, [string]$Name)
-    $property = $Object.PSObject.Properties[$Name]
-    if ($null -eq $property) { return '' }
-    [string]$property.Value
-}
-
 function Get-JoinState {
     param([string]$Path)
     if ($Path) {
         $lines = Get-Content -LiteralPath $Path
     }
     else {
-        $exe = Join-Path $env:SystemRoot 'System32\dsregcmd.exe'
-        if (-not (Test-Path -LiteralPath $exe)) { return [ordered]@{ Error = 'dsregcmd.exe was not found' } }
+        $directory = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+            'Sysnative'
+        } else { 'System32' }
+        $exe = Join-Path $env:SystemRoot "$directory\dsregcmd.exe"
+        if (-not (Test-Path -LiteralPath $exe)) { return [ordered]@{ Error = "dsregcmd.exe was not found at $exe" } }
         $lines = & $exe /status 2>&1
     }
     $wanted = @('AzureAdJoined', 'EnterpriseJoined', 'DomainJoined', 'DeviceAuthStatus', 'TenantName', 'TenantId', 'MdmUrl',
@@ -162,47 +158,64 @@ function Get-JoinState {
     $state
 }
 
+function Open-Registry64Key {
+    param([string]$SubKey)
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try { return $base.OpenSubKey($SubKey, $false) } finally { $base.Dispose() }
+}
+
 function Get-IdentityStoreAccount {
-    $base = 'HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache'
-    try {
-        $keys = @(Get-ChildItem -LiteralPath $base -ErrorAction Stop)
-    }
-    catch {
-        return [pscustomobject]@{ Readable = $false; Message = $_.Exception.Message; Accounts = @() }
+    $base = Open-Registry64Key 'SOFTWARE\Microsoft\IdentityStore\Cache'
+    if ($null -eq $base) {
+        return [pscustomobject]@{ Readable = $false; Message = '64-bit identity store cache is not readable'; Accounts = @() }
     }
     $accounts = @()
-    foreach ($key in $keys) {
-        $sid = $key.PSChildName
-        $cache = Join-Path $key.PSPath "IdentityCache\$sid"
-        if (-not (Test-Path -LiteralPath $cache)) { continue }
-        $values = Get-ItemProperty -LiteralPath $cache
-        $accounts += [pscustomobject]@{
-            Sid      = $sid
-            UserName = Get-PropertyValue $values 'UserName'
-            Provider = Get-PropertyValue $values 'ProviderName'
-            SamName  = Get-PropertyValue $values 'SAMName'
+    try {
+        foreach ($sid in $base.GetSubKeyNames()) {
+            $cache = $base.OpenSubKey("$sid\IdentityCache\$sid", $false)
+            if ($null -eq $cache) { continue }
+            try {
+                $accounts += [pscustomobject]@{
+                    Sid      = $sid
+                    UserName = [string]$cache.GetValue('UserName', '')
+                    Provider = [string]$cache.GetValue('ProviderName', '')
+                    SamName  = [string]$cache.GetValue('SAMName', '')
+                }
+            } finally { $cache.Dispose() }
         }
-    }
+    } catch {
+        return [pscustomobject]@{ Readable = $false; Message = $_.Exception.Message; Accounts = @() }
+    } finally { $base.Dispose() }
     [pscustomobject]@{ Readable = $true; Message = ''; Accounts = $accounts }
 }
 
 function Get-CloudJoinInfo {
     $info = @()
     $message = ''
-    foreach ($path in 'HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo', 'HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\TenantInfo') {
+    foreach ($item in @(
+        @{ Name = 'JoinInfo'; Path = 'SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo' },
+        @{ Name = 'TenantInfo'; Path = 'SYSTEM\CurrentControlSet\Control\CloudDomainJoin\TenantInfo' }
+    )) {
+        $base = Open-Registry64Key $item.Path
+        if ($null -eq $base) { continue }
         try {
-            foreach ($key in @(Get-ChildItem -LiteralPath $path -ErrorAction Stop)) {
-                $values = Get-ItemProperty -LiteralPath $key.PSPath
-                $info += [pscustomobject]@{
-                    Key         = (Split-Path $path -Leaf)
-                    TenantId    = Get-PropertyValue $values 'TenantId'
-                    IdpDomain   = Get-PropertyValue $values 'IdpDomain'
-                    DisplayName = Get-PropertyValue $values 'DisplayName'
-                }
+            foreach ($name in $base.GetSubKeyNames()) {
+                $key = $base.OpenSubKey($name, $false)
+                if ($null -eq $key) { continue }
+                try {
+                    $tenantId = [string]$key.GetValue('TenantId', '')
+                    if (-not $tenantId -and $item.Name -eq 'TenantInfo') { $tenantId = $name }
+                    $info += [pscustomobject]@{
+                        Key         = $item.Name
+                        TenantId    = $tenantId
+                        IdpDomain   = [string]$key.GetValue('IdpDomain', '')
+                        DisplayName = [string]$key.GetValue('DisplayName', '')
+                    }
+                } finally { $key.Dispose() }
             }
-        }
-        catch [System.Management.Automation.ItemNotFoundException] { continue }
-        catch { $message = $_.Exception.Message }
+        } catch { $message = $_.Exception.Message }
+        finally { $base.Dispose() }
     }
     [pscustomobject]@{ Entries = $info; Message = $message }
 }

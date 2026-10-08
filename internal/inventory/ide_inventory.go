@@ -201,6 +201,42 @@ func (idx ideAIIndex) match(family, id string) (AISignature, bool) {
 	return sig, ok
 }
 
+// Some marketplace AI extensions are newer than the curated signature catalog.
+// Exact IDs cover established products; the narrow description rule covers
+// new publishers that describe their own extension as an AI coding tool.
+var marketplaceAIExtensions = map[string]bool{
+	"augment.vscode-augment":                 true,
+	"kilocode.kilo-code":                     true,
+	"rjmacarthy.twinny":                      true,
+	"genieai.chatgpt-vscode":                 true,
+	"gitlab.gitlab-workflow":                 true,
+	"google.gemini-cli-vscode-ide-companion": true,
+	"sst-dev.opencode":                       true,
+	"visualstudioexptteam.vscodeintellicode": true,
+}
+
+func (idx ideAIIndex) matchPlugin(family string, p ideplugins.Plugin) (AISignature, bool) {
+	if sig, ok := idx.match(family, p.ID); ok {
+		return sig, true
+	}
+	if family != ideplugins.FamilyVSCode {
+		return AISignature{}, false
+	}
+	description := strings.ToLower(p.Description)
+	aiDescription := strings.Contains(description, "ai coding") ||
+		strings.Contains(description, "ai code completion") ||
+		strings.Contains(description, "ai-powered code") ||
+		strings.Contains(description, "llm coding") ||
+		strings.Contains(description, "chatgpt")
+	if !marketplaceAIExtensions[strings.ToLower(p.ID)] && !aiDescription {
+		return AISignature{}, false
+	}
+	return AISignature{
+		ID: "ide-" + strings.ToLower(p.ID), Name: p.DisplayName,
+		Vendor: p.Publisher, Category: "editor_extension", Confidence: 0.9,
+	}, true
+}
+
 // detectEditorExtensions reads every scanned home's IDEs. It returns the
 // AI editor-extension signals (one per signature, IDE installation and
 // account, attributed through the home's owner) and the full IDE
@@ -217,7 +253,10 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 	inv := &IDEInventory{Scope: s.ideInventoryScope(), ScannedAt: now}
 	var signals []AISignal
 	for _, home := range homes {
-		limits := ideplugins.Limits{FollowSymlinks: !serviceContext}
+		// Only a user's own gateway follows links: a link a user planted
+		// toward another readable home must not put that account's
+		// plugins in a managed inventory (GAP-0396).
+		limits := ideplugins.Limits{FollowSymlinks: !serviceContext && !s.userHomeScan}
 		if !serviceContext {
 			limits.RoamingAppData, limits.LocalAppData = platformIDEAppData(home)
 		}
@@ -249,7 +288,7 @@ func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, i
 	for _, inst := range installs {
 		seen := map[string]bool{}
 		for _, p := range inst.Plugins {
-			sig, ok := index.match(inst.Family, p.ID)
+			sig, ok := index.matchPlugin(inst.Family, p)
 			if !ok || seen[sig.ID] || inst.Root == "" {
 				continue
 			}
@@ -362,7 +401,7 @@ func (inv *IDEInventory) add(installs []ideplugins.Install, owner ideOwner, inde
 				InstallID: row.InstallID,
 			}
 			plugin.Fingerprint = idePluginFingerprint(plugin)
-			if sig, ok := index.match(inst.Family, p.ID); ok {
+			if sig, ok := index.matchPlugin(inst.Family, p); ok {
 				plugin.IsAI, plugin.AISignatureID = true, sig.ID
 			}
 			inv.Plugins = append(inv.Plugins, plugin)

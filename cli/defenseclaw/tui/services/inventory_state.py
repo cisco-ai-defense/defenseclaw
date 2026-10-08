@@ -264,6 +264,7 @@ class InventoryIDEPlugin:
     user: str = ""
     ide_family: str = ""
     ide_product: str = ""
+    ide_version: str = ""
     display_name: str = ""
     publisher: str = ""
     version: str = ""
@@ -284,6 +285,7 @@ class InventoryIDEPlugin:
             user=_user_of(raw),
             ide_family=str(raw.get("ide_family") or ""),
             ide_product=str(raw.get("ide_product") or ""),
+            ide_version=str(raw.get("ide_version") or ""),
             display_name=str(raw.get("display_name") or ""),
             publisher=str(raw.get("publisher") or ""),
             version=str(raw.get("version") or ""),
@@ -314,6 +316,8 @@ class InventoryIDEPlugin:
     @property
     def ide_label(self) -> str:
         product = self.ide_product or self.ide_family
+        if self.ide_version:
+            product = f"{product} {self.ide_version}"
         return f"{product} ({self.location})" if self.location else product
 
     @property
@@ -490,6 +494,7 @@ class InventorySnapshot:
     ide_plugins: tuple[InventoryIDEPlugin, ...] = ()
     ide_collected: bool = False
     ide_note: str = ""
+    ide_partial: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventorySnapshot:
@@ -562,6 +567,7 @@ class InventorySnapshot:
             ),
             ide_collected="ide_plugins" in raw,
             ide_note=str(raw.get("ide_plugins_note") or ""),
+            ide_partial=bool((summary_raw or {}).get("ide_plugins", {}).get("partial")) if isinstance(summary_raw, Mapping) else False,
         )
 
     @classmethod
@@ -815,7 +821,8 @@ class InventoryPanelModel:
                 label=INVENTORY_SUBTAB_LABELS[subtab],
                 active=subtab == self.active_sub,
                 count=counts.get(subtab),
-                partial=subtab == "agents" and self.agent_identities_total > 0,
+                partial=(subtab == "agents" and self.agent_identities_total > 0)
+                        or (subtab == "ide_plugins" and bool(self.inventory and self.inventory.ide_partial)),
             )
             for subtab in INVENTORY_SUBTABS
         )
@@ -1000,6 +1007,7 @@ class InventoryPanelModel:
             ide_plugins=tuple(ide_plugins),
             ide_collected=ide_collected,
             ide_note=ide_note,
+            ide_partial=any(snap.ide_partial for snap in snaps),
         )
 
     def scroll_by(self, delta: int) -> None:
@@ -1423,6 +1431,7 @@ class InventoryPanelModel:
                     ("AI", "yes" if ide.is_ai else "no"),
                     ("IDE", ide.ide_label),
                     ("Version", ide.version),
+                    ("IDE version", ide.ide_version),
                     ("User", ide.user),
                     ("Name", ide.display_name),
                     ("Publisher", ide.publisher),
@@ -1470,7 +1479,9 @@ class InventoryPanelModel:
 
     def _with_connector_cell(self, entity: object, cells: tuple[str, ...]) -> tuple[str, ...]:
         if self._show_user_column():
-            cells = (str(getattr(entity, "user", "") or "—"), *cells)
+            user = str(getattr(entity, "user", "") or "—")
+            user = "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in user)
+            cells = ((user[:29] + "...") if len(user) > 32 else user, *cells)
         if not self.show_connector_column:
             return cells
         return (str(getattr(entity, "connector", "") or "—"), *cells)

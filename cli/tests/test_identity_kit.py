@@ -12,8 +12,10 @@ or a password that was expanded a second time would only show up on a Linux host
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
+import json
 import os
 import re
 import shutil
@@ -98,7 +100,7 @@ def test_intune_group_devices_match_directory_ids(capsys: pytest.CaptureFixture[
 def test_intune_script_validates_group_before_upsert(tmp_path: Path, command: str) -> None:
     intune = _load(INTUNE)
     script = tmp_path / "script.txt"
-    script.write_text("echo ok\n", encoding="ascii")
+    script.write_text(("#!/bin/sh\n" if command == "macos-script" else "") + "echo ok\n", encoding="ascii")
     mutations = []
 
     class Graph:
@@ -180,6 +182,147 @@ def test_entra_password_file_rejects_links_and_insecure_existing_file(tmp_path: 
     target.chmod(0o600)
     entra._record_password(str(target), "user@example.test", "generated-value")
     assert target.read_text(encoding="ascii").endswith("user@example.test\tgenerated-value\n")
+
+
+def test_graph_add_member_retries_new_group_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    graph = intune.Graph("token")
+    attempts = []
+
+    def request(*_args):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise intune.GraphError(404, "Request_ResourceNotFound", "group is replicating")
+        return {}
+
+    graph.request = request
+    monkeypatch.setattr(intune.time, "sleep", lambda _seconds: None)
+    assert graph.add_member("group", "device")
+    assert len(attempts) == 2
+
+
+def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.onmicrosoft.com", "groups": [{"name": "group"}],
+                                "users": [{"name": "alice"}]}))
+    writes = []
+
+    class Graph:
+        def get_all(self, _path):
+            writes.append("GET")
+            return []
+
+        def request(self, *_args):
+            writes.append("POST")
+            return {}
+
+    with pytest.raises(SystemExit, match="password-file"):
+        entra.cmd_apply(Graph(), argparse.Namespace(config=str(plan), apply=True, password_file=None))
+    assert writes == []
+
+
+def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    graph = intune.Graph("token")
+    posts = []
+    graph.get_all = lambda path: ([{"id": "device-id"}] if "/devices?" in path else [])
+    graph.wait_for_named_object = lambda _path: []
+    graph.get_after_create = lambda _path: {"id": "group-id"}
+
+    def request(method, _path, _body):
+        posts.append(method)
+        return {"id": "group-id"}
+
+    graph.request = request
+    graph.add_member = lambda group, device: posts.append((group, device)) or True
+    args = argparse.Namespace(name=["new-group"], add_device=["device:new-group"], apply=True)
+    assert intune.cmd_groups(graph, args) == 0
+    assert ("group-id", "device-id") in posts
+
+
+def test_okta_group_name_with_spaces_and_admin_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    assert okta.named_int("Research ML Team=1720001") == ("Research ML Team", 1720001)
+    monkeypatch.setenv("OKTA_ORG_URL", "https://example-admin.okta.com")
+    monkeypatch.setenv("OKTA_API_TOKEN", "dummy")
+    with pytest.raises(okta.OktaError, match="not the -admin URL"):
+        okta.read_credentials()
+
+
+def test_entra_apply_validates_later_group_before_first_post(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text(json.dumps({"domain": "example.onmicrosoft.com",
+                                "groups": [{"name": "valid"}, {"name": "!!!"}]}))
+    with pytest.raises(SystemExit, match="mail nickname"):
+        entra.cmd_apply(object(), argparse.Namespace(config=str(plan), apply=True, password_file=None))
+
+
+def test_intune_check_hides_windows_only_rows_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+    monkeypatch.setattr(intune, "try_get", lambda *_args: ({}, None))
+    rows = intune.check_items(Graph(), ["macos"], [])
+    assert not any("MDM user scope" in row["item"] or "Windows Hello" in row["item"] for row in rows)
+
+
+def test_intune_macos_script_validates_before_graph_calls(tmp_path: Path) -> None:
+    intune = _load(INTUNE)
+    script = tmp_path / "wrapper.sh"
+    script.write_text("""#!/bin/sh
+dc_inline_config() {
+    cat <<'DEFENSECLAW_CONFIG'
+DEFENSECLAW_CONFIG
+}
+""")
+    args = argparse.Namespace(file=str(script), name="test", frequency="PT1H", retries=3, group=None, apply=False)
+    with pytest.raises(SystemExit, match="settings block"):
+        intune.cmd_macos_script(object(), args)
+    script.write_text("""#!/bin/sh
+echo ok
+""")
+    args.frequency = "bad"
+    with pytest.raises(SystemExit, match="frequency"):
+        intune.cmd_macos_script(object(), args)
+
+
+def test_okta_assign_posix_rejects_taken_name_before_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    user = {"id": "new", "profile": {"login": "alice@example.com"}}
+    existing = {"id": "old", "profile": {"login": "other@example.com", "unixUsername": "alice"}}
+    monkeypatch.setattr(okta, "collect_users", lambda *_args: [user])
+
+    class Client:
+        def get_all(self, _path):
+            return [existing]
+
+        def must(self, *_args):
+            raise AssertionError("no API write or group lookup expected")
+
+    args = argparse.Namespace(user=["alice@example.com"], users_from=None, apply=True)
+    assert okta.cmd_assign_posix(Client(), args) == 1
+
+
+def test_okta_reactivates_drifted_signon_rule() -> None:
+    okta = _load(OKTA)
+    calls = []
+
+    class Client:
+        def must(self, method, path, _body=None):
+            calls.append((method, path))
+
+    policy = {"id": "policy"}
+    rule = {"id": "rule", "name": "r", "status": "INACTIVE", "conditions": {"people": {}},
+            "actions": {"appSignOn": {"verificationMethod": {"factorMode": "2FA"}}}}
+    report = okta.Report(dry_run=False)
+    okta.ensure_rule(Client(), report, policy, [rule], "r", 1, {}, "password only")
+    assert ("PUT", "/api/v1/policies/policy/rules/rule") in calls
+    assert ("POST", "/api/v1/policies/policy/rules/rule/lifecycle/activate") in calls
 
 
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
@@ -297,7 +440,8 @@ def test_okta_check_rejects_inactive_ldap_app(monkeypatch: pytest.MonkeyPatch) -
                         {name: {"type": definition["type"]} for name, definition in
                          (okta.USER_ATTRIBUTES if kind == "user" else okta.GROUP_ATTRIBUTES).items()})
     args = okta.build_parser().parse_args(["check"])
-    assert okta.cmd_check(type("Client", (), {"org_url": "https://example.okta.com"})(), args) == 1
+    client = type("Client", (), {"org_url": "https://example.okta.com", "get_all": lambda self, path: []})()
+    assert okta.cmd_check(client, args) == 1
 
 
 def test_okta_check_requires_signon_coverage_for_requested_identities(

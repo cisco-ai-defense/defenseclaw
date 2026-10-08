@@ -16,7 +16,8 @@ matches no one.
 This script makes that membership with NetLocalGroupAddMembers, the API that the
 Intune Account protection (Local user group membership) and LocalUsersAndGroups
 policies use. Use the policy for a fleet. Use this script to try it on one
-computer, or as a platform script where a policy is not available.
+computer. For Intune, use an Account protection policy: Intune platform scripts
+receive no arguments, while this script requires -GroupSid.
 
 It is idempotent: a group that is already a member is reported, not an error.
 Run it elevated (an administrator, or SYSTEM from an MDM). Users must sign out and

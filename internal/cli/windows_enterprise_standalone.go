@@ -1096,9 +1096,10 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 		switch {
 		case windowsEnterpriseAccountDeleted(account.SID):
 			result.AddWarning("deleted_account_rows", fmt.Sprintf(
-				"the account %s no longer exists, but its profile folder %s does, so DefenseClaw keeps its %d enrollment row(s) "+
-					"until the profile is removed; remove it under System Properties > Advanced > User Profiles to revoke them",
-				label, account.Home, account.Rows))
+				"the account %s no longer exists; the enumerator drops its %d enrollment row(s) at its next pass although its "+
+					"profile folder %s remains (remove it under System Properties > Advanced > User Profiles), and until then "+
+					"the guardian reports them for this account only",
+				label, account.Rows, account.Home))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
 				"the account %s created %s itself, so it has no DefenseClaw runtime (for example when an agent it ran before enrollment "+

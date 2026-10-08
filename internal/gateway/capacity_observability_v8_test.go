@@ -139,7 +139,7 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 			Sources: []delivery.HealthSnapshot{{
 				Destination: "capture", Generation: graph.Generation(), Signal: string(observability.SignalMetrics),
 				State: delivery.HealthDegraded, Reason: string(delivery.HealthReasonRetryable),
-				Counters: delivery.Counters{Failed: 2}, LastSuccess: lastSuccess,
+				Counters: delivery.Counters{Failed: 2, Dropped: 4, Rejected: 1}, LastSuccess: lastSuccess,
 			}},
 		}},
 	}
@@ -159,6 +159,8 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	}
 	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(time.Second), wrapper, health2)
 	wrapper.snapshot.Destinations[0].Sources[0].Counters.Failed = 5
+	wrapper.snapshot.Destinations[0].Sources[0].Counters.Dropped = 7
+	wrapper.snapshot.Destinations[0].Sources[0].Counters.Rejected = 3
 	health3, err := wrapper.DestinationHealthSnapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -183,6 +185,24 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 			attributes["defenseclaw.telemetry.signal"] != "metrics" {
 			t.Fatalf("exporter error[%d] attributes=%v", index, attributes)
 		}
+	}
+	drops := generatedMetricByName(metrics, observability.TelemetryInstrumentDefenseClawQueueDrops)
+	if len(drops) != 4 {
+		t.Fatalf("destination loss observations=%d want=4", len(drops))
+	}
+	wantLoss := map[string][]int64{"retry_exhausted": {4, 3}, "rejected": {1, 2}}
+	for _, drop := range drops {
+		attrs := drop.Attributes()
+		if attrs["defenseclaw.metric.queue"] != "destination.capture.metrics" {
+			t.Fatalf("drop queue attributes=%v", attrs)
+		}
+		reason, _ := attrs["defenseclaw.metric.reason"].(string)
+		values := wantLoss[reason]
+		value, ok := drop.Value().Int64()
+		if !ok || len(values) == 0 || value != values[0] {
+			t.Fatalf("drop reason=%s value=%d expected=%v", reason, value, values)
+		}
+		wantLoss[reason] = values[1:]
 	}
 	successes := generatedMetricByName(
 		metrics, observability.TelemetryInstrumentDefenseClawTelemetryExporterLastExportTs,

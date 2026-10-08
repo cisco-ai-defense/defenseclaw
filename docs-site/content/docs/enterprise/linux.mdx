@@ -538,6 +538,12 @@ On a tarball host, `uninstall --purge` removes everything, including
   pass `--allow-downgrade`, and `rpm -U` refuses an older package. See
   [Upgrade](/docs/enterprise/lifecycle#upgrade) and
   [Roll back](/docs/enterprise/lifecycle#roll-back).
+- **A package older than the config.** The package refuses to install,
+  before it replaces any file, when `/etc/defenseclaw/config.yaml` has a
+  `config_version` newer than the release reads (a config written for a
+  newer DefenseClaw, for example while rolling back a release). Install a
+  release that reads it, or push a config with the older `config_version`
+  first.
 - **Change the config.** Replace `/etc/defenseclaw/config.yaml`. The apply
   path unit runs `ensure`, which validates the new file and applies it, or
   rolls back. See [Change the config](/docs/enterprise/lifecycle#change-the-config).

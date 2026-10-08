@@ -343,7 +343,12 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		if taken {
 			return nameTakenError(req.Name, headless)
 		}
-		return a.landlockHint(apiError(err), func() openshell.Driver { return drv })
+		problem := a.landlockHint(apiError(err), func() openshell.Driver { return drv })
+		if ex.VMFirstBoot {
+			return fmt.Errorf("%w; a MicroVM first start prepares a 5-8 GB disk and may need a retry; "+
+				"run defenseclaw sandbox doctor to inspect leftover staging disks", problem)
+		}
+		return problem
 	}
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	a.warnUnkeptOptionValue(spec, o.Args)

@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -277,7 +278,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	err = runStartLocked(cmd, args, coldStart)
 	if err != nil && coldStart {
 		if running, _ := daemon.New(dataDir).IsRunning(); !running {
-			recordHookColdStartFailure(dataDir)
+			recordHookColdStartFailure(dataDir, err)
 		}
 	}
 	return err
@@ -313,7 +314,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
 	}
 	if err := daemonConfigLoadError("start", cfgLoadErr); err != nil {
-		return err
+		return startConfigLoadError{err: err}
 	}
 	if rotationTransaction {
 		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
@@ -1057,6 +1058,9 @@ func daemonConfigLoadError(verb string, err error) error {
 	if err == nil {
 		return nil
 	}
+	if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("cannot %s the gateway: no config.yaml exists yet; run defenseclaw init first", verb)
+	}
 	if secretErr := missingObservabilitySecretError(verb, err); secretErr != nil {
 		return secretErr
 	}
@@ -1093,6 +1097,20 @@ func daemonConfigLoadError(verb string, err error) error {
 // emptyConfigProbeBytes matches the Python CLI's _EMPTY_CONFIG_PROBE_BYTES.
 const emptyConfigProbeBytes = 64 << 10
 
+// incompleteConfigProbeBytes bounds the read of a config.yaml that failed to
+// load, to tell a cut-short file from an older or invalid one.
+const incompleteConfigProbeBytes = 4 << 20
+
+var configVersionLine = regexp.MustCompile(`(?m)^config_version[ \t]*:`)
+
+// incompleteConfigFile reports a config.yaml that stops mid-document:
+// DefenseClaw always ends it with a newline, and a file cut short before
+// config_version has none (the Python CLI config_is_incomplete).
+func incompleteConfigFile(raw []byte) bool {
+	return len(raw) > 0 && len(raw) <= incompleteConfigProbeBytes && raw[len(raw)-1] != 0x0a &&
+		!onlyYAMLComments(raw) && !configVersionLine.Match(raw)
+}
+
 // emptyConfigFileMessage reports a config.yaml that exists but holds no
 // settings (0 bytes, blank or comments only) in the Python CLI's words
 // (GAP-1633). The YAML loader calls it a root that must be a mapping and told
@@ -1103,8 +1121,21 @@ func emptyConfigFileMessage(path string) (string, bool) {
 		return "", false
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, emptyConfigProbeBytes+1))
-	if err != nil || len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
+	raw, err := io.ReadAll(io.LimitReader(file, incompleteConfigProbeBytes+1))
+	if err != nil {
+		return "", false
+	}
+	if incompleteConfigFile(raw) {
+		// Cut short while it was written: not an older configuration, so
+		// not "run defenseclaw migrate" either (GAP-0482).
+		return fmt.Sprintf(
+			"%s is incomplete: it stops in the middle of the file (as after a crash or a full disk). "+
+				"It is not an older configuration, and nothing was changed. Restore your copy of config.yaml%s, "+
+				"or remove the file and run defenseclaw init.",
+			path, previousConfigHint(filepath.Dir(path)),
+		), true
+	}
+	if len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
 		return "", false
 	}
 	return fmt.Sprintf(

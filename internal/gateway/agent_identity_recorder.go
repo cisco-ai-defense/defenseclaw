@@ -45,6 +45,13 @@ type agentIdentityRecorder struct {
 	subSessions     map[string]struct{}
 	subSessionOrder []string
 
+	// persistErr is why the last write to inventory.db failed, "" after
+	// one succeeded: the ledger then runs from memory, and its counts and
+	// first-seen times reset at the next restart (GAP-0393).
+	persistMu    sync.Mutex
+	persistErr   string
+	persistSince time.Time
+
 	storeMu         sync.Mutex
 	storeGeneration uint64
 	storeSource     func() *inventory.InventoryStore
@@ -91,10 +98,11 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
 	}
-	if newSession {
+	if newSession && sessionID != "" {
+		// The last session is the newest one counted, not the one that
+		// hooked last: the previous chat can hook once more after a new one
+		// started, as Codex's does after /new (GAP-0395).
 		rec.NoteSession(sessionID)
-	}
-	if sessionID != "" {
 		rec.LastSessionID = sessionID
 	}
 	if facts.InstallHint != "" && (len(r.hints) < agentIdentityRecorderMaxPending || r.hints[facts.ID] != "") {
@@ -203,9 +211,46 @@ func (r *agentIdentityRecorder) flush(ctx context.Context, store *inventory.Inve
 	}
 	if err := store.UpsertAgentIdentities(ctx, batch); err != nil {
 		r.restore(batch)
+		r.notePersist(err)
 		return err
 	}
+	r.notePersist(nil)
 	return nil
+}
+
+// notePersist records whether the last write of the ledger succeeded.
+func (r *agentIdentityRecorder) notePersist(err error) {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	switch {
+	case err == nil:
+		r.persistErr, r.persistSince = "", time.Time{}
+	case r.persistErr == "":
+		r.persistErr, r.persistSince = err.Error(), time.Now().UTC()
+	default:
+		r.persistErr = err.Error()
+	}
+}
+
+// persistFailure is why agent identities are not being saved, and since
+// when, or "" while they are.
+func (r *agentIdentityRecorder) persistFailure() (string, time.Time) {
+	if r == nil {
+		return "", time.Time{}
+	}
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	return r.persistErr, r.persistSince
+}
+
+// agentIdentityLedgerHealth is the /health entry of a ledger that is not
+// being saved, or nil while it is. Secure Client records no identities.
+func agentIdentityLedgerHealth() map[string]any {
+	reason, since := sharedAgentIdentities.persistFailure()
+	if reason == "" || ManagedEnterpriseActive() {
+		return nil
+	}
+	return map[string]any{"persisted": false, "error": reason, "since": since.Format(time.RFC3339)}
 }
 
 // setStoreSource wires where flushes go: source returns AI discovery's
@@ -259,6 +304,9 @@ func (r *agentIdentityRecorder) store() *inventory.InventoryStore {
 	store, err := inventory.NewInventoryStoreForProfile(filepath.Join(dir, "inventory.db"), ManagedEnterpriseActive())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] agent identities not persisted: %v\n", err)
+		if r.pendingCount() > 0 {
+			r.notePersist(err)
+		}
 		return nil
 	}
 	r.ownStore = store
@@ -415,9 +463,13 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		next = strconv.Itoa(offset + limit)
 	}
 	nameAgentIdentityRows(page)
-	a.writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"enabled": true, "persisted": persisted, "identities": page, "total": total, "next_cursor": next,
-	})
+	}
+	if reason, _ := sharedAgentIdentities.persistFailure(); reason != "" {
+		body["persisted"], body["persist_error"] = false, reason
+	}
+	a.writeJSON(w, http.StatusOK, body)
 }
 
 // storedAgentIdentityWindow reads the stored rows that merged rows offset

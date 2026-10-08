@@ -337,6 +337,10 @@ def attach_ide_plugins(inv: dict[str, Any], payload: dict[str, Any] | None, note
     """
     raw = (payload or {}).get("plugins") or []
     plugins = [dict(item) for item in raw if isinstance(item, dict)]
+    versions = {str(inst.get("install_id") or ""): str(inst.get("version") or "")
+                for inst in (payload or {}).get("installations") or [] if isinstance(inst, dict)}
+    for plugin in plugins:
+        plugin["ide_version"] = versions.get(str(plugin.get("install_id") or ""), "")
     inv["ide_plugins"] = plugins
     users = {str(p.get("user_id") or p.get("user") or "") for p in plugins} - {""}
     entry: dict[str, Any] = {
@@ -345,6 +349,9 @@ def attach_ide_plugins(inv: dict[str, Any], payload: dict[str, Any] | None, note
         "disabled": sum(1 for p in plugins if p.get("enabled") == "disabled"),
         "users": len(users),
         "scope": str((payload or {}).get("scope") or ""),
+        "partial": bool((payload or {}).get("partial")) or any(
+            inst.get("partial") for inst in (payload or {}).get("installations") or []
+        ),
     }
     if payload is None or payload.get("enabled") is False or payload.get("scope") == "off":
         entry["collected"] = False

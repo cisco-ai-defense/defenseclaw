@@ -108,6 +108,9 @@ first if you are new to how DefenseClaw uses identity.
    | `signon-policy` | Creates a sign-on policy for the LDAP Interface app with two password-only rules (one for the bind user, one for the group) and assigns it to the app. Its catch-all rule still requires a second factor from everyone else. |
    | `check` | Changes nothing. Reports what is ready and what is missing. |
 
+   Run `assign-posix` from one admin at a time. Okta does not enforce
+   uniqueness on the numeric UID attribute in this schema; `check` detects
+   duplicates, but concurrent assignments can otherwise pick the same number.
    Every command can be run again and changes only what differs. Pick user and
    group IDs outside the local accounts of your hosts. The host step limits SSSD
    to the range 1710000 to 1729999 by default (`--id-min` and `--id-max` of
@@ -154,8 +157,8 @@ grep ldap_use_ppolicy /usr/share/sssd/cfg_rules.ini    # a match means this SSSD
 | SSSD 2.10 or later (RHEL 10) | Has the option upstream. Not tested here |
 
 To rebuild RHEL 9.8's SSSD with the option, run this as a normal user with `sudo`
-on a RHEL 9.8 host (about 15 minutes on 2 vCPUs). It only builds; it installs
-nothing.
+on a RHEL 9.8 host (about 15 minutes on 2 vCPUs). It installs build tools and build dependencies through `sudo dnf`, then builds
+the SSSD packages. It does not install those rebuilt packages.
 
 ```bash
 ./build-sssd-ppolicy-backport.sh --workdir "$HOME/sssd-ppolicy-build"
@@ -410,12 +413,21 @@ operating system already knows, as described in
 
 ## Undo
 
-`install-sssd-okta.sh` keeps the files it replaces: `/etc/sssd/sssd.conf.bak-<time>`
-and `/etc/ssh/sshd_config.d/45-okta-ldap.conf.bak-<time>`. To go back, copy the
-backup over the file, run `sudo systemctl restart sssd` (and `sudo systemctl reload
-sshd` for the drop-in), and delete the `.bak` files you no longer need. In Okta,
-remove what you created: the sign-on policy and its rules (first assign the app
-another policy), the role and resource set, the users' POSIX attributes and groups.
+The installer prints the exact `sssd.conf.bak-<time>` it made and the previous
+`authselect` profile. On a rerun, use **that run's** backup, not simply the
+newest backup if a later rerun has replaced it. For a first install, no backup
+exists: remove `/etc/sssd/sssd.conf` only after deciding no other service uses
+it. Restore the previous authselect profile with `sudo authselect select
+<previous profile and features> --force`, or use the host's pre-install
+authselect backup. Stop and disable `sssd` and `oddjobd` only if this kit
+enabled them and no other login path needs them.
+
+Restore the exact `/etc/ssh/sshd_config.d/45-okta-ldap.conf.bak-<time>`
+printed by the run, or remove the drop-in if this was its first install.
+Validate with `sudo sshd -t` before reloading sshd. Restart SSSD only after
+its config has been restored and validated. In Okta, remove only objects you
+created: the sign-on policy and its rules (first assign the app another
+policy), the role and resource set, and the users' POSIX attributes and groups.
 
 <Cards>
   <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Profile keys, precedence, the audit record and delivery to managed hosts." />

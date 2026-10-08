@@ -236,10 +236,10 @@ Limits do not turn a partial observation into a false deletion. API inventories 
 
 The continuous scanner runs inside the gateway. Unmanaged deployments emit
 `ai_discovery` events when a signal transitions state; managed-enterprise full
-scans emit the complete snapshot described above. Fresh CLI-generated configs
-enable discovery; an older or minimal config that omits the `ai_discovery`
-block leaves the gateway runtime default disabled. Use these commands to make
-the intended state explicit:
+scans emit the complete snapshot described above. A fresh `defenseclaw init`
+leaves AI discovery disabled. Run `defenseclaw agent discovery enable` after
+initialization to collect the IDE inventory. This also enables runtime
+monitoring planes A and B. Use these commands to make the intended state explicit:
 
 <Tabs items={['Enable', 'Status', 'One-shot scan', 'Disable']}>
   <Tab value="Enable">
@@ -386,6 +386,9 @@ Continue installed, and is it switched on?" is one command. The inventory is
 part of the continuous scan and refreshes with every full scan (every five
 minutes by default). Nothing is executed: the scan reads small, bounded
 metadata files only.
+Bundled extensions inside an IDE application, including VS Code built-in GitHub
+Copilot Chat, are not listed. The inventory reads per-user extension data folders.
+
 
 ```text
 $ defenseclaw agent ide-plugins --user alice
@@ -413,7 +416,7 @@ alice  zed              html                                              0.2.1 
 
 | IDE family | Products | Plugin list | Enabled state from |
 | --- | --- | --- | --- |
-| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop, Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
+| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop (including legacy Windsurf folders), Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
 | VS Code Remote-SSH servers | `~/.vscode-server`, `~/.cursor-server` and the other forks' servers, on the host you connect to | The server's `extensions` folder, shown as `vscode (ssh)`, `cursor (ssh)` and so on | `client_side_unknown`, shown as `client side`: the IDE on your laptop keeps that state |
 | JetBrains | IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, DataSpell, RustRover, Aqua, Writerside and Android Studio, plus JetBrains remote development (shown as `(remote dev)`) | Each plugin's `META-INF/plugin.xml` in the plugin folders and bundled JARs | `disabled_plugins.txt`: enabled when not listed |
 | Visual Studio (Windows) | Visual Studio per instance, including the experimental hive: the user's extensions under `%LOCALAPPDATA%\Microsoft\VisualStudio`, and the machine-wide ones under Program Files | `extension.vsixmanifest` | Visual Studio's private registry (`privateregistry.bin`); `unknown` while Visual Studio is running and holds the hive locked |
@@ -481,9 +484,25 @@ extension's own data. The only database read is the one key
 `extensionsIdentifiers/disabled` in a VS Code `state.vscdb`, opened read-only
 and immutable with a 2-second limit. Paths leave the host only as hashes.
 
-Every scan is bounded per home: at most 4,096 plugins, 16,384 files and 64 MiB
-of metadata, and 1 MiB per file. A home that exceeds a bound is reported as a
-partial installation rather than read further.
+Every scan is bounded: at most 4,096 plugins per IDE installation, 16,384
+files and 64 MiB of metadata per home, and 1 MiB per file. An IDE that
+exceeds a bound is reported as a partial installation rather than read further.
+
+Most IDE rows describe plugin data found in each user profile; Windows Visual
+Studio also has machine-wide rows. Removing an IDE
+application can leave those folders behind, so an `enabled` plugin row means
+its metadata is present and enabled in that saved profile; it does not prove
+that the IDE application is still installed.
+
+### Folder coverage
+
+For VS Code, the scanner reads `~/.vscode/extensions` on macOS and Linux
+and `%USERPROFILE%\.vscode\extensions` on Windows, plus the default
+per-user data folders for the listed forks and their remote SSH servers.
+It does not read portable VS Code `data/extensions` beside the app, folders
+selected with `--extensions-dir` or `VSCODE_EXTENSIONS`, Linux XDG
+relocations, or Snap and Flatpak extension roots. Those installations and
+their editor-extension AI signals can be absent from the inventory.
 
 ### Privacy and scope
 
@@ -501,7 +520,9 @@ ai_discovery:
   ide_inventory: ai_only    # all | ai_only | off
 ```
 
-A running gateway applies the change on its next reload, and the inventory
+Set the scope with `defenseclaw agent discovery enable --ide-inventory ai_only --yes`
+(or choose `all` or `off`). This also enables discovery and runtime planes A
+and B. A running gateway applies the change on its next reload, and the inventory
 follows at the next full scan. On a managed host, edit the
 [machine configuration](/docs/enterprise/configuration#where-the-config-lives).
 When the scope is `off`, `defenseclaw agent ide-plugins` says so and exports
@@ -519,7 +540,8 @@ defenseclaw aibom scan --only ide_plugins
 ```
 
 `--ide` takes a product (`vscode`, `cursor`, `pycharm`) or a family
-(`jetbrains`). The footer line reports the counts of the rows that the filters
+(`jetbrains`). `--ide windsurf` is an alias for `devin-desktop` so
+older Windsurf profiles can be found by that name. The footer line reports the counts of the rows that the filters
 select. Without AI discovery enabled, the command tells you to run
 `defenseclaw agent discovery enable`.
 
@@ -1252,7 +1274,14 @@ dashboards:
 | --- | --- |
 | `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
 | `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
-| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
+| `ai.runtime.plane_health` | One running plane per poll cycle |
+
+A running plane emits about one health record per poll cycle (roughly once a
+minute with the default runtime poll), per enabled destination that routes
+ai.discovery logs. Unselected or stopped planes emit no recurring health
+record. Exclude the ai.discovery bucket from a destination route to remove
+this stream there; this also removes runtime findings and discovery events on
+that route. Local sensor status still reports every plane.
 
 A degraded cycle is reported with outcome `partial` rather than `completed`.
 

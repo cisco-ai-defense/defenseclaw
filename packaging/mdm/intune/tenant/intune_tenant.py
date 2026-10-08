@@ -182,6 +182,15 @@ class Graph:
             next_path = page.get("@odata.nextLink")
         return items
 
+    def wait_for_named_object(self, path: str) -> list:
+        """Before creating by name, allow a previous run's Graph index to catch up."""
+        for _ in range(15):
+            found = self.get_all(path)
+            if found:
+                return found
+            time.sleep(3)
+        return self.get_all(path)
+
     def get_after_create(self, path: str):
         """Read an object just created: Graph answers 404 for a few seconds."""
         for _ in range(15):
@@ -201,13 +210,17 @@ class Graph:
         already exist", which is the result asked for.
         """
         ref = {"@odata.id": f"{GRAPH}/v1.0/directoryObjects/{object_id}"}
-        try:
-            self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
-        except GraphError as exc:
-            if exc.status == 400 and "already exist" in str(exc):
-                return False
-            raise
-        return True
+        for attempt in range(16):
+            try:
+                self.request("POST", f"/v1.0/groups/{group_id}/members/$ref", ref)
+                return True
+            except GraphError as exc:
+                if exc.status == 400 and "already exist" in str(exc):
+                    return False
+                if exc.status != 404 or attempt == 15:
+                    raise
+                time.sleep(3)
+        raise AssertionError("unreachable")
 
 
 def odata_eq(field: str, value: str) -> str:
@@ -345,36 +358,37 @@ def check_items(graph: Graph, platforms: list[str], groups: list[str]) -> list[d
                 "found" if enterprise else "none; Microsoft documents E3/E5 or VDA licences for Remediations",
             )
 
-    data, err = try_get(graph, f"{BETA}/policies/mobileDeviceManagementPolicies")
-    if err:
-        add(
-            WARN,
-            "MDM user scope",
-            "cannot be read with this token (" + err + "). Check Devices > Enrollment > Windows > "
-            "Automatic Enrollment: MDM user scope must be Some or All.",
-        )
-    else:
-        for policy in data.get("value", []):
-            scope = str(policy.get("appliesTo"))
+    if "windows" in platforms:
+        data, err = try_get(graph, f"{BETA}/policies/mobileDeviceManagementPolicies")
+        if err:
             add(
-                PASS if scope in ("all", "selected", "some") else FAIL,
-                f"MDM user scope ({policy.get('displayName')})",
-                scope,
+                WARN,
+                "MDM user scope",
+                "cannot be read with this token (" + err + "). Check Devices > Enrollment > Windows > "
+                "Automatic Enrollment: MDM user scope must be Some or All.",
             )
+        else:
+            for policy in data.get("value", []):
+                scope = str(policy.get("appliesTo"))
+                add(
+                    PASS if scope in ("all", "selected", "some") else FAIL,
+                    f"MDM user scope ({policy.get('displayName')})",
+                    scope,
+                )
 
-    data, err = try_get(graph, f"{BETA}/deviceManagement/deviceEnrollmentConfigurations")
-    if err:
-        add(WARN, "enrollment configurations", f"cannot read: {err}")
-    else:
-        hello = [c for c in data.get("value", []) if "WindowsHelloForBusiness" in str(c.get("@odata.type"))]
-        for config in hello:
-            state = str(config.get("state"))
-            add(
-                INFO,
-                "Windows Hello for Business default",
-                state + (" (a new device asks for a PIN)" if state == "enabled" else ""),
-            )
-        add(INFO, "enrollment configurations", str(len(data.get("value", []))))
+        data, err = try_get(graph, f"{BETA}/deviceManagement/deviceEnrollmentConfigurations")
+        if err:
+            add(WARN, "enrollment configurations", f"cannot read: {err}")
+        else:
+            hello = [c for c in data.get("value", []) if "WindowsHelloForBusiness" in str(c.get("@odata.type"))]
+            for config in hello:
+                state = str(config.get("state"))
+                add(
+                    INFO,
+                    "Windows Hello for Business default",
+                    state + (" (a new device asks for a PIN)" if state == "enabled" else ""),
+                )
+            add(INFO, "enrollment configurations", str(len(data.get("value", []))))
 
     if "macos" in platforms:
         data, err = try_get(graph, f"{BETA}/deviceManagement/applePushNotificationCertificate")
@@ -533,15 +547,18 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
     if not args.name and not args.add_device:
         raise SystemExit("error: name at least one --name GROUP or --add-device DEVICE:GROUP")
     tag = plan_tag(args.apply)
+    known_groups: dict[str, dict] = {}
     for name in args.name:
-        found = graph.get_all(
-            f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,securityEnabled,groupTypes"
-        )
+        path = f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,securityEnabled,groupTypes"
+        found = graph.get_all(path)
+        if not found and args.apply:
+            found = graph.wait_for_named_object(path)
         if len(found) > 1:
             raise SystemExit(f"error: {len(found)} groups are named {name!r}; use a unique name")
         if found:
             if not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or []):
                 raise SystemExit(f"error: group {name!r} exists but is not a static security group")
+            known_groups[name] = found[0]
             print(f"{tag}group {name}: exists")
         elif not args.apply:
             print(f"{tag}group {name}: would create a static security group")
@@ -557,7 +574,7 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
                 "securityEnabled": True,
             }
             made = graph.request("POST", f"{V1}/groups", body)
-            graph.get_after_create(f"{V1}/groups/{made['id']}?$select=id")
+            known_groups[name] = graph.get_after_create(f"{V1}/groups/{made['id']}?$select=id")
             print(f"group {name}: created")
     for pair in args.add_device:
         device_name, sep, group_name = pair.partition(":")
@@ -566,12 +583,16 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
         devices = graph.get_all(f"{V1}/devices?$filter={odata_eq('displayName', device_name)}&$select=id,displayName")
         if len(devices) != 1:
             raise SystemExit(f"error: {len(devices)} Entra devices are named {device_name!r}; need exactly one")
-        found = graph.get_all(
+        # A group named with --name was checked above, or created as a static security group.
+        checked = group_name in known_groups
+        found = [known_groups[group_name]] if checked else graph.get_all(
             f"{V1}/groups?$filter={odata_eq('displayName', group_name)}&$select=id,securityEnabled,groupTypes"
         )
         if len(found) > 1:
             raise SystemExit(f"error: {len(found)} groups are named {group_name!r}; use a unique name")
-        if found and (not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or [])):
+        if found and not checked and (
+            not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or [])
+        ):
             raise SystemExit(f"error: group {group_name!r} is not a static security group")
         if not found:
             if args.apply:
@@ -712,6 +733,16 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
 
 def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
     content = read_script(args.file, SHELL_SCRIPT_MAX_BYTES)
+    if not content.startswith(b"#!"):
+        raise SystemExit("error: macOS script must start with a #! interpreter line")
+    settings = re.search(
+        rb"(?ms)^dc_inline_config\(\) \{\n\s*cat <<'DEFENSECLAW_CONFIG'\n(.*?)^DEFENSECLAW_CONFIG$",
+        content,
+    )
+    if settings is not None and not settings.group(1).strip():
+        raise SystemExit("error: fill in the macOS wrapper settings block before upload")
+    if not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
+        raise SystemExit("error: --frequency must be an ISO 8601 duration such as P1D, PT1H or PT0S")
     print(f"script: {args.file} ({len(content)} bytes, sha256 {hashlib.sha256(content).hexdigest()[:16]}...)")
     body = {
         "@odata.type": "#microsoft.graph.deviceShellScript",

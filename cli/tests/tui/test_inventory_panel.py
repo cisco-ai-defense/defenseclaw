@@ -585,6 +585,13 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
         ("bob", "vscode", "ms-python.python", "1.0.0", "no", ""),
     )
     assert dict(panel.summary_table_rows())["IDE plugins"] == "2 (1 AI, 1 disabled, 2 users)"
+    versioned = InventoryPanelModel()
+    versioned.apply_json(json.dumps({"ide_plugins": [ide("alice", "com.tabnine", ide_version="2025.2")]}))
+    versioned.set_active_subtab("ide_plugins")
+    assert versioned.data_table_rows()[0][0] == "vscode 2025.2"
+    versioned.set_cursor(0)
+    assert dict(versioned.detail_info().fields)["IDE version"] == "2025.2"
+
 
     # At 80 columns long cells give way while Enabled and AI stay whole, a
     # remote install is marked (GAP-0055), and the detail leads with what the
@@ -622,6 +629,12 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert panel.data_table_columns() == ("Connector", "User", "ID", "Source", "Model", "Workspace", "Default")
     assert len(panel.data_table_rows()) == 3
     assert panel.data_table_rows()[1] == ("codex", "bob", "agt-0123456789abcdef", "agent identity", "", "", "")
+    long_user = "A" * 300
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [
+        identity("agt-long", long_user), identity("agt-short", "bob"),
+    ]}))
+    assert any(row[1] == "A" * 29 + "..." for row in panel.data_table_rows())
+
     panel.set_cursor(1)
     assert dict(panel.detail_info().fields)["Sessions"] == "3"
     # GAP-0152: a list cut at its bound says so on the sub-tab.

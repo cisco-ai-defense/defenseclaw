@@ -474,7 +474,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertEqual(summary["status"], "needs_attention")
         readiness = {step["name"]: step for step in summary["readiness"]}
         self.assertEqual(readiness["Sidecar"]["status"], "fail")
-        self.assertEqual(readiness["Sidecar"]["detail"], "not confirmed after start")
+        self.assertIn("protection is not active until it does", readiness["Sidecar"]["detail"])
 
     def test_selected_connector_establishment_failure_is_nonzero(self):
         missing_connector = StepResult(

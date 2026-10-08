@@ -64,19 +64,35 @@ type startupError struct {
 func (e *startupError) Error() string { return e.message }
 func (e *startupError) Unwrap() error { return e.err }
 
-func newStartupError(err error, clientID, agentID, profile, mode, contractLock string) error {
-	pair := clientID + "/" + agentID
+// setupCommand is the command that writes this editor entry again: the
+// gateway's enterprise acp setup for a managed enrollment, whose host has no
+// other DefenseClaw command, or defenseclaw acp setup. managedEntry reports
+// which.
+func setupCommand(clientID, agentID, profile, mode, contractLock string) (command string, managedEntry bool) {
 	activate := ""
 	if mode == string(acp.ModeAction) {
 		activate = " --activate"
 	}
 	if gateway := standaloneManagedGatewayCommand(contractLock); gateway != "" {
+		return fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s%s",
+			gateway, clientID, agentID, profile, activate), true
+	}
+	setup := fmt.Sprintf("defenseclaw acp setup --client %s --agent %s", clientID, agentID)
+	if profile != "" && profile != "default" {
+		setup += " --profile " + profile
+	}
+	return setup + activate, false
+}
+
+func newStartupError(err error, clientID, agentID, profile, mode, contractLock string) error {
+	pair := clientID + "/" + agentID
+	setup, managedEntry := setupCommand(clientID, agentID, profile, mode, contractLock)
+	if managedEntry {
 		// A managed host has only the gateway binary, not the Python CLI
 		// the per-user text names (GAP-0270).
 		next := fmt.Sprintf("If your administrator revoked or has not enrolled %s for you, ask them to run "+
-			"enterprise acp enroll; then run %s enterprise acp setup --client %s --agent %s --profile %s%s "+
-			"(the command the enrollment reports), or delete this editor entry.",
-			pair, gateway, clientID, agentID, profile, activate)
+			"enterprise acp enroll; then run %s (the command the enrollment reports), or delete this editor entry.",
+			pair, setup)
 		if errors.Is(err, acp.ErrRuntimeContractMissing) {
 			return &startupError{err: err, message: fmt.Sprintf(
 				"DefenseClaw ACP guard is not set up for %s (the binding was removed). %s", pair, next)}
@@ -84,11 +100,6 @@ func newStartupError(err error, clientID, agentID, profile, mode, contractLock s
 		return &startupError{err: err, message: fmt.Sprintf(
 			"DefenseClaw ACP guard could not start for %s: %v. %s", pair, err, next)}
 	}
-	setup := fmt.Sprintf("defenseclaw acp setup --client %s --agent %s", clientID, agentID)
-	if profile != "" && profile != "default" {
-		setup += " --profile " + profile
-	}
-	setup += activate
 	if errors.Is(err, acp.ErrRuntimeContractMissing) {
 		return &startupError{err: err, message: fmt.Sprintf(
 			"DefenseClaw ACP guard is not set up for %s (the binding was removed). Run '%s', or delete this editor entry.",
@@ -138,13 +149,24 @@ func managedGatewayCommand(contractLock string) string {
 	if runtime.GOOS == "windows" {
 		names = []string{"defenseclaw.exe", "defenseclaw-gateway.exe"}
 	}
-	for _, name := range names {
-		path := filepath.Join(filepath.Dir(guard), name)
-		if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
-			if runtime.GOOS == "windows" {
-				return "& \"" + path + "\""
+	dirs := []string{filepath.Dir(guard)}
+	if !acp.SecureClientHost() && contractLockManagedCustody(contractLock) {
+		// A managed lock whose guard is not the installed one still belongs
+		// to a managed host: name its gateway, not the per-user commands it
+		// lacks (GAP-0391).
+		if layout, layoutErr := managed.StandaloneLayoutFor(runtime.GOOS); layoutErr == nil {
+			dirs = append(dirs, layout.BinDir)
+		}
+	}
+	for _, dir := range dirs {
+		for _, name := range names {
+			path := filepath.Join(dir, name)
+			if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() {
+				if runtime.GOOS == "windows" {
+					return "& \"" + path + "\""
+				}
+				return path
 			}
-			return path
 		}
 	}
 	return ""
@@ -297,9 +319,11 @@ func run(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	setup, managedEntry := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock)
 	return acp.Run(ctx, acp.ProxyOptions{
 		AgentID: *agentID, ClientID: *clientID, Profile: *profile,
 		Mode: acp.Mode(*mode), Command: command, Args: commandArgs,
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Evaluator: evaluator,
+		Managed: managedEntry, SetupCommand: setup,
 	})
 }

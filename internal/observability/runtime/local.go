@@ -181,6 +181,17 @@ func (component *localLogComponent) Process(
 	return component.pipeline.Process(ctx, metadata, builder)
 }
 
+func (component *localLogComponent) ProcessAtomicBatch(
+	ctx context.Context,
+	items []pipeline.AtomicBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	if component == nil || component.pipeline == nil || component.store == nil ||
+		!component.active.Load() || component.closed.Load() {
+		return nil, &localFactoryError{}
+	}
+	return component.pipeline.ProcessAtomicBatch(ctx, items)
+}
+
 func (component *localLogComponent) ProcessLocalOnly(
 	ctx context.Context,
 	metadata router.Metadata,

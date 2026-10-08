@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -164,11 +167,27 @@ func absolutePathEntries(path string) string {
 	return strings.Join(kept, string(os.PathListSeparator))
 }
 
-func recordHookColdStartFailure(dataDir string) {
+// startConfigLoadError marks a start that failed because config.yaml does not
+// load. Its message is the wrapped one.
+type startConfigLoadError struct{ err error }
+
+func (e startConfigLoadError) Error() string { return e.err.Error() }
+func (e startConfigLoadError) Unwrap() error { return e.err }
+
+// recordHookColdStartFailure writes the backoff marker. Its second line names
+// a config.yaml that does not load, so the hook can say that a start cannot
+// help until the file is fixed instead of "run defenseclaw-gateway start"
+// (GAP-0409).
+func recordHookColdStartFailure(dataDir string, cause error) {
 	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
 		return
 	}
-	_ = os.WriteFile(gatewayColdStartFailedPath(dataDir), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+	body := time.Now().UTC().Format(time.RFC3339) + "\n"
+	var configErr startConfigLoadError
+	if errors.As(cause, &configErr) {
+		body += "config-invalid\n"
+	}
+	_ = os.WriteFile(gatewayColdStartFailedPath(dataDir), []byte(body), 0o600)
 }
 
 // hookColdStartRefusal returns why a hook may not start the gateway now, or
@@ -190,4 +209,38 @@ func hookColdStartRefusal(dataDir string, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// watchdogGatewayStarter starts a crashed per-user gateway from the watchdog
+// (GAP-0386). The watchdog process sets it; it stays nil for a loop a test
+// drives, so no test reads or starts a gateway of the account running it.
+var watchdogGatewayStarter func(dataDir string) (bool, error)
+
+// startCrashedGatewayFromWatchdog runs `defenseclaw-gateway start
+// --hook-cold-start` for a per-user Linux or macOS gateway whose process is
+// gone. A gateway with no connector hooks had nothing that started it again,
+// so its inventory and checks stayed dark until a person ran start. The start
+// obeys the hook rules: an operator stop, an install in progress and a recent
+// failed start leave the gateway stopped. A gateway that runs but does not
+// answer is reported, not restarted. It returns whether it ran a start.
+func startCrashedGatewayFromWatchdog(dataDir string) (bool, error) {
+	if !hookColdStartSupported || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return false, nil
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "config.yaml")); err != nil {
+		return false, nil
+	}
+	if running, _ := daemon.New(dataDir).IsRunning(); running {
+		return false, nil
+	}
+	if hookColdStartRefusal(dataDir, time.Now()) != nil {
+		return false, nil
+	}
+	exe, err := os.Executable()
+	if err != nil || !strings.HasPrefix(filepath.Base(exe), "defenseclaw-gateway") {
+		return false, err
+	}
+	cmd := exec.Command(exe, "start", "--"+hookColdStartFlag)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	return true, cmd.Run()
 }

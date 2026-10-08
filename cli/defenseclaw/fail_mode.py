@@ -832,7 +832,16 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
     errors: list[str] = []
     for snapshot in reversed(snapshots):
         try:
+            # A failed save can leave every file untouched. Avoid replacing an
+            # immutable original (and rewriting user edits) in that case.
             if snapshot.existed:
+                try:
+                    current, mode = _snapshot_regular_file(snapshot.path)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if current == snapshot.data and mode == snapshot.mode:
+                        continue
                 snapshot.path.parent.mkdir(parents=True, exist_ok=True)
                 fd, temporary = tempfile.mkstemp(prefix=f".{snapshot.path.name}.", dir=snapshot.path.parent)
                 try:

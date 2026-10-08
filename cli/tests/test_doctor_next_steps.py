@@ -882,3 +882,9 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     fresh = row("2026-10-03T06:21:55Z")
     assert "last under a minute ago" in fresh["detail"]
     assert "0 min" not in fresh["detail"]
+
+
+def test_hermes_bootstrap_process_is_a_running_host() -> None:
+    assert cmd_doctor._hermes_argv_verdict(
+        ["python3", "/home/user/.hermes/tools/hermes_bootstrap.py"]
+    ) is True

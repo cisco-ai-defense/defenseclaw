@@ -127,7 +127,7 @@ def config_validate(quiet: bool) -> None:
         ux.ok("syntax OK", indent="  ")
 
     for issue in result.errors:
-        ux.err(issue, indent="  ")
+        ux.err(issue.removeprefix("Error: ").removeprefix("Error: "), indent="  ")
     for warning in result.warnings:
         ux.warn(warning, indent="  ")
 
@@ -572,13 +572,26 @@ def validate_config() -> ValidationResult:
             return res
         if inspected.valid is not True:
             res.errors.append("canonical v8 validator returned no validity decision")
+        if os.name == "nt" and res.ok:
+            source = load_masked_v8(_bounded_source(cfg_path) or b"", source_name=cfg_path)
+            res.warnings.extend(_per_user_windows_group_warnings(source))
         return res
 
-    if config_module.config_is_empty(cfg_path):
-        res.errors.append(config_module.empty_config_message(cfg_path))
+    if damage := config_module.config_damage_message(cfg_path):
+        res.errors.append(damage)
         return res
     res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res
+
+
+def _per_user_windows_group_warnings(source: dict) -> list[str]:
+    assignments = ((source.get("guardrail") or {}).get("profile_assignments") or [])
+    return [
+        f"guardrail.profile_assignments[{index}].match.groups: groups cannot match on a per-user "
+        "Windows install; use users or standalone enterprise"
+        for index, assignment in enumerate(assignments)
+        if (assignment.get("match") or {}).get("groups")
+    ]
 
 
 def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
@@ -597,7 +610,7 @@ def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
     """
 
     raw = _bounded_source(cfg_path)
-    if exc.field_path == "$":
+    if exc.field_path == "$" or "configuration violates a semantic v8 constraint" in (exc.reason or ""):
         if raw is None:
             return str(exc)
         syntax = _yaml_syntax_detail(raw)

@@ -15,6 +15,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/user"
 
@@ -43,8 +44,26 @@ func enterpriseHookInstallTarget(ctx context.Context, opts enterprisehooks.Insta
 
 func writeEnterpriseHookStandaloneGuardianStateOrLog(io.Writer, string) {}
 
-func enterpriseHookStandaloneLookupFallback(_ string, lookupErr error) (*user.User, error) {
-	return nil, lookupErr
+// enterpriseHookStandaloneLookupFallback resolves an account os/user could
+// not. os/user also looks up the account's primary group in its domain, which
+// fails for every Entra ID account ("No mapping between account names and
+// security IDs was done"), so enterprise acp enroll, verify and revoke --user
+// refused them; the LSA names the account and ProfileList gives its home, as
+// enterprise policy show does (GAP-0242, GAP-0479). Secure Client keeps the
+// lookup of main.
+func enterpriseHookStandaloneLookupFallback(name string, lookupErr error) (*user.User, error) {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		return nil, lookupErr
+	}
+	sid, _, err := enterprisePolicyAccount(name)
+	if err != nil {
+		return nil, lookupErr
+	}
+	home := enterprisePolicyProfileHome(sid)
+	if home == "" {
+		return nil, fmt.Errorf("%s has no profile on this computer yet (it has not signed in here)", sid)
+	}
+	return &user.User{Uid: sid, Username: name, HomeDir: home}, nil
 }
 
 func enterpriseHookStandaloneConfigFingerprint() string { return "" }

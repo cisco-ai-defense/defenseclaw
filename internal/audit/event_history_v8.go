@@ -454,6 +454,86 @@ func (writer *EventHistoryWriter) AppendContext(
 	return nil
 }
 
+// AppendBatchContext commits records in one transaction, all or none, with
+// the validation AppendContext applies to each. A producer that writes a
+// group of related rows per occurrence (the correlation relationship rows of
+// one hook) pays one commit and one write-ahead-log sync instead of one per
+// row (GAP-0246). Every record is persisted when it returns nil.
+func (writer *EventHistoryWriter) AppendBatchContext(
+	ctx context.Context,
+	records []observability.Record,
+	projections []observabilityredaction.Projection,
+) error {
+	if len(records) == 0 || len(records) != len(projections) {
+		return fmt.Errorf("audit: v8 event-history batch needs one projection per record")
+	}
+	if len(records) == 1 {
+		return writer.AppendContext(ctx, records[0], projections[0])
+	}
+	if writer == nil || writer.store == nil || writer.store.db == nil {
+		return fmt.Errorf("audit: v8 event-history writer is not initialized")
+	}
+	if ctx == nil {
+		return fmt.Errorf("audit: v8 event-history context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	release, err := writer.store.acquireReady()
+	if err != nil {
+		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
+		return err
+	}
+	released := false
+	releaseReady := func() {
+		if !released {
+			release()
+			released = true
+		}
+	}
+	defer releaseReady()
+	err = retryBusyObserved(
+		ctx,
+		"v8_event_history_transaction",
+		writer.store.sqliteBusyObservabilityV8(),
+		func() error {
+			tx, beginErr := writer.store.db.BeginTx(ctx, nil)
+			if beginErr != nil {
+				return eventHistoryFailure(
+					EventHistoryHealthWriteFailed,
+					&eventHistoryWriteError{cause: beginErr},
+				)
+			}
+			outcomes := make([]eventHistoryAppendOutcome, 0, len(records))
+			for index := range records {
+				outcome, appendErr := writer.appendContextTx(ctx, tx, records[index], projections[index])
+				if appendErr != nil {
+					_ = tx.Rollback()
+					return appendErr
+				}
+				outcomes = append(outcomes, outcome)
+			}
+			if commitErr := writer.commitAppendTransactionContext(ctx, tx, outcomes...); commitErr != nil {
+				_ = tx.Rollback()
+				return eventHistoryFailure(
+					EventHistoryHealthWriteFailed,
+					&eventHistoryWriteError{cause: commitErr},
+				)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		writer.stageAppendErrorClass(err, eventHistoryCallerGaveUpClass(ctx, err))
+		releaseReady()
+		writer.flushHealth()
+		return err
+	}
+	releaseReady()
+	writer.flushHealth()
+	return nil
+}
+
 // appendContextTx is the one authoritative prepare-and-insert path for both
 // ordinary event-history appends and storage operations that require the event
 // plus a normalized projection to commit atomically. Callers own tx commit or
@@ -842,7 +922,7 @@ func (writer *EventHistoryWriter) commitAppendTransaction(
 func (writer *EventHistoryWriter) commitAppendTransactionContext(
 	ctx context.Context,
 	tx *sql.Tx,
-	outcome eventHistoryAppendOutcome,
+	outcomes ...eventHistoryAppendOutcome,
 ) error {
 	if writer == nil || tx == nil {
 		return fmt.Errorf("audit: event-history commit transaction is unavailable")
@@ -856,7 +936,9 @@ func (writer *EventHistoryWriter) commitAppendTransactionContext(
 		)
 		return err
 	}
-	writer.stageAppendOutcome(outcome, writer.nextHealthSequence())
+	for _, outcome := range outcomes {
+		writer.stageAppendOutcome(outcome, writer.nextHealthSequence())
+	}
 	return nil
 }
 

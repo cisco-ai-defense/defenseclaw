@@ -448,7 +448,82 @@ func loadManagedFileBackupPath(path string) (managedFileBackup, error) {
 	if b.Version != managedBackupVersion {
 		return b, fmt.Errorf("unsupported managed backup version %d", b.Version)
 	}
+	if moved, ok := managedBackupTargetAfterHomeMove(path, b.Path); ok {
+		b.Path = moved
+	}
 	return b, nil
+}
+
+// managedBackupTargetAfterHomeMove maps a record captured before the account
+// home moved (a rename with usermod -m, or a directory service that changed
+// the home path) onto the same file under the current home. Without it every
+// setup, gateway start and uninstall stopped at "managed backup target
+// mismatch" and no product command could repair the install (GAP-0543).
+//
+// The mapping only applies when the record itself lives under the current
+// home, the captured target is outside it, the old root of the captured
+// target no longer exists at all, and the same relative file exists under
+// the current home. Restore still compares the hash of the file with the
+// one setup recorded before it writes anything.
+func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" || strings.TrimSpace(captured) == "" {
+		return "", false
+	}
+	home = filepath.Clean(home)
+	captured = filepath.Clean(captured)
+	record, err := filepath.Abs(recordPath)
+	if err != nil || !filepath.IsAbs(captured) || !managedPathWithin(record, home) || managedPathWithin(captured, home) {
+		return "", false
+	}
+	oldRoot := shallowestMissingAncestor(captured)
+	if oldRoot == "" || managedPathWithin(home, oldRoot) || managedPathWithin(oldRoot, home) {
+		return "", false
+	}
+	rel, err := filepath.Rel(oldRoot, captured)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	candidate := filepath.Join(home, rel)
+	if _, err := os.Lstat(candidate); err != nil {
+		return "", false
+	}
+	return candidate, true
+}
+
+// shallowestMissingAncestor returns the first directory on the way down to
+// path that does not exist (the old home when an account home moved), or ""
+// when every parent of path exists.
+func shallowestMissingAncestor(path string) string {
+	var chain []string
+	for current := path; ; {
+		chain = append(chain, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	for i := len(chain) - 1; i > 0; i-- {
+		if _, err := os.Lstat(chain[i]); err != nil {
+			if os.IsNotExist(err) {
+				return chain[i]
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+func managedPathWithin(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		rel = strings.ToLower(rel)
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func writeManagedFileBackup(path string, b managedFileBackup) error {

@@ -72,6 +72,13 @@ func TestDaemonConfigLoadErrorNamesTheConfig(t *testing.T) {
 	if err := daemonConfigLoadError("start", nil); err != nil {
 		t.Fatalf("nil load error = %v, want nil", err)
 	}
+	if err := daemonConfigLoadError("start", os.ErrNotExist); err == nil ||
+		!strings.Contains(err.Error(), "run defenseclaw init first") {
+		t.Fatalf("missing config refusal = %v", err)
+	}
+	if err := os.WriteFile(config.ConfigPath(), []byte("config_version: 8\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	err := daemonConfigLoadError("start", os.ErrInvalid)
 	if err == nil || !strings.Contains(err.Error(), "cannot start the gateway") ||
 		!strings.Contains(err.Error(), "then run: defenseclaw-gateway start") ||
@@ -130,6 +137,14 @@ func TestGatewayConfigLoadErrorsCallAnEmptyConfigEmpty(t *testing.T) {
 	}
 	if err := daemonConfigLoadError("start", loadErr); strings.Contains(err.Error(), "is empty") {
 		t.Fatalf("a non-empty config was called empty: %v", err)
+	}
+	// GAP-0482: a file cut off before config_version is incomplete, not old.
+	if err := os.WriteFile(config.ConfigPath(), []byte("guardrail:\n  enabled: true\n  conn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg := gatewayStatusConfigLoadError(loadErr).Error(); !strings.Contains(msg, "is incomplete") ||
+		strings.Contains(msg, "migrate") {
+		t.Fatalf("cut-short config: %q", msg)
 	}
 }
 
