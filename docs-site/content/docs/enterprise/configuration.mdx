@@ -62,7 +62,7 @@ and you do not edit them:
 | `config.generation.json` | The config generation: `generation`, `config_sha256`, `actor` (`lifecycle`, `migration`, or a user), `reason` and `written_at`. Every config write updates it |
 | `config.yaml.lock` | The lock every config writer takes |
 | `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only). Pass it as `--config` to go back to a release that reads version 8 |
-| `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --ack` marks it read |
+| `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --config /etc/defenseclaw/config.yaml --ack` marks it read on Linux; on macOS use `--config /opt/cisco/defenseclaw/etc/config.yaml` |
 
 They sit in `/etc/defenseclaw` on Linux, `/opt/cisco/defenseclaw/etc` on macOS
 and `C:\ProgramData\Cisco\DefenseClaw\etc` on Windows. On Linux and macOS the
