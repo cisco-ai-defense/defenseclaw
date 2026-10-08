@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -22,7 +23,10 @@ func TestWindowsEnterpriseHookRuntimeAccessFailsStatusInBothDirections(t *testin
 	original := windowsEnterpriseHookRuntimeDir
 	t.Cleanup(func() { windowsEnterpriseHookRuntimeDir = original })
 	windowsEnterpriseHookRuntimeDir = func() (string, error) { return dir, nil }
-	setDACL := func(sddl string) error {
+	// setAccess writes the SDDL's DACL and, when it names one, its owner. The
+	// owner matters: a new folder belongs to the test account, which is owner
+	// drift on its own, so the clean case must make Administrators the owner.
+	setAccess := func(sddl string) error {
 		descriptor, err := windows.SecurityDescriptorFromString(sddl)
 		if err != nil {
 			return err
@@ -31,20 +35,29 @@ func TestWindowsEnterpriseHookRuntimeAccessFailsStatusInBothDirections(t *testin
 		if err != nil {
 			return err
 		}
-		return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
-			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		owner, _, err := descriptor.Owner()
+		if err != nil {
+			return err
+		}
+		info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+		if owner != nil {
+			info |= windows.OWNER_SECURITY_INFORMATION
+		}
+		return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, info, owner, nil, dacl, nil)
 	}
 	// Let the test's own account remove the folder again.
-	t.Cleanup(func() { _ = setDACL("D:P(A;OICI;FA;;;WD)") })
+	t.Cleanup(func() { _ = setAccess("D:P(A;OICI;FA;;;WD)") })
 	for _, tc := range []struct {
 		name, sddl, want string
 	}{
-		{"users modify", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", "(S-1-5-32-545) holds modify (0x"},
-		{"users read removed", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "(S-1-5-32-545) read and execute entry is missing"},
-		{"as DefenseClaw sets it", "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", ""},
+		{"users modify", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", "(S-1-5-32-545) holds modify (0x"},
+		{"users read removed", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "(S-1-5-32-545) read and execute entry is missing"},
+		{"as DefenseClaw sets it", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := setDACL(tc.sddl); err != nil {
+			if err := setAccess(tc.sddl); errors.Is(err, windows.ERROR_INVALID_OWNER) {
+				t.Skip("making Administrators the owner needs an elevated token")
+			} else if err != nil {
 				t.Fatal(err)
 			}
 			result := enterprisestatus.New("verify", "standalone", "windows", "test")
