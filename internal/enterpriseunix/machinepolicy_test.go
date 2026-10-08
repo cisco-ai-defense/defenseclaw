@@ -654,3 +654,22 @@ func TestVerifyFailsAndRepairRestoresAnUnreadableClaudeDropInDirectory(t *testin
 	}
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 }
+
+// ownership: off for an enabled connector left status and verify green with
+// no note while its sessions ran without DefenseClaw's hooks (GAP-0922).
+func TestStatusWarnsForAnEnabledConnectorWithMachinePolicyOwnershipOff(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	off := strings.Replace(h.read(h.env.Layout.ConfigPath), "  profile: standalone\n",
+		"  profile: standalone\n  machine_policy:\n    connectors:\n      claudecode:\n        ownership: \"off\"\n", 1)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(file, []byte(off), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: file}))
+	writeFreshLedger(t, h)
+	verify := h.run(Options{Action: ActionVerify})
+	if !strings.Contains(messagesOf(verify.Warnings, codeMachinePolicyOff), "claudecode sessions run without DefenseClaw's hooks") {
+		t.Fatalf("verify does not warn about ownership off: %+v", verify.Warnings)
+	}
+}

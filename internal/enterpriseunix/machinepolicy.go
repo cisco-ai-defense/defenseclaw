@@ -41,6 +41,10 @@ const (
 	// failure: the hooks are in place, and the floor stops no build older
 	// than 2.1.163, which predates the setting.
 	codeClaudeVersionFloorMissing = "claude_version_floor_missing"
+	// codeMachinePolicyOff names an enabled connector whose machine policy
+	// ownership is off: its sessions run without DefenseClaw's hooks. It is
+	// a warning, not a verify failure: the administrator chose it.
+	codeMachinePolicyOff = "machine_policy_off"
 )
 
 // MachinePolicyManager publishes, verifies and removes DefenseClaw's hooks
@@ -441,6 +445,19 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
 			"DefenseClaw hooks are in place in vendor machine policy for %s but do not protect %s: %s",
 			machinePolicyLabel(state.Connector, result), state.Connector, strings.Join(reasons, "; ")))
+	}
+	// ownership: off for a connector guardrail.connectors still enables
+	// left status and verify fully green while its sessions ran without
+	// DefenseClaw's hooks; only policy show said so (GAP-0922). OpenCode
+	// keeps its per-user plugin under ownership: off.
+	for _, state := range result.States {
+		if state.Ownership != config.MachinePolicyOwnershipOff || state.Connector == enterprisepolicy.ConnectorOpenCode ||
+			enterprisepolicy.RouteFor(state.Connector, env.GOOS) != enterprisepolicy.RouteMachinePolicy {
+			continue
+		}
+		r.AddWarning(codeMachinePolicyOff, fmt.Sprintf(
+			"guardrail.connectors enables %s, but enterprise.machine_policy.connectors.%s.ownership is off: DefenseClaw neither writes nor checks its machine policy and installs no per-user hooks for it, so %s sessions run without DefenseClaw's hooks; set ownership to merge or verify_only to protect it, or disable the connector",
+			state.Connector, state.Connector, state.Connector))
 	}
 	for _, name := range unwanted {
 		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
