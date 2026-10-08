@@ -386,6 +386,35 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         payload = json.loads(listed.output)
         self.assertIn("custom-cli-ai", {sig["id"] for sig in payload})
 
+    def test_managed_signature_replace_refuses_before_overwrite(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "managed")
+        data_dir = Path(app.cfg.data_dir)
+        data_dir.mkdir()
+        (data_dir / "config.yaml").write_text(
+            "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n",
+            encoding="utf-8",
+        )
+        dest = data_dir / "signature-packs" / "custom-pack.json"
+        dest.parent.mkdir()
+        previous = b'{"version":1,"id":"custom-pack","signatures":[{"id":"old-ai","name":"Old","vendor":"Example","category":"ai_cli"}]}'
+        dest.write_bytes(previous)
+        app.cfg.ai_discovery.signature_packs = [str(dest)]
+        source = Path(tmp_dir) / "replacement.json"
+        source.write_text(
+            json.dumps({"version": 1, "id": "custom-pack", "signatures": [
+                {"id": "new-ai", "name": "New", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            result = self.runner.invoke(agent, ["signatures", "install", "--replace", str(source)], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("managed", str(result.exception).lower())
+            self.assertEqual(dest.read_bytes(), previous)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
     def test_secure_client_signature_list_includes_legacy_directory(self):
         app, tmp_dir, db_path = make_app_context()
         app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")

@@ -3735,7 +3735,11 @@ def signatures_validate(pack_path: Path, as_json: bool) -> None:
 def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
     """Install a validated pack into the managed signature-pack directory and
     add it to ai_discovery.signature_packs, the only packs discovery loads."""
+    from defenseclaw import config_writer
+    from defenseclaw.config import config_path_for_data_dir
+
     cfg = _require_loaded_config(app)
+    config_writer.refuse_when_managed(config_path_for_data_dir(cfg.data_dir))
     configured = list(getattr(cfg.ai_discovery, "signature_packs", []) or [])
     try:
         dest = ai_signatures.install_signature_pack(
