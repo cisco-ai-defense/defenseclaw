@@ -538,7 +538,7 @@ standalone enterprise profile, which reads the machine config.
 | Where | `users` by UPN | `groups` by Entra group |
 | --- | --- | --- |
 | Windows, per-user | Matched in the live test | No: a per-user install has no group list |
-| Windows, standalone enterprise | Not tested live | By SID, after the local group step. Matched in the live test |
+| Windows, standalone enterprise | Matched before a lane-owned account's UPN rename and stopped matching after it; the account SID stayed the same | By SID, after the local group step. Matched in the live test |
 | Linux `aad`, per-user | Matched in the live test | No: the module gives no Entra groups |
 | Linux Himmelblau, per-user and standalone | With `cn_name_mapping = false` | By name, as `id` shows it. Matched in the live test |
 | Linux Entra Domain Services, per-user and standalone | By the UPN on standalone enterprise | `ml-team@domain`, or `ml-team` with short names. Matched in the live test |
@@ -554,8 +554,10 @@ Ask the gateway which profile a user gets. On Windows, name an Entra user by
 SID, as `AzureAD\Name`, by the bare name or by the UPN.
 
 ```powershell
-defenseclaw guardrail profile explain --user AzureAD\Alice --connector claudecode
-defenseclaw guardrail profile explain --connector claudecode    # the account that runs it
+# Standalone enterprise: run in an elevated Administrator prompt.
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user 'AzureAD\Alice' --connector claudecode
+# Per-user install:
+defenseclaw guardrail profile explain --connector claudecode
 ```
 
 ```bash
