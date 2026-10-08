@@ -13,11 +13,24 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Windows hooks cold-start the gateway natively under the hook runtime own
-// lock (hook_gateway_recovery_windows.go), so the shell hook path is unused.
-const hookColdStartSupported = false
+// hookColdStartSupported: a per-user Windows gateway ends with its sign-in
+// session and no service starts it again, so the hook of a PowerShell
+// (install.ps1) install starts it with `start --hook-cold-start`, which
+// keeps the Linux and macOS rules: not after `defenseclaw-gateway stop`,
+// not during an install, one try a minute after a failed start (GAP-0377).
+// Secure Client and managed computers keep their own lifecycle: none of the
+// stop marker, the PATH record or that start applies there.
+func hookColdStartSupported() bool {
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || secureClientHost() {
+		return false
+	}
+	_, managedHost := managedHostWindowsStandalone()
+	return !managedHost
+}
 
 // acquireGatewayStartLock takes the per-data-directory start lock, as on Linux
 // and macOS, so concurrent start and restart commands (a script, the TUI and

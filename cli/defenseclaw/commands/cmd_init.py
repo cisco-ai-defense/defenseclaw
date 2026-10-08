@@ -2693,7 +2693,7 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
         # after a sign-out or reboot (GAP-0377).
         renderer.echo(
             "  After a sign-out or reboot, agent hooks start the gateway on their next call;"
-            " if they do not, run: defenseclaw-gateway start"
+            " after defenseclaw-gateway stop, run: defenseclaw-gateway start"
         )
     if _sandboxes_possible():
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
