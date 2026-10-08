@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -184,6 +186,13 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 		}
 		return enterpriseACPEnrollment{}, fmt.Errorf("unknown ACP client: %s", client)
 	}
+	if _, defined := cfg.ACP.Profiles[profile]; requireAuthorization && !cfg.SecureClientIntegration() &&
+		!defined && !enterpriseACPProfileNameRE.MatchString(profile) {
+		// A 300-character name came back whole in a policy sentence that
+		// named no rule (GAP-0688).
+		return enterpriseACPEnrollment{}, fmt.Errorf("enterprise acp: --profile %s is not a profile name: a name is at most 64 letters, "+
+			"digits, '.', '_' or '-'%s", enterpriseACPShortName(profile), enterpriseACPDefinedProfiles(cfg.ACP))
+	}
 	if requireAuthorization && !cfg.SecureClientIntegration() {
 		if refusals := enterpriseACPAuthorizationRefusals(cfg.ACP, client, agent, profile); len(refusals) > 0 {
 			return enterpriseACPEnrollment{}, fmt.Errorf("central ACP policy does not authorize %s/%s in profile %s: %s",
@@ -290,6 +299,26 @@ func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnr
 	return enterpriseACPEnrollment{
 		target: target, principal: principal, dataDir: abs, client: client, agent: agent, profile: profile,
 	}, nil
+}
+
+// enterpriseACPProfileNameRE is the form of a profile name an enrollment
+// accepts when acp.profiles does not define it.
+var enterpriseACPProfileNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// enterpriseACPShortName bounds a name echoed in a refusal.
+func enterpriseACPShortName(name string) string {
+	if runes := []rune(name); len(runes) > 40 {
+		return string(runes[:32]) + "..."
+	}
+	return name
+}
+
+// enterpriseACPDefinedProfiles names the profiles acp.profiles defines.
+func enterpriseACPDefinedProfiles(policy config.ACPConfig) string {
+	if len(policy.Profiles) == 0 {
+		return ""
+	}
+	return "; acp.profiles defines " + strings.Join(slices.Sorted(maps.Keys(policy.Profiles)), ", ")
 }
 
 // enterpriseACPAuthorizationRefusals applies the gateway's rule for a pair
@@ -714,8 +743,15 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 		if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); encodeErr != nil {
 			return encodeErr
 		}
-		if err != nil {
+		if err != nil && cfg != nil && cfg.SecureClientIntegration() {
 			return errors.New("enterprise ACP operation failed")
+		}
+		if err != nil {
+			// The JSON on stdout names the cause; stderr added a generic
+			// "Error: enterprise ACP operation failed" (GAP-0688).
+			coded := withExitCode(err, 1)
+			silenceJSONReportedError(cmd, true, coded)
+			return coded
 		}
 		return nil
 	}

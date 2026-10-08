@@ -92,7 +92,16 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 		!strings.Contains(err.Error(), "has no home directory") || strings.Contains(err.Error(), "lstat") {
 		t.Fatalf("enroll of an account without a home: %v", err)
 	}
-	enterpriseACPUserHome, enterpriseACPUserDataDir, enterpriseACPJSON = userHome, userData, true
+	// With --json the cause is on stdout once; stderr adds nothing (GAP-0688).
+	enterpriseACPJSON = true
+	var jsonOut bytes.Buffer
+	jsonCommand := &cobra.Command{}
+	jsonCommand.SetOut(&jsonOut)
+	if err := runEnterpriseACPEnroll(jsonCommand, nil); err == nil || !jsonCommand.SilenceErrors ||
+		!strings.Contains(jsonOut.String(), "has no home directory") {
+		t.Fatalf("--json refusal: err=%v silenced=%v stdout=%s", err, jsonCommand.SilenceErrors, jsonOut.String())
+	}
+	enterpriseACPUserHome, enterpriseACPUserDataDir = userHome, userData
 
 	// An enrollment that cannot publish the bearer leaves no credential,
 	// and a failed re-enrollment keeps the working one (GAP-0260).
@@ -335,6 +344,13 @@ func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 	enterpriseACPAgent, enterpriseACPProfile = "hermes", "watch"
 	if _, err := resolveEnterpriseACPEnrollment(true); err == nil || !strings.Contains(err.Error(), `acp.clients.zed.profile is ""`) {
 		t.Fatalf("the refusal does not name the pin that disagrees: %v", err)
+	}
+	// An over-long name is refused with the rule, not echoed whole
+	// (GAP-0688).
+	enterpriseACPProfile = strings.Repeat("p", 300)
+	if _, err := resolveEnterpriseACPEnrollment(true); err == nil || len(err.Error()) > 300 ||
+		!strings.Contains(err.Error(), "at most 64") || !strings.Contains(err.Error(), "locked, watch") {
+		t.Fatalf("over-long profile refusal: %v", err)
 	}
 }
 
