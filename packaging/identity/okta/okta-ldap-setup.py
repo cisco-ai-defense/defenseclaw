@@ -853,7 +853,16 @@ def cmd_signon_policy(client: Okta, args: argparse.Namespace) -> int:
                 "description": "Password-only LDAP binds for Linux hosts (DefenseClaw Okta kit)",
             })
     else:
-        report.ok(f"policy '{args.policy_name}' exists")
+        # A shared app sign-on policy changes authentication for every mapped app.
+        mappings = client.get_all(f"/api/v1/policies/{policy['id']}/mappings")
+        for mapping in mappings:
+            href = (((mapping.get("_links") or {}).get("application") or {}).get("href") or "")
+            path = urllib.parse.urlsplit(href).path
+            if not path.startswith("/api/v1/apps/") or path.rsplit("/", 1)[-1] != app["id"]:
+                report.problem(f"policy '{args.policy_name}' is mapped to another or unknown app",
+                               "Choose a policy dedicated to the LDAP Interface.")
+                return report.finish()
+        report.ok(f"policy '{args.policy_name}' exists and is dedicated to the LDAP Interface")
 
     # Okta ANDs the users and groups conditions of one rule, so the bind user and the group need a rule each.
     existing = client.get_all(f"/api/v1/policies/{policy['id']}/rules") if policy is not None else []
