@@ -140,6 +140,41 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	}
 }
 
+// A Windows standalone Cursor hook whose gateway service is stopped is
+// refused by the foreign-hook guard before hookexec reads the payload, and
+// Cursor's command binds no event. The deny must still be the event's own
+// (permission deny on preToolUse and beforeShellExecution), not the {}
+// Cursor answers an event it cannot name with: Cursor ran the shell call of
+// an open session (GAP-1032). Secure Client is unchanged.
+func TestWindowsStandaloneCursorStoppedGatewayDeniesEachToolEvent(t *testing.T) {
+	for _, event := range []string{"preToolUse", "beforeShellExecution"} {
+		run := func(explain bool) (int, string) {
+			home := t.TempDir()
+			var out, errb bytes.Buffer
+			code := Run(context.Background(), Options{
+				Connector:                "cursor",
+				Home:                     home,
+				HookDir:                  filepath.Join(home, "hooks"),
+				ManagedEnterprise:        true,
+				ExplainUnenrolledAccount: explain,
+				ManagedRuntimeFailure:    managedGatewayNotRunningReason,
+				Stdin:                    strings.NewReader(`{"hook_event_name":"` + event + `","command":"Get-Date"}`),
+				Stdout:                   &out,
+				Stderr:                   &errb,
+			})
+			return code, out.String()
+		}
+		code, stdout := run(true)
+		if code != blockExit || !strings.Contains(stdout, `"permission":"deny"`) ||
+			!strings.Contains(stdout, "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running") {
+			t.Fatalf("%s: code = %d stdout = %q, want the event's deny with the plain text", event, code, stdout)
+		}
+		if code, stdout = run(false); strings.TrimSpace(stdout) != "{}" || code != blockExit {
+			t.Fatalf("%s: Secure Client code = %d stdout = %q, want its unchanged answer", event, code, stdout)
+		}
+	}
+}
+
 // A newly enrolled Windows standalone account can meet a 401 on its first
 // call while the guardian's authorization ledger catches up: the hook sends
 // the call again and it is served. A 401 that stays fails closed with the

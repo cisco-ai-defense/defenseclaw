@@ -1834,13 +1834,18 @@ func hookEventSubject(event string) string {
 }
 
 // resolveManagedStandaloneFailureEvent names the event of a managed
-// standalone invocation that fails before its payload is read. The Claude
+// standalone invocation (Unix, or the Windows standalone binary,
+// managedPlainFailClosed) that fails before its payload is read. The Claude
 // Code, Cursor and Devin commands do not bind their event, so it comes from
 // the payload, as in failForeignHookBlocked; the Codex, Copilot and
-// Antigravity commands bind it out of band. Other invocations are left
-// untouched, so their stdin is never read here.
+// Antigravity commands bind it out of band. Without it a Windows Cursor hook
+// whose gateway service was stopped answered {} (Cursor's response for an
+// event it cannot name), and Cursor ran the tool call (GAP-1032). Other
+// invocations, Secure Client included, are left untouched, so their stdin is
+// never read here.
 func resolveManagedStandaloneFailureEvent(opts *Options, sp spec) {
-	if opts == nil || !opts.ManagedEnterprise || !opts.ManagedStandalone || strings.TrimSpace(opts.Event) != "" {
+	if opts == nil || !opts.ManagedEnterprise || strings.TrimSpace(opts.Event) != "" ||
+		(!opts.ManagedStandalone && !opts.ExplainUnenrolledAccount) {
 		return
 	}
 	switch sp.connector {
