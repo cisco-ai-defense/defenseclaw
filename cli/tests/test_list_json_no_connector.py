@@ -70,6 +70,7 @@ def test_ide_only_scan_without_connector_returns_rows_or_error(monkeypatch: pyte
         result = make_separate_stderr_runner().invoke(aibom, ["scan", "--only", "ide_plugins", "--json"], obj=app)
         assert result.exit_code == 0, result.output
         assert json.loads(result.stdout)["ide_plugins"][0]["plugin_id"] == "github.copilot"
+        assert json.loads(result.stdout)["summary"]["total_items"] == 1
         monkeypatch.setattr(cmd_aibom, "_fetch_ide_plugins", lambda _app: (None, "gateway unavailable"))
         error = make_separate_stderr_runner().invoke(aibom, ["scan", "--only", "ide_plugins"], obj=app)
         assert error.exit_code != 0 and "gateway unavailable" in error.output

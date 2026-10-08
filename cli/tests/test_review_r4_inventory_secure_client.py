@@ -23,6 +23,25 @@ def test_ide_page_cap_is_partial() -> None:
     assert inv["summary"]["ide_plugins"]["count"] == 1
     assert inv["summary"]["ide_plugins"]["partial"] is True
 
+
+def test_secure_client_signature_list_keeps_original_catalog_shape() -> None:
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+            result = CliRunner().invoke(agent, ["signatures", "list", "--json"], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        signatures = json.loads(result.output)
+        assert len(signatures) == 88
+        assert "jetbrains-ai" not in {sig["id"] for sig in signatures}
+        for sig in signatures:
+            assert not {"jetbrains_plugin_ids", "zed_extension_ids", "vim_plugins"} & sig.keys()
+        by_id = {sig["id"]: sig for sig in signatures}
+        assert "openai.chatgpt" not in by_id["codex"]["extension_ids"]
+        assert "anthropic.claude-code" not in by_id["claudecode"]["extension_ids"]
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
 def test_secure_client_aibom_skips_ide_gateway_and_output() -> None:
     app, tmp_dir, db_path = make_app_context()
     try:
