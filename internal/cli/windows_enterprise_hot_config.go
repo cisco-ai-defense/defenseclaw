@@ -61,9 +61,9 @@ var (
 	windowsEnterpriseHotConfigLock     = acquireWindowsEnterpriseLifecycleLock
 	windowsEnterpriseHotConfigValidate = validateWindowsServiceConfig
 	windowsEnterpriseHotConfigPoll     = 2 * time.Second
-	windowsEnterpriseHotConfigWrite    = func(ctx context.Context, path string, raw []byte, reason string) error {
+	windowsEnterpriseHotConfigWrite    = func(ctx context.Context, path string, raw []byte, reason, expectedSHA string) error {
 		_, err := configwrite.ReplaceDocument(ctx, path, raw, configwrite.Options{
-			Actor: configwrite.ActorLifecycle, Reason: reason,
+			Actor: configwrite.ActorLifecycle, Reason: reason, ExpectSHA256: expectedSHA,
 		})
 		return err
 	}
@@ -154,12 +154,7 @@ func windowsEnterpriseHotConfigApply(
 	if err != nil {
 		return false
 	}
-	previous, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
-	if err != nil || config.NeedsMigrationV9(next) || config.NeedsMigrationV9(previous) {
-		return false
-	}
-	changed, err := configwrite.ChangedPaths(previous, next)
-	if err != nil || len(changed) == 0 || len(configwrite.ManagedRestartRequired(changed)) > 0 {
+	if config.NeedsMigrationV9(next) {
 		return false
 	}
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
@@ -172,6 +167,18 @@ func windowsEnterpriseHotConfigApply(
 	}
 	defer release()
 
+	// Status and the installed bytes may have changed while this call waited
+	// for lifecycle.lock. Snapshot only after acquiring it; rollback must
+	// restore the configuration this attempt actually replaced.
+	previous, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil || config.NeedsMigrationV9(previous) {
+		return false
+	}
+	changed, err := configwrite.ChangedPaths(previous, next)
+	if err != nil || len(changed) == 0 || len(configwrite.ManagedRestartRequired(changed)) > 0 {
+		return false
+	}
+
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
 
@@ -180,7 +187,7 @@ func windowsEnterpriseHotConfigApply(
 	_, generationErr := os.Stat(generationPath)
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
 	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
-	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, "enterprise windows ensure"); err != nil {
+	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, "enterprise windows ensure", configwrite.SHA256Hex(previous)); err != nil {
 		return false
 	}
 	// Undoing puts the config back. A config the record named is recorded
@@ -189,7 +196,7 @@ func windowsEnterpriseHotConfigApply(
 	// edit stays unrecorded, and a record the attempt created goes away.
 	undo := func() {
 		if recordedBefore {
-			_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, "enterprise windows ensure (config change not applied)")
+			_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, "enterprise windows ensure (config change not applied)", configwrite.SHA256Hex(next))
 		} else {
 			_ = writeFileKeepingDACL(layout.ConfigPath, previous, layout.ConfigPath)
 		}
