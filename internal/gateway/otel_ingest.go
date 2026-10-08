@@ -977,11 +977,7 @@ func (a *APIServer) codexNotifyAgentID(ctx context.Context, sessionID string) st
 	if sessionID == "" || a.managedAIDOnly() {
 		return ""
 	}
-	identityID := agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID)
-	if identityID == "" {
-		return ""
-	}
-	return agentNodeID(identityID, "codex", sessionID, "root")
+	return agentNodeID(agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID), "codex", sessionID, "root")
 }
 
 func normalizeCodexNotifyPayloadAliases(p *codexNotifyPayload, body []byte) map[string]any {
@@ -1088,7 +1084,10 @@ func (a *APIServer) joinCodexNotifyLineage(meta llmEventMeta) llmEventMeta {
 			return meta
 		}
 	}
-	if meta.UserID == "" || snapshot.UserID == "" || meta.UserID != snapshot.UserID {
+	// Never join the retained hook state of another user (GAP-1017). With
+	// no user on either side (a per-user gateway without account facts) the
+	// session lineage still joins; identity facts need a named user below.
+	if meta.UserID != snapshot.UserID {
 		return meta
 	}
 	if !exact {
