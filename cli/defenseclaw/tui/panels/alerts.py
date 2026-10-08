@@ -78,6 +78,9 @@ class AlertEvent:
     # Labelled facts from the canonical record (connector, rule, scanner,
     # decision) that the flat audit row behind it does not carry.
     facts: tuple[tuple[str, str], ...] = ()
+    # The sandbox the alert was raised in (its record, or the hook decision
+    # of a finding's request), so the Sandboxes panel can count them.
+    sandbox: str = ""
 
 
 @dataclass(frozen=True)
@@ -384,6 +387,9 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
             decision = disposition.group(1).lower().replace("_", " ")
     if decision:
         facts.append(("Decision", decision))
+    sandbox = payload_text(payload, "defenseclaw.sandbox.name")
+    if sandbox and sandbox != target:
+        facts.append(("Sandbox", sandbox))
     severity = (row.severity or "INFO").upper()
     if row.bucket == "network.egress" and severity == "INFO":
         severity = "WARNING"
@@ -409,6 +415,7 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         session_id=row.session_id,
         connector=row.connector,
         facts=tuple(facts),
+        sandbox=sandbox,
     )
 
 
@@ -1805,6 +1812,8 @@ def _with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list
         # A finding raised in a sandbox session names the sandbox, which only
         # its hook decision records, as `defenseclaw alerts` does (GAP-0232).
         sandbox = next((s for raw in rows if (s := parse_detail_tokens(raw or "").get("sandbox", "").strip())), "")
+        if sandbox and not event.sandbox:
+            event = replace(event, sandbox=sandbox)
         if sandbox and all(fact[0] != "Sandbox" for fact in event.facts):
             event = replace(event, facts=(*event.facts, ("Sandbox", sandbox)))
         out.append(event)

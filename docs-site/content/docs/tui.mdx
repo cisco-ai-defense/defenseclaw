@@ -425,6 +425,11 @@ what needs attention:
   says it).
 - **orphaned**: the sandbox has no DefenseClaw binding, so its hooks cannot
   authenticate. Delete it and run again.
+- **N alerts**: the alerts raised in the sandbox since it was created, such
+  as a rule's finding on one of its tool calls or a shadow AI
+  destination. The details count them by severity
+  (`Alerts  2 (1 CRITICAL, 1 LOW)`); in Alerts (`2`), `/` and the sandbox name
+  list them, as `defenseclaw alerts` does with `sandbox=NAME`.
 
 The TUI also toasts a blocked destination you can unblock (once per sandbox
 and host per minute), a new ask, hook tamper, hooks that stop or start

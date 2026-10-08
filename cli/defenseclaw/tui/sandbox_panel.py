@@ -778,6 +778,7 @@ class SandboxPanelMixin:
             model.set_processes(selected.name, payload)
         destinations = await self._fetch_sandbox_destinations(selected.name) if selected is not None else None
         run = await self._fetch_sandbox_run(selected)
+        model.set_alert_events(getattr(getattr(self, "alerts_model", None), "audit_events", ()))
         title, pairs = model.detail_pairs(destinations, run=run)
         keys, keys_hint = self._sandbox_detail_keys()
         key: str | None = None
