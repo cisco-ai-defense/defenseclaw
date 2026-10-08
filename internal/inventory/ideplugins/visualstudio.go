@@ -67,7 +67,11 @@ func (s *scanner) scanVisualStudio() {
 		if strings.HasSuffix(name, "Exp") {
 			inst.Channel = "experimental"
 		}
-		for _, p := range s.readVSIXManifests(extDir, ScopeUser, false) {
+		plugins := s.readVSIXManifests(extDir, ScopeUser, false)
+		if len(plugins) >= visualStudioMaxExtensions {
+			inst.Partial = true
+		}
+		for _, p := range plugins {
 			switch {
 			case !known:
 				p.Enabled, p.EnabledSource = EnabledUnknown, SourceUnknown
@@ -101,7 +105,11 @@ func (s *scanner) scanVisualStudioMachine() {
 					continue
 				}
 				inst := Install{Family: FamilyVisualStudio, Product: "visual-studio", Channel: strings.ToLower(clean(edition)), Version: clean(year), Root: extDir}
-				for _, p := range s.readVSIXManifests(extDir, ScopeMachine, true) {
+				plugins := s.readVSIXManifests(extDir, ScopeMachine, true)
+				if len(plugins) >= visualStudioMaxExtensions {
+					inst.Partial = true
+				}
+				for _, p := range plugins {
 					p.Enabled, p.EnabledSource = EnabledUnknown, SourceUnknown
 					inst.Plugins = append(inst.Plugins, p)
 				}
