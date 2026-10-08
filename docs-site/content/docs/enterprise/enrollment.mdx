@@ -122,6 +122,7 @@ the record itself is unreadable, or when an app or editor extension that
 | `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract |
 | `surface_unverified` | A desktop app or editor extension has no engine version that selects a hook contract, or its hook delivery is not live-verified and `unverified_versions` is `refuse` |
 | `agent_unprotected` | The agent's version could not be read, it is below the platform minimum, its user's home is untrusted (Linux and macOS), its signed-in user's enrollment is pending (Windows), a Claude Code change to an older hook contract was not followed (Windows), or (Windows) it is not installed where the guardian can manage it |
+| `home_untrusted` | Linux and macOS: an eligible account whose home is untrusted and that has no agent the enumerator could list. It names the account and the reason: the account gets no hooks, IDE inventory or discovery until the home is fixed |
 
 A per-user agent in this state runs without DefenseClaw hooks. A
 machine-policy agent refuses the unenrolled user on Windows, and on Linux
@@ -134,7 +135,11 @@ On Linux and macOS a user who has never been enrolled and whose home is
 untrusted (group- or other-writable, a symlink, owned by another account, or
 covered by a user mount) gets no rows. The enumerator still lists the agents
 installed for them, as that user and without running anything in that home
-(package metadata and the presence of the agent CLIs), and reports each one.
+(package metadata and the presence of the agent CLIs), and reports each one,
+or the account itself (`home_untrusted`) when it finds none. The mode of a
+home never changes the profile applied to its user: the guardian keeps the
+account's identity record (its UPN and directory facts) either way, so an
+assignment by UPN or group keeps selecting it.
 Remove group and other write from the home to enroll the user. An enrolled
 user who loosens their home keeps their rows, and their worker removes group
 and other write again before the next repair.

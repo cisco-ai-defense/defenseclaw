@@ -33,6 +33,12 @@ const unixEligibleAccountsMaxBytes = 4 << 20
 type unixEligibleAccountsFile struct {
 	Version  int                   `json:"version"`
 	Accounts []UnixEligibleAccount `json:"accounts"`
+	// IdentityOnly are accounts that pass every enrollment filter but whose
+	// home is not enrolled (it is group/other writable, a symlink or owned
+	// by another account). The guardian keeps their identity record, so a
+	// user cannot drop the profile assigned to him by loosening his own home
+	// (GAP-0714); nothing is written in their homes.
+	IdentityOnly []UnixEligibleAccount `json:"identity_only,omitempty"`
 }
 
 // UnixEligibleAccountsPath is the eligible-accounts record for manifestPath.
@@ -57,13 +63,27 @@ func UnixCopilotVSCodeAccountsPath(manifestPath string) string {
 // below a root-owned directory chain, written through a same-directory temp
 // file and rename. The guardian only trusts a record written this way.
 func WriteUnixEligibleAccounts(path string, accounts []UnixEligibleAccount) error {
+	return WriteUnixEnumeratorAccounts(path, accounts, nil)
+}
+
+// WriteUnixEnumeratorAccounts publishes the eligible accounts and the
+// identity-only accounts (unixEligibleAccountsFile.IdentityOnly) at path.
+func WriteUnixEnumeratorAccounts(path string, accounts, identityOnly []UnixEligibleAccount) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: eligible accounts path must be absolute: %s", path)
 	}
-	sorted := append([]UnixEligibleAccount{}, accounts...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].User < sorted[j].User })
-	data, err := json.MarshalIndent(unixEligibleAccountsFile{Version: 1, Accounts: sorted}, "", "  ")
+	sortAccounts := func(accounts []UnixEligibleAccount) []UnixEligibleAccount {
+		sorted := append([]UnixEligibleAccount{}, accounts...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].User < sorted[j].User })
+		return sorted
+	}
+	sorted := sortAccounts(accounts)
+	record := unixEligibleAccountsFile{Version: 1, Accounts: sorted}
+	if len(identityOnly) > 0 {
+		record.IdentityOnly = sortAccounts(identityOnly)
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -129,45 +149,61 @@ func writeUnixRootOnlyRecord(path string, data []byte, tempPattern string, limit
 // missing record is an empty list; a record that is not a root-owned 0600
 // regular file below a root-owned directory chain is refused.
 func LoadUnixEligibleAccounts(path string) ([]UnixEligibleAccount, error) {
+	record, err := loadUnixEligibleAccountsFile(path)
+	return record.Accounts, err
+}
+
+// LoadUnixIdentityAccounts returns every account whose identity record the
+// guardian keeps: the eligible accounts and the identity-only ones.
+func LoadUnixIdentityAccounts(path string) ([]UnixEligibleAccount, error) {
+	record, err := loadUnixEligibleAccountsFile(path)
+	return append(record.Accounts, record.IdentityOnly...), err
+}
+
+func loadUnixEligibleAccountsFile(path string) (unixEligibleAccountsFile, error) {
+	var none unixEligibleAccountsFile
 	path = filepath.Clean(strings.TrimSpace(path))
 	if err := validateRootOwnedDirChain(filepath.Dir(path)); err != nil {
-		return nil, err
+		return none, err
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return none, nil
 	}
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("enterprise hooks: eligible accounts record %s must be a 0600 regular file", path)
+		return none, fmt.Errorf("enterprise hooks: eligible accounts record %s must be a 0600 regular file", path)
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); !ok || (st.Uid != 0 && !unixManifestTestOwnerAllowed(st.Uid)) || st.Nlink != 1 {
-		return nil, fmt.Errorf("enterprise hooks: eligible accounts record %s is not a root-owned single-link file", path)
+		return none, fmt.Errorf("enterprise hooks: eligible accounts record %s is not a root-owned single-link file", path)
 	}
 	data, err := readBoundedFile(path, unixEligibleAccountsMaxBytes)
 	if err != nil {
-		return nil, err
+		return none, err
 	}
 	var record unixEligibleAccountsFile
 	if err := json.Unmarshal(data, &record); err != nil {
-		return nil, fmt.Errorf("enterprise hooks: parse eligible accounts record: %w", err)
+		return none, fmt.Errorf("enterprise hooks: parse eligible accounts record: %w", err)
 	}
 	if record.Version != 1 {
-		return nil, fmt.Errorf("enterprise hooks: eligible accounts record version %d is not supported", record.Version)
+		return none, fmt.Errorf("enterprise hooks: eligible accounts record version %d is not supported", record.Version)
 	}
-	out := make([]UnixEligibleAccount, 0, len(record.Accounts))
-	for _, account := range record.Accounts {
-		home := filepath.Clean(strings.TrimSpace(account.Home))
-		if account.UID <= 0 || account.GID < 0 || !filepath.IsAbs(home) || home == "/" || strings.TrimSpace(account.User) == "" {
-			continue
+	valid := func(accounts []UnixEligibleAccount) []UnixEligibleAccount {
+		out := make([]UnixEligibleAccount, 0, len(accounts))
+		for _, account := range accounts {
+			home := filepath.Clean(strings.TrimSpace(account.Home))
+			if account.UID <= 0 || account.GID < 0 || !filepath.IsAbs(home) || home == "/" || strings.TrimSpace(account.User) == "" {
+				continue
+			}
+			account.Home = home
+			account.CreatedDirs = UnixCreatedDirsBelow(home, account.CreatedDirs)
+			out = append(out, account)
 		}
-		account.Home = home
-		account.CreatedDirs = UnixCreatedDirsBelow(home, account.CreatedDirs)
-		out = append(out, account)
+		return out
 	}
-	return out, nil
+	return unixEligibleAccountsFile{Version: 1, Accounts: valid(record.Accounts), IdentityOnly: valid(record.IdentityOnly)}, nil
 }
 
 // unixCreatedDirsLimit bounds the folders one account's record entry lists.
