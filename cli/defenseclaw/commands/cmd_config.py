@@ -1438,7 +1438,7 @@ def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
                             return True
                     except yaml.YAMLError:
                         pass
-    return _V8_VERSION_LINE.search(raw) is not None
+    return _V8_VERSION_LINE.search(raw.removeprefix(b"\xef\xbb\xbf")) is not None
 
 
 def _v8_config_path_view(path: str):

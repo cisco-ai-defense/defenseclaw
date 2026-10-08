@@ -65,6 +65,7 @@ from defenseclaw.config import _assert_config_write_allowed, config_path_for_dat
 from defenseclaw.config_writer import ConfigWriteError
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
     _UPSTREAM_FAIL_OPEN_CONNECTORS,
     FileSnapshot,
@@ -2118,7 +2119,15 @@ def _set_connector_hilt(
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
 
-    if restart and gc.enabled:
+    if not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+    elif not asset_lists.is_secure_client(app.cfg):
+        _report_hot_hilt(app)
+    elif restart:
         from defenseclaw.commands import cmd_setup
 
         cmd_setup._restart_services(
@@ -2129,18 +2138,28 @@ def _set_connector_hilt(
         )
         ux.ok(f"Gateway restarted, {label} HILT policy applied.", indent="  ")
         click.echo()
-    elif not gc.enabled:
-        ux.warn(
-            "guardrail is currently disabled — value will take effect "
-            "the next time you run 'defenseclaw guardrail enable'.",
-            indent="  ",
-        )
 
     _log_hilt(
         app,
         f"connector={key} scope=per-connector "
         f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
     )
+
+
+def _report_hot_hilt(app: AppContext) -> None:
+    """Say how a saved HILT change reaches the gateway off Secure Client.
+
+    The gateway applies HILT from the new configuration generation, so the
+    change needs no restart (GAP-0056); a Secure Client gateway reads the
+    connector guardrail settings at start and keeps the restart of main
+    (issue #1092).
+    """
+    outcome = _apply_to_running_gateway(app, needs_restart=False, restart=False, quiet=False)
+    if outcome == "live":
+        ux.ok(_GATEWAY_OUTCOMES[outcome], indent="  ")
+    else:
+        ux.echo(f"  {_GATEWAY_OUTCOMES[outcome]}")
+    click.echo()
 
 
 def _log_hilt(app: AppContext, details: str) -> None:
@@ -2179,7 +2198,8 @@ def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
 @click.option(
     "--restart/--no-restart",
     default=True,
-    help="Restart the gateway so the new HILT policy takes effect (default: on).",
+    help="On Secure Client, restart the gateway so the new HILT policy takes effect (default: on); "
+    "elsewhere the running gateway applies it without a restart.",
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
@@ -2350,7 +2370,15 @@ def hilt_cmd(
 
     from defenseclaw.commands import cmd_setup
 
-    if restart and gc.enabled:
+    if not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+    elif not asset_lists.is_secure_client(app.cfg):
+        _report_hot_hilt(app)
+    elif restart:
         cmd_setup._restart_services(
             app.cfg.data_dir,
             app.cfg.gateway.host,
@@ -2360,12 +2388,6 @@ def hilt_cmd(
         )
         ux.ok("Gateway restarted, HILT policy applied.", indent="  ")
         click.echo()
-    elif not gc.enabled:
-        ux.warn(
-            "guardrail is currently disabled — value will take effect "
-            "the next time you run 'defenseclaw guardrail enable'.",
-            indent="  ",
-        )
 
     _log_hilt(
         app,

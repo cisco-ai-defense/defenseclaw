@@ -106,18 +106,13 @@ def test_rejected_reload_exits_1(app, monkeypatch) -> None:
     assert "defenseclaw policy validate" in result.output and "compilation failed" in result.output
 
 
-def test_a_watch_change_restarts_a_running_gateway(app, monkeypatch) -> None:
-    # GAP-1236: the gateway's config watcher refuses a watch change
-    # ("requires gateway restart"), so a hot policy reload alone would claim
-    # an enforcement it does not have.
+def test_a_watch_change_restarts_only_a_secure_client_gateway(app, monkeypatch) -> None:
+    # The gateway reloads watch hot (GAP-0056); a Secure Client gateway reads
+    # it at start, so there activate keeps the restart of main (GAP-1236).
     from defenseclaw.commands import cmd_policy, cmd_setup
 
     restarts: list[str] = []
-
-    def _no_reload(self):
-        raise AssertionError("a restart replaces the hot reload")
-
-    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _no_reload)
+    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", lambda self: {"status": "reloaded"})
     monkeypatch.setattr(cmd_policy, "_gateway_pid_alive", lambda _app: True)
     monkeypatch.setattr(
         cmd_setup, "_restart_defense_gateway", lambda data_dir, **_kw: restarts.append(data_dir) or True
@@ -125,9 +120,14 @@ def test_a_watch_change_restarts_a_running_gateway(app, monkeypatch) -> None:
     app.cfg.watch.rescan_interval_min = 7
     result = _invoke(app, ["activate", "strict"])
     assert result.exit_code == 0, result.output
+    assert restarts == [] and "Gateway reloaded the policy" in result.output
+
+    monkeypatch.setattr(cmd_policy.asset_lists, "is_secure_client", lambda _cfg: True)
+    app.cfg.watch.rescan_interval_min = 7
+    result = _invoke(app, ["activate", "strict"])
+    assert result.exit_code == 0, result.output
     assert restarts == [app.cfg.data_dir]
     assert "Restarted the gateway; it is enforcing the policy now." in result.output
-    assert "Gateway reloaded the policy" not in result.output
 
 
 def test_no_change_does_not_reload(app, monkeypatch) -> None:

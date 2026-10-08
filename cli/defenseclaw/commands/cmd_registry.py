@@ -252,10 +252,11 @@ def _emit_json(payload: Any) -> None:
     click.echo(_json.dumps(payload, indent=2, sort_keys=True))
 
 
-# GAP-2422: the gateway reads asset_policy only when it starts (its config
-# reload refuses the change), so agent hooks kept the old registry rules until
-# a manual restart. A registry command that changed asset_policy restarts a
-# running gateway on its way out, as `policy activate` does.
+# The gateway reloads asset_policy hot from the new configuration generation
+# (spec 2.4), so a registry change reaches agent hooks without a restart
+# (GAP-0056). A Secure Client gateway keeps the start-time asset policy of
+# main (issue #1092), so there a registry command that changed asset_policy
+# still restarts a running gateway on its way out (GAP-2422).
 _JSON_OUTPUT_KEY = "defenseclaw.registry.json_output"
 
 
@@ -268,10 +269,15 @@ def _apply_asset_policy_to_gateway(ctx: click.Context, app: AppContext, before: 
     if _asset_policy_fingerprint(app.cfg) == before:
         return
     from defenseclaw.commands import cmd_policy, cmd_setup
+    from defenseclaw.enforce import asset_lists
 
     if not cmd_policy._gateway_pid_alive(app):
         return  # a stopped gateway loads the saved policy when it starts
     quiet = bool(ctx.meta.get(_JSON_OUTPUT_KEY))
+    if not asset_lists.is_secure_client(app.cfg):
+        if not quiet:
+            ux.ok("The running gateway applies the new asset policy now, without a restart.")
+        return
     # --json keeps stdout a single JSON document; the restart progress goes to stderr.
     with contextlib.redirect_stdout(sys.stderr) if quiet else contextlib.nullcontext():
         restarted = cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False)

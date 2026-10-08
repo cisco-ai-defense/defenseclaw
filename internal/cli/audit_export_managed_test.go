@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
-
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -117,19 +115,9 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 }
 
 // The rollback database option belongs to per-user and standalone installs,
-// while a managed audit export must use the deployment store.
+// while a managed audit export must use the deployment store. (Secure Client
+// drops --db from its command tree: TestSecureClientKeepsTheEnterpriseViews.)
 func TestAuditExportDBFlagAndManagedBoundary(t *testing.T) {
-	secure := &cobra.Command{Use: "export"}
-	registerAuditExportDBFlag(secure, true)
-	if secure.Flags().Lookup("db") != nil {
-		t.Fatal("Secure Client gained --db")
-	}
-	standalone := &cobra.Command{Use: "export"}
-	registerAuditExportDBFlag(standalone, false)
-	if standalone.Flags().Lookup("db") == nil {
-		t.Fatal("standalone lost --db")
-	}
-
 	withAuditExportManagedSeams(t, true, false)
 	previousDB := auditExportDB
 	auditExportDB = "previous/audit.db"

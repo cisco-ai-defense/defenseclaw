@@ -1645,7 +1645,9 @@ def _read_config_text(cfg_path: str) -> str | None:
     (and occasionally forgotten) per migration.
     """
     try:
-        with open(cfg_path, encoding="utf-8", newline="") as f:
+        # utf-8-sig drops a byte order mark (GAP-0386), so a rewrite of the
+        # first key matches and the file is written back without it.
+        with open(cfg_path, encoding="utf-8-sig", newline="") as f:
             return f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -1735,9 +1737,10 @@ def _read_active_connector_from_yaml(cfg_path: str) -> str:
     """
     if not os.path.isfile(cfg_path):
         return ""
+    from defenseclaw.config import read_config_text
+
     try:
-        with open(cfg_path) as f:
-            text = f.read()
+        text = read_config_text(cfg_path)
     except OSError:
         return ""
 

@@ -1171,7 +1171,8 @@ class HILTCommandTests(unittest.TestCase):
         self.assertTrue(app.cfg.guardrail.hilt.enabled)
         self.assertEqual(app.cfg.guardrail.hilt.min_severity, "MEDIUM")
         app.cfg.save.assert_called_once()
-        restart_mock.assert_called_once()
+        # The gateway applies HILT from the new config generation (GAP-0056).
+        restart_mock.assert_not_called()
 
     def test_partial_change_preserves_other_field(self):
         runner = CliRunner()
@@ -1215,7 +1216,7 @@ class HILTCommandTests(unittest.TestCase):
             self.assertTrue(eff.enabled)
             self.assertEqual(eff.min_severity, "MEDIUM")
         app.cfg.save.assert_called_once()
-        restart_mock.assert_called_once()
+        restart_mock.assert_not_called()
 
     def test_bare_set_off_reconciles_enabled_connector_override(self):
         runner = CliRunner()
@@ -1236,14 +1237,15 @@ class HILTCommandTests(unittest.TestCase):
             self.assertFalse(eff.enabled)
         self.assertEqual(app.cfg.guardrail.connectors["cursor"].hilt.min_severity, "MEDIUM")
         app.cfg.save.assert_called_once()
-        restart_mock.assert_called_once()
+        restart_mock.assert_not_called()
 
-    def test_set_one_connector_persists_and_restarts_only_it(self):
+    def test_set_one_connector_persists_and_restarts_only_it_on_secure_client(self):
+        # Secure Client keeps the restart of main (issue #1092, GAP-0056).
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         with patch(
             "defenseclaw.commands.cmd_setup._restart_services"
-        ) as restart_mock:
+        ) as restart_mock, patch("defenseclaw.enforce.asset_lists.is_secure_client", return_value=True):
             result = runner.invoke(
                 cmd_guardrail.hilt_cmd,
                 ["on", "--min-severity", "MEDIUM", "--connector", "codex", "--yes"],

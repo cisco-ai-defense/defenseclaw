@@ -407,6 +407,41 @@ async def test_external_refresh_preserves_active_setup_form_snapshot(
     assert "Config changed on disk" in app._setup_body_text()  # noqa: SLF001
 
 
+@pytest.mark.asyncio
+async def test_config_draft_moves_onto_an_external_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-0342: with an editor draft open, another writer sets block_at and
+    # alert_at. The untouched row shows the new value, Review shows the
+    # on-disk value as "before" and says the save replaces it.
+    from defenseclaw.tui.screens.config_diff import ConfigDiffModalModel
+
+    initial = {**_config_payload(tmp_path, {"claudecode": {}}), "observability": {}}
+    path = _configure_active_path(monkeypatch, tmp_path, initial)
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "guardrail.alert_at"
+    )
+    assert model.set_current_field_value("CRITICAL")
+    changed = {**initial, "guardrail": {**initial["guardrail"], "block_at": "HIGH", "alert_at": "LOW"}}
+    _atomic_write(path, changed)
+    await app._poll_config_once(now=1.0)  # noqa: SLF001
+    await app._poll_config_once(now=2.0)  # noqa: SLF001
+
+    rows = {field.key: field for section in model.sections for field in section.fields}
+    assert model.disk_change_pending and rows["guardrail.block_at"].value == "HIGH"
+    (entry,) = model.config_diff()
+    assert (entry.key, entry.before, entry.after, entry.disk_changed) == ("guardrail.alert_at", "LOW", "CRITICAL", True)
+    assert "changed on disk; saving replaces it" in ConfigDiffModalModel.from_entries((entry,)).preview_text()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="native Windows current-source acceptance")
 @pytest.mark.allow_subprocess
 @pytest.mark.asyncio
@@ -544,15 +579,46 @@ async def test_config_editor_save_records_an_audit_event(
 
 
 @pytest.mark.asyncio
-async def test_asset_policy_save_says_cli_admission_applies_it_now(
+async def test_save_over_an_unparseable_file_keeps_the_file_and_the_draft(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # GAP-2145: CLI admission reads asset_policy from config.yaml at once, so
-    # the save must not claim the change waits for a gateway restart.
+    # GAP-0370: a save over a config.yaml that no longer parses replaced it
+    # with only the edited fields; it is refused and the draft stays.
+    payload = {**_config_payload(tmp_path, {"claudecode": {}}), "observability": {}}
+    path = _configure_active_path(monkeypatch, tmp_path, payload)
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+    broken = path.read_text(encoding="utf-8") + "\nbroken: [unclosed\n"
+    path.write_text(broken, encoding="utf-8")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "not valid YAML (line" in action.hint and "draft is kept" in action.hint, action.hint
+    assert path.read_text(encoding="utf-8") == broken
+    assert model.has_changes()
+
+
+@pytest.mark.asyncio
+async def test_asset_policy_save_applies_without_a_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The gateway reloads asset_policy hot (GAP-0056), and CLI admission reads
+    # it at once (GAP-2145): the save asks for no restart.
     from defenseclaw.tui.services import config_audit
 
-    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    payload = {**_config_payload(tmp_path, {"claudecode": {}}), "observability": {}}
+    path = _configure_active_path(monkeypatch, tmp_path, payload)
     app = DefenseClawTUI(config=config_module.load(), config_path=path)
     _detach_ui(app, monkeypatch)
     monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, _entries: True)
@@ -568,6 +634,6 @@ async def test_asset_policy_save_says_cli_admission_applies_it_now(
 
     action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
 
-    assert "mcp set" in action.hint and "asset_policy now" in action.hint
+    assert "after a restart" not in action.hint and "Restart the gateway" not in action.hint, action.hint
     banner = app._setup_config_body_text()  # noqa: SLF001 - the banner under test.
-    assert "Saved" in banner and "CLI uses asset_policy now · G: restart gateway" in banner
+    assert "Saved" in banner and "restart" not in banner.lower(), banner

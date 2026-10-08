@@ -13163,6 +13163,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, hint="No config changes to save.")
         saved_entries = self.setup_model.config_diff()
         restart_keys: list[str] | None = None
+        check_saveable = getattr(self.config, "check_saveable", None)
+        if callable(check_saveable):
+            from defenseclaw.config_writer import ConfigUnparseableError
+
+            try:
+                check_saveable()
+            except ConfigUnparseableError as exc:
+                # Saving would replace the file with only the edited fields
+                # (GAP-0370); the draft stays for a save once the file is fixed.
+                return SetupPanelAction(
+                    True, hint=f"Config not saved: {exc}. Your draft is kept: fix the file and press S again, or r to discard it."
+                )
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
@@ -13171,6 +13183,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
                 result = save(actor=current_actor(ACTOR_PREFIX_TUI), reason=restart_reason)
                 restart_keys = getattr(result, "restart_required", None)
+            from defenseclaw.enforce import asset_lists
+
+            secure_client = asset_lists.is_secure_client(self.config)
+            if secure_client:
+                # A Secure Client gateway reads its policy at start, so every
+                # save keeps the restart of main (issue #1092).
+                restart_keys = None
             roster_changed, storage_changed = self._apply_config_snapshot(
                 self.config,
                 external=False,
@@ -13195,7 +13214,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
         self._schedule_config_save_audit(saved_entries)
-        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries)
+        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries) if secure_client else ""
         if self._setup_cli_live_sections:
             return SetupPanelAction(
                 True,
@@ -15349,7 +15368,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # the operator changed any setting that triggers a
                 # restart (e.g. toggling redaction off via setup) the
                 # whole TUI tore down.
-                self.setup_model.mark_restart_started(snapshot.started_at)
+                if self.setup_model.mark_restart_started(snapshot.started_at) and self.status_text.startswith(
+                    "Config changes saved"
+                ):
+                    # The status line still asked for the restart that just
+                    # happened (GAP-0342).
+                    self._set_status("Gateway restarted; it applies the saved config changes.")
             except (AttributeError, TypeError):
                 # Older SetupPanelModel without this method (or with a
                 # different signature) — fall back to clearing the
@@ -16429,7 +16453,8 @@ def _typed_character(event: events.Key) -> str | None:
 
 # Config keys the CLI reads from config.yaml on every command, so CLI
 # admission (mcp set, skill and plugin install) enforces a saved change at
-# once; only the gateway's own checks wait for the restart (GAP-2145).
+# once (GAP-2145). Only a Secure Client gateway waits for a restart to apply
+# them; every other gateway reloads asset_policy hot (GAP-0056).
 _CLI_LIVE_CONFIG_SECTIONS = ("asset_policy",)
 
 

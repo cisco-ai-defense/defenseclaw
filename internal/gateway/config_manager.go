@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -101,9 +102,14 @@ type ConfigManager struct {
 	// appliedRaw is the config.yaml bytes of the last applied or reconciled
 	// generation, so an applied change can name the paths that changed.
 	// Guarded by mu.
-	appliedRaw      []byte
-	afterWatchAdded func()
-	observabilityV8 hookLifecycleMetricV8Runtime
+	appliedRaw []byte
+	// appliedGeneration is the config.generation.json generation of the last
+	// applied bytes (appliedGenerationKnown), so config.change.applied names a
+	// writer only for a single generation (GAP-0318). Guarded by mu.
+	appliedGeneration      uint64
+	appliedGenerationKnown bool
+	afterWatchAdded        func()
+	observabilityV8        hookLifecycleMetricV8Runtime
 	// assetDirs lists the directories of the assets the live generation
 	// references (generation.assetDirs); the watcher follows them so an
 	// edited rule pack or Rego module rebuilds the generation.
@@ -635,6 +641,24 @@ func (m *ConfigManager) setStartupSource(sourceName string, raw []byte) {
 		return
 	}
 	m.startupSource, m.startupKnown = sha256.Sum256(raw), true
+	// The boot bytes hold every generation recorded so far (and a hand edit
+	// made on top while the gateway was stopped); no state file yet means
+	// none was written.
+	state, err := configwrite.ReadGenerationState(m.path)
+	switch {
+	case err == nil:
+		m.appliedGeneration, m.appliedGenerationKnown = state.Generation, true
+	case errors.Is(err, fs.ErrNotExist):
+		m.appliedGeneration, m.appliedGenerationKnown = 0, true
+	}
+}
+
+// noteAppliedGeneration records the generation of the applied raw bytes;
+// bytes no writer recorded (a hand edit) leave it unchanged. Callers hold mu.
+func (m *ConfigManager) noteAppliedGeneration(raw []byte) {
+	if generation, ok := appliedGenerationOf(m.path, raw); ok {
+		m.appliedGeneration, m.appliedGenerationKnown = generation, true
+	}
 }
 
 // startupSourceUnchanged reports whether config.yaml still holds the bytes
@@ -659,6 +683,7 @@ func (m *ConfigManager) startupSourceUnchanged(ctx context.Context) bool {
 	recordHandEdit(ctx, m.Current(), m.path, snapshot.raw)
 	refreshConfigGeneration(snapshot.raw)
 	m.appliedRaw = snapshot.raw
+	m.noteAppliedGeneration(snapshot.raw)
 	version.SetContentHash(snapshot.raw)
 	if m.health != nil {
 		m.health.SetConfig(StateRunning, "", map[string]interface{}{
@@ -856,6 +881,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
 		m.appliedRaw = source.raw
+		m.noteAppliedGeneration(source.raw)
 		if source.compiledV8 != nil && source.compiledV8.Plan != nil {
 			m.v8PlanDigest = source.compiledV8.Plan.Digest()
 			m.v8Plan = source.compiledV8.Plan
@@ -934,8 +960,13 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.v8Plan = source.compiledV8.Plan
 	}
 	version.SetContentHash(source.raw)
+	activity, appliedGeneration, recorded := configChangeActivity(m.path, m.appliedRaw, source.raw, diff.Changed,
+		m.appliedGeneration, m.appliedGenerationKnown)
+	if recorded {
+		m.appliedGeneration, m.appliedGenerationKnown = appliedGeneration, true
+	}
 	if m.logger != nil {
-		if activity, ok := configChangeActivity(m.path, m.appliedRaw, source.raw, diff.Changed); ok && !next.SecureClientIntegration() {
+		if recorded && !next.SecureClientIntegration() {
 			_ = m.logger.LogActivity(activity)
 		} else {
 			_ = m.logger.LogActionCtx(ctx, string(audit.ActionConfigUpdate), m.path,

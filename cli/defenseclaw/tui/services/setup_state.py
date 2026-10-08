@@ -201,6 +201,9 @@ class ConfigDiffEntry:
     before: str
     after: str
     secret: bool = False
+    # Another writer changed this key on disk while the draft was open; the
+    # save replaces that value (GAP-0342).
+    disk_changed: bool = False
 
 
 def parse_credential_rows(raw: bytes | str) -> tuple[CredentialRow, ...]:
