@@ -195,18 +195,41 @@ dc_lower() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
 
 dc_download() {
     url=$1 dest=$2
+    DC_DOWNLOAD_ERROR="download failed"
     case "$url" in https://*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "download URLs must use https://" ;; esac
     if command -v curl >/dev/null 2>&1; then
         set -- curl -fsS --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 5 \
-            --connect-timeout 30 --max-time 1800 -o "$dest"
+            --connect-timeout 30 --max-time 1800 -D "$DC_STAGE/download.headers" -o "$dest"
         [ -z "$DC_HTTPS_PROXY" ] || set -- "$@" --proxy "$DC_HTTPS_PROXY"
-        "$@" "$url"
+        if "$@" "$url" 2>"$DC_STAGE/download.err"; then result=0; else result=$?; fi
+        http_status=$(awk '/^HTTP\// {code=$2} END {print code}' "$DC_STAGE/download.headers" 2>/dev/null)
+        case "$http_status" in
+            3??) DC_DOWNLOAD_ERROR="download redirected (HTTP $http_status); use a URL that serves the file directly"; return 1 ;;
+        esac
+        [ "$result" = 0 ] && return 0
+        case "$http_status" in 4?? | 5??) DC_DOWNLOAD_ERROR="download failed: HTTP $http_status"; return 1 ;; esac
+        case "$result" in
+            6) reason="DNS lookup failed" ;; 7) reason="connection refused" ;;
+            18) reason="transfer ended early" ;; 28) reason="timed out" ;;
+            60) reason="TLS certificate verification failed" ;;
+            *) reason="curl exit $result" ;;
+        esac
+        DC_DOWNLOAD_ERROR="download failed: $reason (curl exit $result)"
+        return 1
     elif command -v wget >/dev/null 2>&1; then
         if [ -n "$DC_HTTPS_PROXY" ]; then
-            https_proxy=$DC_HTTPS_PROXY wget -q --https-only --tries=3 --timeout=60 -O "$dest" "$url"
+            https_proxy=$DC_HTTPS_PROXY wget -q --server-response --max-redirect=0 --https-only --tries=3 --timeout=60 -O "$dest" "$url" 2>"$DC_STAGE/download.err" && return 0
         else
-            wget -q --https-only --tries=3 --timeout=60 -O "$dest" "$url"
+            wget -q --server-response --max-redirect=0 --https-only --tries=3 --timeout=60 -O "$dest" "$url" 2>"$DC_STAGE/download.err" && return 0
         fi
+        result=$?
+        http_status=$(awk '/^[[:space:]]*HTTP\// {code=$2} END {print code}' "$DC_STAGE/download.err")
+        case "$http_status" in
+            3??) DC_DOWNLOAD_ERROR="download redirected (HTTP $http_status); use a URL that serves the file directly" ;;
+            4?? | 5??) DC_DOWNLOAD_ERROR="download failed: HTTP $http_status" ;;
+            *) DC_DOWNLOAD_ERROR="download failed: wget exit $result" ;;
+        esac
+        return 1
     else
         dc_fail_result "$DC_EXIT_FAILURE" mdm_download_unavailable "neither curl nor wget is installed"
     fi
@@ -382,7 +405,7 @@ dc_verify_signature() {
     signature="$DC_STAGE/source.sig"
     if [ -n "$DC_SIGNATURE_URL" ]; then
         dc_download "$DC_SIGNATURE_URL" "$signature" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "could not download the signature"
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "$DC_DOWNLOAD_ERROR (signature)"
     else
         if [ -z "$DC_SIGNATURE" ]; then
             [ -n "$DC_SOURCE" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a downloaded source needs --signature-url or --signature"
@@ -408,7 +431,7 @@ dc_stage_source() {
     DC_STAGED_SOURCE="$DC_STAGE/$name"
     if [ -n "$DC_SOURCE_URL" ]; then
         dc_download "$DC_SOURCE_URL" "$DC_STAGED_SOURCE" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "could not download the source"
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "$DC_DOWNLOAD_ERROR (source)"
     else
         dc_stage_file "$DC_SOURCE" "$DC_STAGED_SOURCE" 1073741824 "source"
     fi
