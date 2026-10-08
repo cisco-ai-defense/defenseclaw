@@ -876,6 +876,15 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
 		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
 			not: []string{"the next session takes a new undo point"}},
+		// GAP-0336: the daemon stopped before the session ended: what did not
+		// run, and the way to it, without the HTTP client's error.
+		{name: "the daemon is down at the end", opts: claude, exit: 1, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.errors["GET "+sandboxapi.PathSandboxes+"/"+sbName] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "the DefenseClaw daemon is not reachable", Detail: "dial tcp 127.0.0.1:18970: connect: connection refused"}
+			ta.daemon.mu.Unlock()
+		}, want: []string{"the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run",
+			"review " + sbName + "` shows its changes"}, not: []string{"connection refused"}},
 		// GAP-0333: a sandbox the session could not stop (OpenShell's error
 		// state after a Docker restart) does not keep running.
 		{name: "keeping when the stop failed", input: "y\n", opts: claude, setup: func(ta *testApp) {

@@ -871,6 +871,19 @@ func (s *session) end(ctx context.Context) error {
 	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 		return deleted()
 	}
+	if daemonUnreachable(err) {
+		// The session's end needs the daemon: say what did not run and the
+		// way to it, where it said only that the daemon was down (GAP-0336).
+		a.println()
+		later := "`" + CommandName + " review " + s.sb.Name + "` shows its changes and `" + CommandName + " undo " + s.sb.Name +
+			"` reverts them; " + s.sb.Name + " and its undo point are kept"
+		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			later = "`" + CommandName + " pull " + s.sb.Name + "` brings its work back; " + s.sb.Name + " keeps it"
+		}
+		a.warn("the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run: start it with " +
+			"`defenseclaw-gateway start`, then " + later)
+		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("the DefenseClaw daemon is not running")}}
+	}
 	if err != nil {
 		return apiError(err)
 	}

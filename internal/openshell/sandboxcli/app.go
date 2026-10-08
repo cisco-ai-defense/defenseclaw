@@ -493,8 +493,10 @@ func apiError(err error) error {
 	}
 	switch e.Code {
 	case sandboxapi.CodeUnavailable:
-		if strings.Contains(e.Message, "daemon is not reachable") {
-			return fmt.Errorf("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`): %s", e.Detail)
+		if daemonUnreachable(e) {
+			// The HTTP client's error, with the loopback API port, is no
+			// news to the user (GAP-0336); `sandbox doctor` has the detail.
+			return errors.New("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
 		}
 	case sandboxapi.CodeDisabled:
 		return &DisabledError{Message: e.Message}
@@ -506,6 +508,13 @@ func apiError(err error) error {
 		}
 	}
 	return e
+}
+
+// daemonUnreachable reports the client's error for a daemon that does not
+// answer at all (sandboxapi.Client).
+func daemonUnreachable(err error) bool {
+	var e *sandboxapi.Error
+	return errors.As(err, &e) && e.Code == sandboxapi.CodeUnavailable && strings.Contains(e.Message, "daemon is not reachable")
 }
 
 // adminLimitMessage opens an organization's clamp: the run goes ahead with
