@@ -3419,6 +3419,20 @@ def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
     ):
         assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")
 
+
+def test_identity_dashboard_counts_acp_only_agents_and_sessions() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    for title in (
+        "Agent identities (agt-)",
+        "Agent sessions (ais-)",
+        "SSH vs local sessions",
+        "Agents per user (agt- ids)",
+        "Sessions per agent",
+    ):
+        expression = _panel(dashboard, title)["targets"][0]["expr"]
+        assert "guardrail[.]evaluation[.]completed" in expression, title
+
+
 def test_verified_principal_share_is_zero_for_claimed_only_activity() -> None:
     dashboard = _dashboard("defenseclaw-identity.json")
     expression = _panel(dashboard, "Verified principal share")["targets"][0]["expr"]
