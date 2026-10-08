@@ -624,6 +624,7 @@ class OverviewPanelModel:
         # The guardrail profile the gateway resolves for this account
         # (``current_user_guardrail_profile``); None without profiles.
         self.guardrail_profile: dict[str, Any] | None = None
+        self.connector_guardrail_profiles: dict[str, dict[str, Any]] = {}
         self.runtime = RuntimeOverview()
         # True until the first audit-history read finishes; a large audit.db
         # can take a minute, and the counts read 0 until then (GAP-1240).
@@ -642,13 +643,19 @@ class OverviewPanelModel:
     def set_health(self, health: HealthSnapshot | None) -> None:
         self.health = health
 
-    def set_guardrail_profile(self, result: dict[str, Any] | None) -> None:
-        self.guardrail_profile = result
+    def set_guardrail_profile(self, result: dict[str, Any] | None, connector: str = "") -> None:
+        if connector:
+            if result is None:
+                self.connector_guardrail_profiles.pop(connector.strip().lower(), None)
+            else:
+                self.connector_guardrail_profiles[connector.strip().lower()] = result
+        else:
+            self.guardrail_profile = result
 
-    def _applied_profile(self) -> tuple[str, dict[str, Any]] | None:
+    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
         """(name, effective settings) of the profile that decides for you."""
 
-        result = self.guardrail_profile or {}
+        result = (self.connector_guardrail_profiles.get(connector.strip().lower()) if connector else self.guardrail_profile) or {}
         name = str(result.get("profile") or "")
         if not name or result.get("error"):
             return None
@@ -1608,7 +1615,7 @@ class OverviewPanelModel:
         base = (self.cfg.guardrail_mode or "").strip()
         # A matching profile replaces guardrail.* for you: "observe" while
         # every decision was the profile's action read wrong (GAP-0050).
-        if not connector and (applied := self._applied_profile()):
+        if applied := self._applied_profile(connector):
             name, effective = applied
             return f"{str(effective.get('mode') or base).strip()}, profile {name}"
         modes = {c.strip().lower(): (m or base).strip() for c, m in self.cfg.connector_modes if c}

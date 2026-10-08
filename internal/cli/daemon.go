@@ -1215,14 +1215,19 @@ func onlyYAMLComments(raw []byte) bool {
 }
 
 // configSourceDigest is the SHA-256 of the file at path, or nil when it
-// cannot be read.
+// cannot be read within the config loader's source-size limit.
 func configSourceDigest(path string) []byte {
-	raw, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
-	sum := sha256.Sum256(raw)
-	return sum[:]
+	defer file.Close()
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, int64(config.V8YAMLMaxSourceBytes)+1))
+	if err != nil || n > int64(config.V8YAMLMaxSourceBytes) {
+		return nil
+	}
+	return hash.Sum(nil)
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {

@@ -1581,6 +1581,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._suppressed_tab_activations: dict[str, int] = {}
         # When the guardrail profile for this account was last asked for.
         self._guardrail_profile_at = float("-inf")
+        self._guardrail_profile_scope = ""
         # The Inventory sub-tab the button bar last scrolled to.
         self._inventory_bar_subtab = ""
         # Auto-dismissing toast queue. Mirrors the Go TUI's
@@ -15257,16 +15258,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """Ask, at most once a minute, which guardrail profile decides for you."""
 
         now = monotonic()
-        if now - self._guardrail_profile_at < 60:
+        connector = self._connector_filter()
+        if now - self._guardrail_profile_at < 60 and connector == self._guardrail_profile_scope:
             return
         self._guardrail_profile_at = now
+        self._guardrail_profile_scope = connector
         from defenseclaw.gateway import current_user_guardrail_profile
 
         try:
-            result = await asyncio.to_thread(current_user_guardrail_profile, self.config)
+            result = await asyncio.to_thread(current_user_guardrail_profile, self.config, connector=connector)
         except Exception:  # noqa: BLE001 - the profile line is informational.
             result = None
-        self.overview_model.set_guardrail_profile(result)
+        self.overview_model.set_guardrail_profile(result, connector)
 
     async def _poll_health(self) -> None:
         result = await asyncio.to_thread(_fetch_gateway_health, self.config)

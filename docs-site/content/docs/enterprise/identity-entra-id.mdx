@@ -103,10 +103,10 @@ The live tests ran on a tenant with no paid licence. They turned security
 defaults off so a scripted password sign-in works; that is a test convenience,
 not a DefenseClaw requirement.
 
-Create an app registration with the application permissions `Group.ReadWrite.All`
-and `User.ReadWrite.All` (read-only `check` needs `Organization.Read.All`
-and `Policy.Read.All`; `sids` needs `Group.Read.All` and `User.Read.All`),
-grant admin consent, and give the script its credentials
+Create an app registration with the application permissions `Group.ReadWrite.All`,
+`User.ReadWrite.All` and `Organization.Read.All` (read-only `check` needs
+`Organization.Read.All` and `Policy.Read.All`; `sids` needs `Group.Read.All` and
+`User.Read.All`), grant admin consent, and give the script its credentials
 through the environment:
 
 ```bash
@@ -562,7 +562,7 @@ defenseclaw guardrail profile explain --connector claudecode    # the account th
 defenseclaw guardrail profile explain --connector claudecode
 # standalone enterprise, as root:
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector claudecode
-sudo defenseclaw-gateway enterprise macos profile-explain --user alice --connector claudecode
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user alice --connector claudecode
 ```
 
 In the per-user live tests, `profile` named the profile from the `users`
@@ -612,7 +612,7 @@ These are the fields the records carried for an Entra user (the complete table i
 
 | Symptom | Cause and fix |
 | --- | --- |
-| A `groups` assignment with an Entra group never matches on Windows | The group is not in the token. Name it by SID (the computer cannot resolve names), have a built-in local group list it, and have the user sign out and in. Check with `Get-DefenseClawEntraIdentity.ps1 -GroupSid` |
+| A `groups` assignment with an Entra group never matches on Windows | The group is not in the token. Name it by SID (the computer cannot resolve names), have a built-in local group list it, verify the account belongs to that Entra security group, then sign out and in if membership was recently added. Check with `Get-DefenseClawEntraIdentity.ps1 -GroupSid` |
 | `profile explain --user <name>` on Windows says "Windows has no account by this name" | The user has not signed in to this computer yet, or the name is misspelled. Pass the SID, `AzureAD\Name` or the UPN |
 | `group_count` is `0` and `groups` never match on a per-user Windows install | Expected: use `users`, or the standalone enterprise profile |
 | `getent group` finds no Entra group on the Linux VM | Expected: the `aad` module gives no Entra groups. Use `users`, Himmelblau or Entra Domain Services |

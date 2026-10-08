@@ -66,7 +66,7 @@ def alert_disposition_timeout_seconds(target_count: int) -> int:
     )
 
 
-def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str, Any] | None:
+def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: float = 3) -> dict[str, Any] | None:
     """Ask the gateway which guardrail profile applies to the account running this.
 
     The gateway resolves the account through the OS the way it does for live
@@ -77,7 +77,9 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     """
     if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
         return None
-    user, label = current_profile_account()
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    user, label = current_profile_account(secure_client=_enterprise_profile(cfg) == "secure_client")
     if not user:
         return {"user": "", "error": "the account name is unknown"}
     try:
@@ -88,8 +90,11 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
             timeout=timeout,
         )
         try:
-            result = client.guardrail_profile_resolve(user=user)
-            overrides = _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+            result = client.guardrail_profile_resolve(user=user, connector=connector)
+            overrides = (
+                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+                if not connector else []
+            )
         finally:
             client.close()
     except requests.exceptions.ReadTimeout as exc:
@@ -179,14 +184,22 @@ def _gateway_off_configured_port_notice(host: str, port: int) -> str:
     )
 
 
-def current_profile_account() -> tuple[str, str]:
+def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
     """The account the gateway resolves for "you", and the name to show for it.
 
-    On Windows the gateway is asked for the process token SID: the login name
-    of an Entra ID account (EntraAlice) is no name Windows can look up, so
-    every Entra user got default_lookup_failed. Elsewhere both are the login
-    name.
+    On Unix the effective UID identifies the process account; LOGNAME and USER
+    can name another account. On Windows the process token SID is authoritative
+    because an Entra ID login name may not be resolvable by Windows.
     """
+    if os.name != "nt" and not secure_client:
+        import pwd
+
+        try:
+            user = pwd.getpwuid(os.geteuid()).pw_name
+        except (KeyError, OSError):
+            return "", ""
+        return user, user
+
     import getpass
 
     try:
@@ -201,9 +214,6 @@ def current_profile_account() -> tuple[str, str]:
         except OSError:
             pass
     return label, label
-
-
-_PROFILE_OVERRIDE_PROBES = 16
 
 
 def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) -> list[dict[str, str]]:
@@ -238,7 +248,7 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
                 if (connector, agent) not in probes:
                     probes.append((connector, agent))
     overrides: list[dict[str, str]] = []
-    for connector, agent in probes[:_PROFILE_OVERRIDE_PROBES]:
+    for connector, agent in probes:
         try:
             answer = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
         except Exception:  # noqa: BLE001 - the user-level answer still stands.
@@ -246,7 +256,9 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
         name = str(answer.get("profile") or "")
         if name and name != profile:
             match = str(answer.get("match") or "")
-            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match})
+            effective = answer.get("effective")
+            mode = str(effective.get("mode") or "") if isinstance(effective, dict) else ""
+            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match, "mode": mode})
     return overrides
 
 

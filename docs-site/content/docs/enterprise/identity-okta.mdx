@@ -62,12 +62,12 @@ first if you are new to how DefenseClaw uses identity.
 ### Prepare Okta
 
 1. Create an API token in the Admin Console (under Security, API) for a super
-   administrator. Give it to the setup script in the environment, never on the
-   command line:
+   administrator. Set the org URL, then let the setup script prompt for the
+   API token in the terminal. The prompt does not echo the token, and typing it
+   there keeps it out of shell history:
 
    ```bash
    export OKTA_ORG_URL=https://example.okta.com
-   export OKTA_API_TOKEN=...
    ```
 
 2. Turn on the LDAP Interface: Admin Console, Directory, Directory
@@ -187,14 +187,18 @@ until you can move to an SSSD that has the option.
 
 `install-sssd-okta.sh` configures SSSD, PAM and sshd on a RHEL-family host. It
 reads the bind password from a file (mode 0600), from `OKTA_BIND_PASSWORD`, or at a
-prompt, never from the command line. Run it as root, dry run first:
+prompt, never from the command line. Read the password without echoing it
+so the dry run can test the bind as well; the command entered into shell history
+contains no password. Run as root, dry run first, then clear the variable:
 
 ```bash
-export OKTA_BIND_PASSWORD='...'
+read -rsp 'Okta bind password: ' OKTA_BIND_PASSWORD; printf '\n'
+export OKTA_BIND_PASSWORD
 sudo --preserve-env=OKTA_BIND_PASSWORD ./install-sssd-okta.sh --org example \
     --bind-login ldap-bind@example.com --allow-group linux-users --dry-run
 sudo --preserve-env=OKTA_BIND_PASSWORD ./install-sssd-okta.sh --org example \
     --bind-login ldap-bind@example.com --allow-group linux-users
+unset OKTA_BIND_PASSWORD
 ```
 
 It:

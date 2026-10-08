@@ -1984,6 +1984,10 @@ func (s *ContinuousDiscoveryService) recordScanIfPossible(report AIDiscoveryRepo
 	}
 	if err := s.invStore.RecordScan(context.Background(), report, s.confidenceParams); err != nil {
 		fmt.Fprintf(os.Stderr, "[ai-discovery] inventory record failed: %v\n", err)
+		return
+	}
+	if inv := report.IDEInventory; inv != nil && inv.persist && !inv.Carried {
+		s.ideRecordedAt = inv.ScannedAt
 	}
 }
 

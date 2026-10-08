@@ -692,6 +692,7 @@ case "$1" in
     stop) rm -f '{self.active}' ;;
     start) : >'{self.active}' ;;
 esac""")
+        _write_stub(self.bin, "systemd-run", f"""echo "systemd-run $*" >>'{self.log}'""")
         for tool in ("systemd-sysusers", "systemd-tmpfiles"):
             _write_stub(self.bin, tool, f"""echo "{tool} $*" >>'{self.log}'""")
         _write_stub(self.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{self.log}'
@@ -746,7 +747,11 @@ def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(
     result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
     assert result.returncode == 0  # a package install never fails on the lifecycle
     assert message in result.stderr
-    assert host.calls()[-1] == f"systemctl start {APPLY_PATH}"
+    calls = host.calls()
+    assert f"systemctl start {APPLY_PATH}" in calls
+    assert calls.index(f"systemctl start {APPLY_PATH}") < calls.index(
+        "systemctl stop defenseclaw-enterprise-apply-recovery.timer"
+    )
 
 
 # GAP-1744: dnf printed only "run verify"; the cause (a missing protected
@@ -809,8 +814,13 @@ def test_linux_preinstall_holds_the_apply_trigger_until_the_postinstall(tmp_path
     }
     pre = host.run(_rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting), "2")
     assert pre.returncode == 0, pre.stderr
-    assert host.calls() == [
-        f"systemctl is-active --quiet {APPLY_PATH}",
+    calls = host.calls()
+    assert calls[0] == f"systemctl is-active --quiet {APPLY_PATH}"
+    assert calls[1] == "systemctl stop defenseclaw-enterprise-apply-recovery.timer"
+    assert calls[2].startswith(
+        "systemd-run --quiet --unit=defenseclaw-enterprise-apply-recovery --on-active=30m "
+    )
+    assert calls[3:] == [
         f"systemctl stop {APPLY_PATH}",
         f"flock -w 600 {host.state}/lifecycle.lock true",
     ]

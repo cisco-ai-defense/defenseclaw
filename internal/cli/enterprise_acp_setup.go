@@ -155,6 +155,21 @@ func runEnterpriseACPSetup(cmd *cobra.Command, _ []string) error {
 // entries in the same editor file, whose configuration digest the new entry
 // changed. A failure restores every file it touched.
 func setupEnterpriseACPUserFiles(in enterpriseACPUserSetup) (result enterpriseACPUserSetupResult, err error) {
+	clientPath, err := acpClientConfigPath(in.client)
+	if err != nil {
+		return result, err
+	}
+	err = withACPUserSetupLock(clientPath, func() error {
+		result, err = setupEnterpriseACPUserFilesLocked(in)
+		return err
+	})
+	return result, err
+}
+
+// The lock covers sibling discovery, snapshots, editor writes, re-pinning,
+// and rollback. The editor path is the shared resource even when callers use
+// different per-user data directories.
+func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterpriseACPUserSetupResult, err error) {
 	catalog, err := acp.LookupAgent(in.agent)
 	if err != nil {
 		return result, fmt.Errorf("%w (the ACP agents are %s)", err, strings.Join(acp.AgentIDs(), ", "))

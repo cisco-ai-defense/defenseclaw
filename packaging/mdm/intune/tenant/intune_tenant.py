@@ -493,16 +493,20 @@ def cmd_status(graph: Graph, args: argparse.Namespace) -> int:
         app = one_by_name(graph, f"{BETA}/deviceAppManagement/mobileApps", args.app, "app")
         # Graph no longer serves mobileApps/{id}/deviceStatuses ("Resource not found for the
         # segment"); the per-device install state comes from the report the admin center shows.
-        report = graph.request(
-            "POST",
-            f"{BETA}/deviceManagement/reports/retrieveDeviceAppInstallationStatusReport",
-            {"filter": f"(ApplicationId eq '{app['id']}')", "top": STATUS_REPORT_ROWS},
-        )
+        path = f"{BETA}/deviceManagement/reports/retrieveDeviceAppInstallationStatusReport"
+        query = {"filter": f"(ApplicationId eq '{app['id']}')", "top": STATUS_REPORT_ROWS, "skip": 0}
+        report = graph.request("POST", path, dict(query))
         columns = [str(c.get("Column", "")) for c in report.get("Schema", [])]
         states = [dict(zip(columns, values)) for values in report.get("Values", [])]
         total = int(report.get("TotalRowCount") or len(states))
-        shown = "" if total <= len(states) else f" (the first {len(states)} shown)"
-        print(f"app {args.app}: {total} device(s) reported{shown}")
+        while len(states) < total:
+            query["skip"] = len(states)
+            report = graph.request("POST", path, dict(query))
+            values = report.get("Values", [])
+            if not values:
+                raise GraphError(502, "IncompleteReport", f"app status stopped after {len(states)} of {total} rows")
+            states.extend(dict(zip(columns, row)) for row in values)
+        print(f"app {args.app}: {len(states)} device(s) reported")
         rows = [
             [
                 str(s.get("DeviceName") or ""),
@@ -545,13 +549,15 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
     tag = plan_tag(args.apply)
     known_groups: dict[str, dict] = {}
     for name in args.name:
-        path = f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id"
+        path = f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,securityEnabled,groupTypes"
         found = graph.get_all(path)
         if not found and args.apply:
             found = graph.wait_for_named_object(path)
         if len(found) > 1:
             raise SystemExit(f"error: {len(found)} groups are named {name!r}; use a unique name")
         if found:
+            if not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or []):
+                raise SystemExit(f"error: group {name!r} exists but is not a static security group")
             known_groups[name] = found[0]
             print(f"{tag}group {name}: exists")
         elif not args.apply:
@@ -577,11 +583,17 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
         devices = graph.get_all(f"{V1}/devices?$filter={odata_eq('displayName', device_name)}&$select=id,displayName")
         if len(devices) != 1:
             raise SystemExit(f"error: {len(devices)} Entra devices are named {device_name!r}; need exactly one")
-        found = [known_groups[group_name]] if group_name in known_groups else graph.get_all(
-            f"{V1}/groups?$filter={odata_eq('displayName', group_name)}&$select=id"
+        # A group named with --name was checked above, or created as a static security group.
+        checked = group_name in known_groups
+        found = [known_groups[group_name]] if checked else graph.get_all(
+            f"{V1}/groups?$filter={odata_eq('displayName', group_name)}&$select=id,securityEnabled,groupTypes"
         )
         if len(found) > 1:
             raise SystemExit(f"error: {len(found)} groups are named {group_name!r}; use a unique name")
+        if found and not checked and (
+            not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or [])
+        ):
+            raise SystemExit(f"error: group {group_name!r} is not a static security group")
         if not found:
             if args.apply:
                 raise SystemExit(f"error: group {group_name!r} does not exist; create it with --name first")
@@ -615,23 +627,35 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
             "finish its upload in the Intune admin center, then run this again"
         )
     group = group_by_name(graph, args.group)
-    existing = graph.get_all(f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments")
-    for assignment in existing:
-        target = assignment.get("target", {})
-        if target.get("groupId") == group["id"] and assignment.get("intent") == args.intent:
-            print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
-            return 0
+    collection = f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments"
+    existing = graph.get_all(collection)
+    matching = [a for a in existing if (a.get("target") or {}).get("groupId") == group["id"]]
+    if len(matching) > 1:
+        raise SystemExit(f"error: {len(matching)} assignments target group {args.group!r}; resolve them in Intune")
+    assignment = matching[0] if matching else None
+    included = assignment and (assignment.get("target") or {}).get("@odata.type") == GROUP_TARGET
+    if included and assignment.get("intent") == args.intent:
+        print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
+        return 0
+    action = "update" if included else "replace exclusion" if assignment else "assign"
     if not args.apply:
-        print(f"[plan] would assign app {args.app} to group {args.group} with intent {args.intent}")
+        print(f"[plan] would {action} app {args.app} for group {args.group} with intent {args.intent}")
         print("Nothing was changed. Run again with --apply to make this change.")
         return 0
+    target = dict((assignment or {}).get("target") or {})
+    target.update({"@odata.type": GROUP_TARGET, "groupId": group["id"]})
     body = {
         "@odata.type": "#microsoft.graph.mobileAppAssignment",
         "intent": args.intent,
-        "target": {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
+        "target": target,
     }
-    graph.request("POST", f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments", body)
-    print(f"assigned app {args.app} to group {args.group} as {args.intent}")
+    if assignment:
+        if "settings" in assignment:
+            body["settings"] = assignment["settings"]
+        graph.request("PATCH", f"{collection}/{assignment['id']}", body)
+    else:
+        graph.request("POST", collection, body)
+    print(f"app {args.app}: {action} completed for group {args.group} as {args.intent}")
     return 0
 
 
@@ -717,8 +741,8 @@ def cmd_macos_script(graph: Graph, args: argparse.Namespace) -> int:
     )
     if settings is not None and not settings.group(1).strip():
         raise SystemExit("error: fill in the macOS wrapper settings block before upload")
-    if not re.fullmatch(r"PT(?:0S|[1-9][0-9]*[HMS])", args.frequency):
-        raise SystemExit("error: --frequency must be an ISO 8601 duration such as PT1H or PT0S")
+    if not re.fullmatch(r"P(?:[1-9][0-9]*D|T(?:0S|[1-9][0-9]*[HMS]))", args.frequency):
+        raise SystemExit("error: --frequency must be an ISO 8601 duration such as P1D, PT1H or PT0S")
     print(f"script: {args.file} ({len(content)} bytes, sha256 {hashlib.sha256(content).hexdigest()[:16]}...)")
     body = {
         "@odata.type": "#microsoft.graph.deviceShellScript",
@@ -840,7 +864,7 @@ def build_parser() -> argparse.ArgumentParser:
     macos.add_argument("--file", required=True, metavar="FILE", help="the script, with its settings block filled in")
     macos.add_argument("--group", metavar="NAME", help="assign it to this group")
     macos.add_argument(
-        "--frequency", default="PT1H", metavar="ISO8601", help="how often it runs; PT0S runs once (default PT1H)"
+        "--frequency", default="P1D", metavar="ISO8601", help="how often it runs; PT0S runs once (default P1D)"
     )
     macos.add_argument("--retries", type=int, default=3, help="retries after a failure (default 3)")
     _mutating(macos)

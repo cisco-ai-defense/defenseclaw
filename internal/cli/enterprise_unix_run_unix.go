@@ -176,6 +176,7 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 
 func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON bool) error {
 	if asJSON {
+		result.PreserveNotRootDeploymentState = secureClientHost()
 		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(result)

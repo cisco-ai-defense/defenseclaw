@@ -156,6 +156,9 @@ type Result struct {
 	Scanners *ScannerRuntime `json:"scanners,omitempty"`
 	LogPath  string          `json:"log_path,omitempty"`
 	ExitCode int             `json:"exit_code"`
+	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
+	// shape for an unelevated macOS lifecycle command.
+	PreserveNotRootDeploymentState bool `json:"-"`
 }
 
 // ScannerRuntime reports the scanners a standalone Windows deployment runs.
@@ -342,7 +345,7 @@ func (r Result) MarshalJSON() ([]byte, error) {
 	if err := encoder.Encode(sorted); err != nil {
 		return nil, err
 	}
-	if !r.refusedNotRoot() {
+	if !r.refusedNotRoot() || r.PreserveNotRootDeploymentState {
 		return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 	}
 	var fields map[string]json.RawMessage

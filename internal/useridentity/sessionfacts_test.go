@@ -135,6 +135,22 @@ func TestSessionFactsHeaderAllowlist(t *testing.T) {
 	}
 }
 
+// A directory may assign a Unicode Kerberos principal or Windows UPN.
+func TestSessionFactsHeaderUnicodePrincipal(t *testing.T) {
+	facts := ClaimedSessionHeader{
+		Session: SessionFacts{KerberosPrincipal: NormalizePrincipal("josé@corp.example")},
+		UPN:     NormalizeUPN("Müller@corp.example"),
+	}
+	header := EncodeSessionFactsHeader(facts)
+	if header != "v1;krb=jos%C3%A9@CORP.EXAMPLE;upn=m%C3%BCller@corp.example" {
+		t.Fatalf("encoded Unicode facts = %q", header)
+	}
+	got, ok := ParseSessionFactsHeader(header)
+	if !ok || got.Session.KerberosPrincipal != facts.Session.KerberosPrincipal || got.UPN != facts.UPN {
+		t.Fatalf("parsed Unicode facts = %+v, %v", got, ok)
+	}
+}
+
 // The Linux and macOS shell hooks cannot read a credential cache: they send
 // the value `hook session-facts` cached for the same session variables, so
 // the Kerberos principal reaches the gateway from them too (GAP-0027).

@@ -181,6 +181,32 @@ func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 	}
 }
 
+// A failed local write must leave unchanged facts due for the next hook.
+func TestIdentityObservedRetriesAfterEmissionFailure(t *testing.T) {
+	subject := VerifiedSubject{
+		UserID: "identity-retry-user", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{
+			Principal: "alice@example.test", Assurance: useridentity.AssuranceVerified,
+			ResolvedAt: time.Now(),
+		},
+	}
+	failing := &failingAPIAuthenticationEmitter{}
+	observeIdentity(context.Background(), failing, subject, useridentity.SessionFacts{})
+	observeIdentity(context.Background(), failing, subject, useridentity.SessionFacts{})
+	if failing.calls != 2 {
+		t.Fatalf("failed identity.observed writes = %d, want retry", failing.calls)
+	}
+	capture := &endpointInventoryCapture{}
+	observeIdentity(context.Background(), capture, subject, useridentity.SessionFacts{})
+	if records := capture.snapshot(); len(records) != 1 {
+		t.Fatalf("successful retry emitted %d records, want one", len(records))
+	}
+	observeIdentity(context.Background(), capture, subject, useridentity.SessionFacts{})
+	if records := capture.snapshot(); len(records) != 1 {
+		t.Fatalf("unchanged facts emitted %d records after success", len(records))
+	}
+}
+
 // The process-owner fallback of the profile selector carries the directory
 // facts the verified paths use, not the groups os/user lists (GAP-0174).
 func TestProcessOwnerProfileSubjectUsesDirectoryFacts(t *testing.T) {

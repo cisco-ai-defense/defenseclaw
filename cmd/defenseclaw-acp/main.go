@@ -73,7 +73,7 @@ func setupCommand(clientID, agentID, profile, mode, contractLock string) (comman
 	if mode == string(acp.ModeAction) {
 		activate = " --activate"
 	}
-	if gateway := managedGatewayCommand(contractLock); gateway != "" {
+	if gateway := standaloneManagedGatewayCommand(contractLock); gateway != "" {
 		return fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s%s",
 			gateway, clientID, agentID, profile, activate), true
 	}
@@ -109,6 +109,25 @@ func newStartupError(err error, clientID, agentID, profile, mode, contractLock s
 		"DefenseClaw ACP guard could not start for %s: %v. Run 'defenseclaw acp verify', then '%s', or delete this editor entry.",
 		pair, err, setup)}
 }
+
+// standaloneManagedGatewayCommand uses the administrator-owned standalone
+// descriptor as the profile gate. Secure Client has no such descriptor and
+// keeps the startup error bytes from main, including for old managed locks.
+func standaloneManagedGatewayCommand(contractLock string) string {
+	if managed.IsSecureClientProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		return ""
+	}
+	layout, err := managedACPStandaloneLayout()
+	if err != nil {
+		return ""
+	}
+	if _, err := loadACPStandaloneDescriptor(layout.DescriptorPath); err != nil {
+		return ""
+	}
+	return managedGatewayCommand(contractLock)
+}
+
+var loadACPStandaloneDescriptor = managed.LoadRuntimeDescriptor
 
 // guardExecutable is the path of this guard; a variable for tests.
 var guardExecutable = os.Executable
