@@ -676,6 +676,12 @@ per-user install:
   (`deferred: ... removes the folder when that user next signs in`, then
   `removed now that the user is signed in`). Two users with a skill or plugin
   of the same name each get their own quarantine copy.
+- With `gateway.watcher.<type>.take_action: false` a rejected asset is only
+  recorded (`verdict=rejected (take_action disabled, no gateway action)`) and
+  stays usable. When an `ensure` turns `take_action` back on, the first rescan
+  admits each such asset again and blocks or quarantines it as for a new
+  install. The `watcher-block` row ends with `rejected while take_action was
+  off, enforced once it was turned on`.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
   user adds goes through admission within about 30 seconds, also while a
@@ -1116,30 +1122,11 @@ account's `%USERPROFILE%\.defenseclaw` from the account's own, so with
 `PURGE=1` the `per_user_state_remaining` warning names each such folder
 for you to remove instead.
 
-A purge also removes the managed ACP folder `%USERPROFILE%\.defenseclaw\acp`
-(the account's ACP token copies and editor contract locks) of every account
-that has one, signed in or not, including accounts that were revoked or
-enrolled for ACP only, and accounts whose other per-user state stays for its
-`connector_backups`. The editors' own ACP entries stay (for example the
-DefenseClaw agents under `agent_servers` in Zed's `settings.json` and
-`%USERPROFILE%\.jetbrains\acp.json`); they start the removed
-`defenseclaw-acp.exe` and fail, so remove them in the editor.
-
-An upgrade replaces each binary in place. When an editor still runs the
-previous `defenseclaw-acp.exe` (an open ACP thread), Windows keeps that copy
-as `defenseclaw-acp.exe.backup.<32 hex>` beside the new one until the thread
-ends: the upgrade succeeds, and once no program runs the copy the hook
-guardian removes it within its next cycle (about a minute), as does the next
-lifecycle run, a no-op Setup `/ensure` included; failing that, Windows
-deletes it at the next restart. Uninstall removes such copies too;
-if a program still runs one, the uninstall stops before changing anything
-and names it: close that editor thread, or restart, and run it again. The
-same holds for the installed binaries themselves: while an editor's ACP
-thread runs `defenseclaw-acp.exe` from `C:\Program Files\Cisco\DefenseClaw\bin`,
-`/uninstall` (with or without `PURGE=1`) fails with `uninstall_in_use`
-before it stops any service, and names the program, its process id, the
-account and the editor that started it. Close that thread (or sign the
-account out) and run the uninstall again.
+While a program runs a DefenseClaw executable from
+`C:\Program Files\Cisco\DefenseClaw\bin`, `/uninstall` (with or without
+`PURGE=1`) fails with `uninstall_in_use` before it stops any service, and
+names the program, its process id, the account and the program that started
+it. Close it (or sign the account out) and run the uninstall again.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
@@ -1306,7 +1293,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile) |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See

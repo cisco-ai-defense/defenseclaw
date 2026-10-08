@@ -262,8 +262,10 @@ Kiro surface the editor launches. See the
 configuration, supported agents, observability attributes, and the
 direct-launch bypass boundary.
 
-`defenseclaw-gateway enterprise acp` and the [ACP guard](/docs/acp-guard)
-stay available on every OS for editors that start Kiro over ACP:
+The [ACP guard](/docs/acp-guard) is available on every OS for per-user
+installs, for editors that start Kiro over ACP. ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
+
+On a per-user install:
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro

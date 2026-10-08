@@ -86,7 +86,7 @@ export const generated: GeneratedStatus = {
     judge: { oss: 'SSP', enterprise: 'PPP' },
     redaction: { oss: 'SSP', enterprise: 'NNN' },
     sandboxes: { oss: 'PPU', enterprise: 'UUU' },
-    acp: { oss: 'PSP', enterprise: 'PPP' },
+    acp: { oss: 'PSP', enterprise: 'NNN' },
     'ai-discovery': { oss: 'SSS', enterprise: 'SSP' },
     'runtime-discovery': { oss: 'SSS', enterprise: 'SSP' },
     tools: { oss: 'SSS', enterprise: 'NNN' },
@@ -249,7 +249,7 @@ const connectorSources: ConnectorSource[] = [
     minVersion: 'Not gated',
     versionNote: 'Per-user installs are not version-gated. The enterprise standalone profile requires kiro-cli 2.24.1 or Kiro IDE 1.0.182.',
     route: PER_USER,
-    routeNote: 'Editors that start Kiro over ACP can also use the ACP guard.',
+    routeNote: 'ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.',
   },
   {
     id: 'opencode',
@@ -402,7 +402,13 @@ const featureSources: FeatureSource[] = [
     group: 'Protect',
     note: 'Linux and macOS only. Managed installs don’t start the sandbox runtime yet.',
   },
-  { id: 'acp', label: 'ACP guard (Kiro, Zed)', href: '/docs/acp-guard', group: 'Protect' },
+  {
+    id: 'acp',
+    label: 'ACP guard (Kiro, Zed)',
+    href: '/docs/acp-guard',
+    group: 'Protect',
+    note: 'Per-user installs only. Not supported in enterprise managed mode in DefenseClaw 1.0.',
+  },
   { id: 'ai-discovery', label: 'AI discovery', href: '/docs/ai-discovery', group: 'Discover' },
   {
     id: 'runtime-discovery',

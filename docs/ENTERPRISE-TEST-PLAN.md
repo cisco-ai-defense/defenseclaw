@@ -1446,14 +1446,12 @@ prompt literal; accept no model prose as evidence of a tool result.
 | Hermes (`hermes`) | Per-user hook and guard | Same | Per-user hook, no guard | Tool block; confirm cannot ask and blocks |
 | OpenHands (`openhands`) | Per-user hook, no guard | Same | Unsupported | Tool and prompt block; confirm cannot ask and blocks |
 | OmniGent (`omnigent`) | Per-user policy bridge, no guard | Same | Unsupported | Tool and prompt block; native confirm |
-| Kiro (`kiro`) | Per-user global hook and CLI agent; ACP optional | Same | ACP route only | Tool block; v3 prompt veto unavailable (R22); confirm alerts |
+| Kiro (`kiro`) | Per-user global hook and CLI agent | Same | Same | Tool block; v3 prompt veto unavailable (R22); confirm alerts |
 
 `openclaw` and `zeptoclaw` require the separate guardrail proxy and are
 refused here. `windsurf` is a retired id migrated to Devin; `geminicli` is
 removed. Record their migration or refusal under CON-14 and CON-15.
-Windows must refuse guardian rows for OpenHands and OmniGent. Kiro ACP
-is a separate route and needs its own UI and [ACP guard](https://cisco-ai-defense.github.io/defenseclaw/docs/acp-guard)
-evidence if deployed.
+Windows must refuse guardian rows for OpenHands and OmniGent. ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
 
 ### Marker rule pack
 
@@ -1574,7 +1572,6 @@ For each row, install the verified version listed under [Agent CLIs and model ac
 | CON-10 | OpenHands (Linux/macOS): `cd ~/dc-test-proj && openhands`; quit from the TUI | C1 edit `~/.openhands/hooks.json` or own script; repaired. C2 `openhands --always-approve` or `--yolo` still inspects. C3 and C3b alternate `HOME` may have no hooks (R1). C4 `uvx --from openhands==1.11.0 openhands` is R15. C5 killed/stalled hook can run after the user's native confirmation (R18). C6 project `.openhands/hooks.json` replaces global hooks (R30); user extra hooks are not guarded (R24). Windows `N/A` |
 | CON-11 | OmniGent (Linux/macOS): start `omnigent server --config ~/.omnigent/config.yaml`; if the team has no documented interactive client command, mark tool-call cases `NOT_RUN` with that reason | C1 change the `policy_modules` entry or bridge, restart, then wait for repair. C2 `omnigent server` without its managed config can be R1. C3 and C3b `OMNIGENT_CONFIG`/`OMNIGENT_CONFIG_HOME` alternate root is R1. C4 0.14+ is unverified. C5 no hook process exists; simulate gateway unavailability and record the policy decision. C6 no foreign-policy guard (R24). Windows `N/A` |
 | CON-12 | Kiro (Linux/macOS): `cd ~/dc-test-proj && kiro-cli` for CLI 2.x; separately `kiro-cli --v3`; use the DefenseClaw agent (`/agent swap defenseclaw` if necessary) | C1 change own `~/.kiro/hooks/defenseclaw.json`, `~/.kiro/agents/defenseclaw.json`, default-agent setting or `kiro-hook.sh`; guardian repairs. C2 `/agent swap` to an own agent or `kiro-cli chat --agent <own-agent>` bypasses the CLI 2.x hook (R22). C3 and C3b alternate `KIRO_HOME` is R22. C4 below 2.24.1 not enrolled. C5 a non-2 hook failure may let the call run. C6 project `.kiro/hooks` merges with global hooks on v3; no foreign guard. The v3 prompt marker reaches the model with a DefenseClaw result attached (R22). Windows guardian `N/A`; test the separate ACP route if configured |
-| CON-12W | Windows Kiro ACP route; managed `acp:` profile `kiro-only` and a supported editor | Admin: `enterprise acp enroll --user std1 --client zed --agent kiro --profile kiro-only --json`; record `token_file` and `next`, never the token. Run `next` in std1's editor session; verify and run allowed and blocked calls; revoke, retry a copied bearer, and re-enroll. Expected: allow and block are audited, revoke immediately rejects the old bearer, re-enroll mints a new one, and enroll without `--profile` fails. |
 | CON-13 | Windows managed config copies with `openhands: {}` and `omnigent: {}` | Apply each unsupported connector separately with `ensure`, recording its exact `not supported on Windows managed_enterprise` refusal; after the two cycles `policy show` and targets contain neither of them. ACP is tested in CON-12W. |
 | CON-14 | Disposable config using retired `windsurf` ID | Apply with `ensure`; `policy show` and `hooks status` name Devin after migration and publish no `windsurf` target. Record the migration notice. |
 | CON-15 | Disposable config using removed `geminicli` ID | Run `ensure` and `policy show`; record the explicit unsupported-connector refusal and verify no target is published. |
@@ -1625,7 +1622,7 @@ and `audit export` row. Rule-pack edits in place need a gateway restart.
 | FM6 | Disposable new account | Run F1 and F2 | Timed enrollment/revocation as documented |
 | FM7 | Directory-backed account available | Sign in, run C0a/C0b, then interrupt directory lookup under admin control | Lookup outage defers changes; no false revocation. If no directory fixture, `N/A` |
 | FM8 | Windows directory fixture available | Run repository identity tests and a controlled profile-list simulation | SID/profile binding stays eligible and isolated; do not label a simulation a real directory sign-in |
-| FM9 | Distinct desktop, IDE or ACP route available | Open that UI and repeat C0a/C0b | Same visible side effect and attributed audit, or named residual / `NOT_RUN` |
+| FM9 | Distinct desktop or IDE route available | Open that UI and repeat C0a/C0b | Same visible side effect and attributed audit, or named residual / `NOT_RUN` |
 
 The expected block message names DefenseClaw, the rule id and title, and tells the agent not to retry in another form. `~/`, `$HOME/` and wildcard redirect targets block for custom and built-in rules on POSIX shells (#925); PowerShell and cmd commands are not reduced this way. A command after `&&` or `||`, a variable target such as `$OUT`, and command substitution have documented detection limits (#923); record the exact form and audit decision. Never classify a model's alternate command as the original marker call.
 
