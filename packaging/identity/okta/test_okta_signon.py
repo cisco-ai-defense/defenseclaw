@@ -24,3 +24,26 @@ def test_signon_requires_password_constraint(monkeypatch):
     report = okta.Report(False)
     okta.check_signon_policy(client, report, {"_links": {"accessPolicy": {"href": "/policy"}}}, "bind", [])
     assert report.problems == 1
+
+
+def test_signon_uses_first_matching_rule(monkeypatch):
+    monkeypatch.setattr(okta, "find_user", lambda client, login: {"id": "bind"})
+    password = {"type": "ASSURANCE", "factorMode": "1FA",
+                "constraints": [{"knowledge": {"types": ["password"]}}]}
+    rules = [
+        {"name": "deny", "status": "ACTIVE", "priority": 0,
+         "conditions": {"people": {"users": {"include": ["bind"]}}},
+         "actions": {"appSignOn": {"access": "DENY"}}},
+        {"name": "allow", "status": "ACTIVE", "priority": 1,
+         "conditions": {"people": {"users": {"include": ["bind"]}}},
+         "actions": {"appSignOn": {"access": "ALLOW", "verificationMethod": password}}},
+    ]
+    client = type("Client", (), {
+        "must": lambda self, method, path: {"id": "policy", "name": "policy"},
+        "get_all": lambda self, path: rules,
+    })()
+    report = okta.Report(False)
+    okta.check_signon_policy(client, report, {"_links": {"accessPolicy": {"href": "/policy"}}}, "bind", [])
+    assert report.problems == 1
+
+

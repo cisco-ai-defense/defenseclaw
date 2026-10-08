@@ -327,8 +327,13 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
             report.problem(f"group {name} does not exist; cannot verify its sign-on rule")
 
     bind_covered = False
+    bind_decided = False
     group_covered = {name: False for name in groups}
-    for rule in client.get_all(f"/api/v1/policies/{policy['id']}/rules"):
+    group_decided = {name: False for name in groups}
+    rules = sorted(client.get_all(f"/api/v1/policies/{policy['id']}/rules"),
+                   key=lambda rule: int(rule.get("priority", 2**31)))
+    bind_groups: set[str] | None = None
+    for rule in rules:
         action = (rule.get("actions") or {}).get("appSignOn") or {}
         method = action.get("verificationMethod") or {}
         factor = method.get("factorMode", "?")
@@ -337,18 +342,30 @@ def check_signon_policy(client: Okta, report: Report, app: dict[str, Any],
         scoped_groups = people.get("groups") or {}
         user_ids = set(users.get("include") or [])
         group_ids = set(scoped_groups.get("include") or [])
+        excluded_users = set(users.get("exclude") or [])
+        excluded_groups = set(scoped_groups.get("exclude") or [])
         scope = f"{len(user_ids)} user(s), {len(group_ids)} group(s)" if people else "everyone"
         report.note(f"rule '{rule.get('name')}' ({rule.get('status')}, priority {rule.get('priority')}): "
                     f"{factor}, {scope}")
-        if (rule.get("status") != "ACTIVE" or action.get("access") != "ALLOW"
-                or not password_only_method(method) or users.get("exclude") or scoped_groups.get("exclude")):
+        if rule.get("status") != "ACTIVE":
             continue
-        # Okta ANDs users and groups on the same rule. An unrestricted rule covers both.
-        if bind and not group_ids and (not user_ids or bind["id"] in user_ids):
-            bind_covered = True
+        password_allow = action.get("access") == "ALLOW" and password_only_method(method)
+        # Okta evaluates active rules in priority order; users and groups on one rule are ANDed.
+        if bind and not bind_decided and bind["id"] not in excluded_users:
+            if bind_groups is None and (group_ids or excluded_groups):
+                bind_groups = {item["id"] for item in client.get_all(
+                    f"/api/v1/users/{bind['id']}/groups?limit=200")}
+            if ((not user_ids or bind["id"] in user_ids)
+                    and (not group_ids or bool(group_ids & (bind_groups or set())))
+                    and not excluded_groups & (bind_groups or set())):
+                bind_covered = password_allow
+                bind_decided = True
         for name, group in groups.items():
-            if group and not user_ids and (not group_ids or group["id"] in group_ids):
-                group_covered[name] = True
+            if group and not group_decided[name] and not user_ids and not excluded_users:
+                if ((not group_ids or group["id"] in group_ids)
+                        and group["id"] not in excluded_groups):
+                    group_covered[name] = password_allow
+                    group_decided[name] = True
     if bind and bind_covered:
         report.ok(f"password-only sign-on covers bind user {bind_login}")
     elif bind:
