@@ -85,6 +85,9 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// hermesTasks gives a Hermes hook that names only its task the session
+	// of that task.
+	hermesTasks hermesTaskSessions
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected

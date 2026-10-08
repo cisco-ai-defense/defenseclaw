@@ -104,6 +104,41 @@ func TestNormalizeAgentHookRequest_AntigravityStepIsEvidenceNotTurn(t *testing.T
 	}
 }
 
+// Hermes sends transform_terminal_output with the task of the terminal call
+// but no session; it takes the session the pre_tool_call of that task named,
+// and never a task of another agent identity (GAP-0945).
+func TestHermesTerminalOutputTakesTheSessionOfItsTask(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	hook := func(identity string, payload map[string]interface{}) agentHookRequest {
+		return normalizeAgentHookRequestWithRawProfileEvent("hermes", payload, nil, profile, "", identity)
+	}
+	var tasks hermesTaskSessions
+	pre := hook("agt-1", map[string]interface{}{
+		"hook_event_name": "pre_tool_call", "tool_name": "terminal", "session_id": "20261008_1",
+		"extra": map[string]interface{}{"task_id": "t1", "tool_call_id": "call_1"},
+	})
+	tasks.fill(&pre)
+	output := func() map[string]interface{} {
+		return map[string]interface{}{
+			"hook_event_name": "transform_terminal_output",
+			"extra":           map[string]interface{}{"task_id": "t1", "command": "ls"},
+		}
+	}
+	own := hook("agt-1", output())
+	tasks.fill(&own)
+	if own.SessionID != "20261008_1" || own.CorrelationValues[connector.CorrelationTargetSession].Value != "20261008_1" {
+		t.Fatalf("terminal output session = %q, want the session of task t1", own.SessionID)
+	}
+	other := hook("agt-2", output())
+	tasks.fill(&other)
+	if other.SessionID != "" {
+		t.Fatalf("another identity took session %q", other.SessionID)
+	}
+}
+
 func TestNormalizeAgentHookRequest_HermesNestedIdentityUsesProfile(t *testing.T) {
 	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
 	req := normalizeAgentHookRequestWithProfile("hermes", map[string]interface{}{

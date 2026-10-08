@@ -325,7 +325,9 @@ profile. A folder on an enrolled connector's hook path
 stays at the guardian's protected permissions, so the service is not granted
 it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
 `.gemini` for Antigravity, `.copilot` for Copilot and
-`%APPDATA%\devin` for Devin. Kiro CLI is then found by its install folder
+`%APPDATA%\devin` for Devin. The Kiro IDE plugins in `.kiro\extensions` are
+still listed: the service is granted that folder alone and reads it without
+any access to `.kiro`. Kiro CLI is then found by its install folder
 `%LOCALAPPDATA%\Kiro-Cli`, Copilot CLI by its package cache
 `%LOCALAPPDATA%\copilot\pkg`, Devin CLI by `%LOCALAPPDATA%\devin\cli` and
 Amp by its npm install `%APPDATA%\npm\node_modules\@ampcode\cli`,
@@ -810,9 +812,10 @@ The local observability stack ships the **AI Agent Usage & Detection** board
 - Prometheus: `defenseclaw_ai_discovery_signals_total` (labels `state`,
   `signal_category`, `ai_vendor`, `ai_product`, `detector`), the active-signal
   gauge and the IDE plugin gauge `defenseclaw_inventory_ide_plugins` (labels
-  `ide_product`, `defenseclaw_ide_plugin_ai`, and
-  `defenseclaw_ide_plugin_enabled`). The board queries the exported label
-  names directly, including for a plain `otlp` destination.
+  `defenseclaw_ide_product`, `defenseclaw_ide_plugin_ai`, and
+  `defenseclaw_ide_plugin_enabled`; the sample without labels is the current
+  total). The board queries the exported label names directly, including for
+  a plain `otlp` destination.
 - Loki: the `ai.discovery.completed`, `ai_component.*` and `ide.plugin.*`
   records.
 - Tempo: the discovery scan traces.
