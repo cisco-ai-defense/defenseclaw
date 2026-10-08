@@ -140,6 +140,9 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		return writeJSON(a.IO.Out, sb)
 	}
 	a.printSandbox(sb)
+	if sb.Phase == "ready" {
+		a.printDetachedRun(ctx, sb)
+	}
 	if sb.Phase == "stopped" {
 		if why := startRefusal(keptPolicy(ctx, api, sb), sb); why != "" {
 			a.warn(sb.Name + " cannot start under the current policy: " + why + "; delete it (`" + CommandName + " delete " + sb.Name +
@@ -147,6 +150,32 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		}
 	}
 	return nil
+}
+
+// printDetachedRun says where a running sandbox's detached run is: one that
+// finished left the sandbox ready (and holding a mounted folder) with
+// nothing saying the job was done (GAP-0231).
+func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return
+	}
+	run, err := a.detachedRun(ctx, a.cli(gateway), sb)
+	if err != nil {
+		return
+	}
+	logs := "`" + CommandName + " logs " + sb.Name + "`"
+	switch run.State {
+	case sandboxapi.RunRunning:
+		a.note("its detached run" + a.startedText(run.Started) + " is still going; " + logs + " -f follows it")
+	case sandboxapi.RunExited:
+		exit := ""
+		if run.Exit != "" {
+			exit = " (exit status " + run.Exit + ")"
+		}
+		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it)")
+	}
 }
 
 func (a *App) printStatus(st *sandboxapi.Status) {

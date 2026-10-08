@@ -1212,6 +1212,22 @@ func TestStopAndDeleteNameAnAttachedSession(t *testing.T) {
 	has(t, ta.output(), "1 terminal is attached to box")
 }
 
+// TestStatusSaysTheDetachedRunFinished (GAP-0231): a finished detached run
+// left its sandbox ready, holding the folder, and status said nothing of
+// the run. Status says it finished and how to stop the sandbox, or that it
+// is still going.
+func TestStatusSaysTheDetachedRunFinished(t *testing.T) {
+	ta := newTestApp(t, "", sampleSandbox("bg1"))
+	runAnswers(ta, "run_started=1790000000\nrun=exited\nrun_exit=0\n", "")
+	ta.ok(t, ta.Status(bg, "bg1", OutputText))
+	has(t, ta.output(), "its detached run (started "+ta.clock(time.Unix(1790000000, 0))+") finished (exit status 0); `defenseclaw sandbox logs bg1` shows it.",
+		"bg1 keeps running until you stop it: `defenseclaw sandbox stop bg1`")
+	ta.out.Reset()
+	runAnswers(ta, "run_started=1790000000\nrun=running\n", "")
+	ta.ok(t, ta.Status(bg, "bg1", OutputText))
+	has(t, ta.output(), "is still going; `defenseclaw sandbox logs bg1` -f follows it")
+}
+
 func TestStopWithALiveDetachedRun(t *testing.T) {
 	const log = "working on it\nstill working\n"
 	going := "run_started=1790000000\nrun=running\n"

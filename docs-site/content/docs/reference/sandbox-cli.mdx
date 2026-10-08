@@ -818,7 +818,10 @@ defenseclaw sandbox list
 
 Without a name, shows the sandbox subsystem: whether it is on and reachable,
 the OpenShell gateway, the listener addresses, the default pack and profile,
-the organization policy, and counts. With a name, shows that sandbox in
+the organization policy, and counts. With a name, a running sandbox's
+detached run (`run --detach`) is named first when it has one: still going,
+or finished with its exit status, which leaves the sandbox running (and a
+mounted folder held) until you stop or delete it. It shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
 policy, hook tamper tier, hook traffic, the verdicts per hook event under
 the harness's own event names ("Hook events  PreToolUse 12 · PostToolUse 11
