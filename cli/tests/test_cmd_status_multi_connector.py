@@ -932,6 +932,18 @@ class TestStatusJson(unittest.TestCase):
         by_name = {c["name"]: c for c in doc["connectors"]}
         self.assertEqual(by_name["codex"]["fail_mode"], report)
 
+    def test_json_invalid_config_does_not_query_runtime(self):
+        self.app.config_problems = ["invalid config.yaml"]
+        health = {"policy": {"effective_digest": "runtime-only-digest"}}
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=health) as fetch:
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        fetch.assert_not_called()
+        doc = json.loads(result.output)
+        self.assertIsNone(doc["sidecar"]["running"])
+        self.assertNotIn("policy", doc)
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
