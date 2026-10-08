@@ -183,17 +183,25 @@ export function withPolicyInput(domain: string, input: unknown, data: OpaData): 
   const base = input as Record<string, unknown>;
   if (domain === 'admission') {
     const targetType = String(base.target_type ?? 'skill');
+    // The browser cannot verify shipped asset bytes. The gateway strips these
+    // built-in entries before admission unless CodeGuard matches a pinned
+    // digest; its own plugin is recognized before admission.
+    const firstParty = data.first_party_allow_list
+      .filter((entry) => entry.target_type === targetType)
+      .filter((entry) => !(targetType === 'skill' && entry.target_name === 'codeguard')
+        && !(targetType === 'plugin' && entry.target_name === 'defenseclaw'))
+      .map((entry) => ({ name: entry.target_name, source_path_contains: [...entry.source_path_contains] }));
     return {
+      ...base,
       admission: {
         scan_on_install: data.config.scan_on_install,
         allow_list_bypass_scan: data.config.allow_list_bypass_scan,
         actions: { ...data.actions, ...(data.scanner_overrides[targetType] ?? {}) },
         scanner_overrides: {},
-        first_party_allow_list: data.first_party_allow_list
-          .filter((entry) => entry.target_type === targetType)
-          .map((entry) => ({ name: entry.target_name, source_path_contains: [...entry.source_path_contains] })),
+        ...(typeof base.admission === 'object' && base.admission !== null && !Array.isArray(base.admission)
+          ? base.admission : {}),
+        first_party_allow_list: firstParty,
       },
-      ...base,
     };
   }
   if (domain === 'guardrail') {
