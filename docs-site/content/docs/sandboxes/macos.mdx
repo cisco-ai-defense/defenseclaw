@@ -382,6 +382,33 @@ defenseclaw sandbox pull myapp-1c2d --patch-out fix.patch
 ask on, or with `--yes`, applies nothing and prints the `pull` command
 instead. `--rm` does not delete a sandbox whose work was not brought back.
 
+Applying a copy's work and undoing it, replayed from a real run:
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.4}
+  height={340}
+  ariaLabel="Animated terminal replay of bringing a copy's work back and undoing it: pull --apply lists the two changed files and applies them, keeping the previous working tree, then sandbox undo shows what it will revert and reverts the apply."
+  caption="Recorded from a real Claude Code sandbox on a Mac. The undo is the preview followed by the revert (`--yes` skips the question)."
+  frames={[
+    { type: 'cmd', text: "defenseclaw sandbox pull myapp-claude --apply", pauseMs: 700 },
+    { type: 'out', text: "  myapp-claude's copy has not changed since its last pull at 02:59; using that pull instead of starting it" },
+    { type: 'out', text: "  myapp-claude: 2 files changed (+3 −0)" },
+    { type: 'out', text: "    M README.md" },
+    { type: 'out', text: "    A notes.md" },
+    { type: 'ok', text: "  ✓ applied 2 changes to ~/code/myapp" },
+    { type: 'out', text: "  your previous working tree is kept at refs/defenseclaw/copy/myapp-claude/pre-apply; `defenseclaw sandbox undo myapp-claude` reverts the apply" },
+    { type: 'spacer' },
+    { type: 'cmd', text: "defenseclaw sandbox undo myapp-claude --yes", pauseMs: 700 },
+    { type: 'out', text: "  Undo will revert the last `pull --apply` of myapp-claude in ~/code/myapp (2 paths):" },
+    { type: 'out', text: "    revert  README.md" },
+    { type: 'out', text: "    remove  notes.md" },
+    { type: 'out', text: "  edits you made since the apply stay" },
+    { type: 'ok', text: "  ✓ reverted the last apply: 2 paths in ~/code/myapp" },
+    { type: 'out', text: "  bring the work back with `defenseclaw sandbox pull myapp-claude --apply`" },
+  ]}
+/>
+
 ## MicroVM specifics
 
 | Topic | What to know |

@@ -129,13 +129,13 @@ listed in [Sandbox telemetry](/docs/observability/sandbox-telemetry).
 | Integration health | Health degraded / restored, Recent health transitions | OpenShell health records with their stable error code. Records about the whole integration name no sandbox and show under every `$sandbox` selection. |
 | Process starts | Process starts, Top started programs | Empty unless the sandbox's process tree is on (`observe.process_tree`, or `sandbox run --process-tree`); it is off in every built-in pack. Sampling misses a process that starts and ends between two samples. |
 
-A real run on a Mac, with **Sandbox** set to one sandbox over the last 30
+A real run on a Mac, with **Sandbox** set to one sandbox over the last 45
 minutes. The fleet row and the lifecycle charts (the metric panels) ignore the
 Sandbox box, so they also count the other sandboxes on the host:
 
-![Grafana Sandboxes board, Sandbox fleet and Lifecycle rows: tiles for active sandboxes, sandboxes seen, egress allowed, egress blocked, shadow-AI findings and health degraded, the active sandboxes by connector and phase transitions charts, and the recent lifecycle changes of the selected sandbox](/images/grafana/sandboxes-overview.png)
+![Grafana Sandboxes board with the Environment, Host, Connector and Sandbox boxes, Sandbox fleet and Lifecycle rows: tiles for active sandboxes (all names), sandboxes seen, egress allowed, egress blocked, shadow-AI findings and health degraded split into sandboxes and gateway-wide, the active sandboxes by connector (all names) and phase transitions charts, and the recent lifecycle changes of the selected sandbox](/images/grafana/sandboxes-overview.png)
 
-![Grafana Sandboxes board, Egress decisions and Traffic volume rows: egress by source and decision as logs and as a metric, the top blocked and top allowed hosts, and bytes up and down by destination and over time](/images/grafana/sandboxes-egress.png)
+![Grafana Sandboxes board, Egress decisions and Traffic volume rows: egress by source and decision as logs and as a metric (all names), the top blocked host (webhook.site) and the top allowed hosts, and bytes up and down by destination and over time](/images/grafana/sandboxes-egress.png)
 
 ![Grafana Sandboxes board, Process starts row: process starts over time and the top started programs, filled because the sandbox ran with the process tree on](/images/grafana/sandboxes-processes.png)
 

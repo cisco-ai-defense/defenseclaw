@@ -867,6 +867,11 @@ defenseclaw sandbox status
 defenseclaw sandbox status myapp-7f3a --output json
 ```
 
+A running Linux sandbox after a short session. The `Egress` row sums up
+the destinations by kind (`AI: 1 model provider, 2 shadow AI`):
+
+![defenseclaw sandbox status myapp-claude: the harness, phase, project, permissions, policy, hook traffic and events, the last blocked call, the egress totals with the AI summary, and the undo point](/images/sandboxes/screens/terminal-sandbox-status.png)
+
 {/* AUTOGEN-BEGIN: sandbox-flags status */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |

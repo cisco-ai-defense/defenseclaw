@@ -52,6 +52,11 @@ suggests `defenseclaw sandbox doctor`.
 
 `Enter` opens the selected row's details, and `Esc` closes them.
 
+The **Activity** view on Linux, for a Claude Code sandbox whose agent reached
+two AI services it does not use, a paste site and a blocked tool call:
+
+![DefenseClaw TUI Activity view on Linux: the feed of one sandbox, newest first, with allowed sites, two shadow AI warnings, a paste site refused with the key that unblocks it, a blocked tool call and the sandbox's lifecycle lines](/images/sandboxes/screens/tui-sandboxes-activity.png)
+
 ![DefenseClaw TUI Asks view on Linux: one ask waiting, with its sandbox, the kind (a port on this machine), the destination host.openshell.internal:9418, the program that asked (/usr/bin/git), the risk and the reason, and the keys to approve, reject and refresh](/images/sandboxes/screens/tui-sandboxes-asks.png)
 
 ### Keys
@@ -98,15 +103,17 @@ it is on (see
 [see what the sandbox runs](/docs/sandboxes/guide#see-what-the-sandbox-runs)).
 The dialog scrolls.
 
-![DefenseClaw TUI details of one sandbox on a Mac: name, harness, phase, uptime, pack, the project copy, sites contacted and blocked, tool calls, the hook events, the last blocked tool call, the run image and the process tree](/images/sandboxes/screens/tui-sandbox-processes.png)
+![DefenseClaw TUI details of one sandbox on a Mac, started with the process tree on: name, harness, phase, uptime, pack, the project copy, sites contacted and blocked with the AI summary, tool calls, the hook events, the last blocked tool call, the run image, the process tree with a running curl, the pull and undo notes, and a Destination row for each site](/images/sandboxes/screens/tui-sandbox-processes.png)
 
 Each **Destination** row further down is one line of
 `defenseclaw sandbox destinations NAME`: the site, what it is, its requests and
 the program that connected, with its parents when the process tree is on.
-This one is from a Linux host, for a stopped sandbox whose repository policy
-turned the process tree on:
+This one is from a Linux host, for a running sandbox started with
+`--process-tree`. The shadow AI service has no program next to it (its
+connection was too short for the tree), and the package registry shows `curl`
+under `bash` under `claude`:
 
-![DefenseClaw TUI details of one stopped sandbox on Linux: harness, phase, pack, the repository policy that turned the process tree on, the live project, sites contacted and blocked with the AI summary, tool calls, hook events, the last blocked tool call, the image, and a Destination row for each site with its kind, requests and the program that connected and its parents](/images/sandboxes/screens/tui-sandbox-destinations.png)
+![DefenseClaw TUI details of one running sandbox on Linux: harness, phase, pack, the live project, sites contacted and blocked with the AI summary, tool calls, hook events, the last blocked tool call, the image, the process tree with a running curl, and a Destination row for each site with its kind, requests and the program that connected with its parents](/images/sandboxes/screens/tui-sandbox-destinations.png)
 
 ### Start a run from the TUI
 
@@ -154,6 +161,13 @@ only `sudo` may still ask for your password. On Windows the wizard says that
 OpenShell sandboxes run on Linux and macOS only.
 
 ![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard on a Mac: the command it will run, the harness choices, credentials, this machine's checks, the Install OpenShell option, the MicroVMs note and the OpenShell telemetry option](/images/sandboxes/screens/tui-setup.png)
+
+On Linux the wizard has no MicroVMs section. Its **This machine** checks name the
+Docker driver's needs (Docker, Landlock, OpenShell, bind mounts), and it asks
+**Mount Project Folder** and **OpenShell Telemetry Off**, each with what
+changing the answer restarts:
+
+![DefenseClaw TUI Setup, Sandboxes (OpenShell) wizard on Linux: the command it will run, the harness choices, credentials, this machine's checks for Docker, Landlock, OpenShell 0.1.2 and bind mounts, and the Install OpenShell, Mount Project Folder and OpenShell Telemetry Off options](/images/sandboxes/screens/tui-setup-linux.png)
 
 The full reference for the panel is in the [TUI guide](/docs/tui#sandboxes-panel).
 

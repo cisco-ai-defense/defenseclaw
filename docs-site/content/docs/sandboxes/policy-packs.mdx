@@ -893,6 +893,51 @@ the sandbox reached one extra host:
 
 ![defenseclaw sandbox policy suggest --pack-out: the pack it wrote, extending balanced and allowing one host with the program that reached it, then comments listing the hosts balanced already covers, the host that was only ever refused, the shadow AI host and the sandbox's model provider](/images/sandboxes/screens/terminal-policy-recorded-pack.png)
 
+The same two commands, replayed:
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={480}
+  ariaLabel="Animated terminal replay of record then lock: policy suggest --diff lists the settings a recorded pack would change and the destinations it would block, then --pack-out writes a pack that extends balanced and allows the one extra host, with comments for the hosts it leaves out."
+  caption="Recorded from a real Claude Code sandbox on Linux after a session on the `open` pack. Nothing is applied by `suggest`; you review the file, then run with `--pack`."
+  frames={[
+    { type: 'cmd', text: "defenseclaw sandbox policy suggest --sandbox myapp-claude --diff", pauseMs: 700 },
+    { type: 'out', text: "  pack myapp-claude-recorded against the policy of sandbox myapp-claude (pack open):" },
+    { type: 'out', text: "    profile                    open → balanced" },
+    { type: 'out', text: "    network.mode               open → allowlist" },
+    { type: 'out', text: "    approvals.mode             auto → triage" },
+    { type: 'out', text: "    egress.allow               +example.net, registry.npmjs.org, registry.yarnpkg.com (+47 more; -o json lists all)" },
+    { type: 'out', text: "    egress.large_upload_mb     25 → 10" },
+    { type: 'out', text: "    hooks.on_tamper            alert → stop" },
+    { type: 'out', text: "    hooks.on_silence           alert → stop" },
+    { type: 'warn', text: "  ⚠ reached now, blocked with the pack:" },
+    { type: 'out', text: "    api.openai.com:443 — network_allowlist  (network.mode allowlist (profile balanced))" },
+    { type: 'spacer' },
+    { type: 'cmd', text: "defenseclaw sandbox policy suggest --sandbox myapp-claude --pack-out ~/.defenseclaw/policies/sandbox/myapp/pack.yaml && cat ~/.defenseclaw/policies/sandbox/myapp/pack.yaml", pauseMs: 700 },
+    { type: 'ok', text: "  ✓ wrote /home/user/.defenseclaw/policies/sandbox/myapp/pack.yaml: pack myapp, extends balanced, 1 host to allow" },
+    { type: 'dim', text: "  review it, then lock a project to it: defenseclaw sandbox run --pack /home/user/.defenseclaw/policies/sandbox/myapp/pack.yaml (or put it at ~/.defenseclaw/policies/sandbox/myapp/pack.yaml and use --pack myapp)" },
+    { type: 'dim', text: "# Recorded by `defenseclaw sandbox policy suggest` on 2026-10-07 from what sandbox myapp-claude reached." },
+    { type: 'dim', text: "# Review every host before you lock a project to this pack; nothing is applied until you" },
+    { type: 'dim', text: "# run with it: defenseclaw sandbox run --pack <this file>, or put it at <openshell.pack_dir>/myapp/pack.yaml." },
+    { type: 'out', text: "version: 1" },
+    { type: 'out', text: "name: myapp" },
+    { type: 'out', text: "description: \"The balanced pack plus the destinations sandbox myapp-claude reached, recorded 2026-10-07\"" },
+    { type: 'out', text: "extends: balanced" },
+    { type: 'out', text: "egress:" },
+    { type: 'out', text: "  allow:" },
+    { type: 'out', text: "    - \"example.net\" # 1 request; by /usr/bin/curl" },
+    { type: 'dim', text: "# Covered by the balanced pack's curated allowlist: github.com, pypi.org, registry.npmjs.org" },
+    { type: 'dim', text: "# Not suggested, only ever refused:" },
+    { type: 'dim', text: "#   169.254.169.254: only ever refused (host_internal)" },
+    { type: 'dim', text: "#   example.org: only ever refused" },
+    { type: 'dim', text: "#   pastebin.com: only ever refused (paste_site)" },
+    { type: 'dim', text: "# Not suggested:" },
+    { type: 'dim', text: "#   api.openai.com: shadow AI (OpenAI): an AI service the harness does not use; add it yourself if you use it" },
+    { type: 'dim', text: "#   bedrock-mantle.us-east-1.api.aws: the sandbox's model provider opens it directly to its own programs" },
+  ]}
+/>
+
 ## Test the policy
 
 `defenseclaw sandbox policy test` says what the egress policy decides for a
@@ -915,6 +960,40 @@ program in the sandbox; `--binary` only names the program in the report.
 For example, what the policy of a running sandbox decides for a paste site:
 
 ![defenseclaw sandbox policy test --sandbox myapp-claude --host pastebin.com:443: the destination is blocked by a blocklist feed entry, with the rule, the source and the reason](/images/sandboxes/screens/terminal-policy-test.png)
+
+Four destinations under three packs, replayed from a real machine:
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={480}
+  ariaLabel="Animated terminal replay of four policy test runs: registry.npmjs.org allowed by the balanced pack's curated allowlist, api.openai.com blocked by balanced's allowlist mode, pastebin.com blocked by a blocklist feed entry on the open pack, and registry.npmjs.org blocked by the strict profile."
+  caption="Recorded on Linux with DefenseClaw 1.0.35; `policy test` resolves a pack without the daemon, so it runs anywhere `defenseclaw-gateway` is installed."
+  frames={[
+    { type: 'cmd', text: "defenseclaw sandbox policy test --pack balanced --host registry.npmjs.org:443", pauseMs: 600 },
+    { type: 'out', text: "  pack balanced · profile balanced · network allowlist" },
+    { type: 'out', text: "DESTINATION             DECISION  RULE                      SOURCE" },
+    { type: 'out', text: "registry.npmjs.org:443  allowed   allow registry.npmjs.org  DefenseClaw's curated allowlist (pack balanced)" },
+    { type: 'spacer' },
+    { type: 'cmd', text: "defenseclaw sandbox policy test --pack balanced --host api.openai.com:443", pauseMs: 600 },
+    { type: 'out', text: "  pack balanced · profile balanced · network allowlist" },
+    { type: 'out', text: "DESTINATION         DECISION                                          RULE               SOURCE" },
+    { type: 'out', text: "api.openai.com:443  blocked (`defenseclaw sandbox unblock` lifts it)  network_allowlist  network.mode allowlist (profile balanced)" },
+    { type: 'dim', text: "  This sandbox's network profile only allows destinations on its allowlist." },
+    { type: 'spacer' },
+    { type: 'cmd', text: "defenseclaw sandbox policy test --pack open --host pastebin.com:443", pauseMs: 600 },
+    { type: 'out', text: "  pack open · profile open · network open" },
+    { type: 'out', text: "DESTINATION       DECISION                                          RULE           SOURCE" },
+    { type: 'out', text: "pastebin.com:443  blocked (`defenseclaw sandbox unblock` lifts it)  feed Pastebin  the defenseclaw-blocklist blocklist feed (entry Pastebin)" },
+    { type: 'dim', text: "  Public paste sites publish whatever is posted to anyone with the link, a common way to exfiltrate code and secrets." },
+    { type: 'spacer' },
+    { type: 'cmd', text: "defenseclaw sandbox policy test --pack strict --host registry.npmjs.org:443 --binary /usr/bin/curl", pauseMs: 600 },
+    { type: 'out', text: "  pack strict · profile strict · network deny" },
+    { type: 'out', text: "DESTINATION                             DECISION  RULE          SOURCE" },
+    { type: 'out', text: "registry.npmjs.org:443 (/usr/bin/curl)  blocked   network_deny  network.mode deny (profile strict)" },
+    { type: 'dim', text: "  the strict profile runs without the egress proxy" },
+  ]}
+/>
 
 For CI, list the destinations and what you expect in a fixture, YAML or
 JSON:
