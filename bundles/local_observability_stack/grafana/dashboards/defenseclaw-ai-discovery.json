@@ -1209,7 +1209,7 @@
     {
       "type": "stat",
       "title": "AI plugins",
-      "description": "Plugins flagged as AI assistants or agents (`ai=\"true\"`).",
+      "description": "Plugins flagged as AI assistants or agents (`defenseclaw_ide_plugin_ai=\"true\"`).",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1222,7 +1222,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{ai=\"true\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_plugin_ai=\"true\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1268,7 +1268,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{enabled=\"disabled\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_plugin_enabled=\"disabled\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1314,7 +1314,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide) (defenseclaw_inventory_ide_plugins))",
+          "expr": "sort_desc(sum by (ide_product) (defenseclaw_inventory_ide_plugins))",
           "legendFormat": "{{ide}}",
           "refId": "A",
           "instant": true
@@ -1357,7 +1357,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide, ai, enabled) (defenseclaw_inventory_ide_plugins))",
+          "expr": "sort_desc(sum by (ide_product, defenseclaw_ide_plugin_ai, defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins))",
           "format": "table",
           "refId": "A",
           "instant": true
@@ -1422,7 +1422,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (ai) (defenseclaw_inventory_ide_plugins)",
+          "expr": "sum by (defenseclaw_ide_plugin_ai) (defenseclaw_inventory_ide_plugins)",
           "legendFormat": "ai={{ai}}",
           "refId": "A",
           "instant": true
@@ -1476,7 +1476,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (enabled) (defenseclaw_inventory_ide_plugins)",
+          "expr": "sum by (defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins)",
           "legendFormat": "{{enabled}}",
           "refId": "A",
           "instant": true
