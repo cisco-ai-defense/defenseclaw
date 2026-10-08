@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -889,8 +890,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		for path := range record.Files {
 			if !want[path] {
-				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/")) {
-					continue // the package owns the binaries and units now
+				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/") ||
+					path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
+					continue // the package owns the binaries, units and OpenCode plugin now
 				}
 				p.stale = append(p.stale, path)
 			}
@@ -2167,13 +2169,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
-	// On Linux the deb/rpm removes its own files. A macOS pkg has no
-	// uninstaller, so the lifecycle removes the binaries and the receipt.
+	// On Linux the deb/rpm removes its own files (the binaries, units and
+	// the managed OpenCode plugin). A macOS pkg has no uninstaller, so the
+	// lifecycle removes the binaries and the receipt.
 	packageManaged := l.packageManaged
 	paths := []string{}
 	if record != nil {
 		for path := range record.Files {
-			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/")) {
+			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/") ||
+				path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
 				continue
 			}
 			paths = append(paths, path)

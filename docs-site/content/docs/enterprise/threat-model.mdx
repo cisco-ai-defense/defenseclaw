@@ -645,6 +645,23 @@ A running gateway can reload an edited config just before the lifecycle rejects 
 
 **What reduces it:** Change the config and upgrade through the lifecycle, and monitor `config_rejected` and `policy.applied` ([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
 
+#### Application control must allow DefenseClaw files
+
+Agents load DefenseClaw's hook binary and, for OpenCode, the managed plugin `<install root>/share/opencode/defenseclaw.js`. Application control that refuses one of them takes DefenseClaw out of that agent's sessions. OpenCode skips a plugin it cannot read and runs tool calls without DefenseClaw, and `status` and `verify` stay green because they cannot see inside the session.
+
+**Where:** Linux with fapolicyd, and any OS whose application control decides which files an agent may read or run.
+
+**What reduces it:** On Linux, install with the deb or rpm. The package ships the binaries and the OpenCode plugin, so fapolicyd's package-database trust (the `rpmdb` backend on RHEL, `debdb` on Debian and Ubuntu) covers them and you add nothing. After a payload (tarball) install, trust the install tree, and update the entry after every upgrade:
+
+```bash
+fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw
+# after each upgrade:
+fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw
+fapolicyd-cli --update
+```
+
+Trust your agents' own install folders the same way. To confirm, start an OpenCode session as a user and check that a tool call your policy blocks is blocked.
+
 #### Unsigned builds and application control
 
 Unsigned, hash-pinned builds do not satisfy application-control rules that require a publisher signature.

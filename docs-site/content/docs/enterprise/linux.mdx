@@ -34,6 +34,7 @@ the same config.
 | SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
 | Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
+| Application control | fapolicyd: the deb and rpm ship every file an agent loads (the binaries and the managed OpenCode plugin), so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file. See [Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files). |
 
 The systemd version decides how the gateway reads secrets:
 
@@ -54,7 +55,7 @@ lists each directive and the version it needs.
 | Item | Path | Owner and mode |
 | --- | --- | --- |
 | Binaries | `/opt/defenseclaw/bin`: `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when present | `root`, `0755` |
-| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js` | `root`, `0644` |
+| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js`, shipped in the deb and rpm (a payload install writes it) | `root`, `0644` |
 | Config | `/etc/defenseclaw/config.yaml` | `root:defenseclaw`, `0640` |
 | Policies | `/etc/defenseclaw/policies` | `root:defenseclaw`, `0750` |
 | Secrets | `/etc/defenseclaw/secrets` | See the table above |
