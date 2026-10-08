@@ -825,7 +825,20 @@ func (a *APIServer) generation() *Generation {
 // generation's, or for an API server without one, queries prepared once
 // from its start-time policy_dir.
 func (a *APIServer) preparedPolicy(ctx context.Context) (*policy.Prepared, error) {
-	return a.preparedPolicyForGeneration(ctx, a.generation())
+	g := pinnedGeneration(ctx)
+	if g == nil {
+		g = a.generation()
+	}
+	return a.preparedPolicyForGeneration(ctx, g)
+}
+
+// pinRequestGeneration pins the API server's published generation on r for
+// a request no profile resolution pinned (GAP-0455).
+func (a *APIServer) pinRequestGeneration(r *http.Request) *http.Request {
+	if g := a.generation(); g.published() {
+		return r.WithContext(withPinnedGeneration(r.Context(), g))
+	}
+	return r
 }
 
 func (a *APIServer) preparedPolicyForGeneration(ctx context.Context, g *Generation) (*policy.Prepared, error) {
@@ -2560,6 +2573,7 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r = a.pinRequestGeneration(r)
 
 	var req policyEvaluateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3254,6 +3268,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r = a.pinRequestGeneration(r)
 
 	var req guardrailEvaluateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

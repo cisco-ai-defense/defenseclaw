@@ -457,6 +457,8 @@ func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Ha
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.guardrailProfileSet() != nil {
 			r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
+		} else {
+			r = a.pinRequestGeneration(r)
 		}
 		next.ServeHTTP(w, r)
 	})
