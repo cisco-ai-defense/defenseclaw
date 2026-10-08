@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -943,7 +944,9 @@ def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
 def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("guardrail: {}")
-    snapshot = fail_mode_runtime.FileSnapshot(path=path, existed=True, data=path.read_bytes(), mode=0o644)
+    # Use the mode the filesystem reports: Windows has no 0o644 (it reports 0o666 or read-only 0o444).
+    mode = stat.S_IMODE(path.stat().st_mode)
+    snapshot = fail_mode_runtime.FileSnapshot(path=path, existed=True, data=path.read_bytes(), mode=mode)
     with patch.object(fail_mode_runtime.os, "replace", side_effect=PermissionError("immutable")) as replace:
         fail_mode_runtime.restore_fail_mode_transaction((snapshot,))
     replace.assert_not_called()
