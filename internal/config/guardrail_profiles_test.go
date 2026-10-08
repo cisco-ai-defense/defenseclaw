@@ -185,6 +185,45 @@ func TestGuardrailPolicyDigestStable(t *testing.T) {
 // GAP-0276: every gateway start and reload derives all profiles. With 1,000
 // profiles the configuration was copied once per profile (a JSON round trip
 // each); it is copied once, and each profile owns only the maps it changes.
+// GAP-0276: loading guardrail profiles and assignments decodes them once
+// from the shared parse instead of flattening every key through viper.
+func TestLoadDecodesGuardrailProfilesWithoutViper(t *testing.T) {
+	source := func(n int) []byte {
+		var b strings.Builder
+		b.WriteString("config_version: 9\nguardrail:\n  profiles:\n    base: {}\n    tuned:\n      connectors: {codex: {}}\n")
+		for i := range n {
+			fmt.Fprintf(&b, "    scale-%04d:\n      mode: observe\n      connectors: {claudecode: {mode: observe}, codex: {mode: observe}}\n", i)
+		}
+		b.WriteString("  profile_assignments:\n    - profile: base\n      match: {groups: [admins]}\n")
+		for i := range n {
+			fmt.Fprintf(&b, "    - profile: scale-%04d\n      match: {groups: [g%04d-a, g%04d-b, g%04d-c]}\n", i, i, i, i)
+		}
+		return []byte(b.String() + "observability: {}\n")
+	}
+	load := func(raw []byte) (*Config, float64) {
+		var cfg *Config
+		allocs := testing.AllocsPerRun(1, func() {
+			var err error
+			if cfg, err = loadConfigSource("config.yaml", raw, false, false); err != nil {
+				t.Fatal(err)
+			}
+		})
+		return cfg, allocs
+	}
+	_, before := load(source(0))
+	cfg, after := load(source(200))
+	_, emptyConnector := cfg.Guardrail.Profiles["tuned"].Connectors["codex"]
+	if _, ok := cfg.Guardrail.Profiles["base"]; !ok || !emptyConnector || len(cfg.Guardrail.Profiles) != 202 ||
+		cfg.Guardrail.Profiles["scale-0007"].Connectors["codex"].Mode != "observe" ||
+		!reflect.DeepEqual(cfg.Guardrail.ProfileAssignments[8].Match.Groups, []string{"g0007-a", "g0007-b", "g0007-c"}) {
+		t.Fatalf("profiles = %d, scale-0007 = %+v, assignment 8 = %+v", len(cfg.Guardrail.Profiles),
+			cfg.Guardrail.Profiles["scale-0007"], cfg.Guardrail.ProfileAssignments[8])
+	}
+	if per := (after - before) / 200; per > 150 {
+		t.Fatalf("loading 200 profiles and assignments made %.0f allocations per profile; decode them once, not through viper", per)
+	}
+}
+
 func TestDeriveGuardrailProfilesCopiesTheConfigurationOnce(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {Mode: "observe"}}

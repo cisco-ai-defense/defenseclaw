@@ -119,6 +119,9 @@ func TestJSONLRefusesSymlinkHardlinkNonRegularAndUnsafeMode(t *testing.T) {
 		if _, err := NewJSONL(JSONLConfig{Path: path, MaxSizeMB: 1}); !IsError(err, ErrorUnsafePath) {
 			t.Fatalf("NewJSONL error = %v, want unsafe_path", err)
 		}
+		if problem := JSONLPathProblem(path); !strings.Contains(problem, "hard link") {
+			t.Fatalf("JSONLPathProblem = %q, want the hard link", problem)
+		}
 	})
 
 	t.Run("non-regular", func(t *testing.T) {
@@ -138,6 +141,11 @@ func TestJSONLRefusesSymlinkHardlinkNonRegularAndUnsafeMode(t *testing.T) {
 		}
 		if _, err := NewJSONL(JSONLConfig{Path: path, MaxSizeMB: 1}); !IsError(err, ErrorUnsafePath) {
 			t.Fatalf("NewJSONL error = %v, want unsafe_path", err)
+		}
+		// config validate and ensure refuse it too, naming the mode
+		// (GAP-1033: they passed it and only the gateway start failed).
+		if problem := JSONLPathProblem(path); !strings.Contains(problem, "mode 0640") {
+			t.Fatalf("JSONLPathProblem = %q, want the file mode", problem)
 		}
 	})
 }

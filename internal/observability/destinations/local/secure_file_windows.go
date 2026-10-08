@@ -252,6 +252,12 @@ func windowsAllowedACEPrincipal(sid *windows.SID) bool {
 	return windowsAllowedOwner(sid)
 }
 
+// jsonlFileProblem is JSONLPathProblem for an existing regular file. The
+// access list of the file is checked by the gateway at open: an entry for
+// the gateway account is right when the gateway checks and foreign when an
+// administrator does, so the start line names it instead.
+func jsonlFileProblem(os.FileInfo) string { return "" }
+
 // jsonlFolderProblem is JSONLPathProblem for an existing folder: an allow
 // entry with write access for an account other than SYSTEM, Administrators,
 // the current account or allowedWriters.

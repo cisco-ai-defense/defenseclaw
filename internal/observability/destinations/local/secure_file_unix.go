@@ -13,6 +13,7 @@
 package local
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 
@@ -192,6 +193,21 @@ func validateSecureDirectory(_ string, info os.FileInfo) error {
 func jsonlFolderProblem(folder string, info os.FileInfo, _ []string) string {
 	if info.Mode().Perm()&0o022 != 0 {
 		return "is in " + folder + ", a folder its group or other users can write"
+	}
+	return ""
+}
+
+// jsonlFileProblem is JSONLPathProblem for an existing regular file, by the
+// rules validateSecureFileInfo applies at open: a mode with group or other
+// bits (a file created with umask 022 is 0644) or a second name. The
+// gateway does not tighten the mode itself: an account that could read the
+// file may already hold it open and would read every event appended after.
+func jsonlFileProblem(info os.FileInfo) string {
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Sprintf("is mode %04o, so its group or other users can read or write it (the gateway needs 0600)", uint32(perm))
+	}
+	if status, ok := info.Sys().(*syscall.Stat_t); ok && status.Nlink != 1 {
+		return "has another name (a hard link)"
 	}
 	return ""
 }

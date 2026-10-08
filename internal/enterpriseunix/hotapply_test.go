@@ -120,3 +120,39 @@ func TestEnsureOfAnUnchangedConfigWithAnotherOwnerIsANoop(t *testing.T) {
 		t.Fatalf("config group = %d, want the service group %d", gid, serviceGID)
 	}
 }
+
+// GAP-1030: the same config.yaml installed again while the apply run that
+// the previous install started is checking (right after it restored the
+// owner) is still a no-op; the gateway is not restarted.
+func TestEnsureStaysANoopWhenTheSameConfigIsInstalledAgainDuringTheCheck(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	config := h.env.P(h.env.Layout.ConfigPath)
+	_, serviceGID, _ := h.env.OwnerOf(config)
+	lchown := h.env.Lchown
+	if err := lchown(config, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	installedAgain := false
+	h.env.Lchown = func(path string, uid, gid int) error {
+		if err := lchown(path, uid, gid); err != nil || path != config || installedAgain {
+			return err
+		}
+		installedAgain = true
+		return lchown(path, 0, 0) // install -o root -g root -m 0640 of the same bytes
+	}
+	from := len(h.services.calls)
+	r := h.run(Options{Action: ActionEnsure})
+	requireOK(t, r)
+	for _, call := range h.services.calls[from:] {
+		if strings.HasSuffix(call, " "+unitGateway) && !strings.HasPrefix(call, "enable ") {
+			t.Fatalf("the gateway was touched (%s); changes = %q", call, r.Changes)
+		}
+	}
+	if !installedAgain || !r.Noop {
+		t.Fatalf("installed again = %v, noop = %v, changes = %q", installedAgain, r.Noop, r.Changes)
+	}
+	if _, gid, _ := h.env.OwnerOf(config); gid != serviceGID {
+		t.Fatalf("config group = %d, want the service group %d", gid, serviceGID)
+	}
+}

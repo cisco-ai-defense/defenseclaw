@@ -332,7 +332,7 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 				destination.Name, path, e.Layout.DataDir, e.Layout.LogDir)
 		}
 		if problem := local.JSONLPathProblem(e.P(path)); problem != "" {
-			return fmt.Errorf("observability destination %q writes %s, which %s; a jsonl destination writes a regular file in a folder only root and the gateway account can write",
+			return fmt.Errorf("observability destination %q writes %s, which %s; a jsonl destination writes a file only the gateway account can read and write (mode 0600, or a missing file it creates) in a folder only root and the gateway account can write",
 				destination.Name, path, problem)
 		}
 	}
