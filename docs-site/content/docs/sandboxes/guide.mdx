@@ -1062,7 +1062,10 @@ source. DefenseClaw records those files by their metadata when the session
 starts, so the review flags the ones the session added or changed, and undo
 names each directory it cannot restore with what to do about it: delete
 `node_modules/` and reinstall, or recreate `.venv/`. Undo deletes what the
-session wrote to Python bytecode caches, which Python rebuilds.
+session wrote to Python bytecode caches, which Python rebuilds. What test and
+build tools write to their caches inside `node_modules/` (`.cache`, `.vite`,
+`.vite-temp`, `.vitest`) installs no package, so a session that only ran the
+tests does not flag `node_modules/`.
 
 To have undo restore dependency directories too, turn on
 `openshell.workdir.undo_ignored`:

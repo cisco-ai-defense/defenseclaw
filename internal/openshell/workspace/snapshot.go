@@ -767,10 +767,12 @@ func sentinelKeep(rel string) int64 {
 	return 0
 }
 
-// toolCacheDir is the cache directory tools keep inside a dependency
-// directory (nyc, babel, eslint, webpack in node_modules/.cache): what they
-// write there installs no package.
-const toolCacheDir = ".cache"
+// toolCacheDirs are the cache directories tools keep inside a dependency
+// directory: what they write there installs no package. nyc, babel, eslint
+// and webpack use node_modules/.cache; Vite and Vitest node_modules/.vite
+// (Vitest's results cache, rewritten by every test run, GAP-0275),
+// .vite-temp and, before Vitest 1, .vitest.
+var toolCacheDirs = map[string]bool{".cache": true, ".vite": true, ".vite-temp": true, ".vitest": true}
 
 func isDependencyDir(name string) bool {
 	for _, d := range dependencyDirNames {
@@ -785,7 +787,7 @@ func isDependencyDir(name string) bool {
 // levels (entry count, newest modification time) plus the package
 // manager's own state file. Installs and removals always show; an in-place
 // edit deep inside one installed package may not. A tool's cache in it
-// (toolCacheDir) is left out, and so is the directory's own time, which its
+// (toolCacheDirs) is left out, and so is the directory's own time, which its
 // creation changes: `npm test` under nyc wrote node_modules/.cache, and
 // every such session flagged node_modules/ (GAP-0275).
 func fingerprintDir(dir string) DirFingerprint {
@@ -801,7 +803,7 @@ func fingerprintDir(dir string) DirFingerprint {
 	}
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
-			if e.Name() == toolCacheDir {
+			if toolCacheDirs[e.Name()] {
 				continue
 			}
 			fp.Entries++
