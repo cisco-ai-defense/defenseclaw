@@ -340,8 +340,13 @@ func TestUserPluginCapPreservesLaterInstallationBaseline(t *testing.T) {
 	boundUserScanIDE(inv)
 	svc := &ContinuousDiscoveryService{ideBaseline: map[string]IDEPlugin{old.Fingerprint: old}, opts: AIDiscoveryOptions{IDEInventory: config.IDEInventoryAll}}
 	got := svc.finishIDEInventory(inv, true, now)
-	if len(got.Removed) != 0 || !got.Installations[1].Partial {
-		t.Fatalf("capped later installation: removed=%v partial=%v", got.Removed, got.Installations[1].Partial)
+	// Publishing the retained row re-sorts the installations (GAP-0594).
+	laterPartial := false
+	for _, inst := range got.Installations {
+		laterPartial = laterPartial || inst.InstallID == later.InstallID && inst.Partial
+	}
+	if len(got.Removed) != 0 || !laterPartial {
+		t.Fatalf("capped later installation: removed=%v partial=%v", got.Removed, laterPartial)
 	}
 	for _, p := range got.Plugins {
 		if p.Fingerprint == old.Fingerprint {
