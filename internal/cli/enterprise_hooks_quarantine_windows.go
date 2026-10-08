@@ -54,7 +54,11 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 				}
 			}
 			channel.ServeOnce(func(request enforce.QuarantineRemovalRequest) error {
-				err := removeEnrolledQuarantinedSource(current, request)
+				latest, loadErr := enterpriseHookQuarantineCurrentConfig(current)
+				err := loadErr
+				if err == nil {
+					err = removeEnrolledQuarantinedSource(latest, request)
+				}
 				outcome := "removed"
 				if err != nil {
 					outcome = "refused: " + err.Error()
@@ -64,6 +68,21 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 			})
 		}
 	}()
+}
+
+// enterpriseHookQuarantineCurrentConfig loads the protected config for each
+// request. The gateway may have adopted new watcher roots without restarting
+// the guardian; a failed load refuses removal rather than using stale roots.
+func enterpriseHookQuarantineCurrentConfig(startup *config.Config) (*config.Config, error) {
+	latest, err := enterpriseHooksWindowsConfigLoader()
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil || !latest.StandaloneEnterprise() || latest.SecureClientIntegration() ||
+		!strings.EqualFold(filepath.Clean(latest.DataDir), filepath.Clean(startup.DataDir)) {
+		return nil, fmt.Errorf("protected enterprise config changed guardian identity")
+	}
+	return latest, nil
 }
 
 // removeEnrolledQuarantinedSource checks a request against the enrolled
