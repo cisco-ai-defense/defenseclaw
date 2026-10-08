@@ -257,6 +257,17 @@ func TestLintRules(t *testing.T) {
 			tp.Spec.LsmHooks[0].Selectors[selSSHBins].MatchArgs[0].Values = values
 		}},
 		{"no selector", 7, func(tp *tracingPolicy) { tp.Spec.LsmHooks[1].Selectors = nil }},
+		// Tetragon refuses a numeric Equal list of more than 4 values, and
+		// with it the whole policy (GAP-0049).
+		{"five uids in an Equal list", 7, func(tp *tracingPolicy) {
+			sel := &tp.Spec.LsmHooks[0].Selectors[selSSHPids]
+			sel.MatchArgs[len(sel.MatchArgs)-1] = tpMatchArg{Args: []int{2}, Operator: "Equal",
+				Values: []string{"1001", "1002", "1003", "1004", "1005"}}
+		}},
+		{"override with a NotInMap uid list", 2, func(tp *tracingPolicy) {
+			sel := &tp.Spec.LsmHooks[0].Selectors[selSSHPids]
+			sel.MatchArgs[len(sel.MatchArgs)-1].Operator = "NotInMap"
+		}},
 		// Rule 8: the schema.
 		{"wrong kind", 8, func(tp *tracingPolicy) { tp.Kind = "TracingPolicyNamespaced" }},
 		{"unknown option", 8, func(tp *tracingPolicy) { tp.Spec.Options = []tpOption{{Name: "override-method", Value: "fmod-ret"}} }},

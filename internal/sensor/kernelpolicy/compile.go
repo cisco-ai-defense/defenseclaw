@@ -574,11 +574,16 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		if write {
 			sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{1}, Operator: "Mask", Values: []string{writeMask}})
 		}
-		selectorUIDs := uidValues
+		// The binaries anchor names one uid. The pid anchor names every user
+		// in scope, and Tetragon's Equal on a number carries at most 4 values
+		// (MAX_MATCH_VALUES): a fifth user made the whole policy fail to load
+		// (GAP-0049). InMap keeps the list in a BPF hash map with no such
+		// limit.
+		uidMatch := tpMatchArg{Args: []int{2}, Operator: "InMap", Values: uidValues}
 		if anchor == "binaries" {
-			selectorUIDs = []string{strconv.Itoa(binaryUID)}
+			uidMatch = tpMatchArg{Args: []int{2}, Operator: "Equal", Values: []string{strconv.Itoa(binaryUID)}}
 		}
-		sel.MatchArgs = append(sel.MatchArgs, tpMatchArg{Args: []int{2}, Operator: "Equal", Values: selectorUIDs})
+		sel.MatchArgs = append(sel.MatchArgs, uidMatch)
 		eperm := eperm
 		sel.MatchActions = []tpAction{{Action: "Override", ArgError: &eperm}, {Action: "Post"}}
 		return sel

@@ -126,6 +126,11 @@ const (
 	// maxValues bounds any one value list, so a very large enrollment is
 	// refused rather than loaded half-understood.
 	maxValues = 512
+	// maxNumericValues is how many values Tetragon's Equal, NotEqual and Mask
+	// take on a numeric argument (MAX_MATCH_VALUES in bpf/process/types/
+	// basic.h, checked by writeMatchValues in v1.7.1). A longer list fails to
+	// load the policy; InMap and NotInMap have no such limit (GAP-0049).
+	maxNumericValues = 4
 	// maxPathLen and maxBinaryLen bound a matched path (Tetragon rejects
 	// binaries of 256 bytes or more).
 	maxPathLen   = 1024

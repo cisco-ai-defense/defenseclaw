@@ -345,7 +345,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-burnin-c665a844
+  name: defenseclaw-controls-burnin-8aa2b3a3
 spec:
   options:
     - name: policy-mode
@@ -400,7 +400,7 @@ spec:
                 - /home/bob/.ssh/id_ed25519
                 - /home/bob/.ssh/id_rsa
             - args: [2]
-              operator: Equal
+              operator: InMap
               values:
                 - "1002"
           matchActions:
@@ -431,7 +431,7 @@ spec:
               values:
                 - "2"
             - args: [2]
-              operator: Equal
+              operator: InMap
               values:
                 - "1002"
           matchActions:
@@ -473,7 +473,7 @@ spec:
               values:
                 - "2"
             - args: [2]
-              operator: Equal
+              operator: InMap
               values:
                 - "1002"
           matchActions:

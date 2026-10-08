@@ -96,7 +96,8 @@ func isNoPost(sel tpSelector) bool {
 //  6. every path is absolute, clean, inside an enrolled home (or a listed
 //     system path) and free of symlinks;
 //  7. at most 5 selectors per hook, 64 pids per selector, DNS-1123 names,
-//     bounded value lists;
+//     bounded value lists, and at most 4 values in a numeric Equal list
+//     (Tetragon refuses more; the uid list of a pid anchor uses InMap);
 //  8. the text round-trips through the typed schema with unknown fields
 //     refused.
 //
@@ -253,7 +254,11 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 				add(8, h, s, "matchArgs args %v does not name one of the hook's %d args", arg.Args, len(args))
 				continue
 			}
-			if at == uidIndex && arg.Operator == "Equal" {
+			if numericArg(args[at]) && !mapOperator(arg.Operator) && len(arg.Values) > maxNumericValues {
+				add(7, h, s, "matchArgs args %v has %d values for %s; Tetragon accepts %d on a number (use InMap)",
+					arg.Args, len(arg.Values), arg.Operator, maxNumericValues)
+			}
+			if at == uidIndex && (arg.Operator == "Equal" || arg.Operator == "InMap") {
 				uidValues += len(arg.Values)
 			}
 			if at == pathIndex {
@@ -300,6 +305,18 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 			}
 		}
 	}
+}
+
+// numericArg reports whether a hook argument is a number, which Tetragon
+// matches from values written into the selector itself.
+func numericArg(arg tpArg) bool {
+	return strings.HasPrefix(arg.Type, "int") || strings.HasPrefix(arg.Type, "uint") ||
+		arg.Type == "size_t" || arg.Type == "syscall64"
+}
+
+// mapOperator reports whether an operator keeps its values in a BPF map.
+func mapOperator(operator string) bool {
+	return operator == "InMap" || operator == "NotInMap"
 }
 
 func lintPaths(h, s int, arg tpMatchArg, override bool, opts LintOptions,
