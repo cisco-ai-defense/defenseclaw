@@ -3813,7 +3813,16 @@ func TestAntigravityAcceptsUnicodeHookPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), hook) {
-		t.Fatalf("registered hook does not contain path %q", hook)
+	// Decode the JSON: on Windows the temp path has backslashes, which the
+	// file stores escaped.
+	var cfg map[string]map[string][]struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode hooks.json: %v", err)
+	}
+	stop := cfg["defenseclaw-antigravity-stop"]["Stop"]
+	if want := hook + " Stop"; len(stop) != 1 || stop[0].Command != want {
+		t.Fatalf("Stop hook = %+v, want command %q", stop, want)
 	}
 }
