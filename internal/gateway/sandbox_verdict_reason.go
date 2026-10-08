@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -77,8 +78,12 @@ func sandboxVerdictReason(connectorName, action string, ruleIDs, findings []stri
 	case "confirm":
 		return agentConfirmSentence(sandboxRulesSubject(rules))
 	}
+	note := sandboxFlaggedNote
+	if action == sandboxActionUndecided {
+		note = sandboxapi.UndecidedNote
+	}
 	if len(rules) == 0 {
-		return "Allowed but flagged by DefenseClaw policy. " + sandboxFlaggedNote
+		return "Allowed but flagged by DefenseClaw policy. " + note
 	}
 	first := rules[0]
 	var b strings.Builder
@@ -93,8 +98,29 @@ func sandboxVerdictReason(connectorName, action string, ruleIDs, findings []stri
 		}
 		b.WriteString(" (also " + strings.Join(others, ", ") + ")")
 	}
-	b.WriteString(". " + sandboxFlaggedNote)
+	b.WriteString(". " + note)
 	return b.String()
+}
+
+// sandboxActionUndecided is the sandboxVerdictReason action of an allowed
+// verdict a rule matched that could not decide it (sandboxMatchUndecided).
+const sandboxActionUndecided = "undecided"
+
+// sandboxMatchUndecided reports an allowed action-mode verdict whose
+// severity blocks or asks at the connector's thresholds: a rule that would
+// have stopped the call matched it but could not decide it (a
+// detection-only match, as for a command the parser cannot read in full),
+// so the call ran (GAP-0312).
+func (a *APIServer) sandboxMatchUndecided(ctx context.Context, connectorName string, resp agentHookResponse) bool {
+	if !strings.EqualFold(strings.TrimSpace(resp.Mode), "action") {
+		return false
+	}
+	probe := []RuleFinding{{Severity: strings.ToUpper(strings.TrimSpace(resp.Severity)), Confidence: 1}}
+	switch guardrailActionForConnectorFindings(a.decisionConfig(ctx), connectorName, probe, true) {
+	case guardrailActionBlock, guardrailActionConfirm:
+		return true
+	}
+	return false
 }
 
 // sandboxRulesSubject names the deciding rules the way agentMatchedRules
@@ -299,7 +325,11 @@ func (a *APIServer) sandboxVerdictWithReason(
 		if severityRank[strings.ToUpper(strings.TrimSpace(resp.Severity))] >= severityRank["LOW"] &&
 			(len(resp.RuleIDs) > 0 || len(findings) > 0) {
 			resp.SourceReason = hookSourceReason(resp)
-			resp.Reason = sandboxVerdictReason(connectorName, "alert", resp.RuleIDs, findings)
+			verb := "alert"
+			if a.sandboxMatchUndecided(ctx, connectorName, resp) {
+				verb = sandboxActionUndecided
+			}
+			resp.Reason = sandboxVerdictReason(connectorName, verb, resp.RuleIDs, findings)
 		}
 		return resp
 	}

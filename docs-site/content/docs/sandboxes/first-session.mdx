@@ -137,7 +137,7 @@ The same feed from a real session on a Mac, for a sandbox named with
 | --- | --- |
 | `✓ host` | The sandbox reached a site through the egress proxy. |
 | `✗ host (why)` | The egress proxy blocked a site. The line ends with the unblock command when the block can be lifted. |
-| `⚠` | A finding: DefenseClaw allowed a tool call but recorded something for your review. |
+| `⚠` | A finding: DefenseClaw allowed a tool call but recorded something for your review. `⚠ Bash ran although DefenseClaw rule … matched it` means a rule that blocks such calls matched one it could not decide: DefenseClaw decides only the commands it can read in full, and a shell variable, a substitution or a construct it does not analyze leaves a match undecided. |
 | `✗ tool … blocked` | DefenseClaw's hooks blocked a tool call. The harness shows the reason too. |
 | `? ask …` | The sandbox asks to reach something only you can open, such as a port on your machine. |
 
