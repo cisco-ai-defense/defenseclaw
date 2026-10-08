@@ -478,7 +478,12 @@ hooks on this computer:
    The Setup form is `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1`.
 
 DefenseClaw records the attestation as you give it; step 3 does not run
-Claude Code. The record is bound to the SHA-256 of the installed Claude Code
+Claude Code. It is a repair, though: like every repair it re-applies the
+deployment, so it stops the four DefenseClaw services and starts them again.
+For about one and a half minutes the agents of every user are refused (fail
+closed, `enterprise_managed_gateway_not_running`), and the run takes several
+minutes more when it prepares the scanner runtime. Plan it like the upgrade
+it follows, in the same maintenance window. The record is bound to the SHA-256 of the installed Claude Code
 policy file and of the hook binary, not to the computer. Every DefenseClaw
 upgrade replaces the hook binary, and a change to the Claude Code hook
 contract the policy is rendered from changes the policy, so either makes the
