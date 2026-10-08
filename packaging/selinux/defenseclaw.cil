@@ -1,0 +1,28 @@
+; Copyright 2026 Cisco Systems, Inc. and its affiliates
+; SPDX-License-Identifier: Apache-2.0
+;
+; defenseclaw: lets SELinux-confined users (user_u, staff_u and the other
+; confined logins) reach the DefenseClaw hook socket. The Linux lifecycle
+; loads it with `semodule -i` on hosts where SELinux is enabled and removes
+; it on uninstall.
+;
+; Without it a confined user's hook cannot even stat
+; /run/defenseclaw-hook/hook.sock (var_run_t, denied and hidden by a
+; dontaudit rule), so every hook that user runs is refused.
+;
+; The socket gets its own type, which every user domain may stat and write;
+; the services run as unconfined_service_t, which a user domain must be
+; allowed to connect to. The gateway authorizes each caller by uid after it
+; connects.
+
+(type defenseclaw_hook_sock_t)
+(roletype object_r defenseclaw_hook_sock_t)
+(typeattributeset file_type (defenseclaw_hook_sock_t))
+; pidfile: systemd and systemd-tmpfiles manage files of this type in /run.
+(typeattributeset pidfile (defenseclaw_hook_sock_t))
+
+; /run is labelled through its /var/run equivalent.
+(filecon "/var/run/defenseclaw-hook/hook\.sock" socket (system_u object_r defenseclaw_hook_sock_t ((s0) (s0))))
+
+(allow userdomain defenseclaw_hook_sock_t (sock_file (getattr write)))
+(allow userdomain unconfined_service_t (unix_stream_socket (connectto)))

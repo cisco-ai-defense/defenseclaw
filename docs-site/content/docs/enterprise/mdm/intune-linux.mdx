@@ -45,7 +45,10 @@ while they remain open.
 - **Release**: verify `checksums.txt` and read the pin of the artifact you
   deploy, as in [What you deliver](/docs/enterprise/mdm#what-you-deliver).
   Ubuntu needs the `.deb`, RHEL the `.rpm`. The payload archive
-  `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz` works on both.
+  `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz` works on both; the
+  wrapper runs its gateway from `/var/lib/defenseclaw-mdm`, so that folder
+  must allow execution (`--staging-dir` picks another root-only folder).
+  Prefer the package on CIS-hardened hosts.
 - **Config**: write the config as described in
   [Configuration](/docs/enterprise/configuration#settings-reference). Keep the
   AI Defense key out of it.

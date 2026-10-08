@@ -31,9 +31,10 @@ the same config.
 | Not WSL | The lifecycle refuses a new install inside a WSL distribution (`wsl_distribution`), even one with systemd: the Windows user can open the distribution as root. A deployment that is already there gets a `wsl_distribution` warning on status, verify and upgrade. Govern WSL from Windows instead. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl). |
 | Architecture | x86_64 (`amd64`) or `arm64`. Each release has a package and a tarball for both. |
 | Package format | `.deb` (Debian, Ubuntu) or `.rpm` (RHEL and derivatives). Hosts without a package manager use the payload tarball. |
-| SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
+| SELinux | Supported, for unconfined and SELinux-confined users (`user_u`, `staff_u` and other confined logins). Where SELinux is enabled, the lifecycle loads a small policy module, `defenseclaw` (`semodule -l` lists it): it labels the hook socket `defenseclaw_hook_sock_t` and lets every user domain stat and write that socket and connect to the DefenseClaw services, which run as `unconfined_service_t`. The gateway still authorizes each caller by uid. Uninstall removes the module. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw`, `/etc/defenseclaw` and `/run/defenseclaw-hook`, and reports a `selinux_relabel` warning if that fails, or `selinux_module` if the module does not load. `status` and `verify` warn with `selinux_module_missing` while confined users cannot reach the socket. |
 | Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
+| Application control | fapolicyd: the deb and rpm ship every file an agent loads (the binaries and the managed OpenCode plugin), so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file. See [Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files). |
 
 The systemd version decides how the gateway reads secrets:
 
@@ -54,7 +55,7 @@ lists each directive and the version it needs.
 | Item | Path | Owner and mode |
 | --- | --- | --- |
 | Binaries | `/opt/defenseclaw/bin`: `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when present | `root`, `0755` |
-| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js` | `root`, `0644` |
+| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js`, shipped in the deb and rpm (a payload install writes it) | `root`, `0644` |
 | Config | `/etc/defenseclaw/config.yaml` | `root:defenseclaw`, `0640` |
 | Policies | `/etc/defenseclaw/policies` | `root:defenseclaw`, `0750` |
 | Secrets | `/etc/defenseclaw/secrets` | See the table above |

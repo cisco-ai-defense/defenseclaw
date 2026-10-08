@@ -148,6 +148,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddWarning(codeUnitDropIn, "local drop-ins change DefenseClaw units: "+strings.Join(dropIns, ", ")+"; they keep the units' account, sandbox and config")
 	}
 	l.describe(ctx, record, true)
+	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false

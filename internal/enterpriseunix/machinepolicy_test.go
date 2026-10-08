@@ -207,6 +207,44 @@ func TestPartiallyPublishedMachinePolicyIsReportedAndSettles(t *testing.T) {
 	}
 }
 
+// heldRetirePolicy publishes through the real writers, except that a
+// connector leaving machine policy cannot be retired: its vendor file is held
+// by another tool (chattr +i), so its entries stay.
+type heldRetirePolicy struct {
+	MachinePolicyManager
+	held string
+}
+
+func (p *heldRetirePolicy) Publish(cfg *config.Config) (enterprisepolicy.Result, error) {
+	intended, err := p.Intended(cfg)
+	if err != nil || contains(intended, p.held) {
+		return p.MachinePolicyManager.Publish(cfg)
+	}
+	result, err := p.Verify(cfg)
+	return result, errors.Join(err, &enterprisepolicy.RetireError{Connector: p.held, Err: errors.New("remove " + claudeDropIn + ": operation not permitted")})
+}
+
+// GAP-0743: removing claudecode from guardrail.connectors while another tool
+// held 90-defenseclaw.json returned ok and committed the config; the hooks
+// stayed and the gateway refused every Claude Code prompt while status and
+// verify were green. The run now fails with machine_policy_failed, rolls back
+// and keeps the previous config, which still serves Claude Code.
+func TestRetiringAConnectorWhoseVendorFileIsHeldRollsBack(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex", "claudecode")}))
+	before, _ := h.env.loadDeployment()
+	h.env.MachinePolicy = &heldRetirePolicy{MachinePolicyManager: h.env.MachinePolicy, held: enterprisepolicy.ConnectorClaudeCode}
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: machinePolicyConfig(t, h, "codex")})
+	requireError(t, r, codeMachinePolicy)
+	if r.ExitCode != 1 || !hasWarning(r, codeRolledBack) {
+		t.Fatalf("a held vendor file must fail and roll back the run: exit %d warnings %+v", r.ExitCode, r.Warnings)
+	}
+	after, _ := h.env.loadDeployment()
+	if after.ConfigSHA256 != before.ConfigSHA256 || !reflect.DeepEqual(descriptorConnectors(t, h), []string{"claudecode", "codex"}) {
+		t.Fatalf("the previous config must stay in force: config %s -> %s, descriptor %v", before.ConfigSHA256, after.ConfigSHA256, descriptorConnectors(t, h))
+	}
+}
+
 func TestVerifyReportsMissingMachinePolicy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))

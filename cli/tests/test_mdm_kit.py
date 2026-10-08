@@ -346,6 +346,42 @@ echo installed-ok
             assert not log.exists(), (shell, "the package manager ran before the version check", log.read_text())
 
 
+# GAP-0752: on a CIS host (/tmp and /var/tmp noexec) the payload's gateway
+# could not run from the wrapper's /var/tmp staging folder, and the result was
+# mdm_lifecycle_no_result with the shell's "Permission denied". The wrapper
+# now stages in a root-only folder of its own and names a noexec mount.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_wrapper_names_a_noexec_staging_mount(tmp_path: Path) -> None:
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in text
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_noexec_mount", "dc_extract_payload"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    findmnt = bin_dir / "findmnt"
+    findmnt.write_text("#!/bin/sh\necho '/var/tmp rw,nosuid,nodev,noexec,relatime'\n", encoding="utf-8")
+    findmnt.chmod(0o755)
+    source = tmp_path / "src"
+    source.mkdir()
+    gateway = source / "defenseclaw-gateway"
+    gateway.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    gateway.chmod(0o644)  # what a noexec mount makes of an executable
+    archive = tmp_path / "payload.tar.gz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "defenseclaw-gateway"], check=True)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    script = f"""
+DC_SCRIPT_OS=linux DC_EXIT_FAILURE=1 DC_STAGE='{stage}' DC_STAGED_SOURCE='{archive}'
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+chown() {{ :; }}
+{functions}
+dc_extract_payload
+echo extracted
+"""
+    result = subprocess.run(["sh", "-c", script], env={"PATH": f"{bin_dir}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "FAIL mdm_staging_noexec" in result.stdout and "/var/tmp is mounted noexec" in result.stdout, result.stdout
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("failure", ["disk_full", "downgrade"])
 def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path: Path) -> None:

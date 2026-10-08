@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -152,6 +153,14 @@ type lifecycle struct {
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
+	// configWrittenDuringRun holds a config.yaml another writer put in place
+	// while a transaction of this run planned its own (applyFiles kept it).
+	// A rollback restores the earlier file, so the newer one is put back
+	// after it and applied once the run ends.
+	configWrittenDuringRun []byte
+	// machinePolicyPublished is set once a transaction of this run wrote
+	// vendor machine policy for its config, which a rollback then undoes.
+	machinePolicyPublished bool
 	// machinePolicyErr is the error of the last vendor machine policy
 	// publish: a file DefenseClaw could not write its hooks into.
 	machinePolicyErr error
@@ -702,6 +711,11 @@ type plan struct {
 	// packageUnits are the digests of the unit files the Linux package
 	// placed (package channel), keyed by canonical path.
 	packageUnits map[string]string
+	// installedConfigSHA is the installed config.yaml's digest when the plan
+	// read its inputs ("" when there was none). A different one when the
+	// transaction writes the planned config means another writer replaced
+	// the file during the run.
+	installedConfigSHA string
 }
 
 // buildPlan computes the desired state without mutating the host. account
@@ -766,6 +780,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
+	p.installedConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	raw, fromInstalled, err := l.configBytes()
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
@@ -900,8 +915,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		for path := range record.Files {
 			if !want[path] {
-				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/")) {
-					continue // the package owns the binaries and units now
+				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/") ||
+					path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
+					continue // the package owns the binaries, units and OpenCode plugin now
 				}
 				p.stale = append(p.stale, path)
 			}
@@ -1272,6 +1288,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if newerConfig != nil {
 			l.restoreNewerConfig(record, newerConfig)
 		}
+		if restored && record != nil && l.machinePolicyPublished {
+			l.restoreMachinePolicy(record)
+		}
+		if restored && record != nil && newerConfig == nil && l.configWrittenDuringRun != nil {
+			l.restoreNewerConfig(record, l.configWrittenDuringRun)
+		} else {
+			l.configWrittenDuringRun = nil
+		}
 		if err != nil {
 			message := err.Error()
 			if refusal := l.configRefusal(ctx); refusal != "" {
@@ -1352,7 +1376,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		l.revokeDeletedAccounts(ctx)
 	}
 	if env.GOOS == "linux" {
-		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
+		// The module labels the hook socket; restorecon then relabels the
+		// socket already in place (GAP-0772).
+		l.ensureSELinuxModule(ctx)
+		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir), env.P(env.Layout.HookSocketDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
 			r.AddWarning("selinux_relabel", err.Error())
 		}
 	}
@@ -1661,7 +1688,15 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 			}
 			continue
 		}
-		if file.KeepContent {
+		// A config.yaml written in place while this run held the lock (a
+		// --config run, say) is newer than the bytes this run planned, so it
+		// stays and a follow-up transaction applies it (input_changed). The
+		// run overwrote it with its own file and nothing warned (GAP-0745).
+		written := file.Kind == "config" && !file.KeepContent && current != p.installedConfigSHA
+		if written {
+			l.configWrittenDuringRun, _ = readBounded(env.P(file.Path), maxInputBytes)
+		}
+		if file.KeepContent || written {
 			// Changed since the plan read it: the newer bytes stay, and the
 			// run applies them in a follow-up transaction. A regular file
 			// still gets the managed mode and owner.
@@ -2280,13 +2315,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
-	// On Linux the deb/rpm removes its own files. A macOS pkg has no
-	// uninstaller, so the lifecycle removes the binaries and the receipt.
+	// On Linux the deb/rpm removes its own files (the binaries, units and
+	// the managed OpenCode plugin). A macOS pkg has no uninstaller, so the
+	// lifecycle removes the binaries and the receipt.
 	packageManaged := l.packageManaged
 	paths := []string{}
 	if record != nil {
 		for path := range record.Files {
-			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/")) {
+			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/") ||
+				path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
 				continue
 			}
 			paths = append(paths, path)
@@ -2348,6 +2385,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		disableKeptDefinitions()
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	l.removeSELinuxModule(ctx)
 	// Runtime leftovers of the stopped services: the sensor helper's socket
 	// directory and the gateway's plugin cache (its TempDir is /tmp: the
 	// service manager sets no TMPDIR).
@@ -2358,7 +2396,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories.
 	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
-	// The managed OpenCode plugin left with the recorded files above.
+	// The managed OpenCode plugin left with the recorded files above, or
+	// leaves with the deb or rpm that ships it.
 	_ = removeDirIfEmpty(env.P(openCodePluginDir(env.Layout)))
 	_ = removeDirIfEmpty(env.P(filepath.Dir(env.Layout.VendorPolicyDir)))
 	if env.GOOS == "darwin" {
