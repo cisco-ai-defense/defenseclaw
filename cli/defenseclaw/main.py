@@ -55,7 +55,7 @@ if __name__ == "__main__" and sys.argv[1:] == ["--version-json"]:
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import platform_support, ux
 from defenseclaw.commands.cmd_acp import acp_cmd
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
@@ -276,6 +276,11 @@ def cli(ctx: click.Context) -> None:
     if _is_offline_rulepack_validation(ctx):
         return
     if _is_audit_export(ctx):
+        return
+    if invoked == "sandbox" and platform_support.host_os() == "windows":
+        # Every sandbox command refuses Windows (exit 3) before it would use
+        # the configuration, so a broken config.yaml is not the first thing
+        # to fix for a feature that cannot run there (GAP-0242).
         return
 
     from defenseclaw import config as cfg_mod
