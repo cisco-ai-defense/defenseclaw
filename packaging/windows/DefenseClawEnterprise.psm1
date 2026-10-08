@@ -930,6 +930,22 @@ namespace $nativeNamespace
             }
         }
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "MoveFileExW")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveFileExDelete(
+            string existingFileName,
+            IntPtr newFileName,
+            uint flags);
+
+        public static void DeleteFileAtRestart(string path)
+        {
+            const uint MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004;
+            if (!MoveFileExDelete(path, IntPtr.Zero, MOVEFILE_DELAY_UNTIL_REBOOT))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "schedule delete at restart failed: " + path);
+        }
+
         public static uint GetRegularFileLinkCountNoFollow(string path)
         {
             const uint FILE_SHARE_READ = 0x00000001;
@@ -4013,6 +4029,7 @@ function Install-DefenseClawFileAtomic {
     )
     Assert-DefenseClawNoReparsePath -Path $Source
     Assert-DefenseClawNoReparsePath -Path $Destination -AllowMissingLeaf
+    [void]@(Remove-DefenseClawStaleReplacementBackups -Destination $Destination)
     if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {
         $sourceItem = Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $Source `
@@ -4099,9 +4116,14 @@ function Install-DefenseClawFileAtomic {
         }
         if (-not [string]::IsNullOrWhiteSpace($backup)) {
             Assert-DefenseClawNoReparsePath -Path $backup
-            Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $backup `
-                -Force
+            if (Test-DefenseClawStandaloneProfile) {
+                [void](Remove-DefenseClawReplacementBackup -Path $backup)
+            }
+            else {
+                Microsoft.PowerShell.Management\Remove-Item `
+                    -LiteralPath $backup `
+                    -Force
+            }
             $backup = ''
         }
     }
@@ -4109,6 +4131,134 @@ function Install-DefenseClawFileAtomic {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
             Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
         }
+        # A replacement that failed after File.Replace leaves its backup. The
+        # transaction snapshot restores the file, so the backup goes too,
+        # unless it is the only copy left (the destination is missing).
+        if ((Test-DefenseClawStandaloneProfile) -and
+            -not [string]::IsNullOrWhiteSpace($backup) -and
+            [IO.File]::Exists($Destination)) {
+            try {
+                [void](Remove-DefenseClawReplacementBackup -Path $backup)
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Verbose "replacement backup stays: $backup"
+            }
+        }
+    }
+}
+
+# Install-DefenseClawFileAtomic keeps the file it replaces as
+# <Destination>.backup.<32 hex> until the new bytes are verified. Windows
+# lets a running program's file be renamed but not deleted, so the backup of
+# a defenseclaw-acp.exe that an editor's ACP thread still runs could not be
+# removed, the upgrade failed with Access to the path is denied and rolled
+# back, and the backup stayed in bin (GAP-0743), where the next uninstall
+# refused it as unexpected content (GAP-0772). Standalone now deletes such a
+# backup at the next restart instead, and every later replacement of the
+# file and every uninstall removes what an earlier run left. Secure Client
+# is unchanged.
+function Test-DefenseClawReplacementBackupName {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Leaf
+    )
+    $prefix = $Leaf + '.backup.'
+    if (-not $Name.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    return ($Name.Substring($prefix.Length) -cmatch '^[0-9a-f]{32}$')
+}
+
+function Remove-DefenseClawReplacementBackup {
+    # Returns $true once the backup is gone and $false when a running
+    # program still uses it; Windows then deletes it at the next restart.
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-DefenseClawNoReparsePath -Path $Path -AllowMissingLeaf
+    if (-not [IO.File]::Exists($Path)) {
+        return $true
+    }
+    try {
+        [IO.File]::Delete($Path)
+        return $true
+    }
+    catch [UnauthorizedAccessException], [IO.IOException] {
+        Request-DefenseClawDeleteAtRestart -Path $Path
+        return $false
+    }
+}
+
+function Request-DefenseClawDeleteAtRestart {
+    param([Parameter(Mandatory)][string]$Path)
+    $nativeSecurityType = Initialize-DefenseClawNativeSecurity
+    $nativeSecurityType::DeleteFileAtRestart($Path)
+}
+
+function Remove-DefenseClawStaleReplacementBackups {
+    # Standalone: removes the replacement backups of Destination that an
+    # earlier run left, and writes each one a running program still uses.
+    param([Parameter(Mandatory)][string]$Destination)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $directory = [IO.Path]::GetDirectoryName($Destination)
+    $leaf = [IO.Path]::GetFileName($Destination)
+    if ([string]::IsNullOrWhiteSpace($leaf) -or -not [IO.Directory]::Exists($directory)) {
+        return
+    }
+    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem `
+            -LiteralPath $directory `
+            -Force `
+            -File `
+            -Filter ($leaf + '.backup.*'))) {
+        if (-not (Test-DefenseClawReplacementBackupName -Name ([string]$item.Name) -Leaf $leaf) -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        if (-not (Remove-DefenseClawReplacementBackup -Path ([string]$item.FullName))) {
+            [string]$item.FullName
+        }
+    }
+}
+
+function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
+    # Uninstall removes the replacement backups an earlier upgrade left
+    # beside the installed files before it checks the install tree. One a
+    # running program still uses keeps the folder, so the uninstall says
+    # which and what to do.
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $kept = [Collections.Generic.List[string]]::new()
+    $files = @(
+        $Layout.BrokerPath,
+        $Layout.GatewayPath,
+        $Layout.ACPPath,
+        $Layout.HookPath,
+        $Layout.SensorHelperPath,
+        $Layout.CLIPath,
+        $Layout.InstallerPath,
+        $Layout.ModulePath
+    )
+    $openCodePlugin = Get-DefenseClawStandaloneOpenCodePluginPaths -Layout $Layout
+    if ($null -ne $openCodePlugin) {
+        $files += [string]$openCodePlugin.PluginPath
+    }
+    foreach ($path in $files) {
+        if ([string]::IsNullOrWhiteSpace([string]$path)) {
+            continue
+        }
+        foreach ($left in @(Remove-DefenseClawStaleReplacementBackups -Destination ([IO.Path]::GetFullPath([string]$path)))) {
+            $kept.Add([string]$left)
+        }
+    }
+    if ($kept.Count -gt 0) {
+        throw (
+            'a program started before the last DefenseClaw upgrade still runs the earlier copy kept beside ' +
+            'the installed file, so the install folder cannot be removed yet: ' + ($kept -join ', ') +
+            '. Close the programs that use it (for example an editor thread that uses DefenseClaw ACP) or ' +
+            'restart the computer, which deletes the copy, then run the uninstall again'
+        )
     }
 }
 
@@ -23433,6 +23583,7 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -AnyStartMode
+    Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
     Assert-DefenseClawManagedInstallTree -Layout $Layout
     Assert-DefenseClawRecordedArtifactHashes `
         -Metadata $metadata `
