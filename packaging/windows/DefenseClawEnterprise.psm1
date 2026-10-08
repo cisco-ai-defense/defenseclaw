@@ -11367,6 +11367,17 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
     $rollbackRequired = [bool]$prepared.Value -or (
         $journalPreserved -and ($journalExists -or $journalChanged)
     )
+    if ($rollbackRequired -and -not [bool]$prepared.Value -and $journalExists -and
+        -not $journalChanged -and (Test-DefenseClawStandaloneProfile) -and
+        (Get-DefenseClawTeardownJournalPhase -Path $Layout.ManagedHooksTeardownJournalPath) -ceq 'rolled_back') {
+        # Standalone: the journal is the unchanged one an earlier, rolled-back
+        # uninstall left. Hidden prepare rewrites it before its first change,
+        # so this transaction changed nothing there. The hidden rollback
+        # refused it once the deployment changed ("does not match the
+        # protected deployment"), and the transaction stayed pending for good
+        # (GAP-1041).
+        $rollbackRequired = $false
+    }
     Restore-DefenseClawTransaction `
         -SnapshotPath $SnapshotPath `
         -Layout $Layout `
@@ -24740,6 +24751,27 @@ function Complete-DefenseClawForcedUninstall {
     return $Result
 }
 
+function Get-DefenseClawTeardownJournalPhase {
+    <#
+        The phase a managed-hook teardown journal records, or an empty string
+        when it cannot be read: an unreadable journal is not provably
+        finished, and the teardown command reports it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $journal = Microsoft.PowerShell.Management\Get-Content -LiteralPath $Path -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $phaseProperty = $journal.PSObject.Properties['phase']
+        if ($null -ne $phaseProperty) {
+            return [string]$phaseProperty.Value
+        }
+    }
+    catch {
+        return ''
+    }
+    return ''
+}
+
 function Remove-DefenseClawRolledBackTeardownJournal {
     <#
         Standalone. Removes the managed-hook teardown journal of a teardown
@@ -24761,21 +24793,7 @@ function Remove-DefenseClawRolledBackTeardownJournal {
         return $false
     }
     Assert-DefenseClawNoReparsePath -Path $path
-    $phase = ''
-    try {
-        $journal = Microsoft.PowerShell.Management\Get-Content -LiteralPath $path -Raw |
-            Microsoft.PowerShell.Utility\ConvertFrom-Json
-        $phaseProperty = $journal.PSObject.Properties['phase']
-        if ($null -ne $phaseProperty) {
-            $phase = [string]$phaseProperty.Value
-        }
-    }
-    catch {
-        # An unreadable journal is not provably finished; the teardown
-        # command reports it.
-        return $false
-    }
-    if ($phase -cne 'rolled_back') {
+    if ((Get-DefenseClawTeardownJournalPhase -Path $path) -cne 'rolled_back') {
         return $false
     }
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $path -Force
