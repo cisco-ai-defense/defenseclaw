@@ -39,8 +39,11 @@ import (
 const (
 	committedConfigName = "committed-config.yaml"
 	rejectedConfigName  = "rejected-config.yaml"
-	codeConfigReverted  = "config_reverted"
-	codeConfigRejected  = "config_rejected"
+	// rejectedReasonName keeps the first error of the run that rejected an
+	// in-place edit, so status and verify can name it (GAP-0587).
+	rejectedReasonName = "rejected-config.reason"
+	codeConfigReverted = "config_reverted"
+	codeConfigRejected = "config_rejected"
 )
 
 func (e *Env) committedConfigPath() string {
@@ -49,6 +52,16 @@ func (e *Env) committedConfigPath() string {
 
 func (e *Env) rejectedConfigPath() string {
 	return filepath.Join(e.P(e.Layout.LifecycleDir), rejectedConfigName)
+}
+
+func (e *Env) rejectedReasonPath() string {
+	return filepath.Join(e.P(e.Layout.LifecycleDir), rejectedReasonName)
+}
+
+// removeRejectedConfig drops the kept rejected edit and its reason.
+func (e *Env) removeRejectedConfig() {
+	_ = removeFile(e.rejectedConfigPath())
+	_ = removeFile(e.rejectedReasonPath())
 }
 
 // saveCommittedConfig records the config a committed transaction applied.
@@ -97,6 +110,14 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 		if err := env.writeFileAtomic(env.rejectedConfigPath(), rejected, 0o600, rootOwner()); err != nil {
 			r.AddWarning(codeConfigReverted, "could not keep a copy of the rejected config: "+err.Error())
 		}
+		_ = removeFile(env.rejectedReasonPath())
+		if len(r.Errors) > 0 {
+			reason := r.Errors[0].Code + ": " + r.Errors[0].Message
+			if len(reason) > 600 {
+				reason = reason[:600] + "..."
+			}
+			_ = env.writeFileAtomic(env.rejectedReasonPath(), []byte(reason), 0o600, rootOwner())
+		}
 	}
 	owner := fileOwner{UID: 0, GID: record.ServiceGID}
 	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), committed, 0o640, owner); err != nil {
@@ -144,8 +165,12 @@ func (e *Env) rejectedConfigProblem() string {
 	}
 	// The run may have failed for a reason other than the file (a service
 	// that did not start), so the hint does not call the file invalid.
-	return fmt.Sprintf("the config.yaml edit rejected at %s is not applied: the run that applied it failed (the lifecycle log says why), the last applied config is in place and the rejected file is kept at %s. Write config.yaml again, even unchanged, to retry it, or push a corrected one",
-		rejected.ModTime().UTC().Format(time.RFC3339), filepath.Join(e.Layout.LifecycleDir, rejectedConfigName))
+	why := "the lifecycle log says why"
+	if reason, err := readBounded(e.rejectedReasonPath(), 4096); err == nil && len(reason) > 0 {
+		why = string(reason)
+	}
+	return fmt.Sprintf("the config.yaml edit rejected at %s is not applied: the run that applied it failed (%s), the last applied config is in place and the rejected file is kept at %s. Write config.yaml again, even unchanged, to retry it, or push a corrected one",
+		rejected.ModTime().UTC().Format(time.RFC3339), why, filepath.Join(e.Layout.LifecycleDir, rejectedConfigName))
 }
 
 // rejectionSuperseded reports whether config.yaml was written after the
@@ -165,6 +190,6 @@ func (l *lifecycle) settleRejectedConfig() {
 		return
 	}
 	if l.opts.ConfigFile != "" || env.rejectionSuperseded(rejected) {
-		_ = removeFile(env.rejectedConfigPath())
+		env.removeRejectedConfig()
 	}
 }
