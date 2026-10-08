@@ -21,6 +21,79 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// An inspect scan must use the authenticated connector profile override.
+func TestInspectScanUsesAuthenticatedConnectorProfilePack(t *testing.T) {
+	stubProfileSources(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	packDir := filepath.Join(t.TempDir(), "codex-pack")
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: INSPECT-CONNECTOR-MARKER
+    pattern: "inspect_connector_marker_token"
+    title: inspect connector fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"codex": {RulePackDir: packDir},
+		}},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	ctx := withAuthenticatedInspectConnector(t.Context(), "codex")
+	ctx = api.withGuardrailProfileDecision(ctx, "")
+	findings, err := scanWithTimeout(ctx, "inspect_connector_marker_token", "shell-response", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := findingIDs(findings); !containsRuleID(ids, "INSPECT-CONNECTOR-MARKER") {
+		t.Fatalf("authenticated connector pack not used: %v", ids)
+	}
+}
+
+// A reload during a request must attribute records to the profile enforced
+// by decisions after the reload.
+func TestGuardrailProfileTelemetryFollowsReloadedSet(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"}, "watch": {Mode: "observe"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx = api.withGuardrailProfileDecision(ctx, "")
+	if got := api.decisionConfig(ctx).Guardrail.Mode; got != "action" {
+		t.Fatalf("initial decision mode = %q", got)
+	}
+	next := *cfg
+	next.Guardrail = cfg.Guardrail
+	next.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	set, err := newGuardrailProfileSet(&next, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.setGuardrailProfiles(set)
+	if got := api.decisionConfig(ctx).Guardrail.Mode; got != "observe" {
+		t.Fatalf("reloaded decision mode = %q", got)
+	}
+	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "watch" {
+		t.Fatalf("telemetry profile = %q, want enforced watch", name)
+	}
+}
+
 // TestSubjectGroupsMatchLikeEqualFold: the group index answers as the scan
 // with strings.EqualFold it replaced (GAP-0118), for names, SIDs, DOMAIN\name
 // groups, a bare name against a DOMAIN\name group, padding, and runes whose
