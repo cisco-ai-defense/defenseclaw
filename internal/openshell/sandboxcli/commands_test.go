@@ -149,6 +149,13 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// GAP-0377: a hook post of a placeholder conversation is not
+		// DefenseClaw's refusal, and a later verdict marks it old.
+		{"placeholder conversation", func(h *sandboxapi.HookCoverage) {
+			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 400 Bad Request", at
+			h.LastHookFailureCause, h.HooksAnsweredAt = sandboxapi.ReasonPlaceholderRefused, at.Add(3*time.Minute)
+		}, "2 failed", []string{"Hook error    a hook post of a conversation that held a sandbox credential placeholder failed at 04:57:01 " +
+			"(HTTP 400 Bad Request; OpenShell refuses such a conversation's requests; the hook failed closed); hooks answered again since 05:00:01"}},
 		// A restarted daemon keeps the counts, not the time of the last
 		// hook (GAP-0166): the column still counts them.
 		{"after a daemon restart", func(h *sandboxapi.HookCoverage) { h.LastHookAt = time.Time{} }, " 4 calls, 1 blocked ",

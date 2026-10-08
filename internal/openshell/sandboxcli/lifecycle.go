@@ -305,11 +305,21 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		row("Last blocked", truncate(sb.Hooks.LastBlocked, 100))
 	}
 	if sb.Hooks.LastHookFailure != "" {
-		last := "DefenseClaw answered " + sb.Hooks.LastHookFailure
+		at := ""
 		if !sb.Hooks.LastHookFailureAt.IsZero() {
-			last += " at " + sb.Hooks.LastHookFailureAt.Local().Format("15:04:05")
+			at = " at " + sb.Hooks.LastHookFailureAt.Local().Format("15:04:05")
 		}
-		row("Hook error", last+" (the hook failed closed)")
+		last := "DefenseClaw answered " + sb.Hooks.LastHookFailure + at + " (the hook failed closed)"
+		if sb.Hooks.LastHookFailureCause == sandboxapi.ReasonPlaceholderRefused {
+			// OpenShell refused that conversation's requests, not DefenseClaw
+			// the hook (GAP-0377).
+			last = "a hook post of a conversation that held a sandbox credential placeholder failed" + at + " (" +
+				sb.Hooks.LastHookFailure + "; OpenShell refuses such a conversation's requests; the hook failed closed)"
+		}
+		if !sb.Hooks.HooksAnsweredAt.IsZero() {
+			last += "; hooks answered again since " + sb.Hooks.HooksAnsweredAt.Local().Format("15:04:05")
+		}
+		row("Hook error", last)
 	}
 	if sb.Hooks.ModelKeyRejected != "" {
 		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))

@@ -83,7 +83,31 @@ func (b *box) observeModelAnswerLocked(d HookDecision, now time.Time) (rejected 
 func (b *box) notePlaceholderLocked(now time.Time) bool {
 	first := !b.placeholderInSessionLocked()
 	b.hooks.placeholderAt = now
+	b.notePlaceholderFailureLocked()
 	return first
+}
+
+// placeholderFailureWindow is how close a hook failure and a refusal of a
+// request that carried a credential placeholder come when the failure is a
+// hook post of the conversation OpenShell refuses: OpenShell refuses the
+// conversation's model request and its hook posts within a second or two.
+const placeholderFailureWindow = 5 * time.Second
+
+// notePlaceholderFailureLocked marks the last hook failure as one of a
+// conversation OpenShell refuses for its credential placeholder when the
+// two came within placeholderFailureWindow of each other in this session,
+// whichever came first. DefenseClaw did not refuse that hook, though the
+// status said "DefenseClaw answered HTTP 400" (GAP-0377), and the hooks do
+// not work again while the conversation goes on (noteHookAnsweredLocked).
+// Callers hold Manager.mu.
+func (b *box) notePlaceholderFailureLocked() {
+	failed := b.hooks.lastFailureAt
+	if failed.IsZero() || failed.Before(b.started) || !b.placeholderInSessionLocked() {
+		return
+	}
+	if d := failed.Sub(b.hooks.placeholderAt); d <= placeholderFailureWindow && d >= -placeholderFailureWindow {
+		b.hooks.failureCause, b.hooks.answeredAt = sandboxapi.ReasonPlaceholderRefused, time.Time{}
+	}
 }
 
 // placeholderInSessionLocked reports a placeholder refusal since b last

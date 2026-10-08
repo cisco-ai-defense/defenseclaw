@@ -137,6 +137,7 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 			b.hooks.promptBlocked++
 		}
 		rejected, placeholder := b.observeModelAnswerLocked(d, m.now())
+		b.noteHookAnsweredLocked(m.now())
 		m.mu.Unlock()
 		if rejected != "" {
 			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Event: d.Event,
@@ -182,6 +183,7 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 	if tamper != tamperNone {
 		alarm = m.noteTamperLocked(b, d, hooks, tamper)
 	}
+	b.noteHookAnsweredLocked(m.now())
 	m.mu.Unlock()
 	if counted && blocked {
 		msg := "✗ tool call blocked by DefenseClaw"
@@ -283,6 +285,8 @@ func (m *Manager) ObserveHookFailure(f HookFailure) {
 	}
 	b.hooks.failed++
 	b.hooks.lastFailure, b.hooks.lastFailureAt = answer, now
+	b.hooks.failureCause, b.hooks.answeredAt = "", time.Time{}
+	b.notePlaceholderFailureLocked()
 	b.hooks.unnoticed++
 	count := int64(0)
 	if b.hooks.failureNoticeAt.IsZero() || now.Sub(b.hooks.failureNoticeAt) >= hookFailureNoticeInterval {
@@ -298,6 +302,17 @@ func (m *Manager) ObserveHookFailure(f HookFailure) {
 		msg = fmt.Sprintf("✗ %d hook calls failed (last: %s), so the harness's actions were blocked (hooks fail closed)", count, answer)
 	}
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityHookFailed, Sandbox: name, Reason: answer, Message: msg})
+}
+
+// noteHookAnsweredLocked notes DefenseClaw's first verdict after the last
+// hook failure, which shows the hooks work again (the status says so),
+// unless a conversation OpenShell refuses for its credential placeholder
+// goes on: its hooks that carry none are answered while the rest still
+// fail. Callers hold Manager.mu.
+func (b *box) noteHookAnsweredLocked(now time.Time) {
+	if !b.hooks.lastFailureAt.IsZero() && b.hooks.answeredAt.IsZero() && !b.placeholderInSessionLocked() {
+		b.hooks.answeredAt = now
+	}
 }
 
 // hookFailureAnswer names an HTTP answer: "HTTP 429 Too Many Requests".
