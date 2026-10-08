@@ -1889,3 +1889,50 @@ func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *te
 		t.Fatalf("standalone change to unverified version = %v, want the hook_contract_unverified refusal", err)
 	}
 }
+
+// GAP-0681: an agent that writes its config under the account umask leaves
+// it 0664 on a host with user-private groups (Hermes on Ubuntu). The guardian
+// tightens a hook config the account owns, through a descriptor that does not
+// follow links, instead of refusing it on every pass; a symlink is still
+// refused and its target left alone.
+func TestHookConfigTheAccountOwnsIsTightened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix modes")
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, ".hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("hooks: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHookConfigSurface(home, path, os.Getuid(), false, false); err != nil {
+		t.Fatalf("loose hook config the account owns: %v", err)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o644 {
+		t.Fatalf("mode = %v, want 0644", info.Mode().Perm())
+	}
+	outside := filepath.Join(t.TempDir(), "other.yaml")
+	if err := os.WriteFile(outside, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outside, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHookConfigSurface(home, path, os.Getuid(), false, false); err == nil {
+		t.Fatal("a symlinked hook config was accepted")
+	}
+	if info, _ := os.Stat(outside); info.Mode().Perm() != 0o666 {
+		t.Fatalf("the symlink target was changed to %v", info.Mode().Perm())
+	}
+}
