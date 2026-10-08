@@ -645,3 +645,21 @@ def test_durable_replacement_preserves_existing_owner_and_group(tmp_path, monkey
     assert seen == [wanted]
     assert path.read_bytes() == b"new"
 
+
+def test_alternate_config_uses_active_data_dir_for_derived_providers(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    active = tmp_path / "active"
+    alternate = tmp_path / "alternate"
+    active.mkdir()
+    alternate.mkdir()
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(active))
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(alternate / "config.yaml"))
+    path = alternate / "config.yaml"
+    path.write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+    entry = {"name": "custom-gateway", "domains": ["llm.example.test"]}
+    config_writer.apply([Change("llm_providers.custom", [entry])], "cli:test", "t", path=path)
+    overlay = json.loads((active / "custom-providers.json").read_text(encoding="utf-8"))
+    assert overlay["providers"][0]["name"] == "custom-gateway"
+    assert not (alternate / "custom-providers.json").exists()

@@ -793,7 +793,9 @@ def _data_dir_for(target: str, candidate: bytes) -> str:
     value = document.get("data_dir") if isinstance(document, dict) else None
     if isinstance(value, str) and value.strip():
         return value.strip()
-    return os.path.dirname(target)
+    from defenseclaw.config import default_data_path
+
+    return str(default_data_path())
 
 
 # ---------------------------------------------------------------------------
