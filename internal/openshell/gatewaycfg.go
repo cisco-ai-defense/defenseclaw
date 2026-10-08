@@ -249,19 +249,14 @@ func brewPrefixOfCLI(lookPath func(string) (string, error), cli string) string {
 	return ""
 }
 
-// BrewCommand is the brew to run: its bare name where it is on PATH, else
-// the brew of the prefix OpenShell was installed by (a per-user Homebrew
-// the shell has not loaded).
+// BrewCommand uses the Homebrew installation that holds the configured
+// OpenShell CLI, even when another brew is on PATH.
 func (g *GatewayConfigurator) BrewCommand() string {
-	if g.LookPath == nil {
-		g.LookPath = exec.LookPath
-	}
-	if _, err := g.LookPath("brew"); err == nil || g.BrewPrefix == "" {
-		return "brew"
-	}
-	own := filepath.Join(g.BrewPrefix, "bin", "brew")
-	if info, err := os.Stat(own); err == nil && info.Mode().IsRegular() {
-		return own
+	if g.BrewPrefix != "" {
+		own := filepath.Join(g.BrewPrefix, "bin", "brew")
+		if info, err := os.Stat(own); err == nil && info.Mode().IsRegular() {
+			return own
+		}
 	}
 	return "brew"
 }

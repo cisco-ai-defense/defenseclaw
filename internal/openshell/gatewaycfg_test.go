@@ -977,6 +977,9 @@ func TestGatewayServiceState(t *testing.T) {
 			if filepath.IsAbs(name) {
 				return name, nil
 			}
+			if name == "brew" {
+				return "/opt/homebrew/bin/brew", nil
+			}
 			return "", exec.ErrNotFound
 		}
 		f.runner.On(filepath.Join(prefix, "bin", "brew")+" services info nvidia/openshell/openshell --json",
