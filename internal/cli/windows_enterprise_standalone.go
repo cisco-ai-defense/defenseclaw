@@ -1913,10 +1913,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 
 	keptConfig := ""
+	var startOnlyKeys []string
 	if plan.Action == "upgrade" && plan.Reason == "drift:config" {
-		if windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result) {
+		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
+		if applied {
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
+		startOnlyKeys = keys
 		keptConfig = keepInstalledWindowsEnterpriseEditedConfig()
 	}
 
@@ -2030,7 +2033,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+keptConfig)
 	}
 	applyWindowsEnterprisePolicy(ctx, result)
-	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
+	reason := plan.Reason
+	if len(startOnlyKeys) > 0 {
+		// Say why a config-only change stopped the services (GAP-0719).
+		reason += " (the services read " + strings.Join(startOnlyKeys, ", ") + " only at start, so every service was restarted)"
+	}
+	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 

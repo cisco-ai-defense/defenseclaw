@@ -2242,6 +2242,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	repairRetryNeeded := false
 	repairRetryDelay := time.Duration(0)
 	reconcile := func(reason string) (bool, error) {
+		enterpriseHookStandaloneConfigRefresh(cmd.ErrOrStderr())
 		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
 		if err != nil {
 			repairRetryNeeded = true

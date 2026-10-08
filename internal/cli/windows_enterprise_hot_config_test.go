@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,6 +32,7 @@ type hotConfigHost struct {
 	configPath string
 	writes     []string
 	adopted    bool
+	refreshes  int
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
@@ -61,8 +63,9 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	layoutSeam, lockSeam := windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll
-	sourceSeam := windowsEnterpriseHotConfigSourceCheck
+	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
 	t.Cleanup(func() {
+		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
@@ -75,6 +78,10 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
 	}
 	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return func() {}, nil }
+	windowsEnterpriseHotConfigRefreshTargets = func(context.Context, managed.StandaloneLayout) error {
+		host.refreshes++
+		return nil
+	}
 	windowsEnterpriseHotConfigValidate = func(string, string, string, bool) (windowsServiceConfigValidation, error) {
 		return windowsServiceConfigValidation{}, nil
 	}
@@ -142,6 +149,28 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	runHotConfigEnsure(t, host, opts, stub)
 	if len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" || len(host.writes) != 0 {
 		t.Fatalf("untrusted source: installer runs %q, writes %q", stub.calls, host.writes)
+	}
+
+	// GAP-0601, GAP-0716: a re-delivery that changes no setting (CRLF line
+	// endings) and an edit of who is enrolled are applied in place too; only
+	// the enrollment edit refreshes the enrolled targets.
+	enrolled := "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: [dcw-eo1]\n"
+	for _, change := range []struct{ previous, next, warning string }{
+		{previous, strings.ReplaceAll(previous, "\n", "\r\n"), "no setting changed"},
+		{enrolled, strings.Replace(enrolled, "[dcw-eo1]", "[dcw-eo1, dcw-eo5]", 1), "enterprise.enrollment.exclude_users"},
+	} {
+		host, opts = newHotConfigHost(t, change.previous, change.next)
+		host.adopted = true
+		stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+		result = runHotConfigEnsure(t, host, opts, stub)
+		wantRefreshes := 0
+		if strings.Contains(change.warning, "enrollment") {
+			wantRefreshes = 1
+		}
+		if len(stub.calls) != 2 || stub.calls[1][1] != "Verify" || host.refreshes != wantRefreshes ||
+			!strings.Contains(fmt.Sprint(result.Warnings), change.warning) {
+			t.Fatalf("%q: installer runs %q, target refreshes %d, warnings %v", change.warning, stub.calls, host.refreshes, result.Warnings)
+		}
 	}
 
 	// A key the gateway reads once at start goes through the upgrade.

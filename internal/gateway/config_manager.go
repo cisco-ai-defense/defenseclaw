@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1351,6 +1352,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		add("enterprise.network", oldEnterprise.Network, newEnterprise.Network)
 		oldEnterprise.Inspection, newEnterprise.Inspection = config.EnterpriseInspectionConfig{}, config.EnterpriseInspectionConfig{}
 		oldEnterprise.Network, newEnterprise.Network = config.EnterpriseNetworkConfig{}, config.EnterpriseNetworkConfig{}
+		if standaloneEnrollmentListsHot {
+			add("enterprise.enrollment", enrollmentLists(oldEnterprise.Enrollment), enrollmentLists(newEnterprise.Enrollment))
+			clearEnrollmentLists(&oldEnterprise.Enrollment)
+			clearEnrollmentLists(&newEnterprise.Enrollment)
+		}
 		add("enterprise", oldEnterprise, newEnterprise)
 	}
 
@@ -1422,6 +1428,9 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	// (see above).
 	if standalone {
 		hotReloadable["enterprise.inspection"] = struct{}{}
+		if standaloneEnrollmentListsHot {
+			hotReloadable["enterprise.enrollment"] = struct{}{}
+		}
 	}
 	for _, path := range changed {
 		if path == "guardrail" && onlyRetainJudgeBodiesChanged(oldCfg, newCfg) {
@@ -1476,6 +1485,26 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		restart = append(restart, "guardrail.connectors")
 	}
 	return ConfigDiff{Changed: changed, RestartRequired: sortedUniqueStrings(restart)}
+}
+
+// standaloneEnrollmentListsHot reports that who is enrolled
+// (enterprise.enrollment's user and group lists) reloads in place. A Windows
+// gateway reads them nowhere: it has no hook-socket authorizer (that is
+// api_uds_unix.go, built once at start), its install watcher follows the
+// guardian's authorization record, and the enumerator and the guardian apply
+// the lists themselves. Before, such an edit was held at its running value,
+// so a config-only ensure never saw the gateway adopt it and ran the full
+// upgrade, every service stopped (GAP-0716). A seam for tests.
+var standaloneEnrollmentListsHot = runtime.GOOS == "windows"
+
+// enrollmentLists is the part of enrollment that standaloneEnrollmentListsHot
+// covers.
+func enrollmentLists(e config.EnterpriseEnrollmentConfig) [5][]string {
+	return [5][]string{e.IncludeUsers, e.ExcludeUsers, e.IncludeGroups, e.ExcludeGroups, e.ExemptUsers}
+}
+
+func clearEnrollmentLists(e *config.EnterpriseEnrollmentConfig) {
+	e.IncludeUsers, e.ExcludeUsers, e.IncludeGroups, e.ExcludeGroups, e.ExemptUsers = nil, nil, nil, nil, nil
 }
 
 // holdRestartRequired returns next with every restart-required section at
