@@ -492,6 +492,9 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	writeFreshLedger(t, h)
 	eligible := filepath.Join(filepath.Dir(h.env.Layout.ManifestPath), "eligible-accounts.json")
 	writeHostFile(t, h, eligible, `{"version": 1, "accounts": [{"user": "alice", "uid": 501, "home": "/home/alice"}]}`)
+	if err := os.Chmod(h.env.P(eligible), 0o600); err != nil { // as the guardian writes it
+		t.Fatal(err)
+	}
 	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath("/home/alice")
 	if err := os.MkdirAll(h.env.P("/home/alice"), 0o755); err != nil {
 		t.Fatal(err)
@@ -509,6 +512,9 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	// the record (GAP-1761).
 	writeHostFile(t, h, filepath.Join(h.env.Layout.GuardianAuthDir, "copilot-vscode-accounts.json"),
 		`{"version": 1, "accounts": [{"user": "alice", "uid": 501, "home": "/home/alice"}]}`)
+	if err := os.Chmod(h.env.P(filepath.Join(h.env.Layout.GuardianAuthDir, "copilot-vscode-accounts.json")), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		got := h.run(Options{Action: action})
 		requireError(t, got, codeVerify)

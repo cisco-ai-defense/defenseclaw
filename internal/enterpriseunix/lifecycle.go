@@ -1311,6 +1311,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.settleSecretModes(ctx, account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if err := l.settleStateModes(account); err != nil {
+		return failAndRollback(codeApply, err)
+	}
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(codeApply, err)

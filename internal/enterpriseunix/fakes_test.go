@@ -372,6 +372,10 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		h.owners[stagedFinal(path)] = [2]int{uid, gid}
 		return nil
 	}
+	env.Fchown = func(f *os.File, uid, gid int) error {
+		h.owners[f.Name()] = [2]int{uid, gid}
+		return nil
+	}
 	env.OwnerOf = func(path string) (int, int, error) {
 		if owner, ok := h.owners[path]; ok {
 			return owner[0], owner[1], nil

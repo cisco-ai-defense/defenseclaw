@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,4 +173,76 @@ func TestRepairRefusesAPackageBinaryReplacedAfterInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireOK(t, h.run(Options{Action: ActionRepair}))
+}
+
+// A support script ran chown -R root:wheel or chmod -R a+rX over the
+// deployment. Repair, ensure and a package reinstall restored only the
+// folders: the gateway could not open its audit store or refused its 0644
+// key files, every retry rolled back, and a standard user could read
+// runtime/device.key (GAP-0746, GAP-0747). status names the entries and
+// repair gives each one back its owner and mode.
+func TestRepairRestoresStateFilesAfterARecursiveChownOrChmod(t *testing.T) {
+	for _, drift := range []string{"chown -R root:wheel", "chmod -R a+rX"} {
+		t.Run(drift, func(t *testing.T) {
+			h := newTestHost(t, "darwin")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			account := h.accounts.accounts[h.env.Layout.ServiceUser]
+			service, rootService := [2]int{account.UID, account.GID}, [2]int{0, account.GID}
+			l := h.env.Layout
+			hooks := filepath.Join(l.DataDir, "hooks")
+			if err := os.Mkdir(h.env.P(hooks), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			h.owners[h.env.P(hooks)] = service
+			type state struct {
+				mode  os.FileMode
+				owner [2]int
+			}
+			// What the gateway and the hook guardian write, as they write it.
+			written := map[string]state{
+				filepath.Join(l.DataDir, "audit.db"):                                  {0o600, service},
+				filepath.Join(l.DataDir, "device.key"):                                {0o600, service},
+				filepath.Join(hooks, ".hook-claudecode.token"):                        {0o600, service},
+				filepath.Join(l.DataDir, guardianStateFile):                           {0o640, rootService},
+				filepath.Join(filepath.Dir(l.ManifestPath), "eligible-accounts.json"): {0o600, [2]int{0, 0}},
+			}
+			for canonical, want := range written {
+				if err := os.WriteFile(h.env.P(canonical), []byte("state\n"), want.mode); err != nil {
+					t.Fatal(err)
+				}
+				h.owners[h.env.P(canonical)] = want.owner
+			}
+			requireOK(t, h.run(Options{Action: ActionStatus}))
+
+			_ = filepath.WalkDir(h.env.P(l.InstallRoot), func(path string, d fs.DirEntry, err error) error {
+				if err != nil || d.Type()&fs.ModeSymlink != 0 {
+					return err
+				}
+				if drift == "chown -R root:wheel" {
+					h.owners[path] = [2]int{0, 0}
+					return nil
+				}
+				info, _ := d.Info()
+				add := os.FileMode(0o044)
+				if d.IsDir() || info.Mode()&0o111 != 0 {
+					add = 0o055
+				}
+				return os.Chmod(path, info.Mode().Perm()|add)
+			})
+			status := h.run(Options{Action: ActionStatus})
+			requireError(t, status, codeVerify)
+			if got := messagesOf(status.Errors, codeVerify); !strings.Contains(got, "under "+l.DataDir) || !strings.Contains(got, " repair`") {
+				t.Fatalf("status does not name the state files and the fix: %s", got)
+			}
+			requireOK(t, h.run(Options{Action: ActionRepair}))
+			written[hooks] = state{0o700, service}
+			for canonical, want := range written {
+				uid, gid, _ := h.env.OwnerOf(h.env.P(canonical))
+				if mode := h.mode(canonical); mode != want.mode || [2]int{uid, gid} != want.owner {
+					t.Errorf("after repair %s is %04o %d:%d, want %04o %d:%d", canonical, mode, uid, gid, want.mode, want.owner[0], want.owner[1])
+				}
+			}
+			requireOK(t, h.run(Options{Action: ActionStatus}))
+		})
+	}
 }
