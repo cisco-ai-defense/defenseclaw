@@ -1165,6 +1165,12 @@ ai_discovery:
 | `observe` | Tetragon | Tetragon's `defenseclaw-observe` policy, with `fanotify` alongside until the policy has run healthy for ten minutes | `defenseclaw-observe`, `defenseclaw-connect` and `defenseclaw-controls` (monitor mode) | None. What the controls would have denied is counted |
 | `enforce` | As `observe` | As `observe` | As `observe`. `controls` is in enforce mode for users who are ready, and `controls-burnin` holds the others in monitor mode | `EPERM` for ready users, when `enforce_ack` matches and every cap below passes |
 
+`fanotify` watches the homes of the users in `targets.yaml`. Users enrolled
+only through vendor machine policy have no row there, so on such a computer
+`fanotify` has nothing to watch: in `observe` and `enforce` the observe policy
+is the file half from the start, and in `consume` and `off` the coverage reports
+file events as missing ("fanotify has no enrolled home to watch").
+
 The policy names end in eight hex digits of the rendered policy's hash, for
 example `defenseclaw-controls-3f9c2a7d`. DefenseClaw adds, changes and deletes
 only names it recorded itself. A policy of yours, even one with a

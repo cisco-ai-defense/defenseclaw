@@ -696,6 +696,17 @@ func (s *tetragonSource) Coverage() Coverage {
 	case s.handed && s.feed != nil:
 		files = "file opens from the DefenseClaw observe policy"
 		coverage.Kinds = append(coverage.Kinds, KindFileRead, KindFileWrite)
+	case len(s.homes) == 0 && s.feed != nil && !s.observeSince.IsZero():
+		// fanotify has no enrolled home to watch (users enrolled through
+		// vendor machine policy have no targets.yaml row), so there is
+		// nothing to hand over: the observe policy is the file half. The
+		// coverage said "partial" for ever on such a host (GAP-0060).
+		files = "file opens from the DefenseClaw observe policy"
+		coverage.Kinds = append(coverage.Kinds, KindFileRead, KindFileWrite)
+	case len(s.homes) == 0:
+		coverage.MissingKinds = append(coverage.MissingKinds, KindFileRead, KindFileWrite)
+		coverage.Limitations = append(coverage.Limitations,
+			"file events need DefenseClaw's observe policy (Tetragon mode observe or enforce); fanotify has no enrolled home to watch")
 	default:
 		coverage.MissingKinds = append(coverage.MissingKinds, KindFileRead, KindFileWrite)
 		coverage.Limitations = append(coverage.Limitations,

@@ -336,6 +336,32 @@ func TestTetragonSourceHandsTheFileHalfOverAndTakesItBack(t *testing.T) {
 	}
 }
 
+// GAP-0060: with no enrolled home (users enrolled only through vendor
+// machine policy) fanotify never starts, so nothing was ever handed over and
+// the coverage blamed CAP_SYS_ADMIN for ever. The observe policy is the file
+// half as soon as it is enabled; without it the reason names the missing home.
+func TestTetragonSourceWithoutAHomeTakesTheFileHalfFromTheObservePolicy(t *testing.T) {
+	h := newHarness(t)
+	observe := func(name string) bool { return name == "defenseclaw-observe-89abcdef" }
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+	h.feeds <- feed
+	source := startSource(t, h, nil, observe)
+	waitFor(t, "the Tetragon stream", func() bool { return source.Coverage().Backend.Kind == BackendTetragon })
+	coverage := source.Coverage()
+	if coverage.Complete() || len(coverage.Limitations) != 1 ||
+		coverage.Limitations[0] != "file events need DefenseClaw's observe policy (Tetragon mode observe or enforce); fanotify has no enrolled home to watch" {
+		t.Fatalf("before the observe policy: %+v", coverage)
+	}
+	if h.lastFiles() != nil {
+		t.Fatal("fanotify started with no home to watch")
+	}
+	feed.setPolicies(BackendPolicy{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "enabled"})
+	waitFor(t, "the observe policy as the file half", func() bool { return source.Coverage().Complete() })
+	if mechanism := source.Coverage().Mechanism; !strings.HasSuffix(mechanism, " + file opens from the DefenseClaw observe policy") {
+		t.Fatalf("mechanism %q", mechanism)
+	}
+}
+
 func TestTetragonSourcePrefersTheTetragonFileEvent(t *testing.T) {
 	h := newHarness(t)
 	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
