@@ -1116,7 +1116,13 @@ as `defenseclaw-acp.exe.backup.<32 hex>` beside the new one until the thread
 ends: the upgrade succeeds, the next lifecycle run removes the copy, and
 Windows deletes it at the next restart. Uninstall removes such copies too;
 if a program still runs one, the uninstall stops before changing anything
-and names it: close that editor thread, or restart, and run it again.
+and names it: close that editor thread, or restart, and run it again. The
+same holds for the installed binaries themselves: while an editor's ACP
+thread runs `defenseclaw-acp.exe` from `C:\Program Files\Cisco\DefenseClaw\bin`,
+`/uninstall` (with or without `PURGE=1`) fails with `uninstall_in_use`
+before it stops any service, and names the program, its process id, the
+account and the editor that started it. Close that thread (or sign the
+account out) and run the uninstall again.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes

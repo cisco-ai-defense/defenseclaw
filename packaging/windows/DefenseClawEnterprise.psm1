@@ -4359,6 +4359,126 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
     }
 }
 
+# How long the in-use check waits before it looks again, so a hook call that
+# was running at the first look does not block the uninstall.
+$script:InstallTreeUseRecheckMilliseconds = 2000
+
+function Get-DefenseClawProcessImages {
+    # Every process this token can see, with its executable, account and
+    # parent process name where Windows reports them.
+    $parents = @{}
+    try {
+        foreach ($entry in @(CimCmdlets\Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+            $parents[[int]$entry.ProcessId] = [int]$entry.ParentProcessId
+        }
+    }
+    catch {
+    }
+    $processes = try {
+        @(Microsoft.PowerShell.Management\Get-Process -IncludeUserName -ErrorAction Stop)
+    }
+    catch {
+        @(Microsoft.PowerShell.Management\Get-Process -ErrorAction SilentlyContinue)
+    }
+    $names = @{}
+    foreach ($process in $processes) {
+        $names[[int]$process.Id] = [string]$process.ProcessName
+    }
+    foreach ($process in $processes) {
+        $path = try { [string]$process.Path } catch { '' }
+        $account = ''
+        if ($null -ne $process.PSObject.Properties['UserName']) {
+            $account = [string]$process.UserName
+        }
+        $parent = ''
+        if ($parents.ContainsKey([int]$process.Id) -and $names.ContainsKey($parents[[int]$process.Id])) {
+            $parent = [string]$names[$parents[[int]$process.Id]]
+        }
+        [pscustomobject]@{ Id = [int]$process.Id; Path = $path; UserName = $account; Parent = $parent }
+    }
+}
+
+function Assert-DefenseClawStandaloneInstallTreeNotInUse {
+    <#
+        Standalone uninstall refuses, before it changes anything, while a
+        program other than the DefenseClaw services and this lifecycle runs
+        an executable from the install folder. An editor's DefenseClaw ACP
+        thread runs defenseclaw-acp.exe: the uninstall removed all four
+        services and then failed 1603 on that file, leaving the computer half
+        removed (GAP-0942). A process seen only once (a hook call) does not
+        block.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [int]$SelfUninstallCallerPID
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $bin = [IO.Path]::GetFullPath([string]$Layout.BinDirectory).TrimEnd('\') + '\'
+    $excluded = [Collections.Generic.HashSet[int]]::new()
+    [void]$excluded.Add([int]$PID)
+    if ($SelfUninstallCallerPID -gt 0) {
+        [void]$excluded.Add([int]$SelfUninstallCallerPID)
+    }
+    foreach ($name in @(
+            $GatewayServiceName,
+            $GuardianServiceName,
+            (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName),
+            (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName)
+        )) {
+        try {
+            if (Test-DefenseClawServiceExists -Name $name) {
+                [void]$excluded.Add([int](Get-DefenseClawServiceProcessId -Name $name))
+            }
+        }
+        catch {
+        }
+    }
+    $users = $null
+    foreach ($pass in 1, 2) {
+        $seen = @{}
+        foreach ($process in @(Get-DefenseClawProcessImages)) {
+            if ([string]::IsNullOrEmpty([string]$process.Path) -or
+                $excluded.Contains([int]$process.Id) -or
+                -not ([IO.Path]::GetFullPath([string]$process.Path)).StartsWith($bin, [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $seen[[int]$process.Id] = $process
+        }
+        if ($null -eq $users) {
+            $users = $seen
+            if ($users.Count -eq 0) {
+                return
+            }
+            Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $script:InstallTreeUseRecheckMilliseconds
+            continue
+        }
+        $still = @($users.Keys | Microsoft.PowerShell.Core\Where-Object { $seen.ContainsKey($_) } | Microsoft.PowerShell.Utility\Sort-Object)
+        if ($still.Count -eq 0) {
+            return
+        }
+        $named = @(foreach ($id in $still) {
+                $process = $seen[$id]
+                $text = '{0} (pid {1}' -f [IO.Path]::GetFileName([string]$process.Path), $id
+                if (-not [string]::IsNullOrEmpty([string]$process.UserName)) {
+                    $text += ', account ' + [string]$process.UserName
+                }
+                if (-not [string]::IsNullOrEmpty([string]$process.Parent)) {
+                    $text += ', started by ' + [string]$process.Parent
+                }
+                $text + ')'
+            })
+        throw (
+            'uninstall_in_use: ' + ($named -join '; ') + " runs from $bin, so DefenseClaw cannot remove its files; nothing was changed. " +
+            'Close it first: for defenseclaw-acp.exe, end the editor thread that uses DefenseClaw ACP (the DefenseClaw agent in Zed or a JetBrains IDE) ' +
+            'in that account, or sign the account out; then run the uninstall again'
+        )
+    }
+}
+
 function Write-DefenseClawJsonAtomic {
     param(
         [Parameter(Mandatory)]$Value,
@@ -24445,6 +24565,11 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GuardianServiceName $GuardianServiceName `
         -AnyStartMode
     Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
+    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -SelfUninstallCallerPID $SelfUninstallCallerPID
     Assert-DefenseClawManagedInstallTree -Layout $Layout
     Assert-DefenseClawRecordedArtifactHashes `
         -Metadata $metadata `
