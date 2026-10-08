@@ -438,3 +438,30 @@ func TestZedDirectoryCapMarksPartial(t *testing.T) {
 	}
 	t.Fatal("Zed installation missing")
 }
+
+func TestVSCodeDisabledStateReadsLiveWAL(t *testing.T) {
+	home := t.TempDir()
+	ext := filepath.Join(home, ".vscode", "extensions")
+	writeFile(t, filepath.Join(ext, "extensions.json"), `[{"identifier":{"id":"example.extension"},"version":"1.0"}]`)
+	path := filepath.Join(home, ".config", "Code", "User", "globalStorage", "state.vscdb")
+	writeStateDB(t, path, "[]")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA wal_autocheckpoint=0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE ItemTable SET value=? WHERE key=?`, `[{"id":"example.extension"}]`, "extensionsIdentifiers/disabled"); err != nil {
+		t.Fatal(err)
+	}
+	plugins := byID(Scan(home, "linux", Limits{}), FamilyVSCode, "vscode", "")
+	p := plugins["example.extension|user"]
+	if p.Enabled != EnabledOff || p.EnabledSource != SourceStateDB {
+		t.Fatalf("live disabled state: %+v", p)
+	}
+}
