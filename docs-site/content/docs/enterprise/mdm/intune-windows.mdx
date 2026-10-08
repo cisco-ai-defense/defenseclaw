@@ -184,7 +184,13 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
 Both print one short line, because Intune keeps 2,048 characters of output.
 The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`.
 Remediations cannot install, upgrade or change the config: the installed CLI
-has no payload to install from. The Win32 app does those.
+has no payload to install from. The Win32 app does those. Nor can they put
+back a missing scanner runtime (for example one an antivirus quarantined
+from `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`): `Remediate-Fix.ps1`
+then exits `1603`, reports `scanner_runtime_unavailable` and names Setup
+`/repair`. Deploy `DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1`
+from the Win32 app content (for example as a second Win32 app, or a
+platform script that runs it as SYSTEM) to install it again.
 
 On a computer installed from the unsigned Setup, the Remediations script's
 `ensure` keeps the marker's `hash_pinned` trust mode, so `detect.ps1`,

@@ -272,9 +272,21 @@ $summary = "exit $code"
 try {
     $document = $run.StdOut | ConvertFrom-Json
     $codes = (@($document.errors) | ForEach-Object { $_.code }) -join ','
-    if ($document.ok -and $document.noop) { $summary = 'already healthy' }
+    # The installed CLI has no payload to install a missing scanner runtime
+    # from: its ensure succeeds with a warning while verify keeps failing, so
+    # this is not repaired, and only Setup /repair fixes it (GAP-0631).
+    $runtime = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'scanner_runtime_unavailable' } | Select-Object -First 1
+    if ($document.ok -and $null -ne $runtime) {
+        $summary = "not repaired (scanner_runtime_unavailable): $($runtime.message)"
+        $code = 1603
+    }
+    elseif ($document.ok -and $document.noop) { $summary = 'already healthy' }
     elseif ($document.ok) { $summary = 'repaired' }
-    else { $summary = "still failing ($codes)" }
+    else {
+        $summary = "still failing ($codes)"
+        $first = @($document.errors) | Select-Object -First 1
+        if ($null -ne $first -and $first.message) { $summary += ": $($first.message)" }
+    }
 } catch { $summary = "exit $code, no lifecycle result" }
 $line = "DefenseClaw $($deployment.Version): $summary"
 if ($line.Length -gt 2000) { $line = $line.Substring(0, 2000) }
