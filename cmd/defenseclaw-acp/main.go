@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -447,14 +448,29 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	setup, managedEntry := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup)
-	return acp.Run(ctx, acp.ProxyOptions{
+	stdin := io.Reader(os.Stdin)
+	var editor *editorInput
+	if *clientID == "zed" && !guardKeepsMainBehaviour() {
+		// Zed keeps this guard for its next threads (GAP-0906).
+		editor = newEditorInput(os.Stdin)
+		stdin = editor
+	}
+	runErr := acp.Run(ctx, acp.ProxyOptions{
 		AgentID: *agentID, ClientID: *clientID, Profile: *profile,
 		Mode: acp.Mode(*mode), Command: command, Args: commandArgs,
-		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Evaluator: evaluator,
+		Stdin: stdin, Stdout: os.Stdout, Stderr: os.Stderr, Evaluator: evaluator,
 		Managed: managedEntry, SetupCommand: setup,
 		SetupCommandFor: func(profile string, mode acp.Mode) string {
 			command, _ := setupCommand(*clientID, *agentID, profile, string(mode), *contractLock, flagsForSetup)
 			return command
 		},
+	})
+	if editor == nil || !(errors.Is(runErr, acp.ErrModeMismatch) || errors.Is(runErr, acp.ErrBindingRefused)) {
+		return runErr
+	}
+	editor.detach()
+	fmt.Fprintf(os.Stderr, "defenseclaw-acp: %v\n", runErr)
+	return serveAfterSessionEnd(editor.rest(), os.Stdout, editor.initializeRequest(), runErr.Error(), func() (*exec.Cmd, bool) {
+		return relaunchCommand(*contractLock, *agentID, args)
 	})
 }
