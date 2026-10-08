@@ -475,3 +475,70 @@ def test_okta_template_filters_local_group_names(tmp_path: Path) -> None:
     local = {line.partition(":")[0] for line in Path("/etc/group").read_text().splitlines() if ":" in line}
     assert local <= filtered
     assert {"wheel", "sudo", "adm"} <= filtered
+
+
+def test_entra_rejects_existing_non_security_group_for_sid_and_apply(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    group = {"id": "00000001-0002-0003-0405-060708090a0b", "displayName": "team",
+             "securityIdentifier": "S-1-12-1-1-196610-117835012-185207048", "securityEnabled": False}
+
+    class Graph:
+        def get_all(self, path: str):
+            assert "/groups?" in path
+            return [group]
+
+        def request(self, *_args):
+            raise AssertionError("a non-security group must never be mutated or accepted")
+
+    graph = Graph()
+    args = entra.build_parser().parse_args(["sids", "--group", "team"])
+    with pytest.raises(entra.GraphError, match="security group"):
+        entra.cmd_sids(graph, args)
+
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","groups":[{"name":"team"}]}', encoding="ascii")
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    graph.get_all = lambda path: ([{"verifiedDomains": [{"name": "example.test"}]}]
+                                  if "/organization?" in path else [group])
+    with pytest.raises(entra.GraphError, match="security group"):
+        entra.cmd_apply(graph, args)
+
+
+def test_entra_apply_checks_verified_domain_before_mutation(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"other.test","groups":[{"name":"team"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str):
+            calls.append(("GET", path))
+            if "/organization?" in path:
+                return [{"verifiedDomains": [{"name": "example.test"}]}]
+            return []
+
+        def request(self, method: str, path: str, body):
+            calls.append((method, path))
+            raise AssertionError("group creation must not be attempted")
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    with pytest.raises(SystemExit, match="verified domain"):
+        entra.cmd_apply(Graph(), args)
+    assert all(method == "GET" for method, _ in calls)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_entra_domain_services_check_fails_for_missing_directory_identities() -> None:
+    script = ENTRA.parent / "join-entra-domain-services.sh"
+    result = subprocess.run(
+        ["bash", str(script), "check", "--user", "dc-no-such-user-91402",
+         "--group", "dc-no-such-group-91402"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 1, result.stdout
+
+
+def test_entra_group_diagnostic_checks_membership_before_relogin_advice() -> None:
+    script = (ENTRA.parent / "Get-DefenseClawEntraIdentity.ps1").read_text(encoding="ascii")
+    branch = script.split("elseif ($listedIn.Count -gt 0)", 1)[1].split("\n    else {", 1)[0]
+    assert re.search(r"member(ship)?.*sign out", branch, re.IGNORECASE)
