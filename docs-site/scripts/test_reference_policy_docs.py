@@ -49,5 +49,13 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("`defenseclaw status`", section)
 
 
+    def test_edited_generated_hook_can_run_before_repair(self):
+        text = (DOCS / "source-of-truth.mdx").read_text()
+        section = text.split("## What is derived", 1)[1].split("## What is evidence", 1)[0]
+        self.assertIn("next hook event", section)
+        self.assertIn("before repair", section)
+        self.assertNotIn("editing one changes nothing", section)
+
+
 if __name__ == "__main__":
     unittest.main()

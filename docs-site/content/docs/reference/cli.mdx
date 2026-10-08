@@ -47,7 +47,8 @@ valid change by itself and shows a new policy generation in `defenseclaw status`
 only the keys listed under [Restart-required keys](#restart-required-keys) need
 `defenseclaw-gateway restart`. Files DefenseClaw
 derives from `config.yaml`, such as `custom-providers.json` and the generated
-hook scripts, are rewritten for you and never read back. See
+hook scripts, are rewritten for you. Connectors execute generated hooks, so
+repair a script that doctor reports as edited. See
 [Configuration: one source of truth](/docs/reference/source-of-truth).
 </Callout>
 
