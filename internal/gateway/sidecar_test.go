@@ -207,6 +207,17 @@ func TestConfiguredConnectorNameFallsBackToClawMode(t *testing.T) {
 	}
 }
 
+func TestSecureClientGuardrailConnectorNameKeepsClawMode(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "secure_client"
+	cfg.Claw.Mode = "openclaw"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
+	if got := guardrailConnectorName(cfg); got != "openclaw" {
+		t.Fatalf("Secure Client connector = %q, want openclaw", got)
+	}
+}
+
 // TestResolveActiveConnector_KnownNameReturnsConnector covers the
 // happy path for every built-in connector. We don't just spot-check
 // one — the registry contract for S1.4 is "every name DefaultRegistry

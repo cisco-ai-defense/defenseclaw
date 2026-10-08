@@ -5884,9 +5884,10 @@ func configuredConnectorName(cfg *config.Config) string {
 // gateway set up an openclaw connector nobody configured at every start and
 // the guardrail exited on its missing extension (GAP-0361). claw.mode still
 // picks among the listed connectors, and decides alone without the map.
+// Secure Client keeps the historical connector selection from claw.mode.
 func guardrailConnectorName(cfg *config.Config) string {
 	name := configuredConnectorName(cfg)
-	if cfg == nil || strings.TrimSpace(cfg.Guardrail.Connector) != "" || len(cfg.Guardrail.Connectors) == 0 {
+	if cfg == nil || cfg.SecureClientIntegration() || strings.TrimSpace(cfg.Guardrail.Connector) != "" || len(cfg.Guardrail.Connectors) == 0 {
 		return name
 	}
 	roster := cfg.ActiveConnectors()
