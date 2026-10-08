@@ -122,6 +122,12 @@ const (
 	ActionConnectorHookTampered Action = "connector-hook-tampered"
 	ActionConnectorHookRepaired Action = "connector-hook-repaired"
 
+	// ActionEnterpriseExemptUser records that a standalone enterprise hook
+	// call came from an account enterprise.enrollment.exempt_users lists: it
+	// is allowed and inspected but not enrolled. At most one row per account
+	// and connector each ten minutes (GAP-0832).
+	ActionEnterpriseExemptUser Action = "enterprise-exempt-user"
+
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
 	// codex's raw JSON arg to /api/v1/codex/notify after every
@@ -385,6 +391,7 @@ func AllActions() []Action {
 		ActionAssetPolicy,
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
+		ActionEnterpriseExemptUser,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,
