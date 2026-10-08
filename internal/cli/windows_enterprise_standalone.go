@@ -801,6 +801,7 @@ func applyWindowsEnterpriseInstallerReport(
 			message, enumeratorCode = text, specific
 		}
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
+		message = windowsEnterpriseNamePrincipals(message)
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if enumeratorCode != "" {
 			code = enumeratorCode
