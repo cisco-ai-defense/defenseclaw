@@ -532,10 +532,13 @@ actual bytes. An existing pin is retained.
 
 ### Pre-9 Rego modules
 
-`init` only seeds missing files, so an upgraded install can still hold an old
-`policies/rego/admission.rego` or `guardrail.rego` that reads `data.json`. On a
+A 0.8.x install still holds the `policies/rego/admission.rego` and
+`guardrail.rego` that its release seeded, and they read `data.json`. On a
 per-user install the migration keeps the old module as
-`<name>.rego.migrated-v9` and replaces it with the shipped module. On a
+`<name>.rego.migrated-v9` and replaces it with the shipped module. The upgrade
+then moves an unmodified 0.8 `sandbox.rego`, which 1.0 no longer ships, to
+`~/.defenseclaw/backups/rego-<time>/` (see
+[Shipped policy files](/docs/get-started/upgrade#shipped-policy-files)). On a
 managed host the administrator owns `policy_dir`, so the migration only
 records a note, and the gateway refuses the old module and uses the
 config-driven policy.
@@ -726,7 +729,9 @@ forward again. To stay on 0.8.x, go back by hand:
    ```
 
    The v9 migration can replace `admission.rego` and `guardrail.rego` and
-   retire `skill_actions.rego`. If a saved copy is missing and the live
+   retire `skill_actions.rego`. Move any module the upgrade saved in
+   `~/.defenseclaw/backups/rego-<time>/` (such as `sandbox.rego`) back into
+   `policies/rego` as well. If a saved copy is missing and the live
    module came from 1.0, restore that module from the matching 0.8.x policy
    bundle before starting the gateway. A version 8 `config.yaml` alone does
    not restore the older admission decisions.

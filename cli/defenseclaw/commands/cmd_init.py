@@ -34,12 +34,12 @@ from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
     from defenseclaw.bootstrap import StepResult
+    from defenseclaw.config import Config
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import (
     bundled_guardrail_profiles_dir,
     bundled_local_observability_dir,
-    bundled_rego_dir,
     bundled_splunk_bridge_dir,
 )
 from defenseclaw.process_liveness import _process_image_path_windows, _process_parent_id_windows
@@ -458,7 +458,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             make_private_directory(d)
     click.echo("  Directories:   " + ux._style("created", fg="green"))
 
-    _seed_rego_policies(cfg.policy_dir)
+    _seed_rego_policies(cfg)
     _seed_guardrail_profiles(cfg.policy_dir)
     _seed_splunk_bridge(cfg.data_dir)
     _seed_local_observability_stack(cfg.data_dir)
@@ -2801,22 +2801,29 @@ def _unguarded_acp_summary() -> str:
     return ", ".join(clients)
 
 
-def _seed_rego_policies(policy_dir: str) -> None:
-    """Copy bundled Rego policies into the user's policy_dir if not already present."""
-    bundled_rego = bundled_rego_dir()
-    if not bundled_rego.is_dir():
+def _seed_rego_policies(cfg: Config) -> None:
+    """Write the shipped Rego modules into policy_dir/rego and bring unedited
+    ones to this release (GAP-0776). Secure Client keeps the copy-if-missing
+    seeding of main (issue #1092)."""
+    from defenseclaw.enforce.asset_lists import is_secure_client
+    from defenseclaw.rego_policies import seed_rego
+
+    result = seed_rego(cfg.policy_dir, os.path.join(cfg.data_dir, "backups"), refresh_stock=not is_secure_client(cfg))
+    if not result.dest:
         return
-
-    dest_rego = os.path.join(policy_dir, "rego")
-    os.makedirs(dest_rego, exist_ok=True)
-
-    for src in bundled_rego.iterdir():
-        if src.suffix == ".rego" and not src.name.startswith("."):
-            dst = os.path.join(dest_rego, src.name)
-            if not os.path.exists(dst):
-                shutil.copy2(str(src), dst)
-
-    click.echo(f"  Rego policies: {dest_rego}")
+    click.echo(f"  Rego policies: {result.dest}")
+    if result.refreshed:
+        click.echo(
+            f"  Rego policies: updated {', '.join(result.refreshed)} to this release "
+            f"(previous copies in {result.backup_dir})"
+        )
+    if result.kept:
+        ux.warn(
+            f"kept the edited Rego policies {', '.join(result.kept)} in {result.dest}; they do not get this "
+            "release's policy changes until the next upgrade replaces them (your copy is then saved)"
+        )
+    for error in result.errors:
+        ux.warn(f"Rego policy was not written ({error})")
 
 
 def _seed_guardrail_profiles(policy_dir: str) -> None:

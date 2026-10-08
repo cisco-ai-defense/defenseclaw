@@ -1306,6 +1306,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 	uv build --wheel --out-dir $(DIST_DIR)
 
 _bundle-data: _checkout-write-preflight
+	@rm -rf cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/envvars

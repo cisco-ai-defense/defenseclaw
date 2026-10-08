@@ -3590,6 +3590,7 @@ def migrate(
         raise MigrationError(f"{config_path} is at config_version {reached} after migrating; expected {target}")
     _refresh_local_observability_bundle(data_dir, __version__)
     _refresh_guardrail_profiles(data_dir, config_path)
+    _refresh_rego_policies(data_dir, config_path)
     # A 0.8.x release may already have written config_version 8 (GAP-1390), so
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
@@ -3605,14 +3606,7 @@ def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
 
     from defenseclaw.guardrail_profiles import refresh_stock_profiles
 
-    policy_dir = os.path.join(data_dir, "policies")
-    try:
-        raw = yaml.safe_load(_read_config_text(config_path) or "") or {}
-    except yaml.YAMLError:
-        raw = {}
-    configured = raw.get("policy_dir") if isinstance(raw, dict) else None
-    if isinstance(configured, str) and configured.strip():
-        policy_dir = os.path.expanduser(configured.strip())
+    policy_dir = _configured_policy_dir(data_dir, _read_config_text(config_path) or "")
     result = refresh_stock_profiles(policy_dir, os.path.join(data_dir, "backups"))
     if result.refreshed:
         ux.ok(
@@ -3630,6 +3624,85 @@ def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
         )
     for error in result.errors:
         ux.warn(f"guardrail rule pack was not updated ({error})", indent="    ")
+
+
+def _configured_policy_dir(data_dir: str, config_text: str) -> str:
+    """The config's policy_dir, else <data_dir>/policies."""
+
+    try:
+        raw = yaml.safe_load(config_text) or {}
+    except yaml.YAMLError:
+        raw = {}
+    configured = raw.get("policy_dir") if isinstance(raw, dict) else None
+    if isinstance(configured, str) and configured.strip():
+        return os.path.expanduser(configured.strip())
+    return os.path.join(data_dir, "policies")
+
+
+def _refresh_rego_policies(data_dir: str, config_path: str) -> None:
+    """Bring the shipped Rego modules in policy_dir to this release (GAP-0776).
+
+    init only wrote missing modules, so an upgraded install kept enforcing
+    the modules of the release that first seeded it. Best effort, like the
+    rule packs: a module that fails to update keeps the previous one, which
+    still loads. A managed host is left alone: its administrator owns
+    policy_dir, and Secure Client keeps its version 8 policy (issue #1092).
+    So is a policy_dir outside the data home, which the upgrade's rollback
+    copy does not cover (as the v9 migration does).
+    """
+
+    from defenseclaw.paths import bundled_rego_dir
+    from defenseclaw.rego_policies import refresh_rego, stale_modules
+
+    text = _read_config_text(config_path) or ""
+    if _guardrail_runtime_migration_is_managed(text):
+        return
+    policy_dir = _configured_policy_dir(data_dir, text)
+    if not any(_path_within(policy_dir, home) for home in (data_dir, os.path.dirname(config_path))):
+        stale = stale_modules(policy_dir)
+        if stale:
+            ux.warn(
+                f"did not update the Rego policies {', '.join(stale)} in {os.path.join(policy_dir, 'rego')}: "
+                "a rollback restores only the data home, and that folder is outside it. "
+                f"Copy this release's modules from {bundled_rego_dir()} to use its policy changes",
+                indent="    ",
+            )
+        return
+    result = refresh_rego(policy_dir, os.path.join(data_dir, "backups"))
+    if result.refreshed:
+        ux.ok(
+            f"Updated the Rego policies {', '.join(result.refreshed)} to this release "
+            f"(previous copies in {result.backup_dir})",
+            indent="    ",
+        )
+    if result.replaced_edited:
+        ux.warn(
+            f"replaced the edited Rego policies {', '.join(result.replaced_edited)} in {result.dest} with this "
+            f"release's; your copies are in {result.backup_dir}. Re-apply your changes, or keep your own rules "
+            "in a file of another name, which upgrades do not touch",
+            indent="    ",
+        )
+    if result.retired:
+        ux.ok(
+            f"Moved {', '.join(result.retired)}, which this release no longer ships, to {result.backup_dir}",
+            indent="    ",
+        )
+    if result.kept:
+        ux.warn(
+            f"kept {', '.join(result.kept)} in {result.dest}: not a regular file, so it does not get this "
+            "release's policy changes",
+            indent="    ",
+        )
+    for error in result.errors:
+        ux.warn(f"Rego policy was not updated ({error})", indent="    ")
+
+
+def _path_within(path: str, root: str) -> bool:
+    path, root = (os.path.normcase(os.path.abspath(os.path.expanduser(p))) for p in (path, root))
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives on Windows
+        return False
 
 
 def _select_windows_agents(data_dir: str) -> None:

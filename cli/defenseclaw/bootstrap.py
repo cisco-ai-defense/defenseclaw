@@ -85,7 +85,6 @@ class BootstrapReport:
     audit_db: str = ""
     is_new_config: bool = False
     dirs_created: list[str] = field(default_factory=list)
-    rego_seeded: str = ""  # destination path, "" if bundle missing
     guardrail_profiles_seeded: list[str] = field(default_factory=list)
     guardrail_profiles_preserved: list[str] = field(default_factory=list)
     splunk_bridge_dest: str = ""  # "" if bundle missing, otherwise dest path
@@ -540,7 +539,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
                 report.errors.append(f"mkdir {d}: {exc}")
 
     # --- policy seeding ---
-    _seed_rego(cfg.policy_dir, report)
+    _seed_rego(cfg, report)
     _seed_guardrail_profiles(cfg.policy_dir, report)
     _seed_splunk_bridge(cfg.data_dir, report)
 
@@ -2289,31 +2288,13 @@ def _next_commands(
 # ---------------------------------------------------------------------------
 
 
-def _seed_rego(policy_dir: str, report: BootstrapReport) -> None:
-    from defenseclaw.paths import bundled_rego_dir
+def _seed_rego(cfg: Config, report: BootstrapReport) -> None:
+    """The shipped Rego modules, as init writes them (rego_policies.seed_rego)."""
+    from defenseclaw.enforce.asset_lists import is_secure_client
+    from defenseclaw.rego_policies import seed_rego
 
-    bundled = bundled_rego_dir()
-    if not bundled or not bundled.is_dir() or not policy_dir:
-        return
-
-    dest = os.path.join(policy_dir, "rego")
-    try:
-        os.makedirs(dest, exist_ok=True)
-    except OSError as exc:
-        report.errors.append(f"mkdir {dest}: {exc}")
-        return
-
-    for src in bundled.iterdir():
-        if src.suffix not in (".rego", ".json") or src.name.startswith("."):
-            continue
-        dst = os.path.join(dest, src.name)
-        if os.path.exists(dst):
-            continue
-        try:
-            shutil.copy2(str(src), dst)
-        except OSError as exc:
-            report.errors.append(f"seed rego {src.name}: {exc}")
-    report.rego_seeded = dest
+    result = seed_rego(cfg.policy_dir, os.path.join(cfg.data_dir, "backups"), refresh_stock=not is_secure_client(cfg))
+    report.errors.extend(f"seed rego {error}" for error in result.errors)
 
 
 def _seed_guardrail_profiles(policy_dir: str, report: BootstrapReport) -> None:
