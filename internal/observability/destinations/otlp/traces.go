@@ -404,7 +404,7 @@ func otlpCanonicalResource(span sdktrace.ReadOnlySpan) (map[string]string, strin
 		values[key] = item.Value.AsString()
 		validation[key] = item.Value.AsString()
 	}
-	if observability.ValidateTelemetryResourceAttributes(validation) != nil {
+	if observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(validation) != nil {
 		return nil, "", false
 	}
 	return values, resource.SchemaURL(), true

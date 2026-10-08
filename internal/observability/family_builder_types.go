@@ -96,6 +96,7 @@ type TraceResourceInput struct {
 	DroppedAttributesCount Optional[uint32]
 	values                 familyFieldValues
 	customValues           familyFieldValues
+	secureClientAliases    bool
 }
 
 // TraceScopeInput carries only the structural dropped count. Scope name, version,

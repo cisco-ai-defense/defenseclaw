@@ -69,30 +69,29 @@ var ErrUnsupportedScheme = errors.New("netguard: only http/https schemes are sup
 // IPv6 magic address, the AWS Service Endpoint reserved space, and
 // the IPv6 ULA range round out the deny-list.
 //
-// 100.64.0.0/10 (RFC 6598 carrier-grade NAT) is included by default
+// 100.64.0.0/10 (RFC 6598 carrier-grade NAT) is blocked by default
 // because it is the canonical "private overlay" address space —
 // AWS Cloud WAN, GCP private overlay, and most carrier NAT deploys
 // land here. Operators running over Tailscale (which uses 100.64/10
 // for its mesh addresses) opt out of CGNAT blocking with
-// DEFENSECLAW_ALLOW_CGNAT=1, which mirrors the gateway-side hatch
+// DEFENSECLAW_ALLOW_CGNAT=1 in unmanaged mode, which mirrors the gateway-side hatch
 // in internal/gateway/provider.go::extraReservedNets so both
 // predicates classify the same set of IPs as unsafe under the same
 // configuration. Loopback, RFC 1918, link-local, IMDS, ECS task
 // metadata, and IPv6 ULA stay blocked unconditionally.
-var extraReservedCIDRs = func() []string {
-	base := []string{
-		"169.254.169.254/32", // EC2/Azure/GCP metadata service
-		"169.254.170.2/32",   // ECS task metadata endpoint
-		"fd00::/8",           // IPv6 ULA
-	}
-	if !cgnatAllowed() {
-		base = append(base, "100.64.0.0/10") // RFC 6598 carrier-grade NAT
-	}
-	return base
+var extraReservedCIDRs = []string{
+	"169.254.169.254/32", // EC2/Azure/GCP metadata service
+	"169.254.170.2/32",   // ECS task metadata endpoint
+	"fd00::/8",           // IPv6 ULA
+}
+
+var cgnatCIDR = func() *net.IPNet {
+	_, network, _ := net.ParseCIDR("100.64.0.0/10")
+	return network
 }()
 
 // cgnatAllowed mirrors the gateway-side check; broken out so the
-// init-time decision is auditable from a single call site.
+// managed-mode policy is applied at each lookup.
 func cgnatAllowed() bool {
 	return envvars.Getenv("DEFENSECLAW_ALLOW_CGNAT") == "1"
 }
@@ -120,7 +119,7 @@ func init() {
 //
 //   - net.IP.IsLoopback / IsPrivate / IsLinkLocalUnicast /
 //     IsLinkLocalMulticast / IsMulticast / IsUnspecified
-//   - extraReservedCIDRs (cloud metadata + CGNAT + IPv6 ULA)
+//   - extraReservedCIDRs (cloud metadata + IPv6 ULA), plus CGNAT
 func IsPrivateOrReserved(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -134,7 +133,7 @@ func IsPrivateOrReserved(ip net.IP) bool {
 	if IsAllowedPrivateIP(ip) {
 		return false
 	}
-	if ip.IsPrivate() {
+	if ip.IsPrivate() || (!cgnatAllowed() && cgnatCIDR.Contains(ip)) {
 		return true
 	}
 	for _, n := range parsedExtraReserved {

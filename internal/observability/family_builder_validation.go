@@ -737,6 +737,20 @@ func mergeFamilyTraceResource(
 	}
 
 	values = append(values, fixed...)
+	if resource.secureClientAliases {
+		for _, alias := range secureClientResourceAliases {
+			for _, entry := range fixed {
+				if entry.key != alias.canonical || !entry.present {
+					continue
+				}
+				values = append(values, familyFieldValue{
+					key: alias.descriptor.key, value: entry.value, present: true,
+				})
+				descriptors = append(descriptors, alias.descriptor)
+				break
+			}
+		}
+	}
 	resource.values = values
 	return resource, descriptors, nil
 }

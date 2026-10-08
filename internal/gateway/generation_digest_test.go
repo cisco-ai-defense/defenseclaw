@@ -72,7 +72,7 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	}
 	alice.Config.DeploymentMode = "managed_enterprise"
 	alice.Config.Enterprise.Profile = managed.ProfileSecureClient
-	if _, ok := health()["policy"]; ok || livePolicyDigestV8().IsPresent() {
+	if _, ok := health()["policy"]; ok || livePolicyStampPresent() {
 		t.Fatal("the Secure Client integration's /health or decision records carry the effective policy")
 	}
 }
@@ -223,4 +223,11 @@ func TestDiscoveryAssetsChangedFollowsTheFileNotTheConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// livePolicyStampPresent reports whether records outside a request would carry
+// a policy stamp.
+func livePolicyStampPresent() bool {
+	digest, generation := livePolicyStampV8()
+	return digest.IsPresent() || generation.IsPresent()
 }

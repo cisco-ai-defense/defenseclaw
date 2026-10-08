@@ -17,8 +17,6 @@
 package gateway
 
 import (
-	"context"
-
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -29,26 +27,26 @@ import (
 // generation and under the Secure Client integration, whose records stay
 // unchanged.
 
-func livePolicyStampV8() (observability.Optional[string], observability.Optional[int64]) {
-	g := livePolicyGeneration()
-	if g == nil {
-		return observability.Absent[string](), observability.Absent[int64]()
-	}
-	return observability.Present(g.Digest), observability.Present(int64(g.N))
-}
-
-func livePolicyDigestV8() observability.Optional[string] {
-	return policyDigestV8(context.Background())
-}
-
-func livePolicyGenerationV8() observability.Optional[int64] {
-	return policyGenerationV8(context.Background())
-}
-
 func livePolicyGeneration() *Generation {
 	g := currentGeneration()
 	if g == nil || g.Config == nil || g.Config.SecureClientIntegration() {
 		return nil
 	}
 	return g
+}
+
+// livePolicyStampV8 reads one applied generation for both audit attributes.
+func livePolicyStampV8() (observability.Optional[string], observability.Optional[int64]) {
+	return policyStampFromLoad(livePolicyGeneration)
+}
+
+func policyStampFromLoad(load func() *Generation) (observability.Optional[string], observability.Optional[int64]) {
+	return policyStampFromGeneration(load())
+}
+
+func policyStampFromGeneration(g *Generation) (observability.Optional[string], observability.Optional[int64]) {
+	if g == nil || g.Config == nil || g.Config.SecureClientIntegration() || g.Digest == "" || g.N == 0 {
+		return observability.Absent[string](), observability.Absent[int64]()
+	}
+	return observability.Present(g.Digest), observability.Present(int64(g.N))
 }

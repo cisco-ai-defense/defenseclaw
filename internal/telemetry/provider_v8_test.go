@@ -1182,3 +1182,29 @@ func TestNewProviderV8InactiveRejectsCanceledContextBeforeAllocation(t *testing.
 		t.Fatalf("provider/error/calls=%v/%v/%d, want nil/canceled/0", provider, err, processorCalls.Load())
 	}
 }
+
+func TestSecureClientV8ResourceRetainsLegacyAliases(t *testing.T) {
+	plan := v8PlanForTest(t, "always_on", "", nil)
+	snapshot := plan.Snapshot()
+	aliases := true
+	snapshot.TracePolicy.CompatibilityAliases = &aliases
+	identity := v8ResourceProcessIdentity{
+		serviceInstanceID: "service-1", defenseClawInstanceID: "instance-1",
+		deviceFingerprint: "fingerprint-1",
+	}
+	resource, err := newV8ResourceContext(snapshot, V8ProviderOptions{
+		Version: "1.0", Environment: "production", DeploymentMode: "managed",
+	}, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"deployment.environment": "production",
+		"deployment.mode":        "managed",
+		"defenseclaw.device.id":  "fingerprint-1",
+	} {
+		if got := resource.values[key]; got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
