@@ -683,3 +683,26 @@ func TestHookResponseRuleIDsCarriesAssetPolicyRule(t *testing.T) {
 		t.Fatalf("no-asset rule IDs = %v", got)
 	}
 }
+
+// GAP-0577: an asset-policy audit row names the verified caller under the
+// keys the hook_decision row of the same event uses.
+func TestAssetPolicyAuditRowNamesTheCaller(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "dcr-epa1"})
+	api.logAssetPolicyAudit(ctx, "claudecode", "skill:epa-deny", "action=block source=admin-deny")
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action != string(audit.ActionAssetPolicy) {
+			continue
+		}
+		if event.Structured[auditUserIDKey] != "1001" || event.Structured[auditUserNameKey] != "dcr-epa1" || event.Connector != "claudecode" {
+			t.Fatalf("asset-policy row connector=%q structured=%v, want the caller", event.Connector, event.Structured)
+		}
+		return
+	}
+	t.Fatal("no asset-policy audit row")
+}
