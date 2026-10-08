@@ -2507,15 +2507,16 @@ async def test_irreversible_confirmations_focus_cancel(fetch, monkeypatch) -> No
     # Delete, and the undo of a running sandbox, ask on the command line,
     # whose questions default to no.
     assert [tuple(argv[1:3]) for argv, _cwd in ran] == [("sandbox", "delete"), ("sandbox", "undo")]
+    # Stop keeps the sandbox for connect, but ends the live agent session:
+    # a stray Enter after s did (GAP-0261), so it focuses Cancel too.
     for title in (
         "Unblock webhook.site in every sandbox?",
         "Always allow www.example.com?",
+        "Stop myapp-claude-7f3a?",
     ):
         screen = confirmations[title]
         assert screen.selected_index is not None, title
         assert screen.actions[screen.selected_index].action_id == "cancel", title
-    # Stop keeps the sandbox for connect: it keeps its default.
-    assert confirmations["Stop myapp-claude-7f3a?"].selected_index is None
 
 
 @pytest.mark.asyncio
