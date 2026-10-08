@@ -554,7 +554,8 @@ func TestPruneRunImages(t *testing.T) {
 	var oldRuns []RunImage
 	for i, body := range []string{`{"b":1}`, `{"c":1}`, `{"d":1}`} {
 		ri := RunImage{Tag: RunRepository(testAliasRepo) + ":claudecode-old-" + string(rune('a'+i)) + "-u1000", ImageID: "sha256:" + strings.Repeat(string(rune('3'+i)), 64),
-			Digest: RunConfigDigest(claudeRunFiles(body)), BaseTag: old.Tag, BaseImageID: old.ImageID, Connector: "claudecode", UID: 1000, GID: 1000, Owner: testOwner}
+			Digest: RunConfigDigest(claudeRunFiles(body)), BaseTag: old.Tag, BaseImageID: old.ImageID, Connector: "claudecode", UID: 1000, GID: 1000, Owner: testOwner,
+			BuiltAt: old.BuiltAt.Add(time.Duration(i) * time.Minute)}
 		daemon.images[ri.ImageID] = fakeImage{labels: map[string]string{LabelSandboxImage: "1", LabelOwner: testOwner, LabelRunImage: "1"}}
 		daemon.tags[ri.Tag] = ri.ImageID
 		must(b.Store.putRunImage(ri))
@@ -579,10 +580,13 @@ func TestPruneRunImages(t *testing.T) {
 		t.Fatalf("dry prune without the alias repository = %+v, %v", rep, err)
 	}
 
-	// A sandbox that runs the old overlay image, named by its ID, keeps it
-	// and so its run images.
+	// A sandbox that runs the old overlay image, named by its ID, keeps it,
+	// its alias and its newest run image; the run images no sandbox runs go
+	// with their disks (GAP-0334).
 	rep, err = b.Prune(ctx, PruneOptions{Repository: "e-defenseclaw-sandbox", AliasRepository: testAliasRepo, Keep: []string{old.ImageID}, DryRun: true})
-	if err != nil || len(rep.Removed) != 0 || !slices.Equal(rep.InUse, []string{old.Tag, oldAlias.Tag}) {
+	if err != nil || !slices.Equal(rep.Removed, []string{oldRuns[0].Tag, oldRuns[1].Tag}) || !slices.Contains(rep.Kept, oldRuns[2].Tag) ||
+		// oldRuns[0]'s image ID stays under another data dir's tag.
+		!slices.Equal(rep.InUse, []string{old.Tag, oldAlias.Tag}) || !slices.Equal(rep.RemovedImageIDs, []string{oldRuns[1].ImageID}) {
 		t.Fatalf("dry prune keeping the old image = %+v, %v", rep, err)
 	}
 

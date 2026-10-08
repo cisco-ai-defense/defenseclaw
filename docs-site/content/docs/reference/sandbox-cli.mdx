@@ -272,7 +272,12 @@ Removes superseded harness images.
   images and aliases of superseded harness images. It counts every harness
   image built for the docker driver as superseded, however new it is (images
   recorded before DefenseClaw built MicroVM images are such images). Such an
-  image goes with its run images and aliases unless a sandbox runs it.
+  image goes with its run images and aliases unless a sandbox runs it. Each
+  run configuration (a profile, `--safe`, a key) makes its own run image,
+  and the MicroVM driver prepares a disk of about 5 GB for each; of a
+  current image, prune keeps the run images sandboxes run and the newest
+  other one (for the next run), and removes the rest with their disks, so a
+  deleted sandbox's disk does not stay behind.
 - **On a docker gateway**, or one whose driver it cannot tell, it keeps the
   newest image of both kinds.
 - **MicroVM disks.** With the daemon's list, it also removes the MicroVM
