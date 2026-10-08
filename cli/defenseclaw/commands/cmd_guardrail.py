@@ -740,6 +740,12 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     runtime_limit_rows: list[str] = []
     posture_rows: list[str] = []
     for name in actives:
+        if normalize_connector(name) == "cursor":
+            runtime_limit_rows.append(
+                "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected "
+                "and fail-closed applies only to hook events the CLI sends. "
+                "Check hook_decision rows for actual coverage"
+            )
         cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
         configured_cfm = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else fail_mode
         cfm = configured_cfm
