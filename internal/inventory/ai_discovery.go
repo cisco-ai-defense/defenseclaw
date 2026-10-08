@@ -187,6 +187,9 @@ type AIDiscoveryOptions struct {
 	// platform enumerated them for a service-context scan (managed Windows).
 	// Signals found under a profile carry its account.
 	homeOwners []discoveryHomeOwner
+	// platformHomes marks HomeDirs as the platform's profile list, which
+	// every full scan reads again (refreshPlatformHomes).
+	platformHomes bool
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -823,7 +826,8 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// developer running a local build does not silently start reading
 	// their coworkers' dotdirs on a shared workstation.
 	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
-		if owners := platformDiscoveryHomeOwners(opts.StandaloneEnterprise); len(owners) > 0 {
+		opts.platformHomes = true
+		if owners := discoveryHomeOwnersLookup(opts.StandaloneEnterprise); len(owners) > 0 {
 			platformHomes := make([]string, 0, len(owners))
 			for _, owner := range owners {
 				platformHomes = append(platformHomes, owner.Home)
@@ -928,6 +932,30 @@ func (s *ContinuousDiscoveryService) Close() error {
 // walk. Never empty when HomeDir was resolvable (normalizeAIDiscoveryOptions
 // always includes HomeDir in HomeDirs); callers can iterate without a
 // separate fallback.
+// discoveryHomeOwnersLookup lists the platform's profiles; replaceable in
+// tests.
+var discoveryHomeOwnersLookup = platformDiscoveryHomeOwners
+
+// refreshPlatformHomes reads the platform's profile list again, so a managed
+// Windows gateway scans an account created after it started from the next
+// full scan on, not after a restart (GAP-0707), and stops reading a profile
+// that is gone. It runs under scanMu, like every reader of the list. An
+// empty answer (the registry unreadable) keeps the last list.
+func (s *ContinuousDiscoveryService) refreshPlatformHomes() {
+	if !s.opts.platformHomes {
+		return
+	}
+	owners := discoveryHomeOwnersLookup(s.opts.StandaloneEnterprise)
+	if len(owners) == 0 {
+		return
+	}
+	homes := make([]string, 0, len(owners))
+	for _, owner := range owners {
+		homes = append(homes, owner.Home)
+	}
+	s.opts.HomeDirs, s.opts.HomeDir, s.opts.homeOwners = homes, homes[0], owners
+}
+
 func (s *ContinuousDiscoveryService) homesToScan() []string {
 	if s == nil {
 		return nil
@@ -1124,6 +1152,9 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 	})
 	defer scanObservation.abort()
 
+	if full {
+		s.refreshPlatformHomes()
+	}
 	prev, prevErr := s.store.Load()
 	if prevErr != nil {
 		// Loading the previous-scan snapshot is best-effort — a
