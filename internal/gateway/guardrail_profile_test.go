@@ -59,6 +59,41 @@ rules:
 	}
 }
 
+// A reload during a request must attribute records to the profile enforced
+// by decisions after the reload.
+func TestGuardrailProfileTelemetryFollowsReloadedSet(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"}, "watch": {Mode: "observe"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx = api.withGuardrailProfileDecision(ctx, "")
+	if got := api.decisionConfig(ctx).Guardrail.Mode; got != "action" {
+		t.Fatalf("initial decision mode = %q", got)
+	}
+	next := *cfg
+	next.Guardrail = cfg.Guardrail
+	next.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	set, err := newGuardrailProfileSet(&next, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.setGuardrailProfiles(set)
+	if got := api.decisionConfig(ctx).Guardrail.Mode; got != "observe" {
+		t.Fatalf("reloaded decision mode = %q", got)
+	}
+	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "watch" {
+		t.Fatalf("telemetry profile = %q, want enforced watch", name)
+	}
+}
+
 // TestSubjectGroupsMatchLikeEqualFold: the group index answers as the scan
 // with strings.EqualFold it replaced (GAP-0118), for names, SIDs, DOMAIN\name
 // groups, a bare name against a DOMAIN\name group, padding, and runes whose

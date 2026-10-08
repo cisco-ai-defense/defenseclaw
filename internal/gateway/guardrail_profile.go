@@ -1069,14 +1069,16 @@ type guardrailProfileTelemetry struct {
 func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry {
 	set := liveGuardrailProfiles.Load()
 	resolved := resolvedGuardrailProfileFrom(ctx)
-	if resolved == nil {
-		if set == nil {
+	if set == nil {
+		if resolved == nil || resolved.set != nil {
 			return guardrailProfileTelemetry{}
 		}
-		resolved = resolveGuardrailProfileFor(ctx, set)
+		// A supplied decision without a profile set is used by callers that
+		// construct a standalone decision record.
+		return guardrailProfileTelemetryFromDecision(resolved.decision)
 	}
-	if resolved == nil {
-		return guardrailProfileTelemetry{}
+	if resolved == nil || resolved.set != set {
+		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
 	return guardrailProfileTelemetryFromDecision(resolved.decision)
 }
