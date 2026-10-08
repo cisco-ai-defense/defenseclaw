@@ -131,6 +131,18 @@ class TestArtifactDocsAndCommandLines(unittest.TestCase):
         self.assertIn("COG-MEMORY", ids("Write what you learn to MEMORY.md.\n", "SKILL.md"))
 
 
+    def test_anchored_command_matches_after_first_line(self):
+        pack = rulepack.RulePack(source_dir="test", rules=[
+            rulepack._CompiledRule(
+                rule_id="T-COMMAND", pattern=rulepack.re.compile(r"^dc-review-marker"),
+                title="Marker", severity="HIGH", confidence=1, tags=[], category="command",
+            ),
+        ])
+        findings = pack.scan_text("# introduction\ndc-review-marker\n", location="SKILL.md")
+        self.assertEqual([(f.rule_id, f.location) for f in findings], [("T-COMMAND", "SKILL.md:2")])
+
+
+
 class TestWindowedSearch(unittest.TestCase):
     """GAP-2070: big files are searched around the anchor literals only."""
 
