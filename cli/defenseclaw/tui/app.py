@@ -13216,13 +13216,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     True, hint=f"Config not saved: {exc}. Your draft is kept: fix the file and press S again, or r to discard it."
                 )
         try:
-            self.setup_model.apply_changes_to_config()
+            self.setup_model.apply_changes_to_config(mark_applied=False)
             save = getattr(self.config, "save", None)
             if callable(save):
                 from defenseclaw.config_writer import ACTOR_PREFIX_TUI, current_actor
 
                 result = save(actor=current_actor(ACTOR_PREFIX_TUI), reason=restart_reason)
                 restart_keys = getattr(result, "restart_required", None)
+            self.setup_model.accept_applied_changes()
             from defenseclaw.enforce import asset_lists
 
             secure_client = asset_lists.is_secure_client(self.config)
