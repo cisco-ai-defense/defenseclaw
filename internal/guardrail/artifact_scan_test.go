@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -115,4 +116,30 @@ func TestArtifactRulesSkipDocMentionsAndCrossLineCommands(t *testing.T) {
 	if got := scanArtifactText(pack.artifactRules(), "cleanup:\n\trm -rf /\n", "Makefile"); len(got) == 0 {
 		t.Error("a one-line rm -rf / is no longer found")
 	}
+}
+
+func TestArtifactOverlayScansUTF16SkillManifest(t *testing.T) {
+	dir := t.TempDir()
+	content := "# introduction\ndc-review-marker\n"
+	encoded := []byte{0xFF, 0xFE}
+	for _, unit := range utf16.Encode([]rune(content)) {
+		encoded = append(encoded, byte(unit), byte(unit>>8))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pack := &RulePack{RuleFiles: []*RulesFileYAML{{
+		Category: "command",
+		Rules:    []RuleDefYAML{{ID: "T-MARKER", Pattern: "dc-review-marker", Severity: "HIGH"}},
+	}}}
+	result, err := NewArtifactOverlay(infoScanner{}, pack).Scan(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range result.Findings {
+		if finding.RuleID == "T-MARKER" && finding.Location == "SKILL.md:2" && finding.Severity == scanner.SeverityHigh {
+			return
+		}
+	}
+	t.Fatalf("UTF-16 SKILL.md rule-pack finding missing: %+v", result.Findings)
 }

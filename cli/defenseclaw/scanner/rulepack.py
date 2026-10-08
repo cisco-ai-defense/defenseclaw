@@ -448,8 +448,15 @@ def _read_text(path: str) -> str | None:
     try:
         if os.path.getsize(path) > _MAX_FILE_BYTES:
             return None
-        with open(path, encoding="utf-8", errors="strict") as fh:
-            return fh.read()
+        with open(path, "rb") as fh:
+            data = fh.read(_MAX_FILE_BYTES + 1)
+        if len(data) > _MAX_FILE_BYTES:
+            return None
+        if os.path.basename(path).casefold() == "skill.md" and data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            from defenseclaw.skill_discovery import decode_skill_text
+
+            return decode_skill_text(data)
+        return data.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
 

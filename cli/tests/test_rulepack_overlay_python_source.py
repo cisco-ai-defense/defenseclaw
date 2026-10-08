@@ -141,6 +141,18 @@ class TestArtifactDocsAndCommandLines(unittest.TestCase):
         findings = pack.scan_text("# introduction\ndc-review-marker\n", location="SKILL.md")
         self.assertEqual([(f.rule_id, f.location) for f in findings], [("T-COMMAND", "SKILL.md:2")])
 
+    def test_utf16_skill_manifest_gets_rule_pack_finding(self):
+        pack = rulepack.RulePack(source_dir="test", rules=[
+            rulepack._CompiledRule(
+                rule_id="T-MARKER", pattern=rulepack.re.compile("dc-review-marker"),
+                title="Marker", severity="HIGH", confidence=1, tags=[], category="command",
+            ),
+        ])
+        with tempfile.TemporaryDirectory() as target:
+            with open(os.path.join(target, "SKILL.md"), "wb") as fh:
+                fh.write("# introduction\ndc-review-marker\n".encode("utf-16"))
+            findings = pack.scan_path(target)
+        self.assertEqual([(f.rule_id, f.location) for f in findings], [("T-MARKER", "SKILL.md:2")])
 
 
 class TestWindowedSearch(unittest.TestCase):
