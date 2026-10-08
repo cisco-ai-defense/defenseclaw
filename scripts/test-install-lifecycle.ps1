@@ -473,6 +473,8 @@ function Test-UpgradeLegacy([string]$From) {
         Check ($code -eq 0) "defenseclaw rollback exited $code"
         $log = Wait-Detached
         Check ($log.Contains("Now running DefenseClaw $From")) "the rollback log does not report success"
+        $exportCommand = '& "' + (Join-Path $DcHome "previous\bin\defenseclaw-gateway.exe") + '" audit export --db "' + (Join-Path $DcHome "previous\data\audit.db") + '"'
+        Check ($log.Contains($exportCommand)) "the rollback log does not print a PowerShell-safe audit export command"
         Assert-Versions $From
         Assert-Healthy
         Assert-DataKept
