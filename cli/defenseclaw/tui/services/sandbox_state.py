@@ -1202,6 +1202,10 @@ class SandboxesPanelModel:
     # The process tree of each sandbox whose detail was opened last
     # (set_processes), as the detail shows it.
     processes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # The Alerts panel's alerts raised in each sandbox, by severity
+    # (set_alert_events): the Alerts cell named only health alerts, so a
+    # sandbox whose tool call a rule blocked showed "-" (GAP-0311).
+    finding_alerts: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def set_processes(self, name: str, payload: Any) -> None:
         """Keep a sandbox's process tree for its detail."""
@@ -1236,6 +1240,44 @@ class SandboxesPanelModel:
     def set_error(self, message: str) -> None:
         """Record a failed refresh; the previous snapshot stays."""
         self.error = message
+
+    def set_alert_events(self, events: Any) -> None:
+        """Count the alerts (the Alerts panel's events) raised in each listed sandbox.
+
+        An alert older than the sandbox belongs to an earlier one of the same name.
+        """
+        created = {row.name: row.created_at for row in self.rows}
+        counts: dict[str, dict[str, int]] = {}
+        for event in events or ():
+            name = getattr(event, "sandbox", "")
+            if name not in created:
+                continue
+            since, at = created[name], getattr(event, "timestamp", None)
+            if since is not None and isinstance(at, datetime) and (at if at.tzinfo else at.replace(tzinfo=timezone.utc)) < since:
+                continue
+            severity = (getattr(event, "severity", "") or "INFO").upper()
+            by_severity = counts.setdefault(name, {})
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+        self.finding_alerts = counts
+
+    def alerts_cell(self, row: SandboxRow, *, short: bool = False) -> str:
+        """The Alerts cell: the row's health alerts, then how many alerts it raised."""
+        health = row.badge(short=short)
+        count = sum(self.finding_alerts.get(row.name, {}).values())
+        if not count:
+            return health
+        raised = "1 alert" if count == 1 else f"{count} alerts"
+        return raised if health == "-" else f"{health}, {raised}"
+
+    def alerts_text(self, row: SandboxRow) -> str:
+        """The detail's Alerts line, or "" when the sandbox raised none."""
+        by_severity = self.finding_alerts.get(row.name, {})
+        if not by_severity:
+            return ""
+        order = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+        ranked = sorted(by_severity.items(), key=lambda item: (order.index(item[0]) if item[0] in order else len(order), item[0]))
+        counts = ", ".join(f"{n} {severity}" for severity, n in ranked)
+        return f"{sum(by_severity.values())} ({counts}): Alerts (2), then / {row.name}, lists them; or run defenseclaw alerts"
 
     def set_config(self, cfg: object | None) -> None:
         self.admin = admin_policy_from_config(cfg)
@@ -1431,6 +1473,10 @@ class SandboxesPanelModel:
                 self._selection_lost.add(view)
         self._clamp()
 
+    def shown(self) -> None:
+        """The panel came into view: the rows under the cursors are what the user sees now (GAP-0328)."""
+        self._selection_lost.clear()
+
     def _take_lost_selection(self) -> str:
         """The refusal for an action key whose selected item went away, once."""
         if self.view not in self._selection_lost:
@@ -1573,6 +1619,10 @@ class SandboxesPanelModel:
         if key == "t":
             index = SANDBOX_VIEWS.index(self.view)
             self.view = SANDBOX_VIEWS[(index + 1) % len(SANDBOX_VIEWS)]
+            # The row under the cursor of the view just opened is what the
+            # user sees: one that went away while the view was hidden is no
+            # selection of theirs (GAP-0328).
+            self._selection_lost.discard(self.view)
             return SandboxPanelAction("view")
         if key == "enter":
             if self._view_len(self.view):
@@ -1843,7 +1893,7 @@ class SandboxesPanelModel:
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),
-                    row.badge(short=True),
+                    self.alerts_cell(row, short=True),
                 )
                 for row in self.rows
             )
@@ -1859,7 +1909,7 @@ class SandboxesPanelModel:
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),
-                    row.alert_badge,
+                    self.alerts_cell(row),
                 )
                 for row in self.rows
             )
@@ -2044,6 +2094,8 @@ class SandboxesPanelModel:
             pairs.append(("Destinations", destinations))
         elif destinations is not None:
             pairs.extend(destination_pairs(destinations, row.name))
+        if raised := self.alerts_text(row):
+            pairs.append(("Alerts", raised))
         for alert in row.alerts:
             pairs.append(("Alert", alert))
         for violation in row.violations:

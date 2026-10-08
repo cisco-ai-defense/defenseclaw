@@ -906,6 +906,7 @@ def test_finding_of_a_sandbox_session_names_the_sandbox() -> None:
     (alert,) = alerts_panel._with_hook_decisions(store, list(alerts_from_v8_history((finding,))))
 
     assert ("Sandbox", "myapp-um") in alert.facts
+    assert alert.sandbox == "myapp-um"  # the Sandboxes panel counts it (GAP-0311)
     assert ("Decision", "allowed") in alert.facts
 
 

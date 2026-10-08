@@ -33,7 +33,8 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   `defenseclaw-gateway sandbox …` and passes your arguments on exactly as
   typed.
 - **Linux and macOS only.** On Windows every command stops with exit status 3
-  before doing anything. `setup`, `run`, `image build`, and `enable` also stop with status
+  before doing anything; there the connector hooks guard your agents (see
+  [Windows](/docs/get-started/windows)). `setup`, `run`, `image build`, and `enable` also stop with status
   3 under WSL2, in a `managed_enterprise` install, and when run as root:
   sandboxes run as your own user. `teardown` also stops with status 3 in a
   `managed_enterprise` install. On a Mac sandboxes run in OpenShell

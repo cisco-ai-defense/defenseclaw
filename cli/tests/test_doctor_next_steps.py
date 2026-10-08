@@ -342,6 +342,29 @@ def test_a_writable_audit_folder_names_the_folder_not_a_restore(tmp_path) -> Non
     assert f"{home} can be written by other accounts" in row["detail"]
 
 
+def test_a_writable_folder_names_the_folder_for_the_device_key_too(tmp_path) -> None:
+    # GAP-0344: with the audit row fixed (GAP-0300), the Device identity row
+    # still sent the same chmod 777 home to a restore of the key from backup.
+    from defenseclaw.doctor_recovery import DeviceKeyHealthStatus
+
+    home = tmp_path / "edge-ub-home"
+    home.mkdir()
+    home.chmod(0o777)
+    health = mock.MagicMock(status=DeviceKeyHealthStatus.INVALID, reason_code="directory-chain-is-writable-by-others")
+    cfg = mock.MagicMock(data_dir=str(home))
+    cfg.gateway.device_key_file = str(home / "device.key")
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.doctor_recovery.inspect_device_key", return_value=health):
+        cmd_doctor._check_device_identity(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "fail"
+    assert row["remediation"] == f"chmod go-w {home}"
+    assert row["detail"] == (
+        f"{home} can be written by other accounts, so the device key in it is not trusted; "
+        "the key itself is untouched (directory-chain-is-writable-by-others)"
+    )
+
+
 def _bedrock_judge_cfg(tmp_path, auth_mode: str):
     from defenseclaw.config import (
         BedrockKeyConfig,

@@ -202,6 +202,30 @@ def test_sandbox_rows_carry_what_the_panel_shows() -> None:
     assert decode_sandbox({"phase": "ready"}) is None
 
 
+def test_the_alerts_cell_counts_the_alerts_a_sandbox_raised() -> None:
+    """GAP-0311: the Alerts cell named health alerts only, so a sandbox whose
+    tool call a rule blocked showed "-" while `defenseclaw alerts` listed it."""
+    from defenseclaw.tui.panels.alerts import AlertEvent
+
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [COPY, {**STOPPED, "created_at": "2026-10-08T05:00:00Z"}], [])
+    model.set_alert_events(
+        [
+            AlertEvent("a1", "CRITICAL", "block", "codex:PreToolUse", sandbox="fix-tests"),
+            AlertEvent("a2", "LOW", "allow", "api.openai.com", sandbox="fix-tests"),
+            AlertEvent("a3", "HIGH", "block", "claudecode:PreToolUse"),  # the host's own agent
+            # An earlier sandbox of the same name.
+            AlertEvent("a4", "HIGH", "block", "x", sandbox="docs", timestamp=datetime(2026, 10, 8, 4, tzinfo=timezone.utc)),
+        ]
+    )
+    cells = {row[0]: row[-1] for row in model.data_table_rows()}
+    assert cells == {"fix-tests": "silent, 2 alerts", "docs": "-"}
+    model.cursor = [row.name for row in model.rows].index("fix-tests")
+    assert dict(model.detail_pairs()[1])["Alerts"] == (
+        "2 (1 CRITICAL, 1 LOW): Alerts (2), then / fix-tests, lists them; or run defenseclaw alerts"
+    )
+
+
 def test_the_detail_says_kept_changes_get_a_new_undo_point() -> None:
     """The daemon's accept (the user kept the last session's changes) is on the
     snapshot: the next start takes a new undo point, whoever starts it."""
@@ -2645,6 +2669,20 @@ def test_a_key_is_refused_once_when_its_ask_went_away() -> None:
     model.cursor = 0
     model.remove_ask("ask-1")
     assert model.handle_key("x") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-3")
+
+
+def test_an_ask_that_went_away_while_its_view_was_hidden_is_no_lost_selection() -> None:
+    """GAP-0328: 7, then t to Asks with one ask listed: a said "The ask the
+    cursor was on is no longer waiting" for an ask the user never saw."""
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1)])
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-2", 2)])  # while the Sandboxes view was shown
+    assert model.handle_key("t").kind == "view" and model.handle_key("t").kind == "view" and model.view == "asks"
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-2")
+    # The same while another panel was shown: opening panel 7 shows the row.
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-3", 3)])
+    model.shown()
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-3")
 
 
 def test_the_activity_selection_follows_its_event() -> None:

@@ -273,8 +273,10 @@ Each block is told once, and only to the sandbox that hit it.
 
 <Callout type="info" title="The proxy credential in verbose output">
 The proxy address the sandbox gets holds a user name and password of its
-own, so `curl -v` prints a `Proxy-Authorization: Basic …` header, and the
-agent may warn you that a credential leaked. It is not one of your secrets.
+own, so `curl -v` prints a `Proxy-Authorization: Basic …` header, and `env`
+or `printenv` show them in `HTTPS_PROXY` and `HTTP_PROXY`
+(`http://<user>:<password>@…`). The agent may warn you that a credential
+leaked. It is not one of your secrets.
 DefenseClaw makes one for each sandbox; it works only on the egress proxy on
 this machine's loopback address, lets the sandbox reach only what its policy
 allows, and stops working when the sandbox is deleted.

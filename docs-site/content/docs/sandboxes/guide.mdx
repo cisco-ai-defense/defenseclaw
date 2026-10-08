@@ -25,7 +25,8 @@ a Mac each sandbox is a small virtual machine of its own (OpenShell's
 MicroVM driver), and every run works on a copy of your folder that you pull
 the changes back from (see [macOS](#macos)). Sandboxes are not supported on
 Windows or WSL2, on Intel Macs, in `managed_enterprise` deployments, or when
-you run DefenseClaw as root.
+you run DefenseClaw as root. On Windows the connector hooks guard your agents
+instead; see [Windows](/docs/get-started/windows).
 
 This page is the full reference. For a shorter, guided path, start with
 [OpenShell sandboxes](/docs/sandboxes): setup on
@@ -381,7 +382,7 @@ Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + bloc
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
-  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t)
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t); each one also rings the bell here
   MCP       github ✓ · linear ✓
   ⚠ MCP: not brought along: postgres-local (runs on this machine, which the sandbox cannot reach)
 ```
@@ -800,12 +801,18 @@ start` there. If none of the session's hooks gets through (the daemon is
 stopped, or the ingress is unreachable), every tool call is blocked. The
 run tells you three times:
 
-- live, in your terminal, as soon as DefenseClaw notices or the first hook
-  is more than 45 seconds late:
+- live, as soon as DefenseClaw notices or the first hook is more than 45
+  seconds late. In a terminal session the bell rings and the terminal's
+  title shows it for a moment (Claude Code takes the title back at once);
+  a run without a terminal, such as `--prompt`, prints the line:
 
   ```text
   [defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor
   ```
+
+  A stopped daemon is announced the same way, as
+  `⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed: …`,
+  and its return as `✓ the DefenseClaw daemon is reachable again`;
 
 - again in the end-of-session summary;
 - in the exit status: 69 when not one hook got through, unless the harness
@@ -927,11 +934,17 @@ go instead (see [work on a copy](#work-on-a-copy)).
 
 ```text
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
-✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+  ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
+  ✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
 ```
+
+The lines under the summary name what the session met, such as a `⚠` line
+for each tool call a rule let run but flagged and a `✗` line for each site
+blocked. After six lines the rest are counted
+(`… 2 more: defenseclaw sandbox activity --sandbox myapp-7f3a`).
 
 The network counts are sites (destinations): the new ones the sandbox
 reached, and the ones blocked during the session, each counted once however

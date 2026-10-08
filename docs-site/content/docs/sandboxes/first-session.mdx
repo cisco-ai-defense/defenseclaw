@@ -71,7 +71,7 @@ Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + bloc
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
-  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t)
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t); each one also rings the bell here
 ```
 
 </Tab>
@@ -250,7 +250,8 @@ the like.
 
 ```text
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
-✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since
+  ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
+  ✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
@@ -398,29 +399,45 @@ myapp-7f3a is stopped; this is the log of its detached run started 07:15, kept w
 
 ## If the hooks cannot reach DefenseClaw
 
-The sandbox hooks fail closed. If DefenseClaw's daemon stops during a
-session, every tool call is blocked, and the harness shows why with each
-blocked call:
+The sandbox hooks fail closed: while they cannot reach DefenseClaw, every
+tool call is blocked, and the harness shows why with each blocked call.
+
+If DefenseClaw's daemon stops during a session (or is restarting), the
+reason the agent shows is:
 
 ```text
 defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there if it is stopped, and after a start retries in a minute (`defenseclaw sandbox doctor` says what is wrong)
 ```
 
-After `defenseclaw-gateway start` the daemon can take up to a minute to
-answer the sandbox again; a call blocked in that minute goes through when
-retried.
+The run also rings the bell and puts
+`[defenseclaw] ⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed: …`
+in the terminal's title for a moment (Claude Code takes the title back at
+once; a terminal with desktop notifications shows it as one). The activity
+feed and the TUI cannot say it: they come from the daemon. Start it again
+(`defenseclaw-gateway start`) and, once it answers, the agent can carry on.
+The daemon can take up to a minute to answer the sandbox after a start; a
+call blocked in that minute goes through when retried. The end-of-session
+summary says how long it was away
+(`⚠ the DefenseClaw daemon was not reachable from 11:05:12 to 11:06:40; the hooks failed closed meanwhile`).
+If it is still stopped when you leave the harness, the run cannot review
+the session. It prints
+``⚠ the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run: start it with `defenseclaw-gateway start`, then `defenseclaw sandbox review NAME` shows its changes and `defenseclaw sandbox undo NAME` reverts them; NAME and its undo point are kept``
+and exits with status 1, without the summary or the keep question. In a
+copy-mode sandbox the line ends with `defenseclaw sandbox pull NAME`, which
+brings the work back. Start the daemon, then run the command the line names.
 
-The terminal's title says so too, and the bell rings (Claude Code keeps the
-title for itself). When not one hook of the session got through, the run
-also prints:
+If the daemon runs but the hooks still cannot reach it, for example when
+the path through OpenShell is broken, DefenseClaw flags the session. The
+feed and the TUI show:
 
 ```text
-[defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor
+⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor
 ```
 
-Start the daemon again (`defenseclaw-gateway start`) and the agent can carry
-on. The end-of-session summary repeats the warning, and the run exits with
-status 69 when not one hook got through.
+The terminal's title shows it for a moment and the bell rings (Claude Code
+takes the title back at once); a run without a terminal, such as
+`--prompt`, prints it as a `[defenseclaw]` line. The end-of-session summary
+repeats it, and the run exits with status 69 when not one hook got through.
 
 ## Next
 
