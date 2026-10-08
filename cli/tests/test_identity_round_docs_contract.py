@@ -57,3 +57,10 @@ def test_authentication_cooldown_and_half_open_probe() -> None:
     text = page("observability/index.mdx")
     assert "Authentication failures open the affected route immediately for five minutes" in text
     assert "a half-open probe then retries it" in text
+
+
+def test_identity_redaction_warns_about_qualified_account_name() -> None:
+    text = page("observability/end-user-identity.mdx")
+    assert "Every redaction profile preserves `defenseclaw.user.name`" in text
+    assert "alice@corp.example.com" in text
+    assert "must not receive the directory account name" in text
