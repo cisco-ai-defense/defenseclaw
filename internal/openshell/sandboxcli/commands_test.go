@@ -971,6 +971,31 @@ func TestPullChecksWhereTheWorkGoesFirst(t *testing.T) {
 	lacks(t, ta.output(), "--accept-sensitive", "Bring them back anyway?")
 }
 
+// GAP-0290: Ctrl-C at the code-running-changes question of a pull says
+// that nothing was applied and how to bring the changes back, and exits 130.
+func TestPullCtrlCAtTheSensitiveQuestionSaysNothingWasApplied(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	pr, pw := io.Pipe() // a terminal nobody types into
+	t.Cleanup(func() { _ = pw.Close() })
+	ta.IO.In, ta.IO.TTY = pr, true
+	sig := make(chan os.Signal, 1)
+	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+		sig <- os.Interrupt
+		return sig, func() {}
+	}
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Changes: []workspace.TreeChange{{Path: "package.json", Status: "M"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: "package.json", Label: "package.json", Severity: workspace.SeverityHigh}}}}
+	wantExit(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}), exitInterrupted)
+	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?",
+		"⚠ interrupted: not brought back; the changes stay in copybox: review them with `defenseclaw sandbox review copybox`")
+	if len(ta.copy.apply) != 0 {
+		t.Fatalf("applied %+v", ta.copy.apply)
+	}
+}
+
 // A branch that holds only the sandbox's earlier pull is refused before the
 // boot when the stopped sandbox has run since (the #1019 retest: `pull
 // --branch` started it, pulled, stopped it and only then refused), naming

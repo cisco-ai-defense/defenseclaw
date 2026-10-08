@@ -88,8 +88,20 @@ type SetupOptions struct {
 // Setup is the one-time `sandbox setup` flow: host checks, the consented
 // OpenShell install, bind mounts on the local gateway, the upstream
 // telemetry choice, harnesses, credentials, shell wrappers and images.
-func (a *App) Setup(ctx context.Context, o SetupOptions) error {
+func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	a.defaults()
+	defer func() {
+		if errors.Is(retErr, errInterrupted) {
+			// Ctrl-C at a question: say which, and that a new run finishes
+			// what is left (GAP-0286).
+			at := "a question"
+			if a.asked != "" {
+				at = fmt.Sprintf("%q", a.asked+"?")
+			}
+			retErr = &ExitError{Code: exitInterrupted, Err: fmt.Errorf("setup interrupted at %s: that step was not done, and the steps before it are kept; "+
+				"run `%s setup` again to finish", at, CommandName)}
+		}
+	}()
 	if err := a.CheckSupported(); err != nil {
 		return err
 	}

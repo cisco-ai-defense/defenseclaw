@@ -182,6 +182,9 @@ type App struct {
 	pager func(text string) bool
 	// intr is the interrupt state of the running command (interrupt.go).
 	intr *interruption
+	// asked is the last question ask showed, to the question mark: what a
+	// Ctrl-C there interrupted.
+	asked string
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run
