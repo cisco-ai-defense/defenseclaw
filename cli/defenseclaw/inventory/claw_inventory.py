@@ -366,6 +366,8 @@ def attach_ide_plugins(inv: dict[str, Any], payload: dict[str, Any] | None, note
         inv["ide_plugins_note"] = note
     summary = inv.get("summary")
     if isinstance(summary, dict):
+        previous = summary.get("ide_plugins") or {}
+        summary["total_items"] = summary.get("total_items", 0) - previous.get("count", 0) + len(plugins)
         summary["ide_plugins"] = entry
 
 
