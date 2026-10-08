@@ -60,8 +60,6 @@ type IDEInventory struct {
 	// at least every ideRecordInterval so retention pruning never drops
 	// the last recorded inventory.
 	persist bool
-	// savedPlugins includes baseline rows retained from partial installations.
-	savedPlugins []IDEPlugin
 }
 
 // ideRecordInterval is how long an unchanged IDE inventory goes without
@@ -559,18 +557,26 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 		}
 		current[p.Fingerprint] = *p
 	}
+	retained := false
 	for fp, prev := range s.ideBaseline {
 		if _, ok := current[fp]; ok {
 			continue
 		}
 		if partial[prev.InstallID] {
-			// A limit cut this installation short; keep the row rather
-			// than report a removal the scan cannot prove.
+			// A limit cut this installation short; keep the row, in the
+			// published inventory as well, rather than report a removal
+			// the scan cannot prove (GAP-0594: the CLI showed none).
+			prev.State = AIStateSeen
 			current[fp] = prev
+			inv.Plugins = append(inv.Plugins, prev)
+			retained = true
 			continue
 		}
 		prev.State = AIStateGone
 		inv.Removed = append(inv.Removed, prev)
+	}
+	if retained {
+		inv.sort()
 	}
 	sort.Slice(inv.Removed, func(i, j int) bool { return inv.Removed[i].Fingerprint < inv.Removed[j].Fingerprint })
 	inv.ScannedAt = now
@@ -580,13 +586,6 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 	}
 	if changed || now.Sub(s.ideRecordedAt) >= ideRecordInterval {
 		inv.persist = true
-		inv.savedPlugins = make([]IDEPlugin, 0, len(current))
-		for _, p := range current {
-			inv.savedPlugins = append(inv.savedPlugins, p)
-		}
-		sort.Slice(inv.savedPlugins, func(i, j int) bool {
-			return inv.savedPlugins[i].Fingerprint < inv.savedPlugins[j].Fingerprint
-		})
 	}
 	s.ideBaseline = current
 	return inv

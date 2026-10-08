@@ -28,6 +28,9 @@ func TestPartialIDEInventoryRetainsBaselineWithoutRewrite(t *testing.T) {
 	if !inv.persist {
 		t.Fatal("periodic refresh did not persist")
 	}
+	if len(inv.Plugins) != 1 || inv.Plugins[0].Fingerprint != prior.Fingerprint {
+		t.Fatalf("published plugins = %+v, want the retained row (GAP-0594)", inv.Plugins)
+	}
 	report := AIDiscoveryReport{Summary: AIDiscoverySummary{ScanID: "partial", ScannedAt: now}, IDEInventory: inv}
 	if err := svc.InventoryStore().RecordScan(context.Background(), report, ConfidenceParams{}); err != nil {
 		t.Fatal(err)
