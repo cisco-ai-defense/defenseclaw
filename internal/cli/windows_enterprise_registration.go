@@ -148,6 +148,15 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 			// rollback emptied it.
 			removeEmptyWindowsEnterpriseInstallParent()
 		}
+		if windowsEnterprisePurgeRemovedMachineDeployment(result) {
+			// The machine deployment is gone; only per-user data stays, so
+			// the marker and the Add/Remove Programs entry go too. They kept
+			// an Intune registry detection rule saying installed, so the
+			// install command never ran again (GAP-0676).
+			err := removeWindowsEnterpriseRegistration()
+			removeEmptyWindowsEnterpriseInstallParent()
+			return err
+		}
 		return nil
 	}
 	switch {
@@ -605,6 +614,29 @@ func windowsEnterpriseRolledBackFirstInstall(result *enterprisestatus.Result) bo
 	if result == nil || result.OK || result.Installed || !windowsEnterpriseMutationAction(result.Action) {
 		return false
 	}
+	return windowsEnterpriseInstallRootGone()
+}
+
+// windowsEnterprisePurgeRemovedMachineDeployment reports a failed uninstall
+// whose only errors are per-user folders it could not remove (a purge that
+// did not run as LocalSystem) after it removed the machine deployment: the
+// result says not installed and the standalone install root is gone.
+func windowsEnterprisePurgeRemovedMachineDeployment(result *enterprisestatus.Result) bool {
+	if result == nil || result.OK || result.Installed || result.TransactionPending ||
+		result.Action != "uninstall" || len(result.Errors) == 0 {
+		return false
+	}
+	for _, message := range result.Errors {
+		if message.Code != "per_user_state_remaining" {
+			return false
+		}
+	}
+	return windowsEnterpriseInstallRootGone()
+}
+
+// windowsEnterpriseInstallRootGone reports that the standalone install root
+// does not exist. A seam for tests.
+var windowsEnterpriseInstallRootGone = func() bool {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return false

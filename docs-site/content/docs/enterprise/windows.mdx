@@ -1058,7 +1058,11 @@ what it names as LocalSystem. A purge that did not run as LocalSystem
 removes the machine deployment but none of these folders, so it fails
 (non-zero exit) and names each account: run Setup `/ensure` and then
 `/uninstall PURGE=1`, both as LocalSystem while the accounts have an active
-(connected) session.
+(connected) session. It still removes the
+`HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` marker and the Add/Remove
+Programs entry with the machine deployment, so an Intune registry detection
+rule reports DefenseClaw as not installed and a required assignment
+installs it again.
 
 The agents' shared machine folders stay while they hold anything else,
 because another product can use them. Setup removes its own files from them.
