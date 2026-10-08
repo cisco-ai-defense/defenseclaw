@@ -198,6 +198,15 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if again := run(runEnterpriseACPRevoke); again["found"] != false || again["centrally_revoked"] != false {
 		t.Fatalf("revoke of a missing enrollment reported a revocation: %v", again)
 	}
+	// A user copy that cannot be checked does not turn "nothing was revoked"
+	// into "the service record was removed" (GAP-0355).
+	if err := os.Mkdir(tokenPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if again := run(runEnterpriseACPRevoke); again["found"] != false || again["ok"] != true ||
+		!strings.Contains(fmt.Sprint(again["note"]), "not checked") {
+		t.Fatalf("revoke of a missing enrollment with an unreadable user copy: %v", again)
+	}
 }
 
 // The Windows refusals named hook mutation and gave no next step; they now
@@ -210,7 +219,8 @@ func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
 		"system owner":    enterpriseACPWindowsTargetError(errors.New("enterprise hooks: refusing non-interactive target SID S-1-5-18"), false),
 	} {
 		message := got.Error()
-		if !strings.HasPrefix(message, "enterprise acp: ") || strings.Contains(message, "hook mutation") {
+		if !strings.HasPrefix(message, "enterprise acp: ") || strings.Contains(message, "hook mutation") ||
+			strings.Contains(message, "enterprise hooks") {
 			t.Errorf("%s: the refusal does not name the ACP enrollment: %q", name, message)
 		}
 		if name != "no session" && (!strings.Contains(message, "LocalSystem") || !strings.Contains(message, "--sid")) {

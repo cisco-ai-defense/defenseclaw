@@ -414,6 +414,10 @@ func enterpriseACPWho(enrollment enterpriseACPEnrollment) string {
 	if name := strings.TrimSpace(enterpriseACPUser); name != "" {
 		return name
 	}
+	if strings.HasPrefix(enrollment.principal, "home:") && enrollment.target.home != "" {
+		// A digest of the folder named nothing the administrator typed.
+		return "the owner of " + enrollment.target.home
+	}
 	return enrollment.principal
 }
 
@@ -607,11 +611,16 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	}
 	err = enterpriseACPRefusal(err)
 	if !cfg.SecureClientIntegration() && err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case !found:
+			// Nothing was revoked, so the copy is only tidying; the error
+			// used to say the service record was removed (GAP-0355).
+			note, err = "the user's copy was not checked: "+strings.TrimPrefix(err.Error(), "enterprise acp: "), nil
+		case errors.Is(err, os.ErrNotExist):
 			// The home is gone with its account: nothing is left to remove,
 			// and the revoke used to end in an error (GAP-0367).
 			note, err = "the home "+enrollment.target.home+" no longer exists; nothing was left there to remove", nil
-		} else {
+		default:
 			err = fmt.Errorf("enterprise acp: the service record was removed, so the credential no longer works, "+
 				"but the user's copy %s could not be removed: %w", tokenPath, err)
 		}
@@ -681,6 +690,9 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 	}
 	if notFound, _ := payload["not_found"].(string); notFound != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), notFound)
+		if note, _ := payload["note"].(string); note != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", note)
+		}
 		return nil
 	}
 	if revoked, _ := payload["centrally_revoked"].(bool); revoked {
