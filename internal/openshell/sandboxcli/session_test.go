@@ -725,6 +725,21 @@ func TestSessionSummary(t *testing.T) {
 			}
 		}, want: []string{"the OpenShell gateway is not available (it was stopped, or another account's gateway took its port; `defenseclaw sandbox doctor` says which), which ended Claude Code"},
 			not: []string{"was stopped from outside this session"}},
+		// GAP-0278: Docker restarted under the session: the harness ended
+		// while the sandbox still read ready, and a moment later OpenShell
+		// held it in its error state.
+		{name: "the container stopped", opts: claude, exit: 1, check: noStop, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 1
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "error" })
+				}
+				return nil
+			}
+		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code",
+			"is in OpenShell's error state → `defenseclaw sandbox delete " + sbName + " --keep-snapshot`"},
+			not: []string{"keeps running", "was stopped from outside this session"}},
 		// GAP-0077: the OpenShell gateway restarted under the session (an
 		// upgrade), which closed the harness's exec relay: the sandbox read
 		// as unknown for a moment, then ready, and the session said it was
@@ -1097,6 +1112,15 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	ta.daemon.add(sampleSandbox("good"))
 	if c := check(ta); c.Status != openshell.StatusPass || !strings.Contains(c.Detail, "1 running sandbox reach") {
 		t.Fatalf("healthy: %+v", c)
+	}
+	// GAP-0278: a sandbox a Docker restart left in OpenShell's error state,
+	// which can be neither stopped nor started, is named with the way on.
+	lost := sampleSandbox("hic")
+	lost.Phase = "error"
+	ta.daemon.add(lost)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "hic is in OpenShell's error state") || c.Fix == nil ||
+		!strings.Contains(c.Fix.Summary, "--keep-snapshot") {
+		t.Fatalf("errored: %+v", c)
 	}
 	bad := sampleSandbox("bad")
 	bad.Hooks.Unreachable, bad.Hooks.UnreachableReason = true, "OpenShell refused the hooks' connections"

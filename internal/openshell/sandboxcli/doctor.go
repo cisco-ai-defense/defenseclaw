@@ -155,17 +155,31 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad []string
+	var bad, errored []string
 	running := 0
 	for _, sb := range list {
 		if sb.Phase == "ready" {
 			running++
+		}
+		if sb.Phase == "error" {
+			errored = append(errored, sb.Name)
 		}
 		if sb.Hooks.Unreachable {
 			bad = append(bad, sb.Name+": "+firstNonEmpty(sb.Hooks.UnreachableReason, "no hook request reaches DefenseClaw"))
 		}
 	}
 	switch {
+	case len(errored) > 0 && len(bad) == 0:
+		// A sandbox OpenShell lost (its container stopped: a Docker
+		// restart) can be neither stopped nor started (GAP-0278).
+		c.Status = openshell.StatusWarn
+		verb := " is in"
+		if len(errored) > 1 {
+			verb = " are in"
+		}
+		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed), " +
+			"where OpenShell can neither stop nor start " + itThem(errored)
+		c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
 	case len(bad) > 0:
 		c.Status = openshell.StatusFail
 		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")

@@ -454,13 +454,48 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.flushDestinations(rec.Name)
 	}
 	if !unchanged {
+		msg := lifecycleMessage(rec.Name, phase)
+		if phase == audit.SandboxPhaseError {
+			// Why, and the way on: OpenShell neither stops nor starts a
+			// sandbox in its error phase (GAP-0278).
+			if cond != nil && strings.TrimSpace(cond.Reason+cond.Message) != "" {
+				msg += " (" + truncate(strings.TrimSpace(cond.Reason+": "+cond.Message), 200) + ")"
+			}
+			msg += "; " + errorPhaseWayOn(rec.Name, rec.WorkdirMode)
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
-			Message: lifecycleMessage(rec.Name, phase),
+			Message: msg,
 		})
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
+}
+
+// errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase,
+// which it can neither stop nor start: its container stopped (a Docker
+// restart stops every one) or its workload failed. Deleting it keeps the
+// folder's changes, and with --keep-snapshot the undo point; a copy's work
+// that was never pulled goes with it.
+func errorPhaseWayOn(name, mode string) string {
+	way := "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed): " +
+		"`defenseclaw sandbox delete " + name + " --keep-snapshot` keeps the undo point and the folder's changes, then run again"
+	if mode == config.OpenShellWorkdirCopy {
+		way = "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed), " +
+			"and its copy's work that was not pulled cannot be read any more: `defenseclaw sandbox delete " + name + "`, then run again"
+	}
+	return way
+}
+
+// errorPhaseRefusal is OpenShell's refusal to stop or start the sandbox
+// name in its error phase as people read it ("Conflict: sandbox must be
+// Stopped, Completed, or a failed main-process Error to start"), or nil.
+func errorPhaseRefusal(name, mode string, err error) error {
+	if err == nil || !openshell.IsConflict(err) || !strings.Contains(err.Error(), "current phase: Error") {
+		return nil
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: name + " is in OpenShell's error state",
+		Detail: errorPhaseWayOn(name, mode)}
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {

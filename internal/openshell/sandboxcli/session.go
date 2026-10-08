@@ -173,8 +173,9 @@ type session struct {
 	otherBlocks map[string]bool
 	approved    map[string]bool
 	// gatewayDown is set when the daemon, at the end of the session, could
-	// not reach the OpenShell gateway.
-	gatewayDown bool
+	// not reach the OpenShell gateway; errored when the sandbox ended in
+	// OpenShell's error phase.
+	gatewayDown, errored bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -995,6 +996,12 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 		return name + " was undone from outside this session (`" + CommandName + " undo` or the TUI): the folder is back at its undo point, " +
 			"and that stopped " + s.harnessName()
 	}
+	if after.Phase == "error" {
+		// Not a stop of anyone's: OpenShell lost the sandbox (GAP-0278).
+		s.errored = true
+		return name + "'s container stopped under the session (Docker restarted, or its workload failed), which ended " + s.harnessName() +
+			"; OpenShell now holds it in its error state, where it can be neither stopped nor started"
+	}
 	if after.Phase != "ready" {
 		if h := after.Hooks; h.Silent && h.OnSilence == packs.OnSilenceStop {
 			// DefenseClaw's own stop (raiseSilence), not someone else's.
@@ -1033,7 +1040,31 @@ func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (
 		return false
 	}
 	if !passing(after.Phase) {
-		return after, nil
+		// A harness that failed while its sandbox still reads ready may
+		// have lost the sandbox a moment ago (a Docker restart stops its
+		// container, and OpenShell says so a few seconds later): look
+		// again shortly before calling it running (GAP-0278).
+		if after.Phase != "ready" || s.harnessCode == 0 || s.before == nil || s.before.Phase != "ready" {
+			return after, nil
+		}
+		for range 2 {
+			if s.app.Sleep(ctx, settlePhaseInterval) != nil {
+				break
+			}
+			next, err := s.api.Get(ctx, s.sb.Name)
+			if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+				return nil, err
+			}
+			if err != nil {
+				break
+			}
+			if after = next; after.Phase != "ready" {
+				break
+			}
+		}
+		if !passing(after.Phase) {
+			return after, nil
+		}
 	}
 	for range int(settlePhaseWait / settlePhaseInterval) {
 		if s.app.Sleep(ctx, settlePhaseInterval) != nil {
@@ -1164,6 +1195,16 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		}
 		s.markStopped()
+	}
+	if s.errored {
+		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			a.note("Sandbox " + name + " is in OpenShell's error state, and its copy's work that was not pulled cannot be read any more → `" +
+				CommandName + " delete " + name + "`, then run again")
+			return nil
+		}
+		a.note("Sandbox " + name + " is in OpenShell's error state → `" + CommandName + " delete " + name +
+			" --keep-snapshot` keeps the undo point and the folder's changes, then run again")
+		return nil
 	}
 	next := "resume: " + CommandName + " connect " + name
 	if s.headless {
