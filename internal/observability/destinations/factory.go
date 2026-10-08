@@ -235,7 +235,7 @@ func (factory *Factory) PrepareDestination(
 				// only runtime_unavailable (GAP-0890).
 				reason := local.JSONLPathProblem(destination.Transport.Path)
 				if reason == "" {
-					reason = "cannot be prepared: its folder cannot be created, or is not a folder the gateway trusts"
+					reason = "cannot be opened safely: the file or its folder belongs to an account the gateway does not trust, or the folder cannot be created"
 				}
 				_, _ = fmt.Fprintf(factory.stderr,
 					"defenseclaw: observability destination %q: %s %s; fix the path or remove the destination\n",

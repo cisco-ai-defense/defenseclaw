@@ -115,7 +115,7 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 			return &config.V8SemanticError{
 				Path:    "$.observability.destinations",
 				Summary: fmt.Sprintf("destination %q writes %s, which %s", destination.Name, destination.Transport.Path, problem),
-				Action:  "point it at a regular file in a folder only its owner (an administrator or the gateway account) can write",
+				Action:  "point it at a file only its owner can read and write (or a missing file, which the gateway creates) in a folder only its owner (an administrator or the gateway account) can write",
 			}
 		}
 	}

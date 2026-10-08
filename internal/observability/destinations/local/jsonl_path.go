@@ -21,11 +21,12 @@ import (
 // a path it may use or cannot inspect. It only reads: the config checks of
 // config validate, ensure and Setup run it before anything changes, and the
 // gateway names the reason with it when the destination does not open. A
-// directory, a link, a device and a folder other accounts can write were
-// refused only at gateway start, as runtime_unavailable (GAP-0890,
-// GAP-0908). allowedWriters are further accounts (SIDs or names) that may
-// write the folder on Windows, the gateway service account when an
-// administrator checks; other platforms ignore them.
+// directory, a link, a device, a folder other accounts can write and an
+// existing file other accounts can read or write were refused only at
+// gateway start, as runtime_unavailable (GAP-0890, GAP-0908, GAP-1033).
+// allowedWriters are further accounts (SIDs or names) that may write the
+// folder on Windows, the gateway service account when an administrator
+// checks; other platforms ignore them.
 func JSONLPathProblem(path string, allowedWriters ...string) string {
 	if info, err := os.Lstat(path); err == nil {
 		switch {
@@ -35,6 +36,9 @@ func JSONLPathProblem(path string, allowedWriters ...string) string {
 			return "is a directory"
 		case !info.Mode().IsRegular():
 			return "is not a regular file (a device, pipe or socket)"
+		}
+		if problem := jsonlFileProblem(info); problem != "" {
+			return problem
 		}
 	}
 	folder := filepath.Dir(path)
