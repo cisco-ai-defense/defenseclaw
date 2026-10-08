@@ -150,15 +150,13 @@ Per-user enrollment also depends on the
 version of the agent being installed for that user.
 
 <Callout type="warn" title="Leave an agent out entirely to leave it unprotected">
-On Linux and macOS, the lifecycle publishes machine policy for Codex,
-Claude Code, Cursor, Copilot and OpenCode when the connector name appears
-anywhere under `guardrail.connectors`, even with `enabled: false`, or under
-`enterprise.machine_policy.connectors`. There, `enabled: false` stops only
-per-user enrollment. Copilot's and OpenCode's machine policy follow the same
-rule on Windows. Windows Codex, Claude Code and Cursor policy is written only
-while the target manifest has an enabled row for that agent. To stop
-publishing machine policy for an agent, remove its name from both maps, or
-set `enterprise.machine_policy.connectors.<name>.ownership: "off"`.
+On standalone enterprise hosts, `guardrail.connectors.<name>.enabled: false`
+disables the connector and removes its DefenseClaw machine policy. An empty
+connector entry (`{}`) enables it. To leave an agent unprotected, omit it from
+`guardrail.connectors` and `enterprise.machine_policy.connectors`, or set
+`enterprise.machine_policy.connectors.<name>.ownership: "off"`. After applying
+a change, use `enterprise policy show` and `enterprise verify` to check which
+agents still have machine coverage.
 </Callout>
 
 The older single-agent key `guardrail.connector` also selects an agent.
