@@ -36,10 +36,13 @@ type AuditEmitter interface {
 }
 
 // MQTTBridge is the narrow interface the fleet API uses to notify the MQTT
-// bridge about decommissioned devices. The bridge's MarkDecommissioned method
-// satisfies this interface.
+// bridge about decommissioned and re-registered devices. The bridge's
+// MarkDecommissioned and ClearDecommissioned methods satisfy this interface.
 type MQTTBridge interface {
 	MarkDecommissioned(fullDeviceID uint64)
+	// ClearDecommissioned removes a device from the tombstone set so that
+	// re-registered devices can resume MQTT communication.
+	ClearDecommissioned(fullDeviceID uint64)
 }
 
 // API handles fleet REST endpoints.
@@ -239,12 +242,24 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		req.HWProfile, req.FWVersion, req.PolicyVersion, req.Capabilities,
 	)
 	if err == manager.ErrDeviceExists {
+		// P1-tombstone fix: Clear the decommission tombstone on re-registration
+		// so the bridge stops rejecting MQTT traffic from this device.
+		if a.bridge != nil {
+			a.bridge.ClearDecommissioned(dev.DeviceID)
+		}
 		writeJSON(w, http.StatusOK, dev)
 		return
 	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+
+	// P1-tombstone fix: Clear the decommission tombstone on fresh registration
+	// too, in case the device was previously decommissioned and its fleet
+	// manager entry was already cleaned up but the bridge tombstone persists.
+	if a.bridge != nil {
+		a.bridge.ClearDecommissioned(dev.DeviceID)
 	}
 
 	// Generate and persist a per-device HMAC signing key (32 random bytes).
@@ -714,15 +729,19 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 	batchID := uuid.New().String()
 	decommissioned := 0
 	var notFound []uint64
+	var keyDeleteFailed []uint64
 
 	for _, d := range req.Devices {
 		fullID := manager.ComposeID(d.TenantID, d.FleetID, d.DeviceID)
 		if a.manager.DecommissionDevice(d.TenantID, d.FleetID, d.DeviceID) {
 			// NEW-5 fix: Revoke the device's HMAC signing key on decommission
 			// so it can no longer authenticate heartbeats or verdicts.
+			// P1-tombstone fix: If key deletion fails, track the failure so
+			// we return a partial-failure response instead of silent HTTP 200.
 			if a.keyStore != nil {
 				if err := a.keyStore.DeleteDeviceKey(fullID); err != nil {
 					log.Printf("[fleet-api] failed to delete device key for %d: %v", fullID, err)
+					keyDeleteFailed = append(keyDeleteFailed, fullID)
 				}
 			}
 			// Notify the MQTT bridge so it immediately rejects any further
@@ -739,18 +758,29 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 
 	a.emitAudit("fleet.device.decommission",
 		batchID,
-		fmt.Sprintf("requested:%d decommissioned:%d not_found:%d", len(req.Devices), decommissioned, len(notFound)))
+		fmt.Sprintf("requested:%d decommissioned:%d not_found:%d key_delete_failed:%d",
+			len(req.Devices), decommissioned, len(notFound), len(keyDeleteFailed)))
 
 	resp := map[string]any{
 		"batch_id":       batchID,
 		"requested":      len(req.Devices),
 		"decommissioned": decommissioned,
-		"status":         "completed",
 	}
 	if len(notFound) > 0 {
 		resp["not_found"] = notFound
 	}
 
+	// P1-tombstone fix: If any key deletions failed, report partial failure
+	// with HTTP 500 so operators know the device keys were not fully revoked.
+	if len(keyDeleteFailed) > 0 {
+		resp["key_delete_failed"] = keyDeleteFailed
+		resp["status"] = "partial_failure"
+		resp["error"] = "some device keys could not be deleted — those devices may still authenticate"
+		writeJSON(w, http.StatusInternalServerError, resp)
+		return
+	}
+
+	resp["status"] = "completed"
 	writeJSON(w, http.StatusOK, resp)
 }
 

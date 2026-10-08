@@ -102,6 +102,19 @@ int main(void) {
         return 1;
     }
 
+    /* P1 fix: Set IPC peer expected UID/GID so non-root users can connect.
+     * By default, accept connections from the same user that started the
+     * daemon.  Env vars DCLAW_IPC_ALLOWED_UID / DCLAW_IPC_ALLOWED_GID
+     * override this for multi-user setups (e.g., daemon runs as root but
+     * CLI runs as a service account). */
+    {
+        dclaw_state_t *st = dclaw_get_state();
+        const char *env_uid = getenv("DCLAW_IPC_ALLOWED_UID");
+        const char *env_gid = getenv("DCLAW_IPC_ALLOWED_GID");
+        st->ipc_peer.expected_uid = env_uid ? (uint32_t)strtoul(env_uid, NULL, 10) : (uint32_t)getuid();
+        st->ipc_peer.expected_gid = env_gid ? (uint32_t)strtoul(env_gid, NULL, 10) : (uint32_t)getgid();
+    }
+
     /* Resolve IPC socket path: env var override, then compile-time default */
     const char *env_ipc = getenv("DCLAW_IPC_SOCKET_PATH");
     const char *ipc_socket_path = (env_ipc && env_ipc[0] != '\0')

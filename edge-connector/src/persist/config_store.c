@@ -141,19 +141,93 @@ static void persist_active_partition(void) {
 }
 
 static void load_active_partition_from_flash(void) {
-    /* Issue #07 fix: Try record A (CRC-validated), fall back to record B.
-     * If both are corrupt, use defaults (partition A, version 0). */
-    uint8_t buf[PARTITION_DATA_SIZE];
-    bool valid = read_and_validate_record(PARTITION_FLASH_OFFSET_A, buf);
-    if (!valid) {
-        fprintf(stderr, "[DCLAW] WARNING: Partition record A CRC invalid, trying backup B.\n");
-        valid = read_and_validate_record(PARTITION_FLASH_OFFSET_B, buf);
-        if (!valid) {
-            fprintf(stderr, "[DCLAW] WARNING: Both partition records corrupt — using defaults.\n");
-            return; /* fall back to defaults (partition A, version 0) */
+    /* Issue #07 fix: Try both records A and B (CRC-validated).
+     * P1-07 fix (dual-record selection): When both are valid, pick the one
+     * with the HIGHER policy version — not just the first valid one. This
+     * handles the case where copy A has an older version because its write
+     * failed during a v11 apply that successfully wrote copy B.
+     * If versions are equal, prefer A (canonical copy). */
+    uint8_t buf_a[PARTITION_DATA_SIZE];
+    uint8_t buf_b[PARTITION_DATA_SIZE];
+    bool valid_a = read_and_validate_record(PARTITION_FLASH_OFFSET_A, buf_a);
+    bool valid_b = read_and_validate_record(PARTITION_FLASH_OFFSET_B, buf_b);
+
+    uint8_t *buf = NULL;
+
+    if (valid_a && valid_b) {
+        /* Both valid: pick the record with the higher policy version.
+         * If equal, prefer A (canonical primary copy). */
+        uint16_t ver_a = ((uint16_t)buf_a[4] << 8) | buf_a[5];
+        uint16_t ver_b = ((uint16_t)buf_b[4] << 8) | buf_b[5];
+        if (ver_b > ver_a) {
+            buf = buf_b;
+            fprintf(stderr, "[DCLAW] Both partition records valid; B has newer version "
+                    "(%u > %u) — using B.\n", ver_b, ver_a);
+        } else {
+            buf = buf_a;
+            if (ver_a != ver_b) {
+                fprintf(stderr, "[DCLAW] Both partition records valid; A has newer version "
+                        "(%u >= %u) — using A.\n", ver_a, ver_b);
+            }
         }
-        fprintf(stderr, "[DCLAW] Recovered partition state from backup record B.\n");
+    } else if (valid_a) {
+        buf = buf_a;
+    } else if (valid_b) {
+        fprintf(stderr, "[DCLAW] WARNING: Partition record A CRC invalid, using backup B.\n");
+        buf = buf_b;
+    } else {
+        /* P1-07 fix (old format migration): Both CRC-validated records failed.
+         * Check if offset A has the raw magic bytes 0xDC 0xAB from the old
+         * 4-byte format (magic + partition + reserved, no version, no CRC).
+         * The old format's CRC fails because bytes [4..7] are not a valid
+         * CRC16 for the 6-byte data region.
+         *
+         * Recovery: read the old 4-byte record to get the active partition,
+         * then recover the version from the active partition's OTA header.
+         * Re-write both records in the new 8-byte CRC format. */
+        uint8_t raw[PARTITION_RECORD_SIZE];
+        if (hal_flash_read(PARTITION_FLASH_OFFSET_A, raw, PARTITION_RECORD_SIZE) == 0 &&
+            raw[0] == PARTITION_MAGIC_0 && raw[1] == PARTITION_MAGIC_1) {
+            fprintf(stderr, "[DCLAW] Detected old 4-byte flash format at record A — migrating.\n");
+            uint8_t old_partition = raw[2];
+            if (old_partition <= 1) {
+                active_policy_partition = old_partition;
+            }
+            /* Recover version from the active partition's OTA header */
+            uint32_t part_offset = (active_policy_partition == 0)
+                                    ? HAL_FLASH_POLICY_A_OFFSET
+                                    : HAL_FLASH_POLICY_B_OFFSET;
+            uint8_t hdr_buf[8];
+            if (hal_flash_read(part_offset, hdr_buf, 8) == 0) {
+                uint16_t recovered_ver = ((uint16_t)hdr_buf[0] << 8) | hdr_buf[1];
+                uint16_t payload_len   = ((uint16_t)hdr_buf[2] << 8) | hdr_buf[3];
+                if (recovered_ver > 0 && recovered_ver != 0xFFFF &&
+                    payload_len > 0 && payload_len <= HAL_FLASH_POLICY_A_SIZE - 8) {
+                    persisted_policy_version = recovered_ver;
+                    fprintf(stderr, "[DCLAW] Migration: recovered policy version %u "
+                            "from partition %c OTA header.\n",
+                            recovered_ver,
+                            active_policy_partition == 0 ? 'A' : 'B');
+                } else {
+                    persisted_policy_version = 0;
+                    fprintf(stderr, "[DCLAW] Migration: partition %c OTA header blank/invalid "
+                            "— version defaults to 0.\n",
+                            active_policy_partition == 0 ? 'A' : 'B');
+                }
+            }
+            /* Re-write both records in new 8-byte CRC format */
+            persist_active_partition();
+            fprintf(stderr, "[DCLAW] Migration: re-persisted in new CRC format "
+                    "(partition=%c, version=%u).\n",
+                    active_policy_partition == 0 ? 'A' : 'B',
+                    persisted_policy_version);
+            goto apply_version;
+        }
+
+        fprintf(stderr, "[DCLAW] WARNING: Both partition records corrupt — using defaults.\n");
+        return; /* fall back to defaults (partition A, version 0) */
     }
+
     if (buf[2] <= 1) {
         active_policy_partition = buf[2];
         fprintf(stderr, "[DCLAW] Restored active policy partition %c from flash.\n",
@@ -206,6 +280,7 @@ static void load_active_partition_from_flash(void) {
         }
     }
 
+apply_version:
     if (persisted_policy_version > 0) {
         dclaw_state_t *s = dclaw_get_state();
         s->device.policy_version = persisted_policy_version;

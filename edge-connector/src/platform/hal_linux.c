@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -79,6 +80,23 @@ int hal_ipc_socket_create(const char *path) {
         return -1;
     }
     chmod(path, 0660);
+
+    /* P1 fix: If running as root, chown the socket to the expected IPC
+     * UID/GID so that the non-root user can connect.  The expected_uid/gid
+     * are set from DCLAW_IPC_ALLOWED_UID/GID env vars or getuid()/getgid()
+     * in main.c after dclaw_init(). */
+    if (getuid() == 0) {
+        const char *env_uid = getenv("DCLAW_IPC_ALLOWED_UID");
+        const char *env_gid = getenv("DCLAW_IPC_ALLOWED_GID");
+        if (env_uid || env_gid) {
+            uid_t sock_uid = env_uid ? (uid_t)strtoul(env_uid, NULL, 10) : 0;
+            gid_t sock_gid = env_gid ? (gid_t)strtoul(env_gid, NULL, 10) : 0;
+            if (chown(path, sock_uid, sock_gid) != 0) {
+                fprintf(stderr, "[DCLAW] WARN: failed to chown IPC socket to %u:%u\n",
+                        (unsigned)sock_uid, (unsigned)sock_gid);
+            }
+        }
+    }
 
     if (listen(fd, 4) < 0) {
         close(fd);
@@ -187,8 +205,62 @@ void hal_watchdog_feed(void) {
     /* Linux: no hardware watchdog in Phase 1. Could write to /dev/watchdog if needed. */
 }
 
+/* Recursively create directories (like mkdir -p).
+ * Returns 0 on success, -1 on failure. */
+static int mkdir_p(const char *path, mode_t mode) {
+    char tmp[256];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, len + 1);
+
+    /* Strip trailing slash */
+    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, mode) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) return -1;
+    return 0;
+}
+
+/* Extract the parent directory from a file path.
+ * Writes into buf (up to buf_size).  Returns buf on success, NULL on failure. */
+static char *parent_dir(const char *filepath, char *buf, size_t buf_size) {
+    const char *last_slash = strrchr(filepath, '/');
+    if (!last_slash || last_slash == filepath) return NULL;
+    size_t len = (size_t)(last_slash - filepath);
+    if (len >= buf_size) return NULL;
+    memcpy(buf, filepath, len);
+    buf[len] = '\0';
+    return buf;
+}
+
 int hal_init(void) {
     const char *flash_path = get_flash_path();
+
+    /* P1 fix: Create parent directory if it doesn't exist.
+     * On pristine hosts /var/lib/defenseclaw/ won't exist, causing open()
+     * to fail with ENOENT.  We create it recursively (mode 0700) and fall
+     * back to /tmp/ if that fails (e.g., permission denied). */
+    {
+        char dir_buf[256];
+        char *dir = parent_dir(flash_path, dir_buf, sizeof(dir_buf));
+        if (dir) {
+            struct stat st;
+            if (stat(dir, &st) != 0) {
+                if (mkdir_p(dir, 0700) != 0) {
+                    fprintf(stderr, "[DCLAW] WARN: cannot create %s (%s); "
+                            "falling back to /tmp/ for flash storage\n",
+                            dir, strerror(errno));
+                    flash_path = "/tmp/defenseclaw-flash.bin";
+                }
+            }
+        }
+    }
 
     /* Open or create flash backing file */
     flash_fd = open(flash_path, O_RDWR | O_CREAT, 0640);

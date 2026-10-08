@@ -197,6 +197,9 @@ def _setup_docker(port: int) -> dict | bool:
     # ── Step 1: Create a staging directory owned by the CLI user ──────────
     # We use a random temp dir so we never collide with a 1883-owned final dir.
     staging_dir = Path(tempfile.mkdtemp(prefix="dclaw-mqtt-staging-"))
+    # Make staging dir world-readable so the Docker container (UID 1883) can
+    # access it when we mount it as a volume.
+    os.chmod(staging_dir, 0o755)
     ux.ok(f"Staging directory: {staging_dir}")
 
     try:
@@ -227,6 +230,7 @@ def _setup_docker_inner(
         "log_dest stdout\n"
     )
     conf_file.write_text(mosquitto_conf)
+    os.chmod(conf_file, 0o644)
     ux.ok("mosquitto.conf written (staging)")
 
     # Generate credentials and password file in staging.
@@ -261,6 +265,8 @@ def _setup_docker_inner(
         ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
         return False
 
+    passwd_staging = staging_dir / "passwd"
+    os.chmod(passwd_staging, 0o640)
     ux.ok(f"MQTT user '{mqtt_user}' password file generated (staging)")
 
     # ── Step 3: Start a test container from staging, verify CONNACK ──────
@@ -345,6 +351,11 @@ def _setup_docker_inner(
     ux.ok(f"Config files installed to {final_dir}")
 
     # ── Step 6: Set final ownership to 1883:1883 ────────────────────────
+    # Create the data/ subdirectory before chowning so mosquitto can write
+    # persistence files (the -R chown below will cover it).
+    data_dir = final_dir / "data"
+    os.makedirs(data_dir, exist_ok=True)
+
     try:
         final_dir.chmod(0o755)
     except OSError:
@@ -376,9 +387,6 @@ def _setup_docker_inner(
     if existing_container:
         ux.echo(f"  Removing old container '{_CONTAINER_NAME}'...")
         subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
-
-    data_dir = final_dir / "data"
-    os.makedirs(data_dir, exist_ok=True)
 
     run_final = subprocess.run(
         [

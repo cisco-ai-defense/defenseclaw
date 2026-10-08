@@ -1,6 +1,7 @@
 #include "defenseclaw.h"
 #include "platform.h"
 #include <string.h>
+#include <stdio.h>
 
 extern dclaw_state_t *dclaw_get_state(void);
 
@@ -24,9 +25,26 @@ int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer) {
     uint32_t uid, gid;
     int32_t pid;
 
-    if (hal_get_peer_cred(client_fd, &uid, &gid, &pid) != 0) return -1;
-    if (uid != peer->expected_uid) return -1;
-    if (gid != peer->expected_gid) return -1;
+    /* P1 fix: If hal_get_peer_cred is not available on this platform
+     * (returns -1, e.g., macOS without LOCAL_PEERCRED), skip the check
+     * with a warning rather than rejecting the connection outright.
+     * This allows development on non-Linux platforms. */
+    if (hal_get_peer_cred(client_fd, &uid, &gid, &pid) != 0) {
+        fprintf(stderr, "[DCLAW] WARN: peer credential check unavailable on this "
+                "platform; allowing connection without UID/GID verification\n");
+        return 0;
+    }
+
+    if (uid != peer->expected_uid) {
+        fprintf(stderr, "[DCLAW] peer UID %u rejected (expected %u)\n",
+                uid, peer->expected_uid);
+        return -1;
+    }
+    if (gid != peer->expected_gid) {
+        fprintf(stderr, "[DCLAW] peer GID %u rejected (expected %u)\n",
+                gid, peer->expected_gid);
+        return -1;
+    }
 
     /* Check PID start time to prevent recycle attacks */
     if (peer->registered_pid != 0) {

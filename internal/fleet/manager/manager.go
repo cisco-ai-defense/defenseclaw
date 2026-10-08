@@ -49,6 +49,12 @@ type Device struct {
 	PrevAllowed   uint16 `json:"prev_allowed"`
 	PrevWarned    uint16 `json:"prev_warned"`
 	PrevEscalated uint16 `json:"prev_escalated"`
+
+	// P1-replay fix: BootEpoch is incremented each time a device reboot is
+	// detected (uptime < last_uptime). Persisted to SQLite so that after a
+	// gateway restart we can distinguish "new boot" from "replay of old
+	// heartbeat with lower uptime".
+	BootEpoch uint32 `json:"boot_epoch"`
 }
 
 // Heartbeat represents a parsed 32-byte device heartbeat.
@@ -307,10 +313,16 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	// last_uptime > 0), the device has rebooted. Accept the heartbeat but
 	// reset the delta counters to 0 so the first post-reboot absolute
 	// values are treated as the full delta. Don't reject legitimate reboots.
-	if hb.UptimeSec < dev.LastUptime || (hb.UptimeSec == 0 && dev.LastUptime > 0) {
-		// Device rebooted — reset replay counters, accept heartbeat.
-		log.Printf("[fleet] device %d rebooted: uptime %d < last %d, resetting counters",
-			deviceID, hb.UptimeSec, dev.LastUptime)
+	//
+	// P1-replay fix: Increment BootEpoch on each detected reboot so that
+	// after a gateway restart we can distinguish a genuine new boot from a
+	// replayed heartbeat with lower uptime.
+	isReboot := hb.UptimeSec < dev.LastUptime || (hb.UptimeSec == 0 && dev.LastUptime > 0)
+	if isReboot {
+		// Device rebooted — increment boot epoch, reset replay counters.
+		dev.BootEpoch++
+		log.Printf("[fleet] device %d rebooted (boot_epoch=%d): uptime %d < last %d, resetting counters",
+			deviceID, dev.BootEpoch, hb.UptimeSec, dev.LastUptime)
 		dev.PrevDenied = 0
 		dev.PrevAllowed = 0
 		dev.PrevWarned = 0
@@ -324,10 +336,22 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	dev.LastUptime = hb.UptimeSec
 
 	dev.LastHeartbeat = time.Now()
-	dev.PolicyVersion = hb.PolicyVersion
-	dev.FWVersion = fmt.Sprintf("%d", hb.FWVersion)
 	dev.Flags = hb.Flags
-	dev.Capabilities = hb.Capabilities
+
+	// P1-replay fix: PolicyVersion, FWVersion, and Capabilities can only
+	// advance (anti-rollback). A replayed heartbeat with an older policy
+	// version must NOT revert the device's state. These fields are only
+	// allowed to increase; they should be updated via authenticated
+	// registration for downgrades.
+	if hb.PolicyVersion > dev.PolicyVersion {
+		dev.PolicyVersion = hb.PolicyVersion
+	}
+	if hb.FWVersion > fwVersionToUint16(dev.FWVersion) {
+		dev.FWVersion = fmt.Sprintf("%d", hb.FWVersion)
+	}
+	if hb.Capabilities > dev.Capabilities {
+		dev.Capabilities = hb.Capabilities
+	}
 
 	// NEW-3 fix: Compute counter deltas instead of blindly accumulating
 	// absolute values.  The device sends cumulative counters that reset on
@@ -575,6 +599,14 @@ func (fm *FleetManager) GetAlertHandler() AlertHandler {
 // P2-19 fix: Needed by WireMetrics to wrap the handler with metric counters.
 func (fm *FleetManager) SetAlertHandler(h AlertHandler) {
 	fm.alertHandler = h
+}
+
+// fwVersionToUint16 parses a stored firmware version string back to uint16
+// for numeric comparison. Returns 0 if the string is not a valid number.
+func fwVersionToUint16(s string) uint16 {
+	var v uint16
+	fmt.Sscanf(s, "%d", &v)
+	return v
 }
 
 // Sentinel errors

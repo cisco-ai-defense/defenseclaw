@@ -474,11 +474,12 @@ class EdgeConnector:
                 # Read current policy_version from the device info struct.
                 # dclaw_get_state() returns a pointer whose first field
                 # contains the dclaw_device_info_t (starts at offset 0).
-                # policy_version is at offset 4 (after tenant_id u16 + fleet_id u16).
+                # Layout: tenant_id(u16, +0) + fleet_id(u16, +2) +
+                #         device_id(u32, +4) + policy_version(u16, +8).
                 state_ptr = lib.dclaw_get_state()
                 if state_ptr:
                     pv = ctypes.cast(
-                        state_ptr + 4,
+                        state_ptr + 8,
                         ctypes.POINTER(ctypes.c_uint16),
                     ).contents.value
                     if self._last_policy_version >= 0 and pv != self._last_policy_version:

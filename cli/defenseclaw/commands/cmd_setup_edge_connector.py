@@ -305,10 +305,13 @@ def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:
     if result.returncode == 0:
         ux.ok(f"Wrote {key} to {svc_env_path}")
     else:
+        # P1 fix: Never print the actual key value to the terminal.
+        # The value is already persisted in ~/.defenseclaw/.env.
+        redacted = value if key != "DCLAW_AUDIT_KEY" else "<generated -- see ~/.defenseclaw/.env>"
         ux.warn(
             f"Could not write {key} to {svc_env_path} (sudo may have been denied).\n"
             f"  The systemd service needs this key in its EnvironmentFile to start.\n"
-            f"  Write it manually: echo '{key}={value}' | sudo tee -a {svc_env_path}"
+            f"  Write it manually: echo '{key}={redacted}' | sudo tee -a {svc_env_path}"
         )
 
 

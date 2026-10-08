@@ -210,6 +210,15 @@ func (b *Bridge) isDecommissioned(fullDeviceID uint64) bool {
 	return ok
 }
 
+// ClearDecommissioned removes a device ID from the decommissioned set.
+// P1-tombstone fix: Called when a previously decommissioned device is
+// re-registered via the API, so the bridge stops rejecting its MQTT traffic.
+func (b *Bridge) ClearDecommissioned(fullDeviceID uint64) {
+	b.decommissionedMu.Lock()
+	delete(b.decommissioned, fullDeviceID)
+	b.decommissionedMu.Unlock()
+}
+
 // SetDeviceKeyStore configures per-device key resolution via a persistent store.
 // When set, the bridge looks up a unique 32-byte key for each device before
 // falling back to the fleet-wide DCLAW_DEVICE_KEY environment variable.

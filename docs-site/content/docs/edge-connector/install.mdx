@@ -394,6 +394,8 @@ mkdir -p mqtt
 docker run --rm --user "$(id -u):$(id -g)" \
   -v ./mqtt:/mosquitto/config eclipse-mosquitto \
   mosquitto_passwd -b -c /mosquitto/config/passwd dclaw yourpassword
+# 0640 lets owner (UID 1883 after chown) read/write; the Docker container
+# runs as UID 1883, so the file must be readable by that user.
 chmod 0640 mqtt/passwd
 
 # Create a config that requires authentication

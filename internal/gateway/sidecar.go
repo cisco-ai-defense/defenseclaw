@@ -6921,27 +6921,67 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if brokerURL := os.Getenv("DCLAW_MQTT_BROKER_URL"); brokerURL != "" {
 		clientID := fmt.Sprintf("dclaw-sidecar-%d", os.Getpid())
 		tcpClient := fleetmqtt.NewTCPClient(brokerURL, clientID)
-		if err := tcpClient.Connect(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connect to %s failed: %v\n", brokerURL, err)
+
+		// NEW-4 fix: Always wire the client and bridge so the fleet API has
+		// references to them even before the broker is reachable. MQTT-dependent
+		// fleet API endpoints already return errors when the client is not
+		// connected, so this is safe. The bridge will start processing messages
+		// once the connection succeeds.
+		fleetMQTTClient = tcpClient
+		bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+		fleetBridge = bridge
+		// Wire block metric so BLOCK verdicts increment the Prometheus counter
+		bridge.SetOnBlock(func() { fleet.GlobalMetrics.BlocksTotal.Add(1) })
+		// Wire per-device key resolution from the SQLite store so the
+		// bridge verifies/computes verdict HMACs with the correct key
+		// instead of falling back to the fleet-wide shared key.
+		if deviceStore != nil {
+			bridge.SetDeviceKeyStore(deviceStore)
+		}
+		// P0-6 fix: Only allow auto-registration of unknown devices when
+		// DCLAW_FLEET_AUTO_REGISTER=true (dev mode). In production (default),
+		// operators must register devices via CLI/API.
+		if strings.EqualFold(os.Getenv("DCLAW_FLEET_AUTO_REGISTER"), "true") {
+			bridge.AllowAutoRegistration = true
+			fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration enabled (DCLAW_FLEET_AUTO_REGISTER=true)")
+		}
+
+		initialErr := tcpClient.Connect(ctx)
+		if initialErr != nil {
+			// NEW-4 fix: Instead of giving up when the broker is down at
+			// startup, start a background goroutine that retries with
+			// exponential backoff (same strategy as tcp_client.go's
+			// reconnectLoop). When the broker becomes available, the bridge
+			// is started. Fleet API endpoints work without MQTT — they
+			// return errors for MQTT-dependent operations.
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connect to %s failed: %v — will retry in background\n", brokerURL, initialErr)
+			go func() {
+				backoff := 1 * time.Second
+				const maxBackoff = 30 * time.Second
+				for {
+					select {
+					case <-ctx.Done():
+						fmt.Fprintln(os.Stderr, "[sidecar] fleet MQTT startup retry cancelled")
+						return
+					case <-time.After(backoff):
+					}
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT retrying connect to %s\n", brokerURL)
+					if err := tcpClient.Connect(ctx); err != nil {
+						fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT retry failed: %v (next in %v)\n", err, backoff*2)
+						backoff *= 2
+						if backoff > maxBackoff {
+							backoff = maxBackoff
+						}
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connected to %s after retry — starting bridge\n", brokerURL)
+					if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
+						fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
+					}
+					return
+				}
+			}()
 		} else {
-			fleetMQTTClient = tcpClient
-			bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
-			fleetBridge = bridge
-			// Wire block metric so BLOCK verdicts increment the Prometheus counter
-			bridge.SetOnBlock(func() { fleet.GlobalMetrics.BlocksTotal.Add(1) })
-			// Wire per-device key resolution from the SQLite store so the
-			// bridge verifies/computes verdict HMACs with the correct key
-			// instead of falling back to the fleet-wide shared key.
-			if deviceStore != nil {
-				bridge.SetDeviceKeyStore(deviceStore)
-			}
-			// P0-6 fix: Only allow auto-registration of unknown devices when
-			// DCLAW_FLEET_AUTO_REGISTER=true (dev mode). In production (default),
-			// operators must register devices via CLI/API.
-			if strings.EqualFold(os.Getenv("DCLAW_FLEET_AUTO_REGISTER"), "true") {
-				bridge.AllowAutoRegistration = true
-				fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration enabled (DCLAW_FLEET_AUTO_REGISTER=true)")
-			}
 			go func() {
 				if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
 					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)

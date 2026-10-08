@@ -119,7 +119,7 @@ Registers a new device with the fleet manager. If a device with the same composi
 }
 ```
 
-**Response** `201 Created` (new device) or `200 OK` (already exists)
+**Response** `201 Created` (new device)
 
 ```json
 {
@@ -142,6 +142,29 @@ Registers a new device with the fleet manager. If a device with the same composi
     "flash_writes": 0
   },
   "device_key": "a1b2c3d4...hex-encoded-32-byte-key..."
+}
+```
+
+**Response** `200 OK` (device already exists)
+
+```json
+{
+  "device_id": 281474976841729,
+  "tenant_id": 1,
+  "fleet_id": 2,
+  "hw_profile": "rpi4",
+  "fw_version": "1.2.0",
+  "policy_version": 3,
+  "capabilities": 127,
+  "status": "online",
+  "last_heartbeat": "2026-10-05T14:32:00Z",
+  "last_audit_hmac": "base64...",
+  "site_id": "factory-east",
+  "registered_at": "2026-09-01T10:00:00Z",
+  "flags": 0,
+  "denied_total": 42,
+  "allowed_total": 18305,
+  "flash_writes": 0
 }
 ```
 

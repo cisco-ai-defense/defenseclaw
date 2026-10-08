@@ -734,8 +734,17 @@ def edge_install(
                     "  Check logs: journalctl -u edge-connector -n 40"
                 )
                 raise SystemExit(1)
-
-        ux.echo()
-        ux.section("Done")
-        ux.echo("  Edge connector installed at /usr/local/lib/libdclaw_core.so")
-        ux.echo("  Next: run 'defenseclaw setup mqtt-broker' to set up the MQTT broker.")
+            ux.echo()
+            ux.section("Done")
+            ux.echo("  Edge connector installed at /usr/local/lib/libdclaw_core.so")
+            ux.echo("  Service is running.")
+            ux.echo("  Next: run 'defenseclaw setup mqtt-broker' to set up the MQTT broker.")
+        else:
+            # P1 fix: Do NOT print "Done" when systemd install fails.
+            ux.echo()
+            ux.err(
+                "Systemd service installation failed. The edge-connector binary\n"
+                "  was built and installed, but the service is NOT running.\n"
+                "  Start it manually or fix the systemd issue and re-run install."
+            )
+            raise SystemExit(1)
