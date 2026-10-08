@@ -611,6 +611,11 @@ func (h *hostPlane) joinToolCall(event plane.Event) {
 	if !ok || lineage.Depth != 1 {
 		return
 	}
+	connector := firstNonEmptyString(lineage.SessionRoot.Agent.Connector, lineage.Root.Agent.Connector)
+	if isAgentShellSetup(connector, event.Cmdline) {
+		// The agent's own setup shell is not a tool call either.
+		return
+	}
 	at := event.At
 	if at.IsZero() {
 		at = time.Now()
@@ -621,7 +626,7 @@ func (h *hostPlane) joinToolCall(event plane.Event) {
 	}
 	join := h.hooks.join(hookExec{
 		RootPID:   lineage.SessionRoot.PID,
-		Connector: firstNonEmptyString(lineage.SessionRoot.Agent.Connector, lineage.Root.Agent.Connector),
+		Connector: connector,
 		UID:       uid,
 		At:        at,
 		Hashes:    shellCommandHashes(event.Cmdline),
@@ -668,6 +673,25 @@ func isHookLauncher(cmdline string) bool {
 }
 
 var hookLauncherQuotes = strings.NewReplacer(`'`, "", `"`, "", `\`, "")
+
+// isAgentShellSetup reports a shell Claude Code starts for itself before the
+// first Bash call of a session: `bash -c env` (it reads the login
+// environment) and `bash -c -l "SNAPSHOT_FILE=..."` (it writes the shell
+// snapshot that its tool shells source). Both start between the PreToolUse
+// decision and the tool's own shell, `bash -c "source <snapshot> && eval
+// '...'"`, and took the first call's decision by agent and time (GAP-0023).
+// A tool call never runs as either: Claude Code runs every Bash command
+// through the snapshot shell.
+func isAgentShellSetup(connector, cmdline string) bool {
+	if connector != "claudecode" {
+		return false
+	}
+	script, ok := shellScript(cmdline)
+	if !ok {
+		return false
+	}
+	return script == "env" || strings.HasPrefix(strings.TrimPrefix(script, `"`), "SNAPSHOT_FILE=")
+}
 
 // firstField is a command line's first word without its quotes.
 func firstField(cmdline string) string {
@@ -840,8 +864,14 @@ type hookRing struct {
 type hookEntry struct {
 	HookDecision
 	valid bool
-	// used marks a command decision already joined to its process.
+	// used marks a command decision joined exactly: its command's shell.
 	used bool
+	// timed marks a command decision a shell took by agent and time only. No
+	// other shell takes it by time, but the shell whose command hashes match
+	// it still takes it exactly: another shell the agent starts between the
+	// decision and the tool's shell (a status line command) must not leave
+	// the tool call unjoined.
+	timed bool
 }
 
 func newHookRing(capacity int, window time.Duration) *hookRing {
@@ -860,8 +890,10 @@ func (r *hookRing) record(decision HookDecision) {
 // (or, when the decision's hook process is not in the lineage table, of the
 // same user and connector), temporal when only the agent and the time agree,
 // and for a command decision only when the process is a shell. A command
-// decision joins one process; a decision for a tool that runs no command (a
-// search spawning rg) can label several, within a short window.
+// decision joins one process exactly and at most one by time (that one may be
+// another shell of the agent's, so it never keeps the decision from the
+// process its command hashes match); a decision for a tool that runs no
+// command (a search spawning rg) can label several, within a short window.
 // rootOf resolves a hook process pid to its agent's session root.
 func (r *hookRing) join(exec hookExec, rootOf func(pid int) (int, bool)) HookJoin {
 	r.mu.Lock()
@@ -900,7 +932,7 @@ func (r *hookRing) join(exec hookExec, rootOf func(pid int) (int, bool)) HookJoi
 		if entry.CommandHash != "" && containsString(exec.Hashes, entry.CommandHash) && (sameRoot || sameUser) {
 			exact = entry
 		}
-		if sameRoot && ((entry.CommandHash != "" && exec.Shell) || (entry.CommandHash == "" && age <= hookUntimedWindow)) {
+		if sameRoot && ((entry.CommandHash != "" && exec.Shell && !entry.timed) || (entry.CommandHash == "" && age <= hookUntimedWindow)) {
 			timed = entry
 		}
 	}
@@ -912,7 +944,11 @@ func (r *hookRing) join(exec hookExec, rootOf func(pid int) (int, bool)) HookJoi
 		return HookJoin{}
 	}
 	if picked.CommandHash != "" {
-		picked.used = true
+		if confidence == HookJoinExact {
+			picked.used = true
+		} else {
+			picked.timed = true
+		}
 	}
 	join := HookJoin{
 		Seen: true, Confidence: confidence, Connector: picked.Connector,
@@ -1036,29 +1072,10 @@ func shellCommandHashes(cmdline string) []string {
 		return nil
 	}
 	var candidates []string
-	if isShellName(tactics.BaseName(strings.Trim(fields[0], `"'`))) {
-		for index := 1; index < len(fields); index++ {
-			field := fields[index]
-			if !isShellCommandFlag(field) {
-				if strings.HasPrefix(field, "-") {
-					continue
-				}
-				break
-			}
-			rest := fields[index+1:]
-			for len(rest) > 0 && isShellOption(rest[0]) {
-				rest = rest[1:]
-			}
-			script := strings.Join(rest, " ")
-			// Tetragon wraps an argument that holds a space in double quotes.
-			if len(script) >= 2 && strings.HasPrefix(script, `"`) && strings.HasSuffix(script, `"`) {
-				script = script[1 : len(script)-1]
-			}
-			candidates = append(candidates, script)
-			if inner, ok := evalArgument(script); ok {
-				candidates = append(candidates, inner)
-			}
-			break
+	if script, ok := shellScript(cmdline); ok {
+		candidates = append(candidates, script)
+		if inner, ok := evalArgument(script); ok {
+			candidates = append(candidates, inner)
 		}
 	}
 	candidates = append(candidates, strings.Join(append([]string{tactics.BaseName(fields[0])}, fields[1:]...), " "))
@@ -1069,6 +1086,37 @@ func shellCommandHashes(cmdline string) []string {
 		}
 	}
 	return hashes
+}
+
+// shellScript is the script of a `sh -c` command line as Tetragon forwards
+// it: the words after -c (or a cluster holding c) and any of the shell's own
+// options, joined with single spaces, without the double quotes Tetragon
+// wraps an argument that holds a space in. false when the command line is not
+// a shell running a script.
+func shellScript(cmdline string) (string, bool) {
+	fields := strings.Fields(cmdline)
+	if len(fields) == 0 || !isShellName(tactics.BaseName(strings.Trim(fields[0], `"'`))) {
+		return "", false
+	}
+	for index := 1; index < len(fields); index++ {
+		field := fields[index]
+		if !isShellCommandFlag(field) {
+			if strings.HasPrefix(field, "-") {
+				continue
+			}
+			return "", false
+		}
+		rest := fields[index+1:]
+		for len(rest) > 0 && isShellOption(rest[0]) {
+			rest = rest[1:]
+		}
+		script := strings.Join(rest, " ")
+		if len(script) >= 2 && strings.HasPrefix(script, `"`) && strings.HasSuffix(script, `"`) {
+			script = script[1 : len(script)-1]
+		}
+		return script, true
+	}
+	return "", false
 }
 
 // evalArgument is the shell word that follows the first `eval` in a script.
