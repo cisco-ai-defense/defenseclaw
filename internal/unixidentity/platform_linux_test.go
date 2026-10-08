@@ -65,13 +65,14 @@ func init() { hostRealms = func(context.Context) ([]Realm, error) { return nil, 
 // stays local: it was reported as the AD account lee@CORP.EXAMPLE.COM. A
 // winbind account of the realm reports its DNS domain, as Windows does, not
 // the NetBIOS name CORP; the NetBIOS domain of a trusted domain gets no
-// realm facts.
+// realm facts. An nss_ldap account named by an e-mail address gets none
+// either: it took the principal of an AD account of that name (GAP-0730).
 func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 	origNSS, origRealms, origPasswd := nsswitchPath, hostRealms, localPasswdPath
 	t.Cleanup(func() { nsswitchPath, hostRealms, localPasswdPath = origNSS, origRealms, origPasswd })
 	nsswitchPath = filepath.Join(t.TempDir(), "nsswitch.conf")
 	localPasswdPath = filepath.Join(t.TempDir(), "passwd")
-	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files winbind systemd\n"), 0o644); err != nil {
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: sss files winbind ldap systemd\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(localPasswdPath, []byte("lee:x:1000:70000::/home/lee:/bin/bash\n"), 0o644); err != nil {
@@ -89,16 +90,17 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		1000:  "lee",
 		70005: `CORP\erin`,
 		70006: `EMEA\frank`,
+		70007: "gina@corp.example.com",
 	}
-	winbind := map[int]bool{70005: true, 70006: true}
+	services := map[int]string{70005: "winbind", 70006: "winbind", 70007: "ldap"}
 	startFakeSSSD(t, nil)
 	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
 		line := commandResult{stdout: []byte(name + ":*:" + strconv.Itoa(uid) + ":70000::/home/" + name + ":/bin/bash\n")}
 		f.results["passwd "+strconv.Itoa(uid)] = line
-		service := "sss"
-		if winbind[uid] {
-			service = "winbind"
+		service := services[uid]
+		if service == "" {
+			service = "sss"
 		}
 		f.results["-s "+service+" passwd "+strconv.Itoa(uid)] = line
 		f.results["-s "+service+" passwd "+name] = line
@@ -117,6 +119,7 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		1000:  {useridentity.DirectoryLocal, useridentity.SourceNSSFiles, "", "", ""},
 		70005: {ad, useridentity.SourceWinbind, "corp.example.com", "CORP.EXAMPLE.COM", "erin@corp.example.com"},
 		70006: {ad, useridentity.SourceWinbind, "emea", "", ""},
+		70007: {useridentity.DirectoryLDAP, useridentity.SourceNSSLDAP, "", "", ""},
 	}
 	r := newFakeNSS(f)
 	for uid, expected := range want {
@@ -235,7 +238,10 @@ func (f *fakeSSSD) serve(conn net.Conn) {
 // account's SID, which SSSD maps to the AD account's uid. Groups count only
 // inside the domain of the account's SID: the LDAP carol does not get the
 // AD groups initgroups lists for the name carol (GAP-0563), and the AD alice
-// keeps her AD and local groups but not another domain's. An SSSD that is
+// keeps her AD groups and the /etc/group groups that list alice, which
+// initgroups by domain\name never lists (GAP-0729), but not another
+// domain's, nor one that lists alice@corp.example.com, the name of an
+// account that a domain names by e-mail address. An SSSD that is
 // stopped, while its memory cache still answers the uid, fails the lookup
 // instead of dropping the realm and the groups (GAP-0606).
 func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
@@ -245,7 +251,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	})
 	dir := t.TempDir()
 	nsswitchPath, localPasswdPath, localGroupPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd"), filepath.Join(dir, "group")
-	for path, content := range map[string]string{nsswitchPath: "passwd: files sss\n", localPasswdPath: "", localGroupPath: "docker:x:7000:alice\n"} {
+	for path, content := range map[string]string{nsswitchPath: "passwd: files sss\n", localPasswdPath: "", localGroupPath: "docker:x:7000:alice\nwheel:x:10:alice@corp.example.com\n"} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -268,7 +274,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 		return commandResult{stdout: []byte(name + ":*:" + id + ":" + id + "::/home/" + name + ":/bin/bash\n")}
 	}
 	f := &fakeRun{results: map[string]commandResult{
-		"initgroups corp.example.com\\alice": {stdout: []byte("corp.example.com\\alice 80001 5000 5300 7000\n")},
+		"initgroups corp.example.com\\alice": {stdout: []byte("corp.example.com\\alice 80001 5000 5300\n")},
 		"group 5000 7000 80001":              {stdout: []byte("domain users:*:5000:\ndocker:*:7000:\nalice:*:80001:\n")},
 		"initgroups carol":                   {stdout: []byte("carol 80003 5000 5100\n")},
 		"group 5100 80003":                   {stdout: []byte("ldap-devs:*:5100:\ncarol:*:80003:\n")},
