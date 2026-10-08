@@ -196,6 +196,7 @@ icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
 icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C | Out-Null
 Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
+icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
 ```
 
 The snippet is safe to run again, for example after you fix a permission:
@@ -233,9 +234,15 @@ For an Intune fleet, deliver a custom pack before the DefenseClaw app using a
 dependent Win32 app, or a pinned HTTPS download with a SHA-256 check; see
 [Intune on Windows](/docs/enterprise/mdm/intune-windows#6-change-the-config-upgrade-and-roll-back).
 
-Setup checks these permissions for the service account before it changes
-anything, and stops with exit code `1639` naming the folder and the
-`icacls` grant that fixes it. Setup checks the config with the
+Setup checks these permissions before it changes anything: the pack folder,
+every file and folder in it (the manifest and the rules folder included) and
+the folders above it must be owned and writable only by Administrators and
+SYSTEM, and readable by the service account. Otherwise it stops with exit
+code `1639`, naming the account, the file or folder it can change and the
+`icacls` commands that fix it. A repair (`/repair`) checks the packs of the
+installed config the same way, digest pins included, before it stops the
+services: when the gateway would not load them, it stops with `1603` and
+changes nothing, and the running gateway keeps its last good policy. Setup checks the config with the
 gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.

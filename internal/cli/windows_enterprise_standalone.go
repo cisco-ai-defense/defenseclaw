@@ -2066,6 +2066,17 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 	}
 
+	// A repair restarts the gateway on the installed config: refuse one whose
+	// rule packs the gateway would not load, before anything stops (GAP-0672).
+	if plan.Action == "repair" && plan.Reason == "verify_failed" {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
 	keptConfig := ""
 	var startOnlyKeys []string
 	if plan.Action == "upgrade" && plan.Reason == "drift:config" {

@@ -13,6 +13,7 @@
 package managed
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -369,4 +370,41 @@ func unusedManagedTestDriveLetter() (string, bool) {
 		return "", false
 	}
 	return `O:`, true
+}
+
+// GAP-0672: the rule-pack check walks into the pack: the manifest and a file
+// in the rules folder are checked, not only the pack folder and its parents,
+// and the first refusal stops the walk.
+func TestWalkWindowsRulePackTreeChecksEveryFileInThePack(t *testing.T) {
+	pack := t.TempDir()
+	rules := filepath.Join(pack, "rules")
+	if err := os.MkdirAll(rules, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{filepath.Join(pack, "defenseclaw-pack.json"), filepath.Join(rules, "markers.yaml")} {
+		if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var checked []string
+	err := walkWindowsRulePackTree(pack, func(path string, isDir bool) error {
+		checked = append(checked, path)
+		if path == filepath.Join(rules, "markers.yaml") {
+			return &UntrustedPrincipalError{Path: path, SID: "S-1-5-11"}
+		}
+		return nil
+	})
+	var principal *UntrustedPrincipalError
+	if !errors.As(err, &principal) || principal.Path != filepath.Join(rules, "markers.yaml") {
+		t.Fatalf("walk = %v, want the refusal of the rules file", err)
+	}
+	for _, want := range []string{filepath.Join(pack, "defenseclaw-pack.json"), rules} {
+		found := false
+		for _, path := range checked {
+			found = found || path == want
+		}
+		if !found {
+			t.Fatalf("checked %q, want %s among them", checked, want)
+		}
+	}
 }
