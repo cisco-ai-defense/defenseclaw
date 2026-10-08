@@ -814,8 +814,33 @@ It also removes the folders an interrupted elevated DefenseClaw command
 left: `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>`,
 `C:\ProgramData\DefenseClaw-Installer-<32 hex>` and
 `C:\Windows\Temp\DefenseClaw-Bootstrap-<32 hex>`; every uninstall does this,
-not only a purge. The `machine_state_remaining` warning names any of these
-folders it could not remove, and why.
+not only a purge. A purge also removes the public policy summary
+`C:\ProgramData\Cisco\DefenseClaw-HookRuntime\machine-policy.json` and that
+folder once it is empty, the DefenseClaw Claude Code drop-ins
+(`90-defenseclaw.json`, its state and lock, `00-defenseclaw-version-floor.json`)
+and the hooks' runtime selectors that name this deployment's hook binary, even
+when the uninstall had no deployment record to tear down (for example after
+`C:\ProgramData\Cisco\DefenseClaw` was deleted), and then the lifecycle lock
+in `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`. Files that name another
+deployment's hook binary stay. The `machine_state_remaining` warning names
+anything it could not remove, and why.
+
+A purge also removes the managed ACP folder `%USERPROFILE%\.defenseclaw\acp`
+(the account's ACP token copies and editor contract locks) of every account
+that has one, signed in or not, including accounts that were revoked or
+enrolled for ACP only, and accounts whose other per-user state stays for its
+`connector_backups`. The editors' own ACP entries stay (for example the
+DefenseClaw agents under `agent_servers` in Zed's `settings.json` and
+`%USERPROFILE%\.jetbrains\acp.json`); they start the removed
+`defenseclaw-acp.exe` and fail, so remove them in the editor.
+
+An upgrade replaces each binary in place. When an editor still runs the
+previous `defenseclaw-acp.exe` (an open ACP thread), Windows keeps that copy
+as `defenseclaw-acp.exe.backup.<32 hex>` beside the new one until the thread
+ends: the upgrade succeeds, the next lifecycle run removes the copy, and
+Windows deletes it at the next restart. Uninstall removes such copies too;
+if a program still runs one, the uninstall stops before changing anything
+and names it: close that editor thread, or restart, and run it again.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
