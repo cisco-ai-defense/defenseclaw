@@ -3752,6 +3752,10 @@ class TestSkillScannerLLMDefault(SkillCommandTestBase):
         _build_skill_scanner(self.app, None)
         cfg = mock_wrapper.call_args.args[0]
         self.assertFalse(cfg.use_llm)
+        with patch("defenseclaw.commands.cmd_skill.asset_lists.is_secure_client", return_value=True):
+            _build_skill_scanner(self.app, None)
+        self.assertTrue(mock_wrapper.call_args.args[0].use_llm)
+        self.assertTrue(mock_wrapper.call_args.kwargs["secure_client"])
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     @patch("defenseclaw.scanner._llm_env.litellm_model", return_value="some/model")

@@ -927,6 +927,7 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
         llm=resolved_llm,
+        secure_client=asset_lists.is_secure_client(app.cfg),
     )
     # R4: overlay the configured guardrail rule pack onto the server definition
     # (command/args/env/url). No-op when no rule pack or guardrail.rules is set.

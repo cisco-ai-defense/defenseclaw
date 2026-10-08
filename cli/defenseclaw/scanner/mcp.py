@@ -844,8 +844,12 @@ def _echo_server_stderr_tail(errlog: Any, launcher: str, max_lines: int = 8) -> 
     the scan result and sent to the audit sinks.
     """
     try:
-        errlog.seek(0)
-        lines = [line.rstrip() for line in errlog.read()[-4096:].splitlines() if line.strip()]
+        errlog.flush()
+        raw = errlog.buffer
+        raw.seek(0, os.SEEK_END)
+        end = raw.tell()
+        raw.seek(max(0, end - 4096))
+        lines = [line.rstrip() for line in raw.read(4096).decode("utf-8", "replace").splitlines() if line.strip()]
     except (OSError, ValueError):
         return
     for line in lines[-max_lines:]:
@@ -1086,8 +1090,10 @@ class MCPScannerWrapper:
         cisco_ai_defense: CiscoAIDefenseConfig | None = None,
         *,
         llm: LLMConfig | None = None,
+        secure_client: bool = False,
     ) -> None:
         self.config = config
+        self.secure_client = secure_client
         self.inspect_llm = inspect_llm or InspectLLMConfig()
         self.cisco_ai_defense = cisco_ai_defense or CiscoAIDefenseConfig()
         # ``_llm`` is the canonical internal view. Prefer the explicit
@@ -1271,7 +1277,7 @@ class MCPScannerWrapper:
         # Settings come from config (sdk_config above); inherited
         # MCP_SCANNER_* / SKILL_SCANNER_* / VIRUSTOTAL_* / AI_DEFENSE_*
         # shell variables never reach the SDK or a scanned stdio server.
-        with settings.scanner_env({}):
+        with settings.scanner_env({}, secure_client=self.secure_client):
             if is_local:
                 all_findings = self._scan_local(scanner, server_entry, analyzers)
             elif pinned_target is not None:

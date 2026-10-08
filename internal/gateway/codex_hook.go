@@ -4089,6 +4089,7 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 			cfg.ResolveLLM("scanners.skill"),
 			cfg.CiscoAIDefense,
 		)
+		ss.SecureClient = cfg.SecureClientIntegration()
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
 		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
