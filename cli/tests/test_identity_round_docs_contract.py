@@ -9,9 +9,8 @@ def page(name: str) -> str:
 
 def test_quickstart_explains_installer_choice_and_init() -> None:
     text = page("get-started/quickstart.mdx")
-    assert "installer asks you to pick one agent to guard (or none)" in text
-    assert "That choice is saved" in text
-    assert "sets up the agent chosen during install" in text
+    assert "the installer asks which agent to guard" in text
+    assert "defenseclaw init --connector claudecode" in text
 
 
 def test_copilot_workspace_scope_and_guardrail_route() -> None:
