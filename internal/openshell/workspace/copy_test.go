@@ -250,10 +250,14 @@ func TestStageNamesWhatUnmaskShared(t *testing.T) {
 	e.commit("ignore")
 	writeFile(t, e.project, ".env", "TOKEN=dccert-decoy\n")
 	writeFile(t, e.project, "local.env", "TOKEN=dccert-decoy\n")
+	// A template of names the pack shares by default, under the pack's .env.*
+	// mask, is no secret the run shared (GAP-0351).
+	writeFile(t, e.project, ".env.sample", "DATABASE_URL=\nSTRIPE_API_KEY=\n")
 	opts := e.stageOpts("c1")
+	opts.Masks = append(opts.Masks, ".env.*")
 	// .env.example is a pack default the project lacks: no warning for it,
 	// only for what the run asked (GAP-0308).
-	opts.Unmask = []string{".env", "local.env", ".env.example"}
+	opts.Unmask = []string{".env", "local.env", ".env.example", ".env.sample"}
 	opts.UnmaskAsked = []string{".env", "local.env"}
 	rec, err := Stage(bg, opts)
 	if err != nil {

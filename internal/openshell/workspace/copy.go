@@ -824,14 +824,25 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	}
 	// What --unmask shared, and what it named that the copy does not take
 	// (git-ignored files never go): both were silent (GAP-0248).
+	// A file only the pack's or the configuration's own entries share (a
+	// committed template such as .env.example, which the pack's .env.* mask
+	// covers) counts only when its content looks like a secret: a template of
+	// names was named on every run as if the user had unmasked it (GAP-0351).
 	unmaskOnly := scanOpts
 	unmaskOnly.unmask = nil
+	contentOnly := unmaskOnly
+	contentOnly.patterns = nil
 	rec.Unmasked = nil
 	for _, rel := range candidates {
-		if unmaskedBy(scanOpts.unmask, rel) {
-			if would, err := detectSecretsIn(root, []string{rel}, unmaskOnly); err == nil && len(would) > 0 {
-				rec.Unmasked = append(rec.Unmasked, rel)
-			}
+		if !unmaskedBy(scanOpts.unmask, rel) {
+			continue
+		}
+		check := contentOnly
+		if unmaskedBy(scanOpts.unmaskAsked, rel) {
+			check = unmaskOnly
+		}
+		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
+			rec.Unmasked = append(rec.Unmasked, rel)
 		}
 	}
 	for _, u := range scanOpts.unmaskAsked {
