@@ -55,7 +55,7 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 		}
 		seen[key] = struct{}{}
 		homeDirs := append([]string(nil), dirs...)
-		for _, ide := range inventoryDACLIDEGrants(home) {
+		for _, ide := range inventoryDACLIDEGrants(home, nil) {
 			homeDirs = append(homeDirs, ide.dir)
 		}
 		for _, dir := range homeDirs {
