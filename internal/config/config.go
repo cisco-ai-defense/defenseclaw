@@ -2729,7 +2729,7 @@ func loadConfigSourceChecked(
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)
 
-	if err := checkRuntimeConfigVersion(cfg.ConfigVersion); err != nil {
+	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err
 	}
 	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
@@ -3165,13 +3165,15 @@ func seedProvenanceOnLoad(cfg *Config, sourceBytes []byte) {
 	}
 }
 
-// checkRuntimeConfigVersion admits config_version 8 through
-// MaxSupportedConfigVersion. An older source (a released 0.8.x layout) is
+// checkRuntimeConfigVersion admits v8 for Secure Client and v8 through
+// MaxSupportedConfigVersion for other profiles. An older source (a released 0.8.x layout) is
 // never decoded here: `defenseclaw migrate` rewrites it once, and this
 // runtime refuses it with that single instruction. A newer one belongs to a
 // newer DefenseClaw and is never guessed at.
-func checkRuntimeConfigVersion(version int) error {
+func checkRuntimeConfigVersion(version int, secureClient bool) error {
 	switch {
+	case secureClient && version > ObservabilityV8ConfigVersion:
+		return fmt.Errorf("config: Secure Client supports config_version 8 only (received %d)", version)
 	case version < ObservabilityV8ConfigVersion:
 		return fmt.Errorf("config: config_version %d is older than %d; run `defenseclaw migrate`",
 			version, ObservabilityV8ConfigVersion)

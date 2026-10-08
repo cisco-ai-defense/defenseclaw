@@ -4167,7 +4167,11 @@ func TestGenerationProvidersFromConfig(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.LLM.BaseURL = "https://llm-gateway.example.com/v1"
 	cfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "acme", Domains: []string{"llm.acme.example"}, EnvKeys: []string{"ACME_KEY"}}}
-	applyGenerationProviders(buildGenerationProviders(cfg))
+	providers, err := buildGenerationProviders(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyGenerationProviders(providers)
 	t.Cleanup(func() { _ = ReloadProviderRegistry() })
 	for _, host := range []string{"llm.acme.example", "llm-gateway.example.com", "llm.operator.example"} {
 		if !isKnownProviderDomain("https://" + host + "/v1/chat/completions") {
@@ -4182,7 +4186,11 @@ func TestGenerationProvidersFromConfig(t *testing.T) {
 	if err := os.WriteFile(overlayPath, []byte(derived), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	applyGenerationProviders(buildGenerationProviders(cfg))
+	providers, err = buildGenerationProviders(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyGenerationProviders(providers)
 	if isKnownProviderDomain("https://llm.stale.example/v1/chat/completions") {
 		t.Fatal("a derived custom-providers.json was read back as input")
 	}

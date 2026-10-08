@@ -1159,3 +1159,158 @@ func TestMigrateV9ReadsAuditDBUnderAnAwkwardPath(t *testing.T) {
 		t.Fatalf("rows after clear = %d, err = %v", len(rows), err)
 	}
 }
+
+// A comment about the old data document does not make a custom Rego module
+// depend on it. Migration must leave the operator's active rules in place.
+func TestMigrateV9KeepsCustomRegoWithLegacyComment(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(dir, "policies", "rego", "admission.rego")
+	if err := os.MkdirAll(filepath.Dir(module), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	custom := []byte("package defenseclaw.admission\nimport rego.v1\n# old data.config was removed\nverdict := \"blocked\" if { input.target.name == \"marker\" }\n")
+	if err := os.WriteFile(module, custom, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(module)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(custom) {
+		t.Fatalf("custom admission module was replaced: %s", got)
+	}
+}
+
+// A missing provider CA changes TLS trust. If its destination is obstructed,
+// the v8 config and live overlay must still be the active inputs.
+func TestMigrateV9RefusesMissingProviderCA(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, ProvidersOverlayFile)
+	if err := os.WriteFile(overlay, []byte(`{"providers":[{"name":"acme","domains":["llm.acme.internal"],"env_keys":["ACME_KEY"],"tls":{"ca_cert_pem":"-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "provider-ca"), []byte("obstruction"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+		t.Fatal("migration succeeded without writing the provider CA")
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "config_version: 8") {
+		t.Fatalf("config committed without the provider CA: %s", raw)
+	}
+	if _, err := os.Stat(overlay); err != nil {
+		t.Fatalf("legacy overlay was removed: %v", err)
+	}
+}
+
+// A protected-* folder is still a mutable v8 pack. Its manifest does not
+// prove the rule files match a rebuilt base plus protections.
+func TestMigrateV9PinsEditedProtectedRulePack(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	pack := filepath.Join(dir, "policies", "guardrail", "protected-team", "strict")
+	if err := os.MkdirAll(filepath.Join(pack, "rules"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "defenseclaw-pack.json"),
+		[]byte(`{"version":1,"base":"strict","protection":["privacy-high-assurance"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "rules", "operator.yaml"), []byte("operator rule"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := "config_version: 8\nguardrail:\n  rule_pack_dir: " + pack + "\nobservability: {}\n"
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: filepath.Join(dir, "config.yaml"), Source: []byte(source), DryRun: true,
+		RulePackDigest: func(got string) (string, error) {
+			if got != pack {
+				t.Fatalf("digest requested for %s, want %s", got, pack)
+			}
+			return strings.Repeat("a", 64), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Guardrail struct {
+			RulePack    string `yaml:"rule_pack"`
+			CustomPacks map[string]struct {
+				Path   string `yaml:"path"`
+				Digest string `yaml:"digest"`
+			} `yaml:"custom_packs"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	ref := doc.Guardrail.RulePack
+	if ref == "strict" || doc.Guardrail.CustomPacks[ref].Path != pack ||
+		doc.Guardrail.CustomPacks[ref].Digest != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("edited protected pack was not pinned: %s", result.Migrated)
+	}
+}
+
+// The record is required evidence for a committed v9 config. A record path
+// failure must leave v8 in place so clearing the obstruction allows a retry.
+func TestMigrateV9RecordFailureCanRetry(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := MigrationRecordPath(configPath)
+	if err := os.Mkdir(recordPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+		t.Fatal("migration succeeded with an obstructed record path")
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "config_version: 8") {
+		t.Fatalf("config committed before the record: %s", raw)
+	}
+	if err := os.Remove(recordPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.ToVersion != ConfigVersionV9 || record.Pending {
+		t.Fatalf("retry did not write a committed v9 migration record: %+v", record)
+	}
+	// An interruption after the config commit can leave a durable pending
+	// record. Retrying the already-v9 file must finish that record.
+	record.Pending = true
+	if err := writeMigrationRecord(recordPath, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("finish pending record: %v", err)
+	}
+	if record, ok := readMigrationRecord(configPath); !ok || record.Pending {
+		t.Fatalf("pending record was not finished: %+v", record)
+	}
+}

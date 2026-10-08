@@ -18,6 +18,7 @@ package guardrail
 
 import (
 	"bytes"
+	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -33,6 +35,20 @@ import (
 
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
+
+// The 0.8.10 default action files are the baseline for preserving operator
+// field edits during v9 migration. The 0.8.x releases shipped these same
+// rules. Only fields unchanged from this baseline take their 1.0 values.
+//
+//go:embed legacy08/*.yaml
+var legacy08RuleFiles embed.FS
+
+var legacy08FileNames = map[string]string{
+	"command":        "commands.yaml",
+	"c2":             "c2.yaml",
+	"cognitive-file": "cognitive.yaml",
+	"sensitive-path": "sensitive-paths.yaml",
+}
 
 // actionRuleCategories judge a concrete action: a command, a path, a change
 // to an agent's own files, a network destination. The engine blocks such an
@@ -274,6 +290,22 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 	if baseRules == nil || oldRules == nil {
 		return nil, errors.New("no rules list")
 	}
+	legacyName, ok := legacy08FileNames[category]
+	if !ok {
+		return nil, fmt.Errorf("no 0.8.x baseline for category %s", category)
+	}
+	legacyBytes, err := legacy08RuleFiles.ReadFile("legacy08/" + legacyName)
+	if err != nil {
+		return nil, err
+	}
+	var legacy yaml.Node
+	if err := yaml.Unmarshal(legacyBytes, &legacy); err != nil {
+		return nil, err
+	}
+	legacyRules := map[string]*yaml.Node{}
+	for _, item := range yamlRulesSequence(&legacy).Content {
+		legacyRules[yamlScalarField(item, "id")] = item
+	}
 	builtin := map[string]*yaml.Node{}
 	for _, item := range baseRules.Content {
 		if id := yamlScalarField(item, "id"); id != "" {
@@ -287,9 +319,7 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 		switch {
 		case builtin[id] != nil:
 			plan.Updated++
-			if yamlScalarField(item, "enabled") == "false" {
-				setYAMLScalarField(builtin[id], "enabled", "false", "!!bool")
-			}
+			preserveRuleEdits(builtin[id], item, legacyRules[id])
 		case slices.Contains(default08RuleIDs[category], id):
 			plan.Updated++ // a 0.8.x rule 1.0 no longer ships
 		default:
@@ -321,6 +351,83 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// preserveRuleEdits applies only fields the operator changed against the
+// shipped 0.8.x rule. Fields added in 1.0, including semantic expressions,
+// remain on the new rule unless the operator explicitly supplied a value.
+func preserveRuleEdits(current, custom, legacy *yaml.Node) {
+	if legacy == nil {
+		legacy = &yaml.Node{Kind: yaml.MappingNode}
+	}
+	keys := map[string]bool{}
+	for i := 0; i+1 < len(custom.Content); i += 2 {
+		keys[custom.Content[i].Value] = true
+	}
+	for i := 0; i+1 < len(legacy.Content); i += 2 {
+		keys[legacy.Content[i].Value] = true
+	}
+	for key := range keys {
+		if key == "id" {
+			continue
+		}
+		oldValue, oldOK := yamlField(custom, key)
+		baseValue, baseOK := yamlField(legacy, key)
+		if yamlValuesEqual(oldValue, oldOK, baseValue, baseOK) {
+			continue
+		}
+		if !oldOK {
+			removeYAMLField(current, key)
+			continue
+		}
+		setYAMLField(current, key, oldValue)
+	}
+}
+
+func yamlField(mapping *yaml.Node, key string) (*yaml.Node, bool) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil, false
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1], true
+		}
+	}
+	return nil, false
+}
+
+func yamlValuesEqual(a *yaml.Node, aOK bool, b *yaml.Node, bOK bool) bool {
+	if aOK != bOK {
+		return false
+	}
+	if !aOK {
+		return true
+	}
+	var av, bv any
+	if a.Decode(&av) != nil || b.Decode(&bv) != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
+func setYAMLField(mapping *yaml.Node, key string, value *yaml.Node) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content[i+1] = value
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, value)
+}
+
+func removeYAMLField(mapping *yaml.Node, key string) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
+			return
+		}
+	}
 }
 
 // literalPattern is the text a pattern matches when it is a plain literal

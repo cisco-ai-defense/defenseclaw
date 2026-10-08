@@ -330,7 +330,10 @@ def _fail_mode_text(cfg: Any) -> str:
     global_mode = _text(cfg, "guardrail.hook_fail_mode") or "closed"
     resolver = getattr(getattr(cfg, "guardrail", None), "effective_hook_fail_mode", None)
     modes: list[str] = []
+    enabled = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
     for name in active_connector_names(cfg):
+        if callable(enabled) and not enabled(name):
+            continue
         if name.lower() in _UPSTREAM_FAIL_OPEN_CONNECTORS:
             modes.append("open")
         elif callable(resolver):

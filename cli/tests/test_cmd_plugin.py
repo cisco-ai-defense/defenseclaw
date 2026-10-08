@@ -1410,6 +1410,16 @@ class TestPluginBlock(PluginCommandTestBase):
 
 
 class TestPluginAllow(PluginCommandTestBase):
+    def test_allow_quarantined_copy_requires_restore(self):
+        self._install_plugin("held-copy")
+        self.assertEqual(self.invoke(["quarantine", "held-copy", "--connector", "openclaw"]).exit_code, 0)
+
+        result = self.invoke(["allow", "held-copy", "--connector", "openclaw"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("restore it before allowing", result.output)
+        self.assertFalse(self.app.cfg.asset_policy.plugin.allowed)
+        self.assertEqual(self.invoke(["restore", "held-copy"]).exit_code, 0)
+
     def test_allow_happy_path(self):
         result = self.invoke(["allow", "allowed-one"])
         self.assertEqual(result.exit_code, 0, result.output)

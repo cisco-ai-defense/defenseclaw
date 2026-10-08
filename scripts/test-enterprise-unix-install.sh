@@ -453,8 +453,9 @@ upgrade_lane() {
     [ -f "$lifecycle_dir/last-package-result.json" ] || die "the postinstall left no lifecycle result (package manager exited $install_rc)"
     cp "$lifecycle_dir/last-package-result.json" "$results/05-upgrade-fault.json"
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
-        --action ensure --expect-error lifecycle_test_fault \
+        --action ensure --expect-error lifecycle_test_fault --ready \
         --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+    services_running
     [ "$(sha256_of "$config")" = "$previous_config_sha" ] || die "the rolled-back upgrade changed $config"
     recorded=$(json_field "$lifecycle_dir/deployment.json" product_version)
     [ "$recorded" = "$previous_version" ] || die "the rolled-back upgrade left the deployment record at '$recorded', want '$previous_version'"

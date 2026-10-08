@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -122,6 +123,10 @@ def test_a_watch_change_restarts_only_a_secure_client_gateway(app, monkeypatch) 
     assert result.exit_code == 0, result.output
     assert restarts == [] and "Gateway reloaded the policy" in result.output
 
+    rego_dir = os.path.join(app.cfg.policy_dir, "rego")
+    os.makedirs(rego_dir, exist_ok=True)
+    with open(os.path.join(rego_dir, "data.json"), "w") as f:
+        json.dump({"config": {}, "actions": {}, "severity_ranking": {}}, f)
     monkeypatch.setattr(cmd_policy.asset_lists, "is_secure_client", lambda _cfg: True)
     app.cfg.watch.rescan_interval_min = 7
     result = _invoke(app, ["activate", "strict"])

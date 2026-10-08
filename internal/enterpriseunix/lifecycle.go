@@ -1189,9 +1189,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		r.AddWarning("not_started", "installed without starting the services (--no-start); run repair or ensure to activate")
 	}
 
+	activatedAt := ""
+	if record != nil {
+		activatedAt = record.ActivatedAt
+	}
+	if !l.opts.NoStart && record != nil && record.NoStart {
+		activatedAt = env.Now().UTC().Format(time.RFC3339Nano)
+	}
 	newRecord := &Deployment{
 		Profile: managed.ProfileStandalone, Platform: env.GOOS, ProductVersion: p.version, Channel: p.channel,
-		InstalledAt: p.installedAt, UpdatedAt: env.Now().UTC().Format(time.RFC3339), NoStart: l.opts.NoStart,
+		InstalledAt: p.installedAt, ActivatedAt: activatedAt, UpdatedAt: env.Now().UTC().Format(time.RFC3339), NoStart: l.opts.NoStart,
 		ServiceUser: account.Name, ServiceUID: account.UID, ServiceGID: account.GID,
 		ConfigSHA256: p.config.SHA, SecretsSHA256: p.secretsSHA, Files: map[string]string{},
 		MachinePolicyConnectors: append([]string{}, p.machinePolicy...),

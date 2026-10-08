@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import yaml from 'js-yaml';
 import matrix from '../data/capability-matrix.json' with { type: 'json' };
 import { featureDemos } from '../data/feature-demos';
 import {
@@ -237,6 +238,23 @@ describe('feature demo catalog', () => {
     assert.match(codexSurface, /raw_action=confirm/i);
     assert.match(codexSurface, /cannot resume|non-resumable/i);
     assert.doesNotMatch(codexSurface, /Prompt through DefenseClaw TUI/i);
+  });
+
+  it('shows a v9 config.yaml sample in the MCP demo', () => {
+    const demo = featureDemos.find((scenario) => scenario.id === 'mcp-shadow-capability');
+    const source = demo!.tabs.find((tab) => tab.id === 'mcp-actions')!.source;
+    const config = yaml.load(source) as Record<string, unknown>;
+    assert.equal(config.config_version, 9);
+    assert.equal('scanner' in config, false);
+    assert.deepEqual((config.scanners as { mcp_scanner: { scan_prompts: boolean; scan_resources: boolean } }).mcp_scanner,
+      { scan_prompts: true, scan_resources: true });
+  });
+
+  it('identifies the enforcement write counter as config generation', () => {
+    const page = readFileSync(new URL('../content/docs/reference/gateway-api.mdx', import.meta.url), 'utf8');
+    assert.match(page, /returns the new config writer generation/);
+    assert.match(page, /`\/health.policy.generation`/);
+    assert.doesNotMatch(page, /returns the new policy generation/);
   });
 
   it('preserves admission workflow boundaries', () => {

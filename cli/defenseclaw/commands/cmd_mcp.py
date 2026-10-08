@@ -2757,6 +2757,15 @@ def set_server(
             click.secho(f"  {note} [{c}]", fg="yellow")
         elif result is not None:
             post_c = _admit(c, scan_result=result)
+            if post_c.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
+                click.secho(f"  blocked [{c}]: {post_c.reason}", fg="red")
+                policy_blocked.append(c)
+                if app.logger:
+                    saved_change_audit(app.logger).log_action(
+                        "install-rejected", name,
+                        f"connector={c} source={post_c.source or 'policy'} reason={post_c.reason}",
+                    )
+                continue
             if post_c.verdict == "rejected":
                 sev = result.max_severity()
                 ux.secho(f"  blocked [{c}]: {sev} findings — rejected by the admission policy", fg="red")

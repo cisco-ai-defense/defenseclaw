@@ -147,6 +147,17 @@ def test_checker_upgrade_gate_options(tmp_path: Path) -> None:
         "--allow-warning", "lifecycle_test_fault", "--allow-warning", "rolled_back",
     )
     assert result.returncode == 0, result.stderr
+    failed_rollback = dict(
+        drill,
+        errors=[*drill["errors"], {"code": "rollback_failed", "message": "gateway did not restart"}],
+        readiness={key: False for key in drill["readiness"]},
+    )
+    result = _check(
+        tmp_path, failed_rollback, "--expect-error", "lifecycle_test_fault",
+        "--allow-warning", "lifecycle_test_fault", "--allow-warning", "rolled_back",
+    )
+    assert result.returncode == 1, result.stderr
+    assert "unexpected error rollback_failed" in result.stderr
     # The upgrade itself must report an applied policy from a newer config generation.
     upgraded = _result(policy={"effective_digest": "sha256:ab", "config_generation": 2, "applied": True})
     assert _check(tmp_path, upgraded, *FULL, "--policy-applied", "--config-generation-above", "1").returncode == 0

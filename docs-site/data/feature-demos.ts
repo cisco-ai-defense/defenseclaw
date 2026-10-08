@@ -507,16 +507,17 @@ exporters:
     "schema_effects": ["filesystem:read", "network:outbound"]
   }
 ]` },
-      { id: 'mcp-actions', label: 'config.yaml', language: 'yaml', source: `admission:
+      { id: 'mcp-actions', label: 'config.yaml', language: 'yaml', source: `config_version: 9
+admission:
   mcp:
     actions:
       high:
         runtime: disable
         install: block
-scanner:
-  prompts: enabled
-  resources: enabled
-  llm_intent_analysis: optional` },
+scanners:
+  mcp_scanner:
+    scan_prompts: true
+    scan_resources: true` },
       { id: 'mcp-result', label: 'scan-result.json', language: 'json', source: `{
   "server": "catalog-lookup",
   "transport": "local_stdio",

@@ -816,11 +816,20 @@ func (a *APIServer) generation() *Generation {
 // generation's, or for an API server without one, queries prepared once
 // from its start-time policy_dir.
 func (a *APIServer) preparedPolicy(ctx context.Context) (*policy.Prepared, error) {
+	return a.preparedPolicyForGeneration(ctx, a.generation())
+}
+
+func (a *APIServer) preparedPolicyForGeneration(ctx context.Context, g *Generation) (*policy.Prepared, error) {
 	if a.generationSource != nil {
-		g := a.generation()
-		if g == nil || g.OPA == nil {
-			if g != nil && g.opaError != "" {
+		if g == nil {
+			return nil, errors.New("policy is not loaded")
+		}
+		if g.OPA == nil {
+			if g.opaError != "" {
 				return nil, errors.New(g.opaError)
+			}
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() {
+				return nil, policy.ErrNoModules
 			}
 			return nil, errors.New("policy is not loaded")
 		}
@@ -2236,47 +2245,14 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		policyName = normalizePluginPolicyName(req.TargetName)
 		runtimeName = resolvePluginRuntimeActionName(pe, req.TargetName, policyName)
 	}
-
-	if a.store != nil {
-		entry, err := pe.GetAction(req.TargetType, runtimeName)
-		if err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	legacy := a.legacyEnforcementRows()
+	var result assetListResult
+	if legacy {
+		// Secure Client keeps its pre-1.0 mutation order and response bytes.
+		if status, err := a.enableAllowedRuntime(r.Context(), req, pe, runtimeName, policyName); err != nil {
+			a.writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
-		if entry != nil && entry.Actions.Runtime == "disable" {
-			if a.client == nil {
-				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway client not configured"})
-				return
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
-			defer cancel()
-			switch req.TargetType {
-			case "skill":
-				if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-					return a.client.EnableSkill(callCtx, req.TargetName)
-				}); err != nil {
-					a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-					return
-				}
-			case "plugin":
-				if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-					return a.client.EnablePlugin(callCtx, runtimeName)
-				}); err != nil {
-					a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-					return
-				}
-				if runtimeName != policyName {
-					if err := pe.Enable("plugin", runtimeName); err != nil {
-						a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-						return
-					}
-				}
-			}
-		}
-	}
-
-	var result assetListResult
-	if a.legacyEnforcementRows() {
 		if err := a.legacyAllow(req.TargetType, policyName, reason); err != nil {
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -2291,21 +2267,71 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			a.writeAssetListError(w, r, audit.ActionAPIEnforceAllow, err)
 			return
 		}
-		// An operator allow lifts the automatic quarantine/disable journal
-		// state, as it always did.
-		if a.store != nil {
-			_ = a.store.ClearActionField(req.TargetType, policyName, "file")
-			_ = a.store.ClearActionField(req.TargetType, policyName, "runtime")
+		if result.reloadErr == nil {
+			// Only activate an asset after the allow rule is committed and applied.
+			if status, err := a.enableAllowedRuntime(r.Context(), req, pe, runtimeName, policyName); err != nil {
+				a.writeJSON(w, status, map[string]any{
+					"error": err.Error(), "policy_written": true, "generation": result.Generation,
+				})
+				return
+			}
+			// An operator allow lifts the automatic quarantine/disable journal
+			// state, as it always did.
+			if a.store != nil {
+				_ = a.store.ClearActionField(req.TargetType, policyName, "file")
+				_ = a.store.ClearActionField(req.TargetType, policyName, "runtime")
+			}
 		}
 	}
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceAllow), policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
-	if a.legacyEnforcementRows() {
+	if legacy {
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 		return
 	}
 	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse("allowed", result))
+}
+
+// enableAllowedRuntime restores a disabled skill or plugin in OpenClaw. The
+// caller chooses the mutation order: Secure Client retains the legacy flow;
+// config-driven policy commits before this is called.
+func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, pe *enforce.PolicyEngine, runtimeName, policyName string) (int, error) {
+	if a.store == nil {
+		return 0, nil
+	}
+	entry, err := pe.GetAction(req.TargetType, runtimeName)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if entry == nil || entry.Actions.Runtime != "disable" {
+		return 0, nil
+	}
+	if a.client == nil {
+		return http.StatusServiceUnavailable, fmt.Errorf("gateway client not configured")
+	}
+	callCtx, cancel := context.WithTimeout(ctx, pluginGatewayMutationTimeout)
+	defer cancel()
+	switch req.TargetType {
+	case "skill":
+		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
+			return a.client.EnableSkill(ctx, req.TargetName)
+		}); err != nil {
+			return http.StatusBadGateway, err
+		}
+	case "plugin":
+		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
+			return a.client.EnablePlugin(ctx, runtimeName)
+		}); err != nil {
+			return http.StatusBadGateway, err
+		}
+		if runtimeName != policyName {
+			if err := pe.Enable("plugin", runtimeName); err != nil {
+				return http.StatusInternalServerError, err
+			}
+		}
+	}
+	return 0, nil
 }
 
 // decodeEnforcementRequest reads and validates an /enforce/* body.
@@ -3355,43 +3381,56 @@ func configFilePathForSnapshot(cfg *config.Config) string {
 	return config.ConfigPath()
 }
 
+// policyConfigSnapshot keeps Secure Client on its start-time policy, while
+// standalone and per-user requests follow the published generation.
+func (a *APIServer) policyConfigSnapshot(g *Generation) *config.Config {
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
+	}
+	if g != nil && g.Config != nil {
+		return g.Config
+	}
+	return a.runtimeConfigSnapshot()
+}
+
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
+	generation := a.generation()
+	policyCfg := a.policyConfigSnapshot(generation)
 	// Avarice F-3288: when a policy bundle is configured but
 	// either the engine constructor or evaluation fails, the
 	// previous code silently fell back to a built-in
 	// severity-derived decision that allows clean/missing scanner
 	// results and downgrades MEDIUM/HIGH to alert. That converted
 	// every policy outage into a quiet enforcement bypass for
-	// action-mode prompts. We now fail closed: any configured
-	// policy directory whose engine/eval fails returns block in
-	// action mode (and an explicit alert in observe mode for
-	// audit visibility).
-	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		if a.scannerCfg.SecureClientIntegration() {
+	// action-mode prompts. Load and evaluation failures still
+	// fail closed. An empty Rego directory is config-only mode,
+	// matching generation loading, so it uses the fallback below.
+	if policyCfg != nil && policyCfg.PolicyDir != "" {
+		if policyCfg.SecureClientIntegration() {
 			// Secure Client keeps the engine load error of main (issue #1092).
-			if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+			if err := policy.SecureClientPolicyLoadError(policyCfg.PolicyDir); err != nil {
 				return policyOutageVerdict(input,
 					fmt.Sprintf("policy engine load failed: %v", err)), nil
 			}
 		}
-		prepared, err := a.preparedPolicy(ctx)
-		if err != nil {
+		prepared, err := a.preparedPolicyForGeneration(ctx, generation)
+		if err == nil {
+			out, evalErr := prepared.EvaluateGuardrail(ctx, input)
+			if evalErr != nil {
+				return policyOutageVerdict(input,
+					fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
+			}
+			return out, nil
+		}
+		if policyCfg.SecureClientIntegration() || !errors.Is(err, policy.ErrNoModules) {
 			return policyOutageVerdict(input,
 				fmt.Sprintf("policy engine load failed: %v", err)), nil
 		}
-		out, evalErr := prepared.EvaluateGuardrail(ctx, input)
-		if evalErr != nil {
-			return policyOutageVerdict(input,
-				fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
-		}
-		return out, nil
+		// No Rego is config-only mode, as it is during generation loading.
 	}
 
-	// No policy directory configured at all — keep the legacy
-	// severity-derived fallback. Operators that want strict
-	// fail-closed behavior on missing policy must configure a
-	// PolicyDir; the absence of one is treated as "no policy"
-	// rather than "policy outage".
+	// No Rego modules (or no policy directory): use the config-driven
+	// severity fallback. Other load and evaluation errors fail closed.
 	sev := "NONE"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
@@ -3408,7 +3447,7 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	}
 
 	action := guardrailFallbackActionForSeverity(sev)
-	if thresholds := input.Thresholds; thresholds != nil && a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() {
+	if thresholds := input.Thresholds; thresholds != nil && policyCfg != nil && !policyCfg.SecureClientIntegration() {
 		// The request carries the resolved thresholds (config levels, pack
 		// posture, Cisco trust level, HILT): apply them as the inspector
 		// fallback does, so both no-OPA paths decide alike. Secure Client
@@ -4137,7 +4176,8 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.scannerCfg == nil || a.scannerCfg.PolicyDir == "" {
+	policyCfg := a.policyConfigSnapshot(a.generation())
+	if policyCfg == nil || policyCfg.PolicyDir == "" {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy_dir not configured"})
 		return
 	}
@@ -4152,8 +4192,8 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	// Secure Client keeps the reload check of main (issue #1092): it fails
 	// while the policy directory has no data.json.
-	if a.scannerCfg.SecureClientIntegration() {
-		if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+	if policyCfg.SecureClientIntegration() {
+		if err := policy.SecureClientPolicyLoadError(policyCfg.PolicyDir); err != nil {
 			recordFailure(err.Error())
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error":  "reload failed: " + err.Error(),
@@ -4183,7 +4223,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	// the fresh rulepack. Safe no-op when the cache is unset.
 	InvalidateJudgeVerdictCache()
 
-	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), a.scannerCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
+	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), policyCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but compliance logging failed"})
 		return
 	}
@@ -4194,7 +4234,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	reloaded := map[string]any{
 		"status":     "reloaded",
-		"policy_dir": a.scannerCfg.PolicyDir,
+		"policy_dir": policyCfg.PolicyDir,
 	}
 	// The live generation after the rebuild, so a caller can say which policy is enforcing now.
 	if g := livePolicyGeneration(); g != nil {

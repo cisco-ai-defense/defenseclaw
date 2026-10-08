@@ -191,11 +191,14 @@ class RulePack:
             if doc and rule.path_write:
                 continue
             source = text
-            m = _search(rule, text, folded)
-            if m is not None and rule.category == _COMMAND_CATEGORY:
-                # A command is one line (GAP-0364).
-                m = _first_line_match(rule.pattern, text)
-            if m is not None and python:
+            if rule.category == _COMMAND_CATEGORY:
+                # Search each line directly: ^ and $ must apply to each
+                # command line, as in the Go install watcher (GAP-0641).
+                match_start = _first_line_match(rule.pattern, text)
+            else:
+                m = _search(rule, text, folded)
+                match_start = m.start() if m is not None else None
+            if match_start is not None and python:
                 if py is False:
                     py = python_source(text)
                     code = text if py is None else "\n".join(py.code)
@@ -209,11 +212,15 @@ class RulePack:
                         ),
                         None,
                     )
+                    match_start = m.start() if m is not None else None
+                elif rule.category == _COMMAND_CATEGORY:
+                    match_start = _first_line_match(rule.pattern, source)
                 else:
-                    m = _search(rule, source, folded)
-            if m is None:
+                    m = _search(rule, source, _fold(source))
+                    match_start = m.start() if m is not None else None
+            if match_start is None:
                 continue
-            line_no = source.count("\n", 0, m.start()) + 1
+            line_no = source.count("\n", 0, match_start) + 1
             loc = f"{location}:{line_no}" if location else ""
             findings.append(
                 Finding(
@@ -281,15 +288,15 @@ def _is_doc(location: str) -> bool:
     return path.replace("\\", "/").lower() != "skill.md"
 
 
-def _first_line_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
-    """The first match of *pattern* that lies on one line of *text*."""
+def _first_line_match(pattern: re.Pattern[str], text: str) -> int | None:
+    """Return the offset of the first match within one line of *text*."""
     start = 0
     while start <= len(text):
         end = text.find("\n", start)
         stop = len(text) if end < 0 else end
-        m = pattern.search(text, start, stop)
+        m = pattern.search(text[start:stop])
         if m is not None:
-            return m
+            return start + m.start()
         if end < 0:
             return None
         start = end + 1
@@ -441,8 +448,15 @@ def _read_text(path: str) -> str | None:
     try:
         if os.path.getsize(path) > _MAX_FILE_BYTES:
             return None
-        with open(path, encoding="utf-8", errors="strict") as fh:
-            return fh.read()
+        with open(path, "rb") as fh:
+            data = fh.read(_MAX_FILE_BYTES + 1)
+        if len(data) > _MAX_FILE_BYTES:
+            return None
+        if os.path.basename(path).casefold() == "skill.md" and data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            from defenseclaw.skill_discovery import decode_skill_text
+
+            return decode_skill_text(data)
+        return data.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
 

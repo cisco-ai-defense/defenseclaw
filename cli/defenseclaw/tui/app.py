@@ -117,7 +117,7 @@ from defenseclaw.tui.policy_panel import PolicyPanelMixin
 from defenseclaw.tui.registry import CmdEntry, build_registry
 from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
-from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
+from defenseclaw.tui.screens.config_diff import ConfigDiffModalModel, ConfigDiffScreen
 from defenseclaw.tui.screens.consequence import (
     ConsequenceAction,
     ConsequenceModalModel,
@@ -13216,13 +13216,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     True, hint=f"Config not saved: {exc}. Your draft is kept: fix the file and press S again, or r to discard it."
                 )
         try:
-            self.setup_model.apply_changes_to_config()
+            self.setup_model.apply_changes_to_config(mark_applied=False)
             save = getattr(self.config, "save", None)
             if callable(save):
                 from defenseclaw.config_writer import ACTOR_PREFIX_TUI, current_actor
 
                 result = save(actor=current_actor(ACTOR_PREFIX_TUI), reason=restart_reason)
                 restart_keys = getattr(result, "restart_required", None)
+            self.setup_model.accept_applied_changes()
             from defenseclaw.enforce import asset_lists
 
             secure_client = asset_lists.is_secure_client(self.config)
@@ -13297,7 +13298,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.run_worker(record, thread=True, exclusive=False, group="config-save-audit")
 
     async def _open_config_diff(self) -> None:
-        result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))
+        from defenseclaw.enforce import asset_lists
+
+        diff = ConfigDiffModalModel.from_entries(
+            self.setup_model.config_diff(), secure_client=asset_lists.is_secure_client(self.config)
+        )
+        result = await self.push_screen_wait(ConfigDiffScreen(diff))
         if result is None:
             self._set_status("Config save cancelled.")
             return
