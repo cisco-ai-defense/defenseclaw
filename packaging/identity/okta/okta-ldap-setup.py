@@ -611,8 +611,12 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
     if report.problems:
         return report.finish()
     primary, primary_gid = ensure_group(client, report, args.primary_group, args.primary_gid, used_gids, args.gid_base)
+    if report.problems:
+        return report.finish()
     for name, gid in args.group or []:
         ensure_group(client, report, name, gid, used_gids, args.gid_base)
+    if report.problems:
+        return report.finish()
 
     print("Users")
     used_uids: set[int] = set()
