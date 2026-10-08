@@ -2170,6 +2170,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 // standalone Unix guardian starts its per-user AI discovery scans here.
 var enterpriseHookAfterWatchReconcile = func(context.Context, io.Writer, enterpriseHookReconcileRun) {}
 
+// enterpriseHookBeforeWatchReconcile runs before each reconcile of the
+// long-running guardian, also after a reconcile failed. The standalone
+// Windows guardian puts a missing hook binary back here: the reconcile
+// itself fails on the missing file, so a repair that waited for a
+// successful reconcile never ran (GAP-0935).
+var enterpriseHookBeforeWatchReconcile = func(io.Writer) {}
+
 func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return fmt.Errorf("enterprise hooks watch: config is not loaded")
@@ -2243,6 +2250,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	repairRetryDelay := time.Duration(0)
 	reconcile := func(reason string) (bool, error) {
 		enterpriseHookStandaloneConfigRefresh(cmd.ErrOrStderr())
+		enterpriseHookBeforeWatchReconcile(cmd.ErrOrStderr())
 		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
 		if err != nil {
 			repairRetryNeeded = true

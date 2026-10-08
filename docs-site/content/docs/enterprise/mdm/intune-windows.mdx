@@ -217,9 +217,11 @@ A missing DefenseClaw binary is the same case. If an antivirus quarantines
 `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, Claude Code
 treats the hook that cannot start as a non-blocking error and runs the tool
 call: until the file is back, that is a fail-open window. The hook guardian
-puts the recorded binary back from its own protected copy within one cycle
-(about a minute), and Setup `/ensure` and `/repair` restore it from their
-payload. `Remediate-Fix.ps1` names Setup `/repair` when the installed CLI
+checks for the file every 5 seconds and puts the recorded binary back from
+its own protected copy, and Setup `/ensure` and `/repair` restore it from
+their payload. The agent behaviour is upstream: a vendor that treated a hook
+that cannot start as a blocking error would close the window.
+`Remediate-Fix.ps1` names Setup `/repair` when the installed CLI
 cannot. Exclude `C:\Program Files\Cisco\DefenseClaw\bin` from quarantine in
 your EDR policy (allow-list the signed DefenseClaw binaries) so the window
 does not open.

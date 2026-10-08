@@ -1032,11 +1032,12 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		})
 	}
 	if len(report.TerminatedServiceProcesses) != 0 {
-		// A hung or suspended service process held up the stop (GAP-0946).
+		// A hung or suspended service process held up the stop (GAP-0946,
+		// GAP-1038).
 		warnings = append(warnings, enterprisestatus.Message{
 			Code: "service_process_terminated",
-			Message: "these DefenseClaw service processes did not answer a stop request within 30 seconds, so the lifecycle ended them " +
-				"(as Windows does for a stuck stop) and continued: " + windowsEnterpriseBoundedLabels(report.TerminatedServiceProcesses),
+			Message: "these DefenseClaw service processes did not answer a stop request within 30 seconds and were ended " +
+				"(by the lifecycle, or by Windows for a stuck stop) before it continued: " + windowsEnterpriseBoundedLabels(report.TerminatedServiceProcesses),
 		})
 	}
 	if report.CursorAdapterRestored {

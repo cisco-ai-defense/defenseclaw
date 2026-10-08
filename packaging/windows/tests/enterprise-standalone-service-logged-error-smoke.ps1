@@ -76,7 +76,17 @@ try {
                 throw [System.ServiceProcess.TimeoutException]::new('smoke: the service did not stop')
             }
             $script:SmokeEnded = @()
+            $script:SmokeRequestOpen = $false
             function script:Get-DefenseClawServiceChecked { param([string]$Name) return $script:SmokeService }
+            function script:Get-DefenseClawServiceProcessId { param([string]$Name) return [uint32]4242 }
+            function script:Start-DefenseClawServiceStopRequest {
+                param([string]$Name)
+                $request = [pscustomobject]@{ HasExited = -not $script:SmokeRequestOpen }
+                $request | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) return $this.HasExited }
+                $request | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.HasExited = $true }
+                $request | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+                return $request
+            }
             function script:Stop-DefenseClawUnresponsiveServiceProcess {
                 param([string]$Name)
                 $script:SmokeEnded += $Name
@@ -93,6 +103,28 @@ try {
             if ((@($script:SmokeEnded) -join ',') -ne $hung) {
                 $failures.Add("the hung service's process was not ended once: '$(@($script:SmokeEnded) -join ',')'")
             }
+            # GAP-1038: Windows ends a process that does not answer the stop
+            # request when that request times out, while the request is still
+            # open; the stop names that process as well and does not end it.
+            $script:SmokeService.Status = [ServiceProcess.ServiceControllerStatus]::Running
+            $script:SmokeService | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Refresh -Force -Value {
+                $this.Status = [ServiceProcess.ServiceControllerStatus]::Stopped
+            }
+            $script:SmokeEnded = @()
+            $script:SmokeRequestOpen = $true
+            $script:DefenseClawTerminatedServiceProcesses = @()
+            try {
+                Stop-DefenseClawService -Name $hung
+            }
+            catch {
+                $failures.Add("a stop Windows completed failed: $($_.Exception.Message)")
+            }
+            if (@($script:SmokeEnded).Count -ne 0 -or
+                (@($script:DefenseClawTerminatedServiceProcesses) -join ',') -ne "$hung (pid 4242)") {
+                $failures.Add("the process Windows ended was not named once: '$(@($script:DefenseClawTerminatedServiceProcesses) -join ',')'")
+            }
+            $script:DefenseClawTerminatedServiceProcesses = @()
+            $script:SmokeService | Microsoft.PowerShell.Utility\Add-Member -MemberType ScriptMethod -Name Refresh -Force -Value { }
             $script:SmokeService.Status = [ServiceProcess.ServiceControllerStatus]::Running
             $script:SmokeEnded = @()
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'SecureClient'

@@ -6,10 +6,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -311,6 +313,29 @@ func TestEnterpriseHooksManagedMutationPreflightPrecedesTokenMinting(t *testing.
 				t.Fatalf("%s minted or loaded a scoped token before LocalSystem preflight", command)
 			}
 		})
+	}
+}
+
+// GAP-0935: the guardian runs its pre-reconcile repair (the Windows guardian
+// restores a missing hook binary there) before every reconcile, also one
+// that then fails, instead of only after a reconcile that succeeded.
+func TestEnterpriseHooksWatchRepairsBeforeAFailingReconcile(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	previousManifest := enterpriseHookManifest
+	previousBefore := enterpriseHookBeforeWatchReconcile
+	t.Cleanup(func() {
+		enterpriseHookManifest = previousManifest
+		enterpriseHookBeforeWatchReconcile = previousBefore
+	})
+	cfg = &config.Config{DeploymentMode: "local"}
+	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
+	repairs := 0
+	enterpriseHookBeforeWatchReconcile = func(io.Writer) { repairs++ }
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetErr(io.Discard)
+	if err := runEnterpriseHooksWatch(cmd, nil); err == nil || repairs != 1 {
+		t.Fatalf("watch = %v after %d pre-reconcile repairs, want the reconcile error after one", err, repairs)
 	}
 }
 
