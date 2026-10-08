@@ -745,7 +745,15 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	}
 	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !enterpriseBlockEmpty(cfg.Enterprise) {
-			return fmt.Errorf("config: the enterprise block requires deployment_mode %s", managed.DeploymentModeManagedEnterprise)
+			// Typed, so validation names the block and the way out instead of
+			// "could not be compiled safely" at $ (GAP-0044): an administrator
+			// may paste a managed snippet into a per-user config.
+			return &V8SemanticError{
+				Path:     "$.enterprise",
+				Summary:  "the enterprise block requires deployment_mode " + managed.DeploymentModeManagedEnterprise,
+				Expected: "no enterprise block in a per-user configuration",
+				Action:   "remove the enterprise block (enterprise settings apply to a managed enterprise deployment only)",
+			}
 		}
 		return nil
 	}
