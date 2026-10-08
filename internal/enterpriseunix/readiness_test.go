@@ -137,6 +137,20 @@ func (r lsofRunner) Run(ctx context.Context, name string, args ...string) (Comma
 // while another process holds the API port.
 const retryingAPIHealth = `{"api":{"state":"error","last_error":"listen tcp 127.0.0.1:18970: bind: address already in use","details":{"addr":"127.0.0.1:18970","tcp_bind_retrying":true}},"inspection":{"local":"active","ai_defense":"disabled"}}`
 
+func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"profile_assignment_warnings":["assignment 1: group missing is not known"],"telemetry":{"details":{"optional_destination_state":"degraded","optional_destination_failure_summary":"archive:failing:no_space"}}}`), nil
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if !hasWarning(result, codeProfileAssignments) || !hasWarning(result, codeOptionalDestination) {
+			t.Fatalf("%s warnings = %+v", action, result.Warnings)
+		}
+	}
+}
+
 // On Linux the gateway unit runs and serves its hook socket, but
 // another account holds 127.0.0.1:18970 and the gateway reports its API
 // listener as retrying. Status reported the gateway ready (a 200 was taken
