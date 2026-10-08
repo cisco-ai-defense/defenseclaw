@@ -223,6 +223,12 @@ def observability_plan(
         )
     else:
         _render_plan_table(rows, inspected.plan_digest, delivery, custody)
+        # The plan is config.yaml's; say when the running gateway does not
+        # apply it yet (GAP-0552).
+        from defenseclaw.gateway import current_gateway_reload_notice
+
+        if notice := current_gateway_reload_notice():
+            click.echo(f"\n! {notice}")
     for warning in effective.get("warnings") or []:
         if isinstance(warning, dict):
             code = str(warning.get("code") or "warning")

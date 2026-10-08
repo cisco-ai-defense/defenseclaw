@@ -319,3 +319,23 @@ def test_profile_validation_mirrors_the_gateway(mutate, message):
     mutate(gc)
     with pytest.raises(ValueError, match=message):
         validate_guardrail_profiles(gc)
+
+
+def test_reload_notice_says_when_the_running_gateway_has_not_applied_the_file(monkeypatch):
+    """GAP-0352, GAP-0363: validate, status and explain describe config.yaml;
+    the notice says when the gateway rejected its last reload or holds keys
+    for a restart, and is silent once the gateway applied the file."""
+    from defenseclaw import gateway
+
+    cfg = default_config()
+    health: dict = {}
+    monkeypatch.setattr(gateway, "foreign_loopback_listener", lambda host, port: "")
+    monkeypatch.setattr(gateway.OrchestratorClient, "health", lambda self: health)
+
+    health["policy"] = {"generation": 4, "last_reload_error": "guardrail profile strict rule pack: directory_not_found"}
+    notice = gateway.gateway_reload_notice(cfg)
+    assert "has NOT applied" in notice and "directory_not_found" in notice and "generation 4" in notice
+    health["policy"] = {"generation": 5, "pending_restart": ["gateway"]}
+    assert "except gateway" in gateway.gateway_reload_notice(cfg)
+    health["policy"] = {"generation": 6}
+    assert gateway.gateway_reload_notice(cfg) == ""

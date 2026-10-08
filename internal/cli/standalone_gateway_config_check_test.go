@@ -123,3 +123,21 @@ func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
 		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack /packs/acme", got)
 	}
 }
+
+// GAP-0188: a custom_packs pin the gateway refuses at start is refused here,
+// with the digest to pin, so a Windows upgrade that keeps the config fails
+// before it stops the services instead of after the readiness wait.
+func TestStandaloneGatewayConfigCheckRefusesAStaleCustomPackPin(t *testing.T) {
+	pack := t.TempDir()
+	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
+	if err := os.WriteFile(filepath.Join(pack, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`, "  rule_pack: acme\n  custom_packs:\n    acme:\n      path: '"+pack+"'\n      digest: sha256:"+strings.Repeat("0", 64), 1)
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") ||
+		!strings.Contains(err.Error(), "rulepack validate --dir") {
+		t.Fatalf("stale custom pack pin = %v, want the digest to pin and the command that prints it", err)
+	}
+}

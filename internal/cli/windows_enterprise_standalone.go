@@ -1899,6 +1899,18 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed"}
 	}
 
+	// An upgrade that keeps the installed config: this release's gateway must
+	// load it before the lifecycle stops the services (GAP-0188). A
+	// drift:config upgrade replaces the edited file instead.
+	if plan.Action == "upgrade" && plan.Reason != "drift:config" && windowsEnterpriseKeepsInstalledConfig(opts) {
+		if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
 	keptConfig := ""
 	if plan.Action == "upgrade" && plan.Reason == "drift:config" {
 		if windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result) {
@@ -2104,6 +2116,12 @@ func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []
 		}
 	}
 	return missing
+}
+
+// windowsEnterpriseKeepsInstalledConfig reports a request that names no
+// config: an upgrade keeps the installed config.yaml.
+func windowsEnterpriseKeepsInstalledConfig(opts *windowsEnterpriseLifecycleOptions) bool {
+	return strings.TrimSpace(opts.configPath) == "" && strings.TrimSpace(opts.mode) == ""
 }
 
 func clearWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) {

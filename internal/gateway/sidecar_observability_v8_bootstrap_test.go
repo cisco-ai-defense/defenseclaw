@@ -2064,3 +2064,110 @@ func TestObservabilityV8RedactionEngineSecureClientKeepsUserEmail(t *testing.T) 
 		}
 	}
 }
+
+// GAP-0552: a redaction profile change reaches a running gateway. After the
+// reload a splunk_hec and a jsonl destination project new records with the
+// new profile, tightening and loosening, without a restart.
+func TestSidecarConfigReloadRebindsDestinationRedactionProfiles(t *testing.T) {
+	const tokenEnv = "DC_TEST_GAP_0552_HEC_TOKEN"
+	t.Setenv(tokenEnv, "gap-0552-token")
+	hecProfiles := make(chan [2]string, 256)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		decoder := json.NewDecoder(request.Body)
+		for {
+			var envelope struct {
+				Event struct {
+					Record struct {
+						RecordID   string         `json:"record_id"`
+						Projection map[string]any `json:"projection"`
+					} `json:"record"`
+				} `json:"event"`
+			}
+			if decoder.Decode(&envelope) != nil {
+				break
+			}
+			profile, _ := envelope.Event.Record.Projection["redaction_profile"].(string)
+			hecProfiles <- [2]string{envelope.Event.Record.RecordID, profile}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"code":0}`)
+	}))
+	defer server.Close()
+
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	jsonlPath := filepath.Join(fixture.dataDir, "records.jsonl")
+	// The destinations follow the capability default (no send block), as
+	// `setup observability add` writes them; `setup redaction defaults set`
+	// changes the global baseline.
+	configFor := func(profile string) []byte {
+		return []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\nobservability:\n"+
+			"  defaults:\n    redaction_profile: %s\n  destinations:\n"+
+			"    - name: cap-hec\n      kind: splunk_hec\n      endpoint: %q\n      token_env: %s\n"+
+			"      network_safety:\n        allow_private_networks: true\n"+
+			"      batch:\n        max_export_batch_size: 1\n        scheduled_delay_ms: 1\n"+
+			"    - name: cap-file\n      kind: jsonl\n      path: %q\n",
+			fixture.dataDir, profile, server.URL+"/services/collector/event", tokenEnv, jsonlPath))
+	}
+	mgr, _ := bootstrapPrivateUpstreamReload(t, fixture, configFor("none"))
+
+	emit := func(requestID string) string {
+		t.Helper()
+		if err := fixture.logger.LogActionCtx(
+			audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{RunID: "gap-0552", RequestID: requestID}),
+			string(audit.ActionConfigUpdate), "config.yaml", "redaction profile reload",
+		); err != nil {
+			t.Fatalf("emit %s: %v", requestID, err)
+		}
+		rows, err := fixture.store.ListEvents(200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if row.RequestID == requestID {
+				return row.ID
+			}
+		}
+		t.Fatalf("no local row for %s", requestID)
+		return ""
+	}
+	fileProfile := func(recordID string) string {
+		raw, _ := os.ReadFile(jsonlPath)
+		for _, line := range bytes.Split(raw, []byte{'\n'}) {
+			var record struct {
+				RecordID   string         `json:"record_id"`
+				Projection map[string]any `json:"projection"`
+			}
+			if json.Unmarshal(line, &record) == nil && record.RecordID == recordID {
+				profile, _ := record.Projection["redaction_profile"].(string)
+				return profile
+			}
+		}
+		return ""
+	}
+	for _, profile := range []string{"strict", "none"} {
+		if err := os.WriteFile(fixture.configPath, configFor(profile), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.reload(t.Context(), "test", false); err != nil {
+			t.Fatalf("reload to %s: %v", profile, err)
+		}
+		recordID := emit("gap-0552-" + profile)
+		deadline := time.Now().Add(5 * time.Second)
+		gotHEC, gotFile := "", ""
+		for (gotHEC == "" || gotFile == "") && time.Now().Before(deadline) {
+			select {
+			case seen := <-hecProfiles:
+				if seen[0] == recordID {
+					gotHEC = seen[1]
+				}
+			case <-time.After(20 * time.Millisecond):
+			}
+			if gotFile == "" {
+				gotFile = fileProfile(recordID)
+			}
+		}
+		if gotHEC != profile || gotFile != profile {
+			t.Fatalf("after the reload to %s: splunk_hec projected %q, jsonl projected %q", profile, gotHEC, gotFile)
+		}
+	}
+}

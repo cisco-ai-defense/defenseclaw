@@ -950,13 +950,16 @@ func TestDiffConfigsV8ResourceIdentityRequiresRestart(t *testing.T) {
 	}
 }
 
-// TestHoldRestartRequiredAppliesTheRest: a hook_self_heal or environment
-// edit needs a restart, so it keeps its running value while an admission edit
-// in the same (or a later) reload still applies hot (GAP-0275). hook_fail_mode
-// is hot: the hook guard reads it from the live config (GAP-0045).
+// TestHoldRestartRequiredAppliesTheRest: a hook_self_heal, environment or
+// gateway.api_port edit needs a restart, so it keeps its running value while
+// an admission edit in the same (or a later) reload still applies hot
+// (GAP-0275; a shared team config naming another account's api_port,
+// GAP-0352). hook_fail_mode is hot: the hook guard reads it from the live
+// config (GAP-0045).
 func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)
+	newCfg.Gateway.APIPort = oldCfg.Gateway.APIPort + 70
 	newCfg.Environment = oldCfg.Environment + "-next"
 	newCfg.Guardrail.HookSelfHeal = !oldCfg.Guardrail.HookSelfHeal
 	newCfg.Guardrail.HookFailMode = "closed"
@@ -965,12 +968,13 @@ func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 
 	diff := diffConfigs(oldCfg, newCfg)
 	held := holdRestartRequired(oldCfg, newCfg, diff.RestartRequired)
-	if !slices.Contains(diff.RestartRequired, "guardrail") || held == nil {
+	if !slices.Contains(diff.RestartRequired, "guardrail") || !slices.Contains(diff.RestartRequired, "gateway") || held == nil {
 		t.Fatalf("restart_required = %v, held = %v", diff.RestartRequired, held != nil)
 	}
 	heldDiff := diffConfigs(oldCfg, held)
 	if len(heldDiff.RestartRequired) != 0 || !slices.Contains(heldDiff.Changed, "admission") ||
 		held.Guardrail.HookSelfHeal != oldCfg.Guardrail.HookSelfHeal || held.Environment != oldCfg.Environment ||
+		held.Gateway.APIPort != oldCfg.Gateway.APIPort ||
 		held.Guardrail.HookFailMode != "closed" || held.Guardrail.BlockAt != "HIGH" {
 		t.Fatalf("held diff = %+v hook_self_heal=%v hook_fail_mode=%q block_at=%q",
 			heldDiff, held.Guardrail.HookSelfHeal, held.Guardrail.HookFailMode, held.Guardrail.BlockAt)

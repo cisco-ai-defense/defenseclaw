@@ -137,6 +137,12 @@ def config_validate(quiet: bool) -> None:
     for warning in result.warnings:
         ux.warn(warning, indent="  ")
 
+    # The file is checked, not the running gateway: say when the gateway has
+    # not applied it (GAP-0352, GAP-0363).
+    from defenseclaw.gateway import current_gateway_reload_notice
+
+    if notice := current_gateway_reload_notice():
+        ux.warn(notice, indent="  ")
     click.echo()
     if not result.ok:
         raise SystemExit(1)

@@ -397,6 +397,13 @@ def _setup_observability_add_details(name: str, preset_id: str, endpoint: str, *
 def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured observability destinations."""
     _print_v8_destination_list(_require_v8_operator_status(app.cfg.data_dir), emit_json=emit_json)
+    if not emit_json:
+        # The rows are config.yaml's; say when the running gateway does not
+        # apply it yet (GAP-0552).
+        from defenseclaw.gateway import gateway_reload_notice
+
+        if notice := gateway_reload_notice(app.cfg):
+            ux.warn(notice, indent="  ")
 
 
 # ---------------------------------------------------------------------------

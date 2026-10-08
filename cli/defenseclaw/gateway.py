@@ -100,6 +100,85 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     return {**result, "user": label, "overrides": overrides}
 
 
+def gateway_reload_notice(cfg: Any, *, timeout: float = 3) -> str:
+    """Say when the running gateway has not applied config.yaml as written, or "".
+
+    ``config validate``, ``guardrail status`` and ``guardrail profile explain``
+    describe the file, but the gateway may still run an earlier generation: it
+    rejected the last reload (``policy.last_reload_error``), some changed keys
+    apply only after a restart (``policy.pending_restart``), or a moved
+    ``gateway.api_port`` left it on its previous port until it restarts
+    (GAP-0352, GAP-0363). "" when it applied the file or cannot be asked.
+    """
+    try:
+        return _gateway_reload_notice(cfg, timeout)
+    except Exception:  # noqa: BLE001 - a notice never fails the command.
+        return ""
+
+
+def _gateway_reload_notice(cfg: Any, timeout: float) -> str:
+    gateway = getattr(cfg, "gateway", None)
+    port = getattr(gateway, "api_port", 0)
+    if gateway is None or not port:
+        return ""
+    host = gateway_api_client_host(cfg)
+    # /health takes no token, so check the holder first: another account's
+    # gateway must not answer for this one.
+    foreign = foreign_loopback_listener(host, int(port))
+    if foreign:
+        return f"The gateway this config.yaml names is not this account's: {foreign}."
+    client = OrchestratorClient(host=host, port=port, timeout=timeout)
+    try:
+        health = client.health()
+    except requests.exceptions.ConnectionError:
+        return _gateway_off_configured_port_notice(host, int(port))
+    finally:
+        client.close()
+    policy = health.get("policy") if isinstance(health, dict) else None
+    if not isinstance(policy, dict):
+        return ""
+    error = str(policy.get("last_reload_error") or "").strip()
+    if error:
+        return (
+            f"The running gateway has NOT applied this config.yaml: it rejected the last reload ({error}) "
+            f"and still enforces generation {policy.get('generation')}. Fix the file; the gateway reloads it "
+            "when it is saved."
+        )
+    pending = [str(key) for key in policy.get("pending_restart") or [] if str(key).strip()]
+    if pending:
+        return (
+            f"The running gateway applied this config.yaml except {', '.join(pending)}, which takes effect "
+            "after `defenseclaw-gateway restart`."
+        )
+    return ""
+
+
+def current_gateway_reload_notice() -> str:
+    """gateway_reload_notice for the config.yaml in use, or "" when it does not load."""
+    try:
+        from defenseclaw import config as config_module
+
+        return gateway_reload_notice(config_module.load())
+    except Exception:  # noqa: BLE001 - a file that does not load has no gateway to ask about.
+        return ""
+
+
+def _gateway_off_configured_port_notice(host: str, port: int) -> str:
+    """This account's gateway is running but not on the configured port, or ""."""
+    from defenseclaw.config import default_data_path
+    from defenseclaw.doctor_gateway import read_pid_record
+    from defenseclaw.process_liveness import pid_alive
+
+    record = read_pid_record(os.path.join(str(default_data_path()), "gateway.pid"))
+    if record.status != "ok" or record.pid <= 0 or not pid_alive(record.pid):
+        return ""
+    return (
+        f"This account's gateway (PID {record.pid}) is running but does not answer on "
+        f"{_url_host(host)}:{port}, the port config.yaml names: a gateway.api_port change takes effect "
+        "after `defenseclaw-gateway restart`, and until then it enforces the configuration it last applied."
+    )
+
+
 def current_profile_account() -> tuple[str, str]:
     """The account the gateway resolves for "you", and the name to show for it.
 

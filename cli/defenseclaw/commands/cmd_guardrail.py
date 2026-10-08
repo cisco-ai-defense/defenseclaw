@@ -878,7 +878,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 "judge": (judge_raw, _style_judge_value(judge_raw)),
             }
         )
-    from defenseclaw.gateway import current_user_guardrail_profile
+    from defenseclaw.gateway import current_user_guardrail_profile, gateway_reload_notice
 
     profile = current_user_guardrail_profile(app.cfg)
     if as_json:
@@ -901,6 +901,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 "Details: defenseclaw guardrail profile explain [--connector NAME] [--agent ID]",
                 indent="    ",
             )
+    # The rows describe config.yaml; say when the running gateway does not
+    # enforce it yet (GAP-0352).
+    if notice := gateway_reload_notice(app.cfg):
+        ux.warn(notice, indent="  ")
     ux.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
     if any_disabled:
         ux.echo(f"  • {ux.dim('fail - = disabled connector (no hooks, so no fail mode)')}")
@@ -4947,7 +4951,12 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     """
     import requests
 
-    from defenseclaw.gateway import OrchestratorClient, current_profile_account, gateway_api_client_host
+    from defenseclaw.gateway import (
+        OrchestratorClient,
+        current_profile_account,
+        gateway_api_client_host,
+        gateway_reload_notice,
+    )
 
     if not user:
         user = current_profile_account()[0]
@@ -4975,12 +4984,18 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         raise SystemExit(1) from None
     except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
         ux.err(f"Could not ask the gateway: {exc}")
-        ux.subhead("Start it with: defenseclaw-gateway start", indent="  ")
+        # A running gateway still on its previous port is not "stopped".
+        notice = gateway_reload_notice(app.cfg)
+        ux.subhead(notice or "Start it with: defenseclaw-gateway start", indent="  ")
         raise SystemExit(1) from None
     if json_out:
         click.echo(json.dumps(result, indent=2, sort_keys=True))
         return
     ux.section("Guardrail profile resolution", indent="  ")
+    # The answer is the gateway's, which may still run an earlier generation
+    # of config.yaml (GAP-0363).
+    if notice := gateway_reload_notice(app.cfg):
+        ux.warn(notice, indent="  ")
     if not result.get("profiles_configured"):
         click.echo(f"  {ux.dim('No guardrail profiles are configured; guardrail.* applies.')}")
     subject = result.get("subject") or {}

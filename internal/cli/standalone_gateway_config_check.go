@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -18,10 +19,10 @@ import (
 // validateStandaloneGatewayConfig proves the gateway service can load
 // configPath before any service starts: it compiles the file with the strict
 // v8 compiler the gateway runs at start, and loads every guardrail rule pack
-// the gateway would load. Before, a config the gateway could not load was
-// installed, and the administrator saw only SCM's "Failed to start service"
-// while the reason stayed in a gateway log a failed first install's rollback
-// deletes. dataDir is the service's DEFENSECLAW_HOME. The error
+// the gateway would load, with their custom_packs pins. Before, a config the
+// gateway could not load was installed, and the administrator saw only SCM's
+// "Failed to start service" while the reason stayed in a gateway log a failed
+// first install's rollback deletes. dataDir is the service's DEFENSECLAW_HOME. The error
 // names the file, the location in it and the reason, from the same safe
 // diagnostic `config-v8 validate` prints. Environment-backed secret
 // references are the gateway's to resolve in its own service identity, so
@@ -57,6 +58,12 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v", pack.dir, configPath, err)
 		}
+	}
+	// The packs as the gateway builds them at start, custom_packs digest pins
+	// included: a pin the gateway refuses kept it from starting, and the
+	// lifecycle waited out its readiness timeout (GAP-0188).
+	if err := gateway.CheckRulePacks(runtime); err != nil {
+		return fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %v", configPath, err)
 	}
 	return nil
 }
