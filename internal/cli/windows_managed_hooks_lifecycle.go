@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -286,6 +287,9 @@ func runWindowsManagedHooksLifecycle(
 		if _, err := os.Lstat(ctx.journalPath); err == nil {
 			return fail(errors.New("managed-hook lifecycle snapshot journal already exists"))
 		} else if !errors.Is(err, os.ErrNotExist) {
+			return fail(err)
+		}
+		if err := windowsManagedHooksVendorFolderTakeBack(); err != nil {
 			return fail(err)
 		}
 		current, active, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
@@ -1773,6 +1777,35 @@ var (
 	windowsManagedHooksLifecycleSelectorCapture = enterprisehooks.CaptureWindowsManagedRuntimeSelector
 	windowsManagedHooksLifecycleSelectorRestore = enterprisehooks.RestoreWindowsManagedRuntimeSelectorCAS
 )
+
+// windowsManagedHooksVendorFolderTakeBack takes back, before the snapshot,
+// the ProgramData vendor folders that hold the Codex and Cursor runtime
+// selectors when a standard user created them first. The capture checks
+// their owner, so such a folder failed the first delivery with 1603 before
+// the takeover machine-policy.mdx describes could run, and every retry
+// failed the same way (GAP-0565). Standalone only; replaceable in tests.
+var windowsManagedHooksVendorFolderTakeBack = func() error {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return nil
+	}
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return err
+	}
+	opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
+	for _, dir := range []string{
+		filepath.Join(programData, "OpenAI", "Codex"),
+		filepath.Join(programData, "Cursor"),
+	} {
+		if _, err := enterprisepolicy.TakeBackVendorPolicyFolder(opts, dir); err != nil {
+			return fmt.Errorf(
+				"%s or a folder above it was created by a standard user before DefenseClaw and could not be taken back (rename it aside as an administrator and run Setup again): %w",
+				dir, err,
+			)
+		}
+	}
+	return nil
+}
 
 func captureWindowsManagedHooksLifecycleSelectors() (
 	[]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,

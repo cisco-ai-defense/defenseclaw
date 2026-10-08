@@ -13,6 +13,7 @@
 package enterprisepolicy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -741,5 +742,38 @@ func TestPublishWindowsGoOwnedHoldsTheAmpMachineFolder(t *testing.T) {
 	}
 	if problems := InspectWindowsAmpMachineFolder(opts); len(problems) != 0 {
 		t.Fatalf("a held Amp machine folder must not be reported: %v", problems)
+	}
+}
+
+// A standard user who created the Codex vendor folder first, with a
+// requirements file in it, no longer stops the first delivery: the folder
+// and its OpenAI parent are taken back and her file is moved aside to a
+// hidden name, as for the Copilot and OpenCode folders (GAP-0565).
+func TestWindowsTakeBackVendorPolicyFolderTakesBackAUserCreatedCodexFolder(t *testing.T) {
+	opts := windowsTestOptions(t)
+	openAI := filepath.Join(opts.WindowsProgramData, "OpenAI")
+	codex := filepath.Join(openAI, "Codex")
+	plantAsUser(t, openAI, "empty directory")
+	plantAsUser(t, codex, "empty directory")
+	planted := filepath.Join(codex, "requirements.toml")
+	if err := os.WriteFile(planted, []byte("# user marker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ownAs(t, planted, wellKnownSID(t, windows.WinBuiltinUsersSid))
+	notes, err := TakeBackVendorPolicyFolder(opts, codex)
+	if err != nil {
+		t.Fatalf("a user-created Codex folder must be taken back: %v (%v)", err, notes)
+	}
+	requireProtected(t, openAI)
+	requireProtected(t, codex)
+	if _, err := os.Lstat(planted); !errors.Is(err, os.ErrNotExist) || len(displacedEntries(t, codex)) != 1 {
+		t.Fatalf("the user's requirements file was not moved aside: %v %v", err, displacedEntries(t, codex))
+	}
+	missing := filepath.Join(opts.WindowsProgramData, "Cursor")
+	if notes, err := TakeBackVendorPolicyFolder(opts, missing); err != nil || len(notes) != 0 {
+		t.Fatalf("a missing folder: %v %v", notes, err)
+	}
+	if _, err := os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a missing folder was created: %v", err)
 	}
 }
