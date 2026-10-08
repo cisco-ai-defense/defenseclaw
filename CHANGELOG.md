@@ -153,8 +153,10 @@ says otherwise. Per-user installs never connect to Tetragon.
   kernel-feed install` adds Tetragon's exec and exit records to the process
   trees of each user's docker sandboxes (`sandbox ps` says `source: kernel`;
   `sandbox.process_tree` records gain `source=tetragon`, `host_pid` and
-  `exec_id`). It reads only container process events, serves members of the
-  `docker` group their own sandboxes, and loads no policy.
+  `exec_id`). A Claude Code hook call, DefenseClaw's hook script and the short
+  system tools it starts, is one row with its tool count. It reads only
+  container process events, serves members of the `docker` group their own
+  sandboxes, and loads no policy.
   `sandbox kernel-feed status|uninstall` check and remove it. See
   [Kernel feed (Tetragon)](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/linux#kernel-feed-tetragon).
 - **New page: Agent segmentation, visibility and enforcement.** Which layer

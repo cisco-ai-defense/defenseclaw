@@ -43,20 +43,25 @@ type hookProcess struct {
 	binary, args, parentID string
 	uid                    int
 	uidKnown               bool
-	role                   hookRole
-	hook                   *hookProcess
-	tools                  int
-	verified               bool
-	pending                *sandboxfeed.Frame
-	frames                 []Item
-	opened                 time.Time
-	tainted                bool
-	finished               bool
-	owner                  int
+	// nsPID is the process's pid in the sandbox (0 when it was not read),
+	// injected a process started into the container from outside it, and
+	// hostPID its pid on the host.
+	nsPID, hostPID int
+	injected       bool
+	role           hookRole
+	hook           *hookProcess
+	tools          int
+	verified       bool
+	pending        *sandboxfeed.Frame
+	frames         []Item
+	opened         time.Time
+	tainted        bool
+	finished       bool
+	owner          int
 }
 
 func hookInfo(p *pb.Process) *hookProcess {
-	i := &hookProcess{binary: p.GetBinary(), args: p.GetArguments(), parentID: p.GetParentExecId()}
+	i := &hookProcess{binary: p.GetBinary(), args: p.GetArguments(), parentID: p.GetParentExecId(), hostPID: int(p.GetPid().GetValue())}
 	if p.GetUid() != nil {
 		i.uid, i.uidKnown = int(p.GetUid().GetValue()), true
 	}
@@ -102,8 +107,23 @@ func isShell(binary string) bool {
 	return false
 }
 
-// agentRoot refuses an agent launched beneath a tool call's command shell.
-// Missing ancestry refuses the optimization, preserving normal visibility.
+// sandboxInit reports the sandbox's own supervisor: OpenShell's
+// openshell-sandbox as the container's pid 1, read from /proc when its exec
+// was seen. The workload can neither start a process at pid 1 nor make one
+// a child of it, so a program it names openshell-sandbox does not pass.
+func (h *hookProcess) sandboxInit() bool {
+	return h != nil && h.nsPID == 1 && !h.injected && path.Base(h.binary) == "openshell-sandbox"
+}
+
+// agentRoot reports a Claude Code the sandbox started, not a tool call.
+// The walk up its ancestry must reach the sandbox's supervisor without
+// passing another Claude Code (one a tool call or an MCP server started) or
+// a command shell whose parent is neither a shell nor the supervisor (an
+// agent runs each tool command as `sh -c ...`). The supervisor's own launch
+// shell, `bash -c "cd ... && claudecode-launch ..."`, passes: it was taken
+// for a tool call's shell, so no hook call of a real sandbox was ever
+// folded (GAP-0063). Missing ancestry refuses the optimization, preserving
+// normal visibility.
 func (m *Mapper) agentRoot(agent *hookProcess) bool {
 	if agent == nil || !sandboxClaudeAgent(agent.binary) || agent.parentID == "" {
 		return false
@@ -111,21 +131,21 @@ func (m *Mapper) agentRoot(agent *hookProcess) bool {
 	ancestorID := agent.parentID
 	for depth := 0; depth < 16 && ancestorID != ""; depth++ {
 		ancestor, ok := m.hookProcs.get(ancestorID)
-		if !ok {
+		if !ok || sandboxClaudeAgent(ancestor.binary) {
 			return false
 		}
-		if path.Base(ancestor.binary) == "openshell-sandbox" {
+		if ancestor.sandboxInit() {
 			return true
 		}
 		if isShell(ancestor.binary) && shellCommand(ancestor.args) {
 			parent, ok := m.hookProcs.get(ancestor.parentID)
-			if !ok || !isShell(parent.binary) {
+			if !ok || !(isShell(parent.binary) || parent.sandboxInit()) {
 				return false
 			}
 		}
 		ancestorID = ancestor.parentID
 	}
-	return ancestorID == ""
+	return false
 }
 
 // forkOfHook recognizes a fork that never execed by its inherited program
@@ -157,6 +177,24 @@ func (m *Mapper) forkOfHook(parent *pb.Process) *hookProcess {
 	return info
 }
 
+// forgetHookProcess drops a process that ended from the ancestry table: its
+// image, and the images it replaced in the same pid (an exec without a
+// fork), which report no exit of their own. A process that ended is no live
+// agent's ancestor. Without this every process of every sandbox stayed in
+// the table, which filled after about 16k processes and turned hook folding
+// off for as long as the Tetragon stream lasted (GAP-0063).
+func (m *Mapper) forgetHookProcess(execID string, hostPID int) {
+	info, ok := m.hookProcs.get(execID)
+	m.hookProcs.remove(execID)
+	for depth := 0; ok && hostPID > 0 && depth < 16; depth++ {
+		parentID := info.parentID
+		if info, ok = m.hookProcs.get(parentID); !ok || info.hostPID != hostPID {
+			return
+		}
+		m.hookProcs.remove(parentID)
+	}
+}
+
 // The exec-id table can add both a previously unseen fork and its child in
 // one event. Release pending calls before its eviction bound is reached.
 func (m *Mapper) hookCapacity() []Item {
@@ -168,6 +206,7 @@ func (m *Mapper) hookCapacity() []Item {
 
 func (m *Mapper) classifyHook(p, rawParent *pb.Process, frame *sandboxfeed.Frame) {
 	info := hookInfo(p)
+	info.nsPID, info.injected = frame.PID, frame.Injected
 	parent := m.forkOfHook(rawParent)
 	if parent == nil {
 		parent, _ = m.hookProcs.get(p.GetParentExecId())

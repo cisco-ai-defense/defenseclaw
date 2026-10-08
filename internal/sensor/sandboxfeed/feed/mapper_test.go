@@ -345,6 +345,12 @@ func TestMapperMarksTheCollectorsForkedPipelineStages(t *testing.T) {
 	}
 }
 
+// hookMapper is a mapper that reads init's pid in the sandbox as 1: the
+// sandbox's supervisor, where a hook-folding agent's ancestry must end.
+func hookMapper(init proc) *Mapper {
+	return NewMapper(MapperConfig{Containers: testContainers(), Proc: fakeProc{init.pid: {ns: 1, ticks: ticksAt(init.ktime)}}})
+}
+
 func TestMapperFoldsVerifiedClaudeHookTools(t *testing.T) {
 	const hook = sandboxClaudeHook
 	if connector.SandboxHookDir+"/claude-code-hook.sh" != hook {
@@ -359,7 +365,7 @@ func TestMapperFoldsVerifiedClaudeHookTools(t *testing.T) {
 	jq := proc{pid: 8006, ktime: 7e8, docker: workload, binary: "/usr/bin/jq", parent: &fork}
 	work := proc{pid: 8007, ktime: 8e8, docker: workload, binary: "/usr/bin/python3", parent: &agent}
 	unexpected := proc{pid: 8008, ktime: 9e8, docker: workload, binary: "/tmp/find", parent: &script}
-	m := NewMapper(MapperConfig{Containers: testContainers()})
+	m := hookMapper(init)
 	ctx := context.Background()
 	m.Map(ctx, execOf(init))
 	m.Map(ctx, execOf(agent))
@@ -411,28 +417,42 @@ func TestMapperFoldsVerifiedClaudeHookTools(t *testing.T) {
 }
 
 func TestMapperLeavesHookLookalikesVisible(t *testing.T) {
+	// The processes a case's agent may run below. A tool call's shell is a
+	// child of the agent (Claude Code runs each command as bash -c); an MCP
+	// server is one the agent starts directly; a program named like the
+	// supervisor is not the sandbox's pid 1.
+	init := proc{pid: 8500, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	outer := proc{pid: 8505, ktime: 15e7, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	toolShell := proc{pid: 8501, ktime: 2e8, docker: workload, binary: "/bin/bash", args: `-c "eval 'claude -p hi'"`, parent: &outer}
+	mcpServer := proc{pid: 8506, ktime: 2e8 + 1, docker: workload, binary: "/usr/bin/node", args: "/sandbox/work/myapp/mcp.js", parent: &outer}
+	unseen := proc{pid: 8507, ktime: 5e7, docker: workload, binary: "/bin/bash", args: "-l"}
+	fakeInit := proc{pid: 8508, ktime: 2e8 + 2, docker: workload, binary: "/tmp/openshell-sandbox", parent: &unseen}
 	for _, tc := range []struct {
 		name, command, script string
-		toolShell             bool
+		agentParent           *proc
+		before                []proc
+		noPID                 bool
 	}{
-		{"different path", "-c " + sandboxClaudeHook, "/tmp/claude-code-hook.sh", false},
-		{"environment wrapper", "-c env X=1 " + sandboxClaudeHook, sandboxClaudeHook, false},
-		{"tool shell", "-c " + sandboxClaudeHook, sandboxClaudeHook, true},
+		{"different path", "-c " + sandboxClaudeHook, "/tmp/claude-code-hook.sh", &init, []proc{init}, false},
+		{"environment wrapper", "-c env X=1 " + sandboxClaudeHook, sandboxClaudeHook, &init, []proc{init}, false},
+		{"tool shell", "-c " + sandboxClaudeHook, sandboxClaudeHook, &toolShell, []proc{init, outer, toolShell}, false},
+		{"agent an agent started", "-c " + sandboxClaudeHook, sandboxClaudeHook, &mcpServer, []proc{init, outer, mcpServer}, false},
+		{"program named like the supervisor", "-c " + sandboxClaudeHook, sandboxClaudeHook, &fakeInit, []proc{fakeInit}, false},
+		{"supervisor not seen", "-c " + sandboxClaudeHook, sandboxClaudeHook, &init, nil, false},
+		{"supervisor pid not read", "-c " + sandboxClaudeHook, sandboxClaudeHook, &init, []proc{init}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			m := NewMapper(MapperConfig{Containers: testContainers()})
-			init := proc{pid: 8500, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
-			agentParent := &init
-			if tc.toolShell {
-				shell := proc{pid: 8501, ktime: 2e8, docker: workload, binary: "/bin/bash", args: "-c claude", parent: &init}
-				m.Map(ctx, execOf(shell))
-				agentParent = &shell
+			m := hookMapper(init)
+			if tc.noPID {
+				m = NewMapper(MapperConfig{Containers: testContainers()})
 			}
-			agent := proc{pid: 8502, ktime: 3e8, docker: workload, binary: "/usr/local/bin/claude", parent: agentParent}
+			for _, p := range tc.before {
+				m.Map(ctx, execOf(p))
+			}
+			agent := proc{pid: 8502, ktime: 3e8, docker: workload, binary: "/usr/local/bin/claude", parent: tc.agentParent}
 			launcher := proc{pid: 8503, ktime: 4e8, docker: workload, binary: "/bin/sh", args: tc.command, parent: &agent}
 			script := proc{pid: 8504, ktime: 5e8, docker: workload, binary: tc.script, args: "-p " + tc.script, parent: &launcher}
-			m.Map(ctx, execOf(init))
 			m.Map(ctx, execOf(agent))
 			m.Map(ctx, execOf(launcher))
 			if f := one(t, m.Map(ctx, execOf(script))).Frame; f.Hook || f.HookTool {
@@ -445,10 +465,104 @@ func TestMapperLeavesHookLookalikesVisible(t *testing.T) {
 	}
 }
 
+// A real sandbox's Claude Code (TS r4, GAP-0063): the supervisor starts it
+// through its launch shell, bash -c "cd ... && claudecode-launch ...", and
+// claudecode-launch, the supervisor script and env, each replacing the last
+// in its pid; the hook script runs its tools directly and in the forks of
+// its command substitutions. That launch shell was taken for a tool call's
+// shell, so no hook call of a real sandbox was folded.
+func TestMapperFoldsHooksOfTheClaudeTheSandboxStarted(t *testing.T) {
+	init := proc{pid: 9100, ktime: 1e8, docker: workload, binary: "/.openshell/runtime/openshell-sandbox", args: "--bootstrap /.openshell/channel/sandbox/bootstrap.json"}
+	launch := proc{pid: 9195, ktime: 2e8, docker: workload, binary: "/bin/bash", parent: &init,
+		args: `-c "cd /sandbox/work/myapp && /usr/local/lib/defenseclaw/bin/claudecode-launch --dangerously-skip-permissions"`}
+	claudeLaunch := proc{pid: 9195, ktime: 2e8 + 1e6, docker: workload, binary: "/usr/local/lib/defenseclaw/bin/claudecode-launch", parent: &launch,
+		args: "-p /usr/local/lib/defenseclaw/bin/claudecode-launch --dangerously-skip-permissions"}
+	supervisor := proc{pid: 9195, ktime: 2e8 + 2e6, docker: workload, binary: "/usr/bin/python3", parent: &claudeLaunch,
+		args: "-I -S /usr/local/lib/defenseclaw/bin/dc_supervisor.py /usr/bin/env -u BASH_ENV /usr/local/bin/claude --dangerously-skip-permissions"}
+	env := proc{pid: 9200, ktime: 3e8, docker: workload, binary: "/usr/bin/env", args: "-u BASH_ENV /usr/local/bin/claude --dangerously-skip-permissions", parent: &supervisor}
+	agent := proc{pid: 9200, ktime: 3e8 + 1e6, docker: workload, binary: "/usr/local/bin/claude", args: "--dangerously-skip-permissions", parent: &env}
+	launcher := proc{pid: 9232, ktime: 4e8, docker: workload, binary: "/bin/sh", args: "-c " + sandboxClaudeHook, parent: &agent}
+	script := proc{pid: 9233, ktime: 4e8 + 1e6, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &launcher}
+	find := proc{pid: 9234, ktime: 4e8 + 2e6, docker: workload, binary: "/usr/bin/find", args: "/usr/local/lib/defenseclaw -mindepth 1", parent: &script}
+	subst := proc{pid: 9235, ktime: 4e8 + 3e6, docker: workload, binary: sandboxClaudeHook, args: script.args, parent: &script}
+	curl := proc{pid: 9236, ktime: 4e8 + 4e6, docker: workload, binary: "/usr/bin/curl", args: "-q -s", parent: &subst}
+	tool := proc{pid: 9240, ktime: 5e8, docker: workload, binary: "/bin/bash", args: `-c "eval '/bin/true ts4-user-marker'"`, parent: &agent}
+	marker := proc{pid: 9241, ktime: 5e8 + 1e6, docker: workload, binary: "/usr/bin/true", args: "ts4-user-marker", parent: &tool}
+
+	m := hookMapper(init)
+	ctx := context.Background()
+	for _, p := range []proc{init, launch, claudeLaunch, supervisor, env, agent} {
+		one(t, m.Map(ctx, execOf(p)))
+	}
+	for _, p := range []proc{launcher, script, find, curl} {
+		if got := m.Map(ctx, execOf(p)); len(got) != 0 {
+			t.Fatalf("hook process %s forwarded: %+v", p.binary, got)
+		}
+	}
+	for _, p := range []proc{tool, marker} {
+		if f := one(t, m.Map(ctx, execOf(p))).Frame; f.Hook || f.HookTool {
+			t.Fatalf("the workload was folded: %+v", f)
+		}
+	}
+	for _, p := range []proc{curl, subst, find} {
+		if got := m.Map(ctx, exitOf(p, 0, "")); len(got) != 0 {
+			t.Fatalf("hook process %s exit forwarded: %+v", p.binary, got)
+		}
+	}
+	got := m.Map(ctx, exitOf(script, 0, ""))
+	if len(got) != 2 || got[0].Frame.Kind != sandboxfeed.FrameExec || got[0].Frame.Binary != sandboxClaudeHook ||
+		!got[0].Frame.Hook || !got[1].Frame.Hook || got[1].Frame.HookTools != 2 {
+		t.Fatalf("hook summary = %+v", got)
+	}
+	if got := m.Map(ctx, exitOf(launcher, 0, "")); len(got) != 0 {
+		t.Fatalf("verified launcher exit forwarded: %+v", got)
+	}
+	if f := one(t, m.Map(ctx, exitOf(marker, 0, ""))).Frame; f.Hook || f.HookTool {
+		t.Fatalf("the workload's exit was folded: %+v", f)
+	}
+}
+
+// The ancestry table holds running processes: an ended process and the
+// images it replaced leave it, so hook folding is still on after more
+// processes than the table holds (GAP-0063: it filled after about 16k and
+// turned folding off for as long as the stream lasted).
+func TestMapperForgetsEndedProcessesAndKeepsFolding(t *testing.T) {
+	init := proc{pid: 9300, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	agent := proc{pid: 9301, ktime: 2e8, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	m := hookMapper(init)
+	ctx := context.Background()
+	m.Map(ctx, execOf(init))
+	m.Map(ctx, execOf(agent))
+	for i := range tracked + 100 {
+		pid := 10_000 + i
+		shell := proc{pid: pid, ktime: 3e8 + int64(i)*10, docker: workload, binary: "/bin/bash", args: `-c "eval 'git status'"`, parent: &agent}
+		git := proc{pid: pid, ktime: shell.ktime + 1, docker: workload, binary: "/usr/bin/git", args: "status", parent: &shell}
+		m.Map(ctx, execOf(shell))
+		m.Map(ctx, execOf(git))
+		m.Map(ctx, exitOf(git, 0, ""))
+	}
+	if !m.hookTrust || len(m.hookProcs.m) != 2 {
+		t.Fatalf("after %d processes: hook folding %v, %d table entries (want init and the agent)", tracked+100, m.hookTrust, len(m.hookProcs.m))
+	}
+	launcher := proc{pid: 9302, ktime: 9e9, docker: workload, binary: "/bin/sh", args: "-c " + sandboxClaudeHook, parent: &agent}
+	script := proc{pid: 9303, ktime: 9e9 + 1, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &launcher}
+	m.Map(ctx, execOf(launcher))
+	if got := m.Map(ctx, execOf(script)); len(got) != 0 {
+		t.Fatalf("hook call not folded after many processes: %+v", got)
+	}
+	if got := m.Map(ctx, exitOf(script, 0, "")); len(got) != 2 || !got[1].Frame.Hook {
+		t.Fatalf("hook summary = %+v", got)
+	}
+	m.Map(ctx, exitOf(launcher, 0, ""))
+	if len(m.hookProcs.m) != 2 {
+		t.Fatalf("a finished hook call stayed in the table: %d entries", len(m.hookProcs.m))
+	}
+}
+
 func TestMapperReleasesUnfinishedHookOnStreamEnd(t *testing.T) {
 	ctx := context.Background()
-	m := NewMapper(MapperConfig{Containers: testContainers()})
 	init := proc{pid: 8600, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	m := hookMapper(init)
 	agent := proc{pid: 8601, ktime: 2e8, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
 	launcher := proc{pid: 8602, ktime: 3e8, docker: workload, binary: "/bin/sh", args: "-c " + sandboxClaudeHook, parent: &agent}
 	script := proc{pid: 8603, ktime: 4e8, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &launcher}
@@ -476,8 +590,8 @@ func TestMapperReleasesUnfinishedHookOnStreamEnd(t *testing.T) {
 
 func TestMapperReleasesHookBeforeAncestryEviction(t *testing.T) {
 	ctx := context.Background()
-	m := NewMapper(MapperConfig{Containers: testContainers()})
 	init := proc{pid: 8700, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	m := hookMapper(init)
 	agent := proc{pid: 8701, ktime: 2e8, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
 	launcher := proc{pid: 8702, ktime: 3e8, docker: workload, binary: "/bin/sh", args: "-c " + sandboxClaudeHook, parent: &agent}
 	script := proc{pid: 8703, ktime: 4e8, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &launcher}

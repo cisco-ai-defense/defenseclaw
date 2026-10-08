@@ -371,11 +371,11 @@ func (m *Mapper) exit(ctx context.Context, response *pb.GetEventsResponse, exit 
 	m.pinned.remove(execID)
 	m.collectors.remove(execID)
 	info, _ := m.hookProcs.get(execID)
+	m.forgetHookProcess(execID, hostPID)
 	if image, _ := m.images.get(hostPID); image == execID {
 		m.images.remove(hostPID)
 	}
 	if info != nil && info.role == hookLauncher {
-		m.hookProcs.remove(execID)
 		if info.verified && info.hook != nil {
 			if info.hook.tainted {
 				return append(released, Item{Frame: frame, Owner: container.Owner})
@@ -390,11 +390,7 @@ func (m *Mapper) exit(ctx context.Context, response *pb.GetEventsResponse, exit 
 		}
 	}
 	if info != nil && info.hook != nil {
-		items := m.hookExitItems(info, frame, container.Owner)
-		if info.role != hookVerified {
-			m.hookProcs.remove(execID)
-		}
-		return append(released, items...)
+		return append(released, m.hookExitItems(info, frame, container.Owner)...)
 	}
 	return append(released, Item{Frame: frame, Owner: container.Owner})
 }
