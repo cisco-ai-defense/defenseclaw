@@ -657,7 +657,7 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if included and assignment.get("intent") == args.intent:
         print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
         return 0
-    action = "delete the existing assignment and create a new one" if assignment else "assign"
+    action = "update the existing assignment" if assignment else "assign"
     if not args.apply:
         print(f"[plan] would {action} app {args.app} for group {args.group} with intent {args.intent}")
         print("Nothing was changed. Run again with --apply to make this change.")
@@ -672,8 +672,9 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if assignment:
         if "settings" in assignment:
             body["settings"] = assignment["settings"]
-        graph.request("DELETE", f"{collection}/{assignment['id']}")
-    graph.request("POST", collection, body)
+        graph.request("PATCH", f"{collection}/{assignment['id']}", body)
+    else:
+        graph.request("POST", collection, body)
     print(f"app {args.app}: {action} completed for group {args.group} as {args.intent}")
     return 0
 

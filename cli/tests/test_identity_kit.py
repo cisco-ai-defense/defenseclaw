@@ -1059,11 +1059,10 @@ def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]
         "assign-app", "--app", "app", "--group", "team", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert len(calls) == 2
-    assert calls[0][0] == "DELETE"
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
     assert calls[0][1].endswith("/assignments/assignment-1")
-    assert calls[1][0] == "POST"
-    assert calls[1][2]["target"]["@odata.type"] == intune.GROUP_TARGET
+    assert calls[0][2]["target"]["@odata.type"] == intune.GROUP_TARGET
 
 
 def test_intune_assign_app_updates_existing_intent() -> None:
@@ -1093,10 +1092,10 @@ def test_intune_assign_app_updates_existing_intent() -> None:
         "assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply",
     ])
     assert intune.cmd_assign_app(Graph(), args) == 0
-    assert [call[0] for call in calls] == ["DELETE", "POST"]
-    assert calls[1][2]["intent"] == "uninstall"
-    assert calls[1][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
-    assert "settings" in calls[1][2]
+    assert [call[0] for call in calls] == ["PATCH"]
+    assert calls[0][2]["intent"] == "uninstall"
+    assert calls[0][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
+    assert "settings" in calls[0][2]
 
 
 def test_intune_groups_reject_dynamic_group() -> None:
@@ -1396,3 +1395,29 @@ def test_intune_remove_assignment_preserves_exclusion() -> None:
         ["remove-assignment", "--app", "app", "--group", "team", "--apply"])
     assert intune.cmd_remove_assignment(Graph(), args) == 0
     assert writes == []
+
+
+def test_intune_intent_change_failure_keeps_original_assignment() -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{"id": "assignment-1", "intent": "required",
+                         "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"}}]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method, path, body=None):
+            writes.append(method)
+            if method != "DELETE":
+                raise intune.GraphError(400, "Rejected", "change rejected")
+            return {}
+
+    args = intune.build_parser().parse_args(
+        ["assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply"])
+    with pytest.raises(intune.GraphError, match="Rejected"):
+        intune.cmd_assign_app(Graph(), args)
+    assert writes == ["PATCH"]
