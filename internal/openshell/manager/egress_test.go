@@ -959,8 +959,9 @@ func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
 // in pairs and no count. The repeats of a minute are one line with their
 // count, and a single repeat adds no line.
 func TestARetryLoopsRefusalsAreOneLineAMinute(t *testing.T) {
-	e := liveEnv(t, "loopbox", nil)
+	e := newEnv(t, nil)
 	_, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "loopbox"})
 	refuse := func() {
 		e.ocsf("loopbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
 	}
