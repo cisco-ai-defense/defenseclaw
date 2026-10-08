@@ -395,7 +395,45 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 		"agent": enrollment.agent, "profile": enrollment.profile, "token_file": tokenPath,
 		"next": enterpriseACPSetupCommand(enrollment, tokenPath),
 	}
+	if !secureClient {
+		// One user copy serves an editor/agent pair, so an enrollment under
+		// another profile kept a second live credential and the last enroll
+		// overwrote the copy the working entry used (GAP-0733).
+		replaced, retireErr := retireEnterpriseACPOtherProfiles(enrollment)
+		if len(replaced) > 0 {
+			payload["replaced"] = replaced
+		}
+		if retireErr != nil {
+			return enterpriseACPResult(cmd, payload, fmt.Errorf(
+				"enterprise acp: enrolled %s %s/%s in profile %s, but its enrollment in another profile could not be revoked: %w; "+
+					"revoke it with enterprise acp revoke and the same selectors", enterpriseACPWho(enrollment),
+				enrollment.client, enrollment.agent, enrollment.profile, retireErr))
+		}
+	}
 	return enterpriseACPResult(cmd, payload, nil)
+}
+
+// retireEnterpriseACPOtherProfiles revokes the enrollments of the same
+// account, editor and agent in other profiles and returns those profiles.
+func retireEnterpriseACPOtherProfiles(enrollment enterpriseACPEnrollment) (replaced []string, err error) {
+	err = withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+		enrollments, _, listErr := acp.ListEnterpriseEnrollments(cfg.DataDir)
+		if listErr != nil {
+			return listErr
+		}
+		for _, other := range enrollments {
+			if other.Principal != enrollment.principal || other.ClientID != enrollment.client ||
+				other.AgentID != enrollment.agent || other.Profile == enrollment.profile {
+				continue
+			}
+			if removeErr := acp.RemoveEnterpriseCredential(cfg.DataDir, other.Principal, other.ClientID, other.AgentID, other.Profile); removeErr != nil {
+				return fmt.Errorf("profile %s: %w", other.Profile, removeErr)
+			}
+			replaced = append(replaced, other.Profile)
+		}
+		return nil
+	})
+	return replaced, err
 }
 
 // enterpriseACPClientIDs lists the catalog's ACP clients.
@@ -680,7 +718,12 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 		return err
 	}
 	if next, ok := payload["next"].(string); ok {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential enrolled\n  Next (as target user): %s\n", Style("✓", "fg=green", "bold"), next)
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential enrolled\n", Style("✓", "fg=green", "bold"))
+		if replaced, _ := payload["replaced"].([]string); len(replaced) > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "    it replaces the %s/%s enrollment in profile %s, whose credential no longer works\n",
+				payload["client"], payload["agent"], strings.Join(replaced, ", "))
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "  Next (as target user): %s\n", next)
 		return nil
 	}
 	if lock, ok := payload["contract_lock"].(string); ok {

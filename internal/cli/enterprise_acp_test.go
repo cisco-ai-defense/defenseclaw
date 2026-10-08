@@ -209,6 +209,63 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 }
 
+// Enrolling the same account, editor and agent under another profile
+// replaces the earlier credential: both stayed live and the shared user copy
+// held whichever was enrolled last (GAP-0733).
+func TestEnterpriseACPEnrollReplacesTheOtherProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enrolls the current Unix user")
+	}
+	previousCfg := cfg
+	previous := []string{enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile, enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir}
+	previousJSON, previousUID, previousGID := enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = previous[0], previous[1], previous[2]
+		enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = previous[3], previous[4], previous[5], previous[6]
+		enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = previousJSON, previousUID, previousGID
+	})
+	profiles := map[string]config.ACPProfile{
+		"obs": {Mode: "observe", AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}},
+		"act": {Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}},
+	}
+	pin := func(profile string) {
+		cfg.ACP.Clients = map[string]config.ACPBinding{"zed": {Enabled: true, Profile: profile}}
+		cfg.ACP.Agents = map[string]config.ACPBinding{"hermes": {Enabled: true, Profile: profile}}
+		cfg.ACP.DefaultProfile, enterpriseACPProfile = profile, profile
+	}
+	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise", ACP: config.ACPConfig{Enabled: true, Profiles: profiles}}
+	cfg.Enterprise.Profile = "standalone"
+	userHome := t.TempDir()
+	enterpriseACPClient, enterpriseACPAgent = "zed", "hermes"
+	enterpriseACPUser, enterpriseACPUserHome, enterpriseACPSID, enterpriseACPUserDataDir = "", userHome, "", ""
+	enterpriseACPJSON, enterpriseACPUID, enterpriseACPGID = true, -1, -1
+	enroll := func() map[string]any {
+		t.Helper()
+		var output bytes.Buffer
+		command := &cobra.Command{}
+		command.SetOut(&output)
+		if err := runEnterpriseACPEnroll(command, nil); err != nil {
+			t.Fatalf("enroll: %v; %s", err, output.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(output.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	pin("obs")
+	enroll()
+	pin("act")
+	if replaced := fmt.Sprint(enroll()["replaced"]); replaced != "[obs]" {
+		t.Fatalf("replaced = %s, want [obs]", replaced)
+	}
+	enrollments, _, err := acp.ListEnterpriseEnrollments(cfg.DataDir)
+	if err != nil || len(enrollments) != 1 || enrollments[0].Profile != "act" {
+		t.Fatalf("enrollments = %+v, err = %v; want only the act enrollment", enrollments, err)
+	}
+}
+
 // The Windows refusals named hook mutation and gave no next step; they now
 // name the ACP enrollment, LocalSystem and --user/--sid (GAP-0261).
 func TestEnterpriseACPWindowsRefusalsSayHowToEnroll(t *testing.T) {
