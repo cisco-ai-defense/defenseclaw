@@ -26,6 +26,7 @@ import yaml
 from defenseclaw import config_writer
 from defenseclaw.config import locked_config_yaml
 from defenseclaw.config_writer import Change
+from defenseclaw.observability.v8_config import V8ConfigError
 
 
 def _reference_page(name: str) -> str:
@@ -130,6 +131,15 @@ def test_unset_multiple_list_indexes_uses_original_positions(tmp_path, monkeypat
     )
     assert result.changed == ["asset_policy.skill.allowed[0]", "asset_policy.skill.allowed[1]"]
     assert yaml.safe_load(open(path, encoding="utf-8"))["asset_policy"]["skill"]["allowed"] == [{"name": "c"}]
+
+
+def test_set_equal_integer_does_not_bypass_boolean_validation(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "admission:\n  skill:\n    scan_on_install: false\n")
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(V8ConfigError):
+        config_writer.apply([Change("admission.skill.scan_on_install", 0)], "cli:test", "t", path=path)
+    assert open(path, encoding="utf-8").read() == before
 
 
 def test_removed_scanner_keys_are_ignored_on_load_and_refused_by_config_set(tmp_path, monkeypatch):

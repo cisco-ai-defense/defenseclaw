@@ -846,6 +846,17 @@ def _check_destination_index(document: Any, path: str, parts: tuple[str | int, .
         )
 
 
+def _same_config_value(before: Any, after: Any) -> bool:
+    """Treat a value as unchanged only when its types match throughout."""
+    if type(before) is not type(after):
+        return False
+    if isinstance(before, dict):
+        return before.keys() == after.keys() and all(_same_config_value(before[key], after[key]) for key in before)
+    if isinstance(before, list):
+        return len(before) == len(after) and all(_same_config_value(a, b) for a, b in zip(before, after))
+    return before == after
+
+
 def _ordered_mutations(mutations: list[Any]) -> list[Any]:
     """Apply list-item removals last, deepest and highest indexed first."""
     from defenseclaw.observability.v8_yaml import DELETE
@@ -878,7 +889,7 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
                 continue
             mutations.append(V8YAMLMutation.delete(parts))
         else:
-            if before is not _MISSING and before == change.value:
+            if before is not _MISSING and _same_config_value(before, change.value):
                 continue
             _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
