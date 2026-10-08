@@ -207,9 +207,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	}
 	resp["total"] = total
 	resp["counts"] = (&inventory.IDEInventory{Installations: installs, Plugins: plugins}).Counts()
-	if !ManagedEnterpriseActive() {
-		nameIDERows(plugins[offset:end], installs)
-	}
+	nameIDERows(plugins[offset:end], installs)
 	resp["installations"] = installs
 	resp["plugins"] = plugins[offset:end]
 	if snap := discovery.Snapshot(); snap.Summary.ScanID != "" {
@@ -219,11 +217,13 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 }
 
 // ideInventoryEmptyReason says why an IDE plugin answer has no inventory and
-// what turns it on. A managed computer has no per-user CLI, so its hint is
-// the administrator config key (GAP-0611).
+// what turns it on. A standalone managed computer has no per-user CLI, so its
+// hint is the administrator config key (GAP-0611). A Secure Client gateway
+// does not mount this route (GAP-0143), so the managed case is the standalone
+// profile.
 func ideInventoryEmptyReason(enabled bool, scope string) string {
 	switch {
-	case !enabled && ManagedEnterpriseActive():
+	case !enabled && standaloneEnterpriseActive.Load():
 		return "AI discovery is off on this computer; an administrator sets ai_discovery.enabled: true in the managed DefenseClaw config to collect the IDE plugin inventory"
 	case !enabled:
 		return "AI discovery is off; turn it on with: defenseclaw agent discovery enable"

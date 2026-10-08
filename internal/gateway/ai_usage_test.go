@@ -52,21 +52,28 @@ func TestHandleAIUsageDisabled(t *testing.T) {
 	}
 }
 
-// A managed computer whose config leaves AI discovery off answers the IDE
-// plugin view with the reason and the administrator config key, not a bare
-// enabled:false (GAP-0611).
+// A standalone managed computer whose config leaves AI discovery off answers
+// the IDE plugin view with the reason and the administrator config key, not
+// the per-user command it does not have; a per-user gateway keeps the command
+// hint (GAP-0611).
 func TestIDEPluginsWithDiscoveryOffSayWhyOnAManagedComputer(t *testing.T) {
-	withManagedEnterprise(t, true)
+	previous := standaloneEnterpriseActive.Load()
+	t.Cleanup(func() { setStandaloneEnterpriseActive(previous) })
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
-	w := httptest.NewRecorder()
-	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins", nil))
-	var body struct {
-		Enabled bool   `json:"enabled"`
-		Reason  string `json:"reason"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Enabled ||
-		!strings.Contains(body.Reason, "ai_discovery.enabled: true") || strings.Contains(body.Reason, "agent discovery enable") {
-		t.Fatalf("answer = %s (%v), want enabled false with the managed config hint", w.Body.String(), err)
+	for _, standalone := range []bool{true, false} {
+		setStandaloneEnterpriseActive(standalone)
+		w := httptest.NewRecorder()
+		api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins", nil))
+		var body struct {
+			Enabled bool   `json:"enabled"`
+			Reason  string `json:"reason"`
+		}
+		err := json.Unmarshal(w.Body.Bytes(), &body)
+		if err != nil || body.Enabled || strings.Contains(body.Reason, "ai_discovery.enabled: true") != standalone ||
+			strings.Contains(body.Reason, "agent discovery enable") == standalone {
+			t.Fatalf("standalone=%t answer = %s (%v), want enabled false with the %s hint", standalone, w.Body.String(), err,
+				map[bool]string{true: "managed config", false: "per-user command"}[standalone])
+		}
 	}
 }
 
