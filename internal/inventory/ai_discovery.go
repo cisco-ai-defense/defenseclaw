@@ -2221,8 +2221,16 @@ func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
 		// Prefer the union reader so we only decode the (often multi-MB)
 		// conversation-state file once and basenames covers both scopes.
 		return config.ReadMCPFromClaudeJSONBothScopes(path)
-	case base == "settings.json" || base == "settings.local.json":
-		return config.ReadMCPFromClaudeSettings(path)
+	case base == "settings.json" || base == "settings.local.json" || base == "settings.jsonc" ||
+		base == "managed-settings.json":
+		// Claude Code and Qwen keep their servers under mcpServers; Amp
+		// (amp mcp add) under amp.mcpServers, in JSONC (GAP-1062).
+		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"}, []string{"amp.mcpServers"})
+	case base == "opencode.json" || base == "opencode.jsonc":
+		return config.ReadMCPFromOpenCodeConfig(path)
+	case base == "openclaw.json" || (base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw"):
+		// Read as a bare map, every top-level key was listed as a server.
+		return config.ReadMCPFromJSONCPaths(path, []string{"mcp", "servers"})
 	default:
 		return config.ReadMCPFromDotMCPJSON(path)
 	}

@@ -613,6 +613,22 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return readMCPFromClaudeSettings(path)
 }
 
+// ReadMCPFromJSONCPaths reads the MCP servers found at each key chain of
+// paths in a JSON or JSONC file (union). AI discovery uses it for the agent
+// files whose servers are not a top-level mcpServers map: Amp's
+// amp.mcpServers and OpenClaw's and ZeptoClaw's mcp.servers (GAP-1062).
+func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(jsonc.Strip(data), &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, paths...)
+}
+
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
 // Codex `~/.codex/config.toml` reader for callers that need to
 // enumerate mcp_servers entries out of a TOML file.
