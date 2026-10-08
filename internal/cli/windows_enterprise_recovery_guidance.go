@@ -311,6 +311,20 @@ func windowsEnterpriseExecutionPolicyRefusal(stderr []byte) string {
 	return ""
 }
 
+// windowsEnterpriseRolledBackMessage is the ensure warning after a pending
+// transaction was rolled back and nothing newer was asked for: the services
+// run again on the restored release, and the change the transaction made
+// (typically an upgrade cut off by a restart or a power loss) did not finish.
+func windowsEnterpriseRolledBackMessage(version string) string {
+	restored := "the restored release"
+	if version = strings.TrimSpace(version); version != "" {
+		restored = "DefenseClaw " + version
+	}
+	return "ensure rolled back an interrupted lifecycle change (for example an upgrade cut off by a restart or a power loss), and " +
+		restored + " runs again. The interrupted change did not finish: run the Setup that started it again with /ensure " +
+		"(" + windowsEnterpriseStandaloneSetupName + " of that release, or let the MDM retry its app assignment)"
+}
+
 // windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
 // lifecycle refused to collect a managed runtime bundle it cannot confirm
 // belongs to this deployment (GAP-1419): the error named no file, no reason

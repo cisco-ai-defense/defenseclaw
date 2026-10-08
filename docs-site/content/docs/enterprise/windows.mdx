@@ -833,7 +833,12 @@ DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
 ```
 
 `/repair` also recovers the transaction; after a failed first install it
-then stops with "run Install", so `/ensure` is the one-step command. Outside
+then stops with "run Install", so `/ensure` is the one-step command. The
+recovery restores the release that ran before the interrupted change, and
+the result, `status`, `verify` and `deployment.json` report that release.
+When the CLI that recovered it is that older release (the installed CLI, or
+the Intune remediation), the result warns `recovered_pending_transaction`:
+the change did not finish, so run the newer Setup `/ensure` again. Outside
 an MDM, a one-time scheduled task that runs as SYSTEM gives the same context
 (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 From a payload folder (see [Run the lifecycle CLI from a payload

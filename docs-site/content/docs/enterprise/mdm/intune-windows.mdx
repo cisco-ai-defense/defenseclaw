@@ -191,7 +191,12 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   and repairs from the installed payload, or does nothing. A repair
   re-applies the deployment and stops every DefenseClaw service, so the
   gateway is down for one to two minutes and hooks fail closed meanwhile. It
-  exits with the lifecycle's code.
+  exits with the lifecycle's code. After an upgrade that a restart or a power
+  loss cut off, the installed (older) CLI rolls the change back: the line says
+  `repaired: ensure rolled back an interrupted lifecycle change`, names the
+  release that runs again, and asks you to run the newer Setup `/ensure` again
+  (the Win32 app retries it). Status, verify and the install record then report
+  the release that is installed.
 
 Both print one short line, because Intune keeps 2,048 characters of output.
 The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`.

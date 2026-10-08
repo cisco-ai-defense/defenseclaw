@@ -2205,6 +2205,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 					result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 					return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 				}
+			} else if !deferredActivation {
+				// The recovery rolled the deployment back and this release
+				// cannot finish the change it interrupted: say so and name the
+				// next step instead of a plain "repaired" (GAP-0767).
+				result.AddWarning("recovered_pending_transaction", windowsEnterpriseRolledBackMessage(followStatus.InstalledVersion))
 			}
 		}
 	}

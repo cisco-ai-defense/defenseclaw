@@ -316,10 +316,15 @@ try {
     # from: its ensure succeeds with a warning while verify keeps failing, so
     # this is not repaired, and only Setup /repair fixes it (GAP-0631).
     $runtime = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'scanner_runtime_unavailable' } | Select-Object -First 1
+    # A rollback of an interrupted change (an upgrade cut off by a restart or
+    # a power loss) is repaired, but the change itself did not finish: say
+    # so and name the next step (GAP-0767).
+    $recovered = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'recovered_pending_transaction' } | Select-Object -First 1
     if ($document.ok -and $null -ne $runtime) {
         $summary = "not repaired (scanner_runtime_unavailable): $($runtime.message)"
         $code = 1603
     }
+    elseif ($document.ok -and $null -ne $recovered) { $summary = "repaired: $($recovered.message)" }
     elseif ($document.ok -and $document.noop) { $summary = 'already healthy' }
     elseif ($document.ok) { $summary = 'repaired' }
     else {
