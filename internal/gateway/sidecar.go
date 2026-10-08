@@ -7082,7 +7082,9 @@ func rollbackFailedConnectorSetup(conn connector.Connector, opts connector.Setup
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] rolling back partial %s setup\n", conn.Name())
-	opts.FailedSetupFailClosed = connector.HookFailClosed(opts, conn)
+	// Per-user installs only: managed and Secure Client rollbacks keep the
+	// tombstone they have always written.
+	opts.FailedSetupFailClosed = !opts.ManagedEnterprise && connector.HookFailClosed(opts, conn)
 	var rollbackErrors []error
 	if err := conn.Teardown(ctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s: %v\n", conn.Name(), err)

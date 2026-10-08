@@ -74,8 +74,11 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
 	}
 	opts.OTLPPathToken = otlpToken
-	if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
-		return setupRefusedUnchanged{err: err}
+	if !opts.ManagedEnterprise {
+		// Managed installs, Secure Client included, keep their setup path.
+		if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
+			return setupRefusedUnchanged{err: err}
+		}
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
