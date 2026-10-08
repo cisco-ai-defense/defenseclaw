@@ -80,7 +80,8 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
     the connector as running (GAP-0378).
     """
 
-    if not _is_windows():
+    if not _is_windows() or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        # Managed installs (Secure Client included) keep their own status.
         return []
     for path in _hook_config_paths(cfg, connector):
         try:

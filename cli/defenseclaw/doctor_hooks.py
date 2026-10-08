@@ -3371,8 +3371,9 @@ def validate_windows_hook_registration(
         )
         resolved = _resolve_target(raw_target, kind, search_path=search_path, pathext=pathext)
         if not resolved:
-            if ntpath.basename(raw_target).casefold() == "defenseclaw-hook.exe":
-                # Only the installer puts the launcher back (GAP-0378).
+            if not managed_enterprise and ntpath.basename(raw_target).casefold() == "defenseclaw-hook.exe":
+                # Only the per-user installer puts the launcher back (GAP-0378);
+                # managed installs keep their own repair text.
                 raise _InspectionError(
                     "launcher-missing",
                     f"the DefenseClaw hook launcher {raw_target} is missing, so every hook call fails",

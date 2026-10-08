@@ -1434,6 +1434,11 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
     return 1
 
 
+def _doctor_managed(cfg) -> bool:
+    """Whether cfg is a managed (enterprise) install, Secure Client included."""
+    return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+
+
 def _root_owned_file(path: str) -> bool:
     """Whether *path* is a regular file owned by root while doctor runs as another account."""
     try:
@@ -1454,7 +1459,11 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     leftovers = sudo_runtime_leftover_relpaths(data_dir)
     # config.yaml and gateway.log are not private runtime files, but a sudo
     # run leaves them root-owned too; chown gives them back (GAP-0398).
-    chown = [name for name in ("config.yaml", "gateway.log") if _root_owned_file(os.path.join(data_dir, name))]
+    chown = (
+        []
+        if _doctor_managed(cfg)
+        else [name for name in ("config.yaml", "gateway.log") if _root_owned_file(os.path.join(data_dir, name))]
+    )
     if chown:
         user = getpass.getuser()
         _emit(
@@ -2178,7 +2187,8 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     from defenseclaw.file_permissions import windows_acl_confidentiality_error
 
     data_dir = _configured_gateway_data_dir(cfg)
-    if not data_dir:
+    if not data_dir or _doctor_managed(cfg):
+        # Managed installs own their file modes; Secure Client keeps its rows.
         return
     gateway = getattr(cfg, "gateway", None)
     targets = (
@@ -2295,7 +2305,7 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
                 "and if it keeps failing, run 'defenseclaw-gateway restart'"
             )
-        elif modes := _audit_db_exposing_modes(db_path):
+        elif not _doctor_managed(cfg) and (modes := _audit_db_exposing_modes(db_path)):
             # A permission slip, not damage: tighten, do not restore (GAP-0337).
             detail = "; ".join(f"{path} has mode {mode:04o}" for path, mode in modes) + (
                 ", so other accounts can read the audit history; the content is intact"
