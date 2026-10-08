@@ -617,6 +617,34 @@ func tetragonCLIHost(t *testing.T) *testHost {
 	return h
 }
 
+// GAP-0046: a pause or resume that wrote its file succeeds whatever else
+// the host reports (here a recorded policy with no helper running, which
+// status fails on), and prints the change, not the whole status: the fleet
+// emergency-pause play marked paused hosts failed.
+func TestTetragonPauseSucceedsWhateverTheHostReports(t *testing.T) {
+	h := tetragonCLIHost(t)
+	ctx := context.Background()
+	h.recordTetragonPolicies(recordedTetragonPolicies...)
+	h.services.active[unitSensorHelper] = false
+	if status := RunTetragon(ctx, h.env, TetragonOptions{Action: TetragonActionStatus}); status.OK {
+		t.Fatalf("test setup: status found no problem: %+v", status.Errors)
+	}
+	for _, action := range []string{TetragonActionPause, TetragonActionResume} {
+		rep := RunTetragon(ctx, h.env, TetragonOptions{Action: action, For: time.Hour, Reason: "dccert"})
+		if !rep.OK || rep.ExitCode != 0 || len(rep.Errors) != 0 || len(rep.Warnings) == 0 {
+			t.Fatalf("%s: ok %v exit %d errors %+v warnings %+v", action, rep.OK, rep.ExitCode, rep.Errors, rep.Warnings)
+		}
+		var out strings.Builder
+		if err := WriteTetragonReport(&out, rep, false); err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+		if len(lines) != 2 || !strings.HasPrefix(lines[0], "✓ ") || !strings.Contains(lines[1], "tetragon status") {
+			t.Fatalf("%s printed:\n%s", action, out.String())
+		}
+	}
+}
+
 func TestTetragonPauseAndResume(t *testing.T) {
 	h := tetragonCLIHost(t)
 	ctx := context.Background()

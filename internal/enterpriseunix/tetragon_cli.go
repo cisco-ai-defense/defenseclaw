@@ -959,8 +959,13 @@ func RunTetragon(ctx context.Context, env *Env, opts TetragonOptions) *TetragonR
 			return finish(enterprisestatus.UnixExitInvalidArgs)
 		}
 	}
+	// A pause or resume that wrote its file succeeded: a problem of the host
+	// it reports (a policy that did not load, say) is the status command's to
+	// fail on, and must not make the kill switch, or the fleet play that runs
+	// it, report a failure (GAP-0046).
+	switched := opts.Action == TetragonActionPause || opts.Action == TetragonActionResume
 	for _, finding := range tetragonFindings(in) {
-		if finding.Problem {
+		if finding.Problem && !switched {
 			rep.addError(finding.Code, finding.Message)
 			if finding.Code == codeKernelPolicyOrphaned {
 				rep.Orphaned = append(rep.Orphaned, state.Loaded...)
@@ -1454,6 +1459,12 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 	}
 	for _, change := range rep.Changes {
 		fmt.Fprintf(w, "✓ %s\n", change)
+	}
+	if (rep.Action == TetragonActionPause || rep.Action == TetragonActionResume) && rep.OK {
+		// The change is the answer; the host's state has its own command
+		// (and shows the helper's view only after its next pass).
+		fmt.Fprintf(w, "  check the host with: %s\n", adminCommand("enterprise", "linux", "tetragon", "status"))
+		return nil
 	}
 	if rep.Helper.Unit == "" {
 		// The command stopped before it read the helper's state.
