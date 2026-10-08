@@ -50,9 +50,11 @@ import (
 func TestListAndStatus(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("b-box"))
 	ta.daemon.add(sampleSandbox("a-box"))
+	// GAP-0359: a profile other than its pack's names the pack as such.
+	ta.daemon.edit("b-box", func(sb *sandboxapi.Sandbox) { sb.Pack, sb.Profile = "open", "balanced" })
 	ta.ok(t, ta.List(bg, OutputText))
 	out := ta.output()
-	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m")
+	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m", "balanced (pack open)")
 	if strings.Index(out, "a-box") > strings.Index(out, "b-box") {
 		t.Fatalf("list is not sorted:\n%s", out)
 	}

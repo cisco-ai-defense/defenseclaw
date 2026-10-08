@@ -814,7 +814,10 @@ defenseclaw sandbox logs fix-tests --lines 50
 ### `sandbox list`
 
 Lists this DefenseClaw's sandboxes with their harness, phase, workspace mode,
-profile, uptime, hook traffic, and project folder. The HOOKS column reads
+profile, uptime, hook traffic, and project folder. PROFILE is the profile the
+sandbox runs, followed by its pack when that is another one: `balanced (pack
+open)` is the balanced profile of the open pack, as a repository policy or
+`--profile` that tightens a pack's profile leaves it. The HOOKS column reads
 `tamper!` once a tool call ran without a DefenseClaw verdict, `unreachable!`
 while the hooks do not reach DefenseClaw, and `silent!` while the harness
 works without hook traffic.

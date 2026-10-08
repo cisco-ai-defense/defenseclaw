@@ -77,9 +77,12 @@ func phaseText(sb sandboxapi.Sandbox) string {
 	return p
 }
 
+// profileText is the PROFILE cell: the profile the sandbox runs, and the
+// pack when it is another one, named as the pack: "balanced (open)" left the
+// reader to guess what the parenthesis held (GAP-0359).
 func profileText(sb sandboxapi.Sandbox) string {
 	if sb.Pack != "" && sb.Pack != sb.Profile {
-		return sb.Profile + " (" + sb.Pack + ")"
+		return sb.Profile + " (pack " + sb.Pack + ")"
 	}
 	return sb.Profile
 }
