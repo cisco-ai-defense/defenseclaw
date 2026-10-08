@@ -139,6 +139,13 @@ type AssetPolicyInput struct {
 	Transport      string
 	RuntimeSurface string
 
+	// DeclaredNames are other names the asset gives itself, such as the
+	// name in a skill's SKILL.md frontmatter. A denied rule matches Name
+	// or any of them, so a copy of a denied skill in a folder with another
+	// name is still denied (GAP-0570); allowed and registry rules match Name
+	// only, so a declared name never admits an asset.
+	DeclaredNames []string
+
 	// unicodeNames compares names after Unicode NFC normalisation
 	// (NormalizeAssetName, GAP-0432). EvaluateAssetPolicy and
 	// AssetListDecision set it outside Secure Client.

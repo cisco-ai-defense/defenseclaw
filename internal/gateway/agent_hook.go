@@ -228,6 +228,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// and the agent identity derived from both (never the payload).
 		// No-op without profiles.
 		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
+		// What a standalone hook read in its user's home for asset_policy
+		// (skill names, the MCP server definition): claims, never authority.
+		r = r.WithContext(withClaimedAssetFacts(r.Context(), r.Header))
 
 		// Run installs the same ordinary API ceiling globally. Keep the hook
 		// handler bounded as a standalone unit too because connector tests and

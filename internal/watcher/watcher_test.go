@@ -195,6 +195,26 @@ func TestAdmission_BlockedSkill(t *testing.T) {
 	}
 }
 
+// GAP-0581: a copy of a denied skill in a folder with another name, whose
+// SKILL.md still declares the denied name, is refused like the original.
+func TestAdmission_BlockedSkillByDeclaredName(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "epa-deny"})
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+
+	skillPath := filepath.Join(skillDir, "epa-alias")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillPath, "SKILL.md"), []byte("---\nname: epa-deny\ndescription: lab\n---\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "epa-alias", Path: skillPath, Timestamp: time.Now()})
+	if result.Verdict != VerdictBlocked {
+		t.Fatalf("verdict %q (%s), want blocked", result.Verdict, result.Reason)
+	}
+}
+
 func TestAdmission_AllowedSkill(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 

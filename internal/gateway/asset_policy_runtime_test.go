@@ -12,6 +12,8 @@ package gateway
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -705,4 +707,33 @@ func TestAssetPolicyAuditRowNamesTheCaller(t *testing.T) {
 		return
 	}
 	t.Fatal("no asset-policy audit row")
+}
+
+// GAP-0570: a skill folder whose SKILL.md declares a denied name is denied
+// under its own folder name, and a declared name never admits a skill.
+func TestClaudeCodeSkillDeniedByDeclaredName(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "skills", "epa-alias")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: epa-deny\n---\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-deny"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1003, Home: home})
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: map[string]interface{}{"skill": "epa-alias"}}
+	if decision, matched := api.claudeCodeSkillAssetDecision(ctx, req); !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+		t.Fatalf("matched=%v decision=%+v, want an admin-deny block", matched, decision)
+	}
+
+	cfg.AssetPolicy.Skill.Denied = nil
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "epa-deny"}}
+	cfg.AssetPolicy.Enabled, cfg.AssetPolicy.Mode, cfg.AssetPolicy.Skill.Default = true, "action", "deny"
+	enableSkillRuntimeDetection(cfg)
+	if decision, matched := api.claudeCodeSkillAssetDecision(ctx, req); !matched || decision.Source != "default-deny" {
+		t.Fatalf("matched=%v decision=%+v, want the declared name not to admit epa-alias", matched, decision)
+	}
 }

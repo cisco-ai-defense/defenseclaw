@@ -98,6 +98,9 @@ func newHookCmd() *cobra.Command {
 			opts.HookSurface = strings.TrimSpace(hookSurface)
 			// Only the standalone binary explains an unenrolled account.
 			opts.ExplainUnenrolledAccount = enterpriseManaged && implicitEnterpriseManagedHook()
+			if enterpriseManaged {
+				opts.AssetFacts = hookAssetFacts
+			}
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {

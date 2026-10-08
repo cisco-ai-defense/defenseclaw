@@ -35,6 +35,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -1044,6 +1045,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	assetDecision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           evt.Name,
+		DeclaredNames:  declaredAssetNames(cfg, evt),
 		Connector:      connector,
 		SourcePath:     evt.Path,
 		RuntimeSurface: "watcher",
@@ -1221,7 +1223,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 // rows in the actions table, unchanged.
 func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent, targetType, connector string) policy.AdmissionInput {
 	block, allow := policy.AssetPolicyListsFor(cfg, w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
-		TargetType: targetType, Name: evt.Name, Connector: connector, SourcePath: evt.Path,
+		TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(cfg, evt),
+		Connector: connector, SourcePath: evt.Path,
 	}))
 	input := policy.AdmissionInput{
 		TargetType: targetType,
@@ -1237,6 +1240,21 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 		input.VerifyFirstParty()
 	}
 	return input
+}
+
+// declaredAssetNames is the name a skill folder declares in its SKILL.md
+// when it differs from the folder name. A denied rule matches it too, so a
+// copy of a denied skill in a folder with another name is refused like the
+// original (GAP-0581). A Secure Client host keeps the folder-name match of
+// main (issue #1092).
+func declaredAssetNames(cfg *config.Config, evt InstallEvent) []string {
+	if evt.Type != InstallSkill || cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
+	if name := assetfacts.DeclaredSkillName(evt.Path); name != "" && !config.SameAssetName(name, evt.Name) {
+		return []string{name}
+	}
+	return nil
 }
 
 // withMCPDefinition adds how an MCP server starts (URL, command, args,

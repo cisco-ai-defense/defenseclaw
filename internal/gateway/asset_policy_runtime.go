@@ -65,6 +65,9 @@ type skillRuntimeProbe struct {
 	// lookup. It must not widen ordinary asset-policy matching or record a
 	// loaded asset when no disable record exists.
 	RuntimeDisableOnly bool
+	// DeclaredNames are the names the skill declares in its SKILL.md
+	// (declaredSkillNames); a denied rule matches them too.
+	DeclaredNames []string
 }
 
 type runtimeAssetDecision struct {
@@ -91,6 +94,7 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
 
@@ -157,6 +161,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 			Matched:            true,
 			RuntimeDisableOnly: runtimeDisableOnly,
 		}
+		probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 		if decision, matched := a.evaluateNativeRuntimeSkillSelection(
 			ctx, "claudecode", req.SessionID, req.HookEventName,
 			runtimeProvenanceClaudeExpansion, probe,
@@ -206,6 +211,7 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
@@ -216,6 +222,7 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
 	return a.evaluateNativeRuntimeSkillSelection(
 		ctx, "codex", req.SessionID, req.HookEventName,
 		runtimeProvenanceCodexPromptSelection, probe,
@@ -342,6 +349,7 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	input := config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           probe.SkillName,
+		DeclaredNames:  probe.DeclaredNames,
 		Connector:      connector,
 		SourcePath:     probe.SourcePath,
 		RuntimeSurface: runtimeSurface,

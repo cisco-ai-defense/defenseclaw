@@ -53,7 +53,13 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 			rules   []AssetPolicyRule
 		}{{AssetListDeny, p.Denied}, {AssetListAllow, p.Allowed}} {
 			for _, rule := range list.rules {
-				if (strings.TrimSpace(rule.Connector) != "") != scoped || !assetRuleMatches(rule, in) {
+				if (strings.TrimSpace(rule.Connector) != "") != scoped {
+					continue
+				}
+				if list.verdict == AssetListDeny && !assetRuleMatchesAnyName(rule, in) {
+					continue
+				}
+				if list.verdict == AssetListAllow && !assetRuleMatches(rule, in) {
 					continue
 				}
 				if list.verdict == AssetListAllow && !allowPinMatches(rule.SourcePathContains, in.SourcePath) {
@@ -97,6 +103,25 @@ func (c *Config) ToolListDecision(tool, connector string) (string, AssetPolicyTo
 		}
 	}
 	return "", AssetPolicyToolRule{}
+}
+
+// assetRuleMatchesAnyName is assetRuleMatches for a denied rule: the asset
+// matches under its name or any name it declares (DeclaredNames).
+func assetRuleMatchesAnyName(rule AssetPolicyRule, in AssetPolicyInput) bool {
+	if assetRuleMatches(rule, in) {
+		return true
+	}
+	for _, name := range in.DeclaredNames {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		alias := in
+		alias.Name = name
+		if assetRuleMatches(rule, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 // SameConnector reports whether two connector names name the same connector
