@@ -55,7 +55,7 @@ if __name__ == "__main__" and sys.argv[1:] == ["--version-json"]:
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import platform_support, ux
 from defenseclaw.commands.cmd_acp import acp_cmd
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
@@ -276,6 +276,11 @@ def cli(ctx: click.Context) -> None:
     if _is_offline_rulepack_validation(ctx):
         return
     if _is_audit_export(ctx):
+        return
+    if invoked == "sandbox" and platform_support.host_os() == "windows":
+        # Every sandbox command refuses Windows (exit 3) before it would use
+        # the configuration, so a broken config.yaml is not the first thing
+        # to fix for a feature that cannot run there (GAP-0242).
         return
 
     from defenseclaw import config as cfg_mod
@@ -683,6 +688,15 @@ def _silence_closed_stdout() -> None:
         pass
 
 
+def _cwd_is_gone() -> bool:
+    """Whether this process's working directory was deleted."""
+    try:
+        os.getcwd()
+    except FileNotFoundError:
+        return True
+    return False
+
+
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
@@ -715,6 +729,15 @@ def main() -> None:
             sys.exit(1)
         import errno
 
+        if exc.errno == errno.ENOENT and _cwd_is_gone():
+            # GAP-0264: a shell left in a folder that was deleted made the
+            # first relative path fail in os.path.abspath, with a traceback.
+            click.echo(
+                "Error: the current directory no longer exists. cd to an existing directory "
+                "and run the command again.",
+                err=True,
+            )
+            sys.exit(1)
         if exc.errno != errno.ENOSPC:
             raise
         # GAP-1838: a full disk is an environment problem, not a crash.

@@ -1802,6 +1802,11 @@ def _with_hook_decisions(store: object | None, events: list[AlertEvent]) -> list
             # An ACP prompt names its route like the audit row (GAP-1629).
             route = _acp_route_from_rows(rows)
             event = replace(event, facts=(*facts, ("Decision", decision), *((("Route", route),) if route else ())))
+        # A finding raised in a sandbox session names the sandbox, which only
+        # its hook decision records, as `defenseclaw alerts` does (GAP-0232).
+        sandbox = next((s for raw in rows if (s := parse_detail_tokens(raw or "").get("sandbox", "").strip())), "")
+        if sandbox and all(fact[0] != "Sandbox" for fact in event.facts):
+            event = replace(event, facts=(*event.facts, ("Sandbox", sandbox)))
         out.append(event)
     return out
 

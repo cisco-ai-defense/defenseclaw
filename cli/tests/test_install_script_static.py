@@ -1118,6 +1118,37 @@ def test_the_two_python_environment_builds_are_named() -> None:
     assert 'New-Venv $Venv "the final environment"' in install_new
 
 
+def test_an_older_release_over_a_newer_one_is_called_a_downgrade(tmp_path: Path) -> None:
+    # GAP-0287: 1.0.23's installer over 1.0.24 asked nothing and said "Upgraded from 1.0.24".
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    helpers = text[text.index("version_key() {") : text.index("is_version() {")]
+    start = text.index('    changed="Upgraded"')
+    end = text.index("\n", text.index('printf "  ${changed} from', start))
+    script = tmp_path / "end.sh"
+    for version, prev, word in (("1.0.23", "1.0.24", "Downgraded"), ("1.0.25", "1.0.24", "Upgraded")):
+        script.write_text(f"{helpers}CYAN= NC=\nVERSION={version} PREV_VERSION={prev}\n{text[start:end]}\n")
+        assert _run([str(script)], tmp_path).stdout.strip() == f"{word} from {prev}. Undo with: defenseclaw rollback"
+    assert 'ask_yes_no "Downgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?' in text
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert 'Confirm-Step "Downgrade DefenseClaw $PrevVersion -> ${Ver}?' in windows and "-DefaultNo)" in windows
+
+
+@pytest.mark.parametrize(
+    ("local", "expected"),
+    [("/srv/assets", "Verifying the release assets in /srv/assets"), ("", "Downloading and verifying release assets")],
+)
+def test_the_asset_step_says_whether_it_downloads(tmp_path: Path, local: str, expected: str) -> None:
+    # GAP-0190: --local printed "Downloading and verifying release assets" although it only copies.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index('if [[ -n "${LOCAL_DIR}" ]]; then\n    info "Verifying')
+    script = tmp_path / "step.sh"
+    script.write_text(f'info() {{ echo "$*"; }}\nLOCAL_DIR="{local}"\n' + text[start : text.index("\nfi\n", start) + 4])
+    assert _run([str(script)], tmp_path).stdout.strip() == expected
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert 'if ($LocalDir) { Write-Info "Verifying the release assets in $LocalDir" } else {' in windows
+    assert "The downloaded gateway" not in text + windows
+
+
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write any prefix")
 def test_declining_openclaw_names_the_working_command_and_skips_quickstart(tmp_path: Path) -> None:
     # GAP-1798: the skip hint said plain "npm install -g" (EACCES on a

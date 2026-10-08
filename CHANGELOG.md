@@ -535,6 +535,12 @@ rest also reach per-user installs.
   fallback. A command that blocks in Claude Code or Codex could then run in
   Amp with a detection-only finding, for example one that writes its output
   to `~/out.txt`. Amp commands are now analyzed like the other agents'.
+- **`defenseclaw alerts` says how many detection-only findings it leaves
+  out.** A rule that matched a call it could not decide is not an alert, so
+  the list could read `No alerts. All clear.` while such calls ran. It now
+  ends with how many detection-only findings the last 24 hours had, says
+  `No alerts.` without `All clear`, and names
+  `defenseclaw audit export --since 24h` to read them.
 - **AI discovery on macOS skips the folders macOS protects.** Without Full
   Disk Access, every model file scan counted each folder macOS privacy
   protection keeps it out of (for example other apps' containers under
@@ -1031,7 +1037,10 @@ deleted.
   terminal, with `--yes` or after a skip, end with `N files changed; nothing
   was applied` and the `sandbox pull` command, and say when they keep a
   sandbox despite `--rm`. `sandbox review` of a copy-mode sandbox previews
-  its pull instead of failing. A copy above the upload cap names
+  its pull instead of failing. A git copy names, in one warning after the
+  upload, what it leaves out because git ignores it or it is a package cache
+  (`node_modules/`, `.venv/`, build output), and says to install the
+  dependencies inside the sandbox. A copy above the upload cap names
   `openshell.workdir.max_upload_mb`; on a Mac a full sandbox disk names the
   MicroVM's overlay (`overlay_disk_mib`).
 - Claude Code and Codex per-run managed settings are baked, root-owned and

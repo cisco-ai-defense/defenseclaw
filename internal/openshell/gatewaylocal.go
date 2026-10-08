@@ -191,9 +191,26 @@ func (r *doctorRun) gatewayPortHeld() (held string, other bool) {
 func (r *doctorRun) portHeldFix(other bool) *Fix {
 	start := r.startCommand().String()
 	if other {
+		handOver := "`" + r.handOverCommand().String() + "` as that account"
+		if r.GOOS != "darwin" {
+			// A plain stop leaves the unit enabled: it starts again at
+			// that account's next login or boot and takes the port back
+			// (GAP-0205).
+			handOver += "; a plain stop starts it again at that account's next login"
+		}
 		return &Fix{Summary: "one OpenShell gateway runs on a machine, under the account that started it, and this account's would not get its port: " +
-			"run sandboxes from that account, or have it stop its gateway (`" + r.stopCommand().String() + "` as that account), then start this one",
+			"run sandboxes from that account, or have it hand its gateway over (" + handOver + "), then start this one",
 			Command: start}
 	}
 	return &Fix{Summary: "stop what holds the port (another OpenShell gateway, for one), then start the service", Command: start}
+}
+
+// handOverCommand stops the gateway service for good, so that another
+// account can run the machine's one gateway: on Linux it also disables the
+// unit; `brew services stop` already unregisters it from login.
+func (r *doctorRun) handOverCommand() serviceCommand {
+	if r.GOOS == "darwin" {
+		return r.stopCommand()
+	}
+	return serviceCommand{"systemctl", []string{"--user", "disable", "--now", GatewayService}}
 }

@@ -264,6 +264,19 @@ def test_the_details_name_the_image_sandbox_image_list_shows() -> None:
     assert "Image" not in dict(_model().detail_pairs()[1])
 
 
+def test_the_details_name_the_repository_policy() -> None:
+    # GAP-0244: the banner named .defenseclaw/sandbox.yaml and what it
+    # tightened; the detail showed only the pack and profile.
+    policy = {"path": "/p/.defenseclaw/sandbox.yaml", "digest": "sha256:ab", "tightened": ["network.mode", "egress.block"]}
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [{**COPY, "repo_policy": policy}], [])
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Repo policy"] == ".defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)"
+    model.set_snapshot(STATUS, [{**COPY, "repo_policy": {**policy, "tightened": []}}], [])
+    assert dict(model.detail_pairs()[1])["Repo policy"] == ".defenseclaw/sandbox.yaml: the policy is as strict already"
+    assert "Repo policy" not in dict(_model().detail_pairs()[1])
+
+
 def test_the_process_tree_is_in_the_details() -> None:
     model = SandboxesPanelModel()
     model.set_snapshot(STATUS, [{**COPY, "process_tree": True}], [])
@@ -380,6 +393,29 @@ async def test_the_sandbox_detail_shows_its_destinations_at_80x24(fetch, monkeyp
         close = screen.query_one("#sandbox-detail-close").region
         assert close.height > 0 and close.y >= 0 and close.bottom <= 24
     assert ("Destination", "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl") in screen.model.pairs
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_sandbox_detail_says_how_its_detached_run_ended(fetch, monkeypatch) -> None:
+    # GAP-0273: only `sandbox logs` said a detached run finished or was cut.
+    from defenseclaw.tui.services.sandbox_state import detached_run_text
+
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls({"name": "docs", "state": "interrupted", "started_at": "2026-10-08T07:15:00Z", "log": "x"})
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        stopped = next(row for row in app.sandbox_model.rows if row.name == "docs")
+        running = next(row for row in app.sandbox_model.rows if row.running)
+        text = await app._fetch_sandbox_run(stopped)  # noqa: SLF001
+        assert await app._fetch_sandbox_run(running) == ""  # noqa: SLF001 - no call for a running one
+    assert text.startswith("did not finish: the sandbox stopped while it ran, started ")
+    assert text.endswith(" · log: defenseclaw sandbox logs docs")
+    assert calls.calls == [("sandbox_run_log", ("docs",), {"lines": 1})]
+    assert detached_run_text({"state": "exited", "exit": "0"}, "night-un") == (
+        "finished: exited with status 0 · log: defenseclaw sandbox logs night-un"
+    )
+    assert detached_run_text({}, "docs") == ""
 
 
 @pytest.mark.asyncio
@@ -1235,6 +1271,8 @@ async def test_windows_shows_only_the_unsupported_message(monkeypatch) -> None:
         await pilot.pause()
         assert app.sandbox_model.view == "sandboxes"
         assert "t view" not in app.hint_text and "? help" in app.hint_text
+        # GAP-0256: the hint bar names the quit key; q only closes a drawer.
+        assert "Ctrl+C quit" in app.hint_text
         assert app.query_one("#sandboxes-controls").has_class("hidden")
 
 
@@ -1468,10 +1506,37 @@ async def test_pull_shows_applies_or_branches_through_the_command_line(fetch, mo
         await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
         await app._sandbox_pull("fix-tests")  # noqa: SLF001
     assert calls.calls == []
-    assert [action.action_id for action in menus[0].actions] == ["review", "apply", "branch", "cancel"]
+    assert [action.action_id for action in menus[0].actions] == ["review", "apply", "branch", "branch_name", "cancel"]
     assert "a copy of /home/dev/code/tests" in menus[0].subtitle
     argv = ["/opt/dc/defenseclaw-gateway", "sandbox", "pull", "fix-tests", *(flags or [])]
     assert ran == ([] if flags is None else [(argv, os.getcwd())])
+
+
+@pytest.mark.asyncio
+async def test_pull_puts_the_work_on_a_branch_the_user_names(fetch, monkeypatch) -> None:
+    # GAP-0266: the TUI fixed the branch to dc/<sandbox>; --branch-name took any.
+    from defenseclaw.tui.services.sandbox_state import branch_name_problem
+
+    fetch.sandboxes = [RUNNING, COPY]
+    app = DefenseClawTUI(config=_config())
+    ran = _fake_terminal(monkeypatch, app)
+    monkeypatch.setattr(app, "_sandbox_call", _Calls())
+    screens: list[Any] = []
+    answers = _screen_answers("branch_name", " dc/un-tui ", "branch_name", None)
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return await answers(screen)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_pull("fix-tests")  # noqa: SLF001
+        await app._sandbox_pull("fix-tests")  # noqa: SLF001 - the name editor cancelled
+    assert screens[1]._value == "dc/fix-tests"  # noqa: SLF001
+    assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "pull", "fix-tests", "--branch-name", "dc/un-tui"], os.getcwd())]
+    assert branch_name_problem("  ") and branch_name_problem("--force") and branch_name_problem("a b")
+    assert branch_name_problem("dc/un-tui") is None
 
 
 @pytest.mark.asyncio
@@ -2247,12 +2312,21 @@ async def test_stop_asks_first_then_runs_the_command_line(fetch, monkeypatch) ->
     calls = _Calls()
     ran = _fake_terminal(monkeypatch, app)
     monkeypatch.setattr(app, "_sandbox_call", calls)
-    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("cancel", "stop"))
+    answers = _screen_answers("cancel", "stop")
+    screens: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return await answers(screen)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
     async with app.run_test(size=(160, 44)):
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
         assert ran == []
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
     assert calls.calls == []
+    # GAP-0261: the dialog opens on Cancel, so s then Enter stops nothing.
+    assert screens[0].actions[screens[0].selected_index].action_id == "cancel"
     assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "stop", "myapp-claude-7f3a"], os.getcwd())]
 
 
@@ -2456,15 +2530,16 @@ async def test_irreversible_confirmations_focus_cancel(fetch, monkeypatch) -> No
     # Delete, and the undo of a running sandbox, ask on the command line,
     # whose questions default to no.
     assert [tuple(argv[1:3]) for argv, _cwd in ran] == [("sandbox", "delete"), ("sandbox", "undo")]
+    # Stop keeps the sandbox for connect, but ends the live agent session:
+    # a stray Enter after s did (GAP-0261), so it focuses Cancel too.
     for title in (
         "Unblock webhook.site in every sandbox?",
         "Always allow www.example.com?",
+        "Stop myapp-claude-7f3a?",
     ):
         screen = confirmations[title]
         assert screen.selected_index is not None, title
         assert screen.actions[screen.selected_index].action_id == "cancel", title
-    # Stop keeps the sandbox for connect: it keeps its default.
-    assert confirmations["Stop myapp-claude-7f3a?"].selected_index is None
 
 
 @pytest.mark.asyncio
@@ -2576,7 +2651,7 @@ def test_the_sandbox_selection_follows_its_row() -> None:
     assert model.handle_key("d") == SandboxPanelAction("delete", sandbox="docs")
     model.set_snapshot(STATUS, [RUNNING, COPY], [])
     refused = model.handle_key("d")
-    assert refused.kind == "hint" and "is gone" in refused.hint
+    assert refused.hint == "The sandbox the cursor was on is gone; nothing was done. Select one, then press the key again."
 
 
 @pytest.mark.asyncio

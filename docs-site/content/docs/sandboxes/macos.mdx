@@ -57,7 +57,7 @@ MicroVMs do not run in Docker Desktop.
 | [Homebrew](https://brew.sh) | OpenShell installs from NVIDIA's `nvidia/openshell` Homebrew formula, and its gateway runs as a Homebrew service. |
 | Xcode or the Command Line Tools | The formula may build from source, and Homebrew then wants current developer tools for your macOS release. See [developer tools](#developer-tools) below. |
 | `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it (`brew install e2fsprogs`). |
-| Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Its buildx plugin is included. |
+| Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Its buildx plugin is included. Start it once on your own account before setup: its first start needs an administrator (see [Docker Desktop's first start](#docker-desktops-first-start)). |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. The MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started. |
 
 DefenseClaw does not check for a minimum macOS release itself. What matters
@@ -80,6 +80,21 @@ setup says `Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so`.
 Update that Xcode or delete it. Updating the Command Line Tools does not
 help.
 </Callout>
+
+### Docker Desktop's first start
+
+The first time Docker Desktop starts on your account, it asks you to:
+
+- install Rosetta, when the Mac does not have it yet;
+- allow it to find devices on your local network;
+- accept its licence;
+- type an administrator's name and password, so that it can install its
+  privileged helper.
+
+On a standard account, have an administrator type their name and password at
+that last prompt. Setup does not answer these prompts for you: it only checks
+that Docker is running, and its Docker check fails until Docker Desktop has
+started once.
 
 ## Set up
 
@@ -112,15 +127,19 @@ Then it:
 2. **Switches the gateway to MicroVMs.** It asks:
 
    ```text
-   Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in ~/.config/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n]
+   Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in /opt/homebrew/var/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n]
    ```
 
    Yes writes the driver, your uid and gid as the MicroVM sandbox user, and
    more resources for each MicroVM (4 vCPUs, up to 4 GiB of memory and a
    16 GiB disk for its changes, which is sparse and costs nothing until
-   used) into `gateway.toml`, with a timestamped backup, then restarts the
-   gateway once. These settings apply to every sandbox on the gateway, and
-   the question says so.
+   used) into `gateway.toml`, with a timestamped backup beside it, then
+   restarts the gateway once. These settings apply to every sandbox on the
+   gateway, and the question says so. The question names the `gateway.toml`
+   the gateway service reads: for the Homebrew service that is the formula's
+   own, `/opt/homebrew/var/openshell/gateway.toml`, unless
+   `~/.config/openshell/gateway.toml` exists, which it then reads instead.
+   `gateway.env` (step 3) is in `~/.config/openshell`.
 3. **Turns OpenShell's anonymous usage telemetry off**, if you agree,
    unless you keep it (`--upstream-telemetry`):
 
@@ -270,6 +289,8 @@ The run says it works on a copy before it copies anything:
 
   Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)
   Uploading the copy (412 files, 3.1 MiB)…
+  ⚠ 1 secret file held back from the copy: .env
+  ⚠ not copied (git ignores them, or they are package caches): node_modules/, dist/; install the dependencies inside the sandbox
 
 Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + blocklist
   Project   ~/code/myapp → /sandbox/work/myapp (copy)   changes come back with `defenseclaw sandbox pull myapp-1c2d`
@@ -280,8 +301,15 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
 ```
 
 The copy is a shallow git clone of your project plus your working tree, with
-secret files such as `.env`, keys and certificates held back. Your folder
-does not change while the agent works.
+secret files such as `.env`, keys and certificates held back. What git
+ignores, such as `node_modules/`, `.venv/` and build output, and package
+caches are not copied either. The lines after the upload name the secret
+files held back and what was left out. Install the dependencies inside the
+sandbox (ask the agent to run `npm install` or
+`pip install -r requirements.txt`) before a build or the tests. Your folder
+does not change while the agent works. With an Amazon Bedrock key the
+`Model` line names the model and the key, for example
+`anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)`.
 
 A real run on a Mac, under the `balanced` pack with the process tree on:
 
@@ -357,7 +385,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 
 | Topic | What to know |
 | --- | --- |
-| Resources | Every MicroVM on the gateway gets the same vCPUs, memory and disk, set under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`. The run flags `--cpu` and `--memory` have no effect. The doctor warns when the disk for changes is under 8 GiB. |
+| Resources | Every MicroVM on the gateway gets the same vCPUs, memory and disk, set under `[openshell.drivers.vm]` in the gateway's `gateway.toml` (`/opt/homebrew/var/openshell/gateway.toml` for the Homebrew service, unless `~/.config/openshell/gateway.toml` exists). The run flags `--cpu` and `--memory` have no effect. The doctor warns when the disk for changes is under 8 GiB. |
 | The sandbox user | Set for the whole gateway: every MicroVM on it runs as your uid and gid. |
 | Disk use | About 5 GB per image the driver has started, in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` and `sandbox image rm` remove images you no longer use, and their disks. |
 | Per-run settings | Claude Code and Codex settings are baked, root-owned and read-only, into a small run image for each sandbox. A run with other `--env`, credentials or model provider prepares another disk. |
@@ -371,6 +399,10 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
   `sandbox undo` reverts the last `pull --apply` instead.
 - **Some run flags do not apply.** `--context` is refused, and
   `--no-snapshot`, `--cpu` and `--memory` have no effect.
+- **No Git LFS inside.** An LFS file arrives in the copy as its real
+  content while the copy's history holds its pointer, so `git status`
+  inside shows it modified. Make commits that touch LFS files on your Mac
+  (see [work on a copy](/docs/sandboxes/guide#work-on-a-copy)).
 - **Experimental driver.** OpenShell calls the MicroVM driver experimental,
   and the doctor says so on every run.
 - **Not every harness runs.** A harness is used only after its image proves
@@ -423,7 +455,7 @@ Several users on one machine are tracked upstream in
 | A first run fails after about 5 minutes with `ProvisioningTimedOut: Provisioning repair window expired after 300 seconds` | The volume most often ran full while the MicroVM disk was prepared (several first starts at once each need one). Check **Disk space** in `defenseclaw sandbox doctor`, then run `defenseclaw sandbox image prune`: it also removes the half-prepared disks that failed or cancelled first starts leave in `~/.local/state/openshell/vm-driver/images`, once nothing has written to them for 15 minutes. |
 | ``<name> cannot start: its own disk is full …`` (start, connect or pull), and `sandbox status` shows `Phase error: its own disk is full …` | The MicroVM stopped with its overlay disk full, and a MicroVM cannot start on a full disk, so its work that was not pulled cannot be read any more. Delete it (`defenseclaw sandbox delete <name>`) and run again; raise `overlay_disk_mib` for new sandboxes. While a sandbox runs, `defenseclaw sandbox exec <name> -- df -h /` shows how full its disk is: free space, or pull its work, before it stops. |
 | The feed and the session summary say ``<name>'s MicroVM went down without DefenseClaw stopping it …``, or a pull's review flags a file that ``ends in N zero bytes`` | The OpenShell gateway restarted under the MicroVM (`brew services restart`, an upgrade, a crash), which stops it without flushing its disk: files written in its last seconds can come back cut short, with a tail of zero bytes. Check those files, and have the agent write them again before you bring the work back. `defenseclaw sandbox stop`, and the gateway restarts DefenseClaw makes, flush first. |
-| **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`, then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
+| **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in the gateway's `gateway.toml` (`/opt/homebrew/var/openshell/gateway.toml` for the Homebrew service, unless `~/.config/openshell/gateway.toml` exists), then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
 | The **Gateway service** check says `127.0.0.1:17670, the gateway's port, is held by a process of another account` | Another account on this Mac runs its OpenShell gateway. See [one OpenShell gateway per Mac](#one-openshell-gateway-per-mac). |
 | **Gateway service** fails: `` `brew services` refuses to run in a tmux session that has no access to this account's macOS login session `` | Run the doctor outside tmux, or in a tmux you start from Terminal in your desktop session. |
 

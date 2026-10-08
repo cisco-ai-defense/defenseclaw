@@ -140,6 +140,10 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 			return withExitCode(err, 1)
 		case errors.Is(err, context.Canceled):
 			return withExitCode(err, 130)
+		case sandboxcli.IsInterrupted(err):
+			// Ctrl-C at a question a command did not explain itself.
+			fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" interrupted at a question: what it asked about was not done; run the command again to finish")
+			return withExitCode(err, 130)
 		}
 		var disabled *sandboxcli.DisabledError
 		if errors.As(err, &disabled) && sandboxJSONOutput(cmd) {

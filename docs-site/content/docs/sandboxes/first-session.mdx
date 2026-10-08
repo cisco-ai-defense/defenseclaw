@@ -54,19 +54,24 @@ image also prepares a MicroVM disk, which takes about a minute.
 ### Read the banner
 
 Before the harness takes over your terminal, DefenseClaw prints what the
-sandbox can see and use.
+sandbox can see and use. On a Mac, where the agent works on a copy, the lines
+just before the banner say what the copy left out, such as
+`⚠ 1 secret file held back from the copy: .env`. With an Amazon Bedrock key
+the `Model` line names the model and the key:
+`Model     anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)`.
 
 <Tabs items={['Linux', 'macOS']}>
 <Tab value="Linux">
 
 ```text
 Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
-  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
   Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
+  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t)
 ```
 
 </Tab>
@@ -88,7 +93,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
 | --- | --- |
 | `Sandbox …` | The name, the harness, and the permission mode. `skip-permissions ON` means the harness's own prompts are off. `--safe` keeps them. |
 | `network: …` | The network profile: `open + blocklist` (the default), `allowlist (balanced)` or `provider hosts only (strict)`. See [network and egress](/docs/sandboxes/network). |
-| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy. |
+| `Project` | Your folder and where it appears inside. `(live)` means the agent edits your folder directly; `(copy)` means it edits a copy, without what git ignores (such as `node_modules/` and `.venv/`), so the dependencies are installed inside. |
 | `Hidden` | Secret files that appear empty inside a live mount. On a copy they are held back instead. |
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook that runs on your machine. |
 | `Model` | Which credential the harness uses. The sandbox gets a placeholder; OpenShell adds the real key only on requests to the model provider. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. |
@@ -110,10 +115,17 @@ defenseclaw sandbox activity -f
 ```text
 14:02:11 myapp-7f3a ✓ registry.npmjs.org
 14:02:13 myapp-7f3a ✓ docs.python.org
-14:02:20 myapp-7f3a ⚠ Bash: Allowed but flagged by DefenseClaw rule C2-WEBHOOK-SITE: webhook.site (known exfil). The action was allowed; DefenseClaw recorded the finding for the user's review.
+14:02:20 myapp-7f3a ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))
 14:02:20 myapp-7f3a ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
+
+The model calls do not appear: OpenShell opens the model provider's hosts
+to the harness directly (the banner's second `Model` line). Other calls of
+the harness to its own vendor do. With an Amazon Bedrock key, for example,
+Claude Code's calls to `api.anthropic.com` go through the egress proxy and
+show as `✓ api.anthropic.com`; `sandbox destinations` lists that host as
+`harness vendor`.
 
 The same feed from a real session on a Mac, for a sandbox named with
 `--name myapp-claude` and printed with
@@ -351,12 +363,24 @@ delete a copy whose work you did not bring back.
 
 ## Run without a terminal
 
-`--prompt` runs the harness headless with one prompt and streams its output.
-The sandbox is deleted at the end unless you pass `--keep`:
+`--prompt` runs the harness headless with one prompt and streams its output:
 
 ```bash
 defenseclaw sandbox run codex --prompt "fix the failing tests"
 ```
+
+When the run changed a mounted folder and you started it in a terminal, it
+ends with the same `Keep changes?` question as a session, and `u` undoes
+them. Once nothing is left in the sandbox to bring back or undo, because
+you kept the changes or there were none, the sandbox is deleted, and its
+undo point with it, so a later `sandbox undo NAME` finds no sandbox:
+
+```text
+  ✓ kept: the changes stay in the folder, and the next session takes a new undo point
+  ✓ sandbox myapp-7f3a deleted: nothing is left in it to bring back or undo (a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it)
+```
+
+Pass `--keep` to keep the sandbox and its undo point.
 
 `--detach` starts a run in the background. `sandbox logs` shows its output,
 and keeps the end of it after the sandbox stops:

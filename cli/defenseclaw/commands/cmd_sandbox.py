@@ -822,7 +822,7 @@ def _forward(ctx: click.Context, **_params: Any) -> NoReturn:
 
 def exec_gateway(argv: Sequence[str]) -> NoReturn:
     """Replace this process with ``defenseclaw-gateway <argv>``."""
-    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.gateway import GATEWAY_NOT_FOUND_MESSAGE, resolve_gateway_binary
     from defenseclaw.platform_support import host_os
 
     if host_os() == "windows":
@@ -830,10 +830,7 @@ def exec_gateway(argv: Sequence[str]) -> NoReturn:
         raise SystemExit(UNSUPPORTED_EXIT_CODE)
     binary = resolve_gateway_binary()
     if not binary:
-        raise click.ClickException(
-            "defenseclaw-gateway is not installed; run 'defenseclaw upgrade' (or 'make gateway-install' "
-            "in a source checkout) and try again",
-        )
+        raise click.ClickException(GATEWAY_NOT_FOUND_MESSAGE)
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()

@@ -148,8 +148,25 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
         ux.subhead("Nothing was changed. 'defenseclaw migrate' (or the upgrade) applies them.")
     else:
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
-    if not check and not as_json:
+    if not check and not as_json and _upgraded_from_0x(result):
         _report_hook_fail_mode_changes(data_dir or _default_data_dir())
+
+
+# The first config_version a 1.x release wrote: below it is a 0.x config,
+# whose hooks 0.8.x sealed with the global fail mode.
+_FIRST_1X_CONFIG_VERSION = 8
+
+
+def _upgraded_from_0x(result) -> bool:
+    """Whether this run migrated a 0.x config, the one upgrade that changes the fail mode.
+
+    A same-release reinstall or a 1.x upgrade printed the fail-open notice
+    too, about a connector already in action mode (GAP-0276): the gateway had
+    rewritten its hooks since, and this check reads the config by Python's
+    rules, not the gateway's.
+    """
+    source = result.from_config_version
+    return bool(result.applied) and source is not None and source < _FIRST_1X_CONFIG_VERSION
 
 
 def _report_hook_fail_mode_changes(data_dir: str) -> None:

@@ -114,7 +114,10 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 		f.doctor.PortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{UID: 4242}, nil }
 		r := f.run()
 		svc := expectCheck(t, r, "gateway-service", openshell.StatusFail, "127.0.0.1:17670, the gateway's port, is held by a process of another account (uid 4242")
-		if svc.Fix == nil || svc.Fix.Apply != nil || !strings.Contains(svc.Fix.Summary, "one OpenShell gateway runs on a machine") {
+		// The hand-over disables the other account's unit: a plain stop
+		// starts it again at that account's next login (GAP-0205).
+		if svc.Fix == nil || svc.Fix.Apply != nil || !strings.Contains(svc.Fix.Summary, "one OpenShell gateway runs on a machine") ||
+			!strings.Contains(svc.Fix.Summary, "(`systemctl --user disable --now openshell-gateway` as that account; a plain stop starts it again") {
 			t.Fatalf("service fix = %+v", svc.Fix)
 		}
 		// Nor does the registration send the user to a doctor --fix that

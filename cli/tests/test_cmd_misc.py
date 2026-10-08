@@ -128,6 +128,11 @@ class TestStatusCommand(unittest.TestCase):
             self.assertIn("details: defenseclaw sandbox status", result.output)
             result = self.runner.invoke(cmd_status.status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertTrue(json.loads(result.output)["sandbox"]["enabled"])
+        # GAP-0246: on Windows the platform wins over the config flag.
+        with patch.object(cmd_status, "_host_is_windows", return_value=True):
+            result = self.runner.invoke(cmd_status.status, [], obj=self.app, catch_exceptions=False)
+        self.assertIn("not supported on Windows (openshell.enabled has no effect here)", result.output)
+        self.assertNotIn("details: defenseclaw sandbox status", result.output)
 
 
 # ---------------------------------------------------------------------------

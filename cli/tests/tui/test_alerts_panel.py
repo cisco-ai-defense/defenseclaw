@@ -890,6 +890,25 @@ def test_post_tool_finding_reads_like_the_cli(monkeypatch) -> None:
     assert label.startswith("SEC-AWS-KEY: AWS access key")
 
 
+def test_finding_of_a_sandbox_session_names_the_sandbox() -> None:
+    """GAP-0232: the hook decision of the request names the sandbox."""
+
+    finding = _v8_alert_row(
+        "f1",
+        bucket="security.finding",
+        event_name="finding.observed",
+        severity="HIGH",
+        action="scan-finding",
+        payload={"defenseclaw.finding.rule_id": "C2-WEBHOOK-SITE", "defenseclaw.finding.target_ref": "claudecode:PreToolUse"},
+    )
+    store = SimpleNamespace(hook_details_for_alerts=lambda ids: {"f1": ["sandbox=myapp-um", "action=allow"]})
+
+    (alert,) = alerts_panel._with_hook_decisions(store, list(alerts_from_v8_history((finding,))))
+
+    assert ("Sandbox", "myapp-um") in alert.facts
+    assert ("Decision", "allowed") in alert.facts
+
+
 def test_copilot_local_and_cli_findings_share_one_target() -> None:
     """GAP-2619: a VS Code Local-harness finding (copilot:PreToolUse) and a
     Copilot CLI one (copilot:preToolUse) show the same Target."""

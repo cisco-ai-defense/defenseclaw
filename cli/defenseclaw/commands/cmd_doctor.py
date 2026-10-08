@@ -1193,10 +1193,13 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
     # Identity check: a stand-in config object must not read as enabled.
     enabled = getattr(openshell, "enabled", False) is True
     if host_os() == "windows":
+        # Skipped whatever openshell.enabled holds: a team config can carry
+        # it from Linux or macOS, and the platform wins (GAP-0246).
         _emit(
-            "warn" if enabled else "skip",
+            "skip",
             "Sandboxes",
-            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported",
+            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"
+            + ("; openshell.enabled has no effect here" if enabled else ""),
             r=r,
             check_id="doctor.sandbox.platform",
             reason_code="sandbox-platform-unsupported",
@@ -1998,6 +2001,42 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     )
 
 
+def _audit_folder_custody_text(reason: str, db_path: str, data_dir: str) -> tuple[str, str]:
+    """Detail and fix for an audit database whose folders failed the private-custody check.
+
+    Restoring the database from a backup does not help there: the folders
+    are what need fixing, and the database was not touched (GAP-0300).
+    """
+    from defenseclaw.doctor_recovery import RecoveryRefusedError, _controlled_directory_paths
+
+    try:
+        chain = _controlled_directory_paths(data_dir, os.path.dirname(db_path))
+    except RecoveryRefusedError:
+        chain = (data_dir,)
+    if reason == "directory-chain-is-writable-by-others":
+        writable = []
+        for folder in chain:
+            with contextlib.suppress(OSError):
+                if stat.S_IMODE(os.lstat(folder).st_mode) & 0o022:
+                    writable.append(folder)
+        folders = writable or [data_dir]
+        return (
+            f"{', '.join(folders)} can be written by other accounts, so the audit database in it is not trusted; "
+            f"the database itself is untouched ({reason})",
+            "chmod go-w " + " ".join(shlex.quote(folder) for folder in folders),
+        )
+    if reason == "directory-owner-mismatch":
+        return (
+            f"a folder of {data_dir} on the way to the audit database belongs to another account ({reason})",
+            f"make {data_dir} and the folders in it yours (chown), then run 'defenseclaw doctor' again",
+        )
+    return (
+        f"the folders that hold the audit database failed the private custody check ({reason})",
+        f"keep {data_dir} a private folder of your own (chmod 700 {shlex.quote(data_dir)}), "
+        "then run 'defenseclaw doctor' again",
+    )
+
+
 def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import (
         _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
@@ -2046,6 +2085,10 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
                 "and if it keeps failing, run 'defenseclaw-gateway restart'"
             )
+        elif reason.startswith("directory-"):
+            # The folders that hold it failed the check, not the database
+            # (GAP-0300).
+            detail, remediation = _audit_folder_custody_text(reason, db_path, str(getattr(cfg, "data_dir", "") or ""))
         else:
             detail = f"private custody validation failed ({reason})"
             remediation = "restore the audit database from a trusted backup"

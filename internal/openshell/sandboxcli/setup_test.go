@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"os"
@@ -411,6 +412,26 @@ func TestSetupNeedsConsentToInstall(t *testing.T) {
 	if !inst.ran {
 		t.Fatal("the installer did not run")
 	}
+}
+
+// GAP-0286: Ctrl-C at a setup question says where setup stopped and how to
+// finish, and exits 130, instead of ending it with a bare ^C.
+func TestSetupCtrlCAtAQuestionSaysWhereItStopped(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	pr, pw := io.Pipe() // a terminal nobody types into
+	t.Cleanup(func() { _ = pw.Close() })
+	ta.IO.In, ta.IO.TTY = pr, true
+	useGateway(ta)
+	ta.HostDoctor = upgradableReport(nil)
+	sig := make(chan os.Signal, 1)
+	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+		sig <- os.Interrupt
+		return sig, func() {}
+	}
+	err := ta.Setup(bg, SetupOptions{})
+	wantExit(t, err, exitInterrupted)
+	wantErr(t, err, `setup interrupted at "Upgrade OpenShell 0.1.1 to `+openshell.InstallerVersion+
+		` in place with NVIDIA's installer?": that step was not done, and the steps before it are kept; run `+"`defenseclaw sandbox setup`"+` again`)
 }
 
 // upgradableReport is hostReport on OpenShell 0.1.1, which the doctor

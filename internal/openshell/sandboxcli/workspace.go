@@ -734,6 +734,11 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			if errors.Is(err, ErrNoTerminal) {
 				return errors.New("some changes can run code on this machine; review them and pass --accept-sensitive")
 			}
+			if errors.Is(err, errInterrupted) {
+				// Ctrl-C: nothing was applied, as at a session's end (GAP-0290).
+				a.warn("interrupted: " + notBroughtBack(o.Name, res.Kind))
+				return &ExitError{Code: exitInterrupted, Err: &Silent{Err: err}}
+			}
 			return err
 		}
 		if !yes {

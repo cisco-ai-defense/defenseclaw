@@ -55,6 +55,11 @@ func TestCreateKeepsTheRepoPolicy(t *testing.T) {
 		rec.Profile != "balanced" || rec.Yolo {
 		t.Fatalf("record = %+v", rec)
 	}
+	// The sandbox's status names it too, without its content (GAP-0244).
+	if got := e.get("repo").RepoPolicy; got == nil || got.Path != file || got.Digest != ex.RepoPolicy.Digest ||
+		!slices.Equal(got.Tightened, []string{"network.mode", "harness.yolo"}) || len(got.Content) != 0 {
+		t.Fatalf("status repo policy = %+v", got)
+	}
 
 	// An edit made after the create (inside a live mount, say) waits for
 	// the next run.

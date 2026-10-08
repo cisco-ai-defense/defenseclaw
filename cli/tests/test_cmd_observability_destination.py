@@ -856,6 +856,35 @@ def test_top_level_command_fails_before_network_when_local_only_audit_seam_is_un
     assert "collector.example.test" not in result.output
 
 
+def test_a_local_file_destination_is_skipped_not_failed(tmp_path: Path) -> None:
+    # GAP-0270: a jsonl file destination read "Error: destination test failed
+    # (unsupported)", a skip reported as a failure.
+    from defenseclaw.main import cli
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
+    wire = ConfigV8WireResult(
+        wire_version=1,
+        kind="effective",
+        config_version=8,
+        source=str(config_path),
+        data_dir=str(tmp_path),
+        plan_digest="destination-test-plan",
+        network_validation="offline_syntax_and_literal_policy_only",
+        effective=_effective({"name": "soc-strict", "kind": "jsonl"}),
+    )
+    with (
+        patch.object(cmd_observability.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_observability, "inspect_v8_config", return_value=wire),
+        patch.object(cmd_observability, "canonical_local_compliance_recorder", return_value=_Compliance()),
+    ):
+        result = CliRunner().invoke(cli, ["observability", "destination", "test", "soc-strict"])
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("result: SKIPPED - jsonl destinations are not connectivity-tested")
+    assert "failed" not in result.output
+    assert destination_test.untestable_kind(_effective(_destination("soc")), "soc") == ""
+
+
 def test_gateway_local_compliance_recorder_uses_stdin_and_accepts_exact_acknowledgement(tmp_path: Path) -> None:
     activity = destination_test.ComplianceActivity(
         phase="outcome",

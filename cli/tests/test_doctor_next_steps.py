@@ -25,6 +25,7 @@ import os
 from contextlib import redirect_stdout
 from unittest import mock
 
+import pytest
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_doctor import _DoctorResult
 from defenseclaw.config_inspect import ConfigInspectError
@@ -319,6 +320,26 @@ def test_header_corrupt_audit_db_names_gateway_restart(tmp_path) -> None:
         cmd_doctor._check_audit_db_store(cfg, r)
     assert r.checks[-1]["status"] == "fail"
     assert "defenseclaw-gateway restart" in r.checks[-1]["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX folder modes")
+def test_a_writable_audit_folder_names_the_folder_not_a_restore(tmp_path) -> None:
+    # GAP-0300: a chmod 777 DEFENSECLAW_HOME read "restore the audit database
+    # from a trusted backup"; the folder was the fault and the database untouched.
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    home = tmp_path / "edge-ub-home"
+    home.mkdir()
+    home.chmod(0o777)
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="directory-chain-is-writable-by-others")
+    cfg = mock.MagicMock(audit_db=str(home / "audit.db"), data_dir=str(home))
+    r = _DoctorResult()
+    with mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    row = r.checks[-1]
+    assert row["status"] == "fail"
+    assert row["remediation"] == f"chmod go-w {home}"
+    assert f"{home} can be written by other accounts" in row["detail"]
 
 
 def _bedrock_judge_cfg(tmp_path, auth_mode: str):

@@ -76,6 +76,38 @@ TOAST_DEDUPE_SECONDS = 60.0
 BLOCK_BANNER_SECONDS = 15 * 60
 
 ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
+
+# A project's repository sandbox policy (packs.RepoPolicyPath).
+REPO_POLICY_PATH = ".defenseclaw/sandbox.yaml"
+
+
+def detached_run_text(run: Any, name: str) -> str:
+    """The detail's line for the detached run whose log a stop kept, or "" (GAP-0273).
+
+    ``run`` is ``GET .../logs`` (state, exit, started_at), which the daemon
+    keeps whenever it stops the sandbox.
+    """
+    data = _dict(run)
+    outcome = {
+        "exited": f"finished: exited with status {_text(data.get('exit')) or '?'}",
+        "interrupted": "did not finish: the sandbox stopped while it ran",
+        "running": "was still going when the sandbox stopped",
+    }.get(_text(data.get("state")), "")
+    if not outcome:
+        return ""
+    started = _time(data.get("started_at"))
+    when = f", started {started.astimezone().strftime('%H:%M')}" if started else ""
+    return f"{outcome}{when} · log: defenseclaw sandbox logs {name}"
+
+
+def branch_name_problem(value: str) -> str | None:
+    """Why the TUI's Pull cannot use a branch name, or None; git judges the rest (GAP-0266)."""
+    name = value.strip()
+    if not name:
+        return "Type a branch name."
+    if name.startswith("-") or any(ch.isspace() for ch in name):
+        return "A branch name has no spaces and does not start with -."
+    return None
 # The next step after an openshell.admin.allow_unblock refusal.
 ADMIN_UNBLOCK_NEXT = "ask your DefenseClaw administrator (openshell.admin.allow_unblock is off)"
 # A saved unblock (openshell.egress.unblocked) the organization's policy ignores.
@@ -478,6 +510,20 @@ class SandboxRow:
     image: str = ""
     # The sandbox's processes are sampled while it runs (observe.process_tree).
     process_tree: bool = False
+    # The repository policy (.defenseclaw/sandbox.yaml) its posture includes,
+    # and the settings it made stricter; the banner names both (GAP-0244).
+    repo_policy: bool = False
+    repo_tightened: tuple[str, ...] = ()
+
+    @property
+    def repo_policy_text(self) -> str:
+        """The repository policy as the launch banner words it, or ""."""
+        if not self.repo_policy:
+            return ""
+        if not self.repo_tightened:
+            return f"{REPO_POLICY_PATH}: the policy is as strict already"
+        settings = "1 setting" if len(self.repo_tightened) == 1 else f"{len(self.repo_tightened)} settings"
+        return f"{REPO_POLICY_PATH}: tightened {settings} ({', '.join(self.repo_tightened)})"
 
     @property
     def running(self) -> bool:
@@ -656,6 +702,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         violations=tuple(v for v in violations if v),
         image=_text(item.get("image")),
         process_tree=bool(item.get("process_tree")),
+        repo_policy=bool(_dict(item.get("repo_policy"))),
+        repo_tightened=tuple(_text(s) for s in _list(_dict(item.get("repo_policy")).get("tightened")) if _text(s)),
     )
 
 
@@ -1377,12 +1425,14 @@ class SandboxesPanelModel:
         if self.view not in self._selection_lost:
             return ""
         self._selection_lost.discard(self.view)
+        # The cursor's row, not a choice the user made: it may never have
+        # moved (GAP-0261).
         gone = {
-            "sandboxes": "The sandbox you selected is gone",
-            "asks": "The ask you selected is no longer waiting",
-            "activity": "The event you selected has left the feed",
+            "sandboxes": "The sandbox the cursor was on is gone",
+            "asks": "The ask the cursor was on is no longer waiting",
+            "activity": "The event the cursor was on has left the feed",
         }[self.view]
-        return f"{gone}; nothing was done. Check the selection, then press the key again."
+        return f"{gone}; nothing was done. Select one, then press the key again."
 
     @property
     def cursor(self) -> int:
@@ -1853,12 +1903,13 @@ class SandboxesPanelModel:
         note = f"+{more} more · Enter" if more else "Enter for details"
         return f"⚠ {row.name}: {alert}", note
 
-    def detail_pairs(self, destinations: Any = None) -> tuple[str, tuple[tuple[str, str], ...]]:
+    def detail_pairs(self, destinations: Any = None, *, run: str = "") -> tuple[str, tuple[tuple[str, str], ...]]:
         """Title and label/value pairs for the detail modal.
 
         ``destinations`` is the selected sandbox's ``GET .../destinations``
         answer (the panel fetches it as the detail opens), or an error
-        string; ``None`` leaves the Destinations section out.
+        string; ``None`` leaves the Destinations section out. ``run`` is the
+        kept detached run's line (detached_run_text).
         """
         if self.view == "activity":
             event = self.selected_event()
@@ -1933,11 +1984,14 @@ class SandboxesPanelModel:
             ("Phase", row.phase or "-"),
             ("Up", row.uptime_text),
             ("Policy", row.policy_label),
+            *((("Repo policy", row.repo_policy_text),) if row.repo_policy else ()),
             ("Skip-permissions", "on" if row.yolo else "off"),
             ("Project", f"{row.project} → {row.workdir} ({row.workdir_mode or '-'})" if row.project else "-"),
             ("Sites", f"{row.destinations} contacted, {row.blocked} blocked{_ai_sites_text(row)}"),
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked" + (f", {row.tool_asked} asked)" if row.tool_asked else ")")),
         ]
+        if run:
+            pairs.append(("Detached run", run))
         if row.hook_events_text:
             pairs.append(("Hook events", row.hook_events_text))
         if row.last_blocked:

@@ -251,9 +251,17 @@ func (a *App) ask(question string, def bool, assumeDefault bool) (bool, error) {
 	if def {
 		hint = "[Y/n]"
 	}
+	a.asked, _, _ = strings.Cut(question, "?")
 	for {
 		fmt.Fprint(a.IO.Out, terminalText(question+" "+a.dim(hint)+" "))
-		ans, err := a.readLine()
+		read := a.readLine
+		if a.intr == nil {
+			// Outside run and connect, whose interrupt runs their cleanup,
+			// Ctrl-C here returns errInterrupted, which the command says in a
+			// line, instead of ending it with a bare ^C (GAP-0286, GAP-0290).
+			read = a.readAnswer
+		}
+		ans, err := read()
 		if err != nil {
 			return false, err
 		}
@@ -286,6 +294,9 @@ type choice struct {
 // errInterrupted is a choice the user answered with Ctrl-C; the caller
 // says what that leaves as it is.
 var errInterrupted = errors.New("interrupted")
+
+// IsInterrupted reports a question the user answered with Ctrl-C.
+func IsInterrupted(err error) bool { return errors.Is(err, errInterrupted) }
 
 // choose asks for one of choices; an empty answer selects def. An answer
 // is a letter and Enter, which the prompt says, and Ctrl-C returns

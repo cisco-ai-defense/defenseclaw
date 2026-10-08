@@ -1090,6 +1090,7 @@ def _test_v8_destination(
         DestinationTestError,
         canonical_local_compliance_recorder,
         run_destination_test,
+        untestable_kind,
     )
 
     path = config_path_for_data_dir(data_dir)
@@ -1109,6 +1110,10 @@ def _test_v8_destination(
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     except DestinationTestError as exc:
+        if exc.failure_class == "unsupported" and (kind := untestable_kind(inspected.effective or {}, name)):
+            click.echo(f"  {name}: skipped: {kind} destinations are not connectivity-tested "
+                       "(they write on this machine or wait for a reader)")
+            return
         message = f"destination test failed ({exc.failure_class}): {exc.message}"
         if exc.failure_class == "not_found":
             message = _unknown_destination_message(name, inspected.effective or {})

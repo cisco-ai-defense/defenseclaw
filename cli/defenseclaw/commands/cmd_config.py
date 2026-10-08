@@ -817,6 +817,12 @@ def validate_config() -> ValidationResult:
     if config_module.config_is_empty(cfg_path):
         res.errors.append(config_module.empty_config_message(cfg_path))
         return res
+    # A file that does not parse is not an older schema: name its line, not
+    # migrate, which refuses it too (GAP-0240).
+    raw = _bounded_source(cfg_path)
+    if raw is not None and (syntax := _yaml_syntax_detail(raw)):
+        res.errors.append(syntax)
+        return res
     res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res
 

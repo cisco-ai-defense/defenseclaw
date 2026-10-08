@@ -872,6 +872,10 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		if e.Pack != nil {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
 		}
+		if rp := e.RepoPolicy; rp != nil {
+			// The TUI's sandbox detail names it like the banner (GAP-0244).
+			v.RepoPolicy = &sandboxapi.RepoPolicy{Path: rp.Source, Digest: rp.Digest, Tightened: slices.Clone(e.RepoTightened)}
+		}
 		v.Violations = wireViolations(b.violations)
 		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
 		if running {

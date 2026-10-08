@@ -3,6 +3,7 @@ and ``--show`` prints the alert ID without the raw details_json blob."""
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -95,6 +96,42 @@ class AlertFindingRowsTests(unittest.TestCase):
         shown = self.runner.invoke(alerts, ["--show", "3"], obj=self.app, catch_exceptions=False)
         self.assertIn("llm-judge", shown.output)
         self.assertNotIn("hook-rules", shown.output)
+
+    def test_finding_of_a_sandbox_session_names_the_sandbox(self):
+        # GAP-0232: a hook-rule finding raised inside a sandbox did not say
+        # which sandbox; only the request's hook decision records it.
+        now = datetime.now(timezone.utc)
+        finding_id = self._finding("req-sbx", "connector=claudecode action=allow", now)
+        self.app.store.db.execute(
+            """INSERT INTO audit_events (id, timestamp, action, actor, details, severity, payload_json, request_id)
+               VALUES ('hd-sbx', ?, 'hook_decision', 'defenseclaw', '', 'INFO', ?, 'req-sbx')""",
+            (now.isoformat(), json.dumps({"defenseclaw.guardrail.effective_action": "allow",
+                                          "defenseclaw.sandbox.name": "myapp-um"})),
+        )
+        self.app.store.db.commit()
+        table = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False).output
+        self.assertIn("sandbox=myapp-um", table)
+        shown = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False).output
+        self.assertRegex(shown, r"Sandbox:\s+myapp-um")
+        listed = json.loads(self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output)
+        self.assertEqual([r.get("sandbox") for r in listed if r.get("id") == finding_id], ["myapp-um"])
+
+    def test_detection_only_findings_are_counted_not_listed(self):
+        # GAP-0176: rules that matched calls that then ran are detection-only,
+        # not alerts (#693), and the list said "All clear" without a word.
+        now = datetime.now(timezone.utc)
+        tags = json.dumps({"defenseclaw.finding.tags": ["detection-only"]})
+        self.app.store.db.executemany(
+            """INSERT INTO audit_events (id, timestamp, action, actor, details, severity, bucket, event_name, payload_json)
+               VALUES (?, ?, 'scan-finding', 'defenseclaw', '', 'CRITICAL', 'security.finding', 'finding.observed', ?)""",
+            [(f"det-{i}", (now - timedelta(hours=h)).isoformat(), tags) for i, h in enumerate((0, 2, 30))],
+        )
+        self.app.store.db.commit()
+        out = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False).output
+        self.assertIn("No alerts.", out)
+        self.assertNotIn("All clear", out)
+        self.assertIn("2 detection-only findings of the last 24 hours not listed", out)
+        self.assertIn("`defenseclaw audit export --since 24h` lists them", out)
 
     def test_copilot_local_and_cli_findings_share_one_target(self):
         # GAP-2619: the VS Code Local harness names the hook PreToolUse and the

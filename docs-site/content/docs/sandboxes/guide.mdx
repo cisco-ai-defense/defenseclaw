@@ -209,7 +209,11 @@ What setup does, in order:
    DefenseClaw mounts only the folder you launch from and the read-only
    settings Claude Code and Codex sandboxes need. Say no, or pass
    `--no-mounts`, and no Claude Code or Codex sandbox can start, a `--copy`
-   run included; other harnesses run on a copy.
+   run included; other harnesses run on a copy. A Linux gateway whose
+   configuration selects a compute driver DefenseClaw does not drive, such
+   as `podman`, is switched to `docker` in the same plan when you agree
+   (see [sandboxes on Linux](/docs/sandboxes/linux#understand-what-it-changed));
+   sandboxes made on the old driver cannot start after the switch.
 
    On a Mac, setup asks instead whether to run sandboxes in OpenShell
    MicroVMs (the default answer is yes, which `--yes` and
@@ -371,11 +375,13 @@ terminal:
   Starting a Claude Code sandbox… (building its image first: about 3 GB, a few minutes)
 
 Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
-  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo myapp-7f3a` restores it
+  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-7f3a` restores it
   Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
+            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
+  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-7f3a (or `defenseclaw tui`: 7, then t)
   MCP       github ✓ · linear ✓
   ⚠ MCP: not brought along: postgres-local (runs on this machine, which the sandbox cannot reach)
 ```
@@ -389,6 +395,8 @@ it copies anything, and the first start of an image says it takes longer:
 
   Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)
   Uploading the copy (412 files, 3.1 MiB)…
+  ⚠ 2 secret files held back from the copy: .env, certs/dev.pem
+  ⚠ not copied (git ignores them, or they are package caches): node_modules/, dist/; install the dependencies inside the sandbox
 ```
 
 ### The banner, line by line
@@ -450,7 +458,10 @@ same holds for the harness's own print flag after `--`, which the shell
 wrapper passes for `claude -p "…"`. The rules are those of `--rm`: changes
 nobody kept in a mounted folder keep their undo point (`sandbox undo NAME`
 still reverts them after the delete), and a copy whose work was not brought
-back keeps its sandbox for `sandbox pull`. The end of the run says which:
+back keeps its sandbox for `sandbox pull`. Changes you keep at the
+`Keep changes?` question of a run started in a terminal leave nothing to
+undo, so the sandbox is deleted with its undo point; `--keep` keeps both.
+The end of the run says which:
 
 ```text
   ✓ sandbox myapp-1c2d deleted: nothing is left in it to bring back or undo (a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it)
@@ -1105,8 +1116,15 @@ On a Mac every run works on a copy, with or without `--copy` (see
 
 DefenseClaw copies the folder into the sandbox (a shallow git clone plus
 your working tree, with secret files held back) and nothing reaches your
-folder until you bring the work back. At the end of the session you choose
-how:
+folder until you bring the work back. What git ignores, such as
+`node_modules/`, `.venv/` and build output, and package caches are not
+copied: a line after the upload names them, and the dependencies are
+installed inside the sandbox. The harness images have no Git LFS: a file
+the project tracks with LFS arrives in the copy as its real content, from
+your working tree, while the copy's history holds its LFS pointer, so
+`git status` inside shows it modified, and a commit made there would store
+the whole file instead of the pointer. Make commits that touch LFS files on
+your machine. At the end of the session you choose how:
 
 ```text
 Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)

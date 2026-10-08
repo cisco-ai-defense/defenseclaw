@@ -499,6 +499,16 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if err != nil {
 		return err
 	}
+	// What git ignores (node_modules/, .venv/, build output) and untracked
+	// package caches stay out of the copy. One warning names them, so a
+	// build that fails inside for want of its dependencies is explained
+	// (GAP-0194).
+	leftOut := map[string]bool{}
+	if ignored, err := proj.output(ctx, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"); err == nil {
+		for _, p := range splitNUL(ignored) {
+			leftOut[p] = true
+		}
+	}
 	candidates := make([]string, 0, len(trackedSet))
 	for p, mode := range trackedSet {
 		if mode != modeGitlink {
@@ -510,10 +520,14 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			rec.Warnings = append(rec.Warnings, "nested repository "+strings.TrimSuffix(p, "/")+" is not copied")
 			continue
 		}
-		if underHeavyDir(p) {
+		if dir := heavyDirOf(p); dir != "" {
+			leftOut[dir] = true
 			continue
 		}
 		candidates = append(candidates, p)
+	}
+	if w := leftOutWarning(leftOut); w != "" {
+		rec.Warnings = append(rec.Warnings, w)
 	}
 	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
 	if err != nil {
@@ -948,13 +962,37 @@ func captureBaseline(ctx context.Context, g gitCmd, seedIndex, parent string, fo
 	return commit, nil
 }
 
-func underHeavyDir(rel string) bool {
-	for _, part := range strings.Split(path.Dir(rel), "/") {
+func underHeavyDir(rel string) bool { return heavyDirOf(rel) != "" }
+
+// heavyDirOf is the package-cache directory above rel ("web/node_modules/"),
+// or "" when there is none.
+func heavyDirOf(rel string) string {
+	parts := strings.Split(path.Dir(rel), "/")
+	for i, part := range parts {
 		if isHeavyDir(part) {
-			return true
+			return strings.Join(parts[:i+1], "/") + "/"
 		}
 	}
-	return false
+	return ""
+}
+
+// leftOutWarning names what a git copy leaves out, directories first.
+func leftOutWarning(paths map[string]bool) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(paths))
+	for p := range paths {
+		names = append(names, p)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if di, dj := strings.HasSuffix(names[i], "/"), strings.HasSuffix(names[j], "/"); di != dj {
+			return di
+		}
+		return names[i] < names[j]
+	})
+	return "not copied (git ignores them, or they are package caches): " + strings.Join(firstN(names, 5), ", ") +
+		"; install the dependencies inside the sandbox"
 }
 
 // heavyExcludePathspecs keeps package caches out of forced captures of

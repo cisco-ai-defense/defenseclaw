@@ -228,6 +228,15 @@ class ValidateConfigTests(unittest.TestCase):
         self.assertTrue(res.errors[0].startswith("line 3, column 12: invalid YAML (expected ',' or ']'"), res.errors)
         self.assertNotIn("candidate field", res.errors[0])
 
+    def test_unparsable_file_without_a_version_names_the_line_not_migrate(self):
+        # GAP-0240: `openshell: [x` read as an older schema ("run migrate").
+        with _IsolatedHome() as env:
+            env.config_path.write_text("openshell: [dccert-block-marker\n", encoding="utf-8")
+            res = cmd_config.validate_config()
+        self.assertEqual(len(res.errors), 1, res.errors)
+        self.assertTrue(res.errors[0].startswith("line 1, column 12: invalid YAML (expected ',' or ']'"), res.errors)
+        self.assertNotIn("migrate", res.errors[0])
+
     def test_missing_secret_refusal_names_the_variable_and_keys_set(self):
         # GAP-1442: name the way out instead of "doctor --fix".
         refusal = ConfigInspectError(
