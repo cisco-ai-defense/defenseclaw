@@ -228,7 +228,9 @@ func (factory *Factory) PrepareDestination(
 			Compress: rotation.Compress, FailOnOpenError: factory.secureClient,
 		})
 		if err != nil {
-			if !nilInterface(factory.stderr) {
+			// Secure Client keeps the origin/main startup refusal without
+			// this line (GAP-1018).
+			if !nilInterface(factory.stderr) && !factory.secureClient {
 				// The destination, the path and the rule: start failed with
 				// only runtime_unavailable (GAP-0890).
 				reason := local.JSONLPathProblem(destination.Transport.Path)
