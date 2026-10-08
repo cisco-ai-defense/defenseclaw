@@ -174,7 +174,11 @@ name selects nobody, and the users of that group fall through to the next
 assignment or the default. The gateway looks the groups of your assignments up
 in the operating system, and a group it definitely does not find is a warning in
 `guardrail profile explain`, `guardrail profile list`, `guardrail status` and
-`doctor`, and a line in the gateway log at start and at every reload
+`doctor` (on standalone enterprise, `enterprise <os> status` and `verify`,
+code `profile_assignment_unmatched`), and a line in the gateway log at start,
+at every reload and when a later check (at most once a minute, while the
+gateway is asked for its health or a profile) first finds it, for example after
+an SSSD naming switch
 (`[guardrail] assignment 1: group "..." is not known to this host`). A lookup
 that fails or times out says nothing. Neither does the check while the
 directory is unreachable: an SSSD that is offline with a cold cache answers

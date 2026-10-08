@@ -296,7 +296,8 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
 		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"},` +
-			`"directory":{"failing":2,"since":"2026-10-07T00:05:54Z","stale":0}}`), nil
+			`"directory":{"failing":2,"since":"2026-10-07T00:05:54Z","stale":0},` +
+			`"profile_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"]}`), nil
 	}
 	status := h.run(Options{Action: ActionStatus})
 	if !status.OK || !strings.Contains(messagesOf(status.Warnings, codeAIDefenseUnavailable), "unavailable:auth_failed") {
@@ -305,6 +306,10 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	if got := messagesOf(status.Warnings, codeDirectoryLookups); !strings.Contains(got, "failing for 2 account(s) since 2026-10-07T00:05:54Z") ||
 		!strings.Contains(got, "enterprise linux profile-explain --user") {
 		t.Fatalf("failing directory lookups must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
+	}
+	// An assignment group the host no longer knows selects nobody (GAP-0704).
+	if got := messagesOf(status.Warnings, codeProfileAssignment); !strings.Contains(got, `group "dc-okta-ml" is not known to this host`) {
+		t.Fatalf("an assignment that selects nobody must warn: %+v", status.Warnings)
 	}
 }
 
