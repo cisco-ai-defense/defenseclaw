@@ -1152,8 +1152,8 @@ def test_intune_remove_assignment_deletes_only_target_group() -> None:
             if "/groups?" in path:
                 return [{"id": "target"}]
             if "/assignments" in path:
-                return [{"id": "one", "target": {"groupId": "target"}},
-                        {"id": "two", "target": {"groupId": "other"}}]
+                return [{"id": "one", "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "target"}},
+                        {"id": "two", "target": {"@odata.type": intune.GROUP_TARGET, "groupId": "other"}}]
             return [{"id": "app", "publishingState": "published"}]
 
         def request(self, method, path, body=None):
@@ -1373,3 +1373,26 @@ def test_intune_remediation_reenables_detection_only_assignment(monkeypatch: pyt
     assert len(writes) == 1
     assert writes[0][2]["deviceHealthScriptAssignments"][0]["runRemediationScript"] is True
     assert writes[0][2]["deviceHealthScriptAssignments"][0]["runSchedule"] == old["runSchedule"]
+
+
+def test_intune_remove_assignment_preserves_exclusion() -> None:
+    intune = _load(INTUNE)
+    writes = []
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{"id": "exclusion", "intent": "required",
+                         "target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget",
+                                    "groupId": "group-1"}}]
+            return [{"id": "app-1"}]
+
+        def request(self, method, path, body=None):
+            writes.append((method, path))
+
+    args = intune.build_parser().parse_args(
+        ["remove-assignment", "--app", "app", "--group", "team", "--apply"])
+    assert intune.cmd_remove_assignment(Graph(), args) == 0
+    assert writes == []

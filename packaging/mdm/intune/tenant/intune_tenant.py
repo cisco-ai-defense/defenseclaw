@@ -682,9 +682,11 @@ def cmd_remove_assignment(graph: Graph, args: argparse.Namespace) -> int:
     app = one_by_name(graph, f"{BETA}/deviceAppManagement/mobileApps", args.app, "app")
     group = group_by_name(graph, args.group)
     collection = f"{BETA}/deviceAppManagement/mobileApps/{app['id']}/assignments"
-    matching = [a for a in graph.get_all(collection) if (a.get("target") or {}).get("groupId") == group["id"]]
+    targeting = [a for a in graph.get_all(collection) if (a.get("target") or {}).get("groupId") == group["id"]]
+    matching = [a for a in targeting if (a.get("target") or {}).get("@odata.type") == GROUP_TARGET]
     if not matching:
-        print(f"app {args.app}: no assignment to {args.group}")
+        detail = "; exclusion target left in place" if targeting else ""
+        print(f"app {args.app}: no included assignment to {args.group}{detail}")
         return 0
     for assignment in matching:
         if not args.apply:
