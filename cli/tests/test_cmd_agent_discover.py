@@ -434,6 +434,41 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         finally:
             cleanup_app(app, db_path, tmp_dir)
 
+    def test_secure_client_signature_install_keeps_v8_config(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "secure-client")
+        data_dir = Path(app.cfg.data_dir)
+        data_dir.mkdir()
+        config = data_dir / "config.yaml"
+        original = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"
+        config.write_text(original, encoding="utf-8")
+        source = Path(tmp_dir) / "pack.json"
+        source.write_text(
+            json.dumps({"version": 1, "id": "legacy", "signatures": [
+                {"id": "legacy-ai", "name": "Legacy", "vendor": "Example", "category": "ai_cli"}
+            ]}),
+            encoding="utf-8",
+        )
+        try:
+            with patch.object(app.cfg, "save", side_effect=RuntimeError("save refused")) as save_mock:
+                with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+                    result = self.runner.invoke(agent, ["signatures", "install", str(source)], obj=app)
+            self.assertEqual(result.exit_code, 0, repr(result.exception) + result.output)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+            save_mock.assert_not_called()
+            self.assertTrue((data_dir / "signature-packs" / "legacy.json").exists())
+
+            # On a standalone user install, a refused config save must undo
+            # the copied pack as well.
+            app.cfg.data_dir = str(Path(tmp_dir) / "per-user")
+            with patch.object(app.cfg, "save", side_effect=RuntimeError("save refused")):
+                with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value=""):
+                    refused = self.runner.invoke(agent, ["signatures", "install", str(source)], obj=app)
+            self.assertNotEqual(refused.exit_code, 0)
+            self.assertFalse((Path(app.cfg.data_dir) / "signature-packs" / "legacy.json").exists())
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
     def test_a_pack_that_fails_its_pin_is_reported_where_it_is_read(self):
         """GAP-0177: a refused pack is named with both digests by list and discovery status."""
         import hashlib
