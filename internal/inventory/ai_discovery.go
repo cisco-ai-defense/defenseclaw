@@ -188,10 +188,17 @@ type AIDiscoveryOptions struct {
 	// from that owner's profile and puts it on the owner's signals
 	// (stampOwnerEmails). The Secure Client profile never reads it here.
 	IncludeUserEmail bool
+	// ExcludeUsers is enterprise.enrollment.exclude_users of the standalone
+	// profile. A managed Windows scan reads no profile of an excluded
+	// account and drops its processes, as the hook enumerator enrolls none
+	// of them (GAP-1024).
+	ExcludeUsers []string
 	// homeOwners names the account of each profile in HomeDirs when the
 	// platform enumerated them for a service-context scan (managed Windows).
 	// Signals found under a profile carry its account.
 	homeOwners []discoveryHomeOwner
+	// excludedOwners are the profiles ExcludeUsers took off homeOwners.
+	excludedOwners []discoveryHomeOwner
 	// extraHomes are the operator's ai_discovery.home_dirs on a managed
 	// scan outside the Secure Client profile: they add to the platform's
 	// profile list instead of replacing it (GAP-0969).
@@ -782,6 +789,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		HomeDir:              home,
 		HomeDirs:             append([]string{}, ad.HomeDirs...),
 		IncludeUserEmail:     ad.IncludeUserEmail,
+		ExcludeUsers:         standaloneExcludeUsers(cfg),
 		ManagedEnterprise:    managed.IsManagedEnterprise(cfg.DeploymentMode),
 		StandaloneEnterprise: cfg.StandaloneEnterprise(),
 		UserScanDir:          UserScanDirForConfig(cfg),
@@ -2636,6 +2644,7 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	if windowsSnapshot {
 		classifyWindowsProcesses(procs, s.catalog)
 		s.attributeProcessOwners(procs)
+		procs = s.withoutExcludedAccounts(procs)
 	}
 	now := time.Now().UTC()
 	var out []AISignal

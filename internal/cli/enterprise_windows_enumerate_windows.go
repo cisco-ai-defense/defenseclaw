@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -244,6 +245,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	})
 	standalone := cfg.StandaloneEnterprise()
 	var unprotected []enterprisehooks.UnprotectedAgent
+	var excluded []enterprisehooks.ManifestTarget
 	// The profiles the last cycle enrolled, so the gateway's read access
 	// can be taken from those this cycle drops.
 	previous, previousErr := enterprisehooks.Manifest{}, errors.New("not loaded")
@@ -260,6 +262,9 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
 		enumerateOpts.ReportUnprotected = func(agent enterprisehooks.UnprotectedAgent) {
 			unprotected = append(unprotected, agent)
+		}
+		enumerateOpts.ReportExcluded = func(target enterprisehooks.ManifestTarget) {
+			excluded = append(excluded, target)
 		}
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
@@ -327,6 +332,9 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			}
 		}
 	}
+	if standalone {
+		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
+	}
 	elapsed := time.Since(start)
 
 	fmt.Fprintf(stderr, "[hook-enumerator] cycle complete users=%d targets=%d changed=%t elapsed=%s\n",
@@ -338,6 +346,57 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN cycle exceeded 10 s target: %s\n", elapsed)
 	}
 	return nil
+}
+
+// enterpriseWindowsExcludedRevoked holds the excluded profiles whose
+// inventory read access this enumerator process already took away.
+var enterpriseWindowsExcludedRevoked = struct {
+	sync.Mutex
+	sids map[string]bool
+}{sids: map[string]bool{}}
+
+// revokeEnterpriseWindowsExcludedInventoryRead takes the gateway's inventory
+// read access off every profile the enrollment excludes, once per profile
+// while it stays excluded. A profile excluded before this install was
+// granted by an earlier one (a cloned image) and was never in a manifest, so
+// the dropped-profile revoke never reached it (GAP-1024).
+func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []enterprisehooks.ManifestTarget) {
+	state := &enterpriseWindowsExcludedRevoked
+	state.Lock()
+	defer state.Unlock()
+	current := map[string]bool{}
+	var pending enterprisehooks.Manifest
+	for _, target := range excluded {
+		sid := strings.ToUpper(strings.TrimSpace(target.SID))
+		if sid == "" || current[sid] {
+			continue
+		}
+		current[sid] = true
+		if !state.sids[sid] {
+			pending.Targets = append(pending.Targets, target)
+		}
+	}
+	for sid := range state.sids {
+		if !current[sid] {
+			delete(state.sids, sid)
+		}
+	}
+	if len(pending.Targets) == 0 {
+		return
+	}
+	if err := enterpriseWindowsInventoryReadRevoker(pending); err != nil {
+		message := err.Error()
+		if len(message) > 512 {
+			message = message[:512] + "..."
+		}
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway may keep read access on %d excluded profile(s); the revoke failed: %s\n",
+			len(pending.Targets), message)
+		return
+	}
+	for _, target := range pending.Targets {
+		state.sids[strings.ToUpper(strings.TrimSpace(target.SID))] = true
+	}
+	fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d excluded profile(s)\n", len(pending.Targets))
 }
 
 // publishEnterpriseWindowsManifestIdentity refreshes signed-in token groups

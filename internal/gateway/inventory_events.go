@@ -365,7 +365,7 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 	// homes stay distinct.
 	for _, home := range homes {
 		home = strings.TrimSpace(home)
-		if home == "" {
+		if home == "" || excludedInventoryHome(cfg, home) {
 			continue
 		}
 		homeScope := endpointInventoryScopeKey(home)
@@ -376,6 +376,27 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		}
 	}
 	return components
+}
+
+// excludedInventoryHome reports a home_dirs entry whose owner the standalone
+// profile's enterprise.enrollment.exclude_users names (by SID or uid,
+// account name or folder name): an excluded account gets no inventory
+// record, as the scan reads none of its profile (GAP-1024).
+func excludedInventoryHome(cfg *config.Config, home string) bool {
+	if cfg == nil || !cfg.StandaloneEnterprise() || len(cfg.Enterprise.Enrollment.ExcludeUsers) == 0 {
+		return false
+	}
+	owner := useridentity.ForHome(home)
+	names := []string{owner.ID, owner.Name, filepath.Base(filepath.Clean(home))}
+	for _, entry := range cfg.Enterprise.Enrollment.ExcludeUsers {
+		entry = strings.TrimSpace(entry)
+		for _, name := range names {
+			if entry != "" && strings.TrimSpace(name) != "" && strings.EqualFold(entry, strings.TrimSpace(name)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // inventoryHomeOwner resolves who owns one profile directory, and which

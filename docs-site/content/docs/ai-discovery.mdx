@@ -341,7 +341,13 @@ process started from one, carries that profile's account (`user.id` is the
 account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 `defenseclaw.user.name` the account name). Folders outside the granted ones,
 such as the profile root that `scan_roots: ["~"]` names, are skipped
-without failing the scan.
+without failing the scan. Only enrolled profiles are read: the profile of an
+account that `enterprise.enrollment.exclude_users` names is not, the
+processes in its sessions are left out, and the components it reported
+before are reported `removed` once; the enumerator also takes away the read
+access an earlier install granted it. `ai_discovery.home_dirs` adds folders
+to the enrolled profiles and never replaces them, and a folder inside an
+excluded profile is not read.
 
 ### Tunable knobs
 

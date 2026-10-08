@@ -137,7 +137,8 @@ func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 			continue
 		}
 		seen[lower] = struct{}{}
-		out = append(out, discoveryHomeOwner{Home: expanded, UserID: sid, UserName: windowsProfileAccountName(sid, expanded)})
+		name, domain := windowsProfileAccount(sid, expanded)
+		out = append(out, discoveryHomeOwner{Home: expanded, UserID: sid, UserName: name, Domain: domain})
 	}
 	return out
 }
@@ -157,16 +158,16 @@ func platformDiscoveryAccountName(sid, _ string) string {
 	return strings.TrimSpace(account)
 }
 
-// windowsProfileAccountName is the account name of sid, or the profile
-// folder's name when the account cannot be looked up.
-func windowsProfileAccountName(sid, home string) string {
+// windowsProfileAccount is the account name and domain of sid, or the
+// profile folder's name and no domain when the account cannot be looked up.
+func windowsProfileAccount(sid, home string) (string, string) {
 	if parsed, err := windows.StringToSid(sid); err == nil {
 		// The bare account name, as agent identities and hook records spell it.
-		if account, _, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
-			return account
+		if account, domain, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
+			return account, strings.TrimSpace(domain)
 		}
 	}
-	return filepath.Base(home)
+	return filepath.Base(home), ""
 }
 
 // normalizeProfileImagePath trims and cleans a raw ProfileImagePath

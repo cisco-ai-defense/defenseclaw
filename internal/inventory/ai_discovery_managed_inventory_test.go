@@ -329,6 +329,31 @@ func TestManagedDiscoveryHomeDirsAddToTheProfileList(t *testing.T) {
 	}
 }
 
+// enterprise.enrollment.exclude_users takes a profile off a managed scan:
+// its folders, a home_dirs folder inside it and its processes (GAP-1024).
+func TestManagedDiscoverySkipsExcludedAccounts(t *testing.T) {
+	root := t.TempDir()
+	alice := discoveryHomeOwner{Home: filepath.Join(root, "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}
+	bob := discoveryHomeOwner{Home: filepath.Join(root, "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob", Domain: "HOST"}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return []discoveryHomeOwner{alice, bob} }
+	svc := &ContinuousDiscoveryService{opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+		ExcludeUsers: []string{`host\BOB`}, HomeDirs: []string{filepath.Join(bob.Home, "work")},
+	})}
+	if homes := svc.homesToScan(); len(homes) != 1 || homes[0] != alice.Home {
+		t.Fatalf("homes = %v, want only alice's profile", homes)
+	}
+	procs := svc.withoutExcludedAccounts([]processInfo{
+		{PID: 1, Comm: "claude.exe", SessionOwnerID: alice.UserID},
+		{PID: 2, Comm: "claude.exe", SessionOwnerID: bob.UserID},
+	})
+	if len(procs) != 1 || procs[0].PID != 1 {
+		t.Fatalf("processes = %+v, want only alice's", procs)
+	}
+}
+
 // A managed Windows scan puts on each owned Claude Code or Codex signal the
 // address the enumerator published for its owner, and on no other signal
 // (GAP-1025).
