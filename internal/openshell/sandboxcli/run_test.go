@@ -1447,10 +1447,18 @@ func TestCopyUploadThatDidNotArrive(t *testing.T) {
 		"; `defenseclaw sandbox doctor` checks the ssh connection sharing that can carry an upload into another sandbox")
 }
 
-// failingCopy is a fakeCopy whose stage or upload fails with the error set.
+// failingCopy is a fakeCopy whose stage, upload or pull fails with the
+// error set.
 type failingCopy struct {
 	*fakeCopy
-	stageErr, uploadErr error
+	stageErr, uploadErr, pullErr error
+}
+
+func (f *failingCopy) Pull(ctx context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	if f.pullErr != nil {
+		return nil, f.pullErr
+	}
+	return f.fakeCopy.Pull(ctx, o)
 }
 
 func (f *failingCopy) Stage(ctx context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {

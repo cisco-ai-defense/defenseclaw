@@ -910,19 +910,23 @@ const lowDiskBytes = 64 << 20
 // on a driver that gives each sandbox a disk of its own (a MicroVM's
 // overlay) the hint names that disk and its size setting instead.
 func (a *App) sandboxDiskHint(ctx context.Context, api API, err error) string {
-	hint := a.diskFullHint(err)
-	if hint == "" || isNoSpace(err) {
-		return hint
+	if disk := a.ownDiskFull(ctx, api, err); disk != "" {
+		return "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by " + disk +
+			"; free some space in the sandbox, or raise that size for new sandboxes (`" + CommandName + " doctor` shows it)"
+	}
+	return a.diskFullHint(err)
+}
+
+// ownDiskFull names the setting that sizes the sandbox's own disk when err
+// is that disk running full (sandboxDiskHint), and is "" otherwise.
+func (a *App) ownDiskFull(ctx context.Context, api API, err error) string {
+	if a.diskFullHint(err) == "" || isNoSpace(err) {
+		return ""
 	}
 	if free, known := freeBytes(a.dataDir()); !known || free < lowDiskBytes {
-		return hint
+		return ""
 	}
-	disk := sandboxDisk(statusDriver(context.WithoutCancel(ctx), api))
-	if disk == "" {
-		return hint
-	}
-	return "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by " + disk +
-		"; free some space in the sandbox, or raise that size for new sandboxes (`" + CommandName + " doctor` shows it)"
+	return sandboxDisk(statusDriver(context.WithoutCancel(ctx), api))
 }
 
 // diskFullHint names a full disk as the cause of a workspace failure (no

@@ -290,6 +290,41 @@ func TestCopySessionLeavesUnpulledWorkInTheSandbox(t *testing.T) {
 	})
 }
 
+// GAP-0339: a copy session whose pull at its end fails on the MicroVM's own
+// full disk leaves the MicroVM running, since one stopped with its disk full
+// cannot start again and its work would be lost, and says how to free space
+// and pull. On docker the full disk is the Docker host's: it stops as before.
+func TestCopySessionOnAFullMicroVMDiskKeepsItRunning(t *testing.T) {
+	const name = "fullbox"
+	full := errors.New("capture the sandbox copy (exit 128): error: unable to create temporary file: No space left on device")
+	running := "Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
+		"free some space in it (`defenseclaw sandbox exec " + name + " -- df -h /` shows it; `defenseclaw sandbox connect " + name +
+		" --shell` to remove what it does not need), then `defenseclaw sandbox pull " + name + "`; stop it after that: `defenseclaw sandbox stop " + name + "`"
+	for _, driver := range []string{"vm", "docker"} {
+		t.Run(driver, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.IO.TTY = false
+			ta.daemon.status.Gateway.Driver = driver
+			ta.Workspace = &failingCopy{fakeCopy: ta.copy, pullErr: full}
+			ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: name, Prompt: "fix it"}))
+			stops := ta.calls("POST", name+"/stop")
+			if driver == "vm" {
+				if stops != 0 {
+					t.Fatalf("a MicroVM whose disk is full was stopped (%d stop calls):\n%s", stops, ta.output())
+				}
+				has(t, ta.output(), "the sandbox's own disk is full", running)
+				lacks(t, ta.output(), "the sandbox is kept", "Sandbox kept (stopped)")
+				return
+			}
+			if stops != 1 {
+				t.Fatalf("docker: %d stop calls, want 1:\n%s", stops, ta.output())
+			}
+			has(t, ta.output(), "retry with `defenseclaw sandbox pull "+name+"`; the sandbox is kept")
+			lacks(t, ta.output(), "keeps running")
+		})
+	}
+}
+
 // A headless session (--prompt) on a terminal still asks "Keep changes?"
 // at its end, and keeping them makes them the next session's base; only a
 // session with no terminal to ask on leaves its changes unaccepted, so the

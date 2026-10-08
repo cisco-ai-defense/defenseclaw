@@ -92,6 +92,11 @@ type session struct {
 	// OpenShell gateway restarted under it, for one) while the sandbox
 	// went on running: it is left running for a reattach.
 	lost bool
+	// diskFull is set when a copy's pull at the end of the session failed
+	// on the sandbox's own full disk (App.ownDiskFull): a MicroVM stopped
+	// like that cannot start again, so it is left running for a pull once
+	// some space is freed (GAP-0339).
+	diskFull bool
 	// headless marks a one-prompt session (the resume hint says how to
 	// run the next prompt).
 	headless bool
@@ -1274,6 +1279,11 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	}
 	if !stopped {
 		switch {
+		case s.diskFull:
+			a.note("Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
+				"free some space in it (`" + CommandName + " exec " + name + " -- df -h /` shows it; `" + CommandName + " connect " + name +
+				" --shell` to remove what it does not need), then `" + CommandName + " pull " + name + "`; stop it after that: `" + CommandName + " stop " + name + "`")
+			return nil
 		case s.liveRun:
 			a.note("Sandbox " + name + " keeps running: its detached run is still going → follow: " + CommandName + " logs " + name + " -f   stop: " +
 				CommandName + " stop " + name)
@@ -1667,8 +1677,11 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			a.warn("interrupted: nothing was brought back, and the work is still in the sandbox")
 		} else {
 			a.warn("could not pull the sandbox's changes: " + err.Error())
+			s.diskFull = a.ownDiskFull(ctx, s.api, err) != ""
 		}
-		a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
+		if !s.diskFull {
+			a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
+		}
 		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}

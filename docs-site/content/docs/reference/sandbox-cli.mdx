@@ -510,6 +510,10 @@ Where the notices appear:
   or the pull or apply failed), so they aren't lost, and the end says so.
 - **A full disk.** A pull that fails because the disk is full says whose
   disk: this machine's, or on a Mac the MicroVM's own (`overlay_disk_mib`).
+  When it is the MicroVM's own, the end of the session leaves the MicroVM
+  running instead of stopping it, since a MicroVM stopped with its disk full
+  cannot start again: free some space in it (`sandbox connect <name>
+  --shell`), then `sandbox pull <name>`, then `sandbox stop <name>`.
 - **The sandbox is kept.** It is stopped and kept for `connect`, unless you
   passed `--rm`.
 
