@@ -3549,8 +3549,8 @@ func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusBadGateway)
 	}
 
-	if len(*recorded) != 0 {
-		t.Fatalf("skill should not become allowed when gateway re-enable fails: %#v", *recorded)
+	if len(*recorded) == 0 {
+		t.Fatal("the authoritative allow should be recorded before runtime re-enable")
 	}
 
 	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
@@ -3799,6 +3799,39 @@ func TestAPIPolicyReload_OTelMetrics_Success(t *testing.T) {
 	}
 	if count := countStoredCanonicalEventsV8(t, capture.store.DatabasePath(), observability.TelemetryEventPolicyUpdated, true); count != 1 {
 		t.Fatalf("generated successful policy reload events=%d", count)
+	}
+}
+
+func TestAPIPolicyDirHotReloadUsesLiveGeneration(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: &config.Config{}}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+
+	policyDir := filepath.Join("..", "..", "policies")
+	prepared, err := policy.Prepare(context.Background(), policyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{Config: &config.Config{PolicyDir: policyDir}, OPA: prepared}
+	})
+	api.SetPolicyReloader(func() error { return nil })
+
+	high := &policy.GuardrailScanResult{Action: "block", Severity: "HIGH", Reason: "marker"}
+	input := policy.GuardrailInput{
+		Mode: "action", LocalResult: high,
+		Thresholds: &policy.ThresholdsInput{Block: 3, Alert: 2, CiscoTrustLevel: "full"},
+	}
+	out, err := api.evaluateGuardrailPolicy(context.Background(), input)
+	if err != nil || out.Action != "block" {
+		t.Fatalf("live policy verdict = %+v, %v; want block", out, err)
+	}
+	w := httptest.NewRecorder()
+	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), policyDir) {
+		t.Fatalf("reload = %d %s; want live policy_dir", w.Code, w.Body.String())
 	}
 }
 
