@@ -548,7 +548,7 @@ A real feed, replayed (the `⚠` line is the shadow AI finding):
   speed={1.5}
   height={340}
   ariaLabel="Animated terminal replay of defenseclaw sandbox activity for a Claude Code sandbox on a Mac: the sandbox is created and ready, the project copy is uploaded, two package and source hosts are allowed, a shadow AI warning for api.openai.com, a paste site refused with its unblock command, and a blocked tool call."
-  caption="Recorded from a real Claude Code sandbox on a Mac. `⚠ shadow AI` is the finding, the `✗` line for the paste site ends with the command that lifts the block, and the last line is a tool call DefenseClaw's hooks blocked."
+  caption="Recorded from a real Claude Code sandbox on a Mac. `⚠ shadow AI` is the finding, the `✗` line for the paste site ends with the command that lifts the block, and the last line is a tool call DefenseClaw's hooks blocked (the rule's name is replaced by a placeholder)."
   frames={[
     { type: 'cmd', text: "defenseclaw sandbox activity --sandbox myapp-claude", pauseMs: 700 },
     { type: 'out', text: "19:36:55 creating sandbox myapp-claude" },
@@ -559,7 +559,7 @@ A real feed, replayed (the `⚠` line is the shadow AI finding):
     { type: 'warn', text: "19:39:29 ⚠ shadow AI: reached api.openai.com (OpenAI)" },
     { type: 'ok', text: "19:39:29 ✓ api.openai.com" },
     { type: 'out', text: "19:39:32 ✗ pastebin.com (paste site)  → unblock: defenseclaw sandbox unblock pastebin.com --sandbox myapp-claude" },
-    { type: 'out', text: "19:39:35 ✗ tool Bash blocked: UN-MARKER-BLOCK (Certification marker command (block))" },
+    { type: 'out', text: "19:39:35 ✗ tool Bash blocked: <the rule's reason>" },
   ]}
 />
 
