@@ -183,6 +183,9 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 				}
 			}
 			if err := writeEnterpriseIdentityView(cmd.OutOrStdout(), path); err != nil {
+				if commandExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+					return err
+				}
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			return nil

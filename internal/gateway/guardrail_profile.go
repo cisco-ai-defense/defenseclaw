@@ -1309,7 +1309,15 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	set := a.guardrailProfileSet()
 	if connectorName != "" && !connector.IsKnownBuiltinConnector(connectorName) &&
 		(set == nil || !set.knownConnector(connectorName)) {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown connector %q; use a built-in or configured plugin connector", connectorName)})
+		known := connector.NewDefaultRegistry().Names()
+		if base != nil {
+			for name := range base.Guardrail.Connectors {
+				known = append(known, config.NormalizeConnectorName(name))
+			}
+		}
+		sort.Strings(known)
+		known = slices.Compact(known)
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown connector %q; valid connectors: %s", connectorName, strings.Join(known, ", "))})
 		return
 	}
 	out := map[string]any{
