@@ -97,12 +97,12 @@ func identityStoreUPN(r windowsDirectoryReader, sid string) (upn, provider strin
 }
 
 // resolveWindowsDirectoryFacts resolves the verified directory facts of sid.
-// adUPN, when non-nil, returns the TranslateNameW answer for a
+// adUPN, when non-nil, returns the TranslateNameW answer for a SID and
 // DOMAIN\account name; it bounds its own wait.
 func resolveWindowsDirectoryFacts(
 	r windowsDirectoryReader,
 	sid string,
-	adUPN func(samName string) string,
+	adUPN func(sid, samName string) string,
 	now time.Time,
 ) DirectoryFacts {
 	sid = strings.ToUpper(strings.TrimSpace(sid))
@@ -152,7 +152,7 @@ func resolveWindowsDirectoryFacts(
 			// which is the account's UPN (GAP-0417).
 			facts.UPN = lsaUPN
 		} else if adUPN != nil && account != "" {
-			facts.UPN = NormalizeUPN(adUPN(domain + `\` + account))
+			facts.UPN = NormalizeUPN(adUPN(sid, domain+`\`+account))
 		}
 		if join.DNSDomain != "" && strings.EqualFold(domain, join.ADDomain) {
 			// The account is in the machine's own domain, whose DNS name
@@ -212,8 +212,9 @@ const (
 	adUPNFailureTTL = 2 * time.Minute
 )
 
-// adUPNCache resolves DOMAIN\account to a UPN with translate, one lookup per
-// name at a time, in the background.
+// adUPNCache resolves a SID and DOMAIN\account to a UPN with translate, one
+// lookup per identity at a time, in the background. A reused account name
+// must not inherit the previous SID's verified UPN.
 type adUPNCache struct {
 	translate func(samName string) string
 	now       func() time.Time
@@ -235,8 +236,8 @@ func newADUPNCache(translate func(string) string) *adUPNCache {
 // lookup returns the UPN of samName: the cached answer, or the one a lookup
 // started now (or already running) produces within wait. A lookup that takes
 // longer returns the previous answer, if any, and finishes in the background.
-func (c *adUPNCache) lookup(samName string, wait time.Duration) string {
-	key := strings.ToLower(samName)
+func (c *adUPNCache) lookup(sid, samName string, wait time.Duration) string {
+	key := strings.ToUpper(strings.TrimSpace(sid)) + "\x00" + strings.ToLower(samName)
 	c.mu.Lock()
 	entry := c.entries[key]
 	if entry.done == nil && !c.now().Before(entry.expires) {

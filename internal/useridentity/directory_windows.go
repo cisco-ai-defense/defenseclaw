@@ -20,7 +20,7 @@ import (
 // finishes in the background and answers a later call.
 func WindowsDirectoryFacts(sid string, wait time.Duration) DirectoryFacts {
 	return resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
-		func(samName string) string { return adUPNs.lookup(samName, wait) }, time.Now())
+		func(sid, samName string) string { return adUPNs.lookup(sid, samName, wait) }, time.Now())
 }
 
 // WindowsGroupNames renders group SIDs as DOMAIN\name where LookupAccountSid
