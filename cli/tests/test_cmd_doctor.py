@@ -88,6 +88,18 @@ class DoctorPolicyStateTests(unittest.TestCase):
             if want == "fail" and not extra:
                 self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
 
+        old = (
+            "[config_schema_invalid] $.bogus_wp: configuration violates the additionalProperties constraint; "
+            "inspect the canonical v8 schema or generated reference and correct this field"
+        )
+        policy = {"effective_digest": applied, "generation": 3, "last_reload_error": old}
+        result = _DoctorResult()
+        cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+        self.assertNotIn("canonical v8", result.checks[0]["detail"])
+        self.assertNotIn("[config_schema_invalid]", result.checks[0]["detail"])
+        self.assertNotIn("$.bogus_wp", result.checks[0]["detail"])
+        self.assertIn("bogus_wp", result.checks[0]["detail"])
+
         # A digest the gateway holds back for a restart-only key is a pending
         # restart (warn), not a stale gateway (fail) (GAP-0072).
         policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
@@ -1873,6 +1885,25 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertEqual(result.warned, 1)
         self.assertEqual(result.checks[0]["label"], "LLM reachable")
         self.assertIn("LiteLLM probe failed", result.checks[0]["detail"])
+
+    def test_failed_llm_probe_names_configured_endpoint_without_credentials(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = SimpleNamespace(
+            guardrail=SimpleNamespace(enabled=True),
+            resolve_llm=lambda _scope: SimpleNamespace(
+                model="bedrock/model",
+                base_url="https://user:secret@example.invalid:9443/v1?token=hidden",
+            ),
+        )
+        result = _DoctorResult()
+        with patch("defenseclaw.llm.ping", return_value=(False, "connection refused")):
+            cmd_doctor._check_llm_reachable(cfg, result)
+        detail = result.checks[0]["detail"]
+        self.assertIn("https://example.invalid:9443/v1", detail)
+        self.assertNotIn("secret", detail)
+        self.assertNotIn("hidden", detail)
+
 
 
 class VerifyBedrockTests(unittest.TestCase):

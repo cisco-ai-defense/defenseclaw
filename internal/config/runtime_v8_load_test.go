@@ -446,6 +446,7 @@ observability: {}
 
 func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 	for path, body := range map[string]string{
+		"$.otel": "otel:\n  endpoint: https://example.invalid\n",
 		"$.guardrail.profiles.p.connectors.codex.rule_pack_dir":           "guardrail:\n  profiles:\n    p:\n      connectors:\n        codex: {rule_pack_dir: /x}\n",
 		"$.scanners.skill_scanner.use_virustotal":                         "scanners:\n  skill_scanner: {use_virustotal: true}\n",
 		"$.observability.trace_policy.compatibility_aliases":              "observability:\n  trace_policy: {compatibility_aliases: true}\n",

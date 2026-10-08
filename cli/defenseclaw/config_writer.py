@@ -689,6 +689,19 @@ _SCHEMA_WORDS = (
 )
 
 
+def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> str:
+    """Return the narrow pin repair when a changed custom pack blocks a write."""
+    if "does not match" not in message or "digest" not in message:
+        return ""
+    match = re.search(r"guardrail\.custom_packs\.([A-Za-z0-9_.-]+)\.digest", message)
+    if not match:
+        return ""
+    return (
+        f"defenseclaw config set guardrail.custom_packs.{match.group(1)}.digest "
+        f"sha256:{files_digest}"
+    )
+
+
 def plain_error(exc: BaseException) -> str:
     """A refused change in plain words: the key and what to do about it.
 
@@ -719,6 +732,9 @@ def plain_error(exc: BaseException) -> str:
         sentence = detail if detail.startswith(name) else f"{name}: {detail}"
         actions = [part for part in parts[1:] if not part.startswith("expected ")]
         message = sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
+        repair = pack_pin_repair(text)
+        if repair:
+            message += f" Re-pin the edited pack: {repair}."
         if "rule-pack directory does not exist" in text:
             # A pack folder deleted while the config still selects it blocks every other change too (GAP-0261).
             message += " To stop using the deleted pack: defenseclaw guardrail use-pack default."

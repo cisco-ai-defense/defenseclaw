@@ -428,6 +428,22 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     assert shown in _reference_page("cli.mdx")
 
 
+def test_edited_pack_error_names_narrow_repin():
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    reason = (
+        "[config_semantic_invalid] config rule pack \"custom\": digest sha256:aaa does not match "
+        "guardrail.custom_packs.custom.digest; fix the reference, then retry"
+    )
+    inspected = ConfigInspectError("rejected", field_path="$.guardrail", reason=reason)
+    refused = config_writer.ConfigWriteError("config.yaml change rejected")
+    refused.__cause__ = inspected
+    assert (
+        "defenseclaw config set guardrail.custom_packs.custom.digest sha256:<files digest>"
+        in config_writer.plain_error(refused)
+    )
+
+
 def test_source_of_truth_page_lists_every_restart_required_key():
     """The page names each key config set reports as restart-required, not a shorter list."""
     page = _reference_page("source-of-truth.mdx")

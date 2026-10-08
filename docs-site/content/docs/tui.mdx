@@ -298,8 +298,8 @@ and help beside the table:
 Keys the TUI can't save show as read-only rows; their hint says where to change
 them (in `config.yaml`, or with `defenseclaw setup <connector>` for connector
 hooks). Only problems in fields you changed block a save. If `config.yaml`
-changes on disk while you edit, the editor says `Config changed on disk; your
-draft is kept`: save merges the fields you edited, and `r` reloads the file.
+changes on disk while you edit, the editor says `Configuration refreshed from disk.`: unsaved fields are
+preserved, save merges the fields you edited, and `r` reloads the file.
 
 #### Saving goes through the config writer
 

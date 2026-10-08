@@ -3928,3 +3928,16 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_guardrail_write_timeout_has_friendly_recovery():
+    from defenseclaw.commands.cmd_guardrail import _guardrail_write_error
+    from defenseclaw.config_inspect import ConfigInspectTimeoutError
+    from defenseclaw.config_writer import ConfigWriteError
+
+    refused = ConfigWriteError("configuration check timed out")
+    refused.__cause__ = ConfigInspectTimeoutError("configuration check timed out")
+    message = _guardrail_write_error(refused)
+    assert message.count("\n") == 2
+    assert "Nothing was changed; re-run the command." in message
+    assert "Traceback" not in message

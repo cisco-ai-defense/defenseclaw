@@ -159,10 +159,10 @@ guardrail:
   custom_packs:
     acme-hardened:
       path: /etc/acme/defenseclaw/packs/acme-hardened
-      digest: sha256:<64 hex digits from the digest line of validate-pack>
+      digest: sha256:<64 hex digits from the files digest line of validate-pack>
 ```
 
-`defenseclaw guardrail validate-pack PATH` prints the `digest:` line to paste
+`defenseclaw guardrail validate-pack PATH` prints the `files digest:` line to paste
 after `sha256:`. If the digest does not match, the change does not build into a
 generation, and the previous policy keeps running. See
 [Rules](/docs/policies/rules).

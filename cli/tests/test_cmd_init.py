@@ -65,6 +65,22 @@ class TestInitCommand(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    def test_invalid_existing_config_stops_before_init_runs(self):
+        from defenseclaw import config as config_module
+
+        source = Path(self.tmp_dir) / "config.yaml"
+        source.write_text("config_version: 9\nguardrail:\n  block_at: BOGUS\n", encoding="utf-8")
+        with (
+            patch.object(config_module, "config_path", return_value=source),
+            patch.object(config_module, "load", side_effect=ValueError("guardrail.block_at is invalid")),
+            patch("defenseclaw.commands.cmd_init._run_first_run_cmd") as run,
+        ):
+            result = self.runner.invoke(init_cmd, ["--non-interactive"], obj=AppContext())
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("guardrail.block_at is invalid", result.output)
+        self.assertIn("last good configuration", result.output)
+        run.assert_not_called()
+
     def test_help(self):
         result = self.runner.invoke(init_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0)

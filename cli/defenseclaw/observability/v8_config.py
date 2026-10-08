@@ -990,6 +990,7 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
 # v8 keys that config_version 9 replaced, as Go's rejectV9RemovedKeys names them:
 # (path of the removed key, what to use instead).
 _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("otel",), "observability.destinations"),
     (("skill_actions",), "admission.skill.actions"),
     (("mcp_actions",), "admission.mcp.actions"),
     (("plugin_actions",), "admission.plugin.actions"),

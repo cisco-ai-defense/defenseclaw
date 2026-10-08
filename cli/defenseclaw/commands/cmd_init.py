@@ -259,6 +259,17 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     refuse_first_run_when_managed()
 
+    from defenseclaw import config as config_module
+
+    if config_module.config_path().is_file():
+        try:
+            config_module.load()
+        except Exception as exc:  # noqa: BLE001 - init is a recovery boundary for hand-edited config.
+            raise click.ClickException(
+                f"Cannot initialize with invalid config.yaml: {exc}. Fix the file, then run "
+                "defenseclaw config validate; a running gateway keeps its last good configuration."
+            ) from exc
+
     # Refuse a pasted key before anything is written (GAP-2589).
     cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
     # GAP-2593: the LLM key's env var name too.

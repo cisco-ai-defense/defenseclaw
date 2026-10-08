@@ -93,9 +93,8 @@ defenseclaw guardrail mode action --connector claudecode
 
 This switches only Claude Code to **action** mode, which enforces the rules.
 Any other agent stays in observe. The mode is saved to `config.yaml`, and the
-running gateway applies it on its own. Here the command also restarts the
-gateway, because switching to action flips Claude Code's hook fail mode (below)
-and the generated hook scripts carry that mode.
+running gateway applies it on its own without a restart. The hook fail mode
+is a separate setting; changing it may require hooks to be refreshed.
 
 Action mode also changes what happens while the gateway is down. The report
 showed `fail mode=open` because an agent in observe mode always fails open. In
