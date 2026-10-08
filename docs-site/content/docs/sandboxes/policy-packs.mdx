@@ -280,6 +280,14 @@ allowlist of your servers by exact command or URL. Codex gets an
 definitions in `/etc/codex/managed_config.toml`. With `allow`, the allowlists
 are left out and your servers join the harness's user registry.
 
+So `claude mcp add` inside a Claude Code sandbox is refused: Claude Code says
+that an enterprise MCP configuration is active and has exclusive control over
+MCP servers. It is DefenseClaw's managed file, not your organization. To give
+a sandbox another server, add it on your machine in user scope
+(`claude mcp add --scope user …`, which writes `~/.claude.json`), then start a
+new sandbox: `mcp.import` brings it along. A sandbox you resume keeps the
+servers it was created with.
+
 ## Choose a pack
 
 Set `openshell.pack` in `~/.defenseclaw/config.yaml`:
