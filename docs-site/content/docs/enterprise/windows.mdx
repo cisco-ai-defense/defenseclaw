@@ -662,6 +662,12 @@ per-user install:
   (`deferred: ... removes the folder when that user next signs in`, then
   `removed now that the user is signed in`). Two users with a skill or plugin
   of the same name each get their own quarantine copy.
+- With `gateway.watcher.<type>.take_action: false` a rejected asset is only
+  recorded (`verdict=rejected (take_action disabled, no gateway action)`) and
+  stays usable. When an `ensure` turns `take_action` back on, the first rescan
+  admits each such asset again and blocks or quarantines it as for a new
+  install. The `watcher-block` row ends with `rejected while take_action was
+  off, enforced once it was turned on`.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
   user adds goes through admission within about 30 seconds, also while a
