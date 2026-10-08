@@ -1198,13 +1198,18 @@ class SetupPanelModel:
             action=action,
         )
 
-    def apply_changes_to_config(self) -> None:
+    def apply_changes_to_config(self, *, mark_applied: bool = True) -> None:
         if self.config is None:
             raise RuntimeError("setup: no config loaded")
         for section in self.sections:
             for field in section.fields:
                 if field.value != field.original:
                     apply_config_field(self.config, field.key, field.value)
+        if mark_applied:
+            self.accept_applied_changes()
+
+    def accept_applied_changes(self) -> None:
+        """Clear the draft only after its config write succeeded."""
         self.disk_changed_keys = frozenset()
         if self.disk_change_pending:
             # The draft was based on an older disk generation. Changed fields

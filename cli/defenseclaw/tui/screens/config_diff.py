@@ -43,6 +43,7 @@ class ConfigDiffModalModel:
 
     entries: tuple[ConfigDiffEntry, ...]
     restart_reason: str = DEFAULT_RESTART_REASON
+    secure_client: bool = False
 
     @classmethod
     def from_entries(
@@ -50,8 +51,9 @@ class ConfigDiffModalModel:
         entries: Iterable[ConfigDiffEntry],
         *,
         restart_reason: str = DEFAULT_RESTART_REASON,
+        secure_client: bool = False,
     ) -> ConfigDiffModalModel:
-        return cls(tuple(entries), restart_reason)
+        return cls(tuple(entries), restart_reason, secure_client)
 
     @property
     def has_changes(self) -> bool:
@@ -62,7 +64,7 @@ class ConfigDiffModalModel:
         """The save button's text: a restart is offered only when a changed
         key is one the gateway reads once at start (everything else applies
         from the new config generation)."""
-        if restart_required([entry.key for entry in self.entries]):
+        if self.secure_client or restart_required([entry.key for entry in self.entries]):
             return "Save and queue restart"
         return "Save"
 

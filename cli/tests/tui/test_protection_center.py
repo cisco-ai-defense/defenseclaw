@@ -524,3 +524,20 @@ async def test_the_toggle_button_grows_to_fit_a_longer_label() -> None:
         await pilot.pause()
         # A button is its label plus one pad cell each side.
         assert app.query_one("#toggle", Button).size.width >= len("Turn off") + 2
+
+
+def test_secure_client_policy_view_uses_legacy_active_name(monkeypatch, tmp_path) -> None:
+    import json
+
+    from defenseclaw import policy_catalog
+    from defenseclaw.enforce import asset_lists
+
+    rego_dir = tmp_path / "rego"
+    rego_dir.mkdir()
+    (rego_dir / "data.json").write_text(json.dumps({"config": {"policy_name": "strict"}}), encoding="utf-8")
+    config = SimpleNamespace(policy_dir=str(tmp_path), guardrail=SimpleNamespace(), admission=None)
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda cfg: cfg is config)
+
+    read = policy_panel.read_policy_catalog(config)
+    assert {row.name for row in read.policies if row.active} == {"strict"}
+    assert policy_catalog.active_policy_name(tmp_path, config) == "strict"

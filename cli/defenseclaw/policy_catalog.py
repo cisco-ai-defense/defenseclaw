@@ -263,6 +263,28 @@ def _is_within(path: str, directory: str) -> bool:
     return real_path == real_dir or real_path.startswith(real_dir + os.sep)
 
 
+def _legacy_active_policy_name(policy_dir: str | os.PathLike[str] | None) -> str:
+    """Secure Client v8 keeps its active policy name in OPA data.json."""
+    candidates = []
+    if policy_dir:
+        candidates.append(os.path.join(os.fspath(policy_dir), "rego", "data.json"))
+    bundled = _bundled_dir()
+    if bundled:
+        candidates.append(os.path.join(bundled, "rego", "data.json"))
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            with open(candidate, encoding="utf-8") as stream:
+                data = json.load(stream)
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        config = data.get("config") if isinstance(data, dict) else None
+        name = config.get("policy_name") if isinstance(config, dict) else None
+        return name if isinstance(name, str) else ""
+    return ""
+
+
 def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> str:
     """The named policy ``cfg`` runs ("" when none matches or there is no config).
 
@@ -278,13 +300,7 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
     from defenseclaw.enforce import asset_lists
 
     if asset_lists.is_secure_client(cfg):
-        path = os.path.join(os.fspath(policy_dir), "rego", "data.json") if policy_dir else ""
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            return str(data.get("config", {}).get("policy_name") or "")
-        except (OSError, ValueError, AttributeError):
-            return ""
+        return _legacy_active_policy_name(policy_dir)
     import copy
 
     from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
