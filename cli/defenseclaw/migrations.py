@@ -3581,7 +3581,44 @@ def migrate(
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
+        _seal_windows_hook_credentials(data_dir)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _seal_windows_hook_credentials(data_dir: str) -> None:
+    """Give the hook credentials a 0.x Windows install wrote a private DACL.
+
+    0.8.x left ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
+    with the DACL they inherit from the folder. 1.x keeps those files, and
+    ``defenseclaw setup rotate-token`` refuses a hook credential whose DACL is
+    inheritable (GAP-0364). A file that only trusted principals can read gets
+    the owner-only DACL 1.x writes; any other is left as it is: the gateway
+    re-issues a token another account could read.
+    """
+
+    if os.name != "nt":
+        return
+    from defenseclaw.file_permissions import protect_private_file, windows_acl_custody_confidentiality_error
+
+    hooks = os.path.join(data_dir, "hooks")
+    try:
+        names = sorted(os.listdir(hooks))
+    except OSError:
+        return
+    for name in names:
+        folded = name.casefold()
+        if not folded.endswith(".token") or not folded.startswith((".hook-", ".otlp-")):
+            continue
+        path = os.path.join(hooks, name)
+        try:
+            if (
+                windows_acl_custody_confidentiality_error(path) != "Windows DACL is inheritable"
+                or windows_acl_custody_confidentiality_error(path, allow_inheritable=True) is not None
+            ):
+                continue
+            protect_private_file(path)
+        except OSError as exc:
+            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is")
 
 
 def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:

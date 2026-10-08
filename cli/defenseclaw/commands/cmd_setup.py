@@ -3520,10 +3520,23 @@ def _rotate_token_hook_metadata(path: str) -> os.stat_result:
         raise click.ClickException("A connector hook credential has an untrusted owner; refusing token rotation.")
     if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
         raise click.ClickException("A connector hook credential is not owner-only; refusing token rotation.")
-    if os.name == "nt" and windows_acl_custody_confidentiality_error(path) is not None:
-        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
-    if sys.platform == "darwin" and darwin_acl_confidentiality_error(path) is not None:
-        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
+    problem = None
+    if os.name == "nt":
+        problem = windows_acl_custody_confidentiality_error(path)
+    elif sys.platform == "darwin":
+        problem = darwin_acl_confidentiality_error(path)
+    if problem is not None:
+        # Name the file, why, and the fix: the message named none (GAP-0364).
+        if os.name == "nt":
+            import getpass
+
+            fix = f'icacls "{path}" /inheritance:r /grant:r "{getpass.getuser()}:F" "SYSTEM:F"'
+        else:
+            fix = f'chmod -N "{path}" && chmod 600 "{path}"'
+        raise click.ClickException(
+            f"The connector hook credential {path} is not private ({problem}); refusing token rotation. "
+            f"Make it private to your account ({fix}), then run the command again."
+        )
     return info
 
 
