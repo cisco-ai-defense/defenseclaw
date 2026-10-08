@@ -133,9 +133,6 @@ func TestDevinManagedCommandOnlyForUnixStandalone(t *testing.T) {
 	home := t.TempDir()
 	perUser := SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), ForeignHookGuardBinary: devinTestAdminHookBinary}
 	conn := NewDevinConnector()
-	if got, want := conn.hookCommandForOS("linux", perUser), filepath.Join(perUser.DataDir, "hooks", "devin-hook.sh"); got != want {
-		t.Fatalf("per-user command = %q, want %q", got, want)
-	}
 	managedOpts := perUser
 	managedOpts.ManagedEnterprise = true
 	if got := devinManagedHookCommand("windows", managedOpts); got != "" {
@@ -143,6 +140,9 @@ func TestDevinManagedCommandOnlyForUnixStandalone(t *testing.T) {
 	}
 	if runtime.GOOS == "windows" {
 		t.Skip("the Linux and macOS commands take an absolute Unix path, which is not absolute on Windows")
+	}
+	if got, want := conn.hookCommandForOS("linux", perUser), filepath.Join(perUser.DataDir, "hooks", "devin-hook.sh"); got != want {
+		t.Fatalf("per-user command = %q, want %q", got, want)
 	}
 	if got := devinManagedHookCommand("darwin", managedOpts); !strings.Contains(got, "hook --connector devin --enterprise-managed") {
 		t.Fatalf("macOS standalone command = %q", got)

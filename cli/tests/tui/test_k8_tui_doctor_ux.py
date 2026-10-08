@@ -156,7 +156,7 @@ def test_80_column_tab_strip_matches_documented_key_labels() -> None:
     assert labels["alerts"] == "2"
     assert labels["policies"] == "P"
     assert strip_width(tuple(labels.values())) <= 66
-    docs = (Path(__file__).parents[3] / "docs-site/content/docs/tui.mdx").read_text()
+    docs = (Path(__file__).parents[3] / "docs-site/content/docs/tui.mdx").read_text(encoding="utf-8")
     assert "At 80 columns, the tab strip keeps every panel's key" in docs
 
 
