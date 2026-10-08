@@ -267,6 +267,27 @@ def test_kernel_tables_keep_their_no_data_sentence_out_of_empty_cells() -> None:
     assert seen >= 5
 
 
+def test_kernel_fleet_panels_show_each_hosts_current_state() -> None:
+    # GAP-0048: the fleet table listed a host once per backend and pause value
+    # it had in 10 minutes, and the stats counted states a host had left. The
+    # table keeps each host's latest record only (the newest record time wins
+    # per host), and the stats read the defenseclaw_kernel_state gauge, whose
+    # series a host leaves drop to 0.
+    board = _dashboard("defenseclaw-ai-runtime.json")
+    panels = [*board["panels"], *(child for row in board["panels"] for child in row.get("panels", []))]
+    by_title = {panel.get("title"): panel for panel in panels}
+    table = by_title["Kernel controls per host (last 10 minutes)"]
+    for target in table["targets"]:
+        expr = target["expr"]
+        assert " and on (host_name, " in expr and "topk by (host_name) (1, " in expr, target["refId"]
+        assert "{{ __timestamp__ | unixEpoch }}" in expr and "unwrap ts" in expr, target["refId"]
+    for title in ("Hosts reporting kernel controls", "Hosts with a stale approval", "Hosts on fallback", "Paused hosts"):
+        panel = by_title[title]
+        assert panel["datasource"]["type"] == "prometheus", title
+        expr = panel["targets"][0]["expr"]
+        assert expr.startswith("count(max by (host_name) (defenseclaw_kernel_state{") and expr.endswith("> 0) or vector(0)"), title
+
+
 def test_security_dashboard_exposes_generated_ai_defense_metrics() -> None:
     dashboard = _dashboard("defenseclaw-security.json")
     attempts = _panel(dashboard, "AI Defense attempts / min")

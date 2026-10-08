@@ -766,10 +766,10 @@
     {
       "type": "stat",
       "title": "Hosts reporting kernel controls",
-      "description": "Hosts whose sensor helper reported its kernel controls (plane c plane_health with helper_mode) in the last 10 minutes.",
+      "description": "Hosts whose sensor helper reported its kernel controls (plane c plane_health with helper_mode) in the last 10 minutes. Counts each host's current state, from the defenseclaw_kernel_state gauge (one series per host at 1, the state it left at 0), so a host that recovered is no longer counted.",
       "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
         "x": 0,
@@ -779,14 +779,13 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (host_name) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\")[10m]))) or vector(0)",
+          "expr": "count(max by (host_name) (defenseclaw_kernel_state{host_name=~\"$host\"}) > 0) or vector(0)",
           "refId": "A",
           "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
           },
-          "instant": true,
-          "queryType": "instant"
+          "instant": true
         }
       ],
       "options": {
@@ -821,10 +820,10 @@
     {
       "type": "stat",
       "title": "Hosts with a stale approval",
-      "description": "Hosts in enforce whose enforce_ack lists no digest of the build they run (approval stale): every user there is in monitor until the new digest is approved. Alert DefenseClawKernelAckStale.",
+      "description": "Hosts in enforce whose enforce_ack lists no digest of the build they run (approval stale): every user there is in monitor until the new digest is approved. Alert DefenseClawKernelAckStale. Counts each host's current state, from the defenseclaw_kernel_state gauge (one series per host at 1, the state it left at 0), so a host that recovered is no longer counted.",
       "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
         "x": 4,
@@ -834,14 +833,13 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (host_name) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_approval=\"stale\")[10m]))) or vector(0)",
+          "expr": "count(max by (host_name) (defenseclaw_kernel_state{host_name=~\"$host\", approval=\"stale\"}) > 0) or vector(0)",
           "refId": "A",
           "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
           },
-          "instant": true,
-          "queryType": "instant"
+          "instant": true
         }
       ],
       "options": {
@@ -876,10 +874,10 @@
     {
       "type": "stat",
       "title": "Hosts on fallback",
-      "description": "Hosts where Tetragon is installed and the helper uses it, but Plane C runs on the native backend (cn_proc and fanotify): no kernel control is enforced there. Alert DefenseClawTetragonFallback.",
+      "description": "Hosts where Tetragon is installed and the helper uses it, but Plane C runs on the native backend (cn_proc and fanotify): no kernel control is enforced there. Alert DefenseClawTetragonFallback. Counts each host's current state, from the defenseclaw_kernel_state gauge (one series per host at 1, the state it left at 0), so a host that recovered is no longer counted.",
       "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
         "x": 8,
@@ -889,14 +887,13 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (host_name) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_plane_backend=\"native\" | body_defenseclaw_ai_runtime_tetragon_installed=\"true\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"off\")[10m]))) or vector(0)",
+          "expr": "count(max by (host_name) (defenseclaw_kernel_state{host_name=~\"$host\", backend=\"native\", tetragon_installed=\"true\", helper_mode!=\"off\"}) > 0) or vector(0)",
           "refId": "A",
           "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
           },
-          "instant": true,
-          "queryType": "instant"
+          "instant": true
         }
       ],
       "options": {
@@ -931,10 +928,10 @@
     {
       "type": "stat",
       "title": "Paused hosts",
-      "description": "Hosts whose kernel enforcement is paused (tetragon pause): every user on the host is in monitor until it expires or is resumed. Alert DefenseClawKernelPausedLong.",
+      "description": "Hosts whose kernel enforcement is paused (tetragon pause): every user on the host is in monitor until it expires or is resumed. Alert DefenseClawKernelPausedLong. Counts each host's current state, from the defenseclaw_kernel_state gauge (one series per host at 1, the state it left at 0), so a host that recovered is no longer counted.",
       "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
         "x": 12,
@@ -944,14 +941,13 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (host_name) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_paused=\"true\")[10m]))) or vector(0)",
+          "expr": "count(max by (host_name) (defenseclaw_kernel_state{host_name=~\"$host\", paused=\"true\"}) > 0) or vector(0)",
           "refId": "A",
           "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
           },
-          "instant": true,
-          "queryType": "instant"
+          "instant": true
         }
       ],
       "options": {
@@ -1096,7 +1092,7 @@
     {
       "type": "table",
       "title": "Kernel controls per host (last 10 minutes)",
-      "description": "The latest plane c plane_health of each host: the Tetragon version, the Plane C backend, the enterprise.tetragon mode, the approval of this build's controls, how many enrolled users enforce and how many are still in burn-in, the pause, and the control-set digest. A host that changed state in the window shows one row per state.",
+      "description": "The latest plane c plane_health of each host: the Tetragon version, the Plane C backend, the enterprise.tetragon mode, the approval of this build's controls, how many enrolled users enforce and how many are still in burn-in, the pause, and the control-set digest. A host that changed state in the window shows one row per state. One row per host: its latest record of the last 10 minutes (the state it left is not listed).",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1109,7 +1105,7 @@
       },
       "targets": [
         {
-          "expr": "max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | unwrap body_defenseclaw_ai_runtime_kernel_users_enrolled | __error__=\"\")[10m]))",
+          "expr": "max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | unwrap body_defenseclaw_ai_runtime_kernel_users_enrolled | __error__=\"\")[10m])) and on (host_name, version, backend, mode, approval, paused, digest) topk by (host_name) (1, max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts | __error__=\"\")[10m])))",
           "refId": "ENROLLED",
           "datasource": {
             "type": "loki",
@@ -1119,7 +1115,7 @@
           "queryType": "instant"
         },
         {
-          "expr": "max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | unwrap body_defenseclaw_ai_runtime_kernel_users_enforced | __error__=\"\")[10m]))",
+          "expr": "max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | unwrap body_defenseclaw_ai_runtime_kernel_users_enforced | __error__=\"\")[10m])) and on (host_name, version, backend, mode, approval, paused, digest) topk by (host_name) (1, max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts | __error__=\"\")[10m])))",
           "refId": "ENFORCED",
           "datasource": {
             "type": "loki",
@@ -1129,7 +1125,7 @@
           "queryType": "instant"
         },
         {
-          "expr": "max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | unwrap body_defenseclaw_ai_runtime_kernel_users_burn_in | __error__=\"\")[10m]))",
+          "expr": "max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | unwrap body_defenseclaw_ai_runtime_kernel_users_burn_in | __error__=\"\")[10m])) and on (host_name, version, backend, mode, approval, paused, digest) topk by (host_name) (1, max by (host_name, version, backend, mode, approval, paused, digest) (last_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane=\"c\" | body_defenseclaw_ai_runtime_kernel_helper_mode!=\"\" | label_format version=\"{{.body_defenseclaw_ai_runtime_tetragon_version}}\", backend=\"{{.body_defenseclaw_ai_runtime_plane_backend}}\", mode=\"{{.body_defenseclaw_ai_runtime_kernel_helper_mode}}\", approval=\"{{.body_defenseclaw_ai_runtime_kernel_approval}}\", paused=\"{{.body_defenseclaw_ai_runtime_kernel_paused}}\", digest=\"{{.body_defenseclaw_policy_version}}\" | label_format ts=`{{ __timestamp__ | unixEpoch }}` | unwrap ts | __error__=\"\")[10m])))",
           "refId": "BURNIN",
           "datasource": {
             "type": "loki",
