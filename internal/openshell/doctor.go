@@ -1700,6 +1700,10 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 			version.Detail = "the gateway refused DefenseClaw's TLS credentials: " + err.Error()
 			version.Fix = &Fix{Summary: "register the local gateway again, so the CLI's client certificate matches the gateway's CA",
 				Command: fmt.Sprintf("openshell gateway remove %s && openshell gateway add %s --local --name %s", r.reg.Name, shellQuote(r.reg.Endpoint), r.reg.Name)}
+		case err != nil && strings.Contains(err.Error(), "connection refused"):
+			// Nothing listens: in words, not the gRPC dial error (GAP-0226).
+			version.Detail = "the gateway is not running: nothing listens on " + r.reg.Endpoint
+			version.Fix = r.gatewayRecoveryFix()
 		case err != nil:
 			version.Detail = "the gateway is not answering: " + err.Error()
 			version.Fix = r.gatewayRecoveryFix()

@@ -586,7 +586,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		// The user starts it: setup stops here, where it would have to.
 		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"), startYourself)
 		// Not `brew services start` of the formula that is not installed.
-		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"), startYourself)
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not running"), startYourself)
 		if r.OK() {
 			t.Fatalf("a Mac whose gateway does not answer is ready:\n%s", r)
 		}

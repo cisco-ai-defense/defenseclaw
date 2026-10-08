@@ -1567,6 +1567,33 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	}
 }
 
+// GAP-0226: with the gateway's user service gone, the Gateway row and the
+// daemon row each printed the raw gRPC dial error, and the summary counted
+// one cause three times. The daemon row now leans on the Gateway row.
+func TestDoctorCountsADownGatewayOnce(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available = false
+	ta.daemon.status.Reason = `the OpenShell gateway is not available: openshell: health: Unavailable: connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:17670: connect: connection refused"`
+	ta.HostDoctor = hostReport(func(rep *openshell.DoctorReport) {
+		gw := rep.Get(openshell.CheckIDGatewayVersion)
+		gw.Status, gw.Detail = openshell.StatusFail, "the gateway is not running: nothing listens on https://127.0.0.1:17670"
+	})
+	ta.images.recs = readyImages(ta)
+	_ = ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON})
+	var rep struct{ Checks []openshell.Check }
+	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(rep.Checks, func(c openshell.Check) bool { return c.ID == CheckIDDaemon })
+	if i < 0 {
+		t.Fatalf("no daemon row in %+v", rep.Checks)
+	}
+	if c := rep.Checks[i]; c.Status != openshell.StatusSkip || c.Fix != nil || strings.Contains(c.Detail, "connection refused") ||
+		!strings.Contains(c.Detail, "once the OpenShell gateway answers (see Gateway)") {
+		t.Fatalf("daemon row = %+v", c)
+	}
+}
+
 // The doctor's same-user check compares this user with the uid the daemon
 // reports, never with this process's own (which could not fail); a daemon
 // that reports none leaves the check nothing to compare.

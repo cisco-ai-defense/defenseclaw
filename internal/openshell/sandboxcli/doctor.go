@@ -107,10 +107,16 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	}
 	rep := a.HostDoctor(ctx, d)
 	if st != nil {
-		if st.unavailable && rep.GatewayPortElsewhere {
+		switch gw := rep.Get(openshell.CheckIDGatewayVersion); {
+		case st.unavailable && rep.GatewayPortElsewhere:
 			// The daemon's connection error is the other account's
 			// certificate refusal (GAP-0201): say what it means.
 			st.check.Detail = "running, but sandboxes are unavailable: the OpenShell gateway on its port is another account's (see Gateway service)"
+		case st.unavailable && gw != nil && gw.Status == openshell.StatusFail:
+			// The daemon's reason repeats the Gateway check's error: one
+			// cause, counted once, with its fix there (GAP-0226).
+			st.check.Status, st.check.Fix = openshell.StatusSkip, nil
+			st.check.Detail = "running; it serves sandboxes once the OpenShell gateway answers (see Gateway)"
 		}
 		rep.Checks = append(rep.Checks, st.check)
 		if st.available {

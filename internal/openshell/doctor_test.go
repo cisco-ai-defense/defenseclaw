@@ -633,7 +633,7 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "gateway unhealthy", setup: func(f *doctorFixture) { f.fake.SetHealth(false, "0.1.1") },
 			want: []checkWant{{"gateway-version", fail, "unhealthy"}, {"gateway-driver", skip, ""}, {"global-policy", skip, ""}}},
 		{name: "gateway unreachable", setup: health(errors.New("connection refused")),
-			want: []checkWant{{"gateway-version", fail, "connection refused"}}},
+			want: []checkWant{{"gateway-version", fail, "the gateway is not running: nothing listens on"}}},
 		// A running gateway that does not answer is restarted, since
 		// starting it again does nothing; a stopped one is started.
 		{name: "gateway running but hung", setup: health(&types.StatusError{Code: types.ErrorDeadlineExceeded, Message: "context deadline exceeded"}),
@@ -656,14 +656,14 @@ func TestDoctorChecks(t *testing.T) {
 			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
 			f.found["openshell"] = false
 			health(errors.New("connection refused"))(f)
-		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
+		}, want: []checkWant{{"gateway-version", fail, "the gateway is not running: nothing listens on"}},
 			fix: &fixWant{command: install, manual: true, text: "install OpenShell, whose openshell-gateway service runs the gateway"}},
 		// With an OpenShell there, the install finds it and installs
 		// nothing (TestDoctorOnLinuxWithoutTheUserUnit).
 		{name: "gateway down without its service, OpenShell there", setup: func(f *doctorFixture) {
 			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
 			health(errors.New("connection refused"))(f)
-		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
+		}, want: []checkWant{{"gateway-version", fail, "the gateway is not running: nothing listens on"}},
 			fix: &fixWant{command: install, manual: true, text: "start that OpenShell's gateway yourself, the way you started it before. " +
 				"DefenseClaw starts and restarts the gateway only through the openshell-gateway user service, which NVIDIA's installer sets up, " +
 				"and the OpenShell 0.1.1 at /usr/bin/openshell was installed another way"}},
@@ -676,7 +676,7 @@ func TestDoctorChecks(t *testing.T) {
 				return []byte("Error: Formula `openshell` is not installed."), errors.New("brew: exit status 1")
 			})
 			health(errors.New("connection refused"))(f)
-		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
+		}, want: []checkWant{{"gateway-version", fail, "the gateway is not running: nothing listens on"}},
 			fix: &fixWant{command: install, manual: true, text: "install OpenShell, whose nvidia/openshell/openshell service runs the gateway"},
 			then: func(t *testing.T, _ *doctorFixture, r *openshell.DoctorReport) {
 				outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return true, nil })
@@ -932,7 +932,7 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 			t.Fatalf("openshell-cli fix = %+v, upgrade available %v", c.Fix, r.OpenShellUpgradeAvailable())
 		}
 		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), outside(start, cli))
-		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not answering"), outside(start, cli))
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not running"), outside(start, cli))
 		outcomes, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil })
 		for _, o := range outcomes {
 			if o.ID == openshell.CheckIDGatewayService || o.ID == openshell.CheckIDGatewayVersion || o.Error != "" {
@@ -1054,7 +1054,7 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		r := f.run()
 		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), "install OpenShell")
-		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not answering"),
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not running"),
 			"install OpenShell, whose openshell-gateway service runs the gateway")
 	})
 	// With the unit, a stopped gateway is started through it, as before.
