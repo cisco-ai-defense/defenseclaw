@@ -13971,7 +13971,7 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
             f"{'; '.join(problems)}; run `defenseclaw doctor --fix`",
             r=r,
         )
-    from defenseclaw.hook_integrity import hook_command_problems
+    from defenseclaw.hook_integrity import hook_command_problems, setup_command
 
     for problem in hook_command_problems(cfg, connector):
         _emit(
