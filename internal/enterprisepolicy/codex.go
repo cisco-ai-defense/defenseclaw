@@ -115,7 +115,8 @@ var (
 // exactly the administrator's text: DefenseClaw adds no separator lines
 // around its blocks (GAP-0903).
 func stripCodexOwned(raw []byte) []byte {
-	lines := strings.SplitAfter(string(raw), "\n")
+	bom := bytes.HasPrefix(raw, utf8BOM)
+	lines := strings.SplitAfter(string(bytes.TrimPrefix(raw, utf8BOM)), "\n")
 	var out strings.Builder
 	skipping := ""
 	for _, line := range lines {
@@ -136,6 +137,9 @@ func stripCodexOwned(raw []byte) []byte {
 			continue
 		}
 		out.WriteString(line)
+	}
+	if bom {
+		return append(append([]byte(nil), utf8BOM...), out.String()...)
 	}
 	return []byte(out.String())
 }
@@ -158,7 +162,7 @@ func codexAdminText(opts Options, path string, current []byte, exists bool) []by
 // codexHasOwned reports whether raw carries a DefenseClaw region or marked
 // line.
 func codexHasOwned(raw []byte) bool {
-	for _, line := range strings.Split(string(raw), "\n") {
+	for _, line := range strings.Split(string(bytes.TrimPrefix(raw, utf8BOM)), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == codexHeadBegin || trimmed == codexTailBegin || strings.HasSuffix(trimmed, codexOwnedMark) {
 			return true
@@ -189,6 +193,7 @@ func analyzeCodexAdmin(lines []string) codexAdminLayout {
 	layout := codexAdminLayout{firstTableLine: -1, featuresHeader: -1, hooksHeader: -1}
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		line = strings.TrimRight(line, "\r\n")
 		if match := tomlArrayHeader.FindStringSubmatch(line); match != nil {
 			if layout.firstTableLine < 0 {
 				layout.firstTableLine = i
@@ -224,6 +229,15 @@ func analyzeCodexAdmin(lines []string) codexAdminLayout {
 // administrator text. It returns the document and the conflicts that
 // prevent DefenseClaw from claiming coverage.
 func renderCodex(opts Options, admin []byte, policy config.ResolvedConnectorPolicy) ([]byte, []string, error) {
+	// A file saved as "UTF-8 with BOM" keeps its BOM first, and DefenseClaw's
+	// lines use the file's line end (CRLF from a Windows editor), as Codex
+	// reads both (GAP-0917).
+	bom := bytes.HasPrefix(admin, utf8BOM)
+	admin = bytes.TrimPrefix(admin, utf8BOM)
+	nl := "\n"
+	if bytes.Contains(admin, []byte("\r\n")) {
+		nl = "\r\n"
+	}
 	adminCfg := map[string]any{}
 	if len(bytes.TrimSpace(admin)) > 0 {
 		if err := toml.Unmarshal(admin, &adminCfg); err != nil {
@@ -303,28 +317,31 @@ func renderCodex(opts Options, admin []byte, policy config.ResolvedConnectorPoli
 	}
 
 	var out strings.Builder
+	if bom {
+		out.Write(utf8BOM)
+	}
 	if len(head) > 0 {
-		out.WriteString(codexHeadBegin + "\n")
+		out.WriteString(codexHeadBegin + nl)
 		for _, line := range head {
-			out.WriteString(line + "\n")
+			out.WriteString(line + nl)
 		}
-		out.WriteString(codexHeadEnd + "\n")
+		out.WriteString(codexHeadEnd + nl)
 	}
 	for i, line := range lines {
 		out.WriteString(line)
 		if !strings.HasSuffix(line, "\n") {
-			out.WriteString("\n")
+			out.WriteString(nl)
 		}
 		for _, owned := range insertAfter[i] {
-			out.WriteString(owned + "\n")
+			out.WriteString(owned + nl)
 		}
 	}
 	if len(tail) > 0 {
-		out.WriteString(codexTailBegin + "\n")
+		out.WriteString(codexTailBegin + nl)
 		for _, line := range tail {
-			out.WriteString(line + "\n")
+			out.WriteString(line + nl)
 		}
-		out.WriteString(codexTailEnd + "\n")
+		out.WriteString(codexTailEnd + nl)
 	}
 	rendered := []byte(out.String())
 	if len(rendered) > policyFileLimit {
@@ -391,6 +408,7 @@ func tomlInt(value any) (int64, bool) {
 // inspectCodex fills state from a requirements document.
 func inspectCodex(opts Options, raw []byte, policy config.ResolvedConnectorPolicy, state *State) error {
 	cfg := map[string]any{}
+	raw = bytes.TrimPrefix(raw, utf8BOM)
 	if len(bytes.TrimSpace(raw)) > 0 {
 		if err := toml.Unmarshal(raw, &cfg); err != nil {
 			return fmt.Errorf("parse Codex requirements: %w", err)
@@ -634,7 +652,7 @@ func codexParseError(path string, current []byte, err error) error {
 		return err
 	}
 	cfg := map[string]any{}
-	if fileErr := toml.Unmarshal(current, &cfg); errors.As(fileErr, &decode) {
+	if fileErr := toml.Unmarshal(bytes.TrimPrefix(current, utf8BOM), &cfg); errors.As(fileErr, &decode) {
 		row, column := decode.Position()
 		return fmt.Errorf("%s does not parse as TOML at line %d, column %d (%v); DefenseClaw does not rewrite administrator lines, so fix that line, then rerun", path, row, column, fileErr)
 	}

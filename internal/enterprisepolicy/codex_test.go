@@ -170,6 +170,28 @@ func TestCodexReconcilePreservesAdministratorBytes(t *testing.T) {
 	}
 }
 
+// A company requirements.toml saved by a Windows editor (UTF-8 BOM, CRLF)
+// is read and merged as Codex reads it: DefenseClaw refused it, so Codex ran
+// without DefenseClaw's hooks (GAP-0917).
+func TestCodexMergesARequirementsFileWithBOMAndCRLF(t *testing.T) {
+	opts := testOptions(t)
+	path := codexPath(t, opts)
+	company := "\ufeff# Company requirements\r\nallowed_approval_policies = [\"on-request\"]\r\n\r\n[features]\r\nweb_search = false\r\n"
+	writeFile(t, path, company)
+	state, err := codexTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNoConflicts(t, state)
+	merged := readFile(t, path)
+	if !strings.HasPrefix(merged, "\ufeff") || string(stripCodexOwned([]byte(merged))) != company {
+		t.Fatalf("the administrator bytes changed:\n%q", merged)
+	}
+	if again, err := (codexTarget{}).Reconcile(opts); err != nil || again.Changed || !again.Covered {
+		t.Fatalf("a second reconcile must find the entries in place once: %v %+v", err, again)
+	}
+}
+
 func TestCodexConflictsAreReportedNotRewritten(t *testing.T) {
 	opts := testOptions(t)
 	path := codexPath(t, opts)
