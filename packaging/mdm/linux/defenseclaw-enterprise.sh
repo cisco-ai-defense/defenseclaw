@@ -47,6 +47,7 @@
 set -eu
 
 DC_SCRIPT_OS=linux # linux | darwin - the only line that differs between the copies
+DC_LOG_NAME=defenseclaw-enterprise.sh
 
 # ---- MDM settings ------------------------------------------------------------
 # Script-only MDMs (Intune platform scripts, Jamf policies, ...) upload this
@@ -135,7 +136,7 @@ dc_log() {
         ( umask 077; : >"$DC_LOG" ) 2>/dev/null || return 0
     fi
     [ -f "$DC_LOG" ] && [ ! -L "$DC_LOG" ] || return 0
-    printf '%s %s[%s] %s\n' "$(dc_now)" "${0##*/}" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
+    printf '%s %s[%s] %s\n' "$(dc_now)" "$DC_LOG_NAME" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
 }
 
 dc_cleanup() {
@@ -224,18 +225,43 @@ dc_lower() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
 
 dc_download() {
     url=$1 dest=$2
+    DC_DOWNLOAD_ERROR="download failed"
     case "$url" in https://*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "download URLs must use https://" ;; esac
     if command -v curl >/dev/null 2>&1; then
         set -- curl -fsS --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 5 \
-            --connect-timeout 30 --max-time 1800 -o "$dest"
+            --connect-timeout 30 --max-time 1800 -D "$DC_STAGE/download.headers" -o "$dest"
         [ -z "$DC_HTTPS_PROXY" ] || set -- "$@" --proxy "$DC_HTTPS_PROXY"
-        "$@" "$url"
+        if "$@" "$url" 2>"$DC_STAGE/download.err"; then result=0; else result=$?; fi
+        http_status=$(awk '/^HTTP\// {code=$2} END {print code}' "$DC_STAGE/download.headers" 2>/dev/null)
+        case "$http_status" in
+            3??) DC_DOWNLOAD_ERROR="download redirected (HTTP $http_status); use a URL that serves the file directly"; return 1 ;;
+        esac
+        [ "$result" = 0 ] && return 0
+        case "$http_status" in 4?? | 5??) DC_DOWNLOAD_ERROR="download failed: HTTP $http_status"; return 1 ;; esac
+        case "$result" in
+            5) reason="proxy lookup failed" ;; 6) reason="DNS lookup failed" ;;
+            7) reason="connection failed" ;; 18) reason="transfer ended early" ;;
+            28) reason="timed out" ;; 35) reason="TLS handshake failed" ;;
+            52) reason="server sent no response" ;; 56) reason="connection closed during transfer" ;;
+            60) reason="TLS certificate verification failed" ;;
+            *) reason="network error" ;;
+        esac
+        DC_DOWNLOAD_ERROR="download failed: $reason (curl exit $result)"
+        return 1
     elif command -v wget >/dev/null 2>&1; then
         if [ -n "$DC_HTTPS_PROXY" ]; then
-            https_proxy=$DC_HTTPS_PROXY wget -q --https-only --tries=3 --timeout=60 -O "$dest" "$url"
+            https_proxy=$DC_HTTPS_PROXY wget -q --server-response --max-redirect=0 --https-only --tries=3 --timeout=60 -O "$dest" "$url" 2>"$DC_STAGE/download.err" && return 0
         else
-            wget -q --https-only --tries=3 --timeout=60 -O "$dest" "$url"
+            wget -q --server-response --max-redirect=0 --https-only --tries=3 --timeout=60 -O "$dest" "$url" 2>"$DC_STAGE/download.err" && return 0
         fi
+        result=$?
+        http_status=$(awk '/^[[:space:]]*HTTP\// {code=$2} END {print code}' "$DC_STAGE/download.err")
+        case "$http_status" in
+            3??) DC_DOWNLOAD_ERROR="download redirected (HTTP $http_status); use a URL that serves the file directly" ;;
+            4?? | 5??) DC_DOWNLOAD_ERROR="download failed: HTTP $http_status" ;;
+            *) DC_DOWNLOAD_ERROR="download failed: wget exit $result" ;;
+        esac
+        return 1
     else
         dc_fail_result "$DC_EXIT_FAILURE" mdm_download_unavailable "neither curl nor wget is installed"
     fi
@@ -274,6 +300,13 @@ dc_usage() {
 }
 
 dc_parse_args() {
+    # Intune's Linux agent invokes sh /proc/self/fd/N /proc/self/fd/N.
+    # The second descriptor is its script argument, not an operator flag.
+    case "${1:-}" in
+        /proc/self/fd/*)
+            case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
+            ;;
+    esac
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --action)
@@ -420,7 +453,7 @@ dc_verify_signature() {
     signature="$DC_STAGE/source.sig"
     if [ -n "$DC_SIGNATURE_URL" ]; then
         dc_download "$DC_SIGNATURE_URL" "$signature" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "could not download the signature"
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "$DC_DOWNLOAD_ERROR (signature)"
     else
         if [ -z "$DC_SIGNATURE" ]; then
             [ -n "$DC_SOURCE" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a downloaded source needs --signature-url or --signature"
@@ -446,7 +479,7 @@ dc_stage_source() {
     DC_STAGED_SOURCE="$DC_STAGE/$name"
     if [ -n "$DC_SOURCE_URL" ]; then
         dc_download "$DC_SOURCE_URL" "$DC_STAGED_SOURCE" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "could not download the source"
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "$DC_DOWNLOAD_ERROR (source)"
     else
         dc_stage_file "$DC_SOURCE" "$DC_STAGED_SOURCE" 1073741824 "source"
     fi
@@ -478,7 +511,7 @@ dc_require_product_version() {
 # rpm version names. The epoch and the Debian revision are dropped and the
 # "~" packages use for a prerelease reads as "-", so 1:1.4.0~rc1-1 is 1.4.0-rc1.
 dc_package_release_version() {
-    printf '%s' "$1" | sed -e 's/^[0-9][0-9]*://' -e 's/-[^-]*$//' -e 's/~/-/'
+    printf '%s' "$1" | sed -e 's/^[0-9][0-9]*://' -e 's/-[0-9][0-9]*$//' -e 's/~/-/'
 }
 
 # dc_install_package: install the staged package when its version differs
@@ -500,12 +533,19 @@ dc_install_package() {
             if [ "$installed" = "install ok installed $version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
-                if ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); then
+                attempt=1
+                while ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); do
+                    if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
+                        dc_log "package manager busy; retry $attempt of 2"
+                        attempt=$((attempt + 1))
+                        sleep 10
+                        continue
+                    fi
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "dpkg failed: $output"
-                fi
+                done
                 case "$installed" in
                     "install ok installed "*) dc_package_step "$(dc_package_release_version "${installed#install ok installed }")" "$(dc_package_release_version "$version")" ;;
                     *) dc_package_step "" "$(dc_package_release_version "$version")" ;;
@@ -531,12 +571,19 @@ dc_install_package() {
                 fi
                 # rpm -U refuses a downgrade, which keeps an older package
                 # from silently replacing a newer deployment.
-                if ! output=$(rpm -U --quiet $replace "$file" 2>&1); then
+                attempt=1
+                while ! output=$(rpm -U --quiet $replace "$file" 2>&1); do
+                    if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
+                        dc_log "package manager busy; retry $attempt of 2"
+                        attempt=$((attempt + 1))
+                        sleep 10
+                        continue
+                    fi
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "rpm failed: $output"
-                fi
+                done
                 dc_package_step "$previous" "$(dc_package_release_version "$version")"
             fi
             ;;
@@ -703,12 +750,27 @@ dc_run_lifecycle() {
     return "$status"
 }
 
+dc_run_lifecycle_retry() {
+    attempt=1
+    while :; do
+        status=0
+        dc_run_lifecycle "$@" || status=$?
+        [ "$status" = 75 ] && [ "$attempt" -lt 3 ] || break
+        dc_log "lifecycle busy; retry $attempt of 2"
+        attempt=$((attempt + 1))
+        sleep 10
+    done
+    return "$status"
+}
+
 dc_main() {
+    dc_layout
+    dc_log "start action=$DC_ACTION"
     dc_parse_args "$@"
+    dc_layout
     platform=$(dc_platform)
     [ "$platform" = "$DC_SCRIPT_OS" ] ||
         dc_fail_result "$DC_EXIT_INVALID" mdm_wrong_platform "this copy of the wrapper is for $DC_SCRIPT_OS, not $platform"
-    dc_layout
     dc_validate_args
     [ "$(id -u)" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_not_root "run as root (the MDM agent's system context)"
 
@@ -720,7 +782,7 @@ dc_main() {
     chmod 0700 "$DC_STAGE"
     [ "$(dc_stat_uid "$DC_STAGE")" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging directory is not root-owned"
     printf '%s\n' "$$" >"$DC_STAGE/pid"
-    dc_log "start action=$DC_ACTION"
+    dc_log "validated action=$DC_ACTION"
 
     if [ "$DC_ACTION" != ensure ]; then
         dc_trusted_path "$DC_GATEWAY" ||
@@ -812,7 +874,7 @@ dc_main() {
     [ -z "$config" ] || set -- "$@" "--config=$config"
     [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
     status=0
-    dc_run_lifecycle "$gateway" "$@" || status=$?
+    dc_run_lifecycle_retry "$gateway" "$@" || status=$?
     [ "$status" != 0 ] || dc_annotate_package_step
     dc_emit_result
     return "$status"

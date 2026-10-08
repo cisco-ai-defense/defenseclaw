@@ -24,6 +24,7 @@
 set -eu
 
 DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the copies
+DC_LOG_NAME=uninstall.sh
 
 # ---- MDM settings (flags override) -------------------------------------------
 DC_PURGE=0          # 1: also remove each account's ~/.defenseclaw and per-user binaries
@@ -61,7 +62,7 @@ dc_log() {
         ( umask 077; : >"$DC_LOG" ) 2>/dev/null || return 0
     fi
     [ -f "$DC_LOG" ] && [ ! -L "$DC_LOG" ] || return 0
-    printf '%s %s[%s] %s\n' "$(dc_now)" "${0##*/}" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
+    printf '%s %s[%s] %s\n' "$(dc_now)" "$DC_LOG_NAME" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
 }
 
 dc_stat_uid() {
@@ -159,6 +160,18 @@ dc_remove_linux_package() {
     dc_log "removed package $DC_LINUX_PACKAGE ($kind)"
 }
 
+# Intune's Linux agent may repeat its /proc/self/fd/N script descriptor.
+case "${1:-}" in
+    /proc/self/fd/*)
+        case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
+        ;;
+esac
+if [ "$DC_SCRIPT_OS" = darwin ]; then
+    [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
+else
+    [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
+fi
+dc_log "start action=uninstall"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --purge) DC_PURGE=1; shift ;;

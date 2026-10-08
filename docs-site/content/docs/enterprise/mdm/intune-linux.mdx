@@ -31,6 +31,11 @@ detection and logs.
 
 ## Before you start
 
+After the first install or a reinstall, ask users to restart agent sessions
+that were already open. Those sessions keep running without DefenseClaw until
+restarted. `status` and `ensure` report `agent_sessions_restart_required`
+while they remain open.
+
 - **Tenant**: licences and device groups are in place; see
   [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). Intune has no Linux enrollment setting.
 - **Devices**: a distribution and version on Microsoft's list of Intune-supported
@@ -119,7 +124,7 @@ In the Intune admin center, go to **Devices** > **Manage devices** >
 **Create profile** > **Custom Configuration (linuxMdm)**. Complete **Basics**,
 **Configuration settings**, **Scope tags**, **Assignments**, then **Review + create**.
 In Configuration settings choose **Execution context: Root**, **Execution
-frequency: Every 1 day**, **Execution retries: 3 times**, and upload the file
+frequency: Every 1 day**, **Execution retries: No retries**, and upload the file
 under **Execution Script** (or paste it in **Bash Script**). The review page may
 show **Platform: No Platform** for this Linux profile.
 
@@ -127,14 +132,15 @@ show **Platform: No Platform** for this Linux profile.
 | --- | --- |
 | Execution context | **Root**. The Intune daemon still needs authorization for `com.microsoft.intune.actions.ConfigureDevice`; see the polkit rule below for unattended runs. |
 | Execution frequency | **Every 1 day**. `ensure` changes nothing when the host already matches, but with `DC_SOURCE_URL` set every run downloads the artifact before it compares versions. |
-| Execution retries | **3 times**. Exit `75` means dpkg, rpm or another lifecycle run held a lock, and a later run succeeds. |
+| Execution retries | **No retries**. The wrapper itself retries exit `75` (busy) up to three times, 10 seconds apart. Intune may count a cached retry inside its frequency window as successful without rerunning the script. |
 | Execution script | Your edited copy of `defenseclaw-enterprise.sh` |
 
 Assign it to device groups. On each run the wrapper downloads the artifact,
 verifies it, installs the package only when its version differs from the
 installed one, runs `ensure` with the config, and exits with the lifecycle's
 code. A busy package manager, for example during unattended upgrades, exits
-`75` (`mdm_package_manager_busy`).
+`75` (`mdm_package_manager_busy`). Intune typically checks in about hourly; a failed non-busy run waits for a later frequency window.
+
 
 For a local-group profile assignment, upload
 `packaging/mdm/intune/linux/sync-local-group.sh` as a **second** root platform
@@ -219,6 +225,13 @@ applies it.
   [Roll back](/docs/enterprise/lifecycle#roll-back).
 
 ## Remove DefenseClaw
+
+If the config names a custom rule pack, run and confirm the pack-delivery
+script before the package/config script. After an uninstall with purge,
+`/etc/defenseclaw` and its pack are gone. Reassign or change the pack
+script so Intune executes it again, confirm the pack is staged, then reassign
+the install script. A missing pack causes `config_invalid`; do not retry the
+install before the pack is restored.
 
 First remove the devices from the install script's assignment. Then assign a
 root platform script with `packaging/mdm/linux/uninstall.sh`. It stops and

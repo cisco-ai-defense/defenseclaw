@@ -227,6 +227,17 @@ Pass `-Purge` to also remove each enrolled account's
 See [Exit codes](/docs/enterprise/mdm#exit-codes) and
 [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes).
 
+## Deliver a custom macOS rule pack
+
+Before the first pkg install, add a root **stage-pack** script that copies the
+pack into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with
+`root:wheel` ownership, `0755` directories and `0644` files. Use the exact
+[stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack).
+Run it before the config and pkg steps. In `config.yaml`, set
+`guardrail.rule_pack` to the pack name and
+`guardrail.custom_packs.<name>` to that absolute path and its
+`sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
+
 ## macOS
 
 ### How Workspace ONE runs macOS apps, scripts and sensors
@@ -396,7 +407,7 @@ true` and `credential: ai-defense-api-key` in the config.
 | Where | What |
 | --- | --- |
 | Workspace ONE: the device's **Scripts** and **Sensors** tabs | Script status and logs, and sensor values |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state; use the MDM policy or audit log for the uninstall result. `detect.sh` does not log. |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
 

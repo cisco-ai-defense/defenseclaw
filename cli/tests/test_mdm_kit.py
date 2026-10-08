@@ -160,6 +160,19 @@ def test_unix_wrapper_failures_are_schema_results() -> None:
             assert [e["code"] for e in document["errors"]] == [error], (args, document)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file descriptors")
+@pytest.mark.parametrize("name", UNIX_SCRIPTS)
+def test_intune_repeated_file_descriptor_is_not_an_argument(name: str) -> None:
+    path = MDM / _host_os_dir() / name
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        script = f"/proc/self/fd/{descriptor}"
+        result = subprocess.run(["sh", script, script], pass_fds=(descriptor,), capture_output=True, text=True, timeout=30)
+    finally:
+        os.close(descriptor)
+    assert "unknown argument" not in result.stderr + result.stdout
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("os_dir", ["linux", "macos"])
 def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path: Path) -> None:
@@ -173,6 +186,67 @@ def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path:
     assert result.returncode == 0, result.stderr
     for directory in (log.parent.parent, log.parent):
         assert directory.stat().st_mode & 0o777 == 0o755, directory
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("http", "code", "reason"),
+    [(302, 0, "redirected (HTTP 302)"), (404, 22, "HTTP 404"), (0, 5, "proxy lookup failed (curl exit 5)")],
+)
+def test_unix_download_reports_status_without_url_query(
+    http: int, code: int, reason: str, tmp_path: Path
+) -> None:
+    curl = tmp_path / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -D) header=$2; shift 2 ;;\n"
+        "    -o) output=$2; shift 2 ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "printf 'HTTP/2 %s\\n' \"$DC_TEST_HTTP\" >\"$header\"\n"
+        ": >\"$output\"\n"
+        "exit \"$DC_TEST_CODE\"\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    download = _shell_function(_text(MDM / "linux" / "defenseclaw-enterprise.sh"), "dc_download")
+    script = (
+        f'DC_STAGE="{tmp_path}"\nDC_HTTPS_PROXY=""\n{download}\n'
+        f'dc_download "https://example.test/a.deb?sig=private" "{tmp_path / "a.deb"}" '
+        '|| printf "%s\\n" "$DC_DOWNLOAD_ERROR"\n'
+    )
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "DC_TEST_HTTP": str(http), "DC_TEST_CODE": str(code)}
+    result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, check=True)
+    assert reason in result.stdout and "private" not in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_lifecycle_retries_only_busy(tmp_path: Path) -> None:
+    retry = _shell_function(_text(MDM / "linux" / "defenseclaw-enterprise.sh"), "dc_run_lifecycle_retry")
+    script = f'''DC_TEST_COUNT="{tmp_path / "count"}"
+dc_log() {{ :; }}
+sleep() {{ :; }}
+dc_run_lifecycle() {{
+    count=$(cat "$DC_TEST_COUNT" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    echo "$count" >"$DC_TEST_COUNT"
+    [ "$count" -ge 2 ] || return 75
+}}
+{retry}
+dc_run_lifecycle_retry ignored
+'''
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0 and (tmp_path / "count").read_text().strip() == "2"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_busy_is_a_retry_signal() -> None:
+    report = _shell_function(_text(MDM / "linux" / "detect.sh"), "dc_report")
+    result = subprocess.run(["sh", "-c", f'DC_FORMAT=exit\n{report}\ndc_report 0 busy busy'], capture_output=True, text=True)
+    assert result.returncode == 75 and "busy" in result.stderr
 
 
 _PACKAGE_TOOL_STUBS = {
@@ -201,6 +275,7 @@ esac""",
         ("defenseclaw-enterprise.deb", "1.5.0", "1.4.0", False),
         ("defenseclaw-enterprise.deb", "1.4.0", "v1.4.0", True),
         ("defenseclaw-enterprise.deb", "1:1.4.0~rc1-1", "1.4.0-rc1", True),
+        ("defenseclaw-enterprise.deb", "1.0.901~SNAPSHOT-d03042625", "1.0.901-SNAPSHOT-d03042625", True),
         ("defenseclaw-enterprise.deb", "1.4.0~rc1", "1.4.0", False),
         ("defenseclaw-enterprise.rpm", "1.5.0-1", "1.4.0", False),
         ("defenseclaw-enterprise.rpm", "1.4.0~rc1-1", "1.4.0-rc1", True),
@@ -317,9 +392,24 @@ def test_unix_detect_formats_without_an_installation() -> None:
     detect = str(MDM / _host_os_dir() / "detect.sh")
     result = _run([detect])
     assert result.returncode == 1 and result.stdout == ""
-    assert _run([detect, "--format", "value"]).stdout == "not-installed\n"
-    assert _run([detect, "--format", "jamf"]).stdout == "<result>not-installed</result>\n"
+    value = "not-installed" if os.geteuid() == 0 else "unknown"
+    assert _run([detect, "--format", "value"]).stdout == f"{value}\n"
+    assert _run([detect, "--format", "jamf"]).stdout == f"<result>{value}</result>\n"
     assert _run([detect, "--format", "yaml"]).returncode == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_rejects_malformed_minimum_version() -> None:
+    detect = str(MDM / _host_os_dir() / "detect.sh")
+    for value in ("", "abc", "1.x.0"):
+        result = _run([detect, "--min-version", value])
+        assert result.returncode == 2 and not result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires a standard user")
+def test_unix_detect_standard_user_reports_unknown() -> None:
+    detect = str(MDM / _host_os_dir() / "detect.sh")
+    assert _run([detect, "--format", "value"]).stdout == "unknown\n"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -363,6 +453,16 @@ def test_windows_shared_helpers_start_the_cli_outside_the_install() -> None:
     region = _shared_region(_text(WINDOWS_SHARED[0]))
     assert "$info.WorkingDirectory = [System.Environment]::SystemDirectory" in region
     assert "GetDirectoryName($FilePath)" not in region
+
+
+def test_intune_package_resolves_output_before_using_dotnet_paths() -> None:
+    script = _text(MDM / "intune" / "windows" / "New-DefenseClawIntunePackage.ps1")
+    assert script.index("$OutputDirectory = [IO.Path]::GetFullPath") < script.index("$content = Join-Path")
+
+
+def test_intune_package_rejects_inline_key_before_copying_setup() -> None:
+    script = _text(MDM / "intune" / "windows" / "New-DefenseClawIntunePackage.ps1")
+    assert script.index("if ($configText -match") < script.index("New-Item -ItemType Directory -Path $content")
 
 
 # PowerShell 7 / .NET Core only constructs that break Windows PowerShell 5.1.

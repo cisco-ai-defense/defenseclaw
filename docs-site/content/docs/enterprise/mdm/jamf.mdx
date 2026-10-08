@@ -299,6 +299,17 @@ contract, see [Detection](/docs/enterprise/mdm#detection).
 
 See [Upgrades, rollback and config changes](/docs/enterprise/mdm#upgrades-rollback-and-config-changes).
 
+## Deliver a custom macOS rule pack
+
+Before the first pkg install, add a root **stage-pack** script that copies the
+pack into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with
+`root:wheel` ownership, `0755` directories and `0644` files. Use the exact
+[stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack).
+Run it before the config and pkg steps. In `config.yaml`, set
+`guardrail.rule_pack` to the pack name and
+`guardrail.custom_packs.<name>` to that absolute path and its
+`sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
+
 ## Uninstall
 
 Jamf Pro's own package uninstall works only for packages indexed with Jamf
@@ -318,7 +329,7 @@ config.
 | --- | --- |
 | Jamf Pro: **Computers** > **Policies** > the policy > **Logs** | Status and script output for each computer, truncated after 25 KB ([Viewing and Flushing Logs for a Policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Viewing_and_Flushing_Logs_for_a_Policy)) |
 | The Mac's `jamf.log` | The Jamf agent's own log ([Getting Additional Logging Information](https://learn.jamf.com/r/en-US/technical-articles/Getting_Additional_Logging_Information_on_Packages_and_Policies)) |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state; use the MDM policy or audit log for the uninstall result. `detect.sh` does not log. |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
 

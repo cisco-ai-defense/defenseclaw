@@ -230,8 +230,9 @@ it. OpenCode itself can still start without it: see
   connector's name from both `guardrail.connectors` and
   `enterprise.machine_policy.connectors`, or set its `ownership` to
   `"off"`, the next `ensure` removes DefenseClaw's entries for it.
-  `enabled: false` is not enough: it stops only per-user enrollment, and
-  the machine policy stays (see
+  On Linux and macOS, `guardrail.connectors.claudecode.enabled: false`
+  also removes Claude Code machine policy and hooks. For other connectors,
+  check the machine-policy ownership map (see
   [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)).
 
 If a Codex `requirements.toml` defines `features` or `hooks` as dotted keys
