@@ -931,9 +931,19 @@ func (s *session) end(ctx context.Context) error {
 		a.note(s.sb.Name + " keeps running for a reattach, so what changes after this review is not in it")
 	case s.started && !s.liveRun:
 		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
-			stopFailed = true
-			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
-				"); what still runs in it can change the folder after this review")
+			if now, gerr := s.api.Get(ctx, s.sb.Name); gerr == nil && now.Phase == "error" {
+				// Docker stopped the container as the session ended: the stop
+				// met that, in whatever words; the line says what happened,
+				// and nothing runs in it any more (GAP-0337).
+				after, stopped = now, true
+				if text := s.endedElsewhere(after); text != "" {
+					a.warn(text)
+				}
+			} else {
+				stopFailed = true
+				a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
+					"); what still runs in it can change the folder after this review")
+			}
 		} else {
 			stopped = true
 			if sb != nil {

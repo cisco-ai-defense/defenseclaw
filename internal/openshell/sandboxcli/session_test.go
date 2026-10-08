@@ -885,6 +885,21 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.mu.Unlock()
 		}, want: []string{"the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run",
 			"review " + sbName + "` shows its changes"}, not: []string{"connection refused"}},
+		// GAP-0337: Docker stopped the container as the session ended, so the
+		// session's stop failed in gRPC's words: the first line says what
+		// happened instead.
+		{name: "the container stopped as the session stopped it", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream,
+				Message: "OpenShell: stop sandbox " + sbName + " failed", Detail: "Cancelled: grpc: the client connection is closing"}
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				for _, c := range ta.daemon.calls { // the fake holds its lock here
+					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/stop") {
+						sb.Phase = "error"
+					}
+				}
+			}
+		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed)"},
+			not: []string{"client connection is closing", "could not stop"}},
 		// GAP-0333: a sandbox the session could not stop (OpenShell's error
 		// state after a Docker restart) does not keep running.
 		{name: "keeping when the stop failed", input: "y\n", opts: claude, setup: func(ta *testApp) {

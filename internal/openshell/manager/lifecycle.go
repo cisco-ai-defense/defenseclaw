@@ -350,6 +350,14 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
 			return e
 		}
+		if e := m.errorPhaseNow(b); e != nil {
+			return e
+		}
+		if connectionClosed(err) {
+			// gRPC's own words reached the user's session end (GAP-0337).
+			return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the connection to the OpenShell gateway closed while %s was stopping "+
+				"(a restart of Docker or of the gateway does that); `defenseclaw sandbox status %s` shows where it stands", name, name)
+		}
 		return upstream("stop sandbox "+name, err)
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
