@@ -144,7 +144,7 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 		1001: {Account: enterpriseHookWorkerAccount{UID: 1001, GID: 1001, User: "alice", Home: "/home/alice"}},
 		1004: {Account: enterpriseHookWorkerAccount{UID: 1004, GID: 1004, User: "dave", Home: "/home/dave"}},
 	}
-	notPurged := addEnterpriseHookStatePurges(jobs, manifest, map[int]bool{1004: true})
+	notPurged := addEnterpriseHookStatePurges(jobs, manifest, nil, map[int]bool{1004: true})
 	want := []string{
 		"bob: its home is not trusted",
 		"carol: its home is not available; rerun the purge when it is",
@@ -163,6 +163,48 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	}
 	if purges != 1 || len(jobs[1004].Request.Targets) != 0 {
 		t.Fatalf("alice purges %d, dave targets %+v", purges, jobs[1004].Request.Targets)
+	}
+}
+
+// GAP-0040: an eligible account with no manifest row (enrolled through
+// vendor machine policy, whose managed hooks write ~/.defenseclaw) has that
+// folder purged too, as the uninstall promised; one whose pending cleanup
+// failed keeps it, and an account without a job (its home is not available)
+// gets none.
+func TestAddEnterpriseHookStatePurgesIncludesMachinePolicyAccounts(t *testing.T) {
+	uid := func(v int) *int { return &v }
+	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{
+		{User: "alice", UserHome: "/home/alice", UID: uid(1001), Connector: "codex"},
+	}}
+	jobs := map[int]*enterpriseHookWorkerJob{
+		1001: {Account: enterpriseHookWorkerAccount{UID: 1001, GID: 1001, User: "alice", Home: "/home/alice"}},
+		1002: {Account: enterpriseHookWorkerAccount{UID: 1002, GID: 1002, User: "bob", Home: "/home/bob"}},
+		1003: {Account: enterpriseHookWorkerAccount{UID: 1003, GID: 1003, User: "carol", Home: "/home/carol"}},
+	}
+	accounts := []enterprisehooks.UnixEligibleAccount{
+		{User: "alice", UID: 1001, GID: 1001, Home: "/home/alice"},
+		{User: "bob", UID: 1002, GID: 1002, Home: "/home/bob"},
+		{User: "carol", UID: 1003, GID: 1003, Home: "/home/carol"},
+		{User: "dave", UID: 1004, GID: 1004, Home: "/home/dave"},
+	}
+	notPurged := addEnterpriseHookStatePurges(jobs, manifest, accounts, map[int]bool{1003: true})
+	if strings.Join(notPurged, "\n") != "carol: its pending hook cleanup failed; the state stays for a retry" {
+		t.Fatalf("not purged %v", notPurged)
+	}
+	purgesOf := func(uid int, dir string) int {
+		n := 0
+		for _, target := range jobs[uid].Request.Targets {
+			if target.Mode == enterpriseHookWorkerModePurge && target.Options.DataDir == dir {
+				n++
+			}
+		}
+		return n
+	}
+	if purgesOf(1001, "/home/alice/.defenseclaw") != 1 || purgesOf(1002, "/home/bob/.defenseclaw") != 1 || len(jobs[1003].Request.Targets) != 0 {
+		t.Fatalf("alice %d, bob %d, carol %+v", purgesOf(1001, "/home/alice/.defenseclaw"), purgesOf(1002, "/home/bob/.defenseclaw"), jobs[1003].Request.Targets)
+	}
+	if _, ok := jobs[1004]; ok {
+		t.Fatal("an account without a job got one")
 	}
 }
 
