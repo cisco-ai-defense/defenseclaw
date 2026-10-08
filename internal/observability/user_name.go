@@ -17,7 +17,7 @@ const userNameMaxBytes = 256
 // OptionalUserName renders an account name for defenseclaw.user.name: NFC,
 // at most 256 bytes, starting with a letter or digit, and otherwise letters,
 // digits, combining marks and . _ : / @ -. An account name in any script is
-// kept (dcad-eoé, GAP-0587); the ASCII identifier rule the other identifiers
+// kept (josé, GAP-0587); the ASCII identifier rule the other identifiers
 // follow dropped it from every record and sink. Spaces, controls and format
 // characters (bidirectional overrides) are refused.
 func OptionalUserName(name string) Optional[string] {

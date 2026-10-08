@@ -69,8 +69,8 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 			// The middle part is the NetBIOS name of the domain the Mac is
 			// bound to, so it is the account's DOMAIN\user namespace only
 			// when the account is in that domain: the one macOS lists the
-			// account's groups in (DCLAB\group), and a users entry
-			// DCLAB\user names (GAP-0635). An account of another domain of
+			// account's groups in (CORP\group), and a users entry
+			// CORP\user names (GAP-0635). An account of another domain of
 			// the forest keeps none.
 			if facts.AccountDomain == "" && adDomain != "" && strings.EqualFold(facts.Domain, adDomain) {
 				facts.AccountDomain = macOSNetBIOSDomain(parts[2])

@@ -151,8 +151,8 @@ func (r *NSSResolver) LookupUser(name string) (Account, error) {
 }
 
 // NameMismatchError is a getent passwd answer for an account whose name is
-// not the one asked: the same account in another spelling (DCLAB\alice for
-// alice@dclab.test on a winbind host) or another account (an SSSD UPN or
+// not the one asked: the same account in another spelling (CORP\alice for
+// alice@corp.example.com on a winbind host) or another account (an SSSD UPN or
 // e-mail search across domains). LookupAccountSpelling tells them apart.
 type NameMismatchError struct {
 	Key      string
