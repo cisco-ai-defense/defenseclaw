@@ -345,7 +345,9 @@ func TestSessionAnnouncesAsks(t *testing.T) {
 		t.Fatalf("live output = %q", live)
 	}
 	has(t, ta.output(), "? asked to reach www.example.com:443 (curl)",
-		"Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox "+sbName,
+		// GAP-0239: Claude Code keeps the title for itself, so the banner
+		// does not promise it.
+		"Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox "+sbName,
 		"? 1 ask is still waiting for you → defenseclaw sandbox approvals --sandbox "+sbName)
 	// A headless session has no screen to protect: its notices are lines.
 	ta = newTestApp(t, "")

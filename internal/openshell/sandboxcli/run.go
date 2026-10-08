@@ -1589,10 +1589,19 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	// its screen is the harness's, so a live session announces them in the
 	// terminal title (session.notice).
 	where := "shown here as they come"
-	if a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
+	live := a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args)
+	switch {
+	case live && titleTakers[sb.Harness]:
+		// The harness rewrites the title on and on (Claude Code's
+		// spinner): the title cannot be promised (GAP-0239).
+		row("Asks", firstNonEmpty(sb.HarnessName, sb.Harness)+" keeps this terminal's title, so watch for them in another terminal: "+
+			CommandName+" approvals --watch --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t); each one also rings the bell here")
+	case live:
 		where = "announced in this terminal's title as they come"
+		fallthrough
+	default:
+		row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
 	}
-	row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
 	if keys := sessionKeys[sb.Harness]; keys != "" && a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
 		row("Keys", keys)
 	}
@@ -1618,6 +1627,10 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	}
 	a.println()
 }
+
+// titleTakers are the harnesses that keep setting the terminal title
+// themselves while they run, so a notice there is overwritten at once.
+var titleTakers = map[string]bool{"claudecode": true}
 
 // hooksTierText is the banner's Hooks line for a sandbox whose hooks are
 // not in the managed tier: what of them the image protects and what the
