@@ -182,6 +182,13 @@ many chats were open at the restart. The column counts chats: a sub-agent that
 runs in a session of its own, as a Codex 0.160 thread does, is not counted. The
 Secure Client profile keeps its existing agent IDs and gets no new attributes.
 
+A record carries an `ais-` ID only when its hook belongs to a session. Hermes
+sends `transform_terminal_output` with the task of the terminal call but no
+session; the gateway gives it the session that the `pre_tool_call` of that task
+named, so it carries the same `ais-`. The OpenCode `defenseclaw.plugin.loaded`
+record is sent when the plugin loads, before any session exists, so it carries
+the `agt-` ID and no `ais-`.
+
 Claude Code and Codex name a sub-agent on every hook it makes, so each of those
 hooks carries the sub-agent's `ais-` at depth one with the main agent as its
 parent, also when the gateway restarted after the sub-agent started. Codex 0.160
