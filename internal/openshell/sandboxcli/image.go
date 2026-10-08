@@ -530,7 +530,7 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 	driver, driverKnown := a.gatewayDriverKnown(ctx)
 	microVMGateway := image.MicroVMTarget(driver)
 	rows := make([][]string, 0, len(recs))
-	var missing, superseded []string
+	var missing, superseded, builds []string
 	unused := 0
 	for _, r := range recs {
 		if gone[r.Tag] {
@@ -539,6 +539,9 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 		}
 		if r.DefenseClawVersion != manager.ImageVersion() {
 			superseded = append(superseded, r.Tag)
+			if b := firstNonEmpty(r.DefenseClawVersion, "an earlier build"); !slices.Contains(builds, b) {
+				builds = append(builds, b)
+			}
 		}
 		verified := "no"
 		if r.HookFireVerified {
@@ -566,9 +569,13 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 			plural(int64(unused), "image", "images")))
 	}
 	if len(superseded) > 0 {
-		// An upgrade's images are built on the next run (GAP-0320).
-		a.note(fmt.Sprintf("built by another DefenseClaw build than this one (%s), so no new sandbox uses them: %s; the next run of each harness builds its image "+
-			"for this build, and `%s image prune` removes these unless a sandbox runs one", manager.ImageVersion(), strings.Join(superseded, ", "), CommandName))
+		// An upgrade's images are built on the next run (GAP-0320). The
+		// note names the build that made them: "another build than this one
+		// (1.0.31)" read as if 1.0.31 had (GAP-0358).
+		sort.Strings(builds)
+		a.note(fmt.Sprintf("not used by this DefenseClaw build (%s): %s, built by DefenseClaw %s, so no new sandbox uses %s; the next run of each harness builds "+
+			"its image for this build, and `%s image prune` removes them unless a sandbox runs one",
+			manager.ImageVersion(), strings.Join(superseded, ", "), strings.Join(builds, ", "), itThem(superseded), CommandName))
 	}
 	if len(missing) > 0 {
 		a.note(fmt.Sprintf("recorded but no longer in Docker: %s; the next run of the harness builds its image again, and `%s image prune` forgets the record",

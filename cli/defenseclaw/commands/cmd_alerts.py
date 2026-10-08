@@ -380,6 +380,10 @@ def _finding_facts(
             "connector": _event_connector(e),
             "rule": f"{rule_id}: {title}" if title else rule_id,
             "sandbox": sandbox if sandbox != (target or sandbox) else "",
+            # GAP-0377: what the finding means and what to do, which the
+            # daemon writes and the title (often OpenShell's) does not say.
+            "description": str(structured.get("defenseclaw.finding.description") or "").strip(),
+            "next_step": str(structured.get("defenseclaw.finding.remediation") or "").strip(),
         }
     target = copilot_hook_target(target)
     facts = {
@@ -719,7 +723,10 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
         if facts.get("target"):
             row["target"] = facts["target"]
-        for key in ("decision", "route", "rule", "scanner", "location", "sandbox", "path", "moved_to"):
+        for key in (
+            "decision", "route", "rule", "scanner", "location",
+            "sandbox", "path", "moved_to", "description", "next_step",
+        ):
             if facts.get(key):
                 row[key] = facts[key]
         if "moved_to" in facts:
@@ -816,7 +823,8 @@ def _alerts_default(
         if facts:
             for key, name in (("decision", "Decision"), ("route", "Route"), ("connector", "Connector"),
                               ("rule", "Rule"), ("scanner", "Scanner"), ("location", "Location"),
-                              ("sandbox", "Sandbox"), ("path", "Path")):
+                              ("sandbox", "Sandbox"), ("path", "Path"), ("description", "Details"),
+                              ("next_step", "Next step")):
                 if facts.get(key):
                     click.echo(f"  {label(name)} {facts[key]}")
         elif quarantined:

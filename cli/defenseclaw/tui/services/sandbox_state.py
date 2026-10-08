@@ -173,6 +173,7 @@ REASON_LABELS: dict[str, str] = {
     "harness_background_fetch": "a background fetch of the harness, which it does without",
     "rule_limit": "the sandbox added its limit of rules this session",
     "too_many_pending": "too many approvals are waiting",
+    "model_host_side": "a connection outside the model channel, which stays open; no OpenShell rule allows it",
     "host_local": "this machine",
 }
 
@@ -494,10 +495,18 @@ class SandboxRow:
     hooks_unreachable: bool = False
     unreachable_reason: str = ""
     ingress_refused: int = 0
+    # OpenShell refused the session's requests because its conversation holds
+    # a credential placeholder (GAP-0354): a new conversation is the way on.
+    placeholder_refused: bool = False
     # Hook posts DefenseClaw answered with an error (a refused route, the
     # rate limit): each failed closed, so the harness did not do it.
     hook_failed: int = 0
     last_hook_failure: str = ""
+    # The last failure was a hook post of a conversation OpenShell refuses for
+    # its credential placeholder, not DefenseClaw's answer; hooks_answered_at
+    # is the first verdict after it (GAP-0377).
+    hook_failure_placeholder: bool = False
+    hooks_answered_at: datetime | None = None
     orphaned: bool = False
     undo_available: bool = False
     # The user kept the last session's changes (the daemon's accept): the
@@ -572,7 +581,12 @@ class SandboxRow:
         else:
             line = f"{self.hook_failed} hook calls failed, so the harness's actions were blocked (hooks fail closed)"
             answered = "DefenseClaw last answered"
-        return line + (f"; {answered} {self.last_hook_failure}" if self.last_hook_failure else "")
+        if self.hook_failure_placeholder:
+            answered = "the last was a hook post of a conversation OpenShell refuses for its credential placeholder:"
+        line += f"; {answered} {self.last_hook_failure}" if self.last_hook_failure else ""
+        if self.hooks_answered_at:
+            line += f"; hooks answered again since {self.hooks_answered_at.astimezone().strftime('%H:%M:%S')}"
+        return line
 
     @property
     def alerts(self) -> tuple[str, ...]:
@@ -586,6 +600,11 @@ class SandboxRow:
             out.append(f"{HOOKS_UNREACHABLE_WARNING}{why}. Run: defenseclaw sandbox doctor")
         elif self.ingress_refused:
             out.append(f"OpenShell refused {self.ingress_refused} hook request(s) to DefenseClaw")
+        if self.placeholder_refused:
+            out.append(
+                "OpenShell refuses this conversation's requests: it holds a sandbox credential placeholder; "
+                f"start a new conversation (defenseclaw sandbox connect {self.name}, without --continue)"
+            )
         if self.hook_failed:
             out.append(self.hook_failure_alert)
         if self.hooks_silent:
@@ -695,8 +714,11 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         hooks_unreachable=bool(hooks.get("unreachable")),
         unreachable_reason=_text(hooks.get("unreachable_reason")),
         ingress_refused=_int(hooks.get("ingress_refused")),
+        placeholder_refused=bool(hooks.get("placeholder_refused_at")),
         hook_failed=_int(hooks.get("hook_failed")),
         last_hook_failure=_text(hooks.get("last_hook_failure")),
+        hook_failure_placeholder=_text(hooks.get("last_hook_failure_cause")) == "credential_placeholder_refused",
+        hooks_answered_at=_time(hooks.get("hooks_answered_at")),
         orphaned=bool(item.get("orphaned")),
         undo_available=bool(snapshot) and _time(snapshot.get("undone_at")) is None,
         undo_accepted=bool(snapshot) and _time(snapshot.get("accepted_at")) is not None,
@@ -1464,13 +1486,17 @@ class SandboxesPanelModel:
         newest event first), so an index alone would point at another item
         after a refresh. When the item itself is gone, the view is marked so
         its next action key is refused rather than applied to a neighbour.
+        A view left empty has no neighbour: a row that comes later is the one
+        on screen under the cursor, as in a view just opened (GAP-0328).
         """
         for view, key in before.items():
             keys = self._item_keys(view)
             if key in keys:
                 self.cursors[view] = keys.index(key)
-            else:
+            elif keys:
                 self._selection_lost.add(view)
+            else:
+                self._selection_lost.discard(view)
         self._clamp()
 
     def shown(self) -> None:

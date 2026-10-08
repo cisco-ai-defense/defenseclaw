@@ -104,6 +104,32 @@ def test_level_changes_reach_a_running_gateway_without_a_restart(app, restarts) 
     assert restarts == []
 
 
+def test_a_change_the_running_gateway_does_not_apply_says_to_restart_it(app, restarts, monkeypatch) -> None:
+    # GAP-0362: after a 0.8.10 upgrade the gateway kept enforcing the earlier
+    # config generation while the command said it applies the change now.
+    from types import SimpleNamespace
+
+    from defenseclaw import config_writer, gateway
+
+    monkeypatch.setattr(config_writer, "read_generation_state", lambda _path: SimpleNamespace(generation=5))
+    monkeypatch.setattr(cmd_guardrail, "_APPLY_CONFIRM_SECONDS", 0)
+    health = {"policy": {"config_generation": 4}, "config": {"details": {}}}
+    monkeypatch.setattr(gateway.OrchestratorClient, "health", lambda _self: health)
+
+    result, payload = _run(app, "block-at", "HIGH", "--json")
+    assert (result.exit_code, payload["gateway"]) == (1, "not_applied")
+    assert "restart it to apply this: defenseclaw-gateway restart" in payload["message"]
+
+    health["policy"]["config_generation"] = 5
+    result, payload = _run(app, "block-at", "MEDIUM", "--json")
+    assert (result.exit_code, payload["gateway"]) == (0, "live")
+
+    health["config"]["details"]["restart_required"] = ["guardrail.connectors"]
+    _, payload = _run(app, "block-at", "LOW", "--json")
+    assert payload["gateway"] == "restart_needed"
+    assert restarts == []
+
+
 def test_alert_above_the_block_level_is_clamped(app) -> None:
     _multi(app)
     result, payload = _run(app, "alert-at", "critical", "--connector", "codex", "--json")

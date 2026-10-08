@@ -58,6 +58,9 @@ type PullOptions struct {
 	// returns ErrNoReusablePull when the last pull is another one, or of
 	// another copy.
 	Reuse string
+	// Unflushed marks a sandbox that went down without a flush since it was
+	// made: the review also flags the files it brings back empty.
+	Unflushed bool
 }
 
 // PullResult is the agent's work, verified and reviewed, ready for Apply.
@@ -288,7 +291,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	if scanners == nil {
 		scanners = DefaultScanners()
 	}
-	rep, err := reviewTreeChanges(ctx, base, pr.Changes, scanners, opts.SensitiveGlobs)
+	rep, err := reviewTreeChanges(ctx, base, pr.Changes, scanners, opts.SensitiveGlobs, opts.Unflushed)
 	if err != nil {
 		return nil, err
 	}
@@ -569,8 +572,8 @@ func dropHeldBack(ctx context.Context, base gitCmd, rec *CopyRecord, result stri
 }
 
 // reviewTreeChanges classifies and scans a tree diff held in g's object
-// store.
-func reviewTreeChanges(ctx context.Context, g gitCmd, changes []TreeChange, scanners []ContentScanner, sensitive []string) (*ReviewReport, error) {
+// store; unflushed is PullOptions.Unflushed.
+func reviewTreeChanges(ctx context.Context, g gitCmd, changes []TreeChange, scanners []ContentScanner, sensitive []string, unflushed bool) (*ReviewReport, error) {
 	var oids []string
 	for _, c := range changes {
 		if c.OldOID != "" {
@@ -593,7 +596,7 @@ func reviewTreeChanges(ctx context.Context, g gitCmd, changes []TreeChange, scan
 		return b, ok
 	}
 	rep := &ReviewReport{Changes: changes}
-	rep.Flags = append(classifyChanges(changes, content, sensitive), zeroFilledFlags(changes, content)...)
+	rep.Flags = append(classifyChanges(changes, content, sensitive), zeroFilledFlags(changes, content, unflushed)...)
 	rep.Findings = scanChanges(changes, scanners, content)
 	for _, c := range changes {
 		rep.FilesChanged++

@@ -77,9 +77,12 @@ func phaseText(sb sandboxapi.Sandbox) string {
 	return p
 }
 
+// profileText is the PROFILE cell: the profile the sandbox runs, and the
+// pack when it is another one, named as the pack: "balanced (open)" left the
+// reader to guess what the parenthesis held (GAP-0359).
 func profileText(sb sandboxapi.Sandbox) string {
 	if sb.Pack != "" && sb.Pack != sb.Profile {
-		return sb.Profile + " (" + sb.Pack + ")"
+		return sb.Profile + " (pack " + sb.Pack + ")"
 	}
 	return sb.Profile
 }
@@ -302,14 +305,27 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		row("Last blocked", truncate(sb.Hooks.LastBlocked, 100))
 	}
 	if sb.Hooks.LastHookFailure != "" {
-		last := "DefenseClaw answered " + sb.Hooks.LastHookFailure
+		at := ""
 		if !sb.Hooks.LastHookFailureAt.IsZero() {
-			last += " at " + sb.Hooks.LastHookFailureAt.Local().Format("15:04:05")
+			at = " at " + sb.Hooks.LastHookFailureAt.Local().Format("15:04:05")
 		}
-		row("Hook error", last+" (the hook failed closed)")
+		last := "DefenseClaw answered " + sb.Hooks.LastHookFailure + at + " (the hook failed closed)"
+		if sb.Hooks.LastHookFailureCause == sandboxapi.ReasonPlaceholderRefused {
+			// OpenShell refused that conversation's requests, not DefenseClaw
+			// the hook (GAP-0377).
+			last = "a hook post of a conversation that held a sandbox credential placeholder failed" + at + " (" +
+				sb.Hooks.LastHookFailure + "; OpenShell refuses such a conversation's requests; the hook failed closed)"
+		}
+		if !sb.Hooks.HooksAnsweredAt.IsZero() {
+			last += "; hooks answered again since " + sb.Hooks.HooksAnsweredAt.Local().Format("15:04:05")
+		}
+		row("Hook error", last)
 	}
 	if sb.Hooks.ModelKeyRejected != "" {
 		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
+	}
+	if at := sb.Hooks.PlaceholderRefusedAt; !at.IsZero() {
+		row("Conversation", a.style(sandboxapi.PlaceholderConversationText(sb.Name)+" (last refused "+at.Local().Format("15:04:05")+")", ansiRed))
 	}
 	failed := ""
 	if n := sb.Egress.UpstreamFailed; n > 0 {
@@ -337,6 +353,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	for _, w := range sb.Warnings {
 		a.warn(w)
+	}
+	if !sb.UnflushedAt.IsZero() {
+		a.warn(sandboxapi.UnflushedText(sb.Name, sb.UnflushedAt))
 	}
 	if sb.Hooks.Unreachable {
 		a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
@@ -634,8 +653,12 @@ func execEndedText(sb *sandboxapi.Sandbox) string {
 		return "the connection to " + sb.Name + " was lost while the command ran (the OpenShell gateway restarted, for one); `" +
 			CommandName + " status " + sb.Name + "` shows whether it runs"
 	}
-	return sb.Name + " is " + sb.Phase + ": it stopped while the command ran (`" + CommandName + " stop`, the TUI, or DefenseClaw); start it with `" +
-		CommandName + " start " + sb.Name + "`"
+	// A session that started the sandbox stops it as it ends, a command in
+	// another terminal running or not; one that found it running leaves it
+	// running (GAP-0390).
+	return sb.Name + " is " + sb.Phase + ": it stopped while the command ran (an agent session that started it ended, or `" + CommandName +
+		" stop`, the TUI, or DefenseClaw stopped it); start it with `" + CommandName + " start " + sb.Name +
+		"` before the session and the command, and it keeps running when the session ends"
 }
 
 // StopOptions are the `sandbox stop` flags.

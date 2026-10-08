@@ -9329,6 +9329,17 @@ def _local_policy_digest(cfg) -> dict | None:
     return local_policy_digest(cfg)
 
 
+def _saved_config_generation(cfg) -> int:
+    """The config generation the DefenseClaw writer last recorded, 0 when unknown."""
+    from defenseclaw import config_writer
+    from defenseclaw.config import config_path_for_data_dir
+
+    try:
+        return int(config_writer.read_generation_state(config_path_for_data_dir(cfg.data_dir)).generation)
+    except Exception:  # noqa: BLE001 - no record, or no data directory: nothing to compare.
+        return 0
+
+
 def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> None:
     """The effective policy the gateway applied: its generation and digest.
 
@@ -9366,11 +9377,24 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         return
     local = _local_policy_digest(cfg)
     if local is not None and local.get("effective_digest") != digest:
+        # Name the cause on every path (GAP-0362, GAP-0382): a later save than
+        # the one the gateway built from, also when the gateway reports no
+        # config generation (an imported 0.8 install), else an asset change.
+        saved = _saved_config_generation(cfg)
+        if saved > config_generation > 0:
+            cause = (
+                f": it has not applied the change saved as config generation {saved} (it enforces generation "
+                f"{config_generation})"
+            )
+        elif saved > config_generation:
+            cause = f": it has not applied the change saved as config generation {saved}"
+        else:
+            cause = ": it has not applied the current config.yaml and policy assets"
         _emit(
             "fail",
             label,
             f"the gateway applies {_short_policy_digest(digest)} but config.yaml and its policy assets compute to "
-            f"{_short_policy_digest(str(local.get('effective_digest')))}",
+            f"{_short_policy_digest(str(local.get('effective_digest')))}{cause}",
             r=r,
             check_id="doctor.policy.stale",
             reason_code="policy-stale",

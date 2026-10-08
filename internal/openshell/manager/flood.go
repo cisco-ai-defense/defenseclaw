@@ -31,6 +31,17 @@ var (
 	// destination, port, category and rule) into the first one's record
 	// and a count.
 	blockCoalesceWindow = 10 * time.Second
+	// feedFoldWindow folds the feed lines of OpenShell's refusals that read
+	// the same (one site's retry loop, by one program or several): the first
+	// is shown at once, and the repeats of the minute are one more line with
+	// their count. Folded for only blockCoalesceWindow, a retry loop with a
+	// few seconds between tries printed each try again (GAP-0329).
+	feedFoldWindow = time.Minute
+	// findingFoldWindow folds OpenShell's repeats of one finding of a
+	// sandbox's session (foldFinding): the first is recorded and shown at
+	// once, the repeats of the window only count, and the next one after it
+	// is recorded with their count.
+	findingFoldWindow = 10 * time.Minute
 	// sinkFlushInterval is how often folded refusals are recorded.
 	sinkFlushInterval = 2 * time.Second
 	// heldBackInterval is how often the counts of the events a sandbox's

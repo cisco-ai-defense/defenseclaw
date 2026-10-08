@@ -234,6 +234,63 @@ func TestScanSandboxRootSaysANamesListStopsAtItsCap(t *testing.T) {
 	}
 }
 
+// GAP-0349: a sandbox's files carry the image's times; what the sandbox
+// found is last active when the sandbox was read, not when the image was
+// built.
+func TestScanSandboxRootDatesSignalsByTheScanNotTheImage(t *testing.T) {
+	skipSandboxScansOnWindows(t)
+	root := t.TempDir()
+	files := map[string]string{
+		"/sandbox/.dccert/mcp.json":             `{"mcpServers":{"dccert-marker":{"command":"true"}}}`,
+		"/sandbox/.dccert/skills/dccert-skill/": "",
+		"/sandbox/.local/bin/dccert":            "",
+		"/sandbox/.bash_history":                "echo dccert-block-marker\n",
+	}
+	writeSandboxTree(t, root, files)
+	image := time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC)
+	for p := range files {
+		if err := os.Chtimes(filepath.Join(root, filepath.FromSlash(p)), image, image); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := time.Now().Add(-time.Hour).UTC()
+	scan := SandboxScan{Root: root, Home: "/sandbox",
+		Processes:   []SandboxProcess{{PID: 42, PPID: 1, Comm: "dccert", StartedAt: started}},
+		Executables: map[string]string{"dccert": "/sandbox/.local/bin/dccert"}}
+	opts := SandboxScanOptions{Mode: "enhanced", IncludeShellHistory: true, MaxFilesPerScan: 100, MaxFileBytes: 64 << 10}
+	before := time.Now().UTC()
+	report, err := ScanSandboxRoot(context.Background(), scan, opts, []AISignature{sandboxTestSignature()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detectors := map[string]bool{}
+	for _, sig := range report.Signals {
+		detectors[sig.Detector] = true
+		switch sig.Detector {
+		case "shell_history":
+			if sig.LastActiveAt != nil {
+				t.Errorf("shell history match last active %v, want none", sig.LastActiveAt)
+			}
+		case "process":
+			// GAP-0392: a running process is active when it was read; its
+			// start stays in Runtime.
+			if sig.LastActiveAt == nil || sig.LastActiveAt.Before(before) || sig.Runtime == nil ||
+				sig.Runtime.StartedAt == nil || !sig.Runtime.StartedAt.Equal(started) {
+				t.Errorf("process last active %v, runtime %+v; want the scan's time and its start", sig.LastActiveAt, sig.Runtime)
+			}
+		default:
+			if sig.LastActiveAt == nil || sig.LastActiveAt.Before(before) {
+				t.Errorf("%s signal last active %v, want the scan's time, not the image's", sig.Detector, sig.LastActiveAt)
+			}
+		}
+	}
+	for _, want := range []string{"binary", "skill", "mcp", "process", "shell_history"} {
+		if !detectors[want] {
+			t.Fatalf("detectors = %v, want %s", detectors, want)
+		}
+	}
+}
+
 func TestScanSandboxRootRefusesARelativeTree(t *testing.T) {
 	if _, err := ScanSandboxRoot(context.Background(), SandboxScan{Root: "relative", Home: "/sandbox"}, SandboxScanOptions{}, nil); err == nil {
 		t.Fatal("want a relative tree refused")

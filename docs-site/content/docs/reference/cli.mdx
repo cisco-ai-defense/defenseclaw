@@ -654,9 +654,16 @@ its next reload; the usual case), `restarted` (a hook fail-mode change),
 `not_running` (it loads the change when it starts), `guardrail_off` (takes
 effect when you run `defenseclaw guardrail enable`), `restart_needed`
 (`--no-restart`: the running gateway keeps the old setting until you restart
-it), `restart_failed` (the change is saved but the restart failed; exit `1`) or
+it), `restart_failed` (the change is saved but the restart failed; exit `1`),
 `still_starting` (saved, but the gateway was still starting, so protection is
-not confirmed yet; exit `1`). The `protection`, `rule` and `suppress` commands
+not confirmed yet; exit `1`) or `not_applied` (the running gateway still
+reports the earlier config generation 10 seconds after the save: it rejected
+the change, which `defenseclaw-gateway status` names, or it never reloaded;
+`defenseclaw-gateway restart` applies it; exit `1`, while the `use-pack`,
+`protection`, `rule` and `suppress` commands print the line and exit `0`, the
+change being saved). A change the gateway
+applies except for a section it reads only at start is `restart_needed` too.
+The `protection`, `rule` and `suppress` commands
 print `Saved (config generation N).` and the same one-line outcome.
 
 ## Policies
@@ -1231,7 +1238,8 @@ moved keys and the upgrade steps.
 ## Sandbox
 
 Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that
-work on a copy (see [macOS](/docs/sandboxes/guide#macos)). The `sandbox`
+work on a copy (see [macOS](/docs/sandboxes/guide#macos)); Windows and WSL2
+are not supported, and every `sandbox` command exits 3 there. The `sandbox`
 commands run coding agents in NVIDIA OpenShell 0.1 sandboxes. `defenseclaw sandbox` checks the command
 line, then hands it unchanged to `defenseclaw-gateway sandbox`. Every command
 and flag, with an example, is on [Sandbox CLI](/docs/reference/sandbox-cli);

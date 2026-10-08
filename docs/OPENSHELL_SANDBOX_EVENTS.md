@@ -314,7 +314,7 @@ audit row's target is `openshell`.
 
 | Kind | Meaning | Default rule ID |
 | --- | --- | --- |
-| `ocsf_finding` | An OpenShell OCSF `FINDING` event | `SANDBOX-OCSF-FINDING` |
+| `ocsf_finding` | An OpenShell OCSF `FINDING` event. OpenShell raises a finding again for each request it refuses on the same grounds, so the repeats of one finding (its type or title, and target) within 10 minutes of a session are one record; the next one after that names how many it folded. `Credential-bearing traffic cannot be inspected` gets a description and remediation that name the conversation's credential placeholder and the new-conversation step | `SANDBOX-OCSF-FINDING` |
 | `hook_silence` | Harness activity with no hook traffic | `SANDBOX-HOOK-SILENCE` |
 | `hook_tamper` | A tool that ran without a DefenseClaw verdict: a `PostToolUse` whose `PreToolUse` was denied or never arrived | `SANDBOX-HOOK-TAMPER` |
 | `large_upload` | A large upload to a first-seen host | `SANDBOX-LARGE-UPLOAD` |

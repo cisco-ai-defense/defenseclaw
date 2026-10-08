@@ -866,6 +866,43 @@ func TestOCSFMapping(t *testing.T) {
 	}
 }
 
+// GAP-0377: one conversation that held a credential placeholder made a HIGH
+// alert and a feed line, in OpenShell's words only, for each request
+// OpenShell refused. Repeats of one finding within the fold window are one
+// record and one line, whose record says what the placeholder does and what
+// to do; the next one after the window names the repeats, and another
+// finding is its own.
+func TestRepeatedOpenShellFindingsAreOneAlert(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "findbox"})
+	const uninspectable = `FINDING:CREATE [HIGH] "Credential-bearing traffic cannot be inspected" [type:openshell.credentials.traffic_uninspectable]`
+	for range 4 {
+		e.ocsf("findbox", uninspectable, e.m.now())
+		advance(5 * time.Second)
+	}
+	e.ocsf("findbox", `FINDING:BLOCKED [HIGH] "Binary drift detected" [confidence:0.9]`, e.m.now())
+	findings := func() []audit.SandboxFindingEvent {
+		return where(&e.tel.mu, &e.tel.findings, func(f audit.SandboxFindingEvent) bool { return f.Kind == audit.SandboxFindingOCSF })
+	}
+	got := findings()
+	if len(got) != 2 || got[0].Title != "Credential-bearing traffic cannot be inspected" || got[1].Title != "Binary drift detected" {
+		t.Fatalf("findings = %+v, want one per finding", got)
+	}
+	if f := got[0]; !strings.Contains(f.Description, "sandbox credential placeholder") || !strings.Contains(f.Description, "`env` output") ||
+		f.Remediation != "If the sandbox's conversation printed its environment, start a new conversation (`defenseclaw sandbox connect findbox`, without --continue)." {
+		t.Fatalf("finding = %+v, want the placeholder named with the next step", f)
+	}
+	if lines := e.events("findbox", sandboxapi.ActivityFinding, ""); len(lines) != 2 {
+		t.Fatalf("feed = %+v, want one line per finding", lines)
+	}
+	advance(findingFoldWindow)
+	e.ocsf("findbox", uninspectable, e.m.now())
+	if got = findings(); len(got) != 3 || !strings.Contains(got[2].Description, "(OpenShell raised it 3 more times after the alert of ") {
+		t.Fatalf("findings = %+v, want the next one to name the 3 folded repeats", got)
+	}
+}
+
 func TestRecoverCredential(t *testing.T) {
 	sb := &openshell.Sandbox{Spec: openshell.SandboxSpec{Environment: map[string]string{"HTTPS_PROXY": "http://dcx-abc:secret@host.openshell.internal:18972"}}}
 	if c, ok := recoverCredential(sb, "dcx-abc"); !ok || c.Password != "secret" {
@@ -881,9 +918,11 @@ func TestRecoverCredential(t *testing.T) {
 
 // fastFlush shortens the refusal fold and the flush for a test.
 func fastFlush(t *testing.T) {
-	window, interval, held := blockCoalesceWindow, sinkFlushInterval, heldBackInterval
-	blockCoalesceWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
-	t.Cleanup(func() { blockCoalesceWindow, sinkFlushInterval, heldBackInterval = window, interval, held })
+	window, lines, interval, held := blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval
+	blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() {
+		blockCoalesceWindow, feedFoldWindow, sinkFlushInterval, heldBackInterval = window, lines, interval, held
+	})
 }
 
 func egressRecords(e *harnessEnv, sandbox string, match func(audit.SandboxEgressEvent) bool) int {
@@ -949,6 +988,38 @@ func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
 	}
 	if n := len(feed) - first; n != 1 || feed[len(feed)-1].Repeats < 1 {
 		t.Fatalf("first %d lines, then %d folded: %q", first, n, msgs)
+	}
+}
+
+// GAP-0329 (round 3): a strict session's npm retry loop, refused at 0 s,
+// 10 s and 11 s, then twice at once a minute later, printed identical lines
+// in pairs and no count. The repeats of a minute are one line with their
+// count, and a single repeat adds no line.
+func TestARetryLoopsRefusalsAreOneLineAMinute(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Now())
+	e.live(sandboxapi.CreateRequest{Name: "loopbox"})
+	refuse := func() {
+		e.ocsf("loopbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
+	}
+	refuse()
+	advance(10 * time.Second)
+	refuse()
+	advance(time.Second)
+	refuse()
+	advance(50 * time.Second)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	refuse()
+	refuse()
+	advance(time.Minute)
+	e.m.sink.flushOpenShell(t.Context(), e.m.now())
+	var msgs []string
+	for _, l := range e.events("loopbox", sandboxapi.ActivityEgressBlocked, "") {
+		msgs = append(msgs, l.Message)
+	}
+	const line = "✗ registry.npmjs.org (no OpenShell rule allows it)"
+	if want := []string{line, line + " (and 1 more like it)", line}; !slices.Equal(msgs, want) {
+		t.Fatalf("feed %q, want %q", msgs, want)
 	}
 }
 
@@ -1203,6 +1274,48 @@ func TestModelProviderEndpointsFollowTheAdminLists(t *testing.T) {
 	wantCode(t, err, sandboxapi.CodeAdminViolation)
 }
 
+// GAP-0361: in a strict session one connection to the model host outside
+// its provider rule was refused, and the feed and the session summary read
+// "x bedrock-mantle... (no OpenShell rule allows this port)", as if strict
+// had cut the model off. The refusal says it was another connection.
+func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "mhbox", LLM: llm})
+	e.ocsf("mhbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> api.anthropic.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_mapping_denied]", time.Now())
+	feed := e.events("mhbox", sandboxapi.ActivityEgressBlocked, "")
+	const want = "✗ api.anthropic.com (a connection outside the model channel, which stays open; no OpenShell rule allows it)"
+	if len(feed) != 1 || feed[0].Message != want || feed[0].Reason != sandboxapi.ReasonModelHostSide {
+		t.Fatalf("feed = %+v, want %q", feed, want)
+	}
+	if n := egressRecords(e, "mhbox", func(r audit.SandboxEgressEvent) bool {
+		return r.Blocked && strings.HasPrefix(r.Reason, "a connection outside the model channel") && strings.HasSuffix(r.Reason, "(transparent_tcp_mapping_denied)")
+	}); n != 1 {
+		t.Fatalf("%d records say the model channel stays open, want 1", n)
+	}
+}
+
+// GAP-0354 with GAP-0361: OpenShell refuses a model request whose body
+// carries a credential placeholder on the sandbox's own model host. That is
+// the model channel refusing this conversation, not a connection outside
+// it: the line and the record name the placeholder.
+func TestAPlaceholderRefusalOnTheModelHostNamesThePlaceholder(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "phbox", LLM: llm})
+	e.ocsf("phbox", "NET:TRAFFIC [HIGH] DENIED api.anthropic.com:443 [reason:POST request body credential traffic denied for api.anthropic.com:443]", time.Now())
+	feed := e.events("phbox", sandboxapi.ActivityEgressBlocked, "")
+	const want = "✗ api.anthropic.com (OpenShell forwards no request whose body carries a sandbox credential placeholder)"
+	if len(feed) != 1 || feed[0].Message != want || feed[0].Reason == sandboxapi.ReasonModelHostSide {
+		t.Fatalf("feed = %+v, want %q", feed, want)
+	}
+	if n := egressRecords(e, "phbox", func(r audit.SandboxEgressEvent) bool {
+		return strings.HasPrefix(r.Reason, "a connection outside the model channel")
+	}); n != 0 {
+		t.Fatalf("%d records call the placeholder refusal a connection outside the model channel", n)
+	}
+}
+
 // privatePack is a custom pack whose allow list opens a private address.
 const privatePack = `version: 1
 name: lanpack
@@ -1301,6 +1414,41 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	e.ocsf("portsbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> webhook.example.net:443 [reason:transparent_tcp_policy_denied]", time.Now())
 	if got := e.events("portsbox", sandboxapi.ActivityEgressBlocked, ""); len(got) != 1 || e.get("portsbox").Egress.Blocked != 1 {
 		t.Fatalf("feed = %+v", got)
+	}
+}
+
+// A settings reload, or a global provider profile import (another
+// sandbox's), drops the transparent mappings of the names a running sandbox
+// looked up: its harness's next model connection was denied
+// (transparent_tcp_mapping_denied) and read as DefenseClaw blocking the
+// model host, a site blocked in the session's summary, while the call was
+// retried and worked (GAP-0379). It is audited as the end of a connection
+// the client makes again; past the reload's window the denial is a block.
+func TestAMappingDenialAfterAReloadIsNoBlock(t *testing.T) {
+	r := newReachEnv(t)
+	denied := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:transparent_tcp_mapping_denied]"
+	blocks := func() (int, int) {
+		return len(r.events(r.name, sandboxapi.ActivityEgressBlocked, "")), r.get(r.name).Egress.Blocked
+	}
+	r.line("CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:7 new_revision:7 policy_changed:false provider_env_changed:true]")
+	r.advance(10 * time.Second)
+	r.line(denied)
+	cut := where(&r.tel.mu, &r.tel.egress, func(ev audit.SandboxEgressEvent) bool {
+		return !ev.Blocked && ev.Terminated && ev.DecisionCode == "SANDBOX_EGRESS_TERMINATED" && strings.Contains(ev.Reason, "mapped the sandbox's names again")
+	})
+	if lines, n := blocks(); lines != 0 || n != 0 || len(cut) != 1 {
+		t.Fatalf("after a reload: feed %d, blocked %d, audited cuts %d; want the denial audited only", lines, n, len(cut))
+	}
+	r.advance(reloadMappingWindow)
+	r.line(denied)
+	if lines, n := blocks(); lines != 1 || n != 1 {
+		t.Fatalf("past the reload's window: feed %d, blocked %d; want a block", lines, n)
+	}
+	r.m.beforeGlobalImport(t.Context(), "defenseclaw-test-profile")
+	r.advance(time.Second)
+	r.line(denied)
+	if lines, n := blocks(); lines != 1 || n != 1 {
+		t.Fatalf("after a global profile import: feed %d, blocked %d; want no new block", lines, n)
 	}
 }
 

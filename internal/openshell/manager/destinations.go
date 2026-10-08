@@ -557,6 +557,11 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 		// Only ever refused; a host the policy let through that failed
 		// upstream is no block (GAP-0340).
 		return sandboxapi.DestinationBlocked, "", ""
+	case r.Host == openshellHostAlias:
+		// A port on this machine the run opened (--host-port, approved) or
+		// the policy opens (a local model endpoint): the feed and the ask
+		// say "port N on this machine", and so does the kind (GAP-0370).
+		return sandboxapi.DestinationThisMachine, "", ""
 	case r.Category != "":
 		return r.Category, "", ""
 	}

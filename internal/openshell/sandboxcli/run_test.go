@@ -813,6 +813,56 @@ func TestRunCopyCleansItsStageWhenTheCreateFails(t *testing.T) {
 	}
 }
 
+// GAP-0360: a create the daemon rolls back (a Ctrl-C cut it off) reads as
+// creating for a moment: the stage is removed once the sandbox is gone,
+// not left as leftover data.
+func TestRunCopyCleansItsStageAfterARolledBackCreate(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.refuseCreate = func(req sandboxapi.CreateRequest) *sandboxapi.Error {
+		sb := sampleSandbox(req.Name)
+		sb.Phase = "creating"
+		ta.daemon.sandboxes[req.Name] = &sb // the fake holds its lock here
+		return &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: create sandbox " + req.Name + " failed", Detail: "context canceled"}
+	}
+	ta.Sleep = func(_ context.Context, d time.Duration) error {
+		if d == discardInterval {
+			ta.daemon.mu.Lock()
+			delete(ta.daemon.sandboxes, "copybox")
+			ta.daemon.mu.Unlock()
+		}
+		return nil
+	}
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}), "create sandbox copybox failed")
+	has(t, ta.output(), "waiting for the daemon to undo the create of copybox before removing its staged copy")
+	if !slices.Equal(ta.copy.steps, []string{"stage copybox", "discard copybox"}) {
+		t.Fatalf("copy steps = %v", ta.copy.steps)
+	}
+}
+
+// stoppingCopy is a fakeCopy whose pull runs stop first: another terminal
+// stops the sandbox while the session's end reads its work.
+type stoppingCopy struct {
+	*fakeCopy
+	stop func()
+}
+
+func (s *stoppingCopy) Pull(ctx context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	s.stop()
+	return s.fakeCopy.Pull(ctx, o)
+}
+
+// GAP-0366: a sandbox the session found running and another terminal
+// stopped while it ended reads as stopped at the end, not as one that keeps
+// running and needs a stop.
+func TestConnectedSessionEndReadsThePhaseAgain(t *testing.T) {
+	ta := newTestApp(t, "s\n", copySandbox("copybox"))
+	ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
+	ta.Workspace = &stoppingCopy{fakeCopy: ta.copy, stop: func() { ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" }) }}
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "copybox"}))
+	has(t, ta.output(), "Sandbox copybox is stopped now (stopped from outside this session) → resume: defenseclaw sandbox connect copybox")
+	lacks(t, ta.output(), "keeps running")
+}
+
 // Resuming a copy-mode sandbox with --refresh probes outside the workdir
 // (a failed refresh may have left none), then refreshes, then attaches; a
 // plain resume probes the workdir.
@@ -1447,10 +1497,18 @@ func TestCopyUploadThatDidNotArrive(t *testing.T) {
 		"; `defenseclaw sandbox doctor` checks the ssh connection sharing that can carry an upload into another sandbox")
 }
 
-// failingCopy is a fakeCopy whose stage or upload fails with the error set.
+// failingCopy is a fakeCopy whose stage, upload or pull fails with the
+// error set.
 type failingCopy struct {
 	*fakeCopy
-	stageErr, uploadErr error
+	stageErr, uploadErr, pullErr error
+}
+
+func (f *failingCopy) Pull(ctx context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	if f.pullErr != nil {
+		return nil, f.pullErr
+	}
+	return f.fakeCopy.Pull(ctx, o)
 }
 
 func (f *failingCopy) Stage(ctx context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {

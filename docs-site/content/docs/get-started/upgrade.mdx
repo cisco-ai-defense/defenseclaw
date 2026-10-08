@@ -37,6 +37,18 @@ The installer:
    [Config migration](#config-migration)).
 4. Starts the gateway and waits for it to report healthy.
 
+<Callout type="warn" title="Running sandboxes refuse tool calls while the gateway restarts">
+On macOS and Linux, an [OpenShell sandbox](/docs/sandboxes) that is running
+during the upgrade keeps running, but its hooks fail closed while the gateway
+is stopped (usually under a minute), so its agent's tool calls are refused
+until the gateway is back. Before it asks, the installer names them
+(`Sandbox myapp-claude is running: while the gateway restarts ...`), and the
+session's end summary records the gap (`the DefenseClaw daemon was not
+reachable from ... to ...; the hooks failed closed meanwhile`). Upgrade between
+sessions, or let the agent retry after the upgrade. `defenseclaw rollback`
+restarts the gateway the same way.
+</Callout>
+
 If any step fails, the installer puts the previous version back, restarts it,
 and keeps the failed attempt in `~/.defenseclaw/.failed-<time>` for
 troubleshooting. Your configuration (`config.yaml`, `.env`, policies), audit

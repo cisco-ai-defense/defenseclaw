@@ -50,9 +50,11 @@ import (
 func TestListAndStatus(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("b-box"))
 	ta.daemon.add(sampleSandbox("a-box"))
+	// GAP-0359: a profile other than its pack's names the pack as such.
+	ta.daemon.edit("b-box", func(sb *sandboxapi.Sandbox) { sb.Pack, sb.Profile = "open", "balanced" })
 	ta.ok(t, ta.List(bg, OutputText))
 	out := ta.output()
-	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m")
+	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m", "balanced (pack open)")
 	if strings.Index(out, "a-box") > strings.Index(out, "b-box") {
 		t.Fatalf("list is not sorted:\n%s", out)
 	}
@@ -147,6 +149,13 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// GAP-0377: a hook post of a placeholder conversation is not
+		// DefenseClaw's refusal, and a later verdict marks it old.
+		{"placeholder conversation", func(h *sandboxapi.HookCoverage) {
+			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 400 Bad Request", at
+			h.LastHookFailureCause, h.HooksAnsweredAt = sandboxapi.ReasonPlaceholderRefused, at.Add(3*time.Minute)
+		}, "2 failed", []string{"Hook error    a hook post of a conversation that held a sandbox credential placeholder failed at 04:57:01 " +
+			"(HTTP 400 Bad Request; OpenShell refuses such a conversation's requests; the hook failed closed); hooks answered again since 05:00:01"}},
 		// A restarted daemon keeps the counts, not the time of the last
 		// hook (GAP-0166): the column still counts them.
 		{"after a daemon restart", func(h *sandboxapi.HookCoverage) { h.LastHookAt = time.Time{} }, " 4 calls, 1 blocked ",
@@ -571,6 +580,20 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	}
 }
 
+// A copy's review and pull said nothing of a MicroVM that went down without
+// a flush, which only `sandbox status` named: a write the MicroVM lost
+// leaves no file to flag, so the list read clean (GAP-0367).
+func TestACopysReviewNamesAnUnflushedStop(t *testing.T) {
+	sb := copySandbox("vmbox")
+	sb.UnflushedAt = time.Date(2026, 10, 8, 18, 31, 5, 0, time.UTC)
+	ta := newTestApp(t, "", sb)
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "vmbox"}))
+	has(t, ta.output(), "vmbox: 1 file changed", sandboxapi.UnflushedText("vmbox", sb.UnflushedAt))
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	lacks(t, ta.output(), "went down without")
+}
+
 // TestReviewKeepsAHostileFileNameOnOneLine (GAP-0291): a copy's review
 // printed a file name with a newline in it raw, so the name split into a
 // second line of the list a user trusts before bringing the work back. A
@@ -787,6 +810,18 @@ func TestExecSaysWhyTheSandboxEndedIt(t *testing.T) {
 	}
 	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"sleep", "600"}}), 255)
 	has(t, ta.output(), "DefenseClaw stopped box while the command ran: its harness worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)")
+	// GAP-0390: the end of the agent session that started the sandbox
+	// stopped it under a command in another terminal; the line names that
+	// and how to keep it running.
+	ta = newTestApp(t, "", sampleSandbox("box"))
+	ta.IO.TTY = false
+	ta.stream.answer = func(argv []string) (int, string) {
+		ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" })
+		return 255, ""
+	}
+	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"make"}}), 255)
+	has(t, ta.output(), "box is stopped: it stopped while the command ran (an agent session that started it ended",
+		"start it with `defenseclaw sandbox start box` before the session and the command, and it keeps running when the session ends")
 }
 
 func TestExecAndLogs(t *testing.T) {
@@ -973,6 +1008,17 @@ func TestRunTailScript(t *testing.T) {
 	run("dangling link", runNoLog, "")
 	writeFile(t, filepath.Join(dir, "gone.log"), "one\ntwo\nthree\n")
 	run("with a log", 0, "two\nthree\n")
+}
+
+// GAP-0365: a pull a Ctrl-C interrupted says what it left and exits 130,
+// and the sandbox it started is stopped again.
+func TestAnInterruptedPullSaysWhatItLeft(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, pullErr: fmt.Errorf("workspace: receive the result bundle: openshell: %w", openshell.ErrInterrupted)}
+	wantExit(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}), exitInterrupted)
+	has(t, ta.output(), "interrupted: nothing was brought back, and the work is still in copybox (`defenseclaw sandbox pull copybox` reads it again)",
+		"stopped copybox again")
+	lacks(t, ta.output(), "exit -1")
 }
 
 func TestPullCopyModeToBranch(t *testing.T) {

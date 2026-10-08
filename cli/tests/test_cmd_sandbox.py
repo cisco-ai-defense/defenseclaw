@@ -376,3 +376,11 @@ def test_config_optional_sandbox_commands_mirror_go(monkeypatch, argv, env, expe
     ctx = click.Context(main_module.cli)
     ctx.invoked_subcommand = argv[0]
     assert main_module._is_config_optional_sandbox_command(ctx) is expected
+
+
+def test_sandbox_help_names_the_supported_platforms_first():
+    # GAP-0385: on Windows, `defenseclaw sandbox --help` told the user to run
+    # setup and run without saying sandboxes do not run there.
+    out = " ".join(CliRunner().invoke(sandbox, ["--help"]).output.split())
+    assert "Windows and WSL2 are not supported" in out.split("Start with")[0]
+    assert "(Linux and macOS only)" in sandbox.get_short_help_str(limit=120)

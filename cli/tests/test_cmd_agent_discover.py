@@ -562,6 +562,23 @@ class AiUsageRendererTests(unittest.TestCase):
         self.assertIn("myapp-7f3a", out)
         self.assertNotIn("Cursor", out)
 
+    def test_sandbox_process_uptime_counts_from_its_start(self):
+        # GAP-0392: a sandbox process read 7 minutes ago showed up=4m59s (its
+        # uptime at that read) beside a Last active of its start.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.commands import cmd_agent
+
+        started = (datetime.now(timezone.utc) - timedelta(hours=2, minutes=5)).isoformat()
+        runtime = {"pid": 466, "uptime_sec": 299, "started_at": started}
+        self.assertTrue(cmd_agent._format_runtime(runtime, live=True).startswith("pid=466 up=2h"))
+        self.assertEqual(cmd_agent._format_runtime(runtime), "pid=466 up=4m59s")
+        found = _ai_signal(state="seen", category="active_process", product="Claude Code", vendor="Anthropic",
+                           detector="process")
+        found.update({"sandbox_name": "incident-um", "source": "sandbox", "runtime": runtime})
+        out = cmd_agent._render_ai_usage_table({"signals": [found]}, detail=True)
+        self.assertIn("pid=466 up=2h", out)
+
     def test_sandbox_filter_counts_that_sandbox_in_the_header(self):
         # GAP-0269: the header counted the whole machine above one sandbox's rows.
         from defenseclaw.commands import cmd_agent
@@ -1248,6 +1265,40 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
             cleanup_app(app, db_path, tmp_dir)
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--limit", result.output)
+
+    # GAP-0386: an unknown --sandbox name was an empty table and exit 0, also
+    # on Windows, where no sandbox can exist.
+    def test_unknown_sandbox_is_an_error_and_windows_refuses(self):
+        from defenseclaw.gateway import SandboxAPIError
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return _wide_payload()
+
+            def get_sandbox(self, name):
+                if name == "nope":
+                    raise SandboxAPIError("not_found", f'sandbox "{name}" not found', status=404)
+                return {"name": name}
+
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        try:
+            with patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+                missing = self.runner.invoke(agent, ["usage", "--sandbox", "nope"], obj=app)
+                fresh = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+                with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+                    windows = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+        self.assertEqual(missing.exit_code, 1, missing.output)
+        self.assertIn("no sandbox nope: `defenseclaw sandbox list` shows your sandboxes", missing.output)
+        self.assertEqual(fresh.exit_code, 0, fresh.output)
+        self.assertIn("AI discovery has found nothing in sandbox fresh yet: `defenseclaw sandbox discover fresh`", fresh.output)
+        self.assertEqual(windows.exit_code, 3, windows.output)
+        self.assertIn("Linux and macOS only", windows.output)
 
 
 if __name__ == "__main__":

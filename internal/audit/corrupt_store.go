@@ -59,8 +59,11 @@ func isSQLiteCorrupt(err error) bool {
 // block/allow list over, so the daemon starts instead of failing. The move is
 // refused while another process still has the database open. Only the daemon,
 // the store's long-lived owner, calls this; other commands keep failing.
-func OpenDaemonStore(dbPath string, warn io.Writer) (*Store, error) {
-	store, err := openCheckedStore(dbPath, warn)
+// warn receives what the operator must see (a corrupt store moved aside, a
+// skipped check), progress the upgrade's own lines (each migration applied);
+// nil is stderr.
+func OpenDaemonStore(dbPath string, warn, progress io.Writer) (*Store, error) {
+	store, err := openCheckedStore(dbPath, warn, progress)
 	if err == nil || !isSQLiteCorrupt(err) {
 		return store, err
 	}
@@ -70,6 +73,7 @@ func OpenDaemonStore(dbPath string, warn io.Writer) (*Store, error) {
 	}
 	store, freshErr := NewStore(dbPath)
 	if freshErr == nil {
+		store.progress = progress
 		if freshErr = store.Init(); freshErr != nil {
 			_ = store.Close()
 		}
@@ -121,11 +125,12 @@ func readCarryOverNote(moved string) (carryOverNote, bool) {
 	return note, true
 }
 
-func openCheckedStore(dbPath string, warn io.Writer) (*Store, error) {
+func openCheckedStore(dbPath string, warn, progress io.Writer) (*Store, error) {
 	store, err := NewStore(dbPath)
 	if err != nil {
 		return nil, err
 	}
+	store.progress = progress
 	if err := store.startupQuickCheck(warn); err != nil {
 		_ = store.Close()
 		return nil, err

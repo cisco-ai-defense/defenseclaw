@@ -46,6 +46,10 @@ func TestAMicroVMThatWentDownUnflushedIsNamed(t *testing.T) {
 	if got := e.events("vmbox", sandboxapi.ActivityFinding, sandboxapi.ReasonUnflushedStop)[0]; got.Message != unflushedStopMessage("vmbox") || got.Severity != "MEDIUM" {
 		t.Fatalf("warning = %+v", got)
 	}
+	// GAP-0367: the sandbox keeps the mark, for its status and its pull.
+	if got := e.get("vmbox").UnflushedAt; got.IsZero() {
+		t.Fatal("the sandbox does not say it went down without a flush")
+	}
 	e.stopBox("vmbox")
 	if n := warned(e, "vmbox"); n != 1 {
 		t.Fatalf("a stop of DefenseClaw's warned too: %d", n)

@@ -290,6 +290,41 @@ func TestCopySessionLeavesUnpulledWorkInTheSandbox(t *testing.T) {
 	})
 }
 
+// GAP-0339: a copy session whose pull at its end fails on the MicroVM's own
+// full disk leaves the MicroVM running, since one stopped with its disk full
+// cannot start again and its work would be lost, and says how to free space
+// and pull. On docker the full disk is the Docker host's: it stops as before.
+func TestCopySessionOnAFullMicroVMDiskKeepsItRunning(t *testing.T) {
+	const name = "fullbox"
+	full := errors.New("capture the sandbox copy (exit 128): error: unable to create temporary file: No space left on device")
+	running := "Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
+		"free some space in it (`defenseclaw sandbox exec " + name + " -- df -h /` shows it; `defenseclaw sandbox connect " + name +
+		" --shell` to remove what it does not need), then `defenseclaw sandbox pull " + name + "`; stop it after that: `defenseclaw sandbox stop " + name + "`"
+	for _, driver := range []string{"vm", "docker"} {
+		t.Run(driver, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.IO.TTY = false
+			ta.daemon.status.Gateway.Driver = driver
+			ta.Workspace = &failingCopy{fakeCopy: ta.copy, pullErr: full}
+			ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: name, Prompt: "fix it"}))
+			stops := ta.calls("POST", name+"/stop")
+			if driver == "vm" {
+				if stops != 0 {
+					t.Fatalf("a MicroVM whose disk is full was stopped (%d stop calls):\n%s", stops, ta.output())
+				}
+				has(t, ta.output(), "the sandbox's own disk is full", running)
+				lacks(t, ta.output(), "the sandbox is kept", "Sandbox kept (stopped)")
+				return
+			}
+			if stops != 1 {
+				t.Fatalf("docker: %d stop calls, want 1:\n%s", stops, ta.output())
+			}
+			has(t, ta.output(), "retry with `defenseclaw sandbox pull "+name+"`; the sandbox is kept")
+			lacks(t, ta.output(), "keeps running")
+		})
+	}
+}
+
 // A headless session (--prompt) on a terminal still asks "Keep changes?"
 // at its end, and keeping them makes them the next session's base; only a
 // session with no terminal to ask on leaves its changes unaccepted, so the
@@ -613,6 +648,35 @@ func failsAtStart(output, state string) func(*testApp) {
 // R2-66, R2-78, L3): late denials count, a harness that failed early is not
 // blamed on the hooks, the continue hint follows a conversation only, and
 // the agent's names cannot drive the terminal.
+// lateContainerStop is a session in the running sandbox "box" whose
+// harness fails as Docker stops its container: from then on the sandbox
+// runs no command, and OpenShell reports its error phase at the at-th look
+// of settledPhase (never, for 0).
+func lateContainerStop(at int32) func(*testApp) {
+	return func(ta *testApp) {
+		box := sampleSandbox("box")
+		box.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: time.Now()}
+		ta.daemon.add(box)
+		ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{FilesChanged: 1, Insertions: 2}}
+		ta.term.code, ta.IO.TTY = 1, true
+		var gone atomic.Bool
+		ta.term.during = func() { gone.Store(true) }
+		ta.stream.answer = func(argv []string) (int, string) {
+			if gone.Load() && slices.Equal(sandboxCommand(argv), []string{"true"}) {
+				return 255, "Error: the sandbox is not reachable"
+			}
+			return 0, ""
+		}
+		var looks atomic.Int32
+		ta.Sleep = func(_ context.Context, d time.Duration) error {
+			if d == settlePhaseInterval && looks.Add(1) == at {
+				ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) { sb.Phase = "error" })
+			}
+			return nil
+		}
+	}
+}
+
 func TestSessionSummary(t *testing.T) {
 	claude := RunOptions{Harness: "claude"}
 	elsewhere := func(undone bool) func(*testApp) {
@@ -687,6 +751,12 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.mu.Unlock()
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.HookRequests += 9; sb.Hooks.ToolCalls += 7 })
 		}, want: []string{"Session ended · 7 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
+		// GAP-0354: OpenShell refuses a conversation that holds a credential
+		// placeholder, so the end offers a new one, not --continue.
+		{name: "a conversation that holds a credential placeholder", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Hooks.PlaceholderRefusedAt = ta.Now() })
+		}, want: []string{"start a new conversation: defenseclaw sandbox connect " + sbName + " (this one holds a sandbox credential placeholder"},
+			not: []string{cont}},
 		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
 			ta.daemon.mu.Lock()
 			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
@@ -755,6 +825,17 @@ func TestSessionSummary(t *testing.T) {
 		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code",
 			"is in OpenShell's error state → `defenseclaw sandbox delete " + sbName + " --keep-snapshot`"},
 			not: []string{"keeps running", "was stopped from outside this session"}},
+		// GAP-0333, GAP-0337: Docker restarted under a session that connected
+		// to a running sandbox, and OpenShell read it ready for longer than
+		// the first look while it ran no command: the end waits for the
+		// phase, and one that never comes says the sandbox does not answer.
+		{name: "the container stopped and OpenShell said so late", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
+			setup: lateContainerStop(4), want: []string{"box's container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code"},
+			not: []string{"keeps running", "is still running"}},
+		{name: "a container that does not answer", input: "y\n", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
+			setup: lateContainerStop(0), want: []string{"box does not answer, though OpenShell still reads it as running",
+				"the undo point stays, since box does not answer", "Sandbox box does not answer → `defenseclaw sandbox status box` shows its state"},
+			not: []string{"keeps running", "is still running"}},
 		// GAP-0077: the OpenShell gateway restarted under the session (an
 		// upgrade), which closed the harness's exec relay: the sandbox read
 		// as unknown for a moment, then ready, and the session said it was
@@ -891,6 +972,23 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
 		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
 			not: []string{"the next session takes a new undo point"}},
+		// GAP-0389: another terminal started the sandbox again while the
+		// question was open, so the daemon refused the acceptance: the last
+		// line says it runs, not that it was kept stopped.
+		{name: "keeping while another terminal starts it again", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: "sandbox " + sbName + " is running; stop it before accepting its changes"}
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				for _, c := range ta.daemon.calls { // the fake holds its lock here
+					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/accept") {
+						sb.Phase = "ready"
+					}
+				}
+			}
+		}, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"could not record that you kept the changes", "Sandbox " + sbName + " is running again (started from outside this session) → reattach"},
+			not: []string{"Sandbox kept (stopped)"}},
 		// GAP-0336: the daemon stopped before the session ended: what did not
 		// run, and the way to it, without the HTTP client's error.
 		{name: "the daemon is down at the end", opts: claude, exit: 1, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
@@ -1184,6 +1282,19 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	if c.Status != openshell.StatusFail || !strings.Contains(c.Detail, "bad: OpenShell refused the hooks' connections") ||
 		strings.Contains(c.Detail, "good") || !strings.Contains(c.Detail, "127.0.0.1:18971") || c.Fix == nil {
 		t.Fatalf("unreachable: %+v", c)
+	}
+	// GAP-0384: a stopped sandbox keeps its last session's verdict
+	// (GAP-0186), but nothing of it runs that could fail closed: it is
+	// named in a warning, and the machine check does not fail.
+	ta = newTestApp(t, "")
+	ta.daemon.add(sampleSandbox("good"))
+	silent := sampleSandbox("c7-stop")
+	silent.Phase = "stopped"
+	silent.Hooks.Unreachable, silent.Hooks.UnreachableReason = true, "the harness has been calling its model for 34s without a single hook request reaching DefenseClaw"
+	ta.daemon.add(silent)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "1 running sandbox reach") ||
+		!strings.Contains(c.Detail, "c7-stop is stopped, and the hooks of its last session") || strings.Contains(c.Detail, "fails closed") || c.Fix == nil {
+		t.Fatalf("stopped: %+v", c)
 	}
 }
 

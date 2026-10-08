@@ -83,6 +83,19 @@ func TestFoldedRefusalsNameTheirCount(t *testing.T) {
 	}
 }
 
+// GAP-0356: a refused port on this machine reads in the daemon's words,
+// which tell a port DefenseClaw never opens from one --host-port opens.
+func TestClosedHostPortsSayWhy(t *testing.T) {
+	ta := newTestApp(t, "")
+	const target = "host.openshell.internal:18990"
+	why := "the sandbox policy does not open port 18990 on this machine to the sandbox (DefenseClaw never opens DefenseClaw API (port 18990) to a sandbox (choose another port))"
+	line := ta.activityLine(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Host: "host.openshell.internal", Port: 18990,
+		Reason: sandboxapi.ReasonHostPortClosed, Message: "✗ " + target + ": " + why, Time: ta.Now()}, false)
+	if !strings.HasSuffix(line, target+": "+why) || strings.Contains(line, "host port closed") {
+		t.Fatalf("line = %q", line)
+	}
+}
+
 func TestSSHBlocksSayUseHTTPS(t *testing.T) {
 	ta := newTestApp(t, "")
 	line := ta.activityLine(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "github.com", Port: 22,

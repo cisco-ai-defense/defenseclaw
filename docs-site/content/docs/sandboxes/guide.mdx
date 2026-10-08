@@ -351,6 +351,14 @@ The agent finds these tools in it:
 - Node.js 22 with `npm`
 - `git`, the GitHub CLI (`gh`), `curl`, `jq` and `ssh`
 
+`make` on the agent's `PATH` is `/usr/local/bin/make`, a DefenseClaw
+wrapper around the image's GNU make: OpenShell's seccomp filter refuses a
+call that make makes for every recipe it starts (a `setresuid` that
+changes nothing), so without the wrapper every recipe fails with
+`make: <command>: Operation not permitted`. The wrapper preloads a small
+library that leaves that call out, for make and every make it starts, so
+`make test` and node-gyp builds (`npm rebuild --build-from-source`) run.
+
 There is no Go, Rust or Java toolchain, and the agent has no root, so it
 can't `apt-get install` one. It can install what `pip`, `uv` and `npm`
 fetch into the project or its home. For another system tool, build a base
@@ -402,11 +410,11 @@ it copies anything, and the first start of an image says it takes longer:
 
 ### The banner, line by line
 
-A real banner from a Mac (copy mode, the `balanced` pack, the process tree on).
-Note the two `Model` lines: the credential and the only host it works at, then
-how that host is reached.
+A real banner from Linux: a live mount of a project with a repository policy,
+started with `--host-port 8765`. Note the two `Model` lines: the credential and
+the only host it works at, then how that host is reached.
 
-![The banner of defenseclaw sandbox run claude on a Mac: the sandbox and its permission mode, the project copy, the model credential bound to its endpoint, the line saying OpenShell opens that endpoint to the harness's own program around the egress proxy, and where asks appear](/images/sandboxes/screens/terminal-run-banner.png)
+![The banner of defenseclaw sandbox run claude --host-port 8765 on Linux: the sandbox and its permission mode, the live project with its undo point, the hidden secret files, the protected git internals, the model credential bound to its endpoint and the line saying OpenShell opens that endpoint to the harness's own program around the egress proxy, the host port that opens on approval, the repository policy that tightened one setting, and where asks appear](/images/sandboxes/screens/terminal-run-banner-linux.png)
 
 | Line | What it tells you |
 | --- | --- |
@@ -545,7 +553,9 @@ The feed shows events as they happen. `defenseclaw sandbox destinations NAME`
 shows the list: every site the sandbox reached or tried to reach, through the
 egress proxy or around it, and what each one is. The KIND column says whether
 it is the sandbox's model provider, another AI provider the harness does not
-use (shadow AI), a site that was only ever refused, or an ordinary site. A row
+use (shadow AI), a site that was only ever refused (`blocked (paste site)`), or
+an ordinary site, named by its category when DefenseClaw knows it
+(`source hosting`, `package registry`). A row
 also counts the requests (the refused ones and the model calls too), the bytes
 sent and received, the program that made the connection and when it was last
 seen. The line under the table counts the shadow AI destinations and names the
@@ -557,17 +567,16 @@ deleted with the sandbox. The TUI shows the same rows in the sandbox's details
   cwd="~/code/myapp"
   speed={1.5}
   height={300}
-  ariaLabel="Animated terminal replay of defenseclaw sandbox destinations for a Claude Code sandbox: the model provider, one shadow AI destination, one blocked site and three ordinary sites, each with its requests, bytes and the program that connected."
-  caption="Recorded from a real Claude Code sandbox named `myapp-claude` under the `open` pack, with a model key from Amazon Bedrock. `api.openai.com` is shadow AI, `pastebin.com` was refused by the blocklist, and the other rows are ordinary sites."
+  ariaLabel="Animated terminal replay of defenseclaw sandbox destinations for a Claude Code sandbox on Linux with the process tree on: one shadow AI destination, the model provider, a site the blocklist refused, a source host and a package registry, each with its requests, bytes and the program that connected with its parents."
+  caption="Recorded from a real Claude Code sandbox named `myapp-claude` on Linux, with the process tree on and a model key from Amazon Bedrock. `api.openai.com` is shadow AI, `pastebin.com` was refused by the blocklist, and the BINARY column shows the program that connected and its parents (`curl ← bash ← claude ← …`)."
   frames={[
     { type: 'cmd', text: 'defenseclaw sandbox destinations myapp-claude', pauseMs: 700 },
-    { type: 'dim', text: 'DESTINATION                       KIND            PROVIDER        REQUESTS            UP / DOWN          BINARY                                    LAST SEEN' },
-    { type: 'out', text: 'api.openai.com                    shadow AI       OpenAI          1                   808 B / 4.3 KiB    /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'bedrock-mantle.us-east-1.api.aws  model provider  Amazon Bedrock  15, 13 model calls  0 B / 0 B          /opt/defenseclaw-harness/claudecode/bin…  10-07 20:25' },
-    { type: 'out', text: 'pastebin.com                      blocked         paste_site      0 (1 refused)       0 B / 0 B          /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'github.com                        other           -               1                   780 B / 581.7 KiB  /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'registry.npmjs.org                other           -               1                   790 B / 25.9 KiB   /usr/bin/curl                             10-07 20:24' },
-    { type: 'out', text: 'pypi.org                          other           -               1                   789 B / 109.9 KiB  /usr/bin/curl                             10-07 20:24' },
+    { type: 'dim', text: 'DESTINATION                       KIND                  PROVIDER        REQUESTS            UP / DOWN         BINARY                                    LAST SEEN' },
+    { type: 'out', text: 'api.openai.com                    shadow AI             OpenAI          1                   808 B / 4.2 KiB   curl ← bash ← claude ← python3 ← opensh…  10-08 08:03' },
+    { type: 'out', text: 'bedrock-mantle.us-east-1.api.aws  model provider        Amazon Bedrock  15, 13 model calls  0 B / 0 B         …fenseclaw-harness/claudecode/bin/claude  10-08 08:06' },
+    { type: 'out', text: 'pastebin.com                      blocked (paste site)  -               0 (1 refused)       0 B / 0 B         /usr/bin/curl                             10-08 08:04' },
+    { type: 'out', text: 'api.github.com                    source hosting        -               1                   783 B / 6.9 KiB   curl ← bash ← claude ← python3 ← opensh…  10-08 08:03' },
+    { type: 'out', text: 'registry.npmjs.org                package registry      -               1                   790 B / 25.8 KiB  curl ← bash ← claude ← python3 ← opensh…  10-08 08:03' },
     { type: 'warn', text: '  ⚠ 1 AI destination the harness does not use (shadow AI); block one with `defenseclaw sandbox policy block HOST`' },
   ]}
 />
@@ -821,7 +830,8 @@ run tells you three times:
 The daemon keeps its hook counts across a restart, but one that did not stop
 cleanly loses the last minute of them. A stopped sandbox also keeps what its
 last session's hooks came to (`unreachable!` or `silent!` in `sandbox list`)
-until its next session. When it restarted during the session
+until its next session; `sandbox doctor` warns about it, but does not fail,
+since nothing of it runs. When it restarted during the session
 and has counted no hook of it, the run can't tell whether the session's hooks
 got through before, so it says that instead, with no warning and no exit
 status 69:
@@ -1949,16 +1959,17 @@ which runs NVIDIA's installer and sets up the service.
 | ``copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …`` | Expected on a Mac: every run works on a copy. Bring the work back at the end of the session or with `defenseclaw sandbox pull <name>`. |
 | ``--context mounts a folder into the sandbox read-only, and the OpenShell MicroVM (vm) driver mounts no host folders`` | Run without `--context` on a Mac. To give the agent a reference folder, put a copy of it inside the project. |
 | ``stage the project copy: the copy (files and history) is …, above the … limit`` | Raise `openshell.workdir.max_upload_mb` in `config.yaml`, or make the project smaller (a shallower history: `openshell.workdir.git_depth`). On a Mac a copy is the only way the project runs. |
-| ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …`` | Free space in the sandbox (`defenseclaw sandbox exec <name> -- df -h` shows it), or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes: `defenseclaw sandbox doctor` shows the value and where it is set. Do it before the sandbox stops: a MicroVM stopped with its disk full cannot start again (``<name> cannot start: its own disk is full``), and only `delete` is left. |
+| ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …`` | Free space in the sandbox (`defenseclaw sandbox exec <name> -- df -h` shows it), or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes: `defenseclaw sandbox doctor` shows the value and where it is set. Do it before the sandbox stops: a MicroVM stopped with its disk full cannot start again (``<name> cannot start: its own disk is full``), and only `delete` is left. A session whose end hits this leaves the MicroVM running so you can free space and `defenseclaw sandbox pull <name>`. |
 | The doctor's **vm-identity** check fails, or a create on a Mac says the MicroVM driver runs sandboxes as another uid | The gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid, so the harness images DefenseClaw built for you would not match. Run `defenseclaw sandbox doctor --fix`, which sets them and restarts the gateway. |
 | On macOS, the **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``, or setup marks ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`` | OpenShell was installed outside Homebrew. See [a gateway run another way on macOS](#a-gateway-run-another-way-on-macos). |
 | On Linux, setup marks ``⚠ OpenShell 0.1.1 has no openshell-gateway user service``, then ``⚠ Gateway service: openshell-gateway is not installed; …`` | OpenShell was installed without NVIDIA's installer. See [a gateway run another way on Linux](#a-gateway-run-another-way-on-linux). |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. A session that ends while it is down skips its review and keep/undo question and says how to run them once it is back (`sandbox review` and `sandbox undo`, or `sandbox pull` for a copy); the sandbox and its undo point are kept. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. ``the OpenShell gateway is not running: nothing listens on 127.0.0.1:17670`` means its service is stopped (or, on Linux, stopped with your login session: the doctor's **systemd linger** row). |
 | ``… rejected the sandbox's model credential (HTTP 401), so Claude Code gets no answers`` | The model provider refused the key the sandbox was given, for example an expired short-term Bedrock key. Put a fresh key in your shell, end the session, and run `defenseclaw sandbox connect <name>` from that shell; see [Choose the model credential](#choose-the-model-credential). |
+| ``OpenShell refuses this conversation's requests, to the model and to DefenseClaw's hooks: the conversation holds a sandbox credential placeholder …`` (the feed, `sandbox status` row **Conversation**, the TUI), where the harness shows `API Error: 403 A credential placeholder in the request body cannot be forwarded` and the hooks fail closed | The conversation printed a placeholder (an `env` or `printenv` output shows them), and the harness sends its conversation with every request, which OpenShell refuses to forward. The key, the sandbox token and DefenseClaw are fine: end the session and start a new conversation with `defenseclaw sandbox connect <name>`, without `--continue`. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
 | ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start) | The check after ready found the sandbox other than DefenseClaw prepared it, on any compute driver, and the reason follows the message: the workload runs as another uid or holds capabilities, a hook, launcher or managed-settings file is missing, changed, not root-owned or writable, or (Linux) a per-run settings file is not on a read-only mount. Nothing of the sandbox kept running. Rebuild the harness image (`defenseclaw sandbox image build <harness> --force`) and run again; on a Mac, a uid mismatch is fixed by `defenseclaw sandbox doctor --fix`. If it repeats, keep the reason for a bug report. |
-| ``<name> is in OpenShell's error state`` (start, stop or connect), or the session ended with ``<name>'s container stopped under the session`` | The sandbox's container stopped while it ran (a Docker restart stops every one, or the workload failed), and OpenShell holds it in its error state, where it can be neither stopped nor started. `defenseclaw sandbox doctor` names it under **Sandbox hooks**. Delete it and run again: `defenseclaw sandbox delete <name> --keep-snapshot` keeps a mounted project's undo point (the folder keeps its changes); a copy's work that was not pulled cannot be read any more. |
+| ``<name> is in OpenShell's error state`` (start, stop or connect), or the session ended with ``<name>'s container stopped under the session`` (or ``<name> does not answer, though OpenShell still reads it as running``, when Docker is still coming back) | The sandbox's container stopped while it ran (a Docker restart stops every one, or the workload failed), and OpenShell holds it in its error state, where it can be neither stopped nor started. `defenseclaw sandbox doctor` names it under **Sandbox hooks**. Delete it and run again: `defenseclaw sandbox delete <name> --keep-snapshot` keeps a mounted project's undo point (the folder keeps its changes); a copy's work that was not pulled cannot be read any more. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. DefenseClaw also refuses system folders, shared roots such as `/tmp`, credential folders such as `~/.ssh`, and agent homes such as `~/.claude` and `~/.codex`, whose settings and hooks run on your machine. |
 | `undo cannot look inside tools in …: the session took read permission away` | Make the folder readable (`chmod u+rwx tools`), review what is in it, and run undo again. |
 | `… cannot be mounted live: …; run with --copy to work on a copy` | Add `--copy`. |

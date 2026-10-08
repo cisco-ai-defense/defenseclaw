@@ -3126,8 +3126,8 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/daemon.go",
-          "description": "Daemon reads from .env"
+          "location": "bundles/splunk_local_bridge/bin/splunk-claw-bridge",
+          "description": "Local Splunk bridge reads it from its own env file"
         }
       ],
       "since": "0.3.0"
@@ -3170,8 +3170,8 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/daemon.go",
-          "description": "Daemon reads from .env"
+          "location": "bundles/splunk_local_bridge/bin/splunk-claw-bridge",
+          "description": "Local Splunk bridge reads it from its own env file"
         }
       ],
       "since": "0.3.0"

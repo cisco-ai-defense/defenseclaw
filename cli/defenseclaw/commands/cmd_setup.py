@@ -3520,10 +3520,23 @@ def _rotate_token_hook_metadata(path: str) -> os.stat_result:
         raise click.ClickException("A connector hook credential has an untrusted owner; refusing token rotation.")
     if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
         raise click.ClickException("A connector hook credential is not owner-only; refusing token rotation.")
-    if os.name == "nt" and windows_acl_custody_confidentiality_error(path) is not None:
-        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
-    if sys.platform == "darwin" and darwin_acl_confidentiality_error(path) is not None:
-        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
+    problem = None
+    if os.name == "nt":
+        problem = windows_acl_custody_confidentiality_error(path)
+    elif sys.platform == "darwin":
+        problem = darwin_acl_confidentiality_error(path)
+    if problem is not None:
+        # Name the file, why, and the fix: the message named none (GAP-0364).
+        if os.name == "nt":
+            import getpass
+
+            fix = f'icacls "{path}" /inheritance:r /grant:r "{getpass.getuser()}:F" "SYSTEM:F"'
+        else:
+            fix = f'chmod -N "{path}" && chmod 600 "{path}"'
+        raise click.ClickException(
+            f"The connector hook credential {path} is not private ({problem}); refusing token rotation. "
+            f"Make it private to your account ({fix}), then run the command again."
+        )
     return info
 
 
@@ -6610,6 +6623,7 @@ def setup_guardrail(
         proxy_active = _guarded_proxy_connector(gc)
         if proxy_active and explicit_connector not in _PROXY_BACKED_CONNECTORS:
             _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
+        _refuse_guardrail_for_connector_not_set_up(gc, explicit_connector)
     elif (
         non_interactive
         and not app.cfg.has_connector_configured()
@@ -6780,7 +6794,14 @@ def setup_guardrail(
             preselect_guardrail_targets(target_connectors)
 
         if explicit_connector:
-            if not (getattr(gc, "connectors", None) and target_connector in gc.connectors):
+            roster = getattr(gc, "connectors", None) or {}
+            if not (roster and target_connector in roster):
+                gc.connector = target_connector
+            elif normalize_connector((gc.connector or "").strip()) not in {normalize_connector(n) for n in roster}:
+                # GAP-0371: a primary mirror that is not on the roster (an
+                # earlier build's half switch left one) names a connector that
+                # is not set up; the summary, claw.mode and the gateway's
+                # primary must follow the connector this run configures.
                 gc.connector = target_connector
         elif not gc.connector or gc.connector == "openclaw":
             if target_connector:
@@ -9498,13 +9519,18 @@ def _write_connector_identity(
         (getattr(gc, "connector", "") or getattr(cfg.claw, "mode", "") or "").strip()
     )
     if write_mode == "add":
-        if not getattr(gc, "connectors", None):
+        first_add = not getattr(gc, "connectors", None)
+        if first_add:
             gc.connectors = {}
         existing_single = (getattr(gc, "connector", "") or "").strip()
         # Only seed a HOOK-enforced predecessor into the multi map — a
         # proxy-backed connector cannot be a multi-connector peer (D4=A).
+        # Only on the first add: once the roster exists the singular field is
+        # just its mirror, and a stale mirror is not a connector that was set
+        # up (GAP-0371: 'setup codex' enrolled a Claude Code nobody set up).
         if (
-            existing_single
+            first_add
+            and existing_single
             and existing_single != connector
             and existing_single in _HOOK_ENFORCED_CONNECTORS
             and existing_single not in gc.connectors
@@ -12759,6 +12785,31 @@ def _guarded_proxy_connector(gc) -> str:
         return ""
     single = normalize_connector((getattr(gc, "connector", "") or "").strip())
     return single if single in _PROXY_BACKED_CONNECTORS else ""
+
+
+def _refuse_guardrail_for_connector_not_set_up(gc, connector: str) -> None:
+    """Fail when ``setup guardrail --connector X`` names a connector the roster lacks.
+
+    GAP-0371: on an install whose ``guardrail.connectors`` roster held only
+    Codex, ``--connector claudecode`` repointed ``guardrail.connector`` without
+    adding Claude Code to the roster, and the gateway's restart dropped the
+    Codex hook registration while status still listed Codex. ``setup
+    <connector>`` adds a connector to the roster (or replaces it with
+    ``--replace``); this command tunes one that is on it. A single-connector
+    install without a roster keeps its switch, and proxy connectors keep their
+    own rules.
+    """
+    roster = {normalize_connector(name) for name in (getattr(gc, "connectors", None) or {}) if name.strip()}
+    if not roster or connector in roster or connector in _PROXY_BACKED_CONNECTORS:
+        return
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    slug = "claude-code" if connector == "claudecode" else connector
+    raise click.ClickException(
+        f"{label} is not set up here (set up: {', '.join(sorted(roster))}), so setup guardrail has no "
+        f"{label} guardrail to configure. No changes made. Add it next to them with "
+        f"'defenseclaw setup {slug}' (or switch to it with 'defenseclaw setup {slug} --replace'), "
+        "then run this again."
+    )
 
 
 def _refuse_hook_setup_over_proxy_connector(connector: str, proxy: str) -> None:

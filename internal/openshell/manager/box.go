@@ -105,6 +105,8 @@ type box struct {
 	// procs is the sandbox's process tree (processes.go), made once its
 	// process tree is on.
 	procs *procTree
+	// findings folds OpenShell's repeats of one finding (foldFinding).
+	findings map[string]*findingFold
 
 	hooks hookStats
 	// activeAt is the harness's latest activity and activeSince the start
@@ -234,11 +236,19 @@ type hookStats struct {
 	lastFailureAt   time.Time
 	failureNoticeAt time.Time
 	unnoticed       int64
+	// failureCause and answeredAt are what the status says of the last
+	// failure (sandboxapi.HookCoverage.LastHookFailureCause,
+	// HooksAnsweredAt; notePlaceholderFailureLocked, noteHookAnsweredLocked).
+	failureCause string
+	answeredAt   time.Time
 	// modelRejected says the model API rejected the sandbox's model
 	// credential, and how to hand it a fresh one; modelRejectedAt is the
 	// last rejection (observeModelAnswerLocked).
 	modelRejected   string
 	modelRejectedAt time.Time
+	// placeholderAt is when OpenShell last refused a request whose body
+	// carried a credential placeholder (notePlaceholderLocked).
+	placeholderAt time.Time
 }
 
 // hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
@@ -412,6 +422,11 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	driver, known := openshell.LookupDriver(b.rec.Driver)
 	unflushed := known && !driver.StopFlushes && trigger == audit.SandboxTriggerWatch && previous == audit.SandboxPhaseReady &&
 		(phase == audit.SandboxPhaseProvisioning || phase == audit.SandboxPhaseStarting || phase == audit.SandboxPhaseStopped || phase == audit.SandboxPhaseError)
+	if unflushed {
+		// The status and the pull's review say so after the feed has
+		// scrolled past it (GAP-0367).
+		b.rec.UnflushedAt = m.now().UTC()
+	}
 	b.phase = phase
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
@@ -866,12 +881,17 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
+		LastHookFailureCause: b.hooks.failureCause, HooksAnsweredAt: b.hooks.answeredAt,
 		ModelKeyRejected: b.hooks.modelRejected, ModelKeyRejectedAt: b.hooks.modelRejectedAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
 		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,
 		NoHookYet: !b.reach.since.IsZero() && b.reach.noHookYet,
 	}
+	if b.placeholderInSessionLocked() {
+		v.Hooks.PlaceholderRefusedAt = b.hooks.placeholderAt
+	}
+	v.UnflushedAt = r.UnflushedAt
 	for _, a := range m.approvals {
 		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {
 			v.PendingApprovals++

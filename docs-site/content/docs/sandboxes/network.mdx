@@ -20,7 +20,12 @@ watches all three:
   `HTTP_PROXY`. The proxy decides and logs every site.
 - **Model calls** go to the harness's model provider directly through
   OpenShell, which adds the real credential outside the sandbox. The sandbox
-  only ever holds a placeholder. This channel bypasses the egress proxy:
+  only ever holds a placeholder, and OpenShell forwards no request whose
+  body carries one: once a conversation shows a placeholder (the agent ran
+  `env`, say), every later request of that conversation is refused, its
+  model calls and its hooks alike. The key is fine; start a new
+  conversation (`defenseclaw sandbox connect <name>`, without
+  `--continue`). This channel bypasses the egress proxy:
   OpenShell opens the model hosts to the harness's own program only, and
   for an npm or Python harness that program is its `node` or `python`
   interpreter, so a script the agent runs with it reaches the model hosts
@@ -303,7 +308,7 @@ site: only its API hosts count as AI.
 The list survives daemon restarts and stops and is deleted with the
 sandbox. `defenseclaw sandbox destinations NAME` prints it:
 
-![defenseclaw sandbox destinations myapp-claude: the model provider with its model calls, one shadow AI destination (api.openai.com), one blocked site (pastebin.com) and three ordinary sites, each with its requests, bytes, the program that connected and when it was last seen, and a warning that counts the shadow AI destinations](/images/sandboxes/screens/terminal-destinations.png)
+![defenseclaw sandbox destinations myapp-claude on Linux with the process tree on: one shadow AI destination (api.openai.com), the model provider with its model calls, a site the blocklist refused (pastebin.com, a paste site), a source host and a package registry, each with its requests, bytes, the program that connected and its parents, and when it was last seen, and a warning that counts the shadow AI destinations](/images/sandboxes/screens/terminal-destinations.png)
 
 With the process tree on, the program column also shows the connecting
 program's parents (see
@@ -323,9 +328,15 @@ defenseclaw sandbox policy explain
 
 `activity` is the live feed of sites, blocks, asks and findings. A burst
 of refusals of one site (a retry loop, by one program or several) is one
-line, then one more a few seconds later that counts the rest (`✗ pypi.org
-(no OpenShell rule allows it) (and 5 more like it)`); `destinations` counts
-every refusal, and the audit records keep each program's. The
+line, then, a minute later, one more that counts the repeats of that minute
+(`✗ pypi.org (no OpenShell rule allows it) (and 5 more like it)`; a single
+repeat adds no line); `destinations` counts
+every refusal, and the audit records keep each program's. A refusal on the
+sandbox's own model host is a connection besides the model calls, and its
+line says so (`a connection outside the model channel, which stays open`):
+the provider rule that carries the model calls is not changed by it. The
+exception is a request that carries a credential placeholder (see above):
+its line names the placeholder. The
 `Egress` row of `status` counts the sites contacted and blocked, the
 requests that failed upstream (allowed, and the site refused or dropped
 them, or did not answer: an outage, not a block) and the bytes sent and

@@ -611,6 +611,10 @@ Where the notices appear:
   or the pull or apply failed), so they aren't lost, and the end says so.
 - **A full disk.** A pull that fails because the disk is full says whose
   disk: this machine's, or on a Mac the MicroVM's own (`overlay_disk_mib`).
+  When it is the MicroVM's own, the end of the session leaves the MicroVM
+  running instead of stopping it, since a MicroVM stopped with its disk full
+  cannot start again: free some space in it (`sandbox connect <name>
+  --shell`), then `sandbox pull <name>`, then `sandbox stop <name>`.
 - **The sandbox is kept.** It is stopped and kept for `connect`, unless you
   passed `--rm`.
 
@@ -911,7 +915,10 @@ defenseclaw sandbox logs fix-tests --lines 50
 ### `sandbox list`
 
 Lists this DefenseClaw's sandboxes with their harness, phase, workspace mode,
-profile, uptime, hook traffic, and project folder. The HOOKS column reads
+profile, uptime, hook traffic, and project folder. PROFILE is the profile the
+sandbox runs, followed by its pack when that is another one: `balanced (pack
+open)` is the balanced profile of the open pack, as a repository policy or
+`--profile` that tightens a pack's profile leaves it. The HOOKS column reads
 `tamper!` once a tool call ran without a DefenseClaw verdict, `unreachable!`
 while the hooks do not reach DefenseClaw, and `silent!` while the harness
 works without hook traffic.
@@ -1107,6 +1114,9 @@ boundary, and says what each one is:
   Each provider raises a `shadow_ai` finding once a session: LOW the first
   time the policy refuses it, MEDIUM the first time the sandbox reaches it
   (a refusal and then a contact raise one of each);
+- **this machine**: a port on this machine reached through
+  `host.openshell.internal` (a `--host-port` service you approved, a local
+  model endpoint), shown as `host.openshell.internal:PORT`;
 - otherwise **blocked** when it was only ever refused (the KIND cell says
   whose list refused it, for example `blocked (paste site)`), else the
   category the egress proxy allowed it under or, when it allowed it without
@@ -1151,7 +1161,7 @@ defenseclaw sandbox destinations myapp-7f3a --output json
 
 Output from a real sandbox named `myapp-claude`:
 
-![defenseclaw sandbox destinations myapp-claude: the model provider, one shadow AI destination, one blocked site and three ordinary sites, with requests, bytes, the program that connected and when it was last seen](/images/sandboxes/screens/terminal-destinations.png)
+![defenseclaw sandbox destinations myapp-claude on Linux with the process tree on: one shadow AI destination, the model provider, a site the blocklist refused, a source host and a package registry, with requests, bytes, the program that connected and its parents, and when it was last seen](/images/sandboxes/screens/terminal-destinations.png)
 
 {/* AUTOGEN-BEGIN: sandbox-flags destinations */}
 | Flag | Takes | Default | Description |

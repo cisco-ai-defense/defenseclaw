@@ -302,6 +302,10 @@ stopped`. Nothing is changed; use the install command above.
 
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
+- Before an upgrade, reinstall or rollback on macOS or Linux restarts the
+  gateway, the installer names the OpenShell sandboxes that are running: their
+  hooks fail closed until the gateway is back, so their agents' tool calls are
+  refused meanwhile.
 
 ### Sandbox telemetry and destinations
 
@@ -346,6 +350,12 @@ stopped`. Nothing is changed; use the install command above.
   (`openshell_telemetry_failed`).
 - Removed the `binary_drift` and `tamper_attempt` sandbox finding kinds,
   which nothing produced.
+- OpenShell's repeats of one finding within 10 minutes of a session are one
+  sandbox finding and one feed line (the next one names how many were
+  folded); "Credential-bearing traffic cannot be inspected" names the
+  conversation's credential placeholder and the new-conversation step, and
+  `defenseclaw alerts --show`/`--json` print a sandbox finding's details and
+  next step.
 - New Grafana dashboard **Sandboxes** (`defenseclaw-sandboxes`), linked from
   Overview: active sandboxes by connector, phase changes, egress by source
   (OpenShell or the DefenseClaw egress proxy) and decision, top blocked and
@@ -421,6 +431,45 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **The gateway prints the local Splunk sign-in only while its web UI
+  answers.** `defenseclaw-gateway start` and `restart` printed the "Splunk
+  Local Mode" block (Web UI, user, where the password is) whenever the
+  bridge's env file held a password, also after `setup splunk --disable`
+  stopped the container or after it was removed. The fallback that read
+  `DEFENSECLAW_LOCAL_USERNAME`/`DEFENSECLAW_LOCAL_PASSWORD` from
+  `~/.defenseclaw/.env` is gone: no supported release writes them there
+  (the local bridge reads them from its own env file).
+- **A PowerShell command with several statements reaches argv block rules.**
+  On Windows, where Codex runs its shell tool in PowerShell, a rule such as
+  `f.commands.exists(c, "<x>" in c.argv)` only reported a detection-only
+  finding for `Write-Output <x>; exit $LASTEXITCODE` or
+  `Get-Location; Write-Output <x>`: the second statement left the whole
+  command partial. Its statements are now judged one by one, up to the first
+  one that cannot be proved, as in the body of `pwsh -Command`.
+- **The `guardrail` commands confirm that the running gateway applied a
+  change.** `guardrail mode`, `block-at`, `alert-at`, `use-pack`,
+  `protection`, `rule` and `suppress` said the running gateway applies it now
+  while, after a 0.8.x upgrade, the gateway kept the previous setting. They
+  wait up to 10 seconds for it to report the saved config generation, and
+  otherwise say it did not apply it and name `defenseclaw-gateway restart`
+  (`mode` and the levels exit 1, `gateway: not_applied` in `--json`).
+  `defenseclaw doctor`'s stale Policy row names the generation it has not
+  applied.
+- **`setup guardrail --connector X` refuses a connector that is not set up.**
+  On an install whose `guardrail.connectors` roster lacked X it repointed the
+  guardrail connector without adding X, and the gateway restart dropped the
+  hooks of the connectors on the roster. It now changes nothing and names
+  `defenseclaw setup <x>`, which adds a connector (or `--replace`, which
+  switches).
+- **`defenseclaw setup rotate-token` after a 0.8.x upgrade on Windows.** The
+  upgrade gives the hook credential files 0.8.x wrote with an inherited DACL
+  the owner-only DACL 1.x writes, which rotation requires. A refusal now names
+  the file, the reason and the `icacls` (or `chmod`) command that fixes it.
+- **No `--from-version` warning on a downgrade.** `install.sh --local` of an
+  older build over a newer one printed `--from-version 1.0.31 is newer than
+  this DefenseClaw`, about a flag the user never typed. The warning remains
+  only where the value is read: a 0.x configuration without a migration
+  record.
 - **Local Splunk starts when the CLI was installed under a private umask.**
   The package's files arrived 0600 and setup copied them so into
   `~/.defenseclaw/splunk-bridge/splunk/`, which the container mounts and reads

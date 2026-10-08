@@ -824,14 +824,25 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	}
 	// What --unmask shared, and what it named that the copy does not take
 	// (git-ignored files never go): both were silent (GAP-0248).
+	// A file only the pack's or the configuration's own entries share (a
+	// committed template such as .env.example, which the pack's .env.* mask
+	// covers) counts only when its content looks like a secret: a template of
+	// names was named on every run as if the user had unmasked it (GAP-0351).
 	unmaskOnly := scanOpts
 	unmaskOnly.unmask = nil
+	contentOnly := unmaskOnly
+	contentOnly.patterns = nil
 	rec.Unmasked = nil
 	for _, rel := range candidates {
-		if unmaskedBy(scanOpts.unmask, rel) {
-			if would, err := detectSecretsIn(root, []string{rel}, unmaskOnly); err == nil && len(would) > 0 {
-				rec.Unmasked = append(rec.Unmasked, rel)
-			}
+		if !unmaskedBy(scanOpts.unmask, rel) {
+			continue
+		}
+		check := contentOnly
+		if unmaskedBy(scanOpts.unmaskAsked, rel) {
+			check = unmaskOnly
+		}
+		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
+			rec.Unmasked = append(rec.Unmasked, rel)
 		}
 	}
 	for _, u := range scanOpts.unmaskAsked {
@@ -982,14 +993,19 @@ func heavyDirOf(rel string) string {
 	return ""
 }
 
-// leftOutWarning names what a git copy leaves out, directories first.
+// leftOutWarning names what a git copy leaves out, directories first. A
+// path inside a folder it names already is left to that folder: git lists
+// .venv/bin/ next to .venv/ when the folder ignores its own content, and the
+// line named one folder five times (GAP-0353).
 func leftOutWarning(paths map[string]bool) string {
 	if len(paths) == 0 {
 		return ""
 	}
 	names := make([]string, 0, len(paths))
 	for p := range paths {
-		names = append(names, p)
+		if !insideListed(paths, p) {
+			names = append(names, p)
+		}
 	}
 	sort.Slice(names, func(i, j int) bool {
 		if di, dj := strings.HasSuffix(names[i], "/"), strings.HasSuffix(names[j], "/"); di != dj {
@@ -999,6 +1015,16 @@ func leftOutWarning(paths map[string]bool) string {
 	})
 	return "not copied (git ignores them, or they are package caches): " + strings.Join(firstN(names, 5), ", ") +
 		"; install the dependencies inside the sandbox"
+}
+
+// insideListed reports whether a folder above p ("dir/") is in paths.
+func insideListed(paths map[string]bool, p string) bool {
+	for dir := path.Dir(strings.TrimSuffix(p, "/")); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if paths[dir+"/"] {
+			return true
+		}
+	}
+	return false
 }
 
 // heavyExcludePathspecs keeps package caches out of forced captures of

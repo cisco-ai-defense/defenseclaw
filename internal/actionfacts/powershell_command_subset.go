@@ -39,6 +39,9 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 			view, ok = Facts{}, false
 		}
 	}()
+	if facts.Parse.Status == StatusPartial && facts.Parse.Dialect == DialectPowerShell {
+		return rawPowerShellStatementSubset(input, facts)
+	}
 	if facts.Parse.Status != StatusPartial ||
 		(facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectMixed) ||
 		len(facts.Commands) == 0 {
@@ -93,34 +96,11 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		if !valid {
 			continue
 		}
-		segments, valid := staticPowerShellSegments(body, 0)
-		if !valid {
-			continue
-		}
-		var commands []CommandFact
-		for _, segment := range segments {
-			if len(commands) != 0 && !powerShellCommandPreservesNext(commands[len(commands)-1]) {
-				break
-			}
-			command, valid := exactPowerShellSegmentCommand(input, segment)
-			if !valid {
-				break
-			}
-			commands = append(commands, command)
-		}
+		commands := powerShellBodyCommands(input, body)
 		if len(commands) == 0 || len(view.Commands)+len(commands) > maxCommands {
 			continue
 		}
-		for _, command := range commands {
-			command.ID = int64(len(view.Commands) + 1)
-			command.ParentCommandID = 0
-			command.PipelineID = 0
-			command.ControlFlowUncertain = false
-			command.ControlFlowOperator = ControlFlowOperatorNone
-			command.Wrappers = nil
-			view.Commands = append(view.Commands, command)
-			inner++
-		}
+		inner += appendPowerShellBodyCommands(&view, commands)
 	}
 	if inner == 0 {
 		return Facts{}, false
@@ -128,12 +108,82 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 	return view, true
 }
 
+// rawPowerShellStatementSubset is the reduction of a raw PowerShell action,
+// such as a Codex shell call on Windows, where the action is a body itself
+// (GAP-0175). An exit after a static command, or a cmdlet with no operand
+// grammar next to it, leaves the whole action partial, so without the view a
+// monotone argv rule could not count its match on `Write-Output marker;
+// exit 0` or `Get-Location; Write-Output marker`.
+func rawPowerShellStatementSubset(input Input, facts Facts) (Facts, bool) {
+	extracted := extractArgsForTool(input.Args, input.Tool)
+	if len(input.Argv) != 0 || len(extracted.argv) != 0 {
+		return Facts{}, false
+	}
+	body := input.Command
+	if body == "" {
+		body = extracted.command
+	}
+	if body == "" || len(body) > maxCommandBytes {
+		return Facts{}, false
+	}
+	commands := powerShellBodyCommands(input, body)
+	if len(commands) == 0 || len(commands) > maxCommands {
+		return Facts{}, false
+	}
+	view := Facts{
+		Tool:       facts.Tool,
+		CWD:        facts.CWD,
+		ActiveHome: facts.ActiveHome,
+		Parse:      ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
+	}
+	appendPowerShellBodyCommands(&view, commands)
+	return view, true
+}
+
+// powerShellBodyCommands parses the static segments of an exact PowerShell
+// body in order, and stops at the first it cannot prove or after a command
+// that may change what the next one runs.
+func powerShellBodyCommands(input Input, body string) []CommandFact {
+	segments, valid := staticPowerShellSegments(body, 0)
+	if !valid {
+		return nil
+	}
+	var commands []CommandFact
+	for _, segment := range segments {
+		if len(commands) != 0 && !powerShellCommandPreservesNext(commands[len(commands)-1]) {
+			break
+		}
+		command, valid := exactPowerShellSegmentCommand(input, segment)
+		if !valid {
+			break
+		}
+		commands = append(commands, command)
+	}
+	return commands
+}
+
+// appendPowerShellBodyCommands adds a body's commands to view as top-level
+// commands that run, and reports how many it added.
+func appendPowerShellBodyCommands(view *Facts, commands []CommandFact) int {
+	for _, command := range commands {
+		command.ID = int64(len(view.Commands) + 1)
+		command.ParentCommandID = 0
+		command.PipelineID = 0
+		command.ControlFlowUncertain = false
+		command.ControlFlowOperator = ControlFlowOperatorNone
+		command.Wrappers = nil
+		view.Commands = append(view.Commands, command)
+	}
+	return len(commands)
+}
+
 // Only these output/read commands can precede another statement in the
 // reduced body. Other commands may exit, alter aliases, or change the
 // process state that determines the next command's identity.
 func powerShellCommandPreservesNext(command CommandFact) bool {
 	switch command.Program {
-	case "echo", "write-output", "write-host", "out-null", "get-date", "get-location", "pwd":
+	case "echo", "write-output", "write-host", "out-null", "get-date", "get-location", "pwd",
+		"get-content", "gc", "cat", "type":
 		return true
 	default:
 		return false

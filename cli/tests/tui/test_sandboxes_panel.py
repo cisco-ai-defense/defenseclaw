@@ -2079,6 +2079,12 @@ def test_unreachable_hooks_are_an_alert_and_a_toast() -> None:
     )
     refused = decode_sandbox({**RUNNING, "hooks": {"ingress_refused": 2}})
     assert refused is not None and any("refused 2 hook request(s)" in alert for alert in refused.alerts)
+    # GAP-0354: a conversation that holds a credential placeholder is named, with the way on.
+    placeholder = decode_sandbox({**RUNNING, "hooks": {"placeholder_refused_at": "2026-10-08T12:51:06Z"}})
+    assert placeholder is not None and any(
+        "holds a sandbox credential placeholder" in alert and f"connect {placeholder.name}, without --continue" in alert
+        for alert in placeholder.alerts
+    )
 
 
 def test_the_alerts_cell_fits_a_narrow_table() -> None:
@@ -2126,6 +2132,15 @@ def test_failed_hook_calls_are_an_alert() -> None:
         "DefenseClaw last answered HTTP 429 Too Many Requests"
     ) in row.alerts
     assert "hook errors" in row.alert_badge
+    # GAP-0377: a placeholder conversation's hook post is not DefenseClaw's answer.
+    held = decode_sandbox({**RUNNING, "hooks": {
+        "hook_failed": 2, "last_hook_failure": "HTTP 400 Bad Request",
+        "last_hook_failure_cause": "credential_placeholder_refused", "hooks_answered_at": "2026-10-08T18:26:02Z",
+    }})
+    assert "OpenShell refuses for its credential placeholder: HTTP 400 Bad Request; hooks answered again since" in (
+        held.hook_failure_alert
+    )
+    assert "DefenseClaw" not in held.hook_failure_alert
     one = decode_sandbox({**RUNNING, "hooks": {"hook_failed": 1}})
     assert "1 hook call failed, so the harness's action was blocked (hooks fail closed)" in one.alerts
     assert decode_sandbox(RUNNING).hook_failed == 0
@@ -2683,6 +2698,18 @@ def test_an_ask_that_went_away_while_its_view_was_hidden_is_no_lost_selection() 
     model.set_snapshot(STATUS, [RUNNING], [_ask("ask-3", 3)])
     model.shown()
     assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-3")
+
+
+def test_an_ask_raised_again_in_an_emptied_asks_view_is_no_lost_selection() -> None:
+    """GAP-0328 (1.0.31): with the Asks view open, its one ask was rejected in
+    another terminal and raised again after the reject window; the first a
+    said it was no longer waiting."""
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1)])
+    model.view = "asks"
+    model.set_snapshot(STATUS, [RUNNING], [])
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 11)])
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1")
 
 
 def test_the_activity_selection_follows_its_event() -> None:

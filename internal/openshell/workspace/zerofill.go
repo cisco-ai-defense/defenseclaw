@@ -33,8 +33,11 @@ const minZeroTail = 16
 
 // zeroFilledFlags flags the changed files whose content is text followed
 // by at least minZeroTail zero bytes. It is information (SeverityInfo):
-// nothing there runs code, but the file is likely cut short.
-func zeroFilledFlags(changes []TreeChange, content contentFunc) []Flag {
+// nothing there runs code, but the file is likely cut short. In a sandbox
+// that went down without a flush (unflushed) it also flags the files it
+// brings back empty: a file written in its last seconds can come back with
+// no bytes at all, which read as a plain "+0 -0" (GAP-0367).
+func zeroFilledFlags(changes []TreeChange, content contentFunc, unflushed bool) []Flag {
 	var out []Flag
 	for _, c := range changes {
 		if c.NewOID == "" || c.Status == "D" {
@@ -42,6 +45,11 @@ func zeroFilledFlags(changes []TreeChange, content contentFunc) []Flag {
 		}
 		b, ok := content(c, true)
 		if !ok {
+			continue
+		}
+		if len(b) == 0 && unflushed {
+			out = append(out, Flag{Path: c.Path, Label: c.Path, Kind: RiskZeroFilled, Severity: SeverityInfo,
+				Detail: "is empty, which a MicroVM stopped without a flush can leave of a file written in its last seconds: check it"})
 			continue
 		}
 		body := bytes.TrimRight(b, "\x00")

@@ -981,6 +981,55 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertFalse(os.path.exists(self.cfg_path))
 
+    # GAP-0371: with only Codex on the roster, '--connector claudecode'
+    # repointed guardrail.connector and the restart dropped Codex's hooks.
+    def test_setup_guardrail_for_a_connector_off_the_roster_is_refused(self):
+        self._seed_map("codex")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "action"],
+                obj=self.app,
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Claude Code is not set up here (set up: codex)", result.output)
+        self.assertIn("'defenseclaw setup claude-code'", result.output)
+        restart.assert_not_called()
+        self.assertEqual(sorted(self.app.cfg.guardrail.connectors), ["codex"])
+        self.assertNotEqual(self.app.cfg.guardrail.connector, "claudecode")
+        self.assertFalse(os.path.exists(self.cfg_path))
+
+    # GAP-0371 reopen: an earlier build left guardrail.connector at claudecode
+    # with only Codex on the roster. Re-running setup for Codex must repair the
+    # mirror, not name Claude Code or enroll it.
+    def test_stale_primary_off_the_roster_follows_the_connector_set_up(self):
+        def seed_stale():
+            self._seed_map("codex")
+            self.app.cfg.guardrail.connector = "claudecode"
+            self.app.cfg.claw.mode = "claudecode"
+            self.app.cfg.guardrail.enabled = True
+
+        seed_stale()
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "codex", "--mode", "action", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Connector: Codex (codex)", result.output)
+        self.assertNotIn("Claude Code", result.output)
+        self.assertEqual((self.app.cfg.guardrail.connector, self.app.cfg.claw.mode), ("codex", "codex"))
+        self.assertEqual(sorted(self.app.cfg.guardrail.connectors), ["codex"])
+
+        seed_stale()
+        with _setup_patches():
+            result = _invoke(["codex", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(sorted(self.app.cfg.guardrail.connectors), ["codex"])
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+
     def test_hook_setup_replace_over_guarded_openclaw_confirms(self):
         self._seed_single("openclaw")
         self.app.cfg.guardrail.enabled = True

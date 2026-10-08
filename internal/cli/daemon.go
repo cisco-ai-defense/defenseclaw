@@ -355,7 +355,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		}
 	}
 	if !coldStart {
-		upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
+		upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr, d)
 	}
 	claimGatewayAPIPort(cfg)
 
@@ -753,7 +753,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
 	}
-	upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
+	upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr, d)
 	claimGatewayAPIPort(cfg)
 
 	fmt.Print("Starting gateway sidecar daemon... ")
@@ -885,34 +885,34 @@ func requestGatewayShutdown(client *http.Client, cfg *config.Config, token strin
 	return nil
 }
 
-// printSplunkLocalHint prints Splunk Web credentials when the local bridge
-// is configured, so the user knows how to access the dashboards.
+// printSplunkLocalHint prints how to sign in to the local Splunk's web UI,
+// which `setup splunk --logs` sets up, while its credentials are there and
+// the UI answers. The credentials outlive the container (`setup splunk
+// --disable` stops it, and a removed container leaves them), so a started
+// gateway advertised a web UI that nothing served (GAP-0381).
 func printSplunkLocalHint() {
-	dataDir := config.DefaultDataPath()
-
-	// Check bridge env first (written by Python setup splunk --logs)
-	bridgeEnvPath := filepath.Join(dataDir, "splunk-bridge", "env", ".env")
-	bridgeEnv := readDotEnv(bridgeEnvPath)
-	if pw := bridgeEnv["SPLUNK_PASSWORD"]; pw != "" {
-		Section("Splunk Local Mode")
-		fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
-		fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
-		fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
-		return
-	}
-
-	// Fallback: legacy DEFENSECLAW_LOCAL_* keys
-	dotenvPath := filepath.Join(dataDir, ".env")
-	env := readDotEnv(dotenvPath)
-	user := env["DEFENSECLAW_LOCAL_USERNAME"]
-	pass := env["DEFENSECLAW_LOCAL_PASSWORD"]
-	if user == "" || pass == "" {
+	bridgeEnvPath := filepath.Join(config.DefaultDataPath(), "splunk-bridge", "env", ".env")
+	if readDotEnv(bridgeEnvPath)["SPLUNK_PASSWORD"] == "" || !splunkWebAnswers() {
 		return
 	}
 	Section("Splunk Local Mode")
-	fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
-	fmt.Printf("  %s %s\n", Style("Username:", "fg=bright_black", "bold"), user)
-	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), dotenvPath)
+	fmt.Printf("  %s http://%s\n", Style("Web UI:", "fg=bright_black", "bold"), splunkWebAddr)
+	fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
+	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
+}
+
+// splunkWebAddr is the local Splunk's web UI, which the container publishes
+// on loopback only.
+const splunkWebAddr = "127.0.0.1:8000"
+
+// splunkWebAnswers reports whether something listens on splunkWebAddr.
+var splunkWebAnswers = func() bool {
+	conn, err := net.DialTimeout("tcp", splunkWebAddr, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 type daemonReadinessRequirements struct {

@@ -102,9 +102,11 @@ The dialog scrolls.
 
 Each **Destination** row further down is one line of
 `defenseclaw sandbox destinations NAME`: the site, what it is, its requests and
-the program that connected. This one is from a Linux host:
+the program that connected, with its parents when the process tree is on.
+This one is from a Linux host, for a stopped sandbox whose repository policy
+turned the process tree on:
 
-![DefenseClaw TUI details of one sandbox on Linux: tool calls and hook events, the process tree, and a Destination row for the model provider and for pypi.org with their kind, requests and program](/images/sandboxes/screens/tui-sandbox-destinations.png)
+![DefenseClaw TUI details of one stopped sandbox on Linux: harness, phase, pack, the repository policy that turned the process tree on, the live project, sites contacted and blocked with the AI summary, tool calls, hook events, the last blocked tool call, the image, and a Destination row for each site with its kind, requests and the program that connected and its parents](/images/sandboxes/screens/tui-sandbox-destinations.png)
 
 ### Start a run from the TUI
 
