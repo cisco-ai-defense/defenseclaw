@@ -50,7 +50,7 @@ profile applied and why.
   where no `defenseclaw` CLI is installed. See
   [Check what DefenseClaw knows about a user](#check-what-defenseclaw-knows-about-a-user).
 - **Doctor.** `defenseclaw doctor` fails and `doctor --fix` repairs a hook
-  script that lost its execute bit, repairs ACP guard pins, reports one root
+  script that lost its execute bit, reports one root
   cause per problem, and names the guardrail profile that decides for the
   account that runs it.
 
@@ -67,8 +67,8 @@ DefenseClaw reads identity only from the operating system the agent runs on.
 Each fact has an assurance level, sent as
 `defenseclaw.user.principal.assurance`: `verified` when the gateway or the
 root guardian resolved it for a uid or SID the gateway took from how it
-authenticated the caller (the kernel's peer credentials, a per-user or
-enterprise ACP credential, or on a per-user install the account the gateway
+authenticated the caller (the kernel's peer credentials, a per-user
+credential, or on a per-user install the account the gateway
 runs as),
 `claimed` when the hook reported it from the user's own session and the user
 could change it. The reference for what is read on each
