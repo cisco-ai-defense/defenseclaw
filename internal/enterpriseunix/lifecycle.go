@@ -1976,7 +1976,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		// the package removal runs this uninstall, which found no deployment
 		// and kept all of it (GAP-0421). It is removed as the state of a
 		// committed deployment is. State a --keep-state uninstall kept stays.
-		l.failedInstallLeftovers = env.GOOS == "linux" && failure != "" && !l.opts.KeepState && len(env.loadRetainedState()) == 0
+		// A failed first macOS pkg install records no receipt, so its
+		// binaries, the rejected config.yaml and the lifecycle result are
+		// leftovers too, which the MDM uninstall script left in place
+		// (GAP-0567).
+		l.failedInstallLeftovers = failure != "" && !l.opts.KeepState && len(env.loadRetainedState()) == 0
 		if !l.failedInstallLeftovers {
 			r.Noop = true
 			r.NoopReason = "not_installed"

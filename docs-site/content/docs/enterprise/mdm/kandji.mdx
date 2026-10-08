@@ -108,8 +108,10 @@ reinstalls the package only when the deployment is missing or older.
 
 The pre-install script puts your config at the layout path
 `/opt/cisco/defenseclaw/etc/config.yaml` before the package installs, so the
-package's own `ensure --from-package` applies it on the first install. It never
-overwrites an existing config.
+package's own `ensure --from-package` applies it on the first install. Once the
+package is installed (its pkg receipt exists) it never overwrites the config.
+Until then it replaces it, so a redeploy after a first install that failed on
+the config installs the fixed one.
 
 ```bash
 #!/bin/sh
@@ -117,7 +119,9 @@ overwrites an existing config.
 set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 layout=/opt/cisco/defenseclaw/etc
-[ -e "$layout/config.yaml" ] && exit 0
+if [ -e "$layout/config.yaml" ] && pkgutil --pkg-info com.cisco.defenseclaw.enterprise >/dev/null 2>&1; then
+    exit 0
+fi
 umask 022
 mkdir -p "$layout"
 tmp=$(mktemp "$layout/.config.yaml.XXXXXX")

@@ -129,6 +129,30 @@ func TestUninstallAfterAFailedPackageInstallRemovesItsLeftovers(t *testing.T) {
 	}
 }
 
+// The same on macOS: the Jamf uninstall script answered noop not_installed
+// and left bin, the rejected etc/config.yaml and lifecycle (GAP-0567).
+func TestMacOSUninstallAfterAFailedFirstPackageInstallRemovesItsLeftovers(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	bin := h.env.P(h.env.Layout.BinDir)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := h.payload("1.0.0")
+	for _, name := range []string{binGateway, binHook, binSensorHelper} {
+		if err := h.env.copyFileAtomic(filepath.Join(staged, name), filepath.Join(bin, name), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHostFile(t, h, h.env.Layout.ConfigPath, "config_version: 9\ngateway:\n  api_port: 18971\n")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"gateway.api_port 18971 must be 18970"}]}`)
+	r := h.run(Options{Action: ActionUninstall})
+	requireOK(t, r)
+	if r.Noop || exists(h.env.P(h.env.Layout.InstallRoot)) {
+		t.Fatalf("the uninstall after a failed first pkg install left %s (noop=%v)", h.env.Layout.InstallRoot, r.Noop)
+	}
+}
+
 // A failed package run the host recovered from out of band (systemd started
 // the gateway again) left its result and the kept gateway output in place:
 // ensure --from-package then found the host healthy and did nothing
