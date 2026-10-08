@@ -143,14 +143,6 @@ func TestAdmitHookCallerBoundsAllCallersTogether(t *testing.T) {
 		!strings.Contains(refused.Body.String(), managedHookReasonOverloaded) {
 		t.Fatalf("request past the bound = %d %v %q", refused.Code, refused.Header(), refused.Body.String())
 	}
-	// Telemetry batches are outside the bound: a refused hook would deny the
-	// tool call, while an exporter retries.
-	otlp := httptest.NewRecorder()
-	if _, release := api.admitHookCaller(otlp, httptest.NewRequest(http.MethodPost, "/v1/logs", nil), "1003", "otlp"); release == nil {
-		t.Fatalf("telemetry refused by the hook bound: %d %q", otlp.Code, otlp.Body.String())
-	} else {
-		release()
-	}
 	first()
 	_, again := admit("1003")
 	if again == nil {
@@ -166,6 +158,32 @@ func TestAdmitHookCallerBoundsAllCallersTogether(t *testing.T) {
 	}
 	if got := api.hookCallerLimits.total; got != 0 {
 		t.Fatalf("%d requests still counted after all finished", got)
+	}
+}
+
+// OTLP exporters share the host bound, with half of it reserved for hooks.
+func TestOTLPBatchesShareHostAdmissionBound(t *testing.T) {
+	limiter := &hookCallerLimiter{rate: 1000, burst: 1000, globalInFlight: 4}
+	first, _, refusal, _ := limiter.acquire("1001" + hookCallerTelemetryBudget)
+	if refusal != "" {
+		t.Fatalf("first OTLP batch refused: %s", refusal)
+	}
+	second, _, refusal, _ := limiter.acquire("1002" + hookCallerTelemetryBudget)
+	if refusal != "" {
+		t.Fatalf("second OTLP batch refused: %s", refusal)
+	}
+	if release, _, refusal, _ := limiter.acquire("1003" + hookCallerTelemetryBudget); release != nil || refusal != managedHookReasonOverloaded {
+		t.Fatalf("OTLP batch over host reserve: release=%v refusal=%s", release != nil, refusal)
+	}
+	hook, _, refusal, _ := limiter.acquire("1003")
+	if refusal != "" {
+		t.Fatalf("hook lost reserved capacity: %s", refusal)
+	}
+	hook()
+	first()
+	second()
+	if limiter.total != 0 || limiter.telemetryTotal != 0 {
+		t.Fatalf("admission counts after release = %d, %d", limiter.total, limiter.telemetryTotal)
 	}
 }
 

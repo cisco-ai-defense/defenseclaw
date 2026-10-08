@@ -5,7 +5,10 @@ package useridentity
 
 import (
 	"net"
+	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // SessionFactsHeader carries the session facts a hook reports from inside
@@ -29,24 +32,64 @@ const (
 	maxSessionFactValueSize = 256
 )
 
-// sessionFactValueOK is the header's allowlisted charset: letters, digits
-// and . _ @ / : - only. Nothing legitimate in a tty, a session id, an
-// address or a principal needs more, and nothing outside it can break a
-// header, a log line or the ; and = framing.
+// sessionFactValueOK accepts the original ASCII header charset for session
+// fields. Principal fields use sessionPrincipalWireValue for Unicode.
 func sessionFactValueOK(value string) bool {
 	if value == "" || len(value) > maxSessionFactValueSize {
 		return false
 	}
 	for i := 0; i < len(value); i++ {
-		c := value[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '.', c == '_', c == '@', c == '/', c == ':', c == '-':
-		default:
+		if !sessionFactByteOK(value[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// sessionPrincipalWireValue escapes UTF-8 bytes while leaving the original
+// ASCII header syntax unchanged. Re-encoding after parsing rejects escaped
+// delimiters, controls, and non-canonical encodings.
+func sessionPrincipalWireValue(value string) string {
+	if value == "" || len(value) > maxSessionFactValueSize || !utf8.ValidString(value) {
+		return ""
+	}
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for _, r := range value {
+		if r < utf8.RuneSelf {
+			c := byte(r)
+			if !sessionFactByteOK(c) {
+				return ""
+			}
+			b.WriteByte(c)
+		} else {
+			if !unicode.IsPrint(r) || unicode.IsSpace(r) {
+				return ""
+			}
+			var bytes [utf8.UTFMax]byte
+			n := utf8.EncodeRune(bytes[:], r)
+			for _, c := range bytes[:n] {
+				b.WriteByte('%')
+				b.WriteByte(hex[c>>4])
+				b.WriteByte(hex[c&0xf])
+			}
+		}
+	}
+	return b.String()
+}
+
+func parseSessionPrincipalWireValue(value string) string {
+	decoded, err := url.PathUnescape(value)
+	if err != nil || sessionPrincipalWireValue(decoded) != value {
+		return ""
+	}
+	return decoded
+}
+
+func sessionFactByteOK(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c == '.' || c == '_' ||
+		c == '@' || c == '/' || c == ':' || c == '-'
 }
 
 // ClaimedSessionHeader is SessionFacts plus the hook's claimed UPN, the
@@ -57,8 +100,8 @@ type ClaimedSessionHeader struct {
 	UPN string
 }
 
-// EncodeSessionFactsHeader renders facts as a header value. Values outside
-// the allowlist are dropped; an empty result means there is nothing to send.
+// EncodeSessionFactsHeader renders facts as an ASCII header value. Unsafe
+// values are dropped; Unicode principal bytes are percent-encoded.
 func EncodeSessionFactsHeader(facts ClaimedSessionHeader) string {
 	parts := []string{sessionFactsVersion}
 	add := func(key, value string) {
@@ -71,9 +114,13 @@ func EncodeSessionFactsHeader(facts ClaimedSessionHeader) string {
 	add("tty", s.TTY)
 	add("ls", s.LogindSession)
 	add("ca", validClientAddr(s.ClientAddr))
-	add("krb", s.KerberosPrincipal)
+	if value := sessionPrincipalWireValue(s.KerberosPrincipal); value != "" {
+		parts = append(parts, "krb="+value)
+	}
 	add("cc", validCCacheType(s.CCacheType))
-	add("upn", facts.UPN)
+	if value := sessionPrincipalWireValue(facts.UPN); value != "" {
+		parts = append(parts, "upn="+value)
+	}
 	if len(parts) == 1 {
 		return ""
 	}
@@ -98,7 +145,15 @@ func ParseSessionFactsHeader(value string) (ClaimedSessionHeader, bool) {
 	var out ClaimedSessionHeader
 	for _, part := range parts[1:] {
 		key, val, found := strings.Cut(part, "=")
-		if !found || !sessionFactValueOK(val) {
+		if !found {
+			continue
+		}
+		if key == "krb" || key == "upn" {
+			val = parseSessionPrincipalWireValue(val)
+		} else if !sessionFactValueOK(val) {
+			continue
+		}
+		if val == "" {
 			continue
 		}
 		switch key {

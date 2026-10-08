@@ -240,25 +240,73 @@ def build_claw_aibom(
     return out
 
 
-def local_user_identity() -> tuple[str, str]:
-    """The account this scan runs as: (name, uid or SID); either may be ""."""
-    import getpass
+def _windows_account_name_for_sid(sid: str) -> str:
+    """Resolve the process token SID to an account without login environment variables."""
+    import ctypes
+    from ctypes import wintypes
 
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    convert = advapi32.ConvertStringSidToSidW
+    convert.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    convert.restype = wintypes.BOOL
+    lookup = advapi32.LookupAccountSidW
+    lookup.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    lookup.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = [wintypes.HLOCAL]
+    local_free.restype = wintypes.HLOCAL
+    sid_ptr = ctypes.c_void_p()
+    if not convert(sid, ctypes.byref(sid_ptr)):
+        raise ctypes.WinError(ctypes.get_last_error())
     try:
-        name = getpass.getuser()
-    except Exception:  # noqa: BLE001 - no login name is not an inventory error.
-        name = ""
-    user_id = ""
+        name_size, domain_size, usage = wintypes.DWORD(), wintypes.DWORD(), wintypes.DWORD()
+        lookup(None, sid_ptr, None, ctypes.byref(name_size), None, ctypes.byref(domain_size), ctypes.byref(usage))
+        if not name_size.value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        name = ctypes.create_unicode_buffer(name_size.value)
+        domain = ctypes.create_unicode_buffer(max(domain_size.value, 1))
+        if not lookup(
+            None, sid_ptr, name, ctypes.byref(name_size), domain, ctypes.byref(domain_size), ctypes.byref(usage)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return f"{domain.value}\\{name.value}" if domain.value else name.value
+    finally:
+        local_free(sid_ptr)
+
+
+def local_user_identity() -> tuple[str, str]:
+    """The process account as (name, uid or SID); either may be empty."""
     if hasattr(os, "getuid"):
-        user_id = str(os.getuid())
-    elif os.name == "nt":
+        import pwd
+
+        uid = os.getuid()
+        try:
+            name = pwd.getpwuid(uid).pw_name
+        except (KeyError, OSError):
+            name = ""
+        return name, str(uid)
+    if os.name == "nt":
         try:
             from defenseclaw.file_permissions import _windows_current_user_sid
 
-            user_id = _windows_current_user_sid()
+            sid = _windows_current_user_sid()
         except Exception:  # noqa: BLE001 - the SID is best effort.
-            user_id = ""
-    return name, user_id
+            return "", ""
+        try:
+            name = _windows_account_name_for_sid(sid)
+        except Exception:  # noqa: BLE001 - unresolved account name leaves the SID authoritative.
+            name = ""
+        return name, sid
+    return "", ""
 
 
 def _stamp_local_user(out: dict[str, Any]) -> None:

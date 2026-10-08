@@ -59,6 +59,8 @@ except ValueError:
 # reads the user's Kerberos credential cache (see _full_session_facts). Empty
 # for a per-user install, which uses its own gateway binary.
 _SESSION_FACTS_BIN = _decoded("{{SESSION_FACTS_BIN_B64}}")
+# The renderer pins the profile; user environment cannot enable new Secure Client headers.
+_SECURE_CLIENT = _decoded("{{SECURE_CLIENT_B64}}") == "1"
 _HOOK_PATH = "/api/v1/omnigent/hook"
 _ENDPOINT = f"http://{_API_ADDR}{_HOOK_PATH}"
 _TIMEOUT_SECONDS = 10
@@ -432,9 +434,10 @@ def _identity_headers() -> dict[str, str]:
     so a hostile account name cannot smuggle a second header into every call.
     """
     headers: dict[str, str] = {}
-    facts = _session_facts_header()
-    if facts:
-        headers["X-DefenseClaw-Session-Facts"] = facts
+    if not _SECURE_CLIENT:
+        facts = _session_facts_header()
+        if facts:
+            headers["X-DefenseClaw-Session-Facts"] = facts
     try:
         # os.getuid is absent on Windows, where no POSIX uid exists.
         uid = os.getuid()  # type: ignore[attr-defined]

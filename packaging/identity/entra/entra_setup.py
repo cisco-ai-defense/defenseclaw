@@ -28,7 +28,7 @@ Credentials come from the environment, never from arguments:
 
 Permissions: check needs Organization.Read.All (and Policy.Read.All for security
 defaults); sids needs Group.Read.All and User.Read.All; apply needs
-Group.ReadWrite.All and User.ReadWrite.All.
+Group.ReadWrite.All, User.ReadWrite.All, and Organization.Read.All.
 
 Exit codes: 0 success, 1 a Graph call or the plan failed, 2 bad usage, input file or
 credentials. Only the Python standard library is used.
@@ -233,12 +233,17 @@ def sid_from_object_id(object_id: str) -> str:
     return SID_PREFIX + "-".join(str(word) for word in words)
 
 
-def find_group(graph: Graph, name: str) -> dict | None:
+def find_group(graph: Graph, name: str, *, wait: bool = False) -> dict | None:
+    """The security group named name, or None. wait allows a previous run's new group to become visible."""
     select = "id,displayName,securityIdentifier,securityEnabled"
     query = f"/v1.0/groups?$filter={odata_eq('displayName', name)}&$select={select}"
     found = graph.get_all(query)
+    if not found and wait:
+        found = graph.wait_for_named_object(query)
     if len(found) > 1:
         raise GraphError(409, "AmbiguousName", f"{len(found)} groups are named {name!r}; use a unique name")
+    if found and found[0].get("securityEnabled") is not True:
+        raise GraphError(400, "NotSecurityGroup", f"group {name!r} is not a security group; use a security group")
     return found[0] if found else None
 
 
@@ -440,6 +445,13 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
         # Check the file before any Graph write: the password is recorded
         # only after Graph creates the user.
         os.close(_open_password_file(args.password_file))
+    orgs = graph.get_all("/v1.0/organization?$select=id,verifiedDomains")
+    domain = plan["domain"].casefold()
+    if not any(
+        str(item.get("name", "")).casefold() == domain
+        for org in orgs for item in org.get("verifiedDomains", [])
+    ):
+        raise SystemExit(f"error: {plan['domain']!r} is not a verified domain of the authenticated tenant")
     tag = "" if apply else "[plan] "
     usage = plan.get("usage_location", "US")
     force_change = bool(plan.get("force_password_change", True))
@@ -452,14 +464,7 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
 
     for spec in plan.get("groups", []):
         name = spec["name"]
-        group = find_group(graph, name)
-        if group is None and apply:
-            found = graph.wait_for_named_object(
-                f"/v1.0/groups?$filter={odata_eq('displayName', name)}&$select=id,displayName,securityIdentifier"
-            )
-            if len(found) > 1:
-                raise GraphError(409, "AmbiguousName", f"{len(found)} groups are named {name!r}")
-            group = found[0] if found else None
+        group = find_group(graph, name, wait=apply)
         if group is not None:
             print(f"{tag}group {name}: exists")
         elif not apply:

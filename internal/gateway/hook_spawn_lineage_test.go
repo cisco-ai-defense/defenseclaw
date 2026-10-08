@@ -694,3 +694,42 @@ func TestCodexChildThreadRequiresRealToolAndIdentityScope(t *testing.T) {
 		t.Fatalf("same identity did not link a child: %+v", got)
 	}
 }
+
+// A parent session ID is supplied by the hook, so retained state from a
+// different managed agent identity cannot establish the child's lineage.
+func TestReconcileHookParentRequiresSameAgentIdentity(t *testing.T) {
+	api := &APIServer{}
+	parent := llmEventMeta{
+		Source: "opencode", SessionID: "shared-parent", AgentID: "owner-parent",
+		RootAgentID: "owner-root", RootSessionID: "owner-root-session",
+		AgentIdentityID: "agt-owner", UserID: "1001",
+	}
+	api.rememberHookSessionState(t.Context(), parent)
+	child := llmEventMeta{
+		Source: "opencode", SessionID: "other-child", AgentID: "other-child-agent",
+		ParentSessionID: parent.SessionID, ParentAgentID: "other-placeholder",
+		RootAgentID: "other-root", RootSessionID: "other-root-session",
+		AgentIdentityID: "agt-other", UserID: "1002", AgentDepth: 1,
+	}
+	got := api.reconcileHookParent(child)
+	if got.ParentAgentID != child.ParentAgentID || got.RootAgentID != child.RootAgentID ||
+		got.RootSessionID != child.RootSessionID || got.ParentLineageResolved {
+		t.Fatalf("foreign parent session changed child lineage: %+v", got)
+	}
+
+	// A later session with the same caller-supplied ID must not hide the
+	// matching parent from the identity-filtered lookup.
+	otherParent := parent
+	otherParent.AgentID = "other-parent"
+	otherParent.RootAgentID = "other-parent"
+	otherParent.AgentIdentityID = child.AgentIdentityID
+	otherParent.UserID = child.UserID
+	api.rememberHookSessionState(t.Context(), otherParent)
+
+	child.AgentIdentityID, child.UserID = parent.AgentIdentityID, parent.UserID
+	got = api.reconcileHookParent(child)
+	if got.ParentAgentID != parent.AgentID || got.RootAgentID != parent.RootAgentID ||
+		got.RootSessionID != parent.RootSessionID || !got.ParentLineageResolved {
+		t.Fatalf("same-identity parent session did not resolve: %+v", got)
+	}
+}

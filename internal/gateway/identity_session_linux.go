@@ -12,7 +12,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +26,11 @@ import (
 // The hook claims its logind session id (XDG_SESSION_ID) and terminal. The
 // gateway's sandbox (ProtectProc=invisible) hides the caller's /proc entry,
 // so it asks systemd-logind instead: GetSession(id) over the system bus, and
-// the session's User must be the kernel-verified peer uid. Only then are the
+// the session's User must be the kernel-verified peer uid and its path must
+// match GetSessionByPID for the kernel-verified peer PID. Only then are the
 // session's kind, remote host and terminal reported as verified. Without
 // logind, /run/utmp confirms a claimed terminal belongs to the peer's
-// account. Only logind session ids are cached; a tty can be reused at logout.
+// account. Session attestations are not cached because a session can end.
 
 const (
 	logindService       = "org.freedesktop.login1"
@@ -39,69 +39,44 @@ const (
 	logindSessionIface  = "org.freedesktop.login1.Session"
 	logindCallTimeout   = 2 * time.Second
 	utmpPath            = "/run/utmp"
-	sessionCacheKeySep  = "\x1f"
 	maxClaimedTTYLength = 32
 )
 
 var (
-	utmpSessionPath  = utmpPath
-	peerSessionsOnce sync.Once
-	peerSessions     *identityCache[useridentity.SessionFacts]
+	utmpSessionPath     = utmpPath
+	logindSessionLookup = logindSessionFacts
 )
 
 // verifyPeerSession confirms the claimed session for a verified peer.
-func verifyPeerSession(uid int, name string, claimed useridentity.SessionFacts) (useridentity.SessionFacts, bool) {
+func verifyPeerSession(uid, pid int, name string, claimed useridentity.SessionFacts) (useridentity.SessionFacts, bool) {
 	if uid < 0 {
 		return useridentity.SessionFacts{}, false
 	}
-	key := ""
-	switch {
-	case claimed.LogindSession != "":
-		key = strings.Join([]string{strconv.Itoa(uid), "ls", claimed.LogindSession}, sessionCacheKeySep)
-	case claimed.TTY != "" && name != "":
-		// A pts number is reusable immediately after logout. Read utmp on
-		// every claim so a new login cannot inherit the prior address.
+	if claimed.LogindSession != "" && pid > 0 {
+		// A session id is only trustworthy when logind associates the peer
+		// process itself with that session. Recheck on every request because
+		// sessions can end or a PID can be reused between requests.
+		session, err := logindSessionLookup(uid, pid, claimed.LogindSession)
+		if err == nil && !session.Empty() {
+			return session, true
+		}
+		if errors.Is(err, errSessionNotOwned) {
+			return useridentity.SessionFacts{}, false
+		}
+	}
+	if claimed.TTY != "" && name != "" {
+		// A TTY can be reused immediately after logout. Read utmp on every
+		// claim and use it when logind is unavailable or cannot verify.
 		session, err := utmpSessionFacts(claimed.TTY, name)
 		return session, err == nil && session.Assurance == useridentity.AssuranceVerified
-	default:
-		return useridentity.SessionFacts{}, false
 	}
-	peerSessionsOnce.Do(func() {
-		peerSessions = newIdentityCache(resolvePeerSession)
-	})
-	session, ok := peerSessions.get(key, true)
-	if !ok || session.Empty() {
-		return useridentity.SessionFacts{}, false
-	}
-	return session, true
+	return useridentity.SessionFacts{}, false
 }
 
-func resolvePeerSession(key string) (useridentity.SessionFacts, error) {
-	parts := strings.Split(key, sessionCacheKeySep)
-	if len(parts) < 3 {
-		return useridentity.SessionFacts{}, errors.New("malformed session key")
-	}
-	uid, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return useridentity.SessionFacts{}, err
-	}
-	switch parts[1] {
-	case "ls":
-		session, err := logindSessionFacts(uid, parts[2])
-		if err != nil {
-			// A definitive answer (no such session, another user's) is
-			// cached as "not verified"; a bus failure is retried.
-			if errors.Is(err, errSessionNotOwned) {
-				return useridentity.SessionFacts{}, nil
-			}
-			return useridentity.SessionFacts{}, err
-		}
-		return session, nil
-	}
-	return useridentity.SessionFacts{}, errors.New("malformed session key")
-}
-
-var errSessionNotOwned = errors.New("session does not belong to the peer")
+var (
+	errSessionNotOwned = errors.New("session does not belong to the peer")
+	errSessionMissing  = errors.New("session no longer exists")
+)
 
 var (
 	logindBusMu sync.Mutex
@@ -136,7 +111,7 @@ func logindConn(ctx context.Context) (*dbus.Conn, error) {
 }
 
 // logindSessionFacts reads one session's properties and checks its owner.
-func logindSessionFacts(uid int, id string) (useridentity.SessionFacts, error) {
+func logindSessionFacts(uid, pid int, id string) (useridentity.SessionFacts, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), logindCallTimeout)
 	defer cancel()
 	conn, err := logindConn(ctx)
@@ -146,9 +121,17 @@ func logindSessionFacts(uid int, id string) (useridentity.SessionFacts, error) {
 	var path dbus.ObjectPath
 	if err := conn.Object(logindService, logindPath).CallWithContext(ctx, logindGetSession, 0, id).Store(&path); err != nil {
 		if dbusErrorName(err) == "org.freedesktop.login1.NoSuchSession" {
-			return useridentity.SessionFacts{}, errSessionNotOwned
+			return useridentity.SessionFacts{}, errSessionMissing
 		}
 		return useridentity.SessionFacts{}, err
+	}
+	var peerPath dbus.ObjectPath
+	if err := conn.Object(logindService, logindPath).CallWithContext(ctx,
+		"org.freedesktop.login1.Manager.GetSessionByPID", 0, uint32(pid)).Store(&peerPath); err != nil {
+		return useridentity.SessionFacts{}, err
+	}
+	if peerPath != path {
+		return useridentity.SessionFacts{}, errSessionNotOwned
 	}
 	var props map[string]dbus.Variant
 	if err := conn.Object(logindService, path).CallWithContext(ctx, "org.freedesktop.DBus.Properties.GetAll", 0, logindSessionIface).Store(&props); err != nil {

@@ -1652,7 +1652,12 @@ function Invoke-Rollback {
         $newerGateway = if ($current -and (Test-Version $current) -and [version]$backTo -lt [version]$current) {
             Join-Path $Previous "bin\defenseclaw-gateway.exe"
         } else { "defenseclaw-gateway" }
-        Write-Info "The other install's audit events (written while $forward ran) are kept apart: $newerGateway audit export --db `"$otherAudit`""
+        $newerGatewayCommand = if ($newerGateway -eq "defenseclaw-gateway") {
+            $newerGateway
+        } else {
+            '& "' + $newerGateway + '"'
+        }
+        Write-Info "The other install's audit events (written while $forward ran) are kept apart: $newerGatewayCommand audit export --db `"$otherAudit`""
     }
     if ([version]$backTo -lt [version]"1.0.0") {
         # 0.x has no `defenseclaw rollback`; the 1.x installer is parked in previous\.

@@ -432,6 +432,93 @@ def test_okta_explicit_gid_is_not_its_own_collision(monkeypatch: pytest.MonkeyPa
     assert report.problems == 0
 
 
+def test_okta_check_rejects_inactive_ldap_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_ldap_app", lambda *_args: {"status": "INACTIVE"})
+    monkeypatch.setattr(okta, "schema_properties", lambda _client, kind:
+                        {name: {"type": definition["type"]} for name, definition in
+                         (okta.USER_ATTRIBUTES if kind == "user" else okta.GROUP_ATTRIBUTES).items()})
+    args = okta.build_parser().parse_args(["check"])
+    client = type("Client", (), {"org_url": "https://example.okta.com", "get_all": lambda self, path: []})()
+    assert okta.cmd_check(client, args) == 1
+
+
+def test_okta_check_requires_signon_coverage_for_requested_identities(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    okta = _load(OKTA)
+    app = {"status": "ACTIVE", "_links": {"accessPolicy": {"href": "/api/v1/policies/policy1"}}}
+    monkeypatch.setattr(okta, "find_ldap_app", lambda *_args: app)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1", "status": "ACTIVE"})
+    monkeypatch.setattr(okta, "find_group", lambda *_args, **_kwargs:
+                        {"id": "group1", "profile": {"gidNumber": 1720000}})
+    monkeypatch.setattr(okta, "schema_properties", lambda _client, kind:
+                        {name: {"type": definition["type"]} for name, definition in
+                         (okta.USER_ATTRIBUTES if kind == "user" else okta.GROUP_ATTRIBUTES).items()})
+    monkeypatch.setattr(okta, "check_bind_user", lambda *_args: None)
+    monkeypatch.setattr(okta, "check_group", lambda *_args: None)
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def must(self, method, path):
+            return {"id": "policy1", "name": "LDAP policy"}
+        def get_all(self, path):
+            return [{"name": "other user", "status": "ACTIVE", "priority": 0,
+                     "conditions": {"people": {"users": {"include": ["other"]}}},
+                     "actions": {"appSignOn": {"access": "ALLOW",
+                                              "verificationMethod": {"factorMode": "1FA"}}}}]
+
+    args = okta.build_parser().parse_args(
+        ["check", "--bind-login", "bind@example.com", "--group", "linux-users"])
+    assert okta.cmd_check(Client(), args) == 1
+    output = capsys.readouterr().out
+    assert "no active password-only ALLOW rule covers bind user" in output
+    assert "no active password-only ALLOW rule covers group" in output
+
+    bind_only = okta.build_parser().parse_args(["check", "--bind-login", "bind@example.com"])
+    assert okta.cmd_check(Client(), bind_only) == 1
+
+
+def test_okta_bind_role_rejects_privileged_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})
+    roles = [{"type": "SUPER_ADMIN", "label": "Super Administrator"}]
+    permissions = list(okta.BIND_PERMISSIONS)
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def get_all(self, path, key=None):
+            if key == "roles":
+                return [{"id": "role1", "label": "reader"}]
+            if key == "resource-sets":
+                return [{"id": "set1", "label": "all"}]
+            if key == "resources":
+                return [{"_links": {"self": {"href": self.org_url + "/api/v1/" + kind}}}
+                        for kind in ("users", "groups")]
+            raise AssertionError(path)
+        def must(self, method, path, body=None):
+            if path.endswith("/permissions"):
+                return {"permissions": [{"label": label} for label in permissions]}
+            if path.endswith("/roles") and method == "GET":
+                return roles
+            if method != "GET":
+                raise AssertionError("privileged account must not be changed")
+            raise AssertionError(path)
+
+    client = Client()
+    report = okta.Report(dry_run=False)
+    okta.check_bind_user(client, report, "bind@example.com")
+    assert report.problems > 0
+    args = okta.build_parser().parse_args(["bind-role", "--bind-login", "bind@example.com", "--apply"])
+    assert okta.cmd_bind_role(client, args) == 1
+
+    roles[:] = [{"type": "CUSTOM", "role": "role1", "resource-set": "set1"}]
+    permissions.append("okta.users.manage")
+    report = okta.Report(dry_run=False)
+    okta.check_bind_user(client, report, "bind@example.com")
+    assert report.problems > 0
+
+
 def test_okta_bind_role_refuses_extra_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
     okta = _load(OKTA)
     monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})
@@ -617,3 +704,177 @@ def test_okta_template_filters_local_group_names(tmp_path: Path) -> None:
     local = {line.partition(":")[0] for line in Path("/etc/group").read_text().splitlines() if ":" in line}
     assert local <= filtered
     assert {"wheel", "sudo", "adm"} <= filtered
+
+
+def test_entra_rejects_existing_non_security_group_for_sid_and_apply(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    group = {"id": "00000001-0002-0003-0405-060708090a0b", "displayName": "team",
+             "securityIdentifier": "S-1-12-1-1-196610-117835012-185207048", "securityEnabled": False}
+
+    class Graph:
+        def get_all(self, path: str):
+            assert "/groups?" in path
+            return [group]
+
+        def request(self, *_args):
+            raise AssertionError("a non-security group must never be mutated or accepted")
+
+    graph = Graph()
+    args = entra.build_parser().parse_args(["sids", "--group", "team"])
+    with pytest.raises(entra.GraphError, match="security group"):
+        entra.cmd_sids(graph, args)
+
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","groups":[{"name":"team"}]}', encoding="ascii")
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    graph.get_all = lambda path: ([{"verifiedDomains": [{"name": "example.test"}]}]
+                                  if "/organization?" in path else [group])
+    with pytest.raises(entra.GraphError, match="security group"):
+        entra.cmd_apply(graph, args)
+
+
+def test_entra_apply_checks_verified_domain_before_mutation(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"other.test","groups":[{"name":"team"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str):
+            calls.append(("GET", path))
+            if "/organization?" in path:
+                return [{"verifiedDomains": [{"name": "example.test"}]}]
+            return []
+
+        def request(self, method: str, path: str, body):
+            calls.append((method, path))
+            raise AssertionError("group creation must not be attempted")
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    with pytest.raises(SystemExit, match="verified domain"):
+        entra.cmd_apply(Graph(), args)
+    assert all(method == "GET" for method, _ in calls)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_entra_domain_services_check_fails_for_missing_directory_identities() -> None:
+    script = ENTRA.parent / "join-entra-domain-services.sh"
+    result = subprocess.run(
+        ["bash", str(script), "check", "--user", "dc-no-such-user-91402",
+         "--group", "dc-no-such-group-91402"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 1, result.stdout
+
+
+def test_entra_group_diagnostic_checks_membership_before_relogin_advice() -> None:
+    script = (ENTRA.parent / "Get-DefenseClawEntraIdentity.ps1").read_text(encoding="ascii")
+    branch = script.split("elseif ($listedIn.Count -gt 0)", 1)[1].split("\n    else {", 1)[0]
+    assert re.search(r"member(ship)?.*sign out", branch, re.IGNORECASE)
+
+
+def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{
+                    "id": "assignment-1", "intent": "required",
+                    "target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget", "groupId": "group-1"},
+                }]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args([
+        "assign-app", "--app", "app", "--group", "team", "--apply",
+    ])
+    assert intune.cmd_assign_app(Graph(), args) == 0
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
+    assert calls[0][1].endswith("/assignments/assignment-1")
+    assert calls[0][2]["target"]["@odata.type"] == intune.GROUP_TARGET
+
+
+def test_intune_assign_app_updates_existing_intent() -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{
+                    "id": "assignment-1", "intent": "required",
+                    "target": {
+                        "@odata.type": intune.GROUP_TARGET, "groupId": "group-1",
+                        "deviceAndAppManagementAssignmentFilterId": "filter-1",
+                    },
+                    "settings": {"@odata.type": "#microsoft.graph.win32LobAppAssignmentSettings"},
+                }]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args([
+        "assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply",
+    ])
+    assert intune.cmd_assign_app(Graph(), args) == 0
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
+    assert calls[0][2]["intent"] == "uninstall"
+    assert calls[0][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
+    assert "settings" in calls[0][2]
+
+
+def test_intune_groups_reject_dynamic_group() -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            return [{"id": "group-1", "securityEnabled": True, "groupTypes": ["DynamicMembership"]}]
+
+    args = intune.build_parser().parse_args(["groups", "--name", "team", "--apply"])
+    with pytest.raises(SystemExit, match="static security group"):
+        intune.cmd_groups(Graph(), args)
+
+
+def test_intune_macos_script_defaults_to_daily_frequency() -> None:
+    intune = _load(INTUNE)
+    args = intune.build_parser().parse_args([
+        "macos-script", "--name", "script", "--file", "script.sh",
+    ])
+    assert args.frequency == "P1D"
+
+
+def test_intune_app_status_fetches_every_report_page(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            return [{"id": "app-1"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append(body)
+            skip = body.get("skip", 0)
+            return {
+                "Schema": [{"Column": "DeviceName"}],
+                "Values": [[f"device-{skip}"]],
+                "TotalRowCount": 2,
+            }
+
+    args = intune.build_parser().parse_args(["status", "--app", "app"])
+    assert intune.cmd_status(Graph(), args) == 0
+    assert [body.get("skip", 0) for body in calls] == [0, 1]
+    output = capsys.readouterr().out
+    assert "device-0" in output and "device-1" in output

@@ -287,6 +287,7 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 		group, domain string
 	}
 	var unknown []unknownGroup
+	skippedLimit, skippedDeadline := false, false
 	absent := map[string]bool{}   // by folded name; present for every group looked up
 	answered := map[string]bool{} // by folded domain: the host knows a group of it
 	for i, assignment := range assignments {
@@ -299,7 +300,12 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 			key := foldKey(group)
 			dead, looked := absent[key]
 			if !looked {
-				if len(absent) >= profileGroupCheckMax || ctx.Err() != nil {
+				if len(absent) >= profileGroupCheckMax {
+					skippedLimit = true
+					continue
+				}
+				if ctx.Err() != nil {
+					skippedDeadline = true
 					continue
 				}
 				known, err := exists(ctx, norm.NFC.String(group))
@@ -341,6 +347,12 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 			}
 		}
 		warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", u.assignment, u.group))
+	}
+	if skippedLimit {
+		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: only the first %d distinct groups were checked; later assignment groups were not checked", profileGroupCheckMax))
+	}
+	if skippedDeadline {
+		warnings = append(warnings, "group warning check incomplete: the directory check timed out; later assignment groups were not checked")
 	}
 	return warnings
 }

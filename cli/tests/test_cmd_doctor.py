@@ -3341,10 +3341,15 @@ def test_a_stopped_local_observability_stack_is_not_a_failure():
 
     local = SimpleNamespace(name="local-observability", preset="")
     remote = SimpleNamespace(name="splunk", preset="")
+    remote_local_preset = SimpleNamespace(name="local-observability", preset="local-otlp", endpoint="stack-host:4317")
     live = SimpleNamespace(circuit_state="open", last_failure_class="network")
     with patch.object(cmd_doctor.socket, "create_connection", side_effect=ConnectionRefusedError):
         assert cmd_doctor._local_observability_stack_stopped(local, live, "fail")
         assert not cmd_doctor._local_observability_stack_stopped(remote, live, "fail")
+        assert not cmd_doctor._local_observability_stack_stopped(remote_local_preset, live, "fail")
+        assert cmd_doctor._local_observability_stack_stopped(
+            remote_local_preset, live, "fail", secure_client=True
+        )
     with patch.object(cmd_doctor.socket, "create_connection", return_value=contextlib.nullcontext()):
         # The stack is up, so its collector failing is a real failure.
         assert not cmd_doctor._local_observability_stack_stopped(local, live, "fail")

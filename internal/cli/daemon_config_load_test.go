@@ -230,3 +230,22 @@ func TestGatewayEmptyConfigMessageNamesTheNewestBackup(t *testing.T) {
 		}
 	}
 }
+
+// A sparse source larger than the loader limit must not be hashed before the
+// loader rejects it; hashing it used to read the entire source into memory.
+func TestConfigSourceDigestRejectsOversizedSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(int64(config.V8YAMLMaxSourceBytes) + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := configSourceDigest(path); got != nil {
+		t.Fatal("oversized source was hashed")
+	}
+}

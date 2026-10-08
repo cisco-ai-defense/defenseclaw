@@ -266,7 +266,7 @@ foreach ($sid in $GroupSid) {
     $listedIn = @($localGroups | Where-Object { $_.EntraSids -contains $sid } | ForEach-Object { $_.Group })
     $inToken = $tokenSids -contains $sid
     if ($inToken) { $verdict = 'in this account''s sign-in token: a groups assignment naming this SID can match' }
-    elseif ($listedIn.Count -gt 0) { $verdict = 'listed in a built-in local group but not in this token: sign out and sign in again' }
+    elseif ($listedIn.Count -gt 0) { $verdict = 'listed in a built-in local group but not in this token: verify this account is a member of the Entra security group; if membership was recently added, sign out and sign in again' }
     else { $verdict = 'not listed in any built-in local group that this script can see, so Windows may not put it in a token (see Add-EntraGroupToLocalGroup.ps1); the list can miss SIDs the computer cannot resolve' }
     $checks += [pscustomobject]@{ GroupSid = $sid; ListedIn = $listedIn; InThisToken = $inToken; Verdict = $verdict }
 }

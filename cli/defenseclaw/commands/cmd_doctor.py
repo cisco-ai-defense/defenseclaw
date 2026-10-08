@@ -9560,8 +9560,14 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
                 return
         _emit("fail", "Observability v8 effective plan", f"cannot inspect the configuration: {exc}", r=r)
         return
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
     _check_observability_v8_status(
-        status, r, live_health=live_health, audit_db=str(getattr(cfg, "audit_db", "") or "")
+        status,
+        r,
+        live_health=live_health,
+        audit_db=str(getattr(cfg, "audit_db", "") or ""),
+        secure_client=_enterprise_profile(cfg) == "secure_client",
     )
     _check_connector_export_custody(
         inspect_connector_custody(
@@ -9843,7 +9849,9 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
 
-def _local_observability_stack_stopped(destination, live, tag: str) -> bool:
+def _local_observability_stack_stopped(
+    destination, live, tag: str, *, secure_client: bool = False
+) -> bool:
     """Whether a failing route is only the bundled local stack being stopped.
 
     The stack runs in Docker and is often down on purpose (Docker quit, a
@@ -9854,6 +9862,15 @@ def _local_observability_stack_stopped(destination, live, tag: str) -> bool:
 
     if not is_local_observability_stack_destination(name=destination.name, preset_id=destination.preset):
         return False
+    endpoint = str(getattr(destination, "endpoint", "") or "").strip()
+    if endpoint and not secure_client:
+        try:
+            parsed = urllib.parse.urlsplit(endpoint if "://" in endpoint else f"//{endpoint}")
+            host = (parsed.hostname or "").lower()
+        except ValueError:
+            return False
+        if host not in {"localhost", "127.0.0.1", "::1"}:
+            return False
     failing = tag == "fail" or live.circuit_state == "open"
     if not failing or live.last_failure_class in {"authentication", "permanent_payload", "unsafe_endpoint"}:
         return False
@@ -9972,6 +9989,7 @@ def _check_observability_v8_status(
     *,
     live_health: dict | None = None,
     audit_db: str = "",
+    secure_client: bool = False,
 ) -> None:
     """Render one canonical v8 operator snapshot into doctor checks."""
 
@@ -10050,7 +10068,9 @@ def _check_observability_v8_status(
             if live.circuit_state == "half_open":
                 tag = "warn"
                 detail += "; awaiting or running one bounded recovery probe"
-            local_stack_stopped = _local_observability_stack_stopped(destination, live, tag)
+            local_stack_stopped = _local_observability_stack_stopped(
+                destination, live, tag, secure_client=secure_client
+            )
             if local_stack_stopped:
                 # Nothing to repair: the bundled stack is not running, and
                 # local SQLite keeps every record meanwhile.

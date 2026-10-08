@@ -153,8 +153,12 @@ do_join() {
 }
 
 do_check() {
+  local failed=0
   echo "Realm:"
-  realm list 2>/dev/null | grep -E '^[^ ]|realm-name|configured|server-software|client-software|login-formats' | sed 's/^/  /' || echo "  realm list failed"
+  if ! realm list 2>/dev/null | grep -E '^[^ ]|realm-name|configured|server-software|client-software|login-formats' | sed 's/^/  /'; then
+    echo "  realm list failed or no realm is configured"
+    failed=1
+  fi
   echo "SSSD naming:"
   if [ -r "$SSSD_CONF" ]; then
     grep -E '^(id_provider|use_fully_qualified_names|entry_cache_timeout)[[:space:]]*=' "$SSSD_CONF" | sed 's/^/  /' || true
@@ -163,14 +167,18 @@ do_check() {
   fi
   if [ -n "$user_name" ]; then
     echo "Account $user_name:"
-    id "$user_name" 2>&1 | sed 's/^/  /' || true
+    if ! id "$user_name" 2>&1 | sed 's/^/  /'; then
+      failed=1
+    fi
   fi
   if [ -n "$group_name" ]; then
     echo "Group $group_name:"
     if ! getent group "$group_name" | sed 's/^/  /'; then
       echo "  not found by that name; with use_fully_qualified_names = True it is $group_name@<domain>"
+      failed=1
     fi
   fi
+  return "$failed"
 }
 
 case "$command" in

@@ -41,12 +41,28 @@ state=/var/lib/defenseclaw-enterprise
 apply_path=defenseclaw-enterprise-apply.path
 # The postinstall starts the trigger again when this marker is present.
 held=/run/defenseclaw-enterprise-apply-path.held
+recovery=defenseclaw-enterprise-apply-recovery
 
 [ -d /run/systemd/system ] || exit 0
 
-if systemctl is-active --quiet "$apply_path" >/dev/null 2>&1; then
-    systemctl stop "$apply_path" >/dev/null 2>&1 || true
-    : >"$held" 2>/dev/null || true
+if systemctl is-active --quiet "$apply_path" >/dev/null 2>&1 || [ -e "$held" ]; then
+    # rpm has no guaranteed failed-unpack callback. Arm an independent
+    # recovery before stopping the trigger, including on 0.8.x upgrades.
+    # The successful postinstall clears the marker and cancels the timer.
+    systemctl stop "$recovery.timer" >/dev/null 2>&1 || true
+    if systemd-run --quiet --unit="$recovery" --on-active=30m /bin/sh -c \
+        '[ ! -e /run/defenseclaw-enterprise-apply-path.held ] || { systemctl start defenseclaw-enterprise-apply.path && rm -f /run/defenseclaw-enterprise-apply-path.held; }' \
+        >/dev/null 2>&1; then
+        if : >"$held" 2>/dev/null; then
+            systemctl stop "$apply_path" >/dev/null 2>&1 || true
+        else
+            echo "defenseclaw-enterprise: could not mark the config apply hold; leaving the trigger active." >&2
+        fi
+    else
+        systemctl start "$apply_path" >/dev/null 2>&1 || true
+        rm -f "$held"
+        echo "defenseclaw-enterprise: could not arm the config apply recovery; leaving the trigger active." >&2
+    fi
 fi
 
 # A running lifecycle run (the apply unit, an MDM ensure) holds the lock for
