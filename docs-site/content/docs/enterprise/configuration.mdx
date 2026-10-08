@@ -191,6 +191,9 @@ The config also holds the policy the gateway enforces. On a managed host these
 are the only places to change it: the local config tools refuse, and the
 lifecycle validates the whole file before it applies it. Every key here is a
 standard DefenseClaw key; the pages linked below describe it.
+On managed standalone hosts, `guardrail.hook_fail_mode: open` does not
+override fail-closed gateway peer verification when the gateway is down.
+
 
 | What | Keys | Details |
 | --- | --- | --- |
