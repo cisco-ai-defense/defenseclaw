@@ -58,7 +58,7 @@ hook scripts, are rewritten for you and never read back. See
 | `defenseclaw init` | Interactive first-run wizard. On a TTY, pre-selects installed hook connectors and lets you choose which ones stay observe vs action. Non-interactive multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
 | `defenseclaw quickstart` | Zero-prompt first-run for **one** connector with safe defaults. Pass `--connector <name>` when more than one connector is configured or detected. See [Quickstart](/docs/get-started/quickstart). |
 | `defenseclaw doctor` | Health and repair check. Run this first whenever something feels off; see [Doctor](#doctor) below. |
-| `defenseclaw status` | Gateway state, the Policy line, and a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. The Policy line names the generation and the first 12 hex characters of the digest of the policy the running gateway applies; see [Policy generation and digest](#policy-generation-and-digest). `--json` adds a `policy` object. |
+| `defenseclaw status` | Gateway state, the Policy line, and a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. The Policy line names the generation and the first 12 hex characters of the digest of the policy the running gateway applies; see [Policy generation and digest](#policy-generation-and-digest). `--json` adds a `policy` object. Secure Client has neither the Policy line nor the JSON `policy` object. |
 | `defenseclaw version [--json] [--no-drift-exit]` | Versions of the CLI, the gateway binary and the OpenClaw plugin, which reads `(not used)` unless OpenClaw is an active connector. Exits `1` when their versions differ (not with `--json` or `--no-drift-exit`) or a component fails to report. |
 
 ## Doctor
@@ -116,6 +116,8 @@ policy or experimental work. A JSON repair must be a dry-run preview or include
 describes the repaired state.
 
 ### Policy generation and digest
+
+This section does not apply to Secure Client, whose status omits the Policy line and JSON `policy` object.
 
 Each time the gateway applies `config.yaml` (and the policy assets it names by
 digest, such as a custom rule pack) it builds a new *policy generation* off the
@@ -906,7 +908,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway policy reload` | Ask the running daemon to reload its OPA policies without bouncing it. |
 | `defenseclaw-gateway policy validate\|test [--rego-dir DIR]` | Compile-check the Rego modules and the admission policy compiled from `config.yaml`, or run the Rego unit tests without a separate `opa` binary. On a managed host, which ships no Rego, `validate` says so and prints where each admission policy comes from. |
 | `defenseclaw-gateway policy show` | Print the admission policy and guardrail levels compiled from `config.yaml`. |
-| `defenseclaw-gateway policy digest [--json]` | Compute the effective policy digest from `config.yaml` and the policy assets it names (rule packs, Rego modules, signature packs, scanner policies), the way the gateway does when it applies a configuration. Compare it with `policy.effective_digest` on the gateway's `/health` to see whether the running gateway applies this configuration. See [Policy generation and digest](#policy-generation-and-digest). |
+| `defenseclaw-gateway policy digest [--json]` | Compute the effective policy digest from `config.yaml` and the policy assets it names (rule packs, Rego modules, signature packs, scanner policies), the way the gateway does when it applies a configuration. Compare it with `policy.effective_digest` on the gateway's `/health` to see whether the running gateway applies this configuration. See [Policy generation and digest](#policy-generation-and-digest). Secure Client does not provide `policy digest`; it returns an unknown-command error. |
 | `defenseclaw-gateway policy evaluate [--target-type T] [--target-name N] [--severity S] [--findings N]` | Dry-run the admission policy for one input. |
 | `defenseclaw-gateway rulepack validate [--dir DIR] [--json]` | Validate a rule-pack directory the way the gateway does when it loads one, without starting it; without `--dir` it validates the embedded default pack. `defenseclaw guardrail validate-pack` runs this. |
 | `defenseclaw-gateway config migrate [--dry-run] [--json] [--ack] [--config FILE] [--data-dir DIR] [--to 9]` | The migration that `defenseclaw config migrate` and `defenseclaw migrate` run: moves `policies/rego/data.json`, the `*_actions` keys, `rule_pack_dir`, the v8 scanner keys, `update_check` and, on a per-user install, the operator block and allow entries of `audit.db` into `config.yaml`. See [Upgrade](#upgrade). |

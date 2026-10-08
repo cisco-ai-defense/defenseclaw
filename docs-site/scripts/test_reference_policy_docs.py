@@ -16,5 +16,19 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("`use_llm: false` disables LLM analysis", row)
 
 
+    def test_secure_client_status_and_digest_exceptions_are_explicit(self):
+        text = (DOCS / "cli.mdx").read_text()
+        status = next(line for line in text.splitlines()
+                      if line.startswith("| `defenseclaw status` |"))
+        digest = next(line for line in text.splitlines()
+                      if line.startswith("| `defenseclaw-gateway policy digest"))
+        self.assertIn("Secure Client", status)
+        self.assertIn("neither the Policy line nor the JSON `policy` object", status)
+        self.assertIn("Secure Client", digest)
+        self.assertIn("unknown-command error", digest)
+        section = text.split("### Policy generation and digest", 1)[1].split("## ", 1)[0]
+        self.assertIn("does not apply to Secure Client", section)
+
+
 if __name__ == "__main__":
     unittest.main()
