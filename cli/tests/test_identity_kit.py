@@ -888,15 +888,28 @@ def test_intune_macos_script_preserves_unspecified_frequency() -> None:
     assert args.frequency is None
 
 
-def test_entra_plan_rejects_duplicate_users_and_normalizes_case(tmp_path: Path) -> None:
+def test_entra_plan_deduplicates_users_and_normalizes_case(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     entra = _load(ENTRA)
     plan = tmp_path / "tenant.json"
     plan.write_text(json.dumps({"domain": "example.test", "users": [{"name": "Alice"}, {"name": "alice"}]}))
-    with pytest.raises(SystemExit) as err:
+
+    class Graph:
+        def get_all(self, path: str):
+            if path.startswith("/v1.0/organization"):
+                return [{"verifiedDomains": [{"name": "example.test"}]}]
+            return []
+
+        def get(self, _path: str):
+            raise entra.GraphError(404, "NotFound", "scratch user is absent")
+
+    args = argparse.Namespace(config=str(plan), apply=False, password_file=None)
+    assert entra.cmd_apply(Graph(), args) == 0
+    output = capsys.readouterr().out
+    assert output.count("user alice@example.test: would create") == 1
+    plan.write_text(json.dumps({"domain": "example.test", "users": [
+        {"name": "Alice", "display_name": "Alice"}, {"name": "alice", "display_name": "Other"}]}))
+    with pytest.raises(SystemExit, match="conflicting display_name"):
         entra._load_plan(str(plan))
-    assert err.value.code == 2
-    plan.write_text(json.dumps({"domain": "example.test", "users": [{"name": "Alice"}]}))
-    assert entra._load_plan(str(plan))["users"][0]["name"] == "alice"
 
 
 def test_intune_remove_assignment_deletes_only_target_group() -> None:

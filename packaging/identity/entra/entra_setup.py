@@ -385,20 +385,30 @@ def _load_plan(path: str) -> dict:
         if not isinstance(group, dict) or not isinstance(group.get("name"), str) or not group["name"]:
             raise SystemExit("error: every entry of 'groups' needs a 'name'")
         _nickname(group["name"])
-    seen_users: set[str] = set()
+    seen_users: dict[str, dict] = {}
+    unique_users: list[dict] = []
     for user in users:
         if not isinstance(user, dict) or not NICKNAME_RE.match(str(user.get("name", ""))):
             raise SystemExit("error: every entry of 'users' needs a 'name' of letters, digits, '-' and '_'")
         user["name"] = user["name"].lower()
-        if user["name"] in seen_users:
-            print(f"error: duplicate user name {user['name']!r} in the plan", file=sys.stderr)
-            raise SystemExit(2)
-        seen_users.add(user["name"])
         if not isinstance(user.get("groups", []), list):
             raise SystemExit("error: each user's groups must be a list")
         for group in user.get("groups", []):
             if not isinstance(group, str) or not group:
                 raise SystemExit("error: each user group must be a name")
+        previous = seen_users.get(user["name"])
+        if previous is not None:
+            for field, value in user.items():
+                if field in {"name", "groups"}:
+                    continue
+                if field in previous and previous[field] != value:
+                    raise SystemExit(f"error: conflicting {field} for duplicate user {user['name']!r}")
+                previous.setdefault(field, value)
+            previous["groups"] = list(dict.fromkeys(previous.get("groups", []) + user.get("groups", [])))
+            continue
+        seen_users[user["name"]] = user
+        unique_users.append(user)
+    plan["users"] = unique_users
     return plan
 
 
