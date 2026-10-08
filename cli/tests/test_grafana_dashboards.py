@@ -1066,6 +1066,22 @@ def test_sandboxes_blocked_egress_leaves_out_audit_only_refusals() -> None:
         assert 'body_defenseclaw_network_decision_code!~"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)"' in expr, expr
 
 
+def test_equal_sandbox_names_on_two_hosts_stay_apart() -> None:
+    # GAP-0298: two hosts ran sandboxes named inc-ua06 and the boards read
+    # them as one: Sandboxes seen counts host and name, and the AI discovery
+    # board's metric and log panels follow a Host box too.
+    sandboxes = _dashboard("defenseclaw-sandboxes.json")
+    seen = _panel(sandboxes, "Sandboxes seen")["targets"][0]["expr"]
+    assert seen.startswith("count(sum by (host_name, defenseclaw_sandbox_name) (")
+    discovery = _dashboard("defenseclaw-ai-discovery.json")
+    assert discovery["templating"]["list"][0]["name"] == "host"
+    panels = [*discovery["panels"], *(child for row in discovery["panels"] for child in row.get("panels", []))]
+    for panel in panels:
+        for target in panel.get("targets", []):
+            if (target.get("datasource") or panel.get("datasource") or {}).get("type") in ("prometheus", "loki"):
+                assert 'host_name=~"$host"' in target["expr"], panel["title"]
+
+
 def test_sandboxes_board_scopes_to_one_computer() -> None:
     # GAP-0195: every panel follows Environment and Host; a metric panel,
     # which cannot follow the Sandbox box, says so in its title; the active

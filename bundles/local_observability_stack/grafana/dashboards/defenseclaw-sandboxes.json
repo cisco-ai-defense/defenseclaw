@@ -123,7 +123,7 @@
       "id": 3,
       "type": "stat",
       "title": "Sandboxes seen",
-      "description": "Distinct sandboxes that recorded a lifecycle change in the selected range.",
+      "description": "Distinct sandboxes, by host and name, that recorded a lifecycle change in the selected range: two hosts' sandboxes with the same name count twice. Pick a Host to see one computer's.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -140,7 +140,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\", deployment_environment=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"

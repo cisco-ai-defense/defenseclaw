@@ -11,7 +11,7 @@
         "iconColor": "red",
         "name": "AI discovery alerts",
         "tagKeys": "alertname,severity",
-        "titleFormat": "{{alertname}} \u2014 {{severity}}",
+        "titleFormat": "{{alertname}} — {{severity}}",
         "useValueForTime": false
       }
     ]
@@ -116,9 +116,47 @@
   "templating": {
     "list": [
       {
+        "name": "host",
+        "label": "Host",
+        "description": "host.name of the computer whose DefenseClaw gateway reported the signals. Applies to the metric and log panels (not the Tempo scan lists), so one computer's inventory, and its sandboxes', reads on its own. Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_ai_discovery_runs_total, host_name)",
+        "query": {
+          "query": "label_values(defenseclaw_ai_discovery_runs_total, host_name)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
         "name": "vendor",
         "label": "AI vendor",
-        "description": "Filter signal panels by ai.vendor (anthropic, openai, microsoft, ...). Safe on empty ingest \u2014 defaults to All so panels render 'no data' rather than silently matching empty strings.",
+        "description": "Filter signal panels by ai.vendor (anthropic, openai, microsoft, ...). Safe on empty ingest — defaults to All so panels render 'no data' rather than silently matching empty strings.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -156,7 +194,7 @@
       {
         "name": "category",
         "label": "Signal category",
-        "description": "Filter by signal.category (cli, ide_extension, sdk, mcp_server, runtime, browser_extension, shell_history). Bounded enum \u2014 cardinality is safe to multi-select.",
+        "description": "Filter by signal.category (cli, ide_extension, sdk, mcp_server, runtime, browser_extension, shell_history). Bounded enum — cardinality is safe to multi-select.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -296,9 +334,9 @@
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+        "definition": "label_values({service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+          "query": "label_values({service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -355,7 +393,7 @@
       },
       "targets": [
         {
-          "expr": "sum(max by (source, privacy_mode) ((defenseclaw_ai_discovery_active_signals{source=~\"$source\"} and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) == on (source, privacy_mode) group_left max by (source, privacy_mode) (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"})))) and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) >= time() - 300)))",
+          "expr": "sum(max by (source, privacy_mode) ((defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"} and (timestamp(defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"}) == on (source, privacy_mode) group_left max by (source, privacy_mode) (timestamp(defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"})))) and (timestamp(defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"}) >= time() - 300)))",
           "refId": "A",
           "instant": true
         }
@@ -391,7 +429,7 @@
     {
       "type": "stat",
       "title": "Scans / min",
-      "description": "Continuous AI discovery scan completions per minute (counter `defenseclaw.ai.discovery.runs`). On a healthy sidecar this should match `60 / ai_discovery.scan_interval_min` (default scan_interval_min=5 \u2192 ~0.2/min). 0 here while AI discovery is enabled is a **stalled** loop.",
+      "description": "Continuous AI discovery scan completions per minute (counter `defenseclaw.ai.discovery.runs`). On a healthy sidecar this should match `60 / ai_discovery.scan_interval_min` (default scan_interval_min=5 → ~0.2/min). 0 here while AI discovery is enabled is a **stalled** loop.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -404,7 +442,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_runs_total{source=~\"$source\"}[5m])) * 60",
+          "expr": "sum(rate(defenseclaw_ai_discovery_runs_total{host_name=~\"$host\", source=~\"$source\"}[5m])) * 60",
           "refId": "A",
           "instant": true
         }
@@ -441,7 +479,7 @@
       },
       "targets": [
         {
-          "expr": "sum(((last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]) - (last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1d] offset 1h) or last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]))) or vector(0)",
+          "expr": "sum(((last_over_time(defenseclaw_ai_discovery_new_signals_total{host_name=~\"$host\", source=~\"$source\"}[1h]) - (last_over_time(defenseclaw_ai_discovery_new_signals_total{host_name=~\"$host\", source=~\"$source\"}[1d] offset 1h) or last_over_time(defenseclaw_ai_discovery_new_signals_total{host_name=~\"$host\", source=~\"$source\"}[1h]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_new_signals_total{host_name=~\"$host\", source=~\"$source\"}[1h]))) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -493,7 +531,7 @@
       },
       "targets": [
         {
-          "expr": "sum(((last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]) - (last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1d] offset 1h) or last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]))) or vector(0)",
+          "expr": "sum(((last_over_time(defenseclaw_ai_discovery_gone_signals_total{host_name=~\"$host\", source=~\"$source\"}[1h]) - (last_over_time(defenseclaw_ai_discovery_gone_signals_total{host_name=~\"$host\", source=~\"$source\"}[1d] offset 1h) or last_over_time(defenseclaw_ai_discovery_gone_signals_total{host_name=~\"$host\", source=~\"$source\"}[1h]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_gone_signals_total{host_name=~\"$host\", source=~\"$source\"}[1h]))) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -516,7 +554,7 @@
     {
       "type": "stat",
       "title": "Detector errors / min",
-      "description": "Continuous AI discovery detector errors per minute (counter `defenseclaw.ai.discovery.errors`, labelled by detector + reason). Any sustained non-zero rate indicates a detector that is failing \u2014 open the 'Detector errors by reason' panel below to isolate.",
+      "description": "Continuous AI discovery detector errors per minute (counter `defenseclaw.ai.discovery.errors`, labelled by detector + reason). Any sustained non-zero rate indicates a detector that is failing — open the 'Detector errors by reason' panel below to isolate.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -529,7 +567,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total{host_name=~\"$host\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -568,7 +606,7 @@
     {
       "type": "stat",
       "title": "Files scanned / min",
-      "description": "Package manifests + shell history files inspected by the discovery loop per minute (counter `defenseclaw.ai.discovery.files_scanned`). Sudden drops below the steady-state imply the file walker is being blocked (permissions, full disk) \u2014 cross-reference with detector errors.",
+      "description": "Package manifests + shell history files inspected by the discovery loop per minute (counter `defenseclaw.ai.discovery.files_scanned`). Sudden drops below the steady-state imply the file walker is being blocked (permissions, full disk) — cross-reference with detector errors.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -581,7 +619,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total{source=~\"$source\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total{host_name=~\"$host\", source=~\"$source\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -616,7 +654,7 @@
     {
       "type": "timeseries",
       "title": "Scan completions by result",
-      "description": "Stacked rate of scan completions, broken down by `result` \u2208 {ok, partial, failed}. A growing 'partial' wedge means at least one detector errored on each run. Source is `defenseclaw.ai.discovery.runs` (Counter).",
+      "description": "Stacked rate of scan completions, broken down by `result` ∈ {ok, partial, failed}. A growing 'partial' wedge means at least one detector errored on each run. Source is `defenseclaw.ai.discovery.runs` (Counter).",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -629,7 +667,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (result) (rate(defenseclaw_ai_discovery_runs_total{source=~\"$source\"}[$__rate_interval]))",
+          "expr": "sum by (result) (rate(defenseclaw_ai_discovery_runs_total{host_name=~\"$host\", source=~\"$source\"}[$__rate_interval]))",
           "legendFormat": "{{result}}",
           "refId": "A"
         }
@@ -649,7 +687,7 @@
     {
       "type": "timeseries",
       "title": "Scan duration (p50 / p95 / p99, ms)",
-      "description": "Wall-clock time of each continuous discovery scan (histogram `defenseclaw.ai.discovery.duration` in ms). p99 climbing past a few seconds usually means a detector is walking too many files \u2014 tune `ai_discovery.max_files_per_scan` or narrow `ai_discovery.scan_roots`.",
+      "description": "Wall-clock time of each continuous discovery scan (histogram `defenseclaw.ai.discovery.duration` in ms). p99 climbing past a few seconds usually means a detector is walking too many files — tune `ai_discovery.max_files_per_scan` or narrow `ai_discovery.scan_roots`.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -662,17 +700,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{host_name=~\"$host\", source=~\"$source\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{host_name=~\"$host\", source=~\"$source\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "refId": "p95"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{host_name=~\"$host\", source=~\"$source\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "refId": "p99"
         }
@@ -699,7 +737,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (le) (increase(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval]))",
+          "expr": "sum by (le) (increase(defenseclaw_ai_discovery_duration_milliseconds_bucket{host_name=~\"$host\", source=~\"$source\"}[$__rate_interval]))",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -739,7 +777,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
+          "expr": "sum by (signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
           "legendFormat": "{{signal_category}}",
           "refId": "A"
         }
@@ -772,7 +810,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (state) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
+          "expr": "sum by (state) (((last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
           "legendFormat": "{{state}}",
           "refId": "A"
         }
@@ -805,7 +843,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))))",
+          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -862,7 +900,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (detector) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))))",
+          "expr": "topk(15, sum by (detector) (((last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{host_name=~\"$host\", ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -911,7 +949,7 @@
     {
       "type": "timeseries",
       "title": "Identity score quantiles (cumulative across scans)",
-      "description": "Two-axis Bayesian engine identity score (probability that a fingerprint is *the* named SDK) histogram-quantiled across every scan in Prometheus retention. p50 \u2248 0.6 + p95 \u2248 0.9 is healthy. A drop in p95 means recent scans had ambiguous fingerprints \u2014 usually a corrupt manifest or a detector regression. Histogram `defenseclaw.ai.confidence.identity_score` is bucketed for the [0,1] range. We deliberately quantile over the *cumulative* `_bucket` series rather than `rate(...)` because confidence is emitted once-per-scan: at idle a rate-based quantile collapses to NaN, while the cumulative form preserves the lifetime distribution and reacts immediately when a new scan moves a bucket.",
+      "description": "Two-axis Bayesian engine identity score (probability that a fingerprint is *the* named SDK) histogram-quantiled across every scan in Prometheus retention. p50 ≈ 0.6 + p95 ≈ 0.9 is healthy. A drop in p95 means recent scans had ambiguous fingerprints — usually a corrupt manifest or a detector regression. Histogram `defenseclaw.ai.confidence.identity_score` is bucketed for the [0,1] range. We deliberately quantile over the *cumulative* `_bucket` series rather than `rate(...)` because confidence is emitted once-per-scan: at idle a rate-based quantile collapses to NaN, while the cumulative form preserves the lifetime distribution and reacts immediately when a new scan moves a bucket.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -924,12 +962,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (defenseclaw_ai_confidence_identity_score_bucket))",
+          "expr": "histogram_quantile(0.50, sum by (le) (defenseclaw_ai_confidence_identity_score_bucket{host_name=~\"$host\"}))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (defenseclaw_ai_confidence_identity_score_bucket))",
+          "expr": "histogram_quantile(0.95, sum by (le) (defenseclaw_ai_confidence_identity_score_bucket{host_name=~\"$host\"}))",
           "legendFormat": "p95",
           "refId": "p95"
         }
@@ -947,7 +985,7 @@
     {
       "type": "timeseries",
       "title": "Presence score quantiles (cumulative across scans)",
-      "description": "Two-axis Bayesian engine presence score (probability the SDK is *currently* deployed) histogram-quantiled across every scan in Prometheus retention. p50 collapsing to ~0 with identity_score still high is the canonical signal for 'SDK was uninstalled but the manifest is still on disk'. Histogram `defenseclaw.ai.confidence.presence_score` is bucketed for the [0,1] range. Quantile is computed against the cumulative `_bucket` counts (no `rate(...)`) so the panel renders at idle and updates the moment a new scan moves a bucket \u2014 see the Identity panel description for the why.",
+      "description": "Two-axis Bayesian engine presence score (probability the SDK is *currently* deployed) histogram-quantiled across every scan in Prometheus retention. p50 collapsing to ~0 with identity_score still high is the canonical signal for 'SDK was uninstalled but the manifest is still on disk'. Histogram `defenseclaw.ai.confidence.presence_score` is bucketed for the [0,1] range. Quantile is computed against the cumulative `_bucket` counts (no `rate(...)`) so the panel renders at idle and updates the moment a new scan moves a bucket — see the Identity panel description for the why.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -960,12 +998,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (defenseclaw_ai_confidence_presence_score_bucket))",
+          "expr": "histogram_quantile(0.50, sum by (le) (defenseclaw_ai_confidence_presence_score_bucket{host_name=~\"$host\"}))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (defenseclaw_ai_confidence_presence_score_bucket))",
+          "expr": "histogram_quantile(0.95, sum by (le) (defenseclaw_ai_confidence_presence_score_bucket{host_name=~\"$host\"}))",
           "legendFormat": "p95",
           "refId": "p95"
         }
@@ -996,7 +1034,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, max by (ecosystem, name) (last_over_time(defenseclaw_ai_components_installs[$__range])))",
+          "expr": "topk(20, max by (ecosystem, name) (last_over_time(defenseclaw_ai_components_installs{host_name=~\"$host\"}[$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -1065,7 +1103,7 @@
       },
       "targets": [
         {
-          "expr": "max by (source, privacy_mode) ((defenseclaw_ai_discovery_active_signals{source=~\"$source\"} and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) == on (source, privacy_mode) group_left max by (source, privacy_mode) (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"})))) and (timestamp(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) >= time() - 300))",
+          "expr": "max by (source, privacy_mode) ((defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"} and (timestamp(defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"}) == on (source, privacy_mode) group_left max by (source, privacy_mode) (timestamp(defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"})))) and (timestamp(defenseclaw_ai_discovery_active_signals{host_name=~\"$host\", source=~\"$source\"}) >= time() - 300))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -1121,7 +1159,7 @@
     {
       "type": "timeseries",
       "title": "Component observations by identity band",
-      "description": "Bayesian-bucketed component observation rate (`defenseclaw.ai.components.observations`). 'very_low' / 'low' identity_band climbing relative to 'high' / 'very_high' usually means the catalog needs a refresh \u2014 fingerprints are matching, but the engine isn't confident enough to name them.",
+      "description": "Bayesian-bucketed component observation rate (`defenseclaw.ai.components.observations`). 'very_low' / 'low' identity_band climbing relative to 'high' / 'very_high' usually means the catalog needs a refresh — fingerprints are matching, but the engine isn't confident enough to name them.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1134,7 +1172,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (identity_band) (rate(defenseclaw_ai_components_observations_total[$__rate_interval]))",
+          "expr": "sum by (identity_band) (rate(defenseclaw_ai_components_observations_total{host_name=~\"$host\"}[$__rate_interval]))",
           "legendFormat": "{{identity_band}}",
           "refId": "A"
         }
@@ -1155,7 +1193,7 @@
     {
       "type": "timeseries",
       "title": "Component observations by presence band",
-      "description": "Same observation counter sliced by `presence_band`. A wedge of 'very_low' presence with stable identity is the 'manifest left over from an old install' shape \u2014 components are still cataloged but not actually deployed.",
+      "description": "Same observation counter sliced by `presence_band`. A wedge of 'very_low' presence with stable identity is the 'manifest left over from an old install' shape — components are still cataloged but not actually deployed.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1168,7 +1206,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (presence_band) (rate(defenseclaw_ai_components_observations_total[$__rate_interval]))",
+          "expr": "sum by (presence_band) (rate(defenseclaw_ai_components_observations_total{host_name=~\"$host\"}[$__rate_interval]))",
           "legendFormat": "{{presence_band}}",
           "refId": "A"
         }
@@ -1214,7 +1252,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins)",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\"})",
           "refId": "A",
           "instant": true
         }
@@ -1260,7 +1298,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{ai=\"true\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\", ai=\"true\"}) or on() (sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1306,7 +1344,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{enabled=\"disabled\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\", enabled=\"disabled\"}) or on() (sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1352,7 +1390,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide) (defenseclaw_inventory_ide_plugins))",
+          "expr": "sort_desc(sum by (ide) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}))",
           "legendFormat": "{{ide}}",
           "refId": "A",
           "instant": true
@@ -1395,7 +1433,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide, ai, enabled) (defenseclaw_inventory_ide_plugins))",
+          "expr": "sort_desc(sum by (ide, ai, enabled) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}))",
           "format": "table",
           "refId": "A",
           "instant": true
@@ -1460,7 +1498,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (ai) (defenseclaw_inventory_ide_plugins)",
+          "expr": "sum by (ai) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"})",
           "legendFormat": "ai={{ai}}",
           "refId": "A",
           "instant": true
@@ -1514,7 +1552,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (enabled) (defenseclaw_inventory_ide_plugins)",
+          "expr": "sum by (enabled) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"})",
           "legendFormat": "{{enabled}}",
           "refId": "A",
           "instant": true
@@ -1568,7 +1606,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
+          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -1657,12 +1695,12 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total[$__rate_interval])) * 60",
+          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total{host_name=~\"$host\"}[$__rate_interval])) * 60",
           "legendFormat": "files / min",
           "refId": "files"
         },
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_dedupe_suppressed_total[$__rate_interval])) * 60",
+          "expr": "sum(rate(defenseclaw_ai_discovery_dedupe_suppressed_total{host_name=~\"$host\"}[$__rate_interval])) * 60",
           "legendFormat": "dedupe / min",
           "refId": "dedupe"
         }
@@ -1690,8 +1728,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (detector, reason) (increase(defenseclaw_ai_discovery_errors_total[1h])) or on() vector(0)",
-          "legendFormat": "{{detector}} \u00b7 {{reason}}",
+          "expr": "sum by (detector, reason) (increase(defenseclaw_ai_discovery_errors_total{host_name=~\"$host\"}[1h])) or on() vector(0)",
+          "legendFormat": "{{detector}} · {{reason}}",
           "refId": "A"
         }
       ],
@@ -1717,7 +1755,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (detector, reason) (increase(defenseclaw_ai_discovery_errors_total[1h])))",
+          "expr": "sort_desc(sum by (detector, reason) (increase(defenseclaw_ai_discovery_errors_total{host_name=~\"$host\"}[1h])))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -1909,7 +1947,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.discovery.completed\"",
+          "expr": "{service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | event_name=\"ai.discovery.completed\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1940,7 +1978,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
+          "expr": "{service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1971,7 +2009,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
           "refId": "A"
         }
       ],
@@ -2010,7 +2048,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (sandbox, vendor, product, component, record) (count_over_time({service_name=\"defenseclaw\"} | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | event_name=~\"ai_component[.](discovered|observed|changed|removed)\" | label_format sandbox=\"{{.defenseclaw_sandbox_name}}\", vendor=\"{{.body_defenseclaw_ai_component_vendor}}\", product=\"{{.body_defenseclaw_ai_component_product}}\", component=\"{{.body_defenseclaw_ai_component_type}}\", record=\"{{.event_name}}\" [$__range]))",
+          "expr": "sum by (sandbox, vendor, product, component, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_sandbox_name!=\"\" | json | __error__=\"\" | event_name=~\"ai_component[.](discovered|observed|changed|removed)\" | label_format sandbox=\"{{.defenseclaw_sandbox_name}}\", vendor=\"{{.body_defenseclaw_ai_component_vendor}}\", product=\"{{.body_defenseclaw_ai_component_product}}\", component=\"{{.body_defenseclaw_ai_component_type}}\", record=\"{{.event_name}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -2082,7 +2120,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw \u2014 AI Agent Usage & Detection",
+  "title": "DefenseClaw — AI Agent Usage & Detection",
   "description": "Continuous AI inventory and discovery health: active signals, vendor/product attribution, confidence, detector throughput, IDE plugin inventory, errors, logs, and Tempo scan traces. No series means discovery is disabled or has not reported a scan; it is distinct from a measured zero.",
   "uid": "defenseclaw-ai-discovery",
   "version": 3,
