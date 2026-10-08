@@ -628,3 +628,110 @@ def test_entra_group_diagnostic_checks_membership_before_relogin_advice() -> Non
     script = (ENTRA.parent / "Get-DefenseClawEntraIdentity.ps1").read_text(encoding="ascii")
     branch = script.split("elseif ($listedIn.Count -gt 0)", 1)[1].split("\n    else {", 1)[0]
     assert re.search(r"member(ship)?.*sign out", branch, re.IGNORECASE)
+
+
+def test_intune_assign_app_replaces_exclusion(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{
+                    "id": "assignment-1", "intent": "required",
+                    "target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget", "groupId": "group-1"},
+                }]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args([
+        "assign-app", "--app", "app", "--group", "team", "--apply",
+    ])
+    assert intune.cmd_assign_app(Graph(), args) == 0
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
+    assert calls[0][1].endswith("/assignments/assignment-1")
+    assert calls[0][2]["target"]["@odata.type"] == intune.GROUP_TARGET
+
+
+def test_intune_assign_app_updates_existing_intent() -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{
+                    "id": "assignment-1", "intent": "required",
+                    "target": {
+                        "@odata.type": intune.GROUP_TARGET, "groupId": "group-1",
+                        "deviceAndAppManagementAssignmentFilterId": "filter-1",
+                    },
+                    "settings": {"@odata.type": "#microsoft.graph.win32LobAppAssignmentSettings"},
+                }]
+            return [{"id": "app-1", "publishingState": "published"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args([
+        "assign-app", "--app", "app", "--group", "team", "--intent", "uninstall", "--apply",
+    ])
+    assert intune.cmd_assign_app(Graph(), args) == 0
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
+    assert calls[0][2]["intent"] == "uninstall"
+    assert calls[0][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
+    assert "settings" in calls[0][2]
+
+
+def test_intune_groups_reject_dynamic_group() -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            return [{"id": "group-1", "securityEnabled": True, "groupTypes": ["DynamicMembership"]}]
+
+    args = intune.build_parser().parse_args(["groups", "--name", "team", "--apply"])
+    with pytest.raises(SystemExit, match="static security group"):
+        intune.cmd_groups(Graph(), args)
+
+
+def test_intune_macos_script_defaults_to_daily_frequency() -> None:
+    intune = _load(INTUNE)
+    args = intune.build_parser().parse_args([
+        "macos-script", "--name", "script", "--file", "script.sh",
+    ])
+    assert args.frequency == "P1D"
+
+
+def test_intune_app_status_fetches_every_report_page(capsys: pytest.CaptureFixture[str]) -> None:
+    intune = _load(INTUNE)
+    calls = []
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            return [{"id": "app-1"}]
+
+        def request(self, method: str, path: str, body):
+            calls.append(body)
+            skip = body.get("skip", 0)
+            return {
+                "Schema": [{"Column": "DeviceName"}],
+                "Values": [[f"device-{skip}"]],
+                "TotalRowCount": 2,
+            }
+
+    args = intune.build_parser().parse_args(["status", "--app", "app"])
+    assert intune.cmd_status(Graph(), args) == 0
+    assert [body.get("skip", 0) for body in calls] == [0, 1]
+    output = capsys.readouterr().out
+    assert "device-0" in output and "device-1" in output
