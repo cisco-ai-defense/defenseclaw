@@ -1183,7 +1183,8 @@ func TestGatewayUnavailable(t *testing.T) {
 	e.connErr = errors.New("connection refused")
 	_, err := e.tryCreate(sandboxapi.CreateRequest{})
 	wantCode(t, err, sandboxapi.CodeUnavailable)
-	if st, err := e.m.Status(t.Context()); err != nil || st.Available || !strings.Contains(st.Reason, "connection refused") || !st.Enabled {
+	// The reason is in words (GAP-0317), the client's text in the log.
+	if st, err := e.m.Status(t.Context()); err != nil || st.Available || st.Reason != "the OpenShell gateway is not running (nothing listens on its port)" || !st.Enabled {
 		t.Fatalf("status = %+v, %v", st, err)
 	}
 	e.connErr = nil

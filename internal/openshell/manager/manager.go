@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -544,7 +545,7 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 		return m.gw, m.gwGone, nil
 	}
 	if m.gwErr != nil && m.now().Sub(m.gwErrAt) < connectBackoff {
-		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", m.gwErr)
+		return nil, nil, gatewayUnavailableError(m.gwErr)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -558,7 +559,7 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 		if m.opts.OnGateway != nil {
 			m.opts.OnGateway(err)
 		}
-		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", err)
+		return nil, nil, gatewayUnavailableError(err)
 	}
 	if m.gwErr != nil {
 		m.health(ctx, audit.SandboxHealthRestored, "", "")
@@ -713,20 +714,51 @@ func (m *Manager) health(ctx context.Context, state audit.SandboxHealthState, co
 
 // gatewayUnavailableSummary is the degraded health record of a failed
 // connection to the OpenShell gateway: what happened in words and the next
-// step, with the client's error last (GAP-0169). The client's text alone
-// ("tls: failed to verify certificate: x509: certificate signed by unknown
-// authority" while another account's gateway held the port) said neither.
+// step (GAP-0169). The client's text alone ("tls: failed to verify
+// certificate: x509: certificate signed by unknown authority" while another
+// account's gateway held the port) said neither. Only a failure it cannot
+// name keeps the client's error last; the daemon log has it either way
+// (GAP-0317).
 func gatewayUnavailableSummary(err error) string {
+	what, known := gatewayUnavailableText(err)
+	if !known {
+		return what + "; run `defenseclaw sandbox doctor` (" + err.Error() + ")"
+	}
+	return what + "; run `defenseclaw sandbox doctor`"
+}
+
+// gatewayUnavailableError is the API's answer while the OpenShell gateway
+// does not answer: what happened in words, which `sandbox run`, status and
+// the TUI print. A stopped gateway read "the OpenShell gateway is not
+// available: openshell: health: Unavailable: connection error: desc =
+// \"transport: Error while dialing: ...\"" (GAP-0317).
+func gatewayUnavailableError(err error) error {
+	what, known := gatewayUnavailableText(err)
+	if !known {
+		what = "the OpenShell gateway is not available: " + err.Error()
+	}
+	return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "%s", what)
+}
+
+// dialAddress is the address a gRPC "Error while dialing: dial tcp ADDR:"
+// failure names.
+var dialAddress = regexp.MustCompile(`dial tcp ([^\s"]+?):\s`)
+
+// gatewayUnavailableText says in words why the OpenShell gateway does not
+// answer; known is false for a failure it cannot name.
+func gatewayUnavailableText(err error) (what string, known bool) {
 	raw := err.Error()
-	what := "the OpenShell gateway does not answer"
 	switch {
 	case strings.Contains(raw, "certificate signed by unknown authority"):
-		what = "the OpenShell gateway on this account's port is not this account's (its certificate is not from this account's " +
-			"OpenShell CA; another account's gateway may hold the port)"
+		return "the OpenShell gateway on this account's port is not this account's (its certificate is not from this account's " +
+			"OpenShell CA; another account's gateway may hold the port)", true
 	case strings.Contains(raw, "connection refused"):
-		what = "the OpenShell gateway is not running (nothing listens on its port)"
+		if m := dialAddress.FindStringSubmatch(raw); m != nil {
+			return "the OpenShell gateway is not running: nothing listens on " + m[1], true
+		}
+		return "the OpenShell gateway is not running (nothing listens on its port)", true
 	}
-	return what + "; run `defenseclaw sandbox doctor` (" + raw + ")"
+	return "the OpenShell gateway does not answer", false
 }
 
 // errorToken is a gateway error code as audit records carry it: a stable
