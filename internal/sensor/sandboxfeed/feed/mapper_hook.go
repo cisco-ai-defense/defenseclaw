@@ -212,7 +212,9 @@ func (m *Mapper) forkOfHook(parent *pb.Process) *hookProcess {
 // often run together; the newest took the other's tools, and the rows said
 // [hook tools: 5] and [hook tools: 26] for two calls of 12 (GAP-0099). Then
 // the fork's ancestry in /proc names its own call. Every candidate is a
-// verified call, so the choice moves a count, never what is shown.
+// verified call of that container and user, so the choice folds nothing
+// another rule would show; a wrong one moved a count, and once the chosen
+// call ended it showed the fork's later tools as unexpected.
 func (m *Mapper) hookCallOf(fork *hookProcess) *hookProcess {
 	if m.hookScriptsFull || fork.container == "" || !fork.uidKnown {
 		return nil
