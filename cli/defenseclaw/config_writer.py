@@ -408,7 +408,7 @@ def _refresh_derived_files(target: str, candidate: bytes) -> None:
         from defenseclaw import derived_providers
         from defenseclaw.config import _merge_llm_providers
 
-        document = yaml.safe_load(candidate.decode("utf-8")) or {}
+        document = _parse_config_document(candidate) or {}
         if not isinstance(document, dict):
             return
         data_dir = os.path.expanduser(_data_dir_for(target, candidate))
@@ -416,6 +416,13 @@ def _refresh_derived_files(target: str, candidate: bytes) -> None:
         derived_providers.refresh(shim)
     except Exception as exc:  # noqa: BLE001 - the config commit stands
         _log.warning("config writer: custom-providers.json was not re-rendered: %s", exc)
+
+
+def _parse_config_document(raw: bytes) -> Any:
+    """Use the same v8/v9 YAML scalar rules as Config.load and the gateway."""
+    from defenseclaw.config import parse_config_yaml
+
+    return parse_config_yaml(raw.decode("utf-8")) if raw.strip() else {}
 
 
 def _resolve(path: str | os.PathLike[str] | None) -> str:
@@ -567,7 +574,7 @@ def _managed_document(current: bytes) -> tuple[bool, dict[str, Any]]:
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
     try:
-        document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
+        document = _parse_config_document(current)
     except (UnicodeDecodeError, yaml.YAMLError):
         document = {}
     if not isinstance(document, dict):
@@ -767,7 +774,7 @@ def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -
 
 def _data_dir_for(target: str, candidate: bytes) -> str:
     try:
-        document = yaml.safe_load(candidate.decode("utf-8")) or {}
+        document = _parse_config_document(candidate) or {}
     except (UnicodeDecodeError, yaml.YAMLError):
         document = {}
     value = document.get("data_dir") if isinstance(document, dict) else None
@@ -893,7 +900,7 @@ def _ordered_mutations(mutations: list[Any]) -> list[Any]:
 def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
-    document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
+    document = _parse_config_document(current)
     mutations = []
     changed: list[str] = []
     for change in changes:
@@ -926,7 +933,7 @@ def render_document(current: bytes, document: dict[str, Any], source_name: str) 
     from defenseclaw.observability.v8_yaml import V8YAMLMutation, V8YAMLMutationError, prepare_v8_yaml_write
 
     try:
-        before = yaml.safe_load(current.decode("utf-8")) if current.strip() else None
+        before = _parse_config_document(current) if current.strip() else None
     except (UnicodeDecodeError, yaml.YAMLError):
         before = None
     if isinstance(before, dict) and before:
@@ -938,7 +945,7 @@ def render_document(current: bytes, document: dict[str, Any], source_name: str) 
             return current
         try:
             candidate = prepare_v8_yaml_write(current, mutations, source_name=source_name, any_path=True).candidate
-            if yaml.safe_load(candidate.decode("utf-8")) == document:
+            if _parse_config_document(candidate) == document:
                 return candidate
         except V8YAMLMutationError:
             pass
@@ -967,10 +974,10 @@ def _document_changes(prefix: tuple[str | int, ...], before: Any, after: Any) ->
 
 def diff_documents(before_raw: bytes, after_raw: bytes) -> list[str]:
     try:
-        before = yaml.safe_load(before_raw.decode("utf-8")) if before_raw.strip() else {}
+        before = _parse_config_document(before_raw)
     except (UnicodeDecodeError, yaml.YAMLError):
         before = {}
-    after = yaml.safe_load(after_raw.decode("utf-8")) if after_raw.strip() else {}
+    after = _parse_config_document(after_raw)
     out = []
     for parts, _value in _document_changes((), before if isinstance(before, dict) else {}, after or {}):
         out.append(format_path(parts) or "$")

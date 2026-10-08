@@ -607,3 +607,15 @@ def test_a_global_mode_change_names_the_connectors_that_keep_their_own_mode(tmp_
     assert out.exit_code == 0, out.output
     assert "keeps its own mode (observe)" in out.output
     assert "defenseclaw guardrail mode action --connector codex" in out.output
+
+
+def test_derived_provider_keeps_yaml_12_name_after_unrelated_write(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "llm_providers:\n  custom:\n    - name: on\n      domains: [llm.example.test]\n")
+    config_writer.apply([Change("update.check", False)], "cli:test", "t", path=path)
+    overlay = json.loads((tmp_path / "custom-providers.json").read_text(encoding="utf-8"))
+    assert overlay["providers"][0]["name"] == "on"
+
+
