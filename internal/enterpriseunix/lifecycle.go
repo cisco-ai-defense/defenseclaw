@@ -234,9 +234,16 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.readOnly(ctx)
 	}
 
+	// A run on a host with no DefenseClaw tree creates the lifecycle folder
+	// (and /opt/cisco/defenseclaw above it) for its lock. A run that commits
+	// nothing, a refused first install, takes them away again (GAP-0542).
+	created := env.missingDirs(env.Layout.LifecycleDir)
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
 		return 0
+	}
+	if len(created) > 0 {
+		defer env.removeUncommittedDirs(created)
 	}
 	lock, err := env.acquireLock(ctx)
 	if err != nil {
@@ -380,6 +387,35 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// missingDirs lists dir and its missing ancestors (canonical paths), deepest
+// first.
+func (e *Env) missingDirs(dir string) []string {
+	var missing []string
+	for dir = filepath.Clean(dir); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(e.P(dir)); !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		missing = append(missing, dir)
+	}
+	return missing
+}
+
+// removeUncommittedDirs removes the lock and the directories this run
+// created for it, when the run committed no deployment and left nothing
+// else there.
+func (e *Env) removeUncommittedDirs(created []string) {
+	if exists(e.deploymentPath()) {
+		return
+	}
+	dir := e.P(e.Layout.LifecycleDir)
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
+		_ = os.Remove(filepath.Join(dir, lockFileName))
+	}
+	for _, path := range created {
+		_ = removeDirIfEmpty(e.P(path))
+	}
 }
 
 // pauseApplyTrigger stops the Linux apply path unit while a protected-state
@@ -992,6 +1028,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err != nil {
 		code := errorCode(err, codeApply)
 		r.AddError(code, err.Error())
+		if record == nil && account.Created {
+			// Refused before any change: the service account this run
+			// created goes too (GAP-0542).
+			_ = env.Accounts.Remove(ctx, serviceName)
+		}
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
 			l.revertRejectedConfig(record, committedConfig, nil)
 		}
@@ -1240,7 +1281,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 				_ = env.Services.Disable(ctx, unit)
 			}
 		}
-		r.AddWarning("not_started", "installed without starting the services (--no-start); run repair or ensure to activate")
+		r.AddWarning(codeNotStarted, "installed without starting the services (--no-start); run repair or ensure to activate")
 	}
 
 	activatedAt := ""

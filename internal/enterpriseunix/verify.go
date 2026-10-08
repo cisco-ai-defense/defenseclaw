@@ -34,6 +34,9 @@ const ledgerFreshness = 5 * time.Minute
 // codeUnitFailed names a DefenseClaw oneshot unit systemd reports failed.
 const codeUnitFailed = "unit_failed"
 
+// codeNotStarted names a deployment installed with --no-start.
+const codeNotStarted = "not_started"
+
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
@@ -133,6 +136,13 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			reported[problem] = true
 			r.AddError(codeVerify, problem)
 		}
+	}
+	if record.NoStart {
+		// Nothing runs, so no agent is protected; ensure reported it as a
+		// warning, and status and verify read ok with every service
+		// not_loaded (GAP-0542).
+		r.AddError(codeNotStarted, "the deployment was installed with --no-start, so its services are not running and agents are not protected; run `"+
+			env.lifecycleCommand(ActionRepair)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to start them")
 	}
 	if !record.NoStart && !r.Readiness.Gateway {
 		// A gateway that is down because the installed binary refuses the
