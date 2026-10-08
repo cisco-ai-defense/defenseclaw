@@ -198,6 +198,16 @@ failed. On Windows the SID of a group survives a
 rename, so it is the spelling to use there; on Linux and macOS a group is
 matched by its name.
 
+**How many profiles.** A config holds at most 1,024 profiles and 4,096
+assignments. Profiles cost time when the config loads: at gateway start, at
+each reload and in each `defenseclaw` command that reads `config.yaml`. On a
+2 vCPU Linux host, with one assignment of three groups per profile,
+`defenseclaw-gateway start` took about 0.45 seconds longer with 100 or 250
+profiles than without profiles, and about 1 second longer with 1,000.
+Requests do not slow down with the number of profiles: the gateway matches a
+subject once and caches the result. To keep the config small, give one profile to many
+groups in one `match` rather than writing a profile for each group.
+
 ### The match reason
 
 Every decision records why a profile was chosen. When an assignment sets more
