@@ -419,6 +419,19 @@ func (m *Manager) beforeGlobalImport(ctx context.Context, profileID string) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: r.name, Reason: "profile_import",
 			Message: "a new sandbox imports the provider profile " + profileID + "; this sandbox's open connections are reset once its hooks are quiet"})
 	}
+	// The import, which follows at once, reloads each one's settings: the
+	// connections they make before OpenShell maps their names again are
+	// denied, and are no refusals (reloadedLocked, GAP-0379).
+	defer func() {
+		now := m.now()
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, r := range list {
+			if b := m.boxes[r.name]; b != nil && b.rec.BindingID == r.bindingID && b.sessionOn() {
+				b.reach.reloaded = now
+			}
+		}
+	}()
 	if m.opts.Quiesce == nil {
 		return
 	}

@@ -972,6 +972,23 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
 		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
 			not: []string{"the next session takes a new undo point"}},
+		// GAP-0389: another terminal started the sandbox again while the
+		// question was open, so the daemon refused the acceptance: the last
+		// line says it runs, not that it was kept stopped.
+		{name: "keeping while another terminal starts it again", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: "sandbox " + sbName + " is running; stop it before accepting its changes"}
+			ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+				for _, c := range ta.daemon.calls { // the fake holds its lock here
+					if c.Method == "POST" && strings.HasSuffix(c.Path, "/"+sbName+"/accept") {
+						sb.Phase = "ready"
+					}
+				}
+			}
+		}, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"could not record that you kept the changes", "Sandbox " + sbName + " is running again (started from outside this session) → reattach"},
+			not: []string{"Sandbox kept (stopped)"}},
 		// GAP-0336: the daemon stopped before the session ended: what did not
 		// run, and the way to it, without the HTTP client's error.
 		{name: "the daemon is down at the end", opts: claude, exit: 1, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
@@ -1265,6 +1282,19 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	if c.Status != openshell.StatusFail || !strings.Contains(c.Detail, "bad: OpenShell refused the hooks' connections") ||
 		strings.Contains(c.Detail, "good") || !strings.Contains(c.Detail, "127.0.0.1:18971") || c.Fix == nil {
 		t.Fatalf("unreachable: %+v", c)
+	}
+	// GAP-0384: a stopped sandbox keeps its last session's verdict
+	// (GAP-0186), but nothing of it runs that could fail closed: it is
+	// named in a warning, and the machine check does not fail.
+	ta = newTestApp(t, "")
+	ta.daemon.add(sampleSandbox("good"))
+	silent := sampleSandbox("c7-stop")
+	silent.Phase = "stopped"
+	silent.Hooks.Unreachable, silent.Hooks.UnreachableReason = true, "the harness has been calling its model for 34s without a single hook request reaching DefenseClaw"
+	ta.daemon.add(silent)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "1 running sandbox reach") ||
+		!strings.Contains(c.Detail, "c7-stop is stopped, and the hooks of its last session") || strings.Contains(c.Detail, "fails closed") || c.Fix == nil {
+		t.Fatalf("stopped: %+v", c)
 	}
 }
 

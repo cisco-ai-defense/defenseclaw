@@ -830,7 +830,8 @@ run tells you three times:
 The daemon keeps its hook counts across a restart, but one that did not stop
 cleanly loses the last minute of them. A stopped sandbox also keeps what its
 last session's hooks came to (`unreachable!` or `silent!` in `sandbox list`)
-until its next session. When it restarted during the session
+until its next session; `sandbox doctor` warns about it, but does not fail,
+since nothing of it runs. When it restarted during the session
 and has counted no hook of it, the run can't tell whether the session's hooks
 got through before, so it says that instead, with no warning and no exit
 status 69:

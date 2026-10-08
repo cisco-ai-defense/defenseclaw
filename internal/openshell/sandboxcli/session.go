@@ -144,6 +144,10 @@ type session struct {
 	// stopped a sandbox it had found running.
 	interrupted bool
 	undoStopped bool
+	// notAccepted is set when the daemon did not record that the user kept
+	// the session's changes (acceptChanges): another terminal may have
+	// started the sandbox again meanwhile.
+	notAccepted bool
 	// unmasked are the files that look like secrets the session left in
 	// the project and the sandbox does not mask: its next start refuses
 	// while they stay there (the review's UnmaskedSecrets).
@@ -1081,6 +1085,7 @@ func (s *session) end(ctx context.Context) error {
 		} else {
 			// The warning said the undo point stays.
 			a.ok("kept: the changes stay in the folder")
+			s.notAccepted = true
 		}
 	case accepted && reviewed && s.unanswered:
 		a.ok("kept: the changes stay in the folder")
@@ -1395,6 +1400,16 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		// connect refuses while they are in the project.
 		next = "to resume, first move " + strings.Join(shownFiles(s.unmasked), ", ") + " out of the project, then: " +
 			strings.TrimPrefix(next, "resume: ")
+	}
+	if s.notAccepted {
+		if now, err := s.api.Get(ctx, name); err == nil && now.Phase == "ready" {
+			// Started again from outside this session while its question was
+			// open (another terminal, the TUI): "kept (stopped)" was false
+			// (GAP-0389).
+			a.note("Sandbox " + name + " is running again (started from outside this session) → reattach: " + CommandName + " connect " + name +
+				"   stop: " + CommandName + " stop " + name)
+			return nil
+		}
 	}
 	kept := "Sandbox kept (stopped)"
 	if s.undoStopped {

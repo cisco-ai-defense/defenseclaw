@@ -327,8 +327,13 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		// (ownHostName), which reaches nothing, or one OpenShell closed
 		// because the policy changed under it (policyReloadCut), which the
 		// policy still allows: the client connects again. They are
-		// audited, but neither counted nor shown on the feed.
-		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host, hostname) || policyReloadCut(r)))
+		// audited, but neither counted nor shown on the feed. Nor is a
+		// connection OpenShell denied its transparent mapping just after it
+		// reloaded the sandbox's settings (remapped): the reload dropped the
+		// mappings of the names the sandbox looked up, and the client looks
+		// up and connects again (GAP-0379).
+		remapped := r.Denied() && mappingDenial(r) && m.reloadedRecently(b)
+		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host, hostname) || policyReloadCut(r) || remapped))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
 			m.markWork(b, at, ofHarness, m.harnessModelCall(b, r, host, ofHarness))
@@ -356,13 +361,17 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 				// The connection that follows is the refusal that counts
 				// (and the alert); the lookup alone is audited at INFO.
 				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeLookupRefused, "INFO"
-			case policyReloadCut(r):
+			case policyReloadCut(r), remapped:
 				// The end of a connection the policy still allows, not a
-				// refusal: no block, no alert, no blocked count (GAP-0138).
+				// refusal: no block, no alert, no blocked count (GAP-0138,
+				// GAP-0379).
 				ev.Blocked, ev.End, ev.Terminated = false, audit.SandboxEgressFailed, true
 				ev.DecisionCode = "SANDBOX_EGRESS_TERMINATED"
-				ev.Reason = truncate("OpenShell closed it when the sandbox policy changed; the client connects again ("+
-					firstNonEmpty(r.Reason, r.Message)+")", 512)
+				what := "OpenShell closed it when the sandbox policy changed"
+				if remapped {
+					what = "OpenShell refused it while it mapped the sandbox's names again after reloading its settings"
+				}
+				ev.Reason = truncate(what+"; the client connects again ("+firstNonEmpty(r.Reason, r.Message)+")", 512)
 			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
