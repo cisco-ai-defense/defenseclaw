@@ -1394,3 +1394,20 @@ func TestBlockReasonNamesTheDecidingFinding(t *testing.T) {
 		t.Fatalf("journal %+v (err %v), want the reason to name only the HIGH finding", entry, err)
 	}
 }
+
+// GAP-0575: a managed gateway's scan rows name the user whose folder held
+// the asset and the judge model the scan ran with.
+func TestWatcherScanCorrelationNamesOwnerAndJudge(t *testing.T) {
+	home := t.TempDir()
+	w := &InstallWatcher{}
+	w.SetAssetOwners([]AssetOwner{{Home: home, ID: "S-1-5-21-1-1001", IDKind: "windows_sid", Name: "dcw-epw1"}})
+	corr := w.ownedScanCorrelation(audit.ScanCorrelation{}, &scanner.ScanResult{
+		Target: filepath.Join(home, ".claude", "skills", "epa-crit"), JudgeModel: "bedrock/haiku",
+	})
+	if corr.UserName != "dcw-epw1" || corr.UserID != "S-1-5-21-1-1001" || corr.UserIDKind != "windows_sid" || corr.JudgeModel != "bedrock/haiku" {
+		t.Fatalf("correlation = %+v, want the owner and the judge", corr)
+	}
+	if other := w.ownedScanCorrelation(audit.ScanCorrelation{}, &scanner.ScanResult{Target: t.TempDir()}); other.UserName != "" || other.UserID != "" {
+		t.Fatalf("an asset outside every enrolled home got an owner: %+v", other)
+	}
+}

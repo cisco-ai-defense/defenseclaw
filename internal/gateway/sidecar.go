@@ -3630,6 +3630,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	})
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
+		w.SetAssetOwners(enrolled.owners)
 		w.SetMCPServerSource(enrolled.live.list)
 	} else {
 		if len(conns) > 1 {

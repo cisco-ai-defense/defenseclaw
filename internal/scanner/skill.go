@@ -356,6 +356,11 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		Timestamp:  start,
 		TargetType: InferTargetType(s.Name()),
 	}
+	if s.Config.UseLLM {
+		if j, ok := s.judge(); ok {
+			result.JudgeModel = j.model
+		}
+	}
 
 	policy, cleanup, err := s.policyArg()
 	defer cleanup()

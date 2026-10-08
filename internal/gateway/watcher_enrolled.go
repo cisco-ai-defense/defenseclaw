@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -57,6 +58,8 @@ type enrolledWatchSet struct {
 	mcp []config.MCPServerEntry
 	// live is what the running watcher reads; the poller refreshes it.
 	live *enrolledMCPServers
+	// owners names the account of each enrolled home (GAP-0575).
+	owners []watcher.AssetOwner
 }
 
 // enrolledMCPServers is the MCP server list a running watcher reads.
@@ -119,6 +122,7 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 	seenMCP := map[string]bool{}
 	type userConnector struct{ home, connector string }
 	var targets []userConnector
+	ownedHomes := map[string]bool{}
 	for _, target := range authorization.ProtectedTargets {
 		home := strings.TrimSpace(target.UserHome)
 		if home == "" && target.Result != nil {
@@ -129,6 +133,14 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 			continue
 		}
 		targets = append(targets, userConnector{filepath.Clean(home), name})
+		if key := strings.ToLower(filepath.Clean(home)); !ownedHomes[key] {
+			ownedHomes[key] = true
+			owner := watcher.AssetOwner{Home: filepath.Clean(home), Name: strings.TrimSpace(target.User)}
+			if sid := strings.TrimSpace(target.SID); sid != "" {
+				owner.ID, owner.IDKind = sid, useridentity.KindWindowsSID
+			}
+			set.owners = append(set.owners, owner)
+		}
 	}
 	// A folder several connectors list (Amp and OpenCode also read Claude
 	// Code's ~/.claude/skills) belongs to the connector that owns its layout,

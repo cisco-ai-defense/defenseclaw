@@ -193,6 +193,9 @@ type InstallWatcher struct {
 	// that holds it (GAP-0132). Empty means every root belongs to
 	// watcherConnectorName.
 	rootConnectors []rootConnector
+	// assetOwners names the account of each enrolled home, longest home
+	// first (SetAssetOwners).
+	assetOwners []AssetOwner
 
 	// mcpServers lists the MCP servers admission and the rescan see. Nil
 	// reads the connector config in the gateway's own home.
@@ -243,6 +246,52 @@ type InstallWatcher struct {
 type rootConnector struct {
 	root      string
 	connector string
+}
+
+// AssetOwner is the account whose home holds watched assets.
+type AssetOwner struct {
+	Home, ID, IDKind, Name string
+}
+
+// SetAssetOwners names the account of each enrolled home. A managed gateway
+// watches every enrolled user's folders, so its scan, scan-finding and
+// quarantine rows name the user whose asset it was (GAP-0575). Call it
+// before Run.
+func (w *InstallWatcher) SetAssetOwners(owners []AssetOwner) {
+	w.assetOwners = w.assetOwners[:0]
+	for _, owner := range owners {
+		if home := strings.TrimSpace(owner.Home); home != "" {
+			owner.Home = filepath.Clean(home)
+			w.assetOwners = append(w.assetOwners, owner)
+		}
+	}
+	sort.Slice(w.assetOwners, func(i, j int) bool { return len(w.assetOwners[i].Home) > len(w.assetOwners[j].Home) })
+}
+
+// ownerOf is the account whose home holds path.
+func (w *InstallWatcher) ownerOf(path string) (AssetOwner, bool) {
+	if w == nil || w.secureClientActive() {
+		return AssetOwner{}, false
+	}
+	for _, owner := range w.assetOwners {
+		if watcherPathAtOrBelow(path, owner.Home) {
+			return owner, true
+		}
+	}
+	return AssetOwner{}, false
+}
+
+// ownedScanCorrelation adds the asset's owner and the judge model of the
+// scan to a watcher scan correlation (GAP-0575).
+func (w *InstallWatcher) ownedScanCorrelation(correlation audit.ScanCorrelation, result *scanner.ScanResult) audit.ScanCorrelation {
+	if w == nil || result == nil || w.secureClientActive() {
+		return correlation
+	}
+	correlation.JudgeModel = result.JudgeModel
+	if owner, ok := w.ownerOf(result.Target); ok {
+		correlation.UserID, correlation.UserIDKind, correlation.UserName = owner.ID, owner.IDKind, owner.Name
+	}
+	return correlation
 }
 
 // newScanner resolves the scanner for evt via the injectable factory, falling
@@ -1969,11 +2018,16 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 }
 
 func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {
+	details := fmt.Sprintf("dest=%s", destPath)
+	if owner, ok := w.ownerOf(evt.Path); ok && owner.Name != "" {
+		// The row says whose asset it was (GAP-0575).
+		details += " user=" + owner.Name
+	}
 	event := audit.Event{
 		Action:   string(action),
 		Target:   evt.Path,
 		Actor:    "defenseclaw",
-		Details:  fmt.Sprintf("dest=%s", destPath),
+		Details:  details,
 		Severity: "INFO",
 	}
 	if action != audit.ActionQuarantine {
@@ -2093,7 +2147,7 @@ func (w *InstallWatcher) logScan(
 	}
 	return w.logger.LogScanWithCorrelation(
 		ctx, result, verdict,
-		watcherScanCorrelation(ctx, "", w.eventConnector(evt)),
+		w.ownedScanCorrelation(watcherScanCorrelation(ctx, "", w.eventConnector(evt)), result),
 	)
 }
 

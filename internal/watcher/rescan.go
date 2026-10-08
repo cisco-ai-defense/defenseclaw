@@ -1514,9 +1514,9 @@ func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.S
 	if w == nil || w.logger == nil || result == nil {
 		return ""
 	}
-	correlation := watcherScanCorrelation(
+	correlation := w.ownedScanCorrelation(watcherScanCorrelation(
 		ctx, rescanRunID(), watcherConnectorName(w.cfg),
-	)
+	), result)
 	err := w.logger.LogScanWithCorrelation(ctx, result, result.Verdict, correlation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)
