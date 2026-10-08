@@ -1146,12 +1146,12 @@ func claudeCodeMissingHookGuard(command string) string {
 		"echo '" + claudeCodeMissingHookGuardMessage + "' >&2; exit 2; }"
 }
 
-// claudeCodeUnguardedHookCommand returns the hook command without the clause
-// claudeCodeMissingHookGuard appends, so a guarded registration of another
-// (old) data directory is recognized like the bare path earlier releases wrote.
+// claudeCodeUnguardedHookCommand removes only the exact generated guard,
+// so an old data directory is recognized without accepting a modified clause
+// that changes a blocking hook exit into success.
 func claudeCodeUnguardedHookCommand(command string) string {
 	index := strings.Index(command, claudeCodeMissingHookGuardSeparator)
-	if index <= 0 || !strings.HasSuffix(command, "; exit 2; }") {
+	if index <= 0 || command != claudeCodeMissingHookGuard(command[:index]) {
 		return command
 	}
 	return command[:index]
