@@ -37,7 +37,11 @@ func (s *scanner) scanVim() {
 	seen := map[string]bool{}
 	addPlugin := func(inst *Install, p Plugin) {
 		key := strings.ToLower(p.ID)
-		if p.ID == "" || seen[inst.Product+"\x00"+key] || len(inst.Plugins) >= vimMaxPlugins {
+		if p.ID == "" || seen[inst.Product+"\x00"+key] {
+			return
+		}
+		if len(inst.Plugins) >= vimMaxPlugins {
+			inst.Partial = true
 			return
 		}
 		seen[inst.Product+"\x00"+key] = true

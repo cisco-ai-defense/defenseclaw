@@ -511,3 +511,50 @@ func TestCleanKeepsDisplayNamesReadable(t *testing.T) {
 		t.Errorf("clean bounded a long name to %d bytes, want %d", len(got), maxFieldLen)
 	}
 }
+
+func TestInternalPluginCapsMarkInstallPartial(t *testing.T) {
+	check := func(t *testing.T, installs []Install, family string) {
+		t.Helper()
+		for _, inst := range installs {
+			if inst.Family == family {
+				if len(inst.Plugins) != 2048 || !inst.Partial {
+					t.Fatalf("%s: plugins=%d partial=%v", family, len(inst.Plugins), inst.Partial)
+				}
+				return
+			}
+		}
+		t.Fatalf("%s installation missing", family)
+	}
+	t.Run("vim", func(t *testing.T) {
+		home := t.TempDir()
+		var lock strings.Builder
+		lock.WriteByte('{')
+		for i := 0; i <= vimMaxPlugins; i++ {
+			if i > 0 {
+				lock.WriteByte(',')
+			}
+			fmt.Fprintf(&lock, `"plugin-%04d":{}`, i)
+		}
+		lock.WriteByte('}')
+		writeFile(t, filepath.Join(home, ".config", "nvim", "lazy-lock.json"), lock.String())
+		check(t, Scan(home, "linux", Limits{}), FamilyVim)
+	})
+	t.Run("eclipse", func(t *testing.T) {
+		home := t.TempDir()
+		var bundles strings.Builder
+		for i := 0; i <= eclipseMaxBundles; i++ {
+			fmt.Fprintf(&bundles, "com.example.plugin%04d,1.0.0,plugins/plugin.jar,4,false\n", i)
+		}
+		writeFile(t, filepath.Join(home, "eclipse", "configuration", "org.eclipse.equinox.simpleconfigurator", "bundles.info"), bundles.String())
+		check(t, Scan(home, "linux", Limits{}), FamilyEclipse)
+	})
+	t.Run("visual-studio", func(t *testing.T) {
+		home := t.TempDir()
+		root := filepath.Join(home, "AppData", "Local", "Microsoft", "VisualStudio", "17.0_1a2b3c4d", "Extensions")
+		for i := 0; i <= visualStudioMaxExtensions; i++ {
+			writeFile(t, filepath.Join(root, fmt.Sprintf("group-%02d", i/64), fmt.Sprintf("ext-%04d", i), "extension.vsixmanifest"),
+				fmt.Sprintf(`<PackageManifest><Metadata><Identity Id="Example.Ext%04d" Version="1.0"/></Metadata></PackageManifest>`, i))
+		}
+		check(t, Scan(home, "windows", Limits{}), FamilyVisualStudio)
+	})
+}
