@@ -160,6 +160,12 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			if len(query) > 0 {
 				path += "?" + query.Encode()
 			}
+			// A standard user cannot read the administrator's deployment: say
+			// so and name the administrator command, as status and audit
+			// export do, instead of a raw config permission error (GAP-0610).
+			if err := refuseEnterpriseIdentityViewForStandardUser(cmd); err != nil {
+				return withExitCode(err, enterprisestatus.UnixExitFailure)
+			}
 			runtimeCommand = cmd
 			if err := writeEnterpriseIdentityView(cmd.OutOrStdout(), path); err != nil {
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
