@@ -193,6 +193,10 @@ icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
 ```
 
+For an Intune fleet, deliver a custom pack before the DefenseClaw app using a
+dependent Win32 app, or a pinned HTTPS download with a SHA-256 check; see
+[Intune on Windows](/docs/enterprise/mdm/intune-windows#6-change-the-config-upgrade-and-roll-back).
+
 Setup checks these permissions for the service account before it changes
 anything, and stops with exit code `1639` naming the folder and the
 `icacls` grant that fixes it. Setup checks the config with the

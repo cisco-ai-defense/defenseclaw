@@ -108,9 +108,19 @@ first if you are new to how DefenseClaw uses identity.
    | `signon-policy` | Creates a sign-on policy for the LDAP Interface app with two password-only rules (one for the bind user, one for the group) and assigns it to the app. Its catch-all rule still requires a second factor from everyone else. |
    | `check` | Changes nothing. Reports what is ready and what is missing. |
 
+   `assign-posix --home-template '/srv/home/{name}' --shell /bin/bash` sets
+   nondefault homes and shells. For homes outside `/home` and `/var/home`, add
+   the parent to `enterprise.enrollment.home_roots` before enrollment.
+   Accounts with `/sbin/nologin`, `/usr/sbin/nologin` or `/bin/false` shells
+   are skipped by hook enrollment. `verify-okta-identity.sh --user NAME`
+   reports the shell skip reason and points out nonstandard homes.
+
    Run `assign-posix` from one admin at a time. Okta does not enforce
    uniqueness on the numeric UID attribute in this schema; `check` detects
    duplicates, but concurrent assignments can otherwise pick the same number.
+   If a UID is shared, clear it on one affected user's profile in Okta Admin
+   Console (**Directory** > **People** > user > **Profile**), save, then rerun
+   `assign-posix --user LOGIN` for that user.
    Every command can be run again and changes only what differs. Pick user and
    group IDs outside the local accounts of your hosts. The host step limits SSSD
    to the range 1710000 to 1729999 by default (`--id-min` and `--id-max` of
@@ -157,8 +167,13 @@ grep ldap_use_ppolicy /usr/share/sssd/cfg_rules.ini    # a match means this SSSD
 | SSSD 2.10 or later (RHEL 10) | Has the option upstream. Not tested here |
 
 To rebuild RHEL 9.8's SSSD with the option, run this as a normal user with `sudo`
-on a RHEL 9.8 host (about 15 minutes on 2 vCPUs). It installs build tools and build dependencies through `sudo dnf`, then builds
-the SSSD packages. It does not install those rebuilt packages.
+on a RHEL 9.8 host (about 15 minutes on 2 vCPUs). It installs `rpm-build`,
+`gcc` and SSSD build dependencies through `sudo dnf` (roughly 370 packages
+on a stock RHEL 9.8 host), then builds the SSSD packages. It does not install
+the rebuilt SSSD packages. Build on a separate host or container if the target
+must stay free of those dependencies; copy the RPMs from the printed `RPMS`
+directory to the target. Remove build-only dependencies on the build host only
+after recording which packages `dnf` added.
 
 ```bash
 ./build-sssd-ppolicy-backport.sh --workdir "$HOME/sssd-ppolicy-build"
@@ -200,6 +215,13 @@ sudo --preserve-env=OKTA_BIND_PASSWORD ./install-sssd-okta.sh --org example \
     --bind-login ldap-bind@example.com --allow-group linux-users
 unset OKTA_BIND_PASSWORD
 ```
+
+For Ansible, Puppet or another configuration manager, the final line is
+`changed: 0` or `changed: 1` on a successful apply. A dry run exits `0` when
+unchanged and `4` when it would change the host; it still checks the bind and
+can fail if the LDAP endpoint is unreachable. Run the dry run as root so it can
+compare the existing root-owned config. Treat exit `1`, `2` and `3` as failures,
+not planned changes.
 
 It:
 
@@ -285,7 +307,9 @@ wrong password is refused.
 Install DefenseClaw for the Okta users as you would for any Linux user: a
 [per-user install](/docs/get-started/install) for each user, or the
 [standalone enterprise package](/docs/enterprise/linux). Then give it profiles
-that name the Okta groups exactly as `id -Gn` prints them:
+that name the complete Okta groups as `id -Gn` prints them. Matching ignores
+case, including in `verify-okta-identity.sh --expect-group`, so avoid groups
+whose names differ only by case:
 
 - **Standalone enterprise profile.** Start from
   `admin-config.example.yaml`: it sets three profiles, assigns two of them to the
@@ -367,14 +391,16 @@ With this setup, read a record with `defenseclaw audit export` as in the
   minutes later, with no new sign-in. DefenseClaw follows the directory, while
   `id -Gn` in an open shell keeps the groups of the sign-in. `sss_cache -E` makes
   SSSD ask Okta at once; `profile explain` asks the operating system directly, so it
-  shows the change first (it prints a `cache:` line with the age of the facts live
-  requests use). See the cache layers in
+  can show the change before live requests use it. The managed Linux command
+  does not currently print a `cache:` age line. See the cache layers in
   [Troubleshooting](/docs/enterprise/identity-and-authentication#troubleshooting).
-- **Okta unreachable.** With a warm SSSD cache, SSSD goes offline and serves the
-  cached entries, so profiles do not change and blocks are still enforced. When Okta
-  answered again, SSSD was Online within seconds and the group profile applied
-  again without a gateway restart. With no cached entry, the lookup fails and
-  requests get the default profile with `default_lookup_failed`.
+- **Okta unreachable.** Open sessions with warm SSSD cache keep their profiles
+  and blocks. New SSH password sign-ins fail while Okta is unreachable because
+  the kit sets `cache_credentials = false`; they can prompt repeatedly without
+  authenticating. With no cached entry, the lookup fails and requests get the
+  default profile with `default_lookup_failed`. In a live outage test SSSD took
+  about two minutes after connectivity returned to report Online; group profiles
+  applied about 40 seconds later without a gateway restart.
 - **The Okta login as the UPN** (standalone enterprise only). The Okta LDAP
   Interface has no `userPrincipalName`; its `uid` is the Okta login. Run
   `install-sssd-okta.sh` with `--map-upn`, which adds `ldap_user_principal = uid` to
@@ -430,6 +456,12 @@ Validate with `sudo sshd -t` before reloading sshd. Restart SSSD only after
 its config has been restored and validated. In Okta, remove only objects you
 created: the sign-on policy and its rules (first assign the app another
 policy), the role and resource set, and the users' POSIX attributes and groups.
+Before stopping SSSD, run `sudo sss_cache -E`. After stopping it, cached NSS
+entries may still resolve for about six minutes from `/var/lib/sss/mc/`; a
+second check after that interval confirms expiry. For immediate removal on a
+dedicated SSSD host, clear only the kit domain's cache files after confirming
+no other SSSD domain needs them. On hosts with `rm -i` aliases, use `command rm`
+after checking the exact paths.
 
 <Cards>
   <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Profile keys, precedence, the audit record and delivery to managed hosts." />

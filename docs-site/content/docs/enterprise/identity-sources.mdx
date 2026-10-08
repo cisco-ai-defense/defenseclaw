@@ -246,8 +246,10 @@ LDAP account of that name.
 | SSH session | `SSH_CONNECTION` | Claimed |
 
 Windows groups follow the sign-in token. A user added to or removed from a
-group gets the new profile only after signing out and back in, and then within
-the 15-minute cache.
+group gets a new token after signing out and back in; a new Entra group SID may
+also need `dsregcmd /refreshprt` followed by another sign-out and sign-in.
+Live hooks can keep the old profile until the gateway's 15-minute directory
+cache expires. `profile-explain` can show the new profile before live hooks use it.
 
 ### macOS
 
@@ -258,7 +260,7 @@ the 15-minute cache.
 | Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
 | AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
 | Device SSO provider (Entra or Okta) | `app-sso platform -s` (JSON on macOS 15, a property list on older releases): Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
-| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account and only root reads. It is the account's UPN and principal; only an account that carries it is reported with the SSO provider's directory, so local accounts that never registered stay `local`. Standalone enterprise only | Verified |
+| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account. Local users can read this directory attribute; only privileged code can write it. The product trusts the controlled write, not the secrecy of the value. It is the account's UPN and principal; accounts that never registered stay `local`. Standalone enterprise only | Verified |
 | Entra or Okta groups through Platform SSO | None reach the macOS group database (macOS 15.8, Company Portal, live) | None |
 | Kerberos principal of the session | The default principal of the default `API:` cache, from `/usr/bin/klist --json` at most once per 5 minutes, or of a `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` | Claimed |
 | SSH session | `SSH_CONNECTION` | Claimed |
@@ -307,7 +309,10 @@ machine.
 An Entra-joined computer puts an Entra group's SID into a user's sign-in
 token only when one of the built-in local groups lists that group:
 Administrators, Users, Guests, Power Users, Remote Desktop Users or Remote
-Management Users. Windows evaluates at most 20 Entra groups this way.
+Management Users. A Windows 11 Enterprise 24H2 live check with 21 different
+Entra group SIDs in the built-in Users group showed all 21 in the signed-in
+user's token. Do not rely on a 20-group ceiling to limit access; verify the
+actual token on the devices and accounts you deploy.
 Membership in any other Entra group never reaches the computer, so a `groups`
 assignment or an enrollment `include_groups` or `exclude_groups` entry that
 names such a group matches no one: its members get the default profile, and

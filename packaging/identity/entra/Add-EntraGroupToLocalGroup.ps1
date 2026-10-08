@@ -30,6 +30,8 @@ Intune delivery of the same membership was not tested yet.
 One or more Entra group SIDs (S-1-12-1-<a>-<b>-<c>-<d>). Read a group's SID with
 entra_setup.py sids --group NAME, or from the securityIdentifier property of the
 group in Microsoft Graph.
+When calling with powershell.exe -File, separate multiple SIDs with commas in
+one argument (PowerShell does not bind an array across process arguments).
 
 .PARAMETER LocalGroup
 The local group, by name or SID. The default is Users (S-1-5-32-545), the least
@@ -40,19 +42,24 @@ administrator rights, so the script warns when you name it.
 Remove the SIDs from the local group instead of adding them.
 
 .EXAMPLE
-.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4444444444 -WhatIf
+.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4000000000 -WhatIf
 
 Shows what would change and changes nothing.
 
 .EXAMPLE
-.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4444444444
+.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4000000000
 
 Adds the Entra group to the built-in Users group.
 
 .EXAMPLE
-.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4444444444 -Remove
+.\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4000000000 -Remove
 
 Removes it again.
+
+.EXAMPLE
+powershell.exe -File .\Add-EntraGroupToLocalGroup.ps1 -GroupSid S-1-12-1-1111111111-2222222222-3333333333-4000000000,S-1-12-1-1-2-3-4 -WhatIf
+
+Checks two SIDs from a separate process.
 
 .OUTPUTS
 One object per SID with GroupSid, LocalGroup and Action: Added, AlreadyMember,
@@ -71,15 +78,27 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    Write-Output 'error: Constrained Language Mode prevents this script from using the Windows local-group API. Run it in an approved FullLanguage administrator session or use Intune Account protection.'
+    exit 1
+}
+
 function Exit-WithError {
     param([string]$Message)
     [Console]::Error.WriteLine("error: $Message")
     exit 1
 }
 
-$entraSidPattern = '^S-1-12-1-\d+-\d+-\d+-\d+$'
+$GroupSid = @($GroupSid | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() })
+$entraSidPattern = '^S-1-12-1-(?:[0-9]|[1-9][0-9]{1,9})-(?:[0-9]|[1-9][0-9]{1,9})-(?:[0-9]|[1-9][0-9]{1,9})-(?:[0-9]|[1-9][0-9]{1,9})$'
 foreach ($sid in $GroupSid) {
-    if ($sid -notmatch $entraSidPattern) {
+    $valid = $sid -cmatch $entraSidPattern
+    if ($valid) {
+        foreach ($component in @($sid -split '-') | Select-Object -Skip 4) {
+            if ([uint64]$component -gt [uint32]::MaxValue) { $valid = $false; break }
+        }
+    }
+    if (-not $valid) {
         Exit-WithError "'$sid' is not the SID of an Entra group (S-1-12-1-<a>-<b>-<c>-<d>). Read it with: entra_setup.py sids --group <name>"
     }
 }

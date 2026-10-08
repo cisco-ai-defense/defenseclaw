@@ -50,6 +50,12 @@ detection and logs.
 
 ## Choose a route
 
+For a first Platform SSO sign-in, macOS may show the full Setup Assistant and
+an AutoUpdate notice before the desktop. Prepare each demonstration account by
+signing it in once before a timed test, or deploy an approved Setup Assistant
+skip payload. Allow the user to finish Setup Assistant; logout shortcuts may
+not work while it is open.
+
 | Route | Install | Detect | Use it when |
 | --- | --- | --- | --- |
 | **A. Shell script** (recommended) | One root shell script: the kit's wrapper with its settings block filled in | Custom attribute that runs `detect.sh`, and the script's own run status | Always, unless you must use app assignments |
@@ -114,6 +120,8 @@ guardrail:
   connectors:
     claudecode: {}
     codex: {}
+ai_discovery:
+  enabled: true
 DEFENSECLAW_CONFIG
 }
 ```
