@@ -1817,6 +1817,8 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", "", 5},
 		// GAP-0640: uninstall answers the same, before the module loads.
 		{"uninstall", "standalone", "elevation_required", "a standard account cannot uninstall the managed deployment", "", 5},
+		// GAP-0931: reconcile too, not 1603 with installed:false.
+		{"reconcile", "standalone", "elevation_required", "a standard account cannot reconcile the managed deployment", "", 5},
 		// GAP-0120: the refusal does not wait for --config to be read.
 		{"ensure", "standalone", "elevation_required", "a standard account cannot ensure the managed deployment", `C:\Users\alice\does-not-compile.yaml`, 5},
 		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, "", 1639},

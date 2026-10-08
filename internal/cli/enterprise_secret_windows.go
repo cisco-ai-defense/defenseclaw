@@ -32,6 +32,7 @@ import (
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -71,6 +72,21 @@ var (
 	windowsSecretRestartGateway = restartWindowsStandaloneGateway
 )
 
+// windowsSecretStandardUserAnswer is a standard account's refusal of
+// `enterprise secret`: the elevated command to ask for, and that nothing
+// changed.
+func windowsSecretStandardUserAnswer(action string, opts *enterpriseSecretOptions) string {
+	if action == "status" {
+		return windowsManagedStandardUserViewAnswer("The protected credentials", "enterprise secret status")
+	}
+	command := "enterprise secret " + action
+	if opts != nil && managed.ValidCredentialName(opts.name) {
+		command += " --name " + opts.name
+	}
+	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
+		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
+}
+
 type windowsSecretState struct {
 	Name         string `json:"name"`
 	Present      bool   `json:"present"`
@@ -81,6 +97,13 @@ type windowsSecretState struct {
 // runEnterpriseSecret implements `enterprise secret` on Windows.
 func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) error {
 	if !windowsSecretIsElevated() {
+		if _, standalone := managedHostWindowsStandalone(); standalone {
+			// Every other standard-account refusal of an enterprise command
+			// on a managed computer exits 5 elevation_required with one
+			// sentence; this one exited 1603 (GAP-0931).
+			return withExitCode(&managedViewRefusal{code: "elevation_required", message: windowsSecretStandardUserAnswer(action, opts)},
+				enterprisestatus.WindowsExitAccessDenied)
+		}
 		return withExitCode(errors.New("run this command from an elevated Administrator prompt or the MDM agent"), windowsSecretExitFailure)
 	}
 	layout, err := windowsSecretLayout()
