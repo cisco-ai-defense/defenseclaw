@@ -1219,3 +1219,51 @@ func TestMigrateV9RefusesMissingProviderCA(t *testing.T) {
 		t.Fatalf("legacy overlay was removed: %v", err)
 	}
 }
+
+// A protected-* folder is still a mutable v8 pack. Its manifest does not
+// prove the rule files match a rebuilt base plus protections.
+func TestMigrateV9PinsEditedProtectedRulePack(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	pack := filepath.Join(dir, "policies", "guardrail", "protected-team", "strict")
+	if err := os.MkdirAll(filepath.Join(pack, "rules"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "defenseclaw-pack.json"),
+		[]byte(`{"version":1,"base":"strict","protection":["privacy-high-assurance"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pack, "rules", "operator.yaml"), []byte("operator rule"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := "config_version: 8\nguardrail:\n  rule_pack_dir: " + pack + "\nobservability: {}\n"
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: filepath.Join(dir, "config.yaml"), Source: []byte(source), DryRun: true,
+		RulePackDigest: func(got string) (string, error) {
+			if got != pack {
+				t.Fatalf("digest requested for %s, want %s", got, pack)
+			}
+			return strings.Repeat("a", 64), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Guardrail struct {
+			RulePack string `yaml:"rule_pack"`
+			CustomPacks map[string]struct {
+				Path string `yaml:"path"`
+				Digest string `yaml:"digest"`
+			} `yaml:"custom_packs"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	ref := doc.Guardrail.RulePack
+	if ref == "strict" || doc.Guardrail.CustomPacks[ref].Path != pack ||
+		doc.Guardrail.CustomPacks[ref].Digest != "sha256:"+strings.Repeat("a", 64) {
+		t.Fatalf("edited protected pack was not pinned: %s", result.Migrated)
+	}
+}

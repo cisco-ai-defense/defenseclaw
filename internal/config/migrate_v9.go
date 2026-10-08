@@ -1955,16 +1955,11 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 				dir, base, shadow, base)
 		}
 	}
+	// A protected-* folder is a concrete rule pack. Its manifest names the
+	// inputs that created it, but cannot prove its rules were not edited later.
+	// Pin the actual files so a local rule cannot disappear on upgrade.
 	if strings.HasPrefix(parent, "protected-") && v9BuiltinPacks[base] {
-		var manifest struct {
-			Protection []string `json:"protection"`
-		}
-		raw, err := os.ReadFile(filepath.Join(clean, "defenseclaw-pack.json"))
-		if err == nil && json.Unmarshal(raw, &manifest) == nil {
-			return base, manifest.Protection, nil
-		}
-		m.note("%s has no readable defenseclaw-pack.json; migrated as the %s pack without its protections", dir, base)
-		return base, nil, nil
+		m.note("%s is a composed rule pack; its current files are pinned as a custom pack to preserve local edits", dir)
 	}
 	if m.in.RulePackDigest == nil {
 		return "", nil, fmt.Errorf("custom rule pack %s needs a digest; run `defenseclaw-gateway config migrate`", dir)
