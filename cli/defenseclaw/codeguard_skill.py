@@ -392,6 +392,23 @@ _PRIOR_SKILL_SIGNATURES = frozenset(
 )
 
 
+def is_shipped_codeguard_skill(path: str) -> bool:
+    """True when *path* is an exact copy of a CodeGuard skill DefenseClaw shipped.
+
+    Admission trusts the codeguard first-party entry only for this content
+    (GAP-0419); without the packaged source only earlier releases match.
+    """
+    if not path or os.path.islink(path):
+        return False
+    signature = _dir_signature(path, skip_bytecode=True)
+    if signature is None:
+        return False
+    source = _find_skill_source()
+    if source is not None and signature == _dir_signature(source, skip_bytecode=True):
+        return True
+    return signature in _PRIOR_SKILL_SIGNATURES
+
+
 def _is_prior_codeguard_skill_dir(path: str) -> bool:
     """True when *path* is an exact copy of an earlier shipped CodeGuard skill.
 

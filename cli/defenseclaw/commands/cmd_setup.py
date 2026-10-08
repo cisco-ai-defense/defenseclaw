@@ -1766,8 +1766,8 @@ def _configure_llm(
             llm.api_key_env = env_name
         llm.base_url = click.prompt(
             "  LLM base URL (leave blank to use provider default)",
-            default=llm.base_url or "",
-            show_default=bool(llm.base_url),
+            default=llm.base_url if llm.provider == previous_provider else "",
+            show_default=bool(llm.base_url and llm.provider == previous_provider),
         )
 
     llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
@@ -1836,7 +1836,10 @@ def _configure_llm_non_interactive(
 
     llm = _target_llm_block(cfg, target_path)
     if provider is not None:
-        llm.provider = provider.strip().lower()
+        next_provider = provider.strip().lower()
+        if next_provider != (llm.provider or "").strip().lower() and base_url is None:
+            llm.base_url = ""
+        llm.provider = next_provider
     elif not llm.provider:
         llm.provider = "anthropic"
 
@@ -5430,7 +5433,10 @@ def _connector_not_detected_message(label: str) -> str:
     hook connector does not — that is a different failure than "the agent isn't
     installed".
     """
-    return f"{label}: connector was not detected locally; setup will write DefenseClaw config anyway."
+    return (
+        f"{label}: agent is not installed (connector was not detected locally); "
+        "setup will write DefenseClaw config, but it is not ready until the agent is installed."
+    )
 
 
 def _connector_contract_upgrade_guidance(
@@ -14249,6 +14255,13 @@ def _restart_services(
             connector_registration_verified = True
         else:
             ux.echo(f" ✗{f' ({diagnostic})' if diagnostic else ''}")
+            if "registration-launcher-digest-missing" in diagnostic:
+                # The native launcher is gone; setup cannot put it back (GAP-0378).
+                from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+                click.echo(
+                    f"  The DefenseClaw hook launcher (defenseclaw-hook.exe) is missing: {LAUNCHER_REINSTALL_STEP}."
+                )
             failed.append(f"{readiness_label} readiness")
 
     # Multi-connector global change: every active hook connector is affected

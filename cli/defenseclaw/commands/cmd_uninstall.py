@@ -211,6 +211,10 @@ class UninstallPlan:
     # does not remove the app, its login item or its background service; the
     # plan says how to.
     mac_app: str = ""
+    # quarantined are the skill and plugin copies DefenseClaw moved out of
+    # the agents' folders (data_dir/quarantine/<kind>/<connector>/<name>):
+    # often the only copy, which `--all` deletes with data_dir (GAP-0422).
+    quarantined: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -246,7 +250,12 @@ class _WindowsProcessWaiter:
 
 
 @click.command("uninstall")
-@click.option("--all", "wipe_data", is_flag=True, help="Also delete ~/.defenseclaw (audit log, config, secrets).")
+@click.option(
+    "--all",
+    "wipe_data",
+    is_flag=True,
+    help="Also delete ~/.defenseclaw (audit log, config, secrets, and the skills and plugins it quarantined).",
+)
 @click.option(
     "--binaries",
     is_flag=True,
@@ -715,7 +724,27 @@ def _build_plan(
             else ""
         ),
         hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
+        quarantined=_quarantined_copies(data_dir) if wipe_data and not preserve_data_entries else (),
     )
+
+
+def _quarantined_copies(data_dir: str) -> tuple[str, ...]:
+    """The quarantined skill and plugin copies under data_dir/quarantine."""
+    root = os.path.join(data_dir, "quarantine")
+    found: list[str] = []
+    for kind in ("skills", "plugins"):
+        try:
+            connectors = sorted(os.scandir(os.path.join(root, kind)), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for connector in connectors:
+            if not connector.is_dir(follow_symlinks=False):
+                continue
+            try:
+                found.extend(sorted(entry.path for entry in os.scandir(connector.path)))
+            except OSError:
+                continue
+    return tuple(found)
 
 
 def _local_observability_stack_file(data_dir: str) -> str:
@@ -1534,6 +1563,13 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         )
         ux.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
     ux.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    if plan.quarantined:
+        # GAP-0422: often the only copy of a skill or plugin; say so before it goes.
+        ux.echo(
+            f"      {ux.dim('·')} {len(plan.quarantined)} quarantined skill/plugin copies in "
+            f"{os.path.join(plan.data_dir, 'quarantine')}, which exist nowhere else. To keep one, restore it "
+            "first: defenseclaw skill restore NAME (or defenseclaw plugin restore NAME)"
+        )
     if plan.hook_temp_dirs:
         roots = sorted({os.path.dirname(path) for path in plan.hook_temp_dirs})
         ux.echo(

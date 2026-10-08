@@ -616,7 +616,34 @@ def _parse_source(data: str | bytes | Mapping[str, Any], source_name: str) -> di
         raise V8ConfigError(source_name, "$", "max-nodes", "reduce the configuration below 65536 nodes")
     if depth > MAX_YAML_DEPTH:
         raise V8ConfigError(source_name, "$", "max-depth", "reduce nesting depth below 33 levels")
+    drop_retired_scanner_keys(document)
     return document
+
+
+# Scanner keys that no scan path ever read and that config_version 9 dropped
+# (GAP-0295, GAP-0301). 1.0 pre-release builds accepted and wrote them, so a
+# source that still holds one loads with the key ignored, as Go
+# dropRetiredScannerKeys does. A Secure Client document keeps the closed
+# schema of main (issue #1092), which never had them. Remove after 1.1.
+_RETIRED_SCANNER_KEYS: tuple[tuple[str, ...], ...] = (
+    ("scanners", "mcp_scanner", "api"),
+    ("scanners", "mcp_scanner", "timeouts"),
+    ("scanners", "skill_scanner", "timeouts", "llm_s"),
+)
+
+
+def drop_retired_scanner_keys(document: dict[str, Any]) -> None:
+    """Remove the retired scanner keys from *document* in place."""
+    from defenseclaw import config_writer
+
+    if config_writer.secure_client_document(document):
+        return
+    for parts in _RETIRED_SCANNER_KEYS:
+        node: Any = document
+        for part in parts[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(parts[-1], None)
 
 
 def _preflight_python_structure(value: Any, source_name: str) -> None:
@@ -963,6 +990,7 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
 # v8 keys that config_version 9 replaced, as Go's rejectV9RemovedKeys names them:
 # (path of the removed key, what to use instead).
 _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("otel",), "observability.destinations"),
     (("skill_actions",), "admission.skill.actions"),
     (("mcp_actions",), "admission.mcp.actions"),
     (("plugin_actions",), "admission.plugin.actions"),

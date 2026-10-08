@@ -288,8 +288,23 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertIn("[mcp] Allowed 'ctx7' (claudecode).", result.output)
         self.assertIn("[mcp] Allowed 'ctx7' (codex).", result.output)
 
-        self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "claudecode"))
-        self.assertTrue(pe.is_allowed_for_connector("mcp", "ctx7", "codex"))
+        # GAP-0371: each rule is pinned to the configured server, so another
+        # server added later under the same name is scanned again.
+        rules = {(r.connector, r.url, r.transport) for r in self.app.cfg.asset_policy.mcp.allowed}
+        self.assertEqual(rules, {
+            ("claudecode", "https://claudecode.example/mcp", "sse"),
+            ("codex", "https://codex.example/mcp", "sse"),
+        })
+        self.assertIn("Pinned to: url https://claudecode.example/mcp (transport sse).", result.output)
+        from defenseclaw.enforce import asset_lists
+
+        def decide(url: str) -> str:
+            return asset_lists.list_decision(
+                self.app.cfg.asset_policy, "mcp", "ctx7", "claudecode", url=url, transport="sse",
+            )[0]
+
+        self.assertEqual(decide("https://claudecode.example/mcp"), "allow")
+        self.assertEqual(decide("https://other.example/mcp"), "")
         self.assertFalse(self.app.store.has_action("mcp", "ctx7", "install", "block", "codex"))
         self.assertFalse(pe.is_allowed("mcp", "ctx7"))
 
@@ -1448,6 +1463,39 @@ class TestMCPScan(MCPCommandTestBase):
             self.app.store.has_action("mcp", "ctx7", "install", "block", "hermes")
         )
 
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.commands.cmd_mcp._run_scan")
+    def test_scan_rejection_prints_the_pinned_allow_that_admits_it(self, mock_run_scan, mock_set):
+        # GAP-0372: the HIGH rejection offered only --skip-scan. It now prints
+        # the reviewed path, an allow pinned to this definition, and that
+        # allow admits the same definition only (GAP-0371).
+        import shlex
+
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+        mock_run_scan.return_value = ScanResult(
+            scanner="mcp-scanner", target="ctx7", timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="HIGH", title="coercive", scanner="mcp-scanner")],
+        )
+        npx_args = '["-y", "@upstash/context7-mcp"]'
+        rejected = self.invoke(["set", "ctx7", "--command", "npx", "--args", npx_args, "--connector", "codex"])
+        self.assertEqual(rejected.exit_code, 1, rejected.output)
+        allow_line = next(line for line in rejected.output.splitlines() if "defenseclaw mcp allow" in line)
+        allow_argv = shlex.split(allow_line.strip().replace('"<why>"', "reviewed"))[2:]
+        self.assertEqual(
+            allow_argv,
+            ["allow", "ctx7", "--command", "npx", "--args", '["-y", "@upstash/context7-mcp"]',
+             "--connector", "codex", "--reason", "reviewed"],
+        )
+        self.assertEqual(self.invoke(allow_argv).exit_code, 0)
+
+        admitted = self.invoke(["set", "ctx7", "--command", "npx", "--args", npx_args, "--connector", "codex"])
+        self.assertEqual(admitted.exit_code, 0, admitted.output)
+        self.assertIn("Allowed override for ctx7", admitted.output)
+        self.assertEqual(mock_run_scan.call_count, 1)
+        other = self.invoke(["set", "ctx7", "--command", "uvx", "--args", "other-mcp", "--connector", "codex"])
+        self.assertEqual(other.exit_code, 1, other.output)
+        self.assertEqual(mock_run_scan.call_count, 2)
+
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
     def test_unset_skips_unsupported_write_surface(self, mock_unset):
         # A connector can expose the server via its READ surface yet have no
@@ -1912,6 +1960,22 @@ class TestMcpListUnconfigured(MCPCommandTestBase):
         self.assertNotIn("connector=openclaw", result.output)
         self.assertNotIn("MCP Servers", result.output)
 
+    def test_unconfigured_policy_commands_edit_asset_policy(self):
+        # GAP-0269/GAP-0379: block worked before setup, but allow, unblock and
+        # list printed the setup hint and exited 0 while the rule stayed.
+        self._unconfigure()
+        self.assertEqual(self.invoke(["block", "demo-mcp", "--reason", "t"]).exit_code, 0)
+        listed = self.invoke(["list"])
+        self.assertIn("blocked  demo-mcp (every connector)", listed.output)
+        unblocked = self.invoke(["unblock", "demo-mcp"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("Unblocked 'demo-mcp'", unblocked.output)
+        self.assertEqual(self.app.cfg.asset_policy.mcp.denied, [])
+        allowed = self.invoke(["allow", "demo-mcp"])
+        self.assertIn("Allowed 'demo-mcp' (every connector)", allowed.output)
+        self.assertIn("this rule matches the name only", allowed.output)
+        self.assertEqual([r.name for r in self.app.cfg.asset_policy.mcp.allowed], ["demo-mcp"])
+
     def test_unconfigured_set_does_not_touch_phantom(self):
         # The mutator path shares the resolver, so `mcp set` with nothing
         # configured must also refuse rather than write to ~/.openclaw.
@@ -2104,6 +2168,25 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
 # ---------------------------------------------------------------------------
 # _parse_args
 # ---------------------------------------------------------------------------
+
+class TestMCPSetHelpExamples(unittest.TestCase):
+    def test_every_stdio_example_uses_a_scannable_launcher(self):
+        # GAP-0373/GAP-0406: the help showed uvx context7-mcp (no such PyPI
+        # package) and node server.js, which the scan refuses.
+        import shlex
+
+        from defenseclaw.commands.cmd_mcp import set_server
+        from defenseclaw.scanner.mcp import is_safe_stdio_scan_command
+
+        examples = [line.split() for line in set_server.help.splitlines() if "--command" in line]
+        self.assertTrue(examples)
+        for line in examples:
+            argv = shlex.split(" ".join(line))
+            command = argv[argv.index("--command") + 1]
+            args = _parse_args(argv[argv.index("--args") + 1]) if "--args" in argv else []
+            self.assertTrue(is_safe_stdio_scan_command(command, args), argv)
+        self.assertNotIn("context7-mcp\n", set_server.help)
+
 
 class TestParseArgs(unittest.TestCase):
     def test_json_array(self):

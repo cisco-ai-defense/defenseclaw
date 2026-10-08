@@ -82,7 +82,7 @@ func rejectRestored(w *InstallWatcher, evt InstallEvent) {
 		Verdict: "rejected", InstallAction: "block", FileAction: "quarantine", RuntimeAction: "block",
 	}
 	w.applyPostScanEnforcement(
-		context.Background(), enforce.NewPolicyEngine(w.store), out, evt, "skill",
+		context.Background(), out, evt, "skill",
 		&scanner.ScanResult{Scanner: "skill-scanner", Target: evt.Path}, "skill-scanner",
 	)
 }
@@ -112,7 +112,7 @@ func TestRescanBlockShorthandKeepsFiles(t *testing.T) {
 		Verdict: "rejected", InstallAction: "block", FileAction: "none", RuntimeAction: "block",
 	}
 	w.applyPostScanEnforcement(
-		context.Background(), enforce.NewPolicyEngine(w.store), out, evt, "skill",
+		context.Background(), out, evt, "skill",
 		&scanner.ScanResult{Scanner: "skill-scanner", Target: evt.Path}, "skill-scanner",
 	)
 	if _, err := os.Lstat(evt.Path); err != nil {

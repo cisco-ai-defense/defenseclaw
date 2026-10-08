@@ -134,6 +134,16 @@ func TestEffectivePolicyDigestMaterializesDefaults(t *testing.T) {
 	if withCodex(&yes) != withCodex(nil) {
 		t.Fatal("guardrail.connectors.codex.enabled: true changed the digest")
 	}
+	// The levels take any case (GAP-0329): high and HIGH are one policy.
+	level := func(global, codex string) string {
+		return build(func(c *config.Config) {
+			c.Guardrail.BlockAt = global
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {AlertAt: codex}}
+		})
+	}
+	if level("high", "medium") != level("HIGH", "MEDIUM") {
+		t.Fatal("guardrail.block_at high and HIGH (or a connector's alert_at medium and MEDIUM) gave two digests")
+	}
 }
 
 // A rebuild with the live digest is unchanged only while the Rego policy

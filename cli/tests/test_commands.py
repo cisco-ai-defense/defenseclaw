@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -366,7 +367,7 @@ class TestInitCommand(unittest.TestCase):
                 mock_dc.return_value = cfg
 
                 with patch("defenseclaw.config.config_path") as mock_cp:
-                    mock_cp.return_value = os.path.join(tmpdir, "config.yaml")
+                    mock_cp.return_value = Path(tmpdir) / "config.yaml"
 
                     result = _invoke(init_cmd, ["--skip-install"])
                     self.assertEqual(result.exit_code, 0)

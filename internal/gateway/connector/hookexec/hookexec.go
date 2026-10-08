@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1199,10 +1200,8 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
 	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
-		// Claude Code and Codex do not show the stderr of a hook that exits 0,
-		// so the shell hooks print this systemMessage (GAP-0037); the native
-		// Windows hook printed nothing and the call ran silently (GAP-0480).
-		return emit(opts.Stdout, failResult{body: `{"systemMessage":` + mustJSONString(notice) + `}`})
+		fmt.Fprintln(opts.Stdout, notice)
+		return 0
 	}
 	return emitHookResult(opts, sp, sp.openAllow)
 }
@@ -1224,37 +1223,39 @@ func coldStartFailureReason(err error) string {
 }
 
 // perUserGatewayDownNotice is the systemMessage a fail-open per-user Claude
-// Code or Codex hook shows when this account gateway is down, for the events
-// those agents display it on.
+// Code or Codex hook prints when the gateway of this account is down. Those
+// agents do not show stderr after exit 0, so an observe-mode agent ran
+// unguarded with no message (GAP-0377). The Unix hooks print the same notice
+// (defenseclaw_unreachable_notice_json) on the same events.
 func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}
+	var events []string
 	switch sp.connector {
 	case "claudecode":
-		switch strings.TrimSpace(opts.Event) {
-		case "SessionStart", "UserPromptSubmit", "PreToolUse":
-		default:
-			return ""
-		}
+		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
 	case "codex":
-		switch strings.TrimSpace(opts.Event) {
-		case "SessionStart", "PreToolUse":
-		default:
-			return ""
-		}
+		events = []string{"SessionStart", "PreToolUse"}
 	default:
 		return ""
 	}
+	if !slices.ContainsFunc(events, func(event string) bool { return strings.EqualFold(event, strings.TrimSpace(opts.Event)) }) {
+		return ""
+	}
+	text := ""
 	switch {
 	case reason == "gateway unreachable":
-		return "DefenseClaw is not checking this session: the gateway is not running or not answering. " +
-			"Check it with `defenseclaw-gateway status`, or start it with `defenseclaw-gateway start`."
+		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
+			"Run `defenseclaw-gateway start` to resume protection."
 	case strings.HasPrefix(reason, coldStartFailedReason):
-		return "DefenseClaw is not checking this session: the gateway is not running and the hook could not " +
-			"start it. Run `defenseclaw-gateway start` to resume protection."
+		// The logged reason carries the cause of the failed start (GAP-0480).
+		text = "DefenseClaw is not checking this session: the gateway could not be started. " +
+			"Run `defenseclaw-gateway start` to see why."
+	default:
+		return ""
 	}
-	return ""
+	return `{"systemMessage":` + mustJSONString(text) + `}`
 }
 
 // unreachableLead starts the unreachable line. Another account's process on
@@ -2033,7 +2034,7 @@ func defaultHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
+			DialContext: (&net.Dialer{Timeout: hookDialTimeout}).DialContext,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse

@@ -131,6 +131,10 @@ type MCPScanner struct {
 	Config         config.MCPScannerConfig
 	LLM            config.LLMConfig
 	CiscoAIDefense config.CiscoAIDefenseConfig
+	// RulePack is the guardrail rule pack the Windows scanner runtime lays
+	// over the server definition (GAP-0296). The Python CLI resolves its own
+	// from config.yaml, so only the runtime command line carries it.
+	RulePack MCPRulePack
 }
 
 // mcpScannerBinary returns the executable to invoke, coercing the
@@ -177,7 +181,15 @@ func (s *MCPScanner) commandArgs(target string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scanner: %s settings for the scanner runtime: %w", s.Name(), err)
 	}
-	return []string{"mcp-scan", "--settings", settings, target}, nil
+	args := []string{"mcp-scan", "--settings", settings}
+	if s.RulePack.Dir != "" {
+		pack, err := s.RulePack.runtimeArg()
+		if err != nil {
+			return nil, fmt.Errorf("scanner: %s rule pack for the scanner runtime: %w", s.Name(), err)
+		}
+		args = append(args, "--rule-pack", pack)
+	}
+	return append(args, target), nil
 }
 
 // buildArgs builds the argument vector for “defenseclaw mcp scan“.

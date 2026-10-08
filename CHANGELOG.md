@@ -33,6 +33,7 @@ stopped`. Nothing is changed; use the install command above.
 
 ### Breaking changes
 
+- The retired top-level `otel:` configuration moves to `observability.destinations` in config_version 9.
 - `install.sh` and `install.ps1` install, upgrade, repair and roll back the
   same way on every platform. Each run keeps the replaced install in
   `~/.defenseclaw/previous` and restores it automatically if the upgrade, the

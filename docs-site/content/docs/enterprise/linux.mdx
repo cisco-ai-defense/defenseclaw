@@ -471,8 +471,14 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
-A per-user gateway that was already running keeps running until it is
-stopped. The install, `status` and `verify` name each such account with the
+A per-user gateway that is still running holds the managed gateway port,
+`127.0.0.1:18970`, unless its user moved it to another port. The install then
+stops before it changes anything: it fails with `api_port_held`, which names
+the process and gives the `kill` command (the package install still completes,
+and `last-package-result.json` has the error). Stop that gateway, or move it to
+another port, then run `defenseclaw-gateway enterprise linux ensure --from-package`.
+A per-user gateway on another port keeps running until it is stopped. The
+install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.
 
 ## Remove
@@ -504,6 +510,10 @@ install it again) and run `uninstall --purge`, or delete those files by
 hand. If uninstall reports an
 error, it keeps the deployment record, the config and the state, so you can
 fix the cause and rerun it.
+After an uninstall and after a reinstall, ask users to restart their agents:
+an agent session left open through both runs without DefenseClaw until it
+restarts, and the `ensure` result, `status` and `verify` name it with the
+`agent_sessions_restart_required` warning.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 On a host installed from the package, `uninstall` leaves the package's
@@ -512,9 +522,9 @@ binaries and units in place, so dpkg or rpm still lists
 
 | Package command | Effect |
 | --- | --- |
-| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
+| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go, also after a package install that failed and rolled back; each user keeps `~/.defenseclaw`. |
 | `apt purge defenseclaw-enterprise` | The same, and it also deletes what a failed uninstall left of `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise` and `/var/log/defenseclaw`. |
-| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
+| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go, also after a package install that failed and rolled back; each user keeps `~/.defenseclaw`. |
 
 If the package's `uninstall` reports a problem, its result stays in
 `/var/lib/defenseclaw-enterprise/last-package-result.json`.

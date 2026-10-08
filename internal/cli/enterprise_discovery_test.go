@@ -386,6 +386,15 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	scanGroup.AddCommand(&cobra.Command{Use: "code"}, &cobra.Command{Use: "skill", Annotations: scanSkillCmd.Annotations},
 		&cobra.Command{Use: "mcp", Annotations: scanMCPCmd.Annotations}, &cobra.Command{Use: "plugin", Annotations: scanPluginCmd.Annotations})
 	root.AddCommand(policyGroup, scanGroup)
+	// Nor the config group, audit export --db, and the newer help of
+	// rulepack and sandbox setup --no-mounts (GAP-0270).
+	configGroup := &cobra.Command{Use: "config", Annotations: configCmd.Annotations}
+	export := &cobra.Command{Use: "export", Long: auditExportCmd.Long, Annotations: auditExportCmd.Annotations}
+	db := *auditExportCmd.Flags().Lookup("db")
+	export.Flags().AddFlag(&db)
+	rulePack := &cobra.Command{Use: "rulepack", Long: rulePackCmd.Long, Annotations: rulePackCmd.Annotations}
+	sandboxSetup := newSandboxSetupCmd()
+	root.AddCommand(configGroup, export, rulePack, sandboxSetup)
 	secureClientHost = func() bool { return false }
 	keepCommandTreeOfMainOnSecureClient(root)
 	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 {
@@ -409,6 +418,12 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	}
 	if got := policyGroup.Commands()[0].Short; got != "Display the current OPA data.json policy configuration" {
 		t.Fatalf("Secure Client policy show help = %q, want the line of main", got)
+	}
+	if !configGroup.Hidden || export.Flag("db") != nil || strings.Contains(export.Long, "--db") ||
+		!strings.HasSuffix(rulePack.Long, "pointing guardrail.rule_pack_dir at it.") ||
+		sandboxSetup.Flag("no-mounts").Usage != "leave bind mounts off (Linux); every run then works on a copy" {
+		t.Fatalf("Secure Client config hidden=%v, export --db %v, help %q / %q / %q: want the tree of main",
+			configGroup.Hidden, export.Flag("db"), export.Long, rulePack.Long, sandboxSetup.Flag("no-mounts").Usage)
 	}
 
 	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))

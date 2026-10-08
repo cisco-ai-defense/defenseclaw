@@ -86,14 +86,56 @@ def test_help_lists_the_permanent_flags(tmp_path: Path) -> None:
         assert flag in result.stdout
 
 
-def test_unknown_flags_are_ignored_not_fatal(tmp_path: Path) -> None:
+def test_an_unknown_option_stops_and_value_options_take_the_equals_form(tmp_path: Path) -> None:
+    # GAP-0361: a typo or the --name=value form was ignored with a warning,
+    # so an unattended install went on without the option and exited 0.
     empty = tmp_path / "assets"
     empty.mkdir()
+    script = _stamped(tmp_path)
 
-    result = _run([str(_stamped(tmp_path)), "--local", str(empty), "--from-the-future"], tmp_path)
+    typo = _run([str(script), "--local", str(empty), "--quickstrat"], tmp_path)
+    assert typo.returncode == 2
+    assert "Unknown option: --quickstrat; nothing was changed" in typo.stderr
+    assert "checksums.txt" not in typo.stdout + typo.stderr
 
-    assert "Ignoring unknown option: --from-the-future" in result.stdout + result.stderr
-    assert "checksums.txt" in result.stdout + result.stderr  # got past argument parsing
+    equals = _run([str(script), f"--local={empty}", "--connector=claudecode", "--quickstart-mode=action"], tmp_path)
+    assert "Unknown option" not in equals.stdout + equals.stderr
+    assert "checksums.txt" in equals.stdout + equals.stderr  # got past argument parsing
+
+    # The copy defenseclaw upgrade runs accepts a newer client's flags.
+    upgrade_copy = tmp_path / "defenseclaw-upgrade-x1"
+    upgrade_copy.mkdir()
+    shutil.copy(script, upgrade_copy / "install.sh")
+    newer = _run([str(upgrade_copy / "install.sh"), "--local", str(empty), "--from-the-future"], tmp_path)
+    assert "Ignoring unknown option: --from-the-future" in newer.stdout + newer.stderr
+    assert "checksums.txt" in newer.stdout + newer.stderr
+
+
+@pytest.mark.parametrize(("answer", "rc", "expected"), [("ClaudeCode", 0, "Connector: claudecode"), ("99", 2, "No agent picked")])
+def test_the_agent_prompt_takes_a_name_and_never_swaps_an_unknown_answer(
+    tmp_path: Path, answer: str, rc: int, expected: str
+) -> None:
+    # GAP-0333: claudecode or 99 at the prompt installed codex without a word.
+    tty = tmp_path / "tty"
+    tty.write_text(answer + "\n", encoding="utf-8")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "pick.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + text[text.index("readonly CONNECTOR_CHOICES=") : text.index("\n", text.index("readonly CONNECTOR_CHOICES="))]
+        + '\nBOLD="" NC="" STAGING="/nonexistent" UV_DIR_NEW="" UV_INSTALLED=""\n'
+        + 'step() { :; }\nok() { echo "$*"; }\nwarn() { echo "$*"; }\nerr() { echo "$*" >&2; }\ndrop_new_uv() { :; }\n'
+        + text[text.index("usage_error() {") : text.index("\n", text.index("usage_error() {")) + 1]
+        + _install_sh_functions("read_tty_line", "connector_choice", "pick_connector").replace("/dev/tty", str(tty))
+        + "pick_connector\n",
+        encoding="utf-8",
+    )
+
+    result = _run([str(script)], tmp_path)
+
+    assert result.returncode == rc, result.stdout + result.stderr
+    assert expected in result.stdout + result.stderr
+    assert "Connector: codex" not in result.stdout
 
 
 def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:
@@ -732,6 +774,8 @@ def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> Non
         # GAP-2481: after 'uninstall --binaries' the guardrail is off, and a
         # gateway start alone does not guard the hooks again.
         assert "Turn it back on with:" in text and "defenseclaw setup guardrail" in text, path
+        # GAP-0384: a port another process holds fails that start too; say so.
+        assert '"check-api-port", "--installed"' in text or "check-api-port --installed" in text, path
 
 _GUARDRAIL_CONFIGS = {
     # What 'uninstall --binaries' and 'setup guardrail --disable' save.
@@ -844,7 +888,7 @@ def _uv_bootstrap(tmp_path: Path, free_kb: int, cache_mb: int | None = None) -> 
         'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ninfo() { echo "info: $*"; }\n'
         "has() { command -v \"$1\" >/dev/null 2>&1; }\n"
         f'OS=darwin ARCH=arm64 UV_VERSION=0 DEFENSECLAW_HOME="{data_dir}" BIN_DIR="{bin_dir}"\n'
-        f'STAGING="{data_dir}/.staging" VENV="{data_dir}/.venv" NOT_DATA=".venv .uv .staging"\n'
+        f'STAGING="{data_dir}/.staging" VENV="{data_dir}/.venv" NOT_DATA=".venv .uv .staging .failed-* backups"\n'
         f'PATH="{fake}:/usr/bin:/bin"\nunset UV_CACHE_DIR UV_PYTHON_INSTALL_DIR\n'
         + install_uv
         + preflight
@@ -925,12 +969,17 @@ def test_an_upgrade_counts_the_rollback_copy_before_staging_or_stopping(tmp_path
     data_dir = tmp_path / "home" / ".defenseclaw"
     (data_dir / ".venv").mkdir(parents=True)
     (data_dir / "audit.db").write_bytes(b"x" * (3 * 1024 * 1024))
+    failed = data_dir / ".failed-20261007T191408"
+    failed.mkdir()
+    (failed / "venv").write_bytes(b"x" * (2 * 1024 * 1024))
     proc = _uv_bootstrap(tmp_path, free_kb=450 * 1024, cache_mb=700)
 
     assert proc.returncode == 1, proc.stdout
     assert "the upgrade needs about 503 MB (400 MB for the new version and 103 MB for a rollback copy" in proc.stdout
     assert "450 MB is free" in proc.stdout and "Free at least 53 MB" in proc.stdout
-    assert f"The largest item is {data_dir}/audit.db (3 MB)" in proc.stdout
+    # GAP-0389: a 3 MB item is no answer to a 53 MB shortfall; what can go is named.
+    assert "The largest item" not in proc.stdout
+    assert f"You can remove {failed} (" in proc.stdout and "MB), the copy a failed install kept for" in proc.stdout
     assert "nothing was changed" in proc.stdout
 
 
@@ -980,6 +1029,27 @@ def test_a_failed_python_build_removes_the_uv_it_installed_and_names_the_kept_ca
     assert (data_dir / ".uv").is_dir()
     assert f"uv's download cache {data_dir}/.uv (" in proc.stdout and "MB) is kept" in proc.stdout
     assert "nothing was changed" not in proc.stdout
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes any folder")
+def test_an_unwritable_install_folder_is_refused_before_anything_changes(tmp_path: Path) -> None:
+    # GAP-0381, GAP-0420: a read-only ~/.local(/bin) failed the swap after the
+    # gateway stopped, or a first install only said uv could not be installed,
+    # and left ~/.defenseclaw/logs behind.
+    empty = tmp_path / "assets"
+    empty.mkdir()
+    local = tmp_path / "home" / ".local"
+    local.mkdir(parents=True)
+    local.chmod(0o555)
+    try:
+        result = _run([str(_stamped(tmp_path)), "--local", str(empty), "--yes"], tmp_path)
+    finally:
+        local.chmod(0o755)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{local} is not writable by" in result.stderr
+    assert "then rerun; nothing was changed" in result.stderr
+    assert not (tmp_path / "home" / ".defenseclaw").exists()
 
 
 def test_an_upgrade_names_a_port_another_account_holds_before_building(tmp_path: Path) -> None:
@@ -1094,6 +1164,85 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     kept = list((dc_home / "backups").glob("audit-history-0.8.10-*/audit.db"))
     assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "0.x history", out
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
+
+
+def test_the_cli_says_an_install_is_running_during_the_swap(tmp_path: Path) -> None:
+    # GAP-0391: while the swap moved the venv, a second `defenseclaw rollback`
+    # (or any command after a killed run) failed with "command not found".
+    bin_dir, snap = tmp_path / "bin", tmp_path / "snap"
+    (snap / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    (bin_dir / "defenseclaw").symlink_to(tmp_path / "venv" / "bin" / "defenseclaw")
+    (snap / "bin" / "defenseclaw").symlink_to(tmp_path / "venv" / "bin" / "defenseclaw")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "swap.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_LINKS", "readonly BUSY_")))
+        + f'BIN_DIR="{bin_dir}" INSTALL_AGAIN="bash install.sh --local /assets"\n'
+        + _install_sh_functions("write_busy_shim", "restore_links")
+        + 'write_busy_shim\n"${BIN_DIR}/defenseclaw" --version || echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+
+    during = _run([str(script)], tmp_path)
+    after = subprocess.run([str(bin_dir / "defenseclaw")], capture_output=True, text=True, check=False)
+
+    assert "a DefenseClaw install is running (pid " in during.stderr and "rc=1" in during.stdout, during
+    assert "stopped before it finished; run the installer again to finish or undo it: bash install.sh" in after.stderr
+    restore = tmp_path / "restore.sh"
+    restore.write_text(script.read_text(encoding="utf-8").replace("write_busy_shim\n", f'restore_links "{snap}"\n'))
+    _run([str(restore)], tmp_path)
+    assert (bin_dir / "defenseclaw").is_symlink()
+
+
+def test_an_undone_install_drops_what_it_staged() -> None:
+    # GAP-0388: after a rolled-back upgrade .staging (722 MB) and the new .uv
+    # (478 MB) stayed next to the .failed-<time> copy, and only that was named.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    swap = text[text.index("if ! swap_in; then") : text.index("\nfinish_swap\n")]
+    restores = swap.count("restore_snapshot\n")
+    assert restores == 2 and swap.count("restore_snapshot\n    drop_staging\n") + swap.count(
+        "restore_snapshot\n        drop_staging\n"
+    ) == restores
+    body = text[text.index("drop_staging() {") : text.index("\n}\n", text.index("drop_staging() {"))]
+    assert 'rm -rf "${STAGING}"' in body and "drop_new_uv" in body
+
+
+def test_a_full_disk_does_not_stop_the_restore_of_the_previous_install(tmp_path: Path) -> None:
+    # GAP-0375: with no room for the .failed-<time> copy, its mkdir ended the
+    # restore under set -e: no CLI, no gateway, and no word of what to do.
+    home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = home / "previous.new"
+    for path in (snap / "bin", snap / "venv" / "bin", snap / "data", home / ".venv" / "bin", bin_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    (snap / "data" / "config.yaml").write_text("old\n", encoding="utf-8")
+    (home / "config.yaml").write_text("new\n", encoding="utf-8")
+    (snap / "venv" / "OLD").write_text("", encoding="utf-8")
+    (snap / "bin" / "defenseclaw-gateway").write_text("old gateway", encoding="utf-8")
+    (snap / "bin" / "defenseclaw").symlink_to(home / ".venv" / "bin" / "defenseclaw")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + 'info() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\nerr() { echo "err: $*"; }\nrestart_old() { :; }\n'
+        # The disk is full: a new folder cannot be made.
+        + 'mkdir() { case "$*" in *.failed-*) echo "mkdir: No space left on device" >&2; return 1 ;; esac; command mkdir "$@"; }\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" SNAP="{snap}" VENV="{home}/.venv" INSTALLER_DIR="{home}/installer"\n'
+        + 'APP_PATH="" VERSION=1.0.1 PREV_VERSION=1.0.0\nrestore_snapshot\necho "done"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert out.rstrip().endswith("done"), out
+    assert "warn: There was no room to keep the failed 1.0.1 install for troubleshooting, so it was deleted" in out
+    assert (home / ".venv" / "OLD").exists() and (home / "config.yaml").read_text(encoding="utf-8") == "old\n"
+    assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "old gateway"
+    assert (bin_dir / "defenseclaw").is_symlink() and not snap.exists()
+    assert not list(home.glob(".failed-*"))
 
 
 def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> None:

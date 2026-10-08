@@ -468,8 +468,9 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     (POST /policy/reload) so the change takes effect immediately. If the
     gateway isn't running, it loads the policy when it next starts.
     """
-    before = _restart_only_config(app.cfg)
-    path = _activate_policy(app, name)
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    before = _restart_only_config(app.cfg) if secure_client else ()
+    path, restart_keys = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
     # One threshold model: the policy's guardrail levels (guardrail.block_at /
     # alert_at) apply to hook tool calls and prompts as well as the proxy.
@@ -484,9 +485,12 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     )
     if not reload_gateway:
         return
-    _reload_and_report(
-        app, name, needs_restart=_restart_only_config(app.cfg) != before, audit_skipped=audit_skipped
-    )
+    # The gateway applies a preset hot from the new configuration generation
+    # (spec section 4); only a key the writer reports as restart-required
+    # restarts it (GAP-0056). Secure Client keeps the restart of main for
+    # the sections its gateway reads at start (issue #1092).
+    needs_restart = _restart_only_config(app.cfg) != before if secure_client else bool(restart_keys)
+    _reload_and_report(app, name, needs_restart=needs_restart, audit_skipped=audit_skipped)
 
 
 def _log_policy_action(
@@ -520,12 +524,11 @@ def _log_policy_action(
 
 
 def _restart_only_config(cfg) -> tuple[str, ...]:  # noqa: ANN001 - Config, imported lazily
-    """The config.yaml sections a policy writes that the gateway cannot hot-reload.
+    """The sections a policy writes that a Secure Client gateway reads at start.
 
-    The gateway's config watcher refuses a change to ``watch`` or (outside
-    managed installs) ``cisco_ai_defense`` with "config reload requires
-    gateway restart", so a policy change that touches them needs a restart
-    to take effect. ``admission`` and ``guardrail`` reload hot.
+    On Secure Client ``policy activate`` keeps the restart of main for a
+    change to ``watch`` or ``cisco_ai_defense`` (issue #1092); every other
+    gateway reloads them hot.
     """
     return tuple(repr(getattr(cfg, section, None)) for section in ("watch", "cisco_ai_defense"))
 
@@ -758,13 +761,14 @@ def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, 
         cfg.guardrail.cisco_trust_level = "" if level == "full" else level
 
 
-def _activate_policy(app: AppContext, name: str) -> str:
+def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
     """Apply the named policy to config.yaml in one config write.
 
     A named policy is a preset: its admission, guardrail threshold, watch,
     Cisco AI Defense and webhook settings become config keys. Returns the
-    resolved source path. Raises ``SystemExit(1)`` when the policy can't
-    be found.
+    resolved source path and the changed keys the writer reports as
+    restart-required. Raises ``SystemExit(1)`` when the policy can't be
+    found.
     """
     path = _find_policy(app, name)
     if not path:
@@ -845,10 +849,10 @@ def _activate_policy(app: AppContext, name: str) -> str:
                         f"Skipped webhook {label}: a webhook with that name or URL is already configured"
                     )
             app.cfg.webhooks = merged
-    app.cfg.save()
+    result = app.cfg.save()
     for note in webhook_notes:
         click.echo(f"  {note}")
-    return path
+    return path, list(getattr(result, "restart_required", None) or [])
 
 
 # ---------------------------------------------------------------------------

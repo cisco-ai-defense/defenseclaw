@@ -87,8 +87,9 @@ def _enterprise_profile(cfg) -> str:
     try:
         import yaml
 
-        with open(config_path()) as handle:
-            raw = yaml.safe_load(handle) or {}
+        from defenseclaw.config import read_config_text
+
+        raw = yaml.safe_load(read_config_text(config_path())) or {}
         enterprise = raw.get("enterprise") if isinstance(raw, dict) else None
         if isinstance(enterprise, dict):
             configured = str(enterprise.get("profile") or "").strip().lower()
@@ -457,8 +458,14 @@ def status(app: AppContext, as_json: bool) -> None:
     # live counters from its identity-bound status snapshot). The same code
     # path drives a single-connector install (one row) and a fan-out install
     # (N rows), so the output never branches on connector count.
-    health = _fetch_runtime_bound_health(client, cfg)
-    if health is not None:
+    health = None if config_problems else _fetch_runtime_bound_health(client, cfg)
+    if config_problems:
+        _status_row(
+            "Sidecar",
+            ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
+        )
+        _print_agents(cfg, sidecar_down=True)
+    elif health is not None:
         from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
 
         if _gateway_runs_replaced_binary(cfg):
@@ -485,7 +492,7 @@ def status(app: AppContext, as_json: bool) -> None:
             "Health check:  defenseclaw doctor",
             "Subsystems:    defenseclaw-gateway status",
         )
-    else:
+    elif not config_problems:
         try:
             from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
 
@@ -985,17 +992,18 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
 def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
     """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
     try:
-        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
 
         problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
         return ""
+    step = repair_command(connector, problems[0])
     return (
         " — "
         + ux._style("DEGRADED", fg="red", bold=True)
-        + ux.dim(f" ({problems[0]}; run `{setup_command(connector)}`)")
+        + ux.dim(f" ({problems[0]}; " + (step if step.startswith("run ") else f"run `{step}`") + ")")
     )
 
 
@@ -1300,6 +1308,14 @@ def _print_llm_judge(health: dict | None) -> None:
     state = str(details.get("judge_state"))
     total = details.get("judge_recent_calls", 0)
     failed = details.get("judge_failed_calls", 0)
+    if state == "unavailable":
+        # The enabled judge could not start (GAP-0383).
+        reason = str(details.get("judge_unavailable_reason") or "it could not start").strip()
+        _status_row(
+            "LLM judge",
+            ux._style(f"not running: {reason}; only the rules decide; run defenseclaw doctor", fg="yellow"),
+        )
+        return
     if state == "ok":
         _status_row("LLM judge", ux._style(f"working (last {total} call(s) completed)", fg="green"))
         return
@@ -1707,7 +1723,10 @@ def _status_payload(app) -> dict:
     except Exception:
         health = None
     running = health is not None
-    payload["sidecar"] = {"running": running}
+    if getattr(app, "config_problems", None):
+        payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
+    else:
+        payload["sidecar"] = {"running": running}
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

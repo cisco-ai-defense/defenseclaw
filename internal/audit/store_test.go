@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1251,5 +1252,37 @@ func TestTargetSnapshotScannerFingerprintColumn(t *testing.T) {
 	}
 	if row.ScanID != "scan-2" {
 		t.Errorf("ScanID = %q, want scan-2", row.ScanID)
+	}
+}
+
+// GAP-0325: a store whose audit.db was deleted, or deleted and created
+// again, while it ran reports that it no longer writes to the file on disk.
+func TestDatabaseFileReplacedAfterDeleteAndRecreate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to delete an open database file")
+	}
+	path := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if store.DatabaseFileReplaced() {
+		t.Fatal("a freshly opened store reports a replaced file")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if !store.DatabaseFileReplaced() {
+		t.Fatal("a deleted audit.db is not reported")
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !store.DatabaseFileReplaced() {
+		t.Fatal("a recreated audit.db is not reported")
 	}
 }

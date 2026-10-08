@@ -325,6 +325,34 @@ func TestRunEnterpriseSetupHelpMatchesEmbeddedFlavor(t *testing.T) {
 	}
 }
 
+// GAP-0353: the standalone Setup printed the Secure Client Setup name and
+// --action flags for /?, and "unexpected positional argument BOGUS=1" for an
+// unknown property, while windows.mdx documents /ensure NAME=value.
+func TestStandaloneSetupUsageAndErrorsSpeakTheDocumentedSyntax(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	var usage, stderr bytes.Buffer
+	if code := runEnterpriseSetup([]string{"/?"}, &usage, &stderr); code != 0 {
+		t.Fatalf("help exit=%d", code)
+	}
+	for _, want := range []string{standaloneSetupArtifactName + " /ensure [NAME=value ...]", "CONFIG=", "MANIFEST=", "JSON=1", "NOSTART=1",
+		"PURGE=1", "TIMEOUTSECONDS=", "ALLOWEDSIGNERS=", "ATTESTCLAUDEEFFECTIVEPOLICY=1"} {
+		if !strings.Contains(usage.String(), want) {
+			t.Errorf("standalone usage lacks %q:\n%s", want, usage.String())
+		}
+	}
+	if strings.Contains(usage.String(), enterpriseSetupArtifactName) || strings.Contains(usage.String(), "--action") {
+		t.Errorf("standalone usage names the Secure Client Setup or --action:\n%s", usage.String())
+	}
+	var stdout bytes.Buffer
+	stderr.Reset()
+	runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=0"}, &stdout, &stderr)
+	if got := stderr.String(); !strings.HasPrefix(got, standaloneSetupArtifactName+": unknown property BOGUS; run ") || !strings.Contains(got, " /? ") {
+		t.Fatalf("unknown property error = %q", got)
+	}
+}
+
 func TestEmbeddedSetupFlavorDefaultsToSecureClient(t *testing.T) {
 	// The source tree embeds only the placeholder, which is not a
 	// standalone manifest.

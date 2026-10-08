@@ -52,7 +52,7 @@ class _FakeConfig:
         self.asset_policy = AssetPolicyConfig()
         self.admission = AdmissionConfig()
         self.admission.plugin.first_party_allow_list = [
-            AdmissionFirstParty(name="defenseclaw", source_path_contains=[".openclaw/extensions/defenseclaw"]),
+            AdmissionFirstParty(name="acme-plugin", source_path_contains=[".openclaw/extensions/acme-plugin"]),
         ]
         self.deployment_mode = ""
 
@@ -94,8 +94,8 @@ class TestEvaluateAdmissionAllowed(_StoreTestBase):
         self.assertEqual(d.source, "manual-allow")
 
     def test_first_party_allow_bypasses_scan(self):
-        d = evaluate_admission(self.pe, target_type="plugin", name="defenseclaw",
-                               source_path="/home/u/.openclaw/extensions/defenseclaw")
+        d = evaluate_admission(self.pe, target_type="plugin", name="acme-plugin",
+                               source_path="/home/u/.openclaw/extensions/acme-plugin")
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
 
@@ -468,13 +468,13 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
 class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
     # F-0141/F-0902: markers must pin the asset's own leaf directory anchored
     # to a DefenseClaw-owned home; the base fixture pins
-    # ``.openclaw/extensions/defenseclaw``.
+    # ``.openclaw/extensions/acme-plugin``.
 
     def test_matching_path_allows(self):
         # F-1221: the legitimate home-anchored install path still bypasses scan.
         d = evaluate_admission(
-            self.pe, target_type="plugin", name="defenseclaw",
-            source_path="/home/user/.openclaw/extensions/defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
+            source_path="/home/user/.openclaw/extensions/acme-plugin",
         )
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
@@ -484,7 +484,7 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
         # ``.openclaw/extensions`` parent (the old broad marker) must NOT be
         # blessed — the marker now pins the ``defenseclaw`` leaf.
         d = evaluate_admission(
-            self.pe, target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="/home/user/.openclaw/extensions/evil",
         )
         self.assertEqual(d.verdict, "scan")
@@ -496,8 +496,8 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
         # dir in a user-writable location must NOT inherit the first-party
         # allow even though the component subsequence matches.
         d = evaluate_admission(
-            self.pe, target_type="plugin", name="defenseclaw",
-            source_path="/tmp/attacker/.openclaw/extensions/defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
+            source_path="/tmp/attacker/.openclaw/extensions/acme-plugin",
         )
         # Anchored to a real (if attacker-named) ``.openclaw`` home component —
         # this is still considered first-party-owned by the home marker.
@@ -506,7 +506,7 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
 
     def test_non_matching_path_falls_through(self):
         d = evaluate_admission(
-            self.pe, target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="/home/user/random/plugins/something",
         )
         self.assertEqual(d.verdict, "scan")
@@ -514,7 +514,7 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
 
     def test_temp_dir_falls_through(self):
         d = evaluate_admission(
-            self.pe, target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="/tmp/dclaw-plugin-fetch-abc123/defenseclaw",
         )
         self.assertEqual(d.verdict, "scan")
@@ -522,7 +522,7 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
 
     def test_empty_path_falls_through(self):
         d = evaluate_admission(
-            self.pe, target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="",
         )
         self.assertEqual(d.verdict, "scan")
@@ -552,15 +552,17 @@ class TestBundledPolicyProvenance(unittest.TestCase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
-    def test_f0902_legitimate_home_anchored_plugin_allowed(self):
+    def test_builtin_plugin_name_alone_requires_scan(self):
+        # GAP-0419: a plugin folder named defenseclaw is not trusted by name;
+        # the gateway recognizes DefenseClaw's own plugin by its bytes.
         d = evaluate_admission(
             self._pe(),
             target_type="plugin",
             name="defenseclaw",
             source_path="/home/u/.openclaw/extensions/defenseclaw",
         )
-        self.assertEqual(d.verdict, "allowed")
-        self.assertEqual(d.source, "policy-allow")
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
 
     def test_f0902_spoofed_sibling_skills_path_scans(self):
         # The bundled skill marker must no longer ship bare ``skills/codeguard``
@@ -574,15 +576,25 @@ class TestBundledPolicyProvenance(unittest.TestCase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
-    def test_f0902_legitimate_home_anchored_skill_allowed(self):
-        d = evaluate_admission(
-            self._pe(),
-            target_type="skill",
-            name="codeguard",
-            source_path="/home/u/.openclaw/workspace/skills/codeguard",
-        )
-        self.assertEqual(d.verdict, "allowed")
-        self.assertEqual(d.source, "policy-allow")
+    def test_codeguard_entry_trusts_only_the_shipped_skill(self):
+        # GAP-0419: any folder named codeguard under a skills folder used to
+        # skip the scan; only an exact copy of the shipped skill does now.
+        import shutil
+        import tempfile
+
+        from defenseclaw.paths import bundled_codeguard_dir
+
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".openclaw", "workspace", "skills", "codeguard")
+            shutil.copytree(bundled_codeguard_dir(), path, ignore=shutil.ignore_patterns("__pycache__"))
+
+            def verdict():
+                return evaluate_admission(self._pe(), target_type="skill", name="codeguard", source_path=path)
+
+            self.assertEqual((verdict().verdict, verdict().source), ("allowed", "policy-allow"))
+            with open(os.path.join(path, "deploy.sh"), "w", encoding="utf-8") as fh:
+                fh.write("echo deploy\n")
+            self.assertEqual((verdict().verdict, verdict().source), ("scan", "scan-required"))
 
     def test_codex_personal_codeguard_path_requires_scan_without_stronger_provenance(self):
         d = evaluate_admission(

@@ -2043,6 +2043,30 @@ func (s *Store) DatabasePath() string {
 	return s.dbPath
 }
 
+// DatabaseFileReplaced reports whether the database path no longer names
+// the file this store opened: it was deleted or replaced while the gateway
+// ran. SQLite keeps writing to the open, unlinked file, so every new audit
+// record is lost until the gateway opens the store again (GAP-0325).
+func (s *Store) DatabaseFileReplaced() bool {
+	if s == nil {
+		return false
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed || s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
+		return false
+	}
+	pinned, err := s.dbPathGuard.pinned.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Lstat(s.dbPathGuard.path)
+	if os.IsNotExist(err) {
+		return true
+	}
+	return err == nil && !os.SameFile(pinned, current)
+}
+
 // acquireReady pins the store against Close for one mandatory v8 transaction.
 // The returned release function must be called on every successful acquire.
 func (s *Store) acquireReady() (func(), error) {

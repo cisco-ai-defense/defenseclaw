@@ -203,6 +203,14 @@ def compute_verdict(
         if a.file == "quarantine":
             return "quarantined", "red"
         if a.install == "block":
+            # The watcher blocked the asset but could not move it into
+            # quarantine storage, or took a linked asset out of the folder
+            # (internal/watcher quarantineFailedReason, errLinkRemoved).
+            reason = str(getattr(action_entry, "reason", "") or "")
+            if reason.startswith("quarantine failed"):
+                return "quarantine failed", "red"
+            if reason.startswith("link removed"):
+                return "link removed", "red"
             return "blocked", "red"
         if a.runtime == "disable":
             return "disabled", "red"

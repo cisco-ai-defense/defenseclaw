@@ -194,7 +194,8 @@ Each severity resolves on its own, first match wins:
 | `info` | `allow` | `warn` | `warn` |
 
 The built-in first-party entries are `codeguard` for skills, `defenseclaw` for
-plugins, and none for MCP servers.
+plugins, and none for MCP servers. Both names are DefenseClaw's own, so they
+trust only DefenseClaw's own content; see [First-party assets](#first-party-assets).
 
 ### The scanner gate
 
@@ -285,6 +286,22 @@ using either slash. A look-alike never matches:
 ```bash
 defenseclaw config set admission.skill.first_party_allow_list --json '[{"name":"acme-review","source_path_contains":[".acme/skills/acme-review"],"reason":"first-party Acme skill"}]'
 ```
+
+`codeguard` and `defenseclaw` are DefenseClaw's own asset names, and a folder
+in a skills or plugins folder can be written by anything the user installs (a
+`git clone`, `npx skills add`). So an entry with one of these names, built in or
+set by you or a policy profile, never trusts a folder by its name and location
+alone:
+
+- `codeguard` (skill) skips the scan only for an exact copy of the CodeGuard
+  skill DefenseClaw ships, checked by a SHA-256 digest of its files. A folder
+  named `codeguard` with any other content is scanned like any other skill.
+- `defenseclaw` (plugin) skips nothing by itself. The gateway recognizes
+  DefenseClaw's own plugin by its bytes (the OpenClaw plugin it installs, the
+  Amp bridge file) before admission; any other plugin with that name is
+  scanned.
+
+Entries with other names match by name and location, as above.
 
 The list you set replaces the built-in one for that asset type, so list
 `codeguard` again if you still want it trusted. `--json '[]'` trusts no asset.
@@ -500,7 +517,18 @@ read_file    allow    global     vetted                                    2026-
 - Without `--connector`, a block or allow covers every connector. With
   `--connector`, it covers that one. `skill allow` and `plugin allow` on an
   installed copy write a rule scoped to the connector that has the copy and
-  pinned to its path.
+  pinned to its path. `skill allow` on a quarantined copy pins the rule to the
+  path the copy is restored to, and says the files stay in quarantine until
+  `defenseclaw skill restore <name>`. When there is no copy to pin to, the
+  command says the rule matches the name only.
+- `mcp allow` pins the rule to how the server starts: its `url`, or its
+  `command` and `args_prefix` (and `transport` when the server sets one), read
+  from the connector's MCP config. A different server added later under the
+  same name is scanned again. For a server that is not configured (for
+  example one `mcp set` just rejected), pass the definition you reviewed:
+  `defenseclaw mcp allow context7 --command npx --args '["-y", "@upstash/context7-mcp"]'`.
+  Without a configured copy or a pin the rule matches the name only, and
+  `mcp allow` says so.
 - `skill allow` and `plugin allow` remove the name from the block list as well.
 - `unblock` removes the block or allow rule for the name and clears its runtime
   state, so its scan verdict decides again: the CLI says the asset is scanned

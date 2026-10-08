@@ -138,6 +138,11 @@ class ConfigLockBusyError(ConfigWriteError):
     """Another DefenseClaw process is changing config.yaml."""
 
 
+class ConfigUnparseableError(ConfigWriteError):
+    """config.yaml on disk is not a YAML mapping, so a save that merges into
+    it would keep only the changed fields (GAP-0370); nothing is written."""
+
+
 class ManagedConfigWriteError(ConfigWriteError):
     """This device is managed; policy changes come from the management plane."""
 
@@ -581,6 +586,19 @@ def standalone_managed(current: bytes) -> bool:
     return managed and _standalone_profile(document)
 
 
+def secure_client_document(document: Any) -> bool:
+    """Whether a parsed config (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describes a
+    managed device on the Secure Client profile, as Go v9SecureClientDocument."""
+    from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
+
+    if not isinstance(document, dict) or machine_managed_standalone():
+        return False
+    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
+        str(document.get("deployment_mode") or "")
+    )
+    return managed and not _standalone_profile(document)
+
+
 def secure_client_managed(current: bytes) -> bool:
     """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
     managed device on the Secure Client profile."""
@@ -671,6 +689,19 @@ _SCHEMA_WORDS = (
 )
 
 
+def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> str:
+    """Return the narrow pin repair when a changed custom pack blocks a write."""
+    if "does not match" not in message or "digest" not in message:
+        return ""
+    match = re.search(r"guardrail\.custom_packs\.([A-Za-z0-9_.-]+)\.digest", message)
+    if not match:
+        return ""
+    return (
+        f"defenseclaw config set guardrail.custom_packs.{match.group(1)}.digest "
+        f"sha256:{files_digest}"
+    )
+
+
 def plain_error(exc: BaseException) -> str:
     """A refused change in plain words: the key and what to do about it.
 
@@ -701,6 +732,9 @@ def plain_error(exc: BaseException) -> str:
         sentence = detail if detail.startswith(name) else f"{name}: {detail}"
         actions = [part for part in parts[1:] if not part.startswith("expected ")]
         message = sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
+        repair = pack_pin_repair(text)
+        if repair:
+            message += f" Re-pin the edited pack: {repair}."
         if "rule-pack directory does not exist" in text:
             # A pack folder deleted while the config still selects it blocks every other change too (GAP-0261).
             message += " To stop using the deleted pack: defenseclaw guardrail use-pack default."

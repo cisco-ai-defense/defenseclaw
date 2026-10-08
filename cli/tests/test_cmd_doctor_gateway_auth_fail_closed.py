@@ -15,6 +15,7 @@ import pytest
 from defenseclaw.commands.cmd_doctor import (
     _authenticated_runtime_matches,
     _check_gateway_auth,
+    _check_policy_state,
     _check_sidecar,
     _DoctorResult,
     _gateway_peer_bound_request,
@@ -294,11 +295,17 @@ def test_sidecar_row_does_not_pass_for_a_listener_that_is_not_the_verified_gatew
         ),
         patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, _healthy_document())),
     ):
-        _check_sidecar(cfg, result)
+        health = _check_sidecar(cfg, result)
 
     sidecar_row = next(row for row in result.checks if row["label"] == "Sidecar API")
     assert sidecar_row["status"] == "warn"
     assert "not as this account's verified gateway" in sidecar_row["detail"]
+    # GAP-0384: its effective policy fed the Policy row, which failed on
+    # another account's digest.
+    assert result.sidecar_unverified is True
+    _check_policy_state(cfg, result, live_health=health)
+    policy_row = next(row for row in result.checks if row["label"] == "Policy")
+    assert policy_row["status"] == "skip" and "not served by this account's verified gateway" in policy_row["detail"]
 
 
 def test_gateway_token_is_written_only_to_the_verified_gateway_peer() -> None:

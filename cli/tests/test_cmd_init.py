@@ -65,6 +65,22 @@ class TestInitCommand(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    def test_invalid_existing_config_stops_before_init_runs(self):
+        from defenseclaw import config as config_module
+
+        source = Path(self.tmp_dir) / "config.yaml"
+        source.write_text("config_version: 9\nguardrail:\n  block_at: BOGUS\n", encoding="utf-8")
+        with (
+            patch.object(config_module, "config_path", return_value=source),
+            patch.object(config_module, "load", side_effect=ValueError("guardrail.block_at is invalid")),
+            patch("defenseclaw.commands.cmd_init._run_first_run_cmd") as run,
+        ):
+            result = self.runner.invoke(init_cmd, ["--non-interactive"], obj=AppContext())
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("guardrail.block_at is invalid", result.output)
+        self.assertIn("last good configuration", result.output)
+        run.assert_not_called()
+
     def test_help(self):
         result = self.runner.invoke(init_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0)
@@ -169,6 +185,17 @@ class TestInitFirstRunBackend(unittest.TestCase):
             },
             cache_hit=False,
         )
+
+    def test_repeated_connector_flag_is_refused_not_silently_dropped(self):
+        # GAP-0392: --connector claudecode --connector codex kept only codex.
+        result = self._invoke([
+            "--non-interactive", "--yes",
+            "--connector", "claudecode", "--connector", "codex",
+            "--skip-install", "--no-start-gateway", "--no-verify",
+        ])
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--action-connectors claudecode,codex", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
 
     def test_json_summary_codex_does_not_default_to_openclaw(self):
         result = self._invoke([

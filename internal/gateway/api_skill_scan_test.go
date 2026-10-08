@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -215,5 +216,18 @@ func TestHandleSkillScanSaysAMissingFolderAndAnUnreadableSkillFile(t *testing.T)
 	w = scan(skill)
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "cannot read "+file) {
 		t.Fatalf("unreadable SKILL.md response = %d %q, want 403 naming the file", w.Code, w.Body.String())
+	}
+}
+
+// GAP-0301: a REST or hook skill scan follows timeouts.scan_s, as the install
+// watcher does; it was cut at two minutes whatever the key said.
+func TestComponentScanTimeoutFollowsSkillScanS(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Scanners.SkillScanner.Timeouts.ScanS = 600
+	if got := componentScanTimeout(cfg, "skill"); got != 600*time.Second {
+		t.Errorf("skill scan timeout = %v, want scan_s", got)
+	}
+	if got := componentScanTimeout(cfg, "mcp"); got != 120*time.Second {
+		t.Errorf("mcp scan timeout = %v, want two minutes", got)
 	}
 }

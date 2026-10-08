@@ -99,8 +99,8 @@ def refuse_first_run_when_managed() -> None:
         ],
         case_sensitive=False,
     ),
-    default=None,
-    help="Agent connector to configure.",
+    multiple=True,
+    help="Agent connector to configure (one; use --action-connectors for several).",
 )
 @click.option(
     "--profile",
@@ -259,10 +259,22 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     refuse_first_run_when_managed()
 
+    from defenseclaw import config as config_module
+
+    if config_module.config_path().is_file():
+        try:
+            config_module.load()
+        except Exception as exc:  # noqa: BLE001 - init is a recovery boundary for hand-edited config.
+            raise click.ClickException(
+                f"Cannot initialize with invalid config.yaml: {exc}. Fix the file, then run "
+                "defenseclaw config validate; a running gateway keeps its last good configuration."
+            ) from exc
+
     # Refuse a pasted key before anything is written (GAP-2589).
     cisco_api_key_env = _validated_api_key_env_name(cisco_api_key_env, "'--cisco-api-key-env'")
     # GAP-2593: the LLM key's env var name too.
     llm_api_key_env = _validated_api_key_env_name(llm_api_key_env, "'--llm-api-key-env'", "DEFENSECLAW_LLM_KEY")
+    connector = _single_connector_option(connector)
     requested_connectors = []
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
@@ -2436,6 +2448,27 @@ def _saved_connector_overrides() -> dict[str, object]:
     return {connector_paths.normalize(name): block for name, block in blocks.items()}
 
 
+def _single_connector_option(values: str | tuple[str, ...] | None) -> str | None:
+    """The one connector ``--connector`` names.
+
+    A repeated ``--connector`` used to keep only its last value, silently
+    (GAP-0392). One connector repeated is fine; two different ones are refused
+    with the flags that configure several.
+    """
+    if not values:
+        return None
+    if isinstance(values, str):
+        return values
+    distinct = list(dict.fromkeys(_normalize_connector_arg(value) for value in values))
+    if len(distinct) > 1:
+        raise click.UsageError(
+            f"--connector was given more than once ({', '.join(distinct)}); it configures one connector. "
+            f"To set up several, use --action-connectors {','.join(distinct)} (enforcing), "
+            "or add --observe-all (every detected connector in observe)."
+        )
+    return values[0]
+
+
 def _normalize_connector_arg(
     connector: str | None,
     *,
@@ -2654,6 +2687,13 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
         renderer.echo(
             "  After a reboot, agent hooks start the gateway on their next call;"
             " after defenseclaw-gateway stop, run: defenseclaw-gateway start"
+        )
+    elif not proxy and platform_support.host_os() == "windows":
+        # The native hook starts the gateway of this account on its next call
+        # after a sign-out or reboot (GAP-0377).
+        renderer.echo(
+            "  After a sign-out or reboot, agent hooks start the gateway on their next call;"
+            " if they do not, run: defenseclaw-gateway start"
         )
     if _sandboxes_possible():
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")

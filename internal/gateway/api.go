@@ -1447,6 +1447,14 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if cfg := a.runtimeConfigSnapshot(); (cfg == nil || !cfg.SecureClientIntegration()) && a.store.DatabaseFileReplaced() {
+		// Present only when it happened, so the usual body is unchanged;
+		// Secure Client keeps its health body (issue #1092).
+		body["audit_store"] = map[string]interface{}{
+			"state":  "replaced",
+			"detail": "audit.db was deleted or replaced after the gateway opened it, so new audit records are lost; restart the gateway: defenseclaw-gateway restart",
+		}
+	}
 	if policy, ok := CurrentPolicyHealth(); ok {
 		body["policy"] = policy
 	}
@@ -2733,7 +2741,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		cfg.CiscoAIDefense,
 	), installScanRulePack(""))
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), componentScanTimeout(cfg, "skill"))
 	defer cancel()
 
 	result, err := ss.Scan(ctx, req.Target)
@@ -2955,6 +2963,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		cfg.ResolveLLM("scanners.mcp"),
 		cfg.CiscoAIDefense,
 	)
+	ms.RulePack = scanner.MCPRulePackFor(cfg, "")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -4004,6 +4013,18 @@ func (a *APIServer) writeJSON(w http.ResponseWriter, status int, v interface{}) 
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// componentScanTimeout bounds one REST or hook scan of component. A skill
+// scan follows scanners.skill_scanner.timeouts.scan_s, as the install watcher
+// does, so a judge-on scan of a large skill is not cut at two minutes while
+// the watcher waits for it (GAP-0301). Plugin and MCP scans keep two minutes,
+// and so does a Secure Client host, as on main (issue #1092).
+func componentScanTimeout(cfg *config.Config, component string) time.Duration {
+	if component == "skill" && cfg != nil && !cfg.SecureClientIntegration() {
+		return time.Duration(cfg.Scanners.SkillScanner.ScanTimeoutSeconds()) * time.Second
+	}
+	return 120 * time.Second
+}
+
 func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 	out := make([]enforcementEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -4029,6 +4050,9 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
 	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	if !secureClient {
+		input.VerifyFirstParty()
+	}
 	if secureClient {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
 		// The engine of main needed data.json: without it, main answered from

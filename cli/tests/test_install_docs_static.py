@@ -977,6 +977,11 @@ def test_quickstart_initializes_before_setup() -> None:
     text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text(encoding="utf-8")
     commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
     assert commands[0] == "defenseclaw init", commands
+    # GAP-0409: the installer asks for one agent and prints its init command;
+    # plain init would set up every detected agent, unlike the report shown.
+    install_sh = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    assert 'Next: ${CYAN}defenseclaw init --connector %s${NC}' in install_sh
+    assert re.search(r"^defenseclaw init --connector claudecode$", text, re.MULTILINE)
 
 
 def test_documented_rule_pack_dirs_are_absolute() -> None:

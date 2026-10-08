@@ -140,18 +140,27 @@ type toolJudgeContextEvent struct {
 // optional RulePack supplies externalized judge prompts, suppressions,
 // and severity overrides.
 func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack, providers *configs.ProvidersConfig) *LLMJudge {
+	judge, _ := newLLMJudgeWithReason(cfg, llm, dotenvPath, rp, providers)
+	return judge
+}
+
+// newLLMJudgeWithReason is NewLLMJudge that also says why an enabled judge
+// could not start ("" when it started or is disabled), so the health
+// snapshot reports it instead of the hook lane silently running on the
+// rules only (GAP-0383).
+func newLLMJudgeWithReason(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack, providers *configs.ProvidersConfig) (*LLMJudge, string) {
 	if cfg == nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: config is nil\n")
-		return nil
+		return nil, ""
 	}
 	if !cfg.Enabled {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge not enabled in config\n")
-		return nil
+		return nil, ""
 	}
 	model := llm.Model
 	if model == "" {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no model configured (set llm.model or guardrail.judge.llm.model)\n")
-		return nil
+		return nil, "no model is configured (set llm.model or guardrail.judge.llm.model)"
 	}
 
 	// API key resolution:
@@ -175,7 +184,7 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 			envName = config.DefenseClawLLMKeyEnv
 		}
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: no API key found (env=%s, dotenv=%s)\n", envName, dotenvDisplay)
-		return nil
+		return nil, "no API key for its LLM: " + envName + " is not set (environment or ~/.defenseclaw/.env)"
 	}
 
 	// Build an effective LLMConfig with the resolved API key pinned
@@ -190,7 +199,7 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 	provider, err := NewProviderForLLMConfig(&effLLM, providers)
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: failed to create provider: %v\n", err)
-		return nil
+		return nil, boundedJudgeHealthValue("its LLM provider could not be created: "+err.Error(), 240)
 	}
 	if strings.TrimSpace(llm.InstanceName) != "" {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s, instance=%s)\n", model, llm.InstanceName)
@@ -200,7 +209,7 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 	return &LLMJudge{
 		cfg: cfg, model: model, providerName: llm.ProviderPrefix(),
 		provider: provider, rp: rp,
-	}
+	}, ""
 }
 
 // llmJudgeAllowsEmptyAPIKey reports whether the selected provider has a
@@ -228,6 +237,29 @@ func llmJudgeAllowsEmptyAPIKey(llm config.LLMConfig, providers *configs.Provider
 		provider = llm.ProviderPrefix()
 	}
 	return provider == "bedrock" || provider == "amazon-bedrock"
+}
+
+type judgeSuppressionPackKey struct{}
+
+// withJudgeSuppressionPack makes a judge run apply the pre-judge strips and
+// finding suppressions of one connector composed rule pack. The judge is
+// built with the global pack, so a suppression saved with --connector never
+// reached the hook-lane judge of that connector (GAP-0351).
+func withJudgeSuppressionPack(ctx context.Context, rp *guardrail.RulePack) context.Context {
+	if rp == nil || rp.Suppressions == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, judgeSuppressionPackKey{}, rp)
+}
+
+// suppressionPack is the rule pack whose suppressions this run applies.
+func (j *LLMJudge) suppressionPack(ctx context.Context) *guardrail.RulePack {
+	if ctx != nil {
+		if rp, ok := ctx.Value(judgeSuppressionPackKey{}).(*guardrail.RulePack); ok && rp != nil {
+			return rp
+		}
+	}
+	return j.rp
 }
 
 // RunJudges runs injection and PII judges according to config.
@@ -286,9 +318,9 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 	// Apply pre-judge strips from the rule pack to remove known metadata
 	// (e.g. "cli" sender name) before sending content to the LLM.
 	strippedContent := content
-	if j.rp != nil && j.rp.Suppressions != nil {
+	if rp := j.suppressionPack(ctx); rp != nil && rp.Suppressions != nil {
 		if runPII {
-			strippedContent = guardrail.PreJudgeStripContent(content, j.rp.Suppressions.PreJudgeStrips, "pii")
+			strippedContent = guardrail.PreJudgeStripContent(content, rp.Suppressions.PreJudgeStrips, "pii")
 		}
 	}
 
@@ -1299,7 +1331,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 			dropped, suffix, direction)
 	}
 
-	verdict := j.piiToVerdict(parsed, direction, toolName)
+	verdict := j.piiToVerdictWith(j.suppressionPack(ctx), parsed, direction, toolName)
 	recordJudgeMetrics(verdict, judgeTraceFailureNone)
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii verdict (dir=%s): action=%s severity=%s findings=%v\n",
 		direction, verdict.Action, verdict.Severity, verdict.Findings)
@@ -1333,6 +1365,11 @@ var piiCategoryDefaults = map[string]struct {
 // tool_suppressions entries that match toolName drop the listed finding IDs
 // from the verdict. Pass "" for prompt/completion flows not tied to a tool.
 func (j *LLMJudge) piiToVerdict(data map[string]interface{}, direction, toolName string) *ScanVerdict {
+	return j.piiToVerdictWith(j.rp, data, direction, toolName)
+}
+
+// piiToVerdictWith is piiToVerdict with the finding suppressions of rp.
+func (j *LLMJudge) piiToVerdictWith(rp *guardrail.RulePack, data map[string]interface{}, direction, toolName string) *ScanVerdict {
 	if data == nil {
 		return allowVerdict("llm-judge-pii")
 	}
@@ -1398,8 +1435,8 @@ func (j *LLMJudge) piiToVerdict(data map[string]interface{}, direction, toolName
 	// Apply post-judge finding suppressions from the rule pack.
 	kept := rawEntities
 	var suppressed []guardrail.SuppressedEntity
-	if j.rp != nil && j.rp.Suppressions != nil {
-		kept, suppressed = guardrail.FilterPIIEntities(rawEntities, j.rp.Suppressions.FindingSupps)
+	if rp != nil && rp.Suppressions != nil {
+		kept, suppressed = guardrail.FilterPIIEntities(rawEntities, rp.Suppressions.FindingSupps)
 
 		// Apply tool_suppressions when this judge run is scoped to a tool.
 		// Without this, the tool_suppressions YAML surface (and its TUI
@@ -1407,9 +1444,9 @@ func (j *LLMJudge) piiToVerdict(data map[string]interface{}, direction, toolName
 		// was tested, but the runtime never called it, so entries like
 		// "tool_pattern: graph_auth_status, suppress_findings: JUDGE-PII-IP"
 		// never took effect.
-		if toolName != "" && len(j.rp.Suppressions.ToolSuppressions) > 0 {
+		if toolName != "" && len(rp.Suppressions.ToolSuppressions) > 0 {
 			var toolSupp []guardrail.SuppressedEntity
-			kept, toolSupp = guardrail.FilterToolFindings(toolName, kept, j.rp.Suppressions.ToolSuppressions)
+			kept, toolSupp = guardrail.FilterToolFindings(toolName, kept, rp.Suppressions.ToolSuppressions)
 			suppressed = append(suppressed, toolSupp...)
 		}
 	}
@@ -2789,8 +2826,8 @@ func (j *LLMJudge) adjudicateCategory(ctx context.Context, direction, content st
 
 	// Apply pre-judge strips before sending content to the LLM.
 	strippedContent := content
-	if j.rp != nil {
-		strippedContent = guardrail.PreJudgeStripContent(content, j.rp.Suppressions.PreJudgeStrips, category)
+	if rp := j.suppressionPack(ctx); rp != nil && rp.Suppressions != nil {
+		strippedContent = guardrail.PreJudgeStripContent(content, rp.Suppressions.PreJudgeStrips, category)
 	}
 
 	systemPrompt := fmt.Sprintf(promptTemplate, direction, evidenceLines)

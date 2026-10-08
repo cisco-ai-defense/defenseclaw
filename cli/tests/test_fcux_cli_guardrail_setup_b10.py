@@ -51,6 +51,7 @@ def test_enable_header_names_only_the_connectors_it_sets_up(
     assert header.strip() == "Enabling guardrail for Claude Code (claudecode), Cursor (cursor)", header
     assert result.output.count("Codex (codex) stays disabled; turn it on with:") == 1
     assert "guardrail enable --connector codex" in result.output
+    assert "Restart any running affected agent (for example Codex)" in result.output
 
 
 def test_status_shows_no_fail_mode_for_a_disabled_connector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

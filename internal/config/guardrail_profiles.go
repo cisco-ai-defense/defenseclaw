@@ -400,25 +400,21 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-// digestConnectors is the connector overrides with enabled: true cleared:
-// true is the default, so it digests like the unset key (GAP-0032).
+// digestConnectors is the connector overrides with enabled: true cleared
+// (true is the default, so it digests like the unset key, GAP-0032) and the
+// block_at and alert_at levels upper-cased.
 func digestConnectors(in map[string]PerConnectorGuardrailConfig) map[string]PerConnectorGuardrailConfig {
-	var out map[string]PerConnectorGuardrailConfig
-	for name, pc := range in {
-		if pc.Enabled == nil || !*pc.Enabled {
-			continue
-		}
-		if out == nil {
-			out = make(map[string]PerConnectorGuardrailConfig, len(in))
-			for k, v := range in {
-				out[k] = v
-			}
-		}
-		pc.Enabled = nil
-		out[name] = pc
-	}
-	if out == nil {
+	if len(in) == 0 {
 		return in
+	}
+	out := make(map[string]PerConnectorGuardrailConfig, len(in))
+	for name, pc := range in {
+		if pc.Enabled != nil && *pc.Enabled {
+			pc.Enabled = nil
+		}
+		// The levels take any case, as the global ones do (GAP-0329).
+		pc.BlockAt, pc.AlertAt = canonicalGuardrailLevel(pc.BlockAt), canonicalGuardrailLevel(pc.AlertAt)
+		out[name] = pc
 	}
 	return out
 }

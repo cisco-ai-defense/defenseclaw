@@ -597,7 +597,23 @@ def _add_v8_destination(
     except BaseException:
         if secret_changed:
             # GAP-0210: a failed add leaves no key behind in .env.
-            restore_secret(data_dir, preset.token_env, secret_before, environ_before)
+            try:
+                restore_secret(data_dir, preset.token_env, secret_before, environ_before)
+            except Exception as restore_error:  # noqa: BLE001 - the add error is the one to report.
+                # GAP-0374: a hand-made .env whose permissions DefenseClaw did
+                # not write can refuse the restore. Keep the original error,
+                # take the key out of this process, and say what is left.
+                if environ_before is None:
+                    os.environ.pop(preset.token_env, None)
+                else:
+                    os.environ[preset.token_env] = environ_before
+                dotenv_path = os.path.join(data_dir, ".env")
+                click.echo(
+                    f"  Note: {preset.token_env} is still in {dotenv_path}: it could not be "
+                    f"taken out again ({type(restore_error).__name__}), because the permissions of that file are "
+                    "not the private ones DefenseClaw writes. Delete that line, then run: defenseclaw doctor --fix",
+                    err=True,
+                )
         raise
     if secret_changed:
         # GAP-2356: the running gateway still holds the old key, and

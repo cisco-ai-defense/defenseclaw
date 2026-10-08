@@ -65,6 +65,7 @@ from defenseclaw.config import _assert_config_write_allowed, config_path_for_dat
 from defenseclaw.config_writer import ConfigWriteError
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
     _UPSTREAM_FAIL_OPEN_CONNECTORS,
     FileSnapshot,
@@ -251,6 +252,15 @@ def _verify_agents_before_enable(app: AppContext, connectors: list[str]) -> None
     cmd_setup._record_windows_setup_agent_selections(app.cfg.data_dir, list(connectors))
 
 
+def _note_running_agent_restart() -> None:
+    """A running agent keeps its previous OTLP token after connector setup."""
+
+    ux.subhead(
+        "Restart any running affected agent (for example Codex) to load refreshed OTLP credentials.",
+        indent="  ",
+    )
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -385,6 +395,7 @@ def _toggle_connector_guardrail(
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
 
+    _note_running_agent_restart()
     _log_guardrail_action(
         app,
         f"guardrail-{verb}",
@@ -1089,6 +1100,7 @@ def disable_cmd(
             ux.ok(f"{_connector_label(connector)} connector teardown complete", indent="  ")
         click.echo()
 
+    _note_running_agent_restart()
     _log_guardrail_action(
         app,
         "guardrail-disable",
@@ -1231,6 +1243,7 @@ def enable_cmd(
             )
         click.echo()
 
+    _note_running_agent_restart()
     _log_guardrail_action(
         app,
         "guardrail-enable",
@@ -2169,7 +2182,15 @@ def _set_connector_hilt(
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
 
-    if restart and gc.enabled:
+    if not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+    elif not asset_lists.is_secure_client(app.cfg):
+        _report_hot_hilt(app)
+    elif restart:
         from defenseclaw.commands import cmd_setup
 
         cmd_setup._restart_services(
@@ -2180,18 +2201,28 @@ def _set_connector_hilt(
         )
         ux.ok(f"Gateway restarted, {label} HILT policy applied.", indent="  ")
         click.echo()
-    elif not gc.enabled:
-        ux.warn(
-            "guardrail is currently disabled — value will take effect "
-            "the next time you run 'defenseclaw guardrail enable'.",
-            indent="  ",
-        )
 
     _log_hilt(
         app,
         f"connector={key} scope=per-connector "
         f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
     )
+
+
+def _report_hot_hilt(app: AppContext) -> None:
+    """Say how a saved HILT change reaches the gateway off Secure Client.
+
+    The gateway applies HILT from the new configuration generation, so the
+    change needs no restart (GAP-0056); a Secure Client gateway reads the
+    connector guardrail settings at start and keeps the restart of main
+    (issue #1092).
+    """
+    outcome = _apply_to_running_gateway(app, needs_restart=False, restart=False, quiet=False)
+    if outcome == "live":
+        ux.ok(_GATEWAY_OUTCOMES[outcome], indent="  ")
+    else:
+        ux.echo(f"  {_GATEWAY_OUTCOMES[outcome]}")
+    click.echo()
 
 
 def _log_hilt(app: AppContext, details: str) -> None:
@@ -2230,7 +2261,8 @@ def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
 @click.option(
     "--restart/--no-restart",
     default=True,
-    help="Restart the gateway so the new HILT policy takes effect (default: on).",
+    help="On Secure Client, restart the gateway so the new HILT policy takes effect (default: on); "
+    "elsewhere the running gateway applies it without a restart.",
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
@@ -2401,7 +2433,15 @@ def hilt_cmd(
 
     from defenseclaw.commands import cmd_setup
 
-    if restart and gc.enabled:
+    if not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+    elif not asset_lists.is_secure_client(app.cfg):
+        _report_hot_hilt(app)
+    elif restart:
         cmd_setup._restart_services(
             app.cfg.data_dir,
             app.cfg.gateway.host,
@@ -2411,12 +2451,6 @@ def hilt_cmd(
         )
         ux.ok("Gateway restarted, HILT policy applied.", indent="  ")
         click.echo()
-    elif not gc.enabled:
-        ux.warn(
-            "guardrail is currently disabled — value will take effect "
-            "the next time you run 'defenseclaw guardrail enable'.",
-            indent="  ",
-        )
 
     _log_hilt(
         app,
@@ -3370,6 +3404,21 @@ def _refuse_if_managed_device(app: AppContext, reason: str, fail) -> None:
         _refuse_managed_write("guardrail", reason, fail)
 
 
+def _guardrail_write_error(exc: BaseException) -> str:
+    """Keep a busy validator refusal short and actionable."""
+    from defenseclaw import config_writer
+    from defenseclaw.config_inspect import ConfigInspectTimeoutError
+
+    cause = exc.__cause__
+    if isinstance(exc, ConfigInspectTimeoutError) or isinstance(cause, ConfigInspectTimeoutError):
+        return (
+            "Config check did not finish:\n"
+            "  ✗ The configuration check timed out.\n"
+            "  Nothing was changed; re-run the command."
+        )
+    return f"Failed to save config: {config_writer.plain_error(exc)}"
+
+
 def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
     reports a refused or failed write and exits."""
@@ -3381,8 +3430,14 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
         )
     except config_writer.ManagedConfigWriteError:
         _refuse_managed_write(getattr(changes[0], "path", "") or "guardrail", reason, fail)
-    except config_writer.ConfigWriteError as exc:
-        fail(1, f"Failed to save config: {config_writer.plain_error(exc)}")
+    except (config_writer.ConfigWriteError, OSError) as exc:
+        detail = _guardrail_write_error(exc)
+        if "unknown rule" in detail and all(
+            not str(change.path).startswith(("guardrail.connectors.", "guardrail.profiles."))
+            for change in changes
+        ):
+            detail += " The global rule pack was checked; use --connector or --profile for another scope."
+        fail(1, detail)
     return None
 
 
@@ -4508,8 +4563,8 @@ def mode_cmd(
 
     try:
         app.cfg.save()
-    except (OSError, ValueError) as exc:
-        _finish(ok=False, exit_code=1, new_mode=previous, previous=previous, message=f"Failed to save config: {exc}")
+    except (OSError, ValueError, ConfigWriteError) as exc:
+        _finish(ok=False, exit_code=1, new_mode=previous, previous=previous, message=_guardrail_write_error(exc))
     _log_guardrail_change(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
@@ -4698,9 +4753,9 @@ def _set_tool_call_level(app: AppContext, setting: str, level: str, connector: s
     setattr(target, setting, value)
     try:
         app.cfg.save()
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ConfigWriteError) as exc:
         setattr(target, setting, previous)
-        _finish(ok=False, exit_code=1, message=f"Failed to save config: {exc}", previous=previous, requested=True)
+        _finish(ok=False, exit_code=1, message=_guardrail_write_error(exc), previous=previous, requested=True)
     _log_guardrail_change(
         app,
         f"guardrail-{words['command']}",

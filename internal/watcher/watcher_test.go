@@ -18,8 +18,11 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1086,5 +1089,288 @@ func TestEvaluateAdmissionFollowsThePolicySource(t *testing.T) {
 	current = prepare("warning")
 	if got := w.evaluateAdmission(context.Background(), in).Verdict; got != "warning" {
 		t.Fatalf("verdict after the generation changed = %q, want warning", got)
+	}
+}
+
+// GAP-0376: with the judge unreachable the scanner finishes with its static
+// analyzers and reports an INFO LLM_ANALYSIS_FAILED finding. Admission read
+// that as a MEDIUM warning and left the skill loaded; the scan now fails
+// closed and says why on the quarantine record.
+func TestAdmissionFailsClosedWhenTheJudgeDidNotRun(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	fake := &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+		{ID: "m1", RuleID: "DATA-READ", Severity: scanner.SeverityMedium, Title: "reads shell history"},
+		{ID: "llm", RuleID: scanner.RuleLLMAnalysisFailed, Severity: scanner.SeverityInfo, Title: "LLM analysis failed",
+			Description: "The LLM analyzer encountered an error: APIConnectionError"},
+	}}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+	skillPath := filepath.Join(skillDir, "usage-stats")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "usage-stats", Path: skillPath, Timestamp: time.Now()})
+	if res.Verdict != VerdictBlocked || !strings.Contains(res.Reason, "the LLM judge did not run") {
+		t.Fatalf("verdict %q reason %q, want blocked because the judge did not run", res.Verdict, res.Reason)
+	}
+	if _, err := os.Lstat(skillPath); !os.IsNotExist(err) {
+		t.Fatalf("the skill stayed in place (lstat err %v)", err)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "usage-stats", "")
+	if err != nil || len(records) != 1 || !strings.Contains(records[0].Reason, "the LLM judge did not run") {
+		t.Fatalf("quarantine records %+v (err %v), want one naming the judge failure", records, err)
+	}
+}
+
+// GAP-0393: quarantining Claude Code's skill-creator recorded the block and
+// the runtime disable for every connector, so Codex's vendor-bundled
+// skill-creator read as quarantined and disabled. The rows now belong to the
+// connector that holds the copy.
+func TestAutomaticEnforcementIsScopedToTheConnectorWithTheCopy(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.SetRootConnectors(map[string]string{skillDir: "claudecode"})
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+			{ID: "c1", RuleID: "CMD-INJECTION", Severity: scanner.SeverityCritical, Title: "command injection"},
+		}}
+	}
+	skillPath := filepath.Join(skillDir, "skill-creator")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "skill-creator", Path: skillPath, Timestamp: time.Now()})
+	if res.Verdict != VerdictRejected {
+		t.Fatalf("verdict %q, want rejected", res.Verdict)
+	}
+	pe := enforce.NewPolicyEngine(store)
+	if disabled, _ := pe.IsDisabledForConnector("skill", "skill-creator", "claudecode"); !disabled {
+		t.Fatal("claudecode copy is not disabled")
+	}
+	if disabled, _ := pe.IsDisabledForConnector("skill", "skill-creator", "codex"); disabled {
+		t.Fatal("the claudecode verdict disabled codex's skill-creator too")
+	}
+}
+
+// GAP-0394: a skill folder that is a symlink was reported quarantined while
+// quarantine refused the link and left it in place, and a quarantine that
+// failed (an unwritable quarantine folder) also read as quarantined. The link
+// is now removed (its target untouched) and a failed move says so.
+func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows; junctions take the same path")
+	}
+	admit := func(t *testing.T, prepare func(cfg *config.Config, skillDir string) string) (*audit.ActionEntry, string) {
+		cfg, store, logger, skillDir := setupTestEnv(t)
+		cfg.Gateway.Watcher.Skill.TakeAction = true
+		w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+		w.scannerFactory = func(InstallEvent) scanner.Scanner {
+			return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+				{ID: "c1", RuleID: "SEC-AWS-KEY", Severity: scanner.SeverityCritical, Title: "hardcoded key"},
+			}}
+		}
+		path := prepare(cfg, skillDir)
+		w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: filepath.Base(path), Path: path, Timestamp: time.Now()})
+		entry, err := store.GetAction("skill", filepath.Base(path))
+		if err != nil || entry == nil {
+			t.Fatalf("no journal row (err %v)", err)
+		}
+		return entry, path
+	}
+	t.Run("link", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "linked-high-src")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		entry, path := admit(t, func(_ *config.Config, skillDir string) string {
+			link := filepath.Join(skillDir, "linked-high")
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		})
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("the link stayed in the skills folder (lstat err %v)", err)
+		}
+		if _, err := os.Stat(target); err != nil {
+			t.Fatalf("the link target was touched: %v", err)
+		}
+		if entry.Actions.File == "quarantine" || !strings.HasPrefix(entry.Reason, "link removed") {
+			t.Fatalf("journal %+v reason %q, want link removed and no file quarantine", entry.Actions, entry.Reason)
+		}
+	})
+	t.Run("unwritable quarantine", func(t *testing.T) {
+		entry, path := admit(t, func(cfg *config.Config, skillDir string) string {
+			if err := os.MkdirAll(cfg.QuarantineDir, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+			dir := filepath.Join(skillDir, "aws-deploy")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		})
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("expected the skill to stay in place: %v", err)
+		}
+		if entry.Actions.File == "quarantine" || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" ||
+			!strings.HasPrefix(entry.Reason, "quarantine failed: ") {
+			t.Fatalf("journal %+v reason %q, want blocked, disabled, quarantine failed", entry.Actions, entry.Reason)
+		}
+	})
+}
+
+// blockingScanner waits until its scan context ends and reports that.
+type blockingScanner struct{ countingScanner }
+
+func (s *blockingScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// GAP-0335: a watcher restart (config reload) or a gateway stop cancels the
+// watcher's context; the in-flight install scan failed closed as a scanner
+// failure and quarantined a clean skill. A scan that times out still does.
+func TestScanCutOffByTheWatcherStoppingDoesNotQuarantine(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &blockingScanner{} }
+	skillPath := filepath.Join(skillDir, "slow-scan")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	evt := InstallEvent{Type: InstallSkill, Name: "slow-scan", Path: skillPath, Timestamp: time.Now()}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	res := w.runAdmission(ctx, evt)
+	if !res.Interrupted || res.Verdict == VerdictBlocked {
+		t.Fatalf("watcher stop: result %+v, want interrupted and not blocked", res)
+	}
+	if _, err := os.Lstat(skillPath); err != nil {
+		t.Fatalf("watcher stop quarantined the skill: %v", err)
+	}
+
+	cfg.Scanners.SkillScanner.Timeouts.ScanS = 1
+	res = w.runAdmission(context.Background(), evt)
+	if res.Interrupted || res.Verdict != VerdictBlocked {
+		t.Fatalf("scan timeout: result %+v, want blocked (fail-closed)", res)
+	}
+}
+
+// gateScanner holds every scan until release is closed and records the
+// largest number of scans that ran at once.
+type gateScanner struct {
+	countingScanner
+	release chan struct{}
+	running int
+	peak    int
+}
+
+func (s *gateScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
+	s.running++
+	if s.running > s.peak {
+		s.peak = s.running
+	}
+	s.mu.Unlock()
+	<-s.release
+	s.mu.Lock()
+	s.running--
+	s.mu.Unlock()
+	return s.countingScanner.Scan(ctx, target)
+}
+
+// GAP-0341: 33 skills dropped at once were admitted one at a time, each one
+// listed as ready and unscanned until its turn. Admission now runs a few at
+// once and AdmissionStateFile shows the rest as pending or scanning.
+func TestBulkDropIsAdmittedInParallelAndShownPending(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	gate := &gateScanner{countingScanner: countingScanner{name: "skill-scanner"}, release: make(chan struct{})}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return gate }
+	for i := 0; i < 6; i++ {
+		path := filepath.Join(skillDir, fmt.Sprintf("bulk-%d", i))
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		w.queuePending(path)
+	}
+	readState := func() map[string]string {
+		raw, err := os.ReadFile(filepath.Join(cfg.DataDir, AdmissionStateFile))
+		if err != nil {
+			return nil
+		}
+		var doc admissionStateFile
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, a := range doc.Assets {
+			out[a.Name] = a.State
+		}
+		return out
+	}
+	if st := readState(); len(st) != 6 || st["bulk-0"] != AdmissionPending {
+		t.Fatalf("state before admission = %v, want 6 pending", st)
+	}
+	w.mu.Lock()
+	for path := range w.pending {
+		w.pending[path] = time.Now().Add(-time.Hour)
+	}
+	w.mu.Unlock()
+	w.processPending(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		gate.mu.Lock()
+		running := gate.running
+		gate.mu.Unlock()
+		if running == liveAdmissionWorkers || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	scanning := 0
+	for _, state := range readState() {
+		if state == AdmissionScanning {
+			scanning++
+		}
+	}
+	close(gate.release)
+	w.waitAdmissions()
+	if gate.peak != liveAdmissionWorkers || scanning != liveAdmissionWorkers {
+		t.Fatalf("peak concurrent scans %d, scanning entries %d; want %d", gate.peak, scanning, liveAdmissionWorkers)
+	}
+	if gate.calls != 6 {
+		t.Fatalf("scans = %d, want 6", gate.calls)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, AdmissionStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("admission state file left after every admission ended (err %v)", err)
+	}
+}
+
+// GAP-0418: the HIGH finding that quarantined a skill (a location-less
+// analyzability finding) was missing from alerts; the watcher's block now
+// names the deciding findings in its alert and journal reason.
+func TestBlockReasonNamesTheDecidingFinding(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{
+			{ID: "m1", RuleID: "DATA-READ", Severity: scanner.SeverityMedium, Title: "reads files"},
+			{ID: "h1", RuleID: "LOW_ANALYZABILITY", Severity: scanner.SeverityHigh, Title: "Critically low analyzability score"},
+		}}
+	}
+	skillPath := filepath.Join(skillDir, "huge-blob")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "huge-blob", Path: skillPath, Timestamp: time.Now()})
+	entry, err := store.GetAction("skill", "huge-blob")
+	if err != nil || entry == nil || !strings.Contains(entry.Reason, "LOW_ANALYZABILITY Critically low analyzability score") ||
+		strings.Contains(entry.Reason, "DATA-READ") {
+		t.Fatalf("journal %+v (err %v), want the reason to name only the HIGH finding", entry, err)
 	}
 }

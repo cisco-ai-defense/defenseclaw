@@ -22,7 +22,9 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import codecs
 import copy
+import locale
 import logging
 import ntpath
 import os
@@ -97,6 +99,26 @@ _GatewayBooleanLoader.yaml_implicit_resolvers = {
 _GatewayBooleanLoader.add_implicit_resolver(
     _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
 )
+
+
+def read_config_text(path: str | os.PathLike[str]) -> str:
+    """Read config.yaml as text: UTF-8, a leading byte order mark dropped.
+
+    Windows editors (Notepad "UTF-8 with BOM", PowerShell 5 Set-Content
+    -Encoding UTF8) start the file with a BOM. Read with the locale
+    encoding (cp1252 on Windows) it became a ``\u00ef\u00bb\u00bf`` prefix on
+    the first key, so that key went missing and a save wrote the bogus key
+    back, which the validator refused (GAP-0386). The gateway reads the
+    file as UTF-8 and skips the mark; a file that is not UTF-8 is decoded
+    with the locale encoding, as before.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    data = data.removeprefix(codecs.BOM_UTF8)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False))
 
 
 def parse_config_yaml(text: str) -> Any:
@@ -255,6 +277,29 @@ def source_config_version(*, path: str | None = None) -> int | None:
     return _exact_config_version(node.value)
 
 
+def _foreign_owner_fix(cfg_file: str) -> tuple[str, str] | None:
+    """(detail, fix) for a config.yaml another account owns, else None."""
+
+    try:
+        owner_uid = os.stat(cfg_file).st_uid
+        current_uid = os.geteuid()  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+    if owner_uid == current_uid:
+        return None
+    try:
+        import pwd
+
+        owner = pwd.getpwuid(owner_uid).pw_name
+        user = pwd.getpwuid(current_uid).pw_name
+    except (ImportError, KeyError):
+        owner, user = str(owner_uid), str(current_uid)
+    return (
+        f"it is owned by {owner}, not by this account (as after a sudo defenseclaw run)",
+        f"Give it back to this account: sudo chown {user} {cfg_file}",
+    )
+
+
 def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
     """Name the file, the problem and its position, and the next step."""
 
@@ -270,7 +315,10 @@ def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
         detail = "the file is not valid UTF-8 text"
     else:
         detail = getattr(exc, "strerror", None) or type(exc).__name__
-    if not isinstance(exc, yaml.YAMLError):
+    if isinstance(exc, PermissionError) and (owned := _foreign_owner_fix(cfg_file)):
+        # A stray sudo defenseclaw run leaves it root-owned (GAP-0398).
+        detail, fix = owned
+    elif not isinstance(exc, yaml.YAMLError):
         fix = "Fix the file"
     return (
         f"Cannot read the DefenseClaw configuration {cfg_file}: {detail}. "
@@ -1390,26 +1438,12 @@ class SkillScannerAnalyzers:
 @dataclass
 class SkillScannerTimeouts:
     scan_s: int = 0
-    llm_s: int = 0
-
-
-@dataclass
-class MCPScannerAPIConfig:
-    endpoint: str = ""
-    api_key_env: str = ""
 
 
 @dataclass
 class MCPScannerYARAConfig:
     include_bundled: bool | None = None
     extra_rules: list[AssetFileRef] = field(default_factory=list)
-
-
-@dataclass
-class MCPScannerTimeouts:
-    stdio_s: int = 0
-    remote_s: int = 0
-    llm_s: int = 0
 
 
 @dataclass
@@ -1456,9 +1490,7 @@ class MCPScannerConfig:
     # config_version 9 keys (empty = unset). ``analyzers`` stays the v8
     # comma-separated string here; a v9 list loads joined with commas.
     judge_source: str = ""
-    api: MCPScannerAPIConfig = field(default_factory=MCPScannerAPIConfig)
     yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
-    timeouts: MCPScannerTimeouts = field(default_factory=MCPScannerTimeouts)
 
 
 @dataclass
@@ -3628,6 +3660,17 @@ class Config:
             llm.max_retries = base.effective_max_retries()
         return llm
 
+    def check_saveable(self) -> None:
+        """Raise ConfigUnparseableError when a save would be refused because
+        config.yaml on disk no longer parses (GAP-0370); a missing file is fine."""
+        path = str(config_path_for_data_dir(self.data_dir))
+        try:
+            with open(path, "rb") as handle:
+                current = handle.read()
+        except FileNotFoundError:
+            return
+        _existing_document_for_save(path, current)
+
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
 
@@ -3686,7 +3729,7 @@ class Config:
         dataclass_data = _config_to_dict(self)
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
-            merged = self._merged_document(path, dataclass_data)
+            merged = self._merged_document(path, dataclass_data, current)
             _assert_config_write_allowed(path, merged)
             candidate = config_writer.render_document(current, merged, source_name)
             return candidate, config_writer.diff_documents(current, candidate)
@@ -3703,8 +3746,8 @@ class Config:
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
         return result
 
-    def _merged_document(self, path: str, dataclass_data: dict[str, Any]) -> dict[str, Any]:
-        """The on-disk document with this Config's changed modeled values."""
+    def _merged_document(self, path: str, dataclass_data: dict[str, Any], current: bytes) -> dict[str, Any]:
+        """The on-disk document (``current``) with this Config's changed modeled values."""
 
         version = self._source_config_version
         baseline = self._loaded_v8_modeled_snapshot
@@ -3721,7 +3764,7 @@ class Config:
                 "This configuration was written by an older DefenseClaw"
                 " — run 'defenseclaw migrate' first."
             )
-        existing = _load_existing_config_yaml(path)
+        existing = _existing_document_for_save(path, current)
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
@@ -4134,8 +4177,7 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
     if isinstance(mcp, dict):
         if not mcp.get("judge_source"):
             mcp.pop("judge_source", None)
-        for key in ("api", "virustotal", "timeouts"):
-            _prune_v9_block(mcp, key, drop_false=True)
+        _prune_v9_block(mcp, "virustotal", drop_false=True)
         _prune_v9_block(mcp, "yara")
 
 
@@ -4263,73 +4305,69 @@ def _serialize_routing(d: dict[str, Any]) -> None:
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
-    """Best-effort read of an existing ``config.yaml`` for round-trip save.
+    """Best-effort read of an existing ``config.yaml`` (the managed check).
 
-    Returns ``{}`` when the file is missing (first save), unreadable, or
-    malformed. On parse failure we log a warning but do NOT raise — the
-    operator's previous file may be partially corrupt and we still want
-    ``cfg.save()`` to succeed so the next setup wizard can rewrite it
-    cleanly. Worst-case the on-disk file is replaced with the
-    dataclass-only view, which is exactly the pre-fix behaviour, so we
-    cannot regress relative to the old serializer.
+    Returns ``{}`` when the file is missing, unreadable, malformed or not a
+    mapping, with a warning for the last three. A save never merges into
+    this: it reads the file with :func:`_existing_document_for_save`.
     """
     try:
-        with open(path) as f:
-            raw = parse_config_yaml(f.read()) or {}
+        raw = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
-        _log.warning(
-            "config.save: cannot read existing %s (%s); writing dataclass-only view (any unmodelled keys will be lost)",
-            path,
-            exc,
-        )
+        _log.warning("config: cannot read existing %s (%s)", path, exc)
         return {}
     except yaml.YAMLError as exc:
-        backup = _backup_unparseable_config(path)
-        _log.warning(
-            "config.save: existing %s failed to parse (%s); writing dataclass-only view (backup=%s)",
-            path,
-            exc,
-            backup or "unavailable",
-        )
+        _log.warning("config: existing %s failed to parse (%s)", path, exc)
         return {}
     if not isinstance(raw, dict):
-        _log.warning(
-            "config.save: existing %s is not a YAML mapping (got %s); writing dataclass-only view",
-            path,
-            type(raw).__name__,
-        )
+        _log.warning("config: existing %s is not a YAML mapping (got %s)", path, type(raw).__name__)
         return {}
+    from defenseclaw.observability.v8_config import drop_retired_scanner_keys
+
+    # A save leaves out the scanner keys no scan read (GAP-0295, GAP-0301).
+    drop_retired_scanner_keys(raw)
     return raw
 
 
-def _backup_unparseable_config(path: str) -> str:
+def _existing_document_for_save(path: str, current: bytes) -> dict[str, Any]:
+    """The on-disk document a save merges into; ``{}`` for an empty file.
+
+    A file that does not parse, or is not a mapping, is refused as the CLI
+    writer refuses it: a save used to fall back to a document of only the
+    changed fields and replace the file with it, which dropped every other
+    setting (listeners, connectors, pack pins) and the protection with them
+    (GAP-0370). Nothing is written, and the error names the line.
+    """
+    from defenseclaw.config_writer import ConfigUnparseableError
+
     try:
-        with open(path, "rb") as src:
-            data = src.read()
-    except OSError:
-        return ""
-    backup = f"{path}.bak"
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(backup, flags, 0o600)
-    except FileExistsError:
-        backup = f"{path}.bak.{os.getpid()}"
-        try:
-            fd = os.open(backup, flags, 0o600)
-        except OSError:
-            return ""
-    except OSError:
-        return ""
-    try:
-        with os.fdopen(fd, "wb") as dst:
-            dst.write(data)
-            dst.flush()
-            os.fsync(dst.fileno())
-    except OSError:
-        return ""
-    return backup
+        text = current.removeprefix(codecs.BOM_UTF8).decode("utf-8")
+        raw = parse_config_yaml(text) if text.strip() else {}
+    except UnicodeDecodeError as exc:
+        raise ConfigUnparseableError(
+            f"{path} is not UTF-8 text (byte {exc.start}); nothing was saved. "
+            "Save it as UTF-8, then run 'defenseclaw config validate'"
+        ) from exc
+    except yaml.YAMLError as exc:
+        from defenseclaw.observability.v8_config import yaml_error_mark
+
+        mark = yaml_error_mark(exc)
+        where = f"line {mark.line + 1}, column {mark.column + 1}: " if mark is not None else ""
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        raise ConfigUnparseableError(
+            f"{path} is not valid YAML ({where}{problem}); nothing was saved. "
+            "Fix that line, then run 'defenseclaw config validate'"
+        ) from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigUnparseableError(
+            f"{path} is a YAML {type(raw).__name__}, not a mapping of settings; nothing was saved. "
+            "Fix the file, then run 'defenseclaw config validate'"
+        )
+    return raw
 
 
 # Dotted YAML paths whose VALUE is a dict[str, str]-style modeled
@@ -5512,9 +5550,7 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
             scan_instructions=raw.get("scan_instructions", False),
             llm=_merge_llm(raw.get("llm")),
             judge_source=str(raw.get("judge_source", "") or ""),
-            api=_merge_mcp_scanner_api(raw.get("api")),
             yara=_merge_mcp_scanner_yara(raw.get("yara")),
-            timeouts=_merge_mcp_scanner_timeouts(raw.get("timeouts")),
         )
     return MCPScannerConfig()
 
@@ -5720,7 +5756,7 @@ def _merge_skill_scanner_analyzers(skill_raw: Any) -> SkillScannerAnalyzers:
 
 def _merge_skill_scanner_timeouts(raw: Any) -> SkillScannerTimeouts:
     raw = _mapping(raw)
-    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")), llm_s=_int_or_zero(raw.get("llm_s")))
+    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")))
 
 
 def _mcp_analyzers_text(raw: Any) -> str:
@@ -5730,27 +5766,11 @@ def _mcp_analyzers_text(raw: Any) -> str:
     return str(raw) if raw is not None else ""
 
 
-def _merge_mcp_scanner_api(raw: Any) -> MCPScannerAPIConfig:
-    raw = _mapping(raw)
-    return MCPScannerAPIConfig(
-        endpoint=str(raw.get("endpoint", "") or ""), api_key_env=str(raw.get("api_key_env", "") or "")
-    )
-
-
 def _merge_mcp_scanner_yara(raw: Any) -> MCPScannerYARAConfig:
     raw = _mapping(raw)
     return MCPScannerYARAConfig(
         include_bundled=_optional_bool(raw.get("include_bundled")),
         extra_rules=[_merge_asset_file_ref(entry) for entry in raw.get("extra_rules") or [] if isinstance(entry, dict)],
-    )
-
-
-def _merge_mcp_scanner_timeouts(raw: Any) -> MCPScannerTimeouts:
-    raw = _mapping(raw)
-    return MCPScannerTimeouts(
-        stdio_s=_int_or_zero(raw.get("stdio_s")),
-        remote_s=_int_or_zero(raw.get("remote_s")),
-        llm_s=_int_or_zero(raw.get("llm_s")),
     )
 
 
@@ -6232,7 +6252,9 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 _log.warning("config: ignored malformed dotenv entry from %s", env_path)
                 continue
             if dotenv_key_is_process_control(key):
-                _log.warning("config: ignored unsafe process-control key %s from %s", key, env_path)
+                # Said on every command, with no fix, it was noise; doctor and
+                # the upgrade's migration name it with the replacement (GAP-0387).
+                _log.debug("config: ignored process-control key %s from %s", key, env_path)
                 continue
             # A managed standalone host skips what the registry ignores there.
             if envvars.managed_policy(key) == envvars.MANAGED_IGNORE:
@@ -6258,6 +6280,39 @@ def _load_dotenv_into_os(data_dir: str) -> None:
         pass
     except OSError as exc:
         _log.warning("config: ignoring unreadable or unsafe dotenv %s: %s", env_path, exc)
+
+
+def ignored_dotenv_control_keys(data_dir: str) -> list[str]:
+    """Each process-control key the data dir's .env sets, with what replaces it.
+
+    A .env never sets one of those (dotenv_key_is_process_control): a 0.8.x
+    workaround such as DEFENSECLAW_FAIL_MODE=open there is ignored, and
+    fail-open hooks became fail-closed without a word (GAP-0387).
+    """
+    try:
+        body = read_regular_file_no_follow(os.path.join(data_dir, ".env"), max_bytes=MAX_DOTENV_BYTES)
+    except OSError:
+        return []
+    found: dict[str, str] = {}
+    for raw_line in body.splitlines():
+        raw_key, separator, raw_value = raw_line.strip().partition(b"=")
+        try:
+            key = raw_key.strip().decode("ascii")
+            value = raw_value.strip().decode("utf-8").strip("\"'").strip().lower()
+        except UnicodeError:
+            continue
+        if not separator or not dotenv_key_is_valid(key) or not dotenv_key_is_process_control(key) or key in found:
+            continue
+        if key.upper() == "DEFENSECLAW_FAIL_MODE" and value in ("open", "closed"):
+            found[key] = f"set it in config.yaml instead: defenseclaw guardrail fail-mode {value}"
+        elif key.upper() == "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT":
+            found[key] = (
+                "to accept a newer agent, export it for one restart instead: "
+                "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
+            )
+        else:
+            found[key] = "export it in the shell of the command that needs it instead"
+    return [f"{key} ({fix})" for key, fix in found.items()]
 
 
 def _warn_plaintext_secrets(cfg: Config) -> None:
@@ -6324,10 +6379,13 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
 
     raw: dict[str, Any] = {}
     try:
-        with open(cfg_file) as f:
-            raw = parse_config_yaml(f.read()) or {}
-    except OSError:
+        raw = parse_config_yaml(read_config_text(cfg_file)) or {}
+    except (FileNotFoundError, NotADirectoryError):
         pass
+    except OSError as exc:
+        # An unreadable file (root-owned after a sudo run) is not a missing
+        # one: never judge the install against built-in defaults (GAP-0398).
+        raise ConfigVersionError(_unreadable_config_message(cfg_file, exc)) from exc
     _warn_untrusted_managed_config(cfg_file, raw)
     # Move the retired Desktop connector ID to devin before any connector key
     # is normalized or checked for duplicates. The Go loader applies the same

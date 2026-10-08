@@ -357,6 +357,65 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
         v9 = v8.replace(b"8", b"9", 1)
         self.assertIn("move it to admission.skill.actions", cmd_config._plain_v8_issue(v9, "$.skill_actions", self.REASON))
 
+    def test_v9_otel_names_its_destination_without_a_suggestion(self):
+        raw = b"config_version: 9\notel:\n  endpoint: https://example.invalid\n"
+        message = cmd_config._plain_v8_issue(raw, "$.otel", self.REASON)
+        self.assertIn("observability.destinations", message)
+        self.assertIn("config_version 9", message)
+        self.assertNotIn("did you mean", message)
+
+    def test_maximum_length_names_value_and_bound(self):
+        raw = b"config_version: 9\nguardrail:\n  block_message: " + b"B" * 4097 + b"\n"
+        message = cmd_config._plain_v8_issue(
+            raw, "$.guardrail.block_message", "[maxLength] configuration violates the maxLength constraint"
+        )
+        self.assertIn("4097 characters", message)
+        self.assertIn("4096", message)
+
+    def test_empty_config_set_points_to_unset(self):
+        result = CliRunner().invoke(cmd_config.config_set, ["guardrail.block_at", ""], obj=SimpleNamespace())
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("defenseclaw config unset guardrail.block_at", result.output)
+
+    def test_hook_self_heal_get_reports_builtin_default(self):
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 9\n", encoding="utf-8")
+            result = CliRunner().invoke(
+                cmd_config.config_get,
+                ["guardrail.hook_self_heal"],
+                obj=SimpleNamespace(cfg=default_config()),
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("true", result.output)
+        self.assertIn("config.yaml does not set guardrail.hook_self_heal", result.output)
+
+    def test_effective_get_explains_invalid_source(self):
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 9\nguardrail:\n  block_at: BOGUS\n", encoding="utf-8")
+            with patch.object(cmd_config.config_module, "load", side_effect=ValueError("guardrail.block_at is invalid")):
+                result = CliRunner().invoke(
+                    cmd_config.config_get,
+                    ["guardrail.block_at", "--effective"],
+                    obj=SimpleNamespace(cfg=None),
+                )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("guardrail.block_at is invalid", result.output)
+        self.assertIn("last good configuration", result.output)
+        self.assertNotIn("Traceback", result.output)
+
+    def test_set_and_unset_invalid_yaml_report_the_line(self):
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 9\nguardrail: [oops\n", encoding="utf-8")
+            for command, args in (
+                (cmd_config.config_set, ["guardrail.alert_at", "LOW"]),
+                (cmd_config.config_unset, ["guardrail.alert_at"]),
+            ):
+                result = CliRunner().invoke(command, args, obj=SimpleNamespace(cfg=None))
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("invalid YAML", result.output)
+                self.assertIn("line 2", result.output)
+                self.assertNotIn("Traceback", result.output)
+
     def test_config_get_and_set_send_a_retired_key_to_migrate(self):
         # A v8 file is migrated, not hand-edited: deleting the key loses its value.
         from defenseclaw import config_writer

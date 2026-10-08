@@ -319,6 +319,7 @@
     },
     "boundedString": {
       "type": "string",
+      "description": "At most 4096 characters.",
       "maxLength": 4096
     },
     "stringList": {
@@ -727,20 +728,6 @@
         "llm": {
           "$ref": "#/$defs/llm"
         },
-        "api": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "Empty values inherit cisco_ai_defense.endpoint and api_key_env.",
-          "properties": {
-            "endpoint": {
-              "type": "string",
-              "maxLength": 8192
-            },
-            "api_key_env": {
-              "$ref": "#/$defs/envNameOrEmpty"
-            }
-          }
-        },
         "yara": {
           "type": "object",
           "additionalProperties": false,
@@ -757,9 +744,6 @@
               }
             }
           }
-        },
-        "timeouts": {
-          "$ref": "#/$defs/mcpScannerTimeouts"
         }
       }
     },
@@ -5516,12 +5500,6 @@
           "minimum": 0,
           "maximum": 86400,
           "default": 300
-        },
-        "llm_s": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 86400,
-          "default": 60
         }
       }
     },
@@ -5543,30 +5521,6 @@
         "$ref": "#/$defs/mcpScannerAnalyzer"
       },
       "description": "Analyzers to run; an empty list lets the scanner choose (auto)."
-    },
-    "mcpScannerTimeouts": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "stdio_s": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 86400,
-          "default": 60
-        },
-        "remote_s": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 86400,
-          "default": 120
-        },
-        "llm_s": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 86400,
-          "default": 30
-        }
-      }
     },
     "v9SourceConstraints": {
       "description": "Additional constraints for a config_version 9 source: removed v8 keys and v9-only value shapes.",

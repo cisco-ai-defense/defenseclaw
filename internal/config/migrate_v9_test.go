@@ -399,6 +399,92 @@ func mustJSON(t *testing.T, value any) string {
 // shipped data.json thresholds alone, so they must not override the strict
 // posture the hook paths used; and a strict-named pack outside
 // <policy_dir>/guardrail is an edited copy, not the preset.
+func TestMigrateV9TransliteratesANonASCIIPackFolder(t *testing.T) {
+	// GAP-0390: "équipe sécu" became custom_packs.quipe-s-cu.
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " +
+		filepath.Join(dir, "policies", "guardrail", "Équipe sécu") + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: equipe-secu") {
+		t.Errorf("want the pack named equipe-secu:\n%s", got)
+	}
+}
+
+func TestMigrateV9KeepsTheZeroEightBackupOfARelabelledV9File(t *testing.T) {
+	// GAP-0352: a v9 file hand-edited to config_version 8 replaced the
+	// pristine 0.8.x config.yaml.v8.bak on the next migration.
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	pristine := []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n")
+	if err := os.WriteFile(configPath+ConfigV8BackupSuffix, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relabelled := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack: default\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(relabelled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if kept, _ := os.ReadFile(configPath + ConfigV8BackupSuffix); string(kept) != string(pristine) {
+		t.Errorf("the 0.8.x backup was replaced:\n%s", kept)
+	}
+	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "keeps the 0.8.x config") }) {
+		t.Errorf("no note says the backup was kept: %q", result.Record.Notes)
+	}
+}
+
+func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
+	// GAP-0360: a 0.8.x copy of the default pack was pinned as it was and
+	// enforced nothing in 1.0; its rebased copy is written next to it and pinned.
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	acme := filepath.Join(dir, "policies", "guardrail", "acme")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + acme + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("b", 64)
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath:     configPath,
+		RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+		RebaseRulePack: func(string) (*RulePackRebasePlan, error) {
+			return &RulePackRebasePlan{
+				Files: map[string][]byte{"rules/commands.yaml": []byte("rebased\n")}, Digest: digest,
+				Updated: 26, Carried: []string{"CMD-ACME-MARKER"}, Expressed: []string{"CMD-ACME-MARKER"},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "path: "+acme+"-1.0") || !strings.Contains(got, "sha256:"+digest) {
+		t.Errorf("want the rebased copy pinned:\n%s", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(acme+"-1.0", "rules", "commands.yaml")); err != nil || string(data) != "rebased\n" {
+		t.Errorf("rebased pack file: %q, %v", data, err)
+	}
+	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "enforced nothing") }) {
+		t.Errorf("no note names the rebase: %q", result.Record.Notes)
+	}
+}
+
 func TestMigrateV9KeepsThePackPosture(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()

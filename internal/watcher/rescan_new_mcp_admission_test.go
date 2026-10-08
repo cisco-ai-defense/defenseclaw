@@ -6,6 +6,8 @@ package watcher
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -47,5 +49,70 @@ func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 	w.runRescanCycle(context.Background())
 	if len(admitted) != 1 {
 		t.Fatalf("the next cycle admitted the server again: %#v", admitted)
+	}
+}
+
+// GAP-0405: servers added with 'claude mcp add' (local scope) or a project's
+// .mcp.json were never scanned: the gateway read only the user scope and the
+// rescan admitted nothing new. ReadWatchedMCPServers lists every project's
+// servers and the discovery poll admits one within its interval.
+func TestProjectMCPServerIsAdmittedOnDiscovery(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	project := filepath.Join(home, "proj")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"projects":{"` + filepath.ToSlash(project) + `":{"mcpServers":{"deepwiki":{"type":"http","url":"https://mcp.example.test/mcp"}}}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".mcp.json"), []byte(`{"mcpServers":{"team-sync":{"command":"python3","args":["sync.py"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Watch.RescanEnabled = true
+	var admitted []AdmissionResult
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	scans := &countingScanner{name: "mcp-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return cfg.ReadWatchedMCPServers([]string{"claudecode"})
+	})
+	w.SetMCPDiscoveryPoll(true)
+	w.firstCycleDone.Store(true)
+
+	w.discoverAddedMCPServers()
+	w.admitAddedMCPServers(context.Background())
+	names := map[string]bool{}
+	for _, r := range admitted {
+		names[r.Event.Name] = true
+	}
+	if !names["deepwiki"] || !names["team-sync"] || scans.calls != 2 {
+		t.Fatalf("admitted %v with %d scans, want deepwiki and team-sync scanned", names, scans.calls)
+	}
+}
+
+// GAP-0371: an allow pinned to the server URL (the rule mcp allow writes)
+// admits the added server without a scan; the watcher used to match the
+// rule against the name alone, which never matches a pinned rule.
+func TestAdmitAddedMCPServerMatchesAllowPinnedToItsURL(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: "ctx7", URL: "https://ctx7.example.test/mcp"}}
+	servers := []config.MCPServerEntry{}
+	var admitted []AdmissionResult
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	scans := &countingScanner{name: "mcp-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+	w.runRescanCycle(context.Background())
+	servers = append(servers, config.MCPServerEntry{Name: "ctx7", URL: "https://ctx7.example.test/mcp", Connector: "codex"})
+	w.AdmitAddedMCPServers([]string{"ctx7"})
+	w.admitAddedMCPServers(context.Background())
+	if len(admitted) != 1 || admitted[0].Verdict != VerdictAllowed || scans.calls != 0 {
+		t.Fatalf("admitted %#v after %d scans, want ctx7 allowed by its pinned rule without a scan", admitted, scans.calls)
 	}
 }

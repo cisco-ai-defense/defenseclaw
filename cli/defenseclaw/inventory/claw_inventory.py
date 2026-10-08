@@ -4968,7 +4968,7 @@ def _read_skill_description(path: str) -> str:
         except OSError:
             continue
         try:
-            reader = os.fdopen(fd, encoding="utf-8", errors="replace")
+            reader = os.fdopen(fd, "rb")
         except OSError:
             try:
                 os.close(fd)
@@ -4977,7 +4977,9 @@ def _read_skill_description(path: str) -> str:
             continue
         try:
             with reader as f:
-                text = f.read(2048)
+                from defenseclaw.skill_discovery import decode_skill_text
+
+                text = decode_skill_text(f.read(4096))[:2048]
         except OSError:
             continue
         frontmatter_description = _frontmatter_description(text)

@@ -197,14 +197,61 @@ func (rp *RulePack) ScanArtifact(ctx context.Context, path string) []scanner.Fin
 	return findings
 }
 
+// artifactCommandCategory is the category of the command-line rules
+// (rules/commands.yaml).
+const artifactCommandCategory = "command"
+
+// artifactDocExts are documentation files.
+var artifactDocExts = map[string]struct{}{".md": {}, ".mdx": {}, ".markdown": {}, ".txt": {}, ".rst": {}}
+
+// isArtifactDoc reports a documentation file other than the skill's own
+// SKILL.md, which holds the instructions the agent follows.
+func isArtifactDoc(location string) bool {
+	if _, ok := artifactDocExts[strings.ToLower(filepath.Ext(location))]; !ok {
+		return false
+	}
+	return !strings.EqualFold(filepath.ToSlash(location), "SKILL.md")
+}
+
+// firstLineMatch is the first match of re that lies on one line of text.
+func firstLineMatch(re *regexp.Regexp, text string) []int {
+	offset := 0
+	for offset <= len(text) {
+		end := strings.IndexByte(text[offset:], '\n')
+		line := text[offset:]
+		if end >= 0 {
+			line = text[offset : offset+end]
+		}
+		if match := re.FindStringIndex(line); match != nil {
+			return []int{offset + match[0], offset + match[1]}
+		}
+		if end < 0 {
+			break
+		}
+		offset += end + 1
+	}
+	return nil
+}
+
 func scanArtifactText(rules []artifactRule, text, location string) []scanner.Finding {
 	python := strings.EqualFold(filepath.Ext(location), ".py")
+	doc := isArtifactDoc(location)
 	var findings []scanner.Finding
 	for _, rule := range rules {
-		if python && rule.pathWrite {
+		// A rule about writing a path describes a tool call: in Python source
+		// it needs the call, and in documentation a file name is a mention
+		// (COG-MEMORY on docs that explain MEMORY.md, GAP-0364).
+		if (python || doc) && rule.pathWrite {
 			continue
 		}
-		match := rule.re.FindStringIndex(text)
+		var match []int
+		if rule.category == artifactCommandCategory {
+			// A command is one line: a match running across lines joined an
+			// rm -rf in a JSON example to a "/" further down (GAP-0364).
+			match = firstLineMatch(rule.re, text)
+		} else {
+			match = rule.re.FindStringIndex(text)
+		}
 		if match == nil {
 			continue
 		}

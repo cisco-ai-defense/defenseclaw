@@ -309,6 +309,14 @@ def _widen_windows_default_executor(loop: asyncio.AbstractEventLoop, *, platform
 TOKENS = DEFAULT_TOKENS
 
 
+def _config_error_summary(path: Path, error: Exception) -> str:
+    """Keep the actionable config failure visible at 80 columns."""
+
+    match = re.search(r"\bline (\d+)\b", str(error))
+    location = f" line {match.group(1)}" if match else ""
+    return f"{path.name}{location} is invalid; run defenseclaw config validate"
+
+
 class _ConfigGenerationChangedError(RuntimeError):
     """The watched config moved while a background reload was in flight."""
 
@@ -1330,6 +1338,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
         self._config_reload_count = 0
+        self._config_error = ""
         # Set on each config-editor save: saved sections the CLI already applies.
         self._setup_cli_live_sections = ""
         self.data_dir = _resolve_data_dir(config, data_dir)
@@ -4941,6 +4950,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("j/k or PgUp/PgDn", "Scroll the dashboard"),
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
+                ("G", "Start or restart the gateway"),
+                ("z", "Enable or run AI Discovery"),
                 ("g", "Setup guardrail"),
                 ("m", overview_m),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
@@ -10268,6 +10279,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         connector_scope = self._overview_connector_scope_text()
 
         notice_lines = []
+        if self._config_error:
+            notice_lines.append(f"[{TOKENS.accent_red}][ERROR][/] {rich_escape(self._config_error)}")
         for notice in notices[:4]:
             color = TOKENS.accent_red if notice.level == "error" else TOKENS.accent_amber
             if notice.level == "info":
@@ -10477,8 +10490,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # rendered overview, so the operator sees ``Scan all`` with
         # no key to press.
         quick = (
-            "\\[s] Scan all   \\[d] Doctor   \\[i] Inventory   "
-            "\\[g] Guardrail   \\[m] Mode   \\[l] Logs"
+            "\\[s] Scan  \\[d] Doctor  \\[G] Gateway  \\[z] AI Discovery  "
+            "\\[i] Inventory  \\[g] Setup"
         )
         return (
             "[bold #22D3EE]Overview[/]  [#9FB2CC]Command center for live risk, setup health, and next actions.[/]\n"
@@ -10645,9 +10658,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "changes are recorded here as they happen.[/]"
                 )
         elif not self.audit_model.filtered and not self.audit_model.filtering:
-            # A search with no matches showed an empty table and no text
-            # (GAP-1631).
-            lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
+            if not self.audit_model.filter_text and self.audit_model.hidden_routine_count():
+                lines.append(f"[{TOKENS.text_muted}]Only routine events exist. Press l to show them.[/]")
+            else:
+                # A search with no matches showed an empty table and no text
+                # (GAP-1631).
+                lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
@@ -10661,7 +10677,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.status_text = text
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
-        if _status_text_fills_line(text, self.size.width):
+        if self._config_error:
+            rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
+        elif _status_text_fills_line(text, self.size.width):
             # A "Done: ..." fitted to the line lost its last cell to the "…"
             # of the cut-off health strip ("press i for readines…", GAP-2133).
             rendered = text
@@ -11869,6 +11887,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             action = self.audit_model.handle_key(_vim_key(key))
             return self._apply_audit_action(action)
         if self.active_panel == "overview":
+            if key == "G":
+                command = "start" if self.overview_model.gateway_down() else "restart"
+                self._submit_command_text(f"defenseclaw-gateway {command}")
+                return True
+            if key == "z":
+                ai_status = (self.overview_model.ai_discovery_box().status or "").lower()
+                command = "enable --yes" if ai_status in {"disabled", "offline"} else "scan"
+                self._submit_command_text(f"defenseclaw agent discovery {command}")
+                return True
             if key == "m":
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
@@ -12660,7 +12687,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return setup_center.task_statuses(self.setup_model)
 
     def _setup_header(self) -> str:
-        """``Setup · 19 tasks ok · 1 needs attention — i readiness checks``.
+        """``Setup · 19 tasks ok · 1 needs attention — i task details``.
 
         Tasks by status (see setup_catalog.task_status), then the ``i`` hint
         when it fits. The count says "tasks": "11 ok — i readiness details"
@@ -12677,7 +12704,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         room = self._body_width() - len("Setup · ")
         plain = " · ".join(text for text, _style in parts)
         tail = next(
-            (tail for tail in (" — i readiness checks", " — i checks", "") if len(plain) + len(tail) <= room),
+            (tail for tail in (" — i task details", " — i details", "") if len(plain) + len(tail) <= room),
             "",
         )
         counts = " · ".join("[" + style + "]" + rich_escape(text) + "[/]" for text, style in parts)
@@ -13175,6 +13202,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return SetupPanelAction(True, hint="No config changes to save.")
         saved_entries = self.setup_model.config_diff()
         restart_keys: list[str] | None = None
+        check_saveable = getattr(self.config, "check_saveable", None)
+        if callable(check_saveable):
+            from defenseclaw.config_writer import ConfigUnparseableError
+
+            try:
+                check_saveable()
+            except ConfigUnparseableError as exc:
+                # Saving would replace the file with only the edited fields
+                # (GAP-0370); the draft stays for a save once the file is fixed.
+                return SetupPanelAction(
+                    True, hint=f"Config not saved: {exc}. Your draft is kept: fix the file and press S again, or r to discard it."
+                )
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
@@ -13183,6 +13222,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
                 result = save(actor=current_actor(ACTOR_PREFIX_TUI), reason=restart_reason)
                 restart_keys = getattr(result, "restart_required", None)
+            from defenseclaw.enforce import asset_lists
+
+            secure_client = asset_lists.is_secure_client(self.config)
+            if secure_client:
+                # A Secure Client gateway reads its policy at start, so every
+                # save keeps the restart of main (issue #1092).
+                restart_keys = None
             roster_changed, storage_changed = self._apply_config_snapshot(
                 self.config,
                 external=False,
@@ -13207,7 +13253,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
         self._schedule_config_save_audit(saved_entries)
-        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries)
+        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries) if secure_client else ""
         if self._setup_cli_live_sections:
             return SetupPanelAction(
                 True,
@@ -13581,6 +13627,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # evaluates the new generation; the current snapshot remains.
                 return
             except Exception as exc:  # noqa: BLE001 - malformed/locked config is retryable.
+                summary = _config_error_summary(watcher.path, exc)
+                if summary != self._config_error:
+                    self._config_error = summary
+                    self._render_chrome()
                 if watcher.reject(generation, now=now):
                     self._write_activity(
                         f"[#FBBF24]external config reload deferred:[/] "
@@ -13603,6 +13653,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return
 
             watcher.accept(generation)
+            self._config_error = ""
             self._config_reload_count += 1
             self._set_status("Configuration refreshed from disk.")
             self._schedule_active_panel_refresh("config-generation")
@@ -13664,6 +13715,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         try:
             new_cfg: object | None = config_module.load()
         except Exception as exc:  # noqa: BLE001 — bad YAML must not crash the TUI.
+            if self._config_watcher is not None:
+                self._config_error = _config_error_summary(self._config_watcher.path, exc)
+                self._render_chrome()
             self._write_activity(
                 f"[#FBBF24]config reload failed:[/] {rich_escape(str(exc))}; keeping current snapshot."
             )
@@ -13674,6 +13728,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             external=False,
             refresh_disk=True,
         )
+        self._config_error = ""
         if self._config_watcher is not None:
             self._config_watcher.sync_to_disk()
         self._schedule_active_panel_refresh("internal-config-generation")
@@ -13998,7 +14053,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 results.append((name, stdout.decode(errors="replace")))
         self.inventory_model.apply_merged(results)
         if not any(text for _name, text in results):
-            self.inventory_model.message = "Could not load inventory for any connector."
+            self.inventory_model.message = self._config_error or "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
@@ -14348,7 +14403,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         model.apply_merged(results)
         if not any(text for _name, text in results):
-            model.message = f"Could not load {panel} for any connector."
+            model.message = self._config_error or f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
         self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
@@ -15365,7 +15420,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # the operator changed any setting that triggers a
                 # restart (e.g. toggling redaction off via setup) the
                 # whole TUI tore down.
-                self.setup_model.mark_restart_started(snapshot.started_at)
+                if self.setup_model.mark_restart_started(snapshot.started_at) and self.status_text.startswith(
+                    "Config changes saved"
+                ):
+                    # The status line still asked for the restart that just
+                    # happened (GAP-0342).
+                    self._set_status("Gateway restarted; it applies the saved config changes.")
             except (AttributeError, TypeError):
                 # Older SetupPanelModel without this method (or with a
                 # different signature) — fall back to clearing the
@@ -16445,7 +16505,8 @@ def _typed_character(event: events.Key) -> str | None:
 
 # Config keys the CLI reads from config.yaml on every command, so CLI
 # admission (mcp set, skill and plugin install) enforces a saved change at
-# once; only the gateway's own checks wait for the restart (GAP-2145).
+# once (GAP-2145). Only a Secure Client gateway waits for a restart to apply
+# them; every other gateway reloads asset_policy hot (GAP-0056).
 _CLI_LIVE_CONFIG_SECTIONS = ("asset_policy",)
 
 

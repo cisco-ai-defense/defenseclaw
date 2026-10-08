@@ -266,7 +266,13 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
         )
     if effective or (_resolves_when_unset(parts) and not _written_in_source(app, parts, written)):
-        resolved = _effective_value(app, parts)
+        try:
+            resolved = _effective_value(app, parts)
+        except (ValueError, yaml.YAMLError, V8ConfigError, config_module.ConfigVersionError) as exc:
+            raise click.ClickException(
+                f"Cannot read effective configuration: {exc}. Fix config.yaml, then run defenseclaw config validate; "
+                "a running gateway keeps its last good configuration."
+            ) from exc
         if resolved is not None:
             value, source = resolved
             click.echo(f"(source: {source})", err=True)
@@ -274,6 +280,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             return
     if written is not None:
         view = _merge_defaults(written, _v8_defaults(app))
+        if parts == ["guardrail", "hook_self_heal"]:
+            view.setdefault("guardrail", {}).setdefault("hook_self_heal", True)
         _resolve_defaults(app, view, written)
     else:
         view = _key_view(app, parts)
@@ -603,7 +611,14 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         raise SystemExit(MANAGED_EXIT_CODE) from exc
     except config_writer.ConfigConflictError as exc:
         raise click.ClickException("config.yaml changed since --expect-sha256 was read; read it again") from exc
-    except (config_writer.ConfigWriteError, V8ConfigError, ValueError) as exc:
+    except yaml.YAMLError as exc:
+        try:
+            syntax = _yaml_syntax_detail(Path(config_module.config_path()).read_bytes())
+        except OSError:
+            syntax = None
+        detail = syntax or "invalid YAML; run defenseclaw config validate to see the line"
+        raise click.ClickException(f"config.yaml was not changed: {detail}") from exc
+    except (config_writer.ConfigWriteError, V8ConfigError, ValueError, OSError) as exc:
         raise click.ClickException(f"config.yaml was not changed: {config_writer.plain_error(exc)}") from exc
     if not result.changed:
         if verb != "unset":
@@ -668,7 +683,24 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
     _refuse_config_version(parts)
+    _refuse_retired_scanner_key(key, parts)
+    if value == "" and not as_json:
+        raise click.ClickException(
+            f"an empty value does not set {key}; use defenseclaw config unset {key}"
+        )
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
+
+
+def _refuse_retired_scanner_key(key: str, parts: list) -> None:
+    """A load ignores the scanner keys no scan read (GAP-0295, GAP-0301), so
+    setting one must fail instead of writing a value that does nothing."""
+    from defenseclaw.observability.v8_config import _RETIRED_SCANNER_KEYS
+
+    if any(tuple(parts[: len(retired)]) == retired for retired in _RETIRED_SCANNER_KEYS):
+        raise click.ClickException(
+            f"{key} is not a configuration key: it was removed because no scan read it; "
+            "config.yaml was not changed."
+        )
 
 
 @config_cmd.command("unset")
@@ -1366,8 +1398,17 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
 
+    if (code == "maxLength" or "maxLength constraint" in text) and isinstance(node, yaml.ScalarNode):
+        return f"{where}{field} has {len(node.value)} characters; the limit is 4096. All fields: {_ALL_FIELDS_COMMAND}"
+
     if code == "additionalProperties" and text.startswith(RETIRED_KEY_ACTION_PREFIX):
         return f"{where}{field} {text[len('this key '):]}"
+    from defenseclaw.config_writer import pack_pin_repair
+
+    repair = pack_pin_repair(text)
+    if repair:
+        return f"{where}{field}: {text}. Re-pin the edited pack: {repair}"
+
 
     parts = [
         part.strip()
@@ -1395,8 +1436,9 @@ def _not_current_message(path: str) -> str:
 
     try:
         version = config_module.source_config_version(path=path)
-    except config_module.ConfigVersionError:
-        version = 0
+    except config_module.ConfigVersionError as exc:
+        # An unreadable file is not an older one (GAP-0398).
+        return str(exc)
     if version and version > config_module.CURRENT_CONFIG_VERSION:
         return config_module.newer_config_message(version)
     return "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
@@ -1443,7 +1485,7 @@ def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
                             return True
                     except yaml.YAMLError:
                         pass
-    return _V8_VERSION_LINE.search(raw) is not None
+    return _V8_VERSION_LINE.search(raw.removeprefix(b"\xef\xbb\xbf")) is not None
 
 
 def _v8_config_path_view(path: str):

@@ -80,7 +80,7 @@ The `update` block of `config.yaml` has three keys.
 | --- | --- | --- |
 | `update.check` | `true` | Show the update notice above. |
 | `update.channel` | `stable` | The release channel. `stable` is the only one. |
-| `update.source` | empty | Where release files are downloaded from: empty for the official GitHub releases, or an `https://` base URL for a mirror. |
+| `update.source` | `https://github.com/cisco-ai-defense/defenseclaw` (built-in) | Where release files are downloaded from; set an `https://` base URL for a mirror. |
 
 ### Install from a mirror
 
@@ -223,11 +223,14 @@ upgrade, the installer says so (`Your previous install is back, but its gateway
 is not running`): agent hooks are not guarded until `defenseclaw-gateway start`
 succeeds.
 
-On a host where several accounts run their own gateways, the installer checks
-the running gateway's API port before it builds or changes anything. When
-another account's process holds that port, it stops there with nothing changed
-and prints the `defenseclaw setup gateway --api-port <free port>` command that
-moves this account's gateway. Run it, then upgrade again.
+On a host where several accounts run their own gateways, the macOS and Linux
+installer checks the running gateway's API port before it builds or changes
+anything. When another account's process holds that port, it stops there with
+nothing changed and prints the `defenseclaw setup gateway --api-port <free port>`
+command that moves this account's gateway. Run it, then upgrade again. A gateway
+that was not running before the upgrade stays stopped; when another process
+holds its port, the installer (on every OS) ends with the same command instead
+of `defenseclaw-gateway start`, which would fail.
 
 If an upgrade or rollback is interrupted (the terminal closes or the machine
 loses power), run the same command again. The installer first restores the

@@ -244,6 +244,61 @@ func hookInvocationCommandWith(goos, connector, unixCommand string, hookBinary f
 	return "& " + powershellQuoteLiteral(hookBinary()) + " " + nativeHookFlag + connector
 }
 
+// posixHookCommandWord renders a Unix hook script path as one POSIX shell
+// word. Claude Code, Codex, Kiro and Devin run a Unix hook command through a
+// shell, so a data directory under a home that contains a space must be
+// quoted or the shell runs the first half of the path and the hook never
+// reaches the gateway (GAP-0382). A path made only of shell-safe characters
+// is returned unchanged, so those registrations stay byte-identical to
+// earlier releases for ownership matching and Codex trusted-hook hashes.
+func posixHookCommandWord(path string) string {
+	if path != "" && strings.IndexFunc(path, posixShellUnsafeRune) < 0 {
+		return path
+	}
+	return shellSingleQuote(path)
+}
+
+func posixShellUnsafeRune(r rune) bool {
+	if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+		return false
+	}
+	return !strings.ContainsRune("/._-+=:,@%", r)
+}
+
+// posixHookCommandUnquoted undoes posixHookCommandWord on the leading word of
+// a command. A command that starts with a single-quoted word comes back with
+// that word unquoted, which is the form releases before GAP-0382 wrote for a
+// path with a space; setup and teardown still claim that form as DefenseClaw
+// hooks. Any other command is returned unchanged.
+func posixHookCommandUnquoted(command string) string {
+	if !strings.HasPrefix(command, "'") {
+		return command
+	}
+	var word strings.Builder
+	for i := 0; i < len(command); {
+		switch {
+		case command[i] == '\'':
+			end := strings.IndexByte(command[i+1:], '\'')
+			if end < 0 {
+				return command
+			}
+			word.WriteString(command[i+1 : i+1+end])
+			i += end + 2
+		case strings.HasPrefix(command[i:], `"'"`):
+			word.WriteByte('\'')
+			i += 3
+		case strings.HasPrefix(command[i:], `\'`):
+			word.WriteByte('\'')
+			i += 2
+		case command[i] == ' ':
+			return word.String() + command[i:]
+		default:
+			return command
+		}
+	}
+	return word.String()
+}
+
 func windowsHermesDirectHookCommand(binary string) string {
 	binary = strings.TrimSpace(binary)
 	if binary == "" || strings.ContainsAny(binary, "\"\x00\r\n") || !isWindowsAbsolutePath(binary) {

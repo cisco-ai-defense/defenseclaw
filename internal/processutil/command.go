@@ -41,3 +41,12 @@ func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd 
 func CombinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, error) {
 	return combinedOutputTree(cmd, allowManagedBreakaway)
 }
+
+// RunTree runs cmd with the streams the caller set and ties it to this
+// process: on Windows a kill-on-close Job Object ends the whole tree, on
+// Linux the child gets SIGKILL when this process dies. A killed gateway left
+// its skill-scanner running at full CPU, and a second one started for the
+// same skill after the restart (GAP-0418). Other platforms run cmd as is.
+func RunTree(cmd *exec.Cmd) error {
+	return runTree(cmd, false)
+}

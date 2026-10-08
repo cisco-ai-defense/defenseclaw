@@ -1105,6 +1105,24 @@ class RenderPlanConnectorTests(unittest.TestCase):
         self.assertIn("connector teardown:  no", text)
         self.assertNotIn("openclaw", text)
 
+    def test_render_names_the_quarantined_copies_all_deletes(self):
+        # GAP-0422: --all deleted the quarantine with every skill and plugin
+        # DefenseClaw had moved there, and neither the plan nor the help said so.
+        with tempfile.TemporaryDirectory() as data_dir:
+            for name in ("skills/claudecode/anthropic-skills", "skills/claudecode/docx", "plugins/codex/helper"):
+                os.makedirs(os.path.join(data_dir, "quarantine", name))
+            plan = cmd_uninstall.UninstallPlan(
+                remove_data_dir=True,
+                data_dir=data_dir,
+                quarantined=cmd_uninstall._quarantined_copies(data_dir),
+            )
+            with capture_click_output() as buf:
+                cmd_uninstall._render_plan(plan, dry_run=True)
+        self.assertIn("3 quarantined skill/plugin copies", buf.getvalue())
+        self.assertIn("defenseclaw skill restore NAME", buf.getvalue())
+        all_help = next(p for p in cmd_uninstall.uninstall_cmd.params if p.name == "wipe_data").help
+        self.assertIn("quarantined", all_help)
+
     def test_render_shows_connector_specific_line_for_codex(self):
         plan = cmd_uninstall.UninstallPlan(
             connector="codex",

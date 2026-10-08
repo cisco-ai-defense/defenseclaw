@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -621,5 +622,41 @@ func TestWatcherUsesConnectorDirsSkipsManagedServiceHome(t *testing.T) {
 	cfg.DeploymentMode = "managed_enterprise"
 	if watcherUsesConnectorDirs(cfg) {
 		t.Fatal("a managed enterprise service must not watch its own profile's connector folders")
+	}
+}
+
+// TestResolveWatcherDirsForConnectors_EveryConfiguredConnector pins GAP-0392:
+// with Claude Code and Codex configured the watcher watches both connectors'
+// skill folders (Codex's $CODEX_HOME/skills included), each tagged with the
+// connector that owns it, not only the first connector's.
+func TestResolveWatcherDirsForConnectors_EveryConfiguredConnector(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	codexSkills := filepath.Join(home, ".codex", "skills")
+	if err := os.MkdirAll(codexSkills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}, "codex": {}}
+	wcfg := config.GatewayWatcherConfig{}
+	wcfg.Skill.Enabled, wcfg.Plugin.Enabled = true, true
+
+	conns := watcherConnectors(connector.NewDefaultRegistry(), cfg)
+	skillDirs, _, roots, _ := resolveWatcherDirsForConnectors(cfg, conns, wcfg)
+	for dir, owner := range map[string]string{
+		filepath.Join(home, ".claude", "skills"): "claudecode",
+		filepath.Join(home, ".agents", "skills"): "codex",
+		codexSkills:                              "codex",
+	} {
+		if !slices.Contains(skillDirs, dir) {
+			t.Errorf("skill dirs %v do not include %s", skillDirs, dir)
+		}
+		if roots[dir] != owner {
+			t.Errorf("root %s owner = %q, want %q", dir, roots[dir], owner)
+		}
 	}
 }

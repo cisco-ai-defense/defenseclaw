@@ -649,6 +649,9 @@ class SetupPanelModel:
         # or config-editor draft. The authoritative config/readiness state
         # still advances, but the draft remains intact until run/cancel/revert.
         self.disk_change_pending = False
+        # Draft keys another writer changed on disk while the draft was open,
+        # so Review can say the save replaces their value (GAP-0342).
+        self.disk_changed_keys: frozenset[str] = frozenset()
         # Goal-first entry layer: a contextual "what do you want to do?" menu
         # that sits in front of the wizard form. ``active_goal`` is carried
         # into the form so its preset filter survives dependent rebuilds.
@@ -676,7 +679,10 @@ class SetupPanelModel:
         self.config = cfg
         self.observability_status = None
         self.observability_status_error = ""
-        if not preserve_config_draft:
+        if preserve_config_draft:
+            self._rebase_config_draft(build_setup_sections(cfg, self.os_name, observability_status=None))
+        else:
+            self.disk_changed_keys = frozenset()
             self.sections = build_setup_sections(cfg, self.os_name, observability_status=None)
             if active_name:
                 for index, section in enumerate(self.sections):
@@ -694,6 +700,34 @@ class SetupPanelModel:
         # changes; otherwise we keep showing rows derived from the
         # snapshot captured at __init__ time even after `setup` runs.
         self.rebuild_readiness_checks()
+
+    def _rebase_config_draft(self, rebuilt: tuple[ConfigSection, ...]) -> None:
+        """Move the open config draft onto the new disk generation (GAP-0342).
+
+        Untouched fields show the value now on disk; an edited field keeps
+        the edit, with the on-disk value as its "before" in Review; an edited
+        field another writer changed meanwhile is recorded in
+        ``disk_changed_keys``, so Review says the save replaces it.
+        """
+
+        edits = {f.key: f for s in self.sections for f in s.fields if f.key and f.value != f.original}
+        changed = set(self.disk_changed_keys)
+        sections: list[ConfigSection] = []
+        for section in rebuilt:
+            fields = []
+            for current in section.fields:
+                draft = edits.get(current.key) if current.key else None
+                if draft is not None:
+                    if current.original != draft.original:
+                        changed.add(current.key)
+                    current = current.with_value(draft.value)
+                fields.append(current)
+            sections.append(replace(section, fields=tuple(fields)))
+        self.sections = tuple(sections)
+        self.disk_changed_keys = frozenset(key for key in changed if key in edits)
+        self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
+        section = self.current_section()
+        self.active_line = _clamp(self.active_line, 0, max(0, len(section.fields) - 1) if section else 0)
 
     def set_observability_status(
         self,
@@ -999,7 +1033,12 @@ class SetupPanelModel:
         return False
 
     def config_diff(self) -> tuple[ConfigDiffEntry, ...]:
-        return config_diff(self.sections)
+        entries = config_diff(self.sections)
+        if not self.disk_changed_keys:
+            return entries
+        return tuple(
+            replace(entry, disk_changed=True) if entry.key in self.disk_changed_keys else entry for entry in entries
+        )
 
     def validation_errors(self) -> tuple[str, ...]:
         return validation_errors(self.sections)
@@ -1043,8 +1082,9 @@ class SetupPanelModel:
         elif field is not None and field.interactive:
             restart_hint = "Restart: queued on save when runtime settings change"
         saved_hint = ""
-        if self.last_saved_at is not None:
-            # "Saved 12:08 UTC", not a microsecond ISO stamp (GAP-1554).
+        if self.last_saved_at is not None and not changes:
+            # "Saved 12:08 UTC", not a microsecond ISO stamp (GAP-1554); an
+            # open draft is not saved, so it shows no earlier save (GAP-0342).
             saved_hint = "Saved " + self.last_saved_at.astimezone(timezone.utc).strftime("%H:%M UTC")
             actions.append(saved_hint)
         return SetupSaveRestartHints(
@@ -1165,6 +1205,7 @@ class SetupPanelModel:
             for field in section.fields:
                 if field.value != field.original:
                     apply_config_field(self.config, field.key, field.value)
+        self.disk_changed_keys = frozenset()
         if self.disk_change_pending:
             # The draft was based on an older disk generation. Changed fields
             # were just merged into the latest authoritative object; rebuild
@@ -3408,6 +3449,7 @@ def _llm_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
             "regional",
             "Use a regional provider (Bedrock / Vertex / Azure)",
             summary="Switch to a cloud-region provider; auth rows appear on pick.",
+            presets={"--provider": "bedrock"},
             fields=("Provider", "Model", *_LLM_PROVIDER_SECTIONS),
         ),
         WizardGoal(
@@ -5830,6 +5872,8 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
         return field.value
     if reveal:
         return field.value or "(empty)"
+    if field.label == "Secret Value":
+        return "********" if field.value else "(empty)"
     return mask_secret(field.value)
 
 
@@ -8089,7 +8133,7 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             "guardrail.alert_at",
             "choice",
             ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
-            "Lowest severity prompts, completions and tool calls alert at; blank=the rule pack's level.",
+            "Lowest alert level; blocking severities always alert too. Effective level cannot be above Block At.",
         ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),

@@ -368,16 +368,25 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
+	scanPath, unstage, err := stageUTF16Skill(target)
+	defer unstage()
+	if err != nil {
+		result.Duration = time.Since(start)
+		result.ScanError = err.Error()
+		result.ExitCode = -1
+		return result, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.Config.ScanTimeoutSeconds())*time.Second)
 	defer cancel()
-	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(target, policy)...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(scanPath, policy)...)
 	cmd.Env = s.scanEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
+	err = processutil.RunTree(cmd)
 	result.Duration = time.Since(start)
 	stderrStr := stderr.String()
 
@@ -402,7 +411,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	}
 
 	if stdout.Len() > 0 {
-		findings, parseErr := parseSkillOutput(stdout.Bytes(), target)
+		findings, parseErr := parseSkillOutput(stdout.Bytes(), scanPath)
 		if parseErr != nil {
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr
@@ -419,6 +428,38 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	}
 
 	return result, nil
+}
+
+// RuleLLMAnalysisFailed is the INFO finding skill-scanner reports when its
+// LLM judge started but did not answer (an outage, blocked egress, a model
+// error); the scan then finished with the deterministic analyzers only.
+const RuleLLMAnalysisFailed = "LLM_ANALYSIS_FAILED"
+
+// ErrJudgeDidNotRun marks a skill scan whose LLM judge did not run.
+var ErrJudgeDidNotRun = errors.New("the LLM judge did not run, so the scan is incomplete")
+
+// JudgeFailure returns an ErrJudgeDidNotRun error when result carries the
+// scanner's LLM_ANALYSIS_FAILED finding, nil otherwise. The install watcher
+// fails such a scan closed, as skill-scanner.mdx promises for a judge that
+// cannot run (GAP-0376); the INFO finding alone read as a clean scan.
+func JudgeFailure(result *ScanResult) error {
+	if result == nil {
+		return nil
+	}
+	for _, f := range result.Findings {
+		if f.RuleID != RuleLLMAnalysisFailed {
+			continue
+		}
+		detail := strings.Join(strings.Fields(f.Description), " ")
+		if len(detail) > 240 {
+			detail = detail[:240] + "..."
+		}
+		if detail == "" {
+			return ErrJudgeDidNotRun
+		}
+		return fmt.Errorf("%w: %s", ErrJudgeDidNotRun, detail)
+	}
+	return nil
 }
 
 type skillOutput struct {

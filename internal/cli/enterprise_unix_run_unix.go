@@ -352,6 +352,9 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	case "set":
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
+			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
+				return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
 				return withExitCode(err, enterprisestatus.UnixExitFailure)

@@ -91,14 +91,20 @@ func (e *RulePackError) Error() string {
 // RulePack, but none of the source regexes, prompts, suppression values, tool
 // names, or filesystem paths are exposed.
 type RulePackSummary struct {
-	JudgeCount         int    `json:"judge_count"`
-	JudgeCategoryCount int    `json:"judge_category_count"`
-	RuleFileCount      int    `json:"rule_file_count"`
-	RuleCount          int    `json:"rule_count"`
-	EnabledRuleCount   int    `json:"enabled_rule_count"`
-	LocalPatternCount  int    `json:"local_pattern_count"`
-	SuppressionCount   int    `json:"suppression_count"`
-	SensitiveToolCount int    `json:"sensitive_tool_count"`
+	JudgeCount         int `json:"judge_count"`
+	JudgeCategoryCount int `json:"judge_category_count"`
+	RuleFileCount      int `json:"rule_file_count"`
+	RuleCount          int `json:"rule_count"`
+	EnabledRuleCount   int `json:"enabled_rule_count"`
+	LocalPatternCount  int `json:"local_pattern_count"`
+	SuppressionCount   int `json:"suppression_count"`
+	SensitiveToolCount int `json:"sensitive_tool_count"`
+	// StaleRuleCount counts enabled action rules (command, sensitive-path,
+	// cognitive-file, c2) that are 0.8.x copies of built-in rules without
+	// the expression 1.0 needs to block; AlertOnlyRuleCount the operator's
+	// own action rules without one, which record matches and never block.
+	StaleRuleCount     int    `json:"stale_rule_count"`
+	AlertOnlyRuleCount int    `json:"alert_only_rule_count"`
 	Digest             string `json:"digest"`
 	// FilesDigest is FilesDigest: the pin guardrail.custom_packs.<name>.digest
 	// holds (hex).
@@ -1479,6 +1485,7 @@ func (rp *RulePack) counts() RulePackSummary {
 	if tools := rp.SensitiveTools; tools != nil {
 		summary.SensitiveToolCount = len(tools.Tools)
 	}
+	summary.StaleRuleCount, summary.AlertOnlyRuleCount = rp.actionRuleGaps()
 	return summary
 }
 

@@ -84,7 +84,9 @@ func configDigest(cfg *config.Config) (string, error) {
 // admission: becomes the compiled admission policy, so an explicit empty
 // first_party_allow_list (which YAML omits) differs from the built-in list and
 // a value equal to its default digests like the unset key; a connector's
-// enabled: true is the default and is dropped. A Secure Client host keeps its
+// enabled: true is the default and is dropped; a block_at or alert_at level is
+// upper-cased (the schema takes it in any case and enforcement reads it so, so
+// high and HIGH are one policy, GAP-0329). A Secure Client host keeps its
 // document as written.
 func materializeConfigDefaults(cfg *config.Config, doc any) any {
 	root, ok := doc.(map[string]any)
@@ -98,6 +100,7 @@ func materializeConfigDefaults(cfg *config.Config, doc any) any {
 		}
 	}
 	if guardrail, ok := root["guardrail"].(map[string]any); ok {
+		canonicalizeGuardrailLevels(guardrail)
 		if overrides, ok := guardrail["connectors"].(map[string]any); ok {
 			for _, override := range overrides {
 				if fields, ok := override.(map[string]any); ok && fields["enabled"] == true {
@@ -107,6 +110,25 @@ func materializeConfigDefaults(cfg *config.Config, doc any) any {
 		}
 	}
 	return root
+}
+
+// canonicalizeGuardrailLevels upper-cases every block_at and alert_at string
+// in value (the guardrail section: global, connectors and profiles).
+func canonicalizeGuardrailLevels(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if level, ok := child.(string); ok && (key == "block_at" || key == "alert_at") {
+				v[key] = strings.ToUpper(strings.TrimSpace(level))
+				continue
+			}
+			canonicalizeGuardrailLevels(child)
+		}
+	case []any:
+		for _, child := range v {
+			canonicalizeGuardrailLevels(child)
+		}
+	}
 }
 
 // observabilityDigest digests the observability section of config.yaml

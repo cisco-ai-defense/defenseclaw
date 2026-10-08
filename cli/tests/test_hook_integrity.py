@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import sys
 from types import SimpleNamespace
 
@@ -74,7 +75,7 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     _check_hook_runtime_integrity(cfg, "codex", r)
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
-    assert "defenseclaw setup codex" in row["detail"] and "doctor --fix" in row["detail"]
+    assert "doctor --fix" in row["detail"] and "setup codex" not in row["detail"]
 
     # GAP-0098: --fix restarts the gateway, which renders the script again.
     from defenseclaw.commands import cmd_doctor
@@ -169,6 +170,47 @@ def test_removed_hook_registration_is_reported(tmp_path):
     assert hook_registration_problems(cfg, "codex") == []
 
 
+def test_unquoted_hook_path_with_a_space_fails_doctor(tmp_path):
+    # GAP-0382: the shell runs the first half of an unquoted path with a space.
+    data_dir = tmp_path / "dc ip8" / ".defenseclaw"
+    (data_dir / "hooks").mkdir(parents=True)
+    script = str(data_dir / "hooks" / "claude-code-hook.sh")
+    settings = tmp_path / "settings.json"
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock))
+    cfg = SimpleNamespace(data_dir=str(data_dir))
+
+    def register(command):
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": command}]}]}}))
+
+    register(shlex.quote(script))
+    assert hook_registration_problems(cfg, "claudecode") == []
+    register(script)
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and "cannot run" in problems[0]
+    r = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "claudecode", r)
+    row = next(row for row in r.checks if row.get("label") == "Hook command")
+    assert row["status"] == "fail"
+
+
+def test_missing_windows_hook_launcher_names_the_installer(tmp_path, monkeypatch):
+    # GAP-0378: the native launcher is gone; only the installer restores it.
+    from defenseclaw import hook_integrity
+
+    settings = tmp_path / "settings.json"
+    launcher = "C:\\Users\\dcw-dr1\\.local\\bin\\defenseclaw-hook.exe"
+    hook = {"type": "command", "command": launcher, "args": ["hook", "--connector", "claudecode"]}
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+
+    problems = hook_registration_problems(SimpleNamespace(data_dir=str(tmp_path)), "claudecode")
+    assert problems and launcher in problems[0]
+    assert "installer" in hook_integrity.repair_command("claudecode", problems[0])
+
+
 def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
     # GAP-1316: an older build's script still holds the freshness sentinels,
     # but it does not match the digest setup sealed.
@@ -243,3 +285,19 @@ def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeyp
         script.chmod(0o700)
     assert "cannot be read" in problem
     assert "changed since setup" not in " ".join(problems)
+
+
+def test_missing_hook_script_is_named_as_missing_with_one_repair(tmp_path):
+    from defenseclaw.commands.cmd_doctor import _repair_display_tag
+
+    cfg, script = _install(tmp_path)
+    script.unlink()
+    problems = hook_runtime_problems(cfg, "codex")
+    assert len(problems) == 1 and "is missing" in problems[0]
+    assert "changed since setup" not in problems[0]
+
+    result = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", result)
+    row = next(row for row in result.checks if row.get("label") == "Hook runtime files")
+    assert row["detail"].count("doctor --fix") == 1
+    assert _repair_display_tag("blocked") == "skip"

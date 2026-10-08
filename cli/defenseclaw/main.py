@@ -377,8 +377,8 @@ def cli(ctx: click.Context) -> None:
             # GAP-0288: the file is there and refused; `init` would not fix it.
             ux.echo(
                 f"Failed to load config: {exc}. Fix it in {cfg_mod.config_path()}; "
-                "'defenseclaw config validate' shows the line. If the gateway is running, "
-                "it keeps its last good config.",
+                "'defenseclaw config validate' shows the line. "
+                "A running gateway keeps its last good configuration.",
                 err=True,
             )
         else:
@@ -633,7 +633,7 @@ def _try_launch_tui() -> bool:
         return False
 
     if not ux.terminal_supports_tui():
-        ux.echo(ux.TUI_UNAVAILABLE_MESSAGE, err=True)
+        ux.echo(ux.tui_unavailable_message(), err=True)
         return True
 
     from defenseclaw.tui import run_textual_tui
@@ -747,6 +747,11 @@ def main() -> None:
             # GAP-2580: the TUI runs "python -m defenseclaw.main"; usage errors
             # must still name the command the user types.
             cli(prog_name="defenseclaw")
+    except KeyboardInterrupt:
+        # Ctrl+C outside Click's own handling (an import, the TUI handoff, the
+        # upgrade's migration step) printed a Python traceback (GAP-0408).
+        click.echo("\nInterrupted.", err=True)
+        sys.exit(130)
     except CanonicalObservabilityUnavailableError as exc:
         # The command's audit event needs the gateway (for example after
         # init --no-start-gateway): one line with the fix, no traceback

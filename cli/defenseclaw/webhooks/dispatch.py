@@ -37,8 +37,10 @@ import hashlib
 import hmac
 import json
 import re
+import socket
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -290,6 +292,16 @@ class DispatchResult:
     duration_ms: float = 0.0
 
 
+def network_error_text(exc: BaseException, url: str) -> str:
+    """Give DNS failures a host-only explanation without echoing webhook secrets."""
+
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, socket.gaierror):
+        host = urllib.parse.urlsplit(url).hostname or "the destination"
+        return f"could not resolve host {host}"
+    return str(exc)
+
+
 def send_synthetic(
     *,
     webhook_type: str,
@@ -384,7 +396,7 @@ def send_synthetic(
         status = int(exc.code)
         err = f"HTTP {exc.code}: {exc.reason}"
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        err = str(exc)
+        err = network_error_text(exc, url)
     duration_ms = (time.perf_counter() - started_at) * 1000.0
 
     ok = status is not None and 200 <= status < 300

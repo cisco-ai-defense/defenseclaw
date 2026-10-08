@@ -115,6 +115,34 @@ def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
     assert "required_pack" not in text and "config_version: 9" in text
 
 
+def test_removed_scanner_keys_are_ignored_on_load_and_refused_by_config_set(tmp_path, monkeypatch):
+    # GAP-0295/GAP-0301: no scan read scanners.mcp_scanner.api or .timeouts
+    # or skill_scanner.timeouts.llm_s. A file a pre-release build wrote with
+    # them still validates and takes writes; config set refuses them.
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_config
+    from defenseclaw.observability.v8_config import validate_v8_source
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(
+        tmp_path,
+        "scanners:\n  skill_scanner:\n    timeouts: {scan_s: 600, llm_s: 60}\n"
+        "  mcp_scanner:\n    api: {endpoint: https://aid.example.test}\n    timeouts: {remote_s: 5}\n",
+    )
+    validate_v8_source(open(path, encoding="utf-8").read())
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+    ):
+        refused = CliRunner().invoke(cmd_config.config_cmd, ["set", "scanners.mcp_scanner.timeouts.remote_s", "9"])
+        written = CliRunner().invoke(cmd_config.config_cmd, ["set", "guardrail.mode", "action"])
+    assert refused.exit_code == 1 and "no scan read it" in refused.output, refused.output
+    assert written.exit_code == 0, written.output
+    assert "remote_s: 9" not in open(path, encoding="utf-8").read()
+
+
 def test_a_field_of_an_unlisted_destination_names_the_range(tmp_path, monkeypatch):
     # GAP-0154: set indexes the destinations written in config.yaml, as get does.
     monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
@@ -398,6 +426,22 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     # The CLI reference quotes this message for a rejected `config set`.
     shown = f"Error: config.yaml was not changed: {config_writer.plain_error(block_at)}\n"
     assert shown in _reference_page("cli.mdx")
+
+
+def test_edited_pack_error_names_narrow_repin():
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    reason = (
+        "[config_semantic_invalid] config rule pack \"custom\": digest sha256:aaa does not match "
+        "guardrail.custom_packs.custom.digest; fix the reference, then retry"
+    )
+    inspected = ConfigInspectError("rejected", field_path="$.guardrail", reason=reason)
+    refused = config_writer.ConfigWriteError("config.yaml change rejected")
+    refused.__cause__ = inspected
+    assert (
+        "defenseclaw config set guardrail.custom_packs.custom.digest sha256:<files digest>"
+        in config_writer.plain_error(refused)
+    )
 
 
 def test_source_of_truth_page_lists_every_restart_required_key():

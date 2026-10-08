@@ -2124,6 +2124,32 @@ def test_low_entropy_promoted_value_cannot_remain_as_string_scalar(
         )
 
     assert captured.value.code == "secret_in_candidate"
+    assert "X-Short" in str(captured.value) and "run the upgrade again" in str(captured.value)
+
+
+@pytest.mark.parametrize("label", ["platform", "POST", "observe"])
+def test_a_promoted_header_label_equal_to_another_scalar_is_no_leak(tmp_path: Path, label: str) -> None:
+    # GAP-0326: a non-secret header such as X-Acme-Team: platform aborted the
+    # 0.x upgrade with an opaque secret_in_candidate whenever any other scalar
+    # (a method, a mode, a label) had the same value.
+    fixture = _fixture(tmp_path)
+    edit = _edit("DEFENSECLAW_MIGRATED_TEAM", label, path=("headers", "X-Acme-Team", "env"))
+    candidate = _candidate_with_header_reference(fixture["candidate"], "X-Acme-Team", edit.name)
+    migration = _migration(
+        fixture["source"],
+        candidate + f"unrelated_label: {label}\r\n".encode(),
+        edits=(edit,),
+        effective_data_dir=str(fixture["data_dir"]),
+    )
+
+    result = activate_v8_migration(
+        migration,
+        validator=lambda _candidate, _environment: None,
+        data_dir=fixture["data_dir"],
+        config_path=fixture["config_path"],
+    )
+
+    assert result.activated
 
 
 def test_backup_directories_are_collision_safe(tmp_path: Path) -> None:

@@ -63,6 +63,16 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 		len(settings.YARA.ExtraRules) != 1 || settings.YARA.ExtraRules[0].Path != rule.Path || settings.YARA.ExtraRules[0].Digest != rule.Digest {
 		t.Fatalf("runtime settings = %s", args[2])
 	}
+	// GAP-0296: the runtime also gets the rule pack the CLI overlays.
+	mcp.RulePack = MCPRulePack{
+		Dir:   `C:\ProgramData\DefenseClaw\policies\guardrail\strict`,
+		Rules: []config.GuardrailRulesConfig{{Disable: []string{"SEC-X"}}},
+	}
+	args, err = mcp.commandArgs("https://mcp.example.test/mcp")
+	if err != nil || len(args) != 6 || args[3] != "--rule-pack" || args[5] != "https://mcp.example.test/mcp" ||
+		!strings.Contains(args[4], `"rules":[{"disable":["SEC-X"]}]`) {
+		t.Fatalf("mcp args with a rule pack = %v (%v)", args, err)
+	}
 	env := strings.Join(mcp.runtimeEnv(), "\n")
 	for _, wantLine := range []string{
 		"DEFENSECLAW_SCANNER_LLM_MODEL=bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",

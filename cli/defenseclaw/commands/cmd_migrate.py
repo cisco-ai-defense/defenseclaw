@@ -148,6 +148,21 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
     if not check and not as_json:
         _report_hook_fail_mode_changes(data_dir or _default_data_dir())
+        _report_ignored_dotenv_keys(data_dir or _default_data_dir())
+
+
+def _report_ignored_dotenv_keys(data_dir: str) -> None:
+    """Name each 0.x .env control key this release no longer reads (GAP-0387)."""
+    from defenseclaw.config import ignored_dotenv_control_keys
+
+    keys = ignored_dotenv_control_keys(data_dir)
+    if not keys:
+        return
+    env_path = os.path.join(data_dir, ".env")
+    ux.warn(f"{env_path} sets {len(keys)} variable(s) DefenseClaw no longer reads from .env:")
+    for entry in keys:
+        ux.subhead(entry, indent="    ")
+    ux.subhead(f"Then remove those lines from {env_path}; 'defenseclaw doctor' lists them until then.", indent="    ")
 
 
 def _report_hook_fail_mode_changes(data_dir: str) -> None:

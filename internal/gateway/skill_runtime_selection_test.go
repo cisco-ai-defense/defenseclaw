@@ -321,17 +321,11 @@ func TestClaudeNativePromptExpansionCorrelatesRuntimeDisableFromProductionIdenti
 			if response.Action != "block" || response.RawAction != "block" {
 				t.Fatalf("action=%q raw=%q reason=%q", response.Action, response.RawAction, response.Reason)
 			}
-			for _, want := range []string{
-				"reason_code=runtime-disable",
-				"source=runtime-disable",
-				"asset_type=" + tc.targetType,
-				"asset_name=" + tc.targetName,
-				"connector=claudecode",
-				"surface=prompt_expansion",
-			} {
-				if !strings.Contains(response.Reason, want) {
-					t.Fatalf("reason %q missing %q", response.Reason, want)
-				}
+			// GAP-0362: the agent reads one plain sentence; the audit record
+			// below keeps the structured reason.
+			if !strings.Contains(response.Reason, tc.targetName+" is disabled by security policy") ||
+				strings.Contains(response.Reason, "reason_code=") {
+				t.Fatalf("agent reason %q, want a plain sentence naming %s", response.Reason, tc.targetName)
 			}
 
 			hookIndexes := make([]int, 0, 1)
@@ -378,8 +372,17 @@ func TestClaudeNativePromptExpansionCorrelatesRuntimeDisableFromProductionIdenti
 				t.Fatalf("audit action=%v raw_action=%v", structured["action"], structured["raw_action"])
 			}
 			auditReason, _ := structured["reason"].(string)
-			if !strings.Contains(auditReason, "reason_code=runtime-disable") {
-				t.Fatalf("audit reason=%q, want runtime-disable provenance", auditReason)
+			for _, want := range []string{
+				"reason_code=runtime-disable",
+				"source=runtime-disable",
+				"asset_type=" + tc.targetType,
+				"asset_name=" + tc.targetName,
+				"connector=claudecode",
+				"surface=prompt_expansion",
+			} {
+				if !strings.Contains(auditReason, want) {
+					t.Fatalf("audit reason %q missing %q", auditReason, want)
+				}
 			}
 		})
 	}

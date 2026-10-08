@@ -670,6 +670,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeDeletedEnrolledAccounts()
 	if record != nil {
 		l.describePerUserGateways(ctx)
+		l.describeAgentSessionsBeforeActivation(ctx, record)
 	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")

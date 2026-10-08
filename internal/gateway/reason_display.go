@@ -379,6 +379,13 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is denied by the default asset policy"
 	case "admin-deny":
 		return kind + " " + name + " is denied by asset policy"
+	case "runtime-disable":
+		// A disabled or quarantined asset: say so in words, not with the
+		// registry fields of the record (GAP-0362).
+		if values["asset_type"] == "skill" {
+			return "skill " + name + " is disabled by security policy; `defenseclaw skill info " + name + "` shows why"
+		}
+		return kind + " " + name + " is disabled by security policy"
 	}
 	return ""
 }

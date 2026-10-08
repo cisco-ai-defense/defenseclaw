@@ -31,8 +31,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -1098,6 +1100,27 @@ func codeGuardRuleFindings(
 	return applyTrustedActionProofBoundary(result, enforcementCapable)
 }
 
+// withoutBlockMessageEcho drops the configured block message from text the
+// agent hands back: a tool result that carries the denial DefenseClaw
+// returned, or the reply that repeats it. A contact address in that message
+// raised a PII alert on every block (GAP-0400). Only that exact
+// operator-authored text is replaced, by a space so the text around it is
+// not joined, and the rest is still scanned, so nothing else is hidden.
+func withoutBlockMessageEcho(cfg *config.Config, connector, content string) string {
+	if cfg == nil {
+		return content
+	}
+	message := strings.TrimSpace(cfg.EffectiveBlockMessageForConnector(connector))
+	if len(message) < minEchoedBlockMessageLen || !strings.Contains(content, message) {
+		return content
+	}
+	return strings.ReplaceAll(content, message, " ")
+}
+
+// minEchoedBlockMessageLen keeps a very short block message from removing
+// ordinary words from scanned text.
+const minEchoedBlockMessageLen = 16
+
 // inspectMessageContent scans outbound message content for secrets, PII,
 // and data exfiltration patterns. Uses the same rule engine.
 func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
@@ -1124,6 +1147,9 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		return verdict
 	}
 
+	if req.Direction == "response" || req.Direction == "tool_result" {
+		content = withoutBlockMessageEcho(a.decisionConfig(ctx), req.Connector, content)
+	}
 	if content == "" {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
@@ -1269,6 +1295,27 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 	return a.runHookJudge(ctx, direction, direction, req.Connector, content, req.Tool, current)
 }
 
+// connectorRulePack is the composed rule pack the request scans connector
+// with: its guardrail profile scope when one applies, else the connector
+// scope of the live generation (guardrail.rules with every connector
+// layer), else the global pack.
+func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
+	connector = canonicalConnectorRulePackKey(connector)
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
+		if pack := resolved.set.packs[effectiveRulePackKey(resolved.derived, connector)]; pack != nil {
+			return pack
+		}
+	}
+	g := a.generation()
+	if g == nil {
+		return nil
+	}
+	if pack := g.RulePacks["conn:"+connector]; pack != nil {
+		return pack
+	}
+	return g.RulePacks["global"]
+}
+
 // runHookJudge is the shared hook-lane judge core for all three hook
 // surfaces — message content, tool-call args (J3-3b), and tool output
 // (J3-3d). It is the opt-in gate: the judge runs only when the operator
@@ -1358,6 +1405,7 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	}
 	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	jctx = withJudgeSuppressionPack(jctx, a.connectorRulePack(ctx, connector))
 
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""

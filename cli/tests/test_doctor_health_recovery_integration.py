@@ -823,8 +823,31 @@ def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) ->
 
     assert result.checks[0]["status"] == "fail"
     assert result.checks[0]["reason_code"] == "audit-db-custody-invalid"
+    # GAP-0337: a permission slip names the mode and the chmod, not a restore.
+    assert "mode 0644" in result.checks[0]["detail"]
+    assert result.checks[0]["remediation"] == f"chmod 600 {cfg.audit_db}"
     assert planned.state == "blocked"
     assert planned.blockers == ("audit-db-custody-invalid",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_world_readable_dotenv_fails_the_private_files_row(tmp_path) -> None:
+    # GAP-0336: plain doctor reported all passed for a 0644 .env.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    dotenv = data_dir / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    os.chmod(dotenv, 0o600)
+    clean = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, clean)
+    assert clean.checks[-1]["status"] == "pass"
+
+    os.chmod(dotenv, 0o644)
+    exposed = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, exposed)
+    assert exposed.checks[-1]["status"] == "fail"
+    assert "0644" in exposed.checks[-1]["detail"]
+    assert "defenseclaw doctor --fix --yes" in exposed.checks[-1]["remediation"]
 
 
 def test_audit_recovery_removes_stale_pid_dependency_in_one_run(tmp_path) -> None:
@@ -1064,3 +1087,47 @@ def test_device_identity_requires_explicit_attended_repair(tmp_path) -> None:
     cmd_doctor._check_device_identity(cfg, repaired_health)
     assert repaired_health.checks[-1]["status"] == "pass"
     assert repaired_health.checks[-1]["reason_code"] == "device-key-provenance-valid"
+
+
+def test_deleted_device_key_with_leftover_provenance_has_an_attended_repair(tmp_path) -> None:
+    # GAP-0323: only device.key was deleted; its provenance files remain.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    attended = (
+        patch.object(cmd_doctor, "_recovery_gateway_blocker", return_value=""),
+        patch("click.confirm", return_value=True),
+    )
+    with attended[0], attended[1]:
+        assert cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)[0] == "pass"
+    os.remove(cfg.gateway.device_key_file)
+
+    health = _DoctorResult()
+    cmd_doctor._check_device_identity(cfg, health)
+    assert "doctor.identity.device-key.initialize" in health.checks[-1]["remediation"]
+    with attended[0], attended[1]:
+        tag, detail = cmd_doctor._fix_device_key_recovery(cfg, assume_yes=False)
+    assert tag == "pass", detail
+    status = inspect_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir).status
+    assert status is DeviceKeyHealthStatus.VALID
+    kept = [name for _root, _dirs, files in os.walk(data_dir) for name in files if ".orphaned-" in name]
+    assert len(kept) == 2, kept
+
+
+def test_gateway_writing_to_a_deleted_audit_db_fails_and_restarts(tmp_path) -> None:
+    # GAP-0325: the gateway health says its open audit.db is no longer on disk.
+    cfg = _cfg(_private_data_dir(tmp_path))
+    health = {"audit_store": {"state": "replaced"}}
+    rows = _DoctorResult()
+    cmd_doctor._check_live_audit_store(health, rows)
+    assert rows.checks[-1]["status"] == "fail"
+    assert "defenseclaw-gateway restart" in rows.checks[-1]["remediation"]
+
+    restart = Mock(return_value=(True, ""))
+    with (
+        patch.object(cmd_doctor, "_live_gateway_health", return_value=health),
+        patch.object(cmd_doctor, "_trusted_gateway_listener_for_lifecycle", return_value=_GatewayTrust("trusted", "", pid=4242)),
+        patch.object(cmd_doctor, "_repair_gateway_lifecycle", restart),
+    ):
+        assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+        assert cmd_doctor._fix_audit_store_reopen(cfg, assume_yes=True)[0] == "pass"
+    restart.assert_called_once()

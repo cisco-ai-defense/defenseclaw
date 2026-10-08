@@ -34,10 +34,13 @@ import (
 
 // config is the operator-facing config group of the gateway binary. Like
 // config-v8 it runs without the root pre-run, which would load the very
-// file being migrated.
+// file being migrated. Main has no config group, so a Secure Client
+// computer leaves it out of its help; it stays runnable there and answers
+// that the config stays on config_version 8 (issue #1092, GAP-0270).
 var configCmd = &cobra.Command{
-	Use:   "config",
-	Short: "Migrate config.yaml",
+	Use:         "config",
+	Short:       "Migrate config.yaml",
+	Annotations: map[string]string{secureClientHiddenAnnotation: "true"},
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},
@@ -116,6 +119,19 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 }
 
+// rebaseRulePackForMigration is guardrail.PlanRulePackRebase in the config
+// package's terms (GAP-0360).
+func rebaseRulePackForMigration(dir string) (*config.RulePackRebasePlan, error) {
+	plan, err := guardrail.PlanRulePackRebase(dir)
+	if err != nil || plan == nil {
+		return nil, err
+	}
+	return &config.RulePackRebasePlan{
+		Files: plan.Files, Digest: plan.Digest, Updated: plan.Updated,
+		Carried: plan.Carried, Expressed: plan.Expressed, AlertOnly: plan.AlertOnly, Disabled: plan.Disabled,
+	}, nil
+}
+
 // configMigrateV9Input resolves the data.json and audit.db inputs of the
 // config at path. A v8 file the runtime loader refuses (it still carries a key
 // the runtime no longer knows, such as update_check or skill_actions) falls
@@ -133,6 +149,7 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		ConfigPath:     abs,
 		Source:         raw,
 		RulePackDigest: guardrail.RulePackDigest,
+		RebaseRulePack: rebaseRulePackForMigration,
 	}
 	policyDir, auditDB := "", ""
 	if cfg, loadErr := config.LoadRuntimeV8File(abs); loadErr == nil {

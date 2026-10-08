@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -117,7 +118,10 @@ const (
 // since the last baseline. Unchanged targets are skipped entirely, which keeps
 // the periodic loop cheap and stops scan_results from growing on every cycle.
 func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
-	defer func() { w.startupRescanDone = true }()
+	defer func() {
+		w.startupRescanDone = true
+		w.firstCycleDone.Store(true)
+	}()
 	if !w.startupRescanDone {
 		w.startupAdmitRoots = w.baselinedWatchRoots()
 		defer func() { w.startupAdmitRoots = nil }()
@@ -132,14 +136,16 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 
 	// Scanner fingerprints depend on the target *type*, not the individual
 	// target, so compute them at most once per kind per cycle.
-	fpCache := make(map[InstallType]string)
+	fpCache := make(map[string]string)
 
-	var scanned, skipped int
-	for _, evt := range targets {
-		if ctx.Err() != nil {
-			return
-		}
-		outcome := w.rescanTarget(ctx, evt, fpCache)
+	var (
+		countMu          sync.Mutex
+		scanned, skipped int
+		startup          sync.WaitGroup
+	)
+	count := func(evt InstallEvent, outcome rescanOutcome) {
+		countMu.Lock()
+		defer countMu.Unlock()
 		if outcome == rescanScanned {
 			scanned++
 			w.recordWatcherEvent(ctx, "rescan_scan", string(evt.Type), "")
@@ -147,6 +153,36 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			skipped++
 			w.recordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
 		}
+	}
+	for _, evt := range targets {
+		if ctx.Err() != nil {
+			break
+		}
+		if w.admitsNewAtStartup(evt) {
+			// Added while the gateway was stopped: admitted by
+			// startupAdmissionWorkers at once, shown as pending until
+			// then, instead of one after another in this loop (GAP-0341).
+			w.state.set(evt, AdmissionPending)
+			startup.Add(1)
+			go func() {
+				defer startup.Done()
+				defer w.state.clear(evt.Path)
+				select {
+				case w.startupSlots <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-w.startupSlots }()
+				w.state.set(evt, AdmissionScanning)
+				count(evt, w.rescanTarget(ctx, evt, fpCache))
+			}()
+			continue
+		}
+		count(evt, w.rescanTarget(ctx, evt, fpCache))
+	}
+	startup.Wait()
+	if ctx.Err() != nil {
+		return
 	}
 	w.markWatchRoots()
 
@@ -218,6 +254,16 @@ func (w *InstallWatcher) markWatchRoots() {
 			w.markedWatchRoots[key] = true
 		}
 	}
+}
+
+// admitsNewAtStartup reports a skill or plugin the startup rescan admits:
+// one without a baseline under a root that was baselined before.
+func (w *InstallWatcher) admitsNewAtStartup(evt InstallEvent) bool {
+	if w.startupRescanDone || evt.Type == InstallMCP || w.startupSlots == nil || !w.admitsAtStartup(evt) {
+		return false
+	}
+	_, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	return errors.Is(err, sql.ErrNoRows)
 }
 
 // admitsAtStartup reports whether the startup rescan must run install
@@ -616,7 +662,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 // the scanner, diffs findings, emits drift alerts, and refreshes the baseline.
 // Targets whose content and scanner fingerprint are unchanged are skipped
 // without invoking the scanner or writing a scan_results row.
-func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[InstallType]string) rescanOutcome {
+func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[string]string) rescanOutcome {
 	if evt.Type == InstallMCP {
 		w.mcpMu.Lock()
 		defer w.mcpMu.Unlock()
@@ -659,10 +705,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				// watcher started: admit it as `mcp set` would (GAP-0132).
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
 				res := w.runAdmission(ctx, evt)
-				if w.onAdmit != nil {
-					w.onAdmit(res)
+				w.notifyAdmission(res)
+				if !res.Interrupted {
+					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
 				}
-				w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
 				return rescanScanned
 			}
 			if w.admitsAtStartup(evt) {
@@ -670,10 +716,8 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt)
-				if w.onAdmit != nil {
-					w.onAdmit(res)
-				}
-				if _, statErr := os.Lstat(evt.Path); statErr == nil {
+				w.notifyAdmission(res)
+				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
 					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
@@ -780,6 +824,11 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	defer cancel()
 
 	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	if err == nil && !w.secureClientActive() {
+		// A scan without its judge is incomplete: it never becomes the
+		// baseline, so the next cycle scans again (GAP-0376).
+		err = scanner.JudgeFailure(result)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] scan %s: %v\n", evt.Path, err)
 		return nil, ""
@@ -871,24 +920,35 @@ func (w *InstallWatcher) findingDrift(baseline *audit.SnapshotRow, current *scan
 // cachedFingerprint returns the scanner fingerprint for evt's type, computing
 // it (and caching) on first use within a cycle. The fingerprint depends only on
 // the scanner kind + config + binary version, not the individual target.
-func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[InstallType]string) string {
-	if cache != nil {
-		if fp, ok := cache[evt.Type]; ok {
-			return fp
-		}
+func (w *InstallWatcher) cachedFingerprint(evt InstallEvent, cache map[string]string) string {
+	// A skill's fingerprint includes its connector's rule pack.
+	key := string(evt.Type)
+	if evt.Type == InstallSkill {
+		key += "\x00" + w.eventConnector(evt)
+	}
+	if cache == nil {
+		return w.scannerFingerprint(evt)
+	}
+	// The startup admissions of a cycle share the cache.
+	w.fpMu.Lock()
+	defer w.fpMu.Unlock()
+	if fp, ok := cache[key]; ok {
+		return fp
 	}
 	fp := w.scannerFingerprint(evt)
-	if cache != nil {
-		cache[evt.Type] = fp
-	}
+	cache[key] = fp
 	return fp
 }
 
 // scannerFingerprint builds a stable hash over the inputs that determine a
 // scanner's output for a given target kind: the scanner binary (path + probed
-// version), the scan-affecting config flags, and the DefenseClaw provenance
-// (binary version + config/policy content hash + generation). When any of these
-// change, byte-identical targets are re-scanned so updated rules take effect.
+// version), the scan-affecting settings (policy, judge model, analyzers), the
+// connector's rule pack for a skill, and the DefenseClaw build. When any of
+// these change, byte-identical targets are re-scanned so updated rules take
+// effect. The whole-config hash and the reload generation are not inputs:
+// they changed on every config reload and gateway start, so an unrelated key
+// (watch.rescan_interval_min) re-ran the paid judge on every installed skill
+// (GAP-0415).
 //
 // Secrets (API keys) are deliberately excluded — only non-sensitive routing
 // fields (model, provider, base URL) feed the fingerprint.
@@ -916,6 +976,7 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 			"llm_model="+llm.Model,
 			"llm_provider="+llm.Provider,
 			"llm_base_url="+llm.BaseURL,
+			"rulepack="+w.rulePackDigest(evt),
 		)
 	case InstallMCP:
 		c := w.cfg.Scanners.MCPScanner
@@ -946,8 +1007,6 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 	prov := version.Current()
 	parts = append(parts,
 		"prov_binary="+prov.BinaryVersion,
-		"prov_content="+prov.ContentHash,
-		fmt.Sprintf("prov_generation=%d", prov.Generation),
 		fmt.Sprintf("prov_schema=%d", prov.SchemaVersion),
 	)
 
@@ -964,6 +1023,29 @@ func (w *InstallWatcher) scannerBinaryVersion(binary string) string {
 	if binary == "" {
 		return ""
 	}
+	// One probe per binary for the watcher's life (a config change starts a
+	// new watcher): it was a Python start per admission and per cycle.
+	if cached, ok := w.binaryVersions.Load(binary); ok {
+		return cached.(string)
+	}
+	probed := w.probeScannerBinaryVersion(binary)
+	w.binaryVersions.Store(binary, probed)
+	return probed
+}
+
+// rulePackDigest is the files digest of the rule pack evt's connector adds
+// to a skill scan, or "" when none applies.
+func (w *InstallWatcher) rulePackDigest(evt InstallEvent) string {
+	if w.rulePackSource == nil {
+		return ""
+	}
+	if pack := w.rulePackSource(w.eventConnector(evt)); pack != nil {
+		return pack.FilesDigest()
+	}
+	return ""
+}
+
+func (w *InstallWatcher) probeScannerBinaryVersion(binary string) string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1324,10 +1406,16 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 // same name has its own baseline and admission; any other server is keyed by
 // its name.
 func MCPEventPath(server config.MCPServerEntry) string {
-	if server.Home == "" {
-		return server.Name
+	key := server.Name
+	if server.Home != "" {
+		key += "@" + server.Connector + ":" + server.Home
 	}
-	return server.Name + "@" + server.Connector + ":" + server.Home
+	// A project's server is its own: another project's server with the
+	// same name has its own baseline and admission (GAP-0405).
+	if server.Project != "" {
+		key += "@" + server.Connector + "#" + server.Project
+	}
+	return key
 }
 
 func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEntry, error) {

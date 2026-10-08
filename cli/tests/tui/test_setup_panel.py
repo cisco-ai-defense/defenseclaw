@@ -1047,7 +1047,7 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     assert built == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert "--value" not in built
     assert "sk-live" not in built
-    assert render_wizard_value(set_fields[2]) == "****live"
+    assert render_wizard_value(set_fields[2]) == "********"
     assert render_wizard_value(set_fields[2], reveal=True) == "sk-live"
 
     # GAP-1176: a stored credential can be removed from the wizard.
@@ -1456,6 +1456,9 @@ def test_setup_review_save_action_and_saved_hint_are_model_level() -> None:
     assert review.hint == "Review 1 config change before saving."
 
     model.mark_saved(datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc))
+    # A new draft is not saved yet, so no earlier save shows (GAP-0342).
+    assert model.save_restart_hints().saved_hint == ""
+    model.sections = (ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "9091", "9091"),), ""),)
     hints = model.save_restart_hints()
     assert hints.saved_hint == "Saved 12:00 UTC"
     assert hints.saved_hint in hints.action_bar

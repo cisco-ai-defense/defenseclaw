@@ -116,10 +116,16 @@ class TestSkillBlock(SkillCommandTestBase):
         self.assertEqual(len(actions), 1)
         self.assertIn("test", actions[0].details)
 
-    def test_block_uses_basename(self):
-        self.invoke(["block", "/path/to/evil-skill"])
-        pe = PolicyEngine(self.app.store, self.app.cfg)
-        self.assertTrue(pe.is_blocked("skill", "evil-skill"))
+    def test_block_and_allow_refuse_blank_and_path_names(self):
+        # GAP-0416: '' and ' ' wrote rules that match nothing, and a path was
+        # quietly cut to its last part.
+        for verb in ("block", "allow"):
+            for name in ("", " ", "../../etc/x", "/path/to/evil-skill"):
+                with self.subTest(verb=verb, name=name):
+                    result = self.invoke([verb, name])
+                    self.assertEqual(result.exit_code, 2, result.output)
+        self.assertEqual(self.app.cfg.asset_policy.skill.denied, [])
+        self.assertEqual(self.app.cfg.asset_policy.skill.allowed, [])
 
     def test_hermes_unchanged_bundled_skill_cannot_be_blocked_or_quarantined(self):
         hermes_home = os.path.join(self.tmp_dir, "hermes")
@@ -212,11 +218,36 @@ class TestSkillAllow(SkillCommandTestBase):
         mock_cls.return_value.enable_skill.side_effect = Exception("timeout")
 
         result = self.invoke(["allow", "safe-skill", "--reason", "reviewed"])
-        self.assertEqual(result.exit_code, 0, result.output)
+        # GAP-0358: an error line with exit 0 read as success; the rule is
+        # written, but OpenClaw keeps the skill disabled, so the exit is 1.
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("gateway enable failed", result.output)
-        self.assertIn("runtime disable remains until the gateway is reachable", result.output)
+        self.assertIn("OpenClaw still has it disabled", result.output)
         self.assertTrue(pe.is_allowed("skill", "safe-skill"))
         self.assertTrue(self.app.store.has_action("skill", "safe-skill", "runtime", "disable"))
+
+    @patch("defenseclaw.gateway.OrchestratorClient")
+    def test_allow_quarantined_copy_pins_its_destination_without_the_gateway(self, mock_cls):
+        # GAP-0358/GAP-0359: Claude Code has no /skill/enable route (allow
+        # printed its 404), and a quarantined copy has no installed path, so
+        # allow wrote a global name-only rule and never said restore is needed.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        destination = os.path.join(self.tmp_dir, "claude-skills", "docx")
+        self.app.store.create_quarantine_record(
+            "skill", "docx", destination, os.path.join(self.tmp_dir, "q", "docx"), "h", "scan", "claudecode",
+            state="active",
+        )
+        PolicyEngine(self.app.store, self.app.cfg).disable("skill", "docx", "scan")
+
+        result = self.invoke(["allow", "docx", "--reason", "vetted"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_cls.return_value.enable_skill.assert_not_called()
+        rules = [(r.connector, r.source_path_contains) for r in self.app.cfg.asset_policy.skill.allowed]
+        self.assertEqual(rules, [("claudecode", [destination])])
+        self.assertIn(f"covers the copy at {destination} only", result.output)
+        self.assertIn("Restore them with: defenseclaw skill restore docx", result.output)
+        self.assertFalse(self.app.store.has_action("skill", "docx", "runtime", "disable"))
 
 
 class TestSkillUnblock(SkillCommandTestBase):
@@ -942,7 +973,7 @@ class TestSkillScan(SkillCommandTestBase):
                 ]
             }
 
-        def scan_skill(*, target, name):
+        def scan_skill(*, target, name, timeout):
             if name == "beta":
                 raise RuntimeError("codex sidecar unavailable")
             return {
@@ -1072,7 +1103,7 @@ class TestSkillScan(SkillCommandTestBase):
         with patch("defenseclaw.commands.cmd_skill._sidecar_client", return_value=client):
             _scan_all_remote(self.app, as_json=False, connector="codex")
 
-        client.scan_skill.assert_called_once_with(target=regular, name="operator-skill")
+        client.scan_skill.assert_called_once_with(target=regular, name="operator-skill", timeout=330)
 
     def test_explicit_bundled_skill_scan_is_skipped_without_scanner_or_action(self):
         bundled = os.path.join(
@@ -2039,6 +2070,62 @@ class TestSkillList(SkillCommandTestBase):
             "1 vendor-bundled skill(s) are discovery-only",
             " ".join(result.output.split()),
         )
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_bundled_skill_ignores_a_verdict_on_another_copy(self, mock_list):
+        """GAP-0393: another connector's quarantined skill-creator marked the
+        vendor-bundled skill-creator quarantined and disabled."""
+        mock_list.return_value = {
+            "skills": [
+                {"name": "skill-creator", "description": "", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "bundled", "bundled": True, "homepage": ""},
+            ]
+        }
+        self.app.store.set_action_field("skill", "skill-creator", "file", "quarantine", "watcher")
+        self.app.store.set_action_field("skill", "skill-creator", "runtime", "disable", "watcher")
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertFalse(item["disabled"])
+        self.assertNotIn("actions", item)
+        self.assertEqual(item["verdict"], "-")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_says_quarantine_failed_when_the_move_failed(self, mock_list):
+        """GAP-0394: a blocked skill the watcher could not move read as quarantined."""
+        mock_list.return_value = {
+            "skills": [
+                {"name": "aws-deploy", "description": "", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "user", "bundled": False, "homepage": ""},
+            ]
+        }
+        self.app.store.set_action_field(
+            "skill", "aws-deploy", "install", "block", "quarantine failed: permission denied",
+        )
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertEqual(item["verdict"], "quarantine failed")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_shows_a_skill_the_watcher_has_not_scanned_as_pending(self, mock_list):
+        """GAP-0341: an unscanned skill read active/ready, as if clean."""
+        base = os.path.join(self.tmp_dir, "skills", "bulk-7")
+        mock_list.return_value = {
+            "skills": [
+                {"name": "bulk-7", "description": "", "emoji": "", "baseDir": base,
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "user", "bundled": False, "homepage": ""},
+            ]
+        }
+        with open(os.path.join(self.app.cfg.data_dir, "watcher-admission.json"), "w", encoding="utf-8") as fh:
+            json.dump({"assets": [{"type": "skill", "name": "bulk-7", "path": base, "state": "pending"}]}, fh)
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        [item] = json.loads(result.output)
+        self.assertEqual(item["status"], "pending")
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_table_title_shows_connector_in_scope(self, mock_list):

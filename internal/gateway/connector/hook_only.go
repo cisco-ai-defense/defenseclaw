@@ -1773,6 +1773,10 @@ func (c *hookOnlyConnector) hookCommandForOS(goos string, opts SetupOpts) string
 		if command := devinManagedHookCommand(goos, opts); command != "" {
 			return command
 		}
+		if goos != "windows" {
+			// Devin runs the command through bash (GAP-0382).
+			return posixHookCommandWord(unixCommand)
+		}
 	}
 	return hookInvocationCommandFor(goos, c.name, unixCommand)
 }
@@ -4895,6 +4899,12 @@ func patchAntigravityHooks(path, hookScript string) error {
 }
 
 func patchAntigravityHooksForOS(path, hookScript, goos string) error {
+	if goos != "windows" && posixHookCommandWord(hookScript) != hookScript {
+		// Antigravity splits the command at spaces and runs it without a shell,
+		// so no quoting can carry this path; refuse instead of registering a
+		// hook that never runs (GAP-0382).
+		return fmt.Errorf("antigravity cannot run a hook from %s: it splits hook commands at spaces and runs them without a shell; set DEFENSECLAW_HOME to a directory whose path has no spaces or shell characters, then run: defenseclaw setup antigravity", hookScript)
+	}
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err

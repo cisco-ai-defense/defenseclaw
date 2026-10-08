@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -74,5 +75,44 @@ func TestArtifactOverlayAddsTheRulePackFindingsToASkillScan(t *testing.T) {
 	}}
 	if findings := narrow.ScanArtifact(context.Background(), dir); len(findings) != 0 {
 		t.Fatalf("findings = %+v, want none", findings)
+	}
+}
+
+// GAP-0364: cloning anthropics/skills quarantined claude-api for a CRITICAL
+// CMD-RM-RF that joined "rm -rf /workspace/reports" in a JSON example to a
+// "/" lines further down, and for COG-MEMORY on docs that explain MEMORY.md.
+// Command rules now match within one line, and path-write rules skip
+// documentation other than SKILL.md.
+func TestArtifactRulesSkipDocMentionsAndCrossLineCommands(t *testing.T) {
+	dir := t.TempDir()
+	for name, text := range map[string]string{
+		"SKILL.md":         "# notes\nWrite what you learn to MEMORY.md.\n",
+		"shared/tools.md":  "```json\n{ \"input\": { \"command\": \"rm -rf /workspace/reports\" },\n  \"note\": \"paths under / are protected\" }\n```\n",
+		"shared/memory.md": "The memory tool keeps notes in MEMORY.md.\n",
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack := mustLoadRulePack(t, filepath.Join("..", "..", "policies", "guardrail", "default"))
+	found := map[string]string{}
+	for _, f := range pack.ScanArtifact(context.Background(), dir) {
+		found[f.RuleID+" "+strings.SplitN(f.Location, ":", 2)[0]] = f.Location
+	}
+	if _, ok := found["CMD-RM-RF shared/tools.md"]; ok {
+		t.Errorf("CMD-RM-RF matched across lines of a JSON example: %v", found)
+	}
+	if _, ok := found["COG-MEMORY shared/memory.md"]; ok {
+		t.Errorf("COG-MEMORY fired on documentation: %v", found)
+	}
+	if _, ok := found["COG-MEMORY SKILL.md"]; !ok {
+		t.Errorf("COG-MEMORY no longer checks SKILL.md: %v", found)
+	}
+	if got := scanArtifactText(pack.artifactRules(), "cleanup:\n\trm -rf /\n", "Makefile"); len(got) == 0 {
+		t.Error("a one-line rm -rf / is no longer found")
 	}
 }

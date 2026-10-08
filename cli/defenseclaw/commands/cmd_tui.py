@@ -27,7 +27,7 @@ from defenseclaw import ux
 def tui() -> None:
     """Open the interactive DefenseClaw dashboard in this terminal."""
     if not ux.terminal_supports_tui():
-        raise click.ClickException(ux.TUI_UNAVAILABLE_MESSAGE)
+        raise click.ClickException(ux.tui_unavailable_message())
 
     from defenseclaw.tui import run_textual_tui
 
