@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -124,6 +125,14 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}()
 	if !w.startupRescanDone {
 		w.startupAdmitRoots = w.baselinedWatchRoots()
+		for _, root := range w.newRoots {
+			for typ, dirs := range map[InstallType][]string{InstallSkill: w.skillDirs, InstallPlugin: w.pluginDirs} {
+				if slices.ContainsFunc(dirs, func(dir string) bool { return strings.EqualFold(filepath.Clean(dir), filepath.Clean(root)) }) &&
+					!slices.Contains(w.startupAdmitRoots[typ], root) {
+					w.startupAdmitRoots[typ] = append(w.startupAdmitRoots[typ], root)
+				}
+			}
+		}
 		defer func() { w.startupAdmitRoots = nil }()
 	}
 	targets := w.enumerateTargets()
@@ -831,12 +840,37 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] scan %s: %v\n", evt.Path, err)
+		w.auditRescanFailure(evt, s.Name(), err)
 		return nil, ""
 	}
 	if result == nil {
 		return nil, ""
 	}
+	w.rescanFailureMu.Lock()
+	delete(w.rescanFailureLogged, evt.Path)
+	w.rescanFailureMu.Unlock()
 	return result, w.emitRescanResult(scanCtx, result)
+}
+
+// auditRescanFailure records, once per target until it scans again, that a
+// rescan could not scan it, so a target left unscanned (the scanner runtime
+// missing, GAP-0571) shows in the audit log and not only in gateway.log.
+func (w *InstallWatcher) auditRescanFailure(evt InstallEvent, scannerName string, err error) {
+	if w.logger == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	w.rescanFailureMu.Lock()
+	logged := w.rescanFailureLogged[evt.Path]
+	if w.rescanFailureLogged == nil {
+		w.rescanFailureLogged = make(map[string]bool)
+	}
+	w.rescanFailureLogged[evt.Path] = true
+	w.rescanFailureMu.Unlock()
+	if logged {
+		return
+	}
+	_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
+		fmt.Sprintf("type=%s scanner=%s error=rescan could not scan it: %v", evt.Type, scannerName, err))
 }
 
 // admissionSnapshot hashes a live-watcher target before admission scans it,

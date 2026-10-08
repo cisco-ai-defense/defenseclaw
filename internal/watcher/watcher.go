@@ -135,6 +135,14 @@ type InstallWatcher struct {
 	// startupAdmitRoots are the skill and plugin roots that already held
 	// baselines when the startup rescan began (rescan goroutine only).
 	startupAdmitRoots map[InstallType][]string
+	// newRoots are watch roots the gateway did not watch before this
+	// watcher started (AdmitNewRootsAtStartup); the startup rescan admits
+	// what they hold.
+	newRoots []string
+	// rescanFailureLogged keeps the targets whose failed rescan scan was
+	// audited, so a scanner that stays down writes one row per target.
+	rescanFailureMu     sync.Mutex
+	rescanFailureLogged map[string]bool
 	// markedWatchRoots caches the root markers written by this process
 	// (rescan goroutine only).
 	markedWatchRoots map[string]bool
@@ -239,6 +247,16 @@ type InstallWatcher struct {
 type rootConnector struct {
 	root      string
 	connector string
+}
+
+// AdmitNewRootsAtStartup names watch roots that appeared after the gateway
+// started watching (an enrolled user created ~/.claude/skills): the startup
+// rescan runs install admission for what they hold, as the live watcher does
+// for an install, instead of only recording a baseline. Before, a skill
+// copied in with its folder was baselined, so with the scanner runtime
+// missing it was neither blocked nor audited (GAP-0571). Call before Run.
+func (w *InstallWatcher) AdmitNewRootsAtStartup(roots []string) {
+	w.newRoots = append([]string(nil), roots...)
 }
 
 // newScanner resolves the scanner for evt via the injectable factory, falling
