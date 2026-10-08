@@ -287,7 +287,9 @@ class SandboxPanelMixin:
     def _sandbox_keys_line(self) -> str:
         """The hint bar's keys; on Windows the panel only says why, so no sandbox keys (GAP-0073)."""
         if not self._sandbox_supported():
-            return "KEYS  Tab next panel | : commands | ? help"
+            # The quit key too: q only closes a drawer, so a Windows user who
+            # opened the TUI to read this panel was stuck (GAP-0256).
+            return "KEYS  Tab next panel | : commands | ? help | Ctrl+C quit"
         return self.sandbox_model.keys_line()
 
     def _sandbox_mount(self) -> None:

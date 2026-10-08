@@ -1248,6 +1248,8 @@ async def test_windows_shows_only_the_unsupported_message(monkeypatch) -> None:
         await pilot.pause()
         assert app.sandbox_model.view == "sandboxes"
         assert "t view" not in app.hint_text and "? help" in app.hint_text
+        # GAP-0256: the hint bar names the quit key; q only closes a drawer.
+        assert "Ctrl+C quit" in app.hint_text
         assert app.query_one("#sandboxes-controls").has_class("hidden")
 
 

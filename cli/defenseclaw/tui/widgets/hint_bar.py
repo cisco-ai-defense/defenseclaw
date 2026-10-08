@@ -39,6 +39,8 @@ DEFAULT_HINTS: tuple[str, ...] = (
     "Use scan aibom to generate a component inventory of the active connector.",
     "Press / on lists to filter. Esc clears the active filter.",
     "Press ? for the full keybinding reference.",
+    # q and Esc close a drawer or dialog, never the app (GAP-0256).
+    "Press Ctrl+C to quit DefenseClaw. q and Esc close a drawer or dialog.",
 )
 
 
