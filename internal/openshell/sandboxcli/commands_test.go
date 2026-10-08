@@ -975,6 +975,17 @@ func TestRunTailScript(t *testing.T) {
 	run("with a log", 0, "two\nthree\n")
 }
 
+// GAP-0365: a pull a Ctrl-C interrupted says what it left and exits 130,
+// and the sandbox it started is stopped again.
+func TestAnInterruptedPullSaysWhatItLeft(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, pullErr: fmt.Errorf("workspace: receive the result bundle: openshell: %w", openshell.ErrInterrupted)}
+	wantExit(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}), exitInterrupted)
+	has(t, ta.output(), "interrupted: nothing was brought back, and the work is still in copybox (`defenseclaw sandbox pull copybox` reads it again)",
+		"stopped copybox again")
+	lacks(t, ta.output(), "exit -1")
+}
+
 func TestPullCopyModeToBranch(t *testing.T) {
 	ta := newTestApp(t, "", copySandbox("copybox"))
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))

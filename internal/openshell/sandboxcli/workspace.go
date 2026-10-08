@@ -666,7 +666,18 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		if err != nil {
 			return err
 		}
-		if res, err = a.pull(ctx, api, a.cli(gateway), sb, true); err != nil {
+		// A Ctrl-C while the work is read ends the read, not the command:
+		// the sandbox it started is stopped again, and the line says what
+		// was left, where only ^C showed (GAP-0365).
+		pullCtx, done := a.interruptible(ctx)
+		res, err = a.pull(pullCtx, api, a.cli(gateway), sb, true)
+		interrupted := a.intr != nil && a.intr.fired.Load()
+		done()
+		if err != nil {
+			if interrupted || killedByInterrupt(err) {
+				a.warn("interrupted: nothing was brought back, and the work is still in " + o.Name + " (`" + CommandName + " pull " + o.Name + "` reads it again)")
+				return &ExitError{Code: exitInterrupted, Err: &Silent{Err: errors.New("interrupted")}}
+			}
 			return err
 		}
 	}
