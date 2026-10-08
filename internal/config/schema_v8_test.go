@@ -31,6 +31,20 @@ func TestV9SchemaErrorDoesNotPointToV8(t *testing.T) {
 	}
 }
 
+// GAP-0940: an http_jsonl destination with bearer_env and bearer_credential
+// is reported as those two fields, not as the kind of another destination
+// type ("kind must be the literal jsonl").
+func TestV8SchemaNamesFieldsThatExcludeEachOther(t *testing.T) {
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nobservability:\n  destinations:\n"+
+		"    - name: eo3-http\n      kind: http_jsonl\n      endpoint: https://collector.example.test/ingest\n"+
+		"      bearer_credential: eo3-http-token\n      bearer_env: EO3_REF\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Keyword != "not" || schemaErr.Path != "$.observability.destinations[0]" ||
+		schemaErr.Expected != "either bearer_env or bearer_credential, not both" {
+		t.Fatalf("both credential fields = %v (%+v)", err, schemaErr)
+	}
+}
+
 func TestConfigV8SchemaClassifiesEveryTopLevelGoConfigField(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {

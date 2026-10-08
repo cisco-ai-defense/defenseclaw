@@ -104,6 +104,12 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 			default:
 				reason = "does not match the setting's required format"
 			}
+		} else if schemaErr.Keyword == "not" && strings.HasPrefix(schemaErr.Expected, "either ") {
+			// Two fields that exclude each other (GAP-0940).
+			if name, ok := yamlMappingNameAt(raw, schemaErr.Line, schemaErr.Column); ok {
+				field = fmt.Sprintf("%s (destination %q)", field, name)
+			}
+			reason = "sets both; set " + schemaErr.Expected
 		} else if schemaErr.Expected != "" {
 			reason = "must be " + schemaErr.Expected
 		}
@@ -153,6 +159,46 @@ func configField(path string) string {
 		return "the document"
 	}
 	return field
+}
+
+// yamlMappingNameAt returns the name: of the mapping at line:column of raw
+// (a destination), at most 60 bytes.
+func yamlMappingNameAt(raw []byte, line, column int) (string, bool) {
+	if line <= 0 || column <= 0 {
+		return "", false
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return "", false
+	}
+	var name string
+	var walk func(*yaml.Node) bool
+	walk = func(node *yaml.Node) bool {
+		if node == nil {
+			return false
+		}
+		if node.Kind == yaml.MappingNode && node.Line == line && node.Column == column {
+			for index := 0; index+1 < len(node.Content); index += 2 {
+				if key, value := node.Content[index], node.Content[index+1]; key.Value == "name" && value.Kind == yaml.ScalarNode {
+					name = value.Value
+				}
+			}
+			return true
+		}
+		for _, child := range node.Content {
+			if walk(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if !walk(&doc) || name == "" {
+		return "", false
+	}
+	if len(name) > 60 {
+		name = strings.ToValidUTF8(name[:57], "") + "..."
+	}
+	return name, true
 }
 
 // yamlScalarAt returns the scalar at line:column of raw, at most 60 bytes.
