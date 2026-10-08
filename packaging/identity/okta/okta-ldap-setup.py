@@ -428,11 +428,16 @@ def check_group(client: Okta, report: Report, name: str, gid: int | None) -> Non
     else:
         report.ok(f"gidNumber {have}")
     members = client.get_all(f"/api/v1/groups/{group['id']}/users?limit=200")
-    bare = [m.get("profile", {}).get("login") for m in members if m.get("profile", {}).get("uidNumber") is None]
-    if bare:
-        report.problem(f"{len(bare)} member(s) have no uidNumber: " + ", ".join(str(b) for b in bare[:5]))
+    incomplete = [(m.get("profile", {}).get("login"), [
+        attr for attr in ("uidNumber", "gidNumber", "unixUsername")
+        if m.get("profile", {}).get(attr) in (None, "")
+    ]) for m in members]
+    incomplete = [(login, missing) for login, missing in incomplete if missing]
+    if incomplete:
+        detail = ", ".join(f"{login} ({', '.join(missing)})" for login, missing in incomplete[:5])
+        report.problem(f"{len(incomplete)} member(s) have incomplete POSIX attributes: {detail}")
     else:
-        report.ok(f"{len(members)} member(s), all with a uidNumber")
+        report.ok(f"{len(members)} member(s), all with POSIX identity attributes")
 
 
 def self_read_only(attribute: dict[str, Any]) -> bool:
