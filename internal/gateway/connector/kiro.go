@@ -519,6 +519,7 @@ func (c *KiroConnector) hookCommand(opts SetupOpts) string {
 // launcher finished; either way Kiro proceeded.
 func kiroHookInvocationCommandFor(goos, unixCommand, surface string, managed bool) string {
 	if goos != "windows" {
+		unixCommand = posixHookCommandWord(unixCommand)
 		if surface != "" {
 			return unixCommand + " --hook-surface " + surface
 		}
@@ -586,6 +587,9 @@ func kiroOwnedHookCommands(hookScript string) []string {
 	commands := []string{hookScript}
 	if runtime.GOOS == "windows" {
 		commands = append(commands, kiroWindowsOwnedHookCommands()...)
+	} else {
+		// The unquoted form releases before GAP-0382 wrote.
+		commands = append(commands, posixHookCommandUnquoted(hookScript))
 	}
 	return uniqueNonEmptyStrings(commands)
 }

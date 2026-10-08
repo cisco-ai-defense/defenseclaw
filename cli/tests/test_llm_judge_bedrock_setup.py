@@ -265,3 +265,17 @@ class JudgeBedrockSetupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JudgeNotRunningTest(unittest.TestCase):
+    # GAP-0383: the gateway says the enabled judge could not start; doctor
+    # fails a row instead of counting the earlier judge calls as working.
+    def test_unavailable_judge_fails_and_skips_the_calls_row(self):
+        reason = "no API key for its LLM: DEFENSECLAW_LLM_KEY is not set (environment or ~/.defenseclaw/.env)"
+        health = {"guardrail": {"details": {"judge_state": "unavailable", "judge_unavailable_reason": reason}}}
+        r = _DoctorResult()
+        self.assertTrue(cmd_doctor._check_judge_running(health, r))
+        row = r.checks[-1]
+        self.assertEqual(row["status"], "fail")
+        self.assertIn(reason, row["detail"])
+        self.assertFalse(cmd_doctor._check_judge_running({"guardrail": {"details": {"judge_state": "ok"}}}, r))

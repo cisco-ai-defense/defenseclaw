@@ -984,17 +984,18 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
 def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
     """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
     try:
-        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
 
         problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
         return ""
+    step = repair_command(connector, problems[0])
     return (
         " — "
         + ux._style("DEGRADED", fg="red", bold=True)
-        + ux.dim(f" ({problems[0]}; run `{setup_command(connector)}`)")
+        + ux.dim(f" ({problems[0]}; " + (step if step.startswith("run ") else f"run `{step}`") + ")")
     )
 
 
@@ -1289,6 +1290,14 @@ def _print_llm_judge(health: dict | None) -> None:
     state = str(details.get("judge_state"))
     total = details.get("judge_recent_calls", 0)
     failed = details.get("judge_failed_calls", 0)
+    if state == "unavailable":
+        # The enabled judge could not start (GAP-0383).
+        reason = str(details.get("judge_unavailable_reason") or "it could not start").strip()
+        _status_row(
+            "LLM judge",
+            ux._style(f"not running: {reason}; only the rules decide; run defenseclaw doctor", fg="yellow"),
+        )
+        return
     if state == "ok":
         _status_row("LLM judge", ux._style(f"working (last {total} call(s) completed)", fg="green"))
         return

@@ -1445,6 +1445,14 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if cfg := a.runtimeConfigSnapshot(); (cfg == nil || !cfg.SecureClientIntegration()) && a.store.DatabaseFileReplaced() {
+		// Present only when it happened, so the usual body is unchanged;
+		// Secure Client keeps its health body (issue #1092).
+		body["audit_store"] = map[string]interface{}{
+			"state":  "replaced",
+			"detail": "audit.db was deleted or replaced after the gateway opened it, so new audit records are lost; restart the gateway: defenseclaw-gateway restart",
+		}
+	}
 	if policy, ok := CurrentPolicyHealth(); ok {
 		body["policy"] = policy
 	}

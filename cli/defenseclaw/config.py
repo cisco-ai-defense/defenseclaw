@@ -246,6 +246,29 @@ def source_config_version(*, path: str | None = None) -> int | None:
     return _exact_config_version(node.value)
 
 
+def _foreign_owner_fix(cfg_file: str) -> tuple[str, str] | None:
+    """(detail, fix) for a config.yaml another account owns, else None."""
+
+    try:
+        owner_uid = os.stat(cfg_file).st_uid
+        current_uid = os.geteuid()  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+    if owner_uid == current_uid:
+        return None
+    try:
+        import pwd
+
+        owner = pwd.getpwuid(owner_uid).pw_name
+        user = pwd.getpwuid(current_uid).pw_name
+    except (ImportError, KeyError):
+        owner, user = str(owner_uid), str(current_uid)
+    return (
+        f"it is owned by {owner}, not by this account (as after a sudo defenseclaw run)",
+        f"Give it back to this account: sudo chown {user} {cfg_file}",
+    )
+
+
 def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
     """Name the file, the problem and its position, and the next step."""
 
@@ -261,7 +284,10 @@ def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
         detail = "the file is not valid UTF-8 text"
     else:
         detail = getattr(exc, "strerror", None) or type(exc).__name__
-    if not isinstance(exc, yaml.YAMLError):
+    if isinstance(exc, PermissionError) and (owned := _foreign_owner_fix(cfg_file)):
+        # A stray sudo defenseclaw run leaves it root-owned (GAP-0398).
+        detail, fix = owned
+    elif not isinstance(exc, yaml.YAMLError):
         fix = "Fix the file"
     return (
         f"Cannot read the DefenseClaw configuration {cfg_file}: {detail}. "
@@ -6275,8 +6301,12 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     try:
         with open(cfg_file) as f:
             raw = parse_config_yaml(f.read()) or {}
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         pass
+    except OSError as exc:
+        # An unreadable file (root-owned after a sudo run) is not a missing
+        # one: never judge the install against built-in defaults (GAP-0398).
+        raise ConfigVersionError(_unreadable_config_message(cfg_file, exc)) from exc
     _warn_untrusted_managed_config(cfg_file, raw)
     # Move the retired Desktop connector ID to devin before any connector key
     # is normalized or checked for duplicates. The Go loader applies the same

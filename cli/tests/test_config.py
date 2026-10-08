@@ -2034,3 +2034,23 @@ class TestPolicyDirDefault(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(sys.platform == "win32" or os.geteuid() == 0, "POSIX permissions as a regular account")
+class UnreadableConfigTest(unittest.TestCase):
+    # GAP-0398: a root-owned (unreadable) config.yaml is not a missing one.
+    def test_load_refuses_instead_of_using_defaults(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg_file = os.path.join(data_dir, "config.yaml")
+            Path(cfg_file).write_text("config_version: 9\n")
+            os.chmod(cfg_file, 0)
+            try:
+                with patch.object(config_mod, "config_path_for_data_dir", return_value=Path(cfg_file)):
+                    with self.assertRaises(config_mod.ConfigVersionError):
+                        config_mod.load(data_dir=data_dir)
+                with patch.object(config_mod.os, "geteuid", return_value=os.getuid() + 1):
+                    message = config_mod._unreadable_config_message(cfg_file, PermissionError(13, "Permission denied"))
+                self.assertIn("sudo chown", message)
+                self.assertIn(cfg_file, message)
+            finally:
+                os.chmod(cfg_file, 0o600)

@@ -1924,7 +1924,7 @@ func codexHookCommandForPlatform(
 	if goos == "windows" {
 		return windowsCodexHookCommandForEvent(event, contractID)
 	}
-	return hookCommand +
+	return posixHookCommandWord(hookCommand) +
 		" --event " + event +
 		" --hook-contract " + contractID
 }
@@ -3195,6 +3195,9 @@ func parseCodexManagedCommandIdentityForPlatform(goos, command string) (
 	}
 	script := prefix[:eventIndex]
 	event := prefix[eventIndex+len(eventSeparator):]
+	if goos != "windows" {
+		script = posixHookCommandUnquoted(script)
+	}
 	if event == "" || !isCodexManagedScriptCandidate(script) {
 		return codexManagedCommandIdentity{}, "", false
 	}
@@ -3202,7 +3205,10 @@ func parseCodexManagedCommandIdentityForPlatform(goos, command string) (
 	if !registered || !codexContractContainsEvent(contract, event) {
 		return codexManagedCommandIdentity{}, "", false
 	}
-	if command != codexHookCommandForPlatform(goos, event, contractID, script) {
+	// Releases before GAP-0382 wrote the script path unquoted; that form
+	// never ran for a path with a space, and setup replaces it.
+	unquoted := goos != "windows" && command == script+eventSeparator+event+contractSeparator+contractID
+	if !unquoted && command != codexHookCommandForPlatform(goos, event, contractID, script) {
 		return codexManagedCommandIdentity{}, "", false
 	}
 	return codexManagedCommandIdentity{script: script, contractID: contractID}, event, true

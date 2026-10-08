@@ -18,6 +18,7 @@ package connector
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -541,4 +542,41 @@ func codexTestCommandCount(rawGroups interface{}, command string) int {
 		}
 	}
 	return count
+}
+
+// GAP-0382: a home path with a space must still give a hook command the
+// shell can run, and setup must still claim the unquoted form older
+// releases wrote so it replaces it.
+func TestHookCommandForHomeWithSpaceRunsAndStaysOwned(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell hook commands")
+	}
+	hooksDir := filepath.Join(t.TempDir(), "dc ip8", ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(hooksDir, "codex-hook.sh")
+	ran := filepath.Join(hooksDir, "ran")
+	body := "#!/bin/sh\n" + hookMarker + "1\necho \"$@\" > \"" + ran + "\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := codexHookCommandForPlatform("linux", "PreToolUse", "codex-hooks-v4", script)
+	if out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("sh -c %q: %v: %s", command, err, out)
+	}
+	if got, err := os.ReadFile(ran); err != nil || !strings.Contains(string(got), "--event PreToolUse") {
+		t.Fatalf("hook did not run with its arguments: %q %v", got, err)
+	}
+	legacy := script + " --event PreToolUse --hook-contract codex-hooks-v4"
+	for _, registered := range []string{command, legacy} {
+		identity, event, ok := parseCodexManagedCommandIdentityForPlatform("linux", registered)
+		if !ok || identity.script != script || event != "PreToolUse" {
+			t.Fatalf("%q not claimed: %+v %q %v", registered, identity, event, ok)
+		}
+	}
+	plain := "/home/u/.defenseclaw/hooks/codex-hook.sh"
+	if got := posixHookCommandWord(plain); got != plain {
+		t.Fatalf("a shell-safe path changed: %q", got)
+	}
 }

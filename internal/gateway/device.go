@@ -201,8 +201,9 @@ func writeFreshDeviceIdentity(keyFile, dataDir string, keyData []byte) error {
 		if _, err := os.Lstat(path); err == nil {
 			return fmt.Errorf(
 				"gateway: device identity continuity artifact already exists: %s"+
-					" (a previous identity creation did not complete; run explicit"+
-					" continuity-aware recovery before creating a new identity)",
+					" (the device key is missing but its provenance files remain; restore the"+
+					" key from a backup, or run: defenseclaw doctor --fix --fix-id"+
+					" doctor.identity.device-key.initialize)",
 				path,
 			)
 		} else if !os.IsNotExist(err) {

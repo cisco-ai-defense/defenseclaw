@@ -2676,6 +2676,13 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
             "  After a reboot, agent hooks start the gateway on their next call;"
             " after defenseclaw-gateway stop, run: defenseclaw-gateway start"
         )
+    elif not proxy and platform_support.host_os() == "windows":
+        # The native hook starts the gateway of this account on its next call
+        # after a sign-out or reboot (GAP-0377).
+        renderer.echo(
+            "  After a sign-out or reboot, agent hooks start the gateway on their next call;"
+            " if they do not, run: defenseclaw-gateway start"
+        )
     if _sandboxes_possible():
         renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():

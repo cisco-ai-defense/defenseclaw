@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import sys
 from types import SimpleNamespace
 
@@ -167,6 +168,47 @@ def test_removed_hook_registration_is_reported(tmp_path):
     settings.write_text(json.dumps({"env": env}))
     assert hook_registration_problems(cfg, "claudecode")
     assert hook_registration_problems(cfg, "codex") == []
+
+
+def test_unquoted_hook_path_with_a_space_fails_doctor(tmp_path):
+    # GAP-0382: the shell runs the first half of an unquoted path with a space.
+    data_dir = tmp_path / "dc ip8" / ".defenseclaw"
+    (data_dir / "hooks").mkdir(parents=True)
+    script = str(data_dir / "hooks" / "claude-code-hook.sh")
+    settings = tmp_path / "settings.json"
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock))
+    cfg = SimpleNamespace(data_dir=str(data_dir))
+
+    def register(command):
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": command}]}]}}))
+
+    register(shlex.quote(script))
+    assert hook_registration_problems(cfg, "claudecode") == []
+    register(script)
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and "cannot run" in problems[0]
+    r = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "claudecode", r)
+    row = next(row for row in r.checks if row.get("label") == "Hook command")
+    assert row["status"] == "fail"
+
+
+def test_missing_windows_hook_launcher_names_the_installer(tmp_path, monkeypatch):
+    # GAP-0378: the native launcher is gone; only the installer restores it.
+    from defenseclaw import hook_integrity
+
+    settings = tmp_path / "settings.json"
+    launcher = "C:\\Users\\dcw-dr1\\.local\\bin\\defenseclaw-hook.exe"
+    hook = {"type": "command", "command": launcher, "args": ["hook", "--connector", "claudecode"]}
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+
+    problems = hook_registration_problems(SimpleNamespace(data_dir=str(tmp_path)), "claudecode")
+    assert problems and launcher in problems[0]
+    assert "installer" in hook_integrity.repair_command("claudecode", problems[0])
 
 
 def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):

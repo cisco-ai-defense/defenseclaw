@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1192,7 +1193,46 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
+		fmt.Fprintln(opts.Stdout, notice)
+		return 0
+	}
 	return emitHookResult(opts, sp, sp.openAllow)
+}
+
+// perUserGatewayDownNotice is the systemMessage a fail-open per-user Claude
+// Code or Codex hook prints when the gateway of this account is down. Those
+// agents do not show stderr after exit 0, so an observe-mode agent ran
+// unguarded with no message (GAP-0377). The Unix hooks print the same notice
+// (defenseclaw_unreachable_notice_json) on the same events.
+func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+		return ""
+	}
+	var events []string
+	switch sp.connector {
+	case "claudecode":
+		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
+	case "codex":
+		events = []string{"SessionStart", "PreToolUse"}
+	default:
+		return ""
+	}
+	if !slices.ContainsFunc(events, func(event string) bool { return strings.EqualFold(event, strings.TrimSpace(opts.Event)) }) {
+		return ""
+	}
+	text := ""
+	switch reason {
+	case "gateway unreachable":
+		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
+			"Run `defenseclaw-gateway start` to resume protection."
+	case "gateway cold start failed":
+		text = "DefenseClaw is not checking this session: the gateway could not be started. " +
+			"Run `defenseclaw-gateway start` to see why."
+	default:
+		return ""
+	}
+	return `{"systemMessage":` + mustJSONString(text) + `}`
 }
 
 // unreachableLead starts the unreachable line. Another account's process on
@@ -1970,7 +2010,7 @@ func defaultHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
-			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
+			DialContext: (&net.Dialer{Timeout: hookDialTimeout}).DialContext,
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
