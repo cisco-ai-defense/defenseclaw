@@ -271,7 +271,12 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time, hold bool) (st
 			seen[p.PID] = true
 		}
 		for pid, node := range t.live {
-			if !seen[pid] && node.FirstSeen.Before(sampledAt) {
+			// The sandbox's init, pid 1 of its pid namespace, ends only with
+			// the sandbox, which ends the whole tree: a sample without it
+			// missed it (GAP-0100: an idle sandbox recorded its pid 1 ending
+			// and starting again, about once an hour). Another process at
+			// pid 1 has another start and ends it below.
+			if !seen[pid] && pid != 1 && node.FirstSeen.Before(sampledAt) {
 				exited = append(exited, t.exitLocked(node, now, nil))
 			}
 		}
