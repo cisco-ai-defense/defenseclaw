@@ -99,14 +99,16 @@ func TestDestinations(t *testing.T) {
 			PID: 77, Lineage: []sandboxapi.DestinationProcess{{PID: 77, Exe: "/usr/bin/wget"}, {PID: 42, Comm: "bash"}, {PID: 7, Comm: "claude"}}},
 		// GAP-0177: the PROVIDER cell holds an AI provider or -, never the
 		// egress category; a refusal's reason reads in words in KIND.
-		{Host: "pypi.org", Kind: "package_registry", Category: "package_registry", Connections: 2, LastSeen: seen},
+		// GAP-0198: a long program path keeps its file name.
+		{Host: "pypi.org", Kind: "package_registry", Category: "package_registry", Connections: 2, LastSeen: seen,
+			Binaries: []string{"/sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/python3.14"}},
 		{Host: "example.net", Kind: sandboxapi.DestinationBlocked, Category: "not_allowlisted", Blocked: 1, LastSeen: seen},
 	}, Models: []sandboxapi.ModelUse{{Provider: "anthropic", Model: "claude-haiku", Calls: 2, Failed: 1, LastSeen: seen}}}}
 	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputText))
 	out := ta.output()
 	has(t, out, "DESTINATION", "shadow AI", "model provider", "5, 2 model calls", "host.openshell.internal:8080,11434",
 		"0 (4 refused)", "/usr/bin/curl", "wget ← bash ← claude", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)",
-		"blocked (paste site)", "blocked (not on the allowlist)", "package registry")
+		"blocked (paste site)", "blocked (not on the allowlist)", "package registry", "…-3.14.3-linux-x86_64-gnu/bin/python3.14")
 	if strings.Contains(out, "package_registry") || strings.Contains(out, "not_allowlisted") || strings.Contains(out, "paste_site") {
 		t.Fatalf("a category slug reads in the table:\n%s", out)
 	}
@@ -262,6 +264,28 @@ func TestActivityRendering(t *testing.T) {
 // skipping the new feed's events, numbered from one again under another
 // epoch. The follower waits for the daemon, follows its new feed from the
 // start and says so; what it replays of a feed already shown is skipped.
+// TestActivitySaysWhereTheFeedStarts (GAP-0283): after a daemon restart
+// sandbox activity showed only the new feed's events, without a word that
+// the earlier ones (lifecycle, shadow AI, egress) were gone or where they
+// are. A sandbox older than the daemon's start gets that line; a newer one
+// does not.
+func TestActivitySaysWhereTheFeedStarts(t *testing.T) {
+	old := sampleSandbox("old")
+	old.CreatedAt = time.Now().Add(-time.Hour)
+	fresh := sampleSandbox("fresh")
+	fresh.CreatedAt = time.Now().Add(time.Minute)
+	ta := newTestApp(t, "", old, fresh)
+	ta.daemon.mu.Lock()
+	ta.daemon.status.StartedAt = time.Now()
+	ta.daemon.mu.Unlock()
+	const line = "the feed starts when the DefenseClaw daemon last started ("
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "old"}))
+	has(t, ta.output(), line, "`defenseclaw-gateway audit export`")
+	ta.out.Reset()
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "fresh"}))
+	lacks(t, ta.output(), line)
+}
+
 func TestActivityFollowsTheDaemonsNextFeed(t *testing.T) {
 	ta := newTestApp(t, "")
 	at := ta.Now()
@@ -305,6 +329,13 @@ func TestApprovalsAndDecisions(t *testing.T) {
 		Reason: "a door into your machine", Status: sandboxapi.ApprovalPending}}
 	ta.ok(t, ta.Approvals(bg, ApprovalsOptions{}))
 	has(t, ta.output(), "ap-1", "127.0.0.1:5432", "risky")
+	// The whole reason shows, not 60 characters of it (GAP-0304).
+	ta.out.Reset()
+	long := "the sandbox asks to reach port 8765 on your machine (--host-port 8765), which serves dccert-block-marker to it"
+	ta.daemon.approvals[0].Reason = long
+	ta.ok(t, ta.Approvals(bg, ApprovalsOptions{}))
+	has(t, ta.output(), long)
+	ta.daemon.approvals[0].Reason = "a door into your machine"
 	// An ask for several ports shows every one approving opens.
 	ta.out.Reset()
 	ta.daemon.approvals[0].Endpoints = []sandboxapi.ApprovalEndpoint{{Host: "127.0.0.1", Port: 5432}, {Host: "127.0.0.1", Port: 6379}}
@@ -331,6 +362,15 @@ func TestApprovalsAndDecisions(t *testing.T) {
 	if calls := ta.daemon.callsTo("POST", sandboxapi.PathApprovals+"/ap-1"); !strings.Contains(string(calls[1].Body), `"decision":"reject"`) {
 		t.Fatalf("reject body = %s", calls[1].Body)
 	}
+	// GAP-0249: an ask answered already (in the TUI) is not "no pending
+	// ask": the answer says how and when, and the same answer again is no
+	// failure.
+	ta = newTestApp(t, "")
+	ta.daemon.events = []sandboxapi.ActivityEvent{{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: "box", ApprovalID: "ap-2",
+		Reason: sandboxapi.ApprovedByOperator, Message: "approved port 8765 on your machine (host.openshell.internal:8765)", Time: ta.Now()}}
+	ta.ok(t, ta.Decide(bg, DecideOptions{Sandbox: "box", ID: "ap-2", Approve: true}))
+	has(t, ta.output(), "ask ap-2 of sandbox box was approved already, at ")
+	wantErr(t, ta.fresh().Decide(bg, DecideOptions{Sandbox: "box", ID: "ap-2"}), "was approved already")
 }
 
 func TestUnblock(t *testing.T) {
@@ -409,6 +449,17 @@ func TestUndo(t *testing.T) {
 				RefChanges: []workspace.RefChange{{Ref: "refs/heads/fix", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
 			want: []string{"revert  main.go", "reset HEAD (main) from bbbbbbb back to aaaaaaa", "restore 1 branch or tag: fix",
 				"stop box first (its harness session ends)"}},
+		// GAP-0225: under --keep-refs the plan said "restore" for the refs it
+		// keeps, and a run that changed only refs asked to restore nothing.
+		{name: "keep refs", input: "y\n", opts: UndoOptions{KeepRefs: true}, undos: 2,
+			undo: &workspace.UndoResult{HeadBefore: before, HeadAfter: after, BranchBefore: "main", BranchAfter: "main", RefsKept: true,
+				RefChanges: []workspace.RefChange{{Ref: "refs/tags/v7.7.7", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
+			want: []string{"keep 1 branch or tag: v7.7.7 (as the session left them: --keep-refs)", "keep HEAD as the session left it (--keep-refs)",
+				"left 1 branch or tag as the session made them (--keep-refs)"},
+			not: []string{"restore 1 branch or tag", "reset HEAD"}},
+		{name: "only refs under keep refs", opts: UndoOptions{KeepRefs: true}, undos: 1,
+			undo: &workspace.UndoResult{Preview: true, RefsKept: true, RefChanges: []workspace.RefChange{{Ref: "refs/heads/scratch/two", After: after}}},
+			want: []string{"nothing to undo", "--keep-refs leaves its 1 branch or tag as the session made them"}},
 		{name: "json restore", input: "y\n", opts: UndoOptions{Output: OutputJSON}, undos: 2, stopped: true,
 			want: []string{"revert  README.md", "stop box first (its harness session ends)", "Stop box and restore "}},
 		{name: "json declined", input: "n\n", opts: UndoOptions{Output: OutputJSON}, undos: 1, want: []string{"revert  README.md", "nothing changed"}},
@@ -486,9 +537,9 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	ta := newTestApp(t, "", copySandbox("copybox"))
 	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox", Diff: true}))
 	has(t, ta.output(), "starting copybox to read its work", "copybox: 1 file changed (+4 −1)", "  M main.go",
-		"--diff: the changes of a copy come back as a patch; `defenseclaw sandbox pull copybox --patch-out FILE` writes one",
 		"nothing was applied; bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch or --patch-out FILE)", "stopped copybox again")
-	if !slices.Equal(ta.copy.steps, []string{"pull copybox"}) || ta.calls("POST", "copybox/review") != 0 {
+	// --diff shows the pull's diff (GAP-0207).
+	if !slices.Equal(ta.copy.steps, []string{"pull copybox", "diff copybox"}) || ta.calls("POST", "copybox/review") != 0 {
 		t.Fatalf("copy steps %v, daemon reviews %d; want a pull and nothing applied", ta.copy.steps, ta.calls("POST", "copybox/review"))
 	}
 	if r := ta.bodies("POST", "copybox/workspace"); len(r) != 0 {
@@ -511,6 +562,36 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	if len(ta.copy.apply) != 0 {
 		t.Fatalf("a review applied %+v", ta.copy.apply)
 	}
+}
+
+// TestReviewKeepsAHostileFileNameOnOneLine (GAP-0291): a copy's review
+// printed a file name with a newline in it raw, so the name split into a
+// second line of the list a user trusts before bringing the work back. A
+// name is escaped onto one line and a long one cut in the middle.
+func TestReviewKeepsAHostileFileNameOnOneLine(t *testing.T) {
+	long := "edge/" + strings.Repeat("a", 240) + ".txt"
+	ta := newTestApp(t, "", copySandbox("plainbox"))
+	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain, Changes: []workspace.TreeChange{
+		{Path: "edge/line\n  A forged.txt", Status: "A", Added: 1}, {Path: "edge/esc\x1b]2;title\a", Status: "A"},
+		{Path: "edge/rtl‮txt.sh", Status: "A"}, {Path: long, Status: "A"},
+	}, Review: workspace.ReviewReport{FilesChanged: 4, Insertions: 1}}
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "plainbox"}))
+	has(t, ta.output(), `  A edge/line\n  A forged.txt`, `  A edge/esc\x1b]2;title\a`, "  A edge/rtl�txt.sh",
+		"  A edge/"+strings.Repeat("a", 75)+"…"+strings.Repeat("a", 75)+".txt")
+	for _, line := range strings.Split(ta.output(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "A forged.txt") {
+			t.Fatalf("a file name forged a line of the review:\n%s", ta.output())
+		}
+	}
+}
+
+// TestReviewNamesTheCommitsSinceTheUndoPoint (GAP-0223): the commits HEAD
+// gained are named, with a word that they may be the user's own.
+func TestReviewNamesTheCommitsSinceTheUndoPoint(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.printReviewDetail(&workspace.ReviewReport{Commits: []string{"4d2bdf3 me: plain own commit"}})
+	has(t, ta.output(), "1 commit since the undo point (the session's, or yours if you committed in the folder meanwhile; undo resets them all): "+
+		"4d2bdf3 me: plain own commit")
 }
 
 // The review merges each file's reasons into one line (manual test L10).
@@ -915,6 +996,15 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	if last := ta.copy.apply[len(ta.copy.apply)-1]; last.Mode != workspace.ApplyMerge || !last.AcceptSensitive {
 		t.Fatalf("apply = %+v", last)
 	}
+	// A branch or a patch file runs nothing: no consent, and a note
+	// (GAP-0262, GAP-0267), unless a secret would go into the branch.
+	ta.out.Reset()
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", PatchOut: filepath.Join(t.TempDir(), "x.patch")}))
+	has(t, ta.output(), "nothing of it runs from a branch: review the flagged files before you merge or check out the branch",
+		"nothing of it runs from a patch file: review the flagged files before you apply it")
+	ta.copy.pull.Review.Findings = []workspace.ScanFinding{{Path: ".envrc", Scanner: "clawshield-secrets", Severity: "CRITICAL"}}
+	wantErr(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}), "--accept-sensitive")
 	// Work the folder already has is not "applied 0 changes".
 	ta.out.Reset()
 	ta.copy.pull, ta.copy.applied = nil, &workspace.ApplyResult{Mode: workspace.ApplyMerge, UpToDate: true}

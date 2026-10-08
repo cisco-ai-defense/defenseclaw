@@ -3015,7 +3015,8 @@ nothing of the vm driver, but the names of its caches carry the release
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, BuildKit through the buildx plugin,
-  host networking, file sharing, disk), systemd linger, the gateway service,
+  host networking, file sharing, disk), systemd linger (the `Login session`
+  row on macOS), the gateway service,
   CLI, ssh connection sharing, registration, mTLS files, gateway version and
   driver, global policy, bind mounts, OpenShell telemetry and the sandbox
   ports; on a vm gateway also `vm-driver` (e2fsprogs, the Hypervisor

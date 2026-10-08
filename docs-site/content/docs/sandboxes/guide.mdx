@@ -335,6 +335,25 @@ off:
 The [capability matrix](/docs/connectors/capability-matrix) lists each harness's hook
 file, pinned version and status.
 
+## What is in the sandbox image
+
+Each harness image is NVIDIA's OpenShell community base image (Ubuntu
+24.04, pinned by digest) with the harness and DefenseClaw's hooks on top.
+The agent finds these tools in it:
+
+- `gcc`, `g++` and `make`
+- Python 3.14 with `pip` (in `/sandbox/.venv`, first on `PATH`) and `uv`
+- Node.js 22 with `npm`
+- `git`, the GitHub CLI (`gh`), `curl`, `jq` and `ssh`
+
+There is no Go, Rust or Java toolchain, and the agent has no root, so it
+can't `apt-get install` one. It can install what `pip`, `uv` and `npm`
+fetch into the project or its home. For another system tool, build a base
+image of your own `FROM` the pinned base, push it, and set
+`openshell.image.base` in `config.yaml` to its digest (`<image>@sha256:…`;
+see the [configuration reference](/docs/reference/configuration)). The next
+run builds the harness images on it.
+
 ## Run an agent
 
 From the project folder:
@@ -394,7 +413,7 @@ how that host is reached.
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
 | `Policy` | Shown when the project has a [repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml): `repo policy .defenseclaw/sandbox.yaml: tightened 2 settings (network.mode, egress.block)`, or that the policy was as strict already. |
-| `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
+| `Asks` | Where the rare asks go while the harness has your terminal: each one rings the bell and is announced in the terminal's title, and you answer it in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). Claude Code keeps the terminal's title for itself, so with Claude Code keep `defenseclaw sandbox approvals --watch --sandbox <name>` (or the TUI's Asks view) open in another terminal. |
 | `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
 | `Hooks` | Shown for user-tier harnesses: what of the harness's hooks the image keeps root-owned and what the agent can still change, for example `user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit (Kiro has no system settings tier) (DefenseClaw stops the sandbox when the harness works for 10m without its hooks)`; under the `open` pack it ends `DefenseClaw alerts when …` instead. It reads the same on every compute driver. The connector pages have the details. |
@@ -457,6 +476,15 @@ command.
 You can keep working in the folder and running things on your machine while
 the agent works. The harness runs as it always does; DefenseClaw stays out
 of the way unless something needs you.
+
+With a live mount, the end-of-session review covers the whole folder since
+the undo point, so it includes what you changed and committed there
+meanwhile: it cannot tell your edits from the agent's. It lists the commits
+HEAD gained (`1 commit since the undo point (the session's, or yours if you
+committed in the folder meanwhile; undo resets them all): 4d2bdf3 …`), and
+`undo` puts the folder back as it was at the undo point, your own edits and
+commits of the session included. Work you want to keep apart belongs in
+another folder, or in a copy-mode sandbox (`--copy`).
 
 `Ctrl+Z` doesn't suspend a sandboxed harness: there's no shell in the
 sandbox to bring it back with `fg`, so the harness comes straight back to
@@ -724,6 +752,14 @@ moment of the sandbox, because every OpenShell policy change closes the
 sandbox's open connections. In the TUI, the **Asks** view takes `a`
 (approve), `A` (always) and `x` (reject).
 
+The connection that raised an ask fails at once, and the agent's next tool
+hook tells it the connection waits for you, so it can tell you and try
+again once you approve. After a reject the agent is told that you declined;
+the sandbox's attempts at the same destination in the next 10 minutes are
+refused without a new ask, and the one after that asks again. Answering an
+ask that was answered already (in the TUI, or another terminal) says how and
+when it was answered.
+
 The `balanced` profile also asks about sites outside its allowlist, and
 `strict` asks about every request.
 
@@ -733,8 +769,23 @@ The agent runs in skip-permissions mode, but DefenseClaw's hooks still
 check every tool call. A blocked call appears in the feed and counts in the
 end-of-session summary, and the harness shows the reason.
 
+A command you type yourself with Claude Code's `!` prefix (its bash mode)
+is not a tool call: Claude Code runs it without a `PreToolUse` hook, so
+DefenseClaw does not check it. It still runs inside the sandbox, under its
+network policy, hidden secrets and protected git internals.
+
+A block keeps a secret out of the agent's next step, not out of the
+records. With the default redaction profile (`none`), the local audit store
+(`defenseclaw-gateway audit export`) and every telemetry destination keep
+prompts, model replies and tool arguments and results as they were, so a
+secret the hooks blocked (a pasted key the `SEC-STRIPE` rule caught, say)
+is in them verbatim. To mask secrets there, apply the `sensitive` or
+`strict` profile, as [Redaction](/docs/observability/redaction) describes.
+
 The sandbox hooks fail closed: a hook that cannot reach DefenseClaw blocks
-the tool call. If none of the session's hooks gets through (the daemon is
+the tool call, and its block message, which the harness shows, says the
+daemon on your machine does not answer and to run `defenseclaw-gateway
+start` there. If none of the session's hooks gets through (the daemon is
 stopped, or the ingress is unreachable), every tool call is blocked. The
 run tells you three times:
 
@@ -1058,11 +1109,16 @@ folder until you bring the work back. At the end of the session you choose
 how:
 
 ```text
-Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
 ```
 
-Changes that can run code on your machine, or that hold what looks like a
-secret, are brought back only after a second yes. Nothing is applied
+`d` shows the diff first, then asks again; above the question are the
+review's flags, its findings and a warning when the sandbox wrote what
+looks like a secret. Changes that can run code on your machine, or that
+hold what looks like a secret, are applied to your folder only after a second
+yes. A branch or a patch file runs nothing, so they get a note to review
+the flagged files instead, except that a branch that would take a secret
+into the history asks too. Nothing is applied
 without a review: a skip, a run with no terminal to ask on (a script, or a
 `--prompt` run in one) and `--yes` leave the changes in the sandbox and say
 how many there are:
@@ -1074,6 +1130,11 @@ how many there are:
 The sandbox is then stopped and kept. `--rm` does not delete a sandbox
 whose work was not brought back, and says so, and neither does the end of a
 headless run; delete it once you have pulled what you want.
+
+Submodules are not copied: the sandbox sees each one uninitialized (an
+empty folder), and the run says so. `git submodule update --init` in the
+sandbox fetches one from its remote, and a submodule whose commit did not
+change is not part of the work that comes back.
 
 Or later, with `pull`:
 
@@ -1103,6 +1164,14 @@ exists is refused before the sandbox starts, and a branch that already holds
 the work is reported as done. A branch that holds only the last pull is
 refused before the start too when the stopped sandbox has run since that pull
 (`--branch-name NAME` or `--force` goes on).
+
+The branch starts at the commit your checkout was on when the copy was made
+and holds only what the sandbox changed. A copy made while your folder had
+uncommitted edits (yours, or another live sandbox's) carries those edits,
+but they are not the sandbox's work: the branch leaves them out, they stay
+in your working tree, and the sandbox's own commits come in as one commit
+that lists them. When the sandbox changed one of those edits further, or
+git is older than 2.38, the branch holds the edits too, and `pull` says so.
 
 A copy-mode sandbox changes your folder only through `pull --apply`, so for
 such a sandbox `undo` reverts its last apply, after a preview. Edits you
@@ -1253,6 +1322,20 @@ picks another.
 A login you do inside a kept sandbox stays in it; the sandbox's files are
 readable by the agent, so prefer an API key where you can.
 
+When the model provider rejects the key a Claude Code sandbox was given
+(a short-term Bedrock key that expired, a revoked key), Claude Code retries
+for a few minutes and then suggests `/login`, which does not apply to a
+shared key. DefenseClaw says what happened in the activity feed, in
+`defenseclaw sandbox status` (a **Model key** row) and in the
+end-of-session summary:
+
+```text
+⚠ Amazon Bedrock rejected the sandbox's model credential (HTTP 401), so Claude Code gets no answers: put a fresh AWS_BEARER_TOKEN_BEDROCK in your shell, end the session (`defenseclaw sandbox stop myapp-claude` for a detached run), then run `defenseclaw sandbox connect myapp-claude` from that shell, which hands the sandbox the new key
+```
+
+A start hands the sandbox the key your environment holds then, so the
+session after `connect` works with the new key.
+
 The harness starts with its own home inside the sandbox. Your user-level
 harness settings are not copied in; your MCP servers are the exception
 ([below](#mcp-servers)).
@@ -1321,11 +1404,18 @@ port arrives as an ask for you to approve. Once approved, the session's
 first connection shows in `defenseclaw sandbox activity` as
 `✓ host.openshell.internal:5432 (port 5432 on this machine)`.
 
+The ports DefenseClaw refuses are your account's: its API, hook ingress and
+egress proxy, and the OpenShell gateway. On a machine several accounts use,
+another account's DefenseClaw listens on ports your account cannot see as
+DefenseClaw's (its configuration is private to it), so `--host-port` accepts
+them like any other port, and the ask is what stands between them and the
+sandbox. Approve only a port whose service you know.
+
 ### Other run flags
 
 | Flag | Effect |
 | --- | --- |
-| `--unmask GLOB` | Share a hidden secret file with the sandbox (repeatable). |
+| `--unmask GLOB` | Share a hidden secret file with the sandbox (repeatable). On a copy the run names each secret-looking file it shared, and says so when a glob matched no file the copy takes: a copy never takes git-ignored files, unmasked or not. |
 | `--no-mcp` | Leave the harness's MCP servers behind. |
 | `--env KEY=VALUE` | A non-secret environment variable for the sandbox (repeatable). |
 | `--no-snapshot` | Skip the pre-session snapshot, and with it undo (mount mode). |
@@ -1550,7 +1640,8 @@ defenseclaw sandbox doctor
 ```
 
 It checks the platform, your user, Landlock, Docker (version, BuildKit, host
-networking and file sharing on Docker Desktop, disk space), systemd linger,
+networking and file sharing on Docker Desktop, disk space), systemd linger
+on Linux (the login session on a Mac),
 the OpenShell service, CLI, ssh connection sharing, registration, mTLS
 files, version and driver, gateway-global policy, bind mounts, telemetry,
 the sandbox ports, the DefenseClaw daemon, the sandbox hooks, the harness
@@ -1819,17 +1910,20 @@ which runs NVIDIA's installer and sets up the service.
 | ``copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …`` | Expected on a Mac: every run works on a copy. Bring the work back at the end of the session or with `defenseclaw sandbox pull <name>`. |
 | ``--context mounts a folder into the sandbox read-only, and the OpenShell MicroVM (vm) driver mounts no host folders`` | Run without `--context` on a Mac. To give the agent a reference folder, put a copy of it inside the project. |
 | ``stage the project copy: the copy (files and history) is …, above the … limit`` | Raise `openshell.workdir.max_upload_mb` in `config.yaml`, or make the project smaller (a shallower history: `openshell.workdir.git_depth`). On a Mac a copy is the only way the project runs. |
-| ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …`` | Free space in the sandbox (`defenseclaw sandbox exec <name> -- df -h` shows it), or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes: `defenseclaw sandbox doctor` shows the value and where it is set. |
+| ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …`` | Free space in the sandbox (`defenseclaw sandbox exec <name> -- df -h` shows it), or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes: `defenseclaw sandbox doctor` shows the value and where it is set. Do it before the sandbox stops: a MicroVM stopped with its disk full cannot start again (``<name> cannot start: its own disk is full``), and only `delete` is left. |
 | The doctor's **vm-identity** check fails, or a create on a Mac says the MicroVM driver runs sandboxes as another uid | The gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid, so the harness images DefenseClaw built for you would not match. Run `defenseclaw sandbox doctor --fix`, which sets them and restarts the gateway. |
 | On macOS, the **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``, or setup marks ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`` | OpenShell was installed outside Homebrew. See [a gateway run another way on macOS](#a-gateway-run-another-way-on-macos). |
 | On Linux, setup marks ``⚠ OpenShell 0.1.1 has no openshell-gateway user service``, then ``⚠ Gateway service: openshell-gateway is not installed; …`` | OpenShell was installed without NVIDIA's installer. See [a gateway run another way on Linux](#a-gateway-run-another-way-on-linux). |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
+| ``… rejected the sandbox's model credential (HTTP 401), so Claude Code gets no answers`` | The model provider refused the key the sandbox was given, for example an expired short-term Bedrock key. Put a fresh key in your shell, end the session, and run `defenseclaw sandbox connect <name>` from that shell; see [Choose the model credential](#choose-the-model-credential). |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
 | ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start) | The check after ready found the sandbox other than DefenseClaw prepared it, on any compute driver, and the reason follows the message: the workload runs as another uid or holds capabilities, a hook, launcher or managed-settings file is missing, changed, not root-owned or writable, or (Linux) a per-run settings file is not on a read-only mount. Nothing of the sandbox kept running. Rebuild the harness image (`defenseclaw sandbox image build <harness> --force`) and run again; on a Mac, a uid mismatch is fixed by `defenseclaw sandbox doctor --fix`. If it repeats, keep the reason for a bug report. |
+| ``<name> is in OpenShell's error state`` (start, stop or connect), or the session ended with ``<name>'s container stopped under the session`` | The sandbox's container stopped while it ran (a Docker restart stops every one, or the workload failed), and OpenShell holds it in its error state, where it can be neither stopped nor started. `defenseclaw sandbox doctor` names it under **Sandbox hooks**. Delete it and run again: `defenseclaw sandbox delete <name> --keep-snapshot` keeps a mounted project's undo point (the folder keeps its changes); a copy's work that was not pulled cannot be read any more. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. DefenseClaw also refuses system folders, shared roots such as `/tmp`, credential folders such as `~/.ssh`, and agent homes such as `~/.claude` and `~/.codex`, whose settings and hooks run on your machine. |
 | `undo cannot look inside tools in …: the session took read permission away` | Make the folder readable (`chmod u+rwx tools`), review what is in it, and run undo again. |
 | `… cannot be mounted live: …; run with --copy to work on a copy` | Add `--copy`. |
+| In a live-mounted sandbox, `npm install` (or `npm ci`) fails in a `prepare` script with `EROFS` on a file under the folder the banner's **Protected** line marks as `the repository's core.hooksPath` | The project points git's hooks at that folder (husky does), and DefenseClaw keeps it read-only so the sandbox cannot plant a hook your git runs. Run `npm install --ignore-scripts` (or `npm ci --ignore-scripts`) in the sandbox, or work on a copy with `--copy`. |
 | `the folder (for its undo snapshot) is …, above the 1.0 GiB limit` | A folder without git has a 1 GiB snapshot cap. Make it a git repository, or run with `--copy`, or with `--no-snapshot` (no undo). |
 | `blocked by your organization's DefenseClaw policy: <key>` | An `openshell.admin` limit refused the setting. `defenseclaw sandbox policy explain` shows which one. |
 | `` `sandbox run` attaches Claude Code to your terminal, and there is none `` | Run it from a terminal, or pass `--prompt`. |
@@ -1837,6 +1931,7 @@ which runs NVIDIA's installer and sets up the service.
 | ``docker's buildx plugin is not available (`docker buildx version`: …)``, or the doctor's **Docker BuildKit** check fails | The harness images need BuildKit, which docker builds with only through its buildx plugin; without it docker would fall back to its legacy builder, which cannot build them (`the --chmod option requires BuildKit`). Install the plugin: Docker Desktop provides it, and on Linux it is the `docker-buildx-plugin` package from Docker's repository. docker looks for it in the `cli-plugins` directory of its config, `DOCKER_CONFIG` or `~/.docker` when that is unset, so a `DOCKER_CONFIG` or `HOME` that points elsewhere hides it: point `DOCKER_CONFIG` at the config that has `cli-plugins/docker-buildx`. The daemon builds in the environment it started with, so restart it (`defenseclaw-gateway restart`) after changing that. |
 | ``DOCKER_BUILDKIT=0 turns BuildKit off`` | Unset `DOCKER_BUILDKIT`, or set it to `1`, where you run DefenseClaw and where the daemon starts, then restart the daemon. |
 | A tool cannot reach a site | Look for the block in `defenseclaw sandbox activity`, then unblock it. Git over SSH and databases don't go through the web proxy: use HTTPS remotes, or `--host-port` for a service on your machine. |
+| `git` or `npm install` fails with `ssh: connect to host github.com port 22: Permission denied` | No SSH leaves a sandbox, and no unblock opens it. Use HTTPS: `git remote set-url origin https://github.com/OWNER/REPO.git`. npm resolves `github:OWNER/REPO` and `git+ssh://` dependencies to SSH: write them as `git+https://github.com/OWNER/REPO.git`. Claude Code, Codex, Copilot CLI, Cursor and Devin agents are told this after the refused call. |
 | Project folder mounts show as disabled | Run `defenseclaw sandbox doctor --fix`, or setup again. On a Mac on the MicroVM driver the doctor skips this check: every run works on a copy. |
 | ``not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about … from its image in …`` (macOS) | The first start of an image prepares a disk of about the image's size on the volume of `~/.local/state/openshell/vm-driver`, and the run is refused before anything is copied when that volume lacks it. Free space there: `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them (see the next row). A warning that only some space is free means the start goes ahead with little to spare. |
 | Low disk space | `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness images, and `defenseclaw sandbox image rm <harness>` every image of a harness you no longer run. Avoid `docker system prune` on a machine you share: it also removes every stopped container, unused network and build cache, other users' too. On a Mac, the MicroVM driver keeps a prepared disk of about 5 GB for each image it started, in `~/.local/state/openshell/vm-driver/images`: the doctor shows their size, and prune and `image rm` remove the disks of the images they remove (see [`sandbox image prune`](/docs/reference/sandbox-cli#sandbox-image-prune) and [`sandbox image rm`](/docs/reference/sandbox-cli#sandbox-image-rm)). If the space does not come back, an app that backs up or indexes your files may still hold a removed disk open: `lsof +L1` lists such files, and the space returns when the app lets go. |

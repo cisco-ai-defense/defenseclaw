@@ -112,6 +112,24 @@ func TestEgressRefusalsReachTheBindingsAgentOnce(t *testing.T) {
 	}
 }
 
+// GAP-0216: npm resolved a github: dependency to ssh://git@github.com, and
+// OpenShell refused the SSH connection; the agent saw only "Permission
+// denied" and gave no HTTPS alternative. The refusal reaches the binding's
+// agent once, with the HTTPS way.
+func TestEgressRefusalsTellOfAnSSHRefusal(t *testing.T) {
+	e := liveEnv(t, "sshbox", nil)
+	b := e.binding("sshbox")
+	e.ocsf("sshbox", "NET:OPEN [MED] DENIED /usr/bin/ssh(42) -> github.com:22/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", time.Now())
+	got := e.m.EgressRefusals(b.ID, b.SandboxName)
+	if len(got) != 1 || got[0].Note != NoteSSH || got[0].Host != "github.com" || got[0].Port != 22 ||
+		!strings.Contains(got[0].Remedy, "git+https://github.com/OWNER/REPO.git") {
+		t.Fatalf("refusals = %+v", got)
+	}
+	if again := e.m.EgressRefusals(b.ID, b.SandboxName); len(again) != 0 {
+		t.Fatalf("told again: %+v", again)
+	}
+}
+
 // RT U3: when the large-upload block cut an upload on a tunnel it had let
 // through, the agent saw only "curl: (56) Failure when receiving data from
 // the peer" and replied "Uploaded the file."; the #954 note covered refused

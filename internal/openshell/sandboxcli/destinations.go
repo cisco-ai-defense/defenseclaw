@@ -58,7 +58,7 @@ func (a *App) Destinations(ctx context.Context, name string, format OutputFormat
 		rows = append(rows, []string{
 			destinationHost(r), truncate(destinationKindCell(r), 48), truncate(firstNonEmpty(r.Provider, "-"), 32),
 			destinationRequests(r), humanBytes(r.BytesUp) + " / " + humanBytes(r.BytesDown),
-			truncate(firstNonEmpty(destinationBinary(r), "-"), 40), r.LastSeen.Local().Format("01-02 15:04"),
+			destinationBinaryCell(r), r.LastSeen.Local().Format("01-02 15:04"),
 		})
 	}
 	if len(rows) > 0 {
@@ -146,9 +146,13 @@ func destinationKindText(kind string) string {
 
 // destinationRequests counts a row's requests and refusals.
 func destinationRequests(r sandboxapi.DestinationRow) string {
-	s := strconv.FormatInt(r.Connections+r.Tunnels, 10)
+	s := strconv.FormatInt(r.Connections+r.Tunnels+r.Failed, 10)
 	if refused := r.Refused + r.Blocked; refused > 0 {
 		s += fmt.Sprintf(" (%d refused)", refused)
+	}
+	if r.Failed > 0 {
+		// Allowed, and the host did not take them (GAP-0284).
+		s += fmt.Sprintf(", %d failed upstream", r.Failed)
 	}
 	if r.ModelTurns > 0 {
 		s += fmt.Sprintf(", %d model calls", r.ModelTurns)
@@ -167,6 +171,17 @@ func destinationBinary(r sandboxapi.DestinationRow) string {
 		names = append(names, firstNonEmpty(p.Comm, path.Base(p.Exe), strconv.Itoa(p.PID)))
 	}
 	return strings.Join(names, " ← ")
+}
+
+// destinationBinaryCell is the BINARY cell: a program's path is cut from
+// the left, so its name stays (GAP-0198); a lineage from the right, after
+// the program that connected.
+func destinationBinaryCell(r sandboxapi.DestinationRow) string {
+	b := firstNonEmpty(destinationBinary(r), "-")
+	if len(r.Lineage) < 2 {
+		return truncateLeft(b, 40)
+	}
+	return truncate(b, 40)
 }
 
 func lastOf(list []string) string {

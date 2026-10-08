@@ -140,6 +140,9 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		return writeJSON(a.IO.Out, sb)
 	}
 	a.printSandbox(sb)
+	if sb.Phase == "ready" {
+		a.printDetachedRun(ctx, sb)
+	}
 	if sb.Phase == "stopped" {
 		if why := startRefusal(keptPolicy(ctx, api, sb), sb); why != "" {
 			a.warn(sb.Name + " cannot start under the current policy: " + why + "; delete it (`" + CommandName + " delete " + sb.Name +
@@ -147,6 +150,32 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		}
 	}
 	return nil
+}
+
+// printDetachedRun says where a running sandbox's detached run is: one that
+// finished left the sandbox ready (and holding a mounted folder) with
+// nothing saying the job was done (GAP-0231).
+func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return
+	}
+	run, err := a.detachedRun(ctx, a.cli(gateway), sb)
+	if err != nil {
+		return
+	}
+	logs := "`" + CommandName + " logs " + sb.Name + "`"
+	switch run.State {
+	case sandboxapi.RunRunning:
+		a.note("its detached run" + a.startedText(run.Started) + " is still going; " + logs + " -f follows it")
+	case sandboxapi.RunExited:
+		exit := ""
+		if run.Exit != "" {
+			exit = " (exit status " + run.Exit + ")"
+		}
+		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it)")
+	}
 }
 
 func (a *App) printStatus(st *sandboxapi.Status) {
@@ -200,7 +229,12 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	a.println(a.bold(sb.Name))
 	row("Harness", strings.TrimSpace(firstNonEmpty(sb.HarnessName, sb.Harness)+" "+sb.HarnessVersion))
-	row("Phase", phaseText(*sb))
+	phase := phaseText(*sb)
+	if sb.PhaseReason != "" && sb.Phase == "error" {
+		// Why, in words (GAP-0297): the phase alone said nothing.
+		phase += ": " + sb.PhaseReason
+	}
+	row("Phase", phase)
 	if sb.UptimeSeconds > 0 {
 		row("Uptime", humanDuration(time.Duration(sb.UptimeSeconds)*time.Second))
 	}
@@ -270,8 +304,16 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		}
 		row("Hook error", last+" (the hook failed closed)")
 	}
-	row("Egress", fmt.Sprintf("%s contacted, %d blocked, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
-		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
+	if sb.Hooks.ModelKeyRejected != "" {
+		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
+	}
+	failed := ""
+	if n := sb.Egress.UpstreamFailed; n > 0 {
+		// Allowed, and the host did not take them: an outage, not a block.
+		failed = fmt.Sprintf(", %d failed upstream", n)
+	}
+	row("Egress", fmt.Sprintf("%s contacted, %d blocked%s, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
+		failed, humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
 	for _, ep := range sb.Endpoints {
 		row("Endpoint", ep.Host+" "+ep.Result)
 	}
@@ -725,6 +767,14 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				}
 			} else if h := a.lastHandover(sb); h != nil {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
+			}
+		}
+		if n := a.attachedSessions(name); n > 0 {
+			// Its sessions in other terminals end with it (GAP-0285).
+			what := attachedText(name, n) + "; deleting it ends " + them(n)
+			question = what + ". " + question
+			if o.Yes {
+				a.warn(what + " (--yes)")
 			}
 		}
 		yes, err := a.confirm(question, o.Yes)

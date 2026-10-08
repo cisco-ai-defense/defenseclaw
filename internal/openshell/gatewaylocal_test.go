@@ -118,9 +118,42 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 			t.Fatalf("service fix = %+v", svc.Fix)
 		}
 		// Nor does the registration send the user to a doctor --fix that
-		// cannot start the gateway.
-		if reg := r.Get("gateway-registration"); reg == nil || reg.Fix == nil || strings.Contains(reg.Fix.Summary, "doctor --fix") {
+		// cannot start the gateway: it is not checked (GAP-0288).
+		if reg := r.Get("gateway-registration"); reg == nil || reg.Status != openshell.StatusSkip || reg.Fix != nil {
 			t.Fatalf("registration = %+v", reg)
+		}
+	})
+
+	// GAP-0201: the account that handed the gateway over keeps its
+	// registration; the gateway answering on the port is the other
+	// account's, whose CA refuses this account's certificate. The Gateway
+	// row printed the raw x509 error and told it to register again, and
+	// the rows that follow from it failed with their own fixes (GAP-0288):
+	// they are skipped, and Gateway service gives the way on.
+	t.Run("another account's gateway answers on the port", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "disabled"), nil)
+		f.busy["127.0.0.1:17670"] = true
+		f.doctor.PortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{UID: 4242}, nil }
+		f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
+			return nil, errors.New("openshell: health: Unavailable: tls: failed to verify certificate: x509: certificate signed by unknown authority")
+		}
+		f.found["docker"] = false
+		r := f.run()
+		const elsewhere = "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+		for _, id := range []string{openshell.CheckIDGatewayVersion, openshell.CheckIDGatewayDriver, openshell.CheckIDDocker} {
+			if c := expectCheck(t, r, id, openshell.StatusSkip, elsewhere); c.Fix != nil {
+				t.Fatalf("%s keeps a fix: %+v", id, c.Fix)
+			}
+		}
+		var failed []string
+		for _, c := range r.Checks {
+			if c.Status == openshell.StatusFail {
+				failed = append(failed, c.ID)
+			}
+		}
+		if len(failed) != 1 || failed[0] != openshell.CheckIDGatewayService || !r.GatewayPortElsewhere || strings.Contains(r.String(), "x509") {
+			t.Fatalf("failed = %v, elsewhere %v:\n%s", failed, r.GatewayPortElsewhere, r.String())
 		}
 	})
 }

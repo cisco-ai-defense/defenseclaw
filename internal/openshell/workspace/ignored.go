@@ -186,6 +186,10 @@ func ignoredAreaOf(rel string, roots map[string]bool) (string, ignoredKind) {
 	segs := strings.Split(rel, "/")
 	for i := 0; i < len(segs)-1; i++ {
 		if _, ok := dependencyAreas[segs[i]]; ok {
+			if i+2 < len(segs) && segs[i+1] == toolCacheDir {
+				// A tool's cache, which no package is (GAP-0275).
+				return strings.Join(segs[:i+2], "/") + "/", ignoredOther
+			}
 			return strings.Join(segs[:i+1], "/") + "/", ignoredDependencies
 		}
 		if segs[i] == "__pycache__" {

@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
 	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -39,6 +41,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
+
+// killedByInterrupt reports an error of a command a Ctrl-C ended: the
+// terminal sends SIGINT to its whole foreground group, the git that a pull
+// runs included.
+func killedByInterrupt(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return errors.Is(err, errInterrupted) || errors.Is(err, openshell.ErrInterrupted)
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == syscall.SIGINT
+}
 
 // RunDir is where detached runs keep their output inside the sandbox.
 const RunDir = harness.RunDir
@@ -52,6 +66,9 @@ type session struct {
 	sb   *sandboxapi.Sandbox
 	rm   bool
 	yes  bool
+	// cliErr holds the OpenShell CLI's own standard error of the session's
+	// interactive harness or shell (holdCLIErr).
+	cliErr *heldOutput
 	// autoRm marks an rm the run did not ask for: a headless run's sandbox,
 	// which goes by the rules of --rm unless --keep or
 	// openshell.keep_headless keeps it (App.headlessRm). The end of the
@@ -151,6 +168,17 @@ type session struct {
 	// unblocked since, whose summary line offers no unblock.
 	blockedHosts   map[string]bool
 	unblockedHosts map[string]bool
+	// refused are the host:port destinations of OpenShell's own refusals
+	// the session announced, with their host; otherBlocks the hosts blocked
+	// another way too; approved the destinations an approval opened since
+	// (GAP-0196): no longer blocked, and not counted as such.
+	refused     map[string]string
+	otherBlocks map[string]bool
+	approved    map[string]bool
+	// gatewayDown is set when the daemon, at the end of the session, could
+	// not reach the OpenShell gateway; errored when the sandbox ended in
+	// OpenShell's error phase.
+	gatewayDown, errored bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -224,9 +252,71 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	if err != nil {
 		return -1, err
 	}
-	code, err := s.app.Terminal.Run(ctx, inv)
+	code, err := s.app.Terminal.Run(ctx, s.holdCLIErr(inv))
+	if err != nil {
+		s.printCLIErr(false)
+	}
 	s.harnessCode = code
 	return code, err
+}
+
+// maxHeldCLIErr bounds what holdCLIErr keeps of the OpenShell CLI's own
+// standard error during a session.
+const maxHeldCLIErr = 64 << 10
+
+// heldOutput keeps what is written to it, up to maxHeldCLIErr bytes.
+type heldOutput struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (h *heldOutput) Write(p []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if room := maxHeldCLIErr - h.b.Len(); room > 0 {
+		h.b.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (h *heldOutput) take() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := h.b.String()
+	h.b.Reset()
+	return out
+}
+
+// holdCLIErr has the OpenShell CLI's own standard error of an interactive
+// session held until the session ends (printCLIErr): written into the
+// harness's screen it corrupts it, and its relay error when the gateway
+// restarted ("Error: × code: The service is currently unavailable,
+// message: exec relay closed before the command reported an exit status")
+// came before DefenseClaw's account of what ended the session (GAP-0279).
+func (s *session) holdCLIErr(inv openshell.Invocation) openshell.Invocation {
+	s.cliErr = &heldOutput{}
+	inv.Stderr = s.cliErr
+	return inv
+}
+
+// printCLIErr prints what the OpenShell CLI wrote on its own standard
+// error during the session, after DefenseClaw's lines. Its relay error is
+// left out when explained: DefenseClaw said what ended the session.
+func (s *session) printCLIErr(explained bool) {
+	if s.cliErr == nil {
+		return
+	}
+	text := strings.TrimRight(s.cliErr.take(), "\r\n")
+	if text == "" || explained && relayClosed(text) {
+		return
+	}
+	fmt.Fprintln(s.app.IO.Err, terminalText(text))
+}
+
+// relayClosed reports whether the OpenShell CLI's error is its exec relay
+// that closed under the session (the gateway restarted or went away).
+func relayClosed(text string) bool {
+	return strings.Contains(text, "exec relay closed") || strings.Contains(text, "The service is currently unavailable")
 }
 
 // loginShell starts the sandbox user's login shell (bash where the image
@@ -245,6 +335,7 @@ func (s *session) attachShell(ctx context.Context) (int, error) {
 	stop := s.beginSession(ctx)
 	defer stop()
 	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
+	inv = s.holdCLIErr(inv)
 	if err != nil {
 		return -1, err
 	}
@@ -368,6 +459,10 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.blockNotice(ev)
 	case sandboxapi.ActivityEgressUnblocked:
 		s.onUnblock(ev.Host)
+	case sandboxapi.ActivityApprovalResolved:
+		if sandboxapi.ApprovalApplied(ev) {
+			s.onApproved(ev)
+		}
 	case sandboxapi.ActivityEgressLargeUpload:
 		s.largeUploadNotice(ev)
 	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookBlocked, sandboxapi.ActivityHookFailed:
@@ -500,17 +595,67 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
 		n.summary = text
 	}
+	// OpenShell refuses a connection no rule allows yet; an approval
+	// (triage's own, under the open profile) opens it: its line then says
+	// so instead of a block (onApproved).
+	direct := ev.Source == sandboxapi.SourceOpenShell && ev.Category == ""
+	if direct {
+		n.dest = strings.ToLower(where)
+		n.approved = "⚠ " + where + ": a connection was refused before a rule allowed it; approved since"
+	}
 	s.noticeMu.Lock()
 	if s.blockedHosts == nil {
-		s.blockedHosts = map[string]bool{}
+		s.blockedHosts, s.refused, s.otherBlocks = map[string]bool{}, map[string]string{}, map[string]bool{}
 	}
 	if len(s.blockedHosts) < maxSeenEvents {
 		s.blockedHosts[host] = true
+		if direct {
+			s.refused[n.dest] = host
+		} else {
+			s.otherBlocks[host] = true
+		}
 	}
-	// Blocked again after an unblock: the command applies again.
+	// Blocked again after an unblock or approval: the block applies again.
 	delete(s.unblockedHosts, host)
+	delete(s.approved, n.dest)
 	s.noticeMu.Unlock()
 	s.noticeWith(key, text, n)
+}
+
+// onApproved records that an approval opened a destination during the
+// session.
+func (s *session) onApproved(ev sandboxapi.ActivityEvent) {
+	dest := strings.ToLower(askDestination(ev))
+	if dest == "" {
+		return
+	}
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	if s.approved == nil {
+		s.approved = map[string]bool{}
+	}
+	if len(s.approved) < maxSeenEvents {
+		s.approved[dest] = true
+	}
+}
+
+// liftedBlocks counts the hosts the session announced blocked only by
+// OpenShell refusals of destinations an approval opened since. Under
+// noticeMu.
+func (s *session) liftedBlocks() int {
+	open := map[string]bool{}
+	for dest, host := range s.refused {
+		if _, seen := open[host]; !seen || !s.approved[dest] {
+			open[host] = s.approved[dest] && !s.otherBlocks[host]
+		}
+	}
+	n := 0
+	for _, lifted := range open {
+		if lifted {
+			n++
+		}
+	}
+	return n
 }
 
 // largeUploadNotice announces a large upload only the report saw (the
@@ -691,6 +836,10 @@ func (a *App) copyWarnings(rec *workspace.CopyRecord) {
 	if n := len(rec.HeldBack); n > 0 {
 		a.warn(plural(int64(n), "secret file", "secret files") + " held back from the copy: " + strings.Join(firstN(rec.HeldBack, 8), ", "))
 	}
+	if n := len(rec.Unmasked); n > 0 {
+		a.warn(plural(int64(n), "file that looks like a secret is", "files that look like secrets are") + " in the copy (--unmask), so the agent can read " +
+			itThem(rec.Unmasked) + ": " + strings.Join(firstN(rec.Unmasked, 8), ", "))
+	}
 	for _, w := range rec.Warnings {
 		a.warn(w)
 	}
@@ -715,6 +864,7 @@ func (s *session) end(ctx context.Context) error {
 		a.println()
 		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() +
 			"; there is nothing left to review, and its undo point went with it")
+		s.printCLIErr(true)
 		return nil
 	}
 	after, err := s.settled(ctx)
@@ -732,11 +882,13 @@ func (s *session) end(ctx context.Context) error {
 	a.println()
 	if st, err := s.api.Status(ctx); err == nil {
 		s.daemonStarted = st.StartedAt
+		s.gatewayDown = st.Enabled && !st.Available
 	}
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
 		a.warn(elsewhere)
 	}
+	s.printCLIErr(elsewhere != "")
 	// While the sandbox still runs: the review may stop it.
 	s.diagnoseStart(ctx, after, elsewhere != "")
 	if !s.started && after.Phase == "ready" {
@@ -799,6 +951,7 @@ func (s *session) end(ctx context.Context) error {
 		}
 	}
 	if rev != nil && rev.Report != nil {
+		a.printCommits(rev.Report)
 		if line := riskLine(rev.Report); line != "" {
 			a.println(a.style(line, ansiYellow))
 		}
@@ -912,11 +1065,23 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 		return name + " was undone from outside this session (`" + CommandName + " undo` or the TUI): the folder is back at its undo point, " +
 			"and that stopped " + s.harnessName()
 	}
+	if after.Phase == "error" {
+		// Not a stop of anyone's: OpenShell lost the sandbox (GAP-0278).
+		s.errored = true
+		return name + "'s container stopped under the session (Docker restarted, or its workload failed), which ended " + s.harnessName() +
+			"; OpenShell now holds it in its error state, where it can be neither stopped nor started"
+	}
 	if after.Phase != "ready" {
 		if h := after.Hooks; h.Silent && h.OnSilence == packs.OnSilenceStop {
 			// DefenseClaw's own stop (raiseSilence), not someone else's.
 			return "DefenseClaw stopped " + name + ": " + s.harnessName() + " worked for " + firstNonEmpty(h.SilenceAfter, "a while") +
 				" without a hook reaching DefenseClaw (hooks.on_silence: stop). Check its hook configuration in the sandbox before you start it again"
+		}
+		if s.gatewayDown {
+			// Not a stop of DefenseClaw's (GAP-0202): the gateway that runs
+			// the sandbox went away under it.
+			return "the OpenShell gateway is not available (it was stopped, or another account's gateway took its port; `" + CommandName +
+				" doctor` says which), which ended " + s.harnessName()
 		}
 		return name + " was stopped from outside this session (`" + CommandName + " stop` or the TUI), which ended " + s.harnessName()
 	}
@@ -944,7 +1109,31 @@ func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (
 		return false
 	}
 	if !passing(after.Phase) {
-		return after, nil
+		// A harness that failed while its sandbox still reads ready may
+		// have lost the sandbox a moment ago (a Docker restart stops its
+		// container, and OpenShell says so a few seconds later): look
+		// again shortly before calling it running (GAP-0278).
+		if after.Phase != "ready" || s.harnessCode == 0 || s.before == nil || s.before.Phase != "ready" {
+			return after, nil
+		}
+		for range 2 {
+			if s.app.Sleep(ctx, settlePhaseInterval) != nil {
+				break
+			}
+			next, err := s.api.Get(ctx, s.sb.Name)
+			if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+				return nil, err
+			}
+			if err != nil {
+				break
+			}
+			if after = next; after.Phase != "ready" {
+				break
+			}
+		}
+		if !passing(after.Phase) {
+			return after, nil
+		}
 	}
 	for range int(settlePhaseWait / settlePhaseInterval) {
 		if s.app.Sleep(ctx, settlePhaseInterval) != nil {
@@ -1075,6 +1264,16 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		}
 		s.markStopped()
+	}
+	if s.errored {
+		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			a.note("Sandbox " + name + " is in OpenShell's error state, and its copy's work that was not pulled cannot be read any more → `" +
+				CommandName + " delete " + name + "`, then run again")
+			return nil
+		}
+		a.note("Sandbox " + name + " is in OpenShell's error state → `" + CommandName + " delete " + name +
+			" --keep-snapshot` keeps the undo point and the folder's changes, then run again")
+		return nil
 	}
 	next := "resume: " + CommandName + " connect " + name
 	if s.headless {
@@ -1308,7 +1507,8 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	parts = append(parts, contacted)
 	s.noticeMu.Lock()
-	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked)
+	lifted := s.liftedBlocks()
+	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked) - lifted
 	s.noticeMu.Unlock()
 	if sitesBlocked > 0 {
 		parts = append(parts, plural(int64(sitesBlocked), "site blocked", "sites blocked"))
@@ -1430,7 +1630,14 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.println(s.summaryLine(after, nil))
 		s.printHookReach(after, endedElsewhere)
 		s.printNotices()
-		a.warn("could not pull the sandbox's changes: " + err.Error())
+		if killedByInterrupt(err) {
+			// The Ctrl-C reached the git the pull runs (GAP-0221): not a
+			// bundle that does not apply.
+			s.interrupted = true
+			a.warn("interrupted: nothing was brought back, and the work is still in the sandbox")
+		} else {
+			a.warn("could not pull the sandbox's changes: " + err.Error())
+		}
 		a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
 		s.keepUnpulled()
 		return s.finish(ctx, false)
@@ -1444,6 +1651,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}
 	s.printAsks(after)
+	a.printReviewDetail(&pull.Review)
 	for _, b := range pull.Blocking {
 		a.warn(b)
 	}
@@ -1463,8 +1671,18 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			// A plain folder has no branches to put the work on.
 			choices = append(choices, choice{"b", "branch dc/" + after.Name})
 		}
-		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"})
+		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"}, choice{"d", "show diff"})
 		ans, err := a.choose("Bring the changes back?", choices, "a")
+		for err == nil && ans == "d" {
+			// Read the work before choosing, as a mounted project's end
+			// offers (GAP-0207).
+			if diff, derr := a.Workspace.Diff(ctx, a.dataDir(), after.Name); derr != nil {
+				a.warn("diff: " + derr.Error())
+			} else {
+				a.page(diff)
+			}
+			ans, err = a.choose("Bring the changes back?", choices, "a")
+		}
 		switch {
 		case errors.Is(err, errInterrupted):
 			// Ctrl-C: nothing comes back; the changes wait in the sandbox.
@@ -1494,7 +1712,12 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		opts.PatchOut = after.Name + ".patch"
 	}
 	// A branch that holds this work already takes nothing new: nothing to
-	// confirm.
+	// confirm; nor does a branch or a patch file, which change nothing that
+	// runs until merged or applied (GAP-0262, GAP-0267).
+	if sensitive && writesElsewhere(opts.applyMode(), &pull.Review) {
+		a.note(elsewhereNote(opts.applyMode()))
+		opts.AcceptSensitive, sensitive = true, false
+	}
 	if sensitive && !a.branchHolds(ctx, after, opts) {
 		yes, err := a.ask(a.bringBackQuestion(&pull.Review), false, false)
 		if err != nil {

@@ -120,6 +120,9 @@ type box struct {
 	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
+	// toolHostsSaid are the harness tool hosts whose refusal the feed
+	// explained (firstToolHostRefusal).
+	toolHostsSaid map[string]bool
 	// seenChunks are the pending draft chunks triage decided; it is pruned
 	// to the inbox's pending chunks on every poll.
 	seenChunks map[string]struct{}
@@ -231,6 +234,11 @@ type hookStats struct {
 	lastFailureAt   time.Time
 	failureNoticeAt time.Time
 	unnoticed       int64
+	// modelRejected says the model API rejected the sandbox's model
+	// credential, and how to hand it a fresh one; modelRejectedAt is the
+	// last rejection (observeModelAnswerLocked).
+	modelRejected   string
+	modelRejectedAt time.Time
 }
 
 // hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
@@ -398,6 +406,12 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if previous == "" && b.rec.Phase != "" {
 		previous = audit.SandboxPhase(b.rec.Phase)
 	}
+	// A MicroVM that left the ready phase without DefenseClaw stopping or
+	// deleting it (whose own transitions come first) went down without a
+	// flush: the OpenShell gateway restarted under it, for one (GAP-0289).
+	driver, known := openshell.LookupDriver(b.rec.Driver)
+	unflushed := known && !driver.StopFlushes && trigger == audit.SandboxTriggerWatch && previous == audit.SandboxPhaseReady &&
+		(phase == audit.SandboxPhaseProvisioning || phase == audit.SandboxPhaseStarting || phase == audit.SandboxPhaseStopped || phase == audit.SandboxPhaseError)
 	b.phase = phase
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
@@ -428,6 +442,10 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.rec.SessionYolo = nil
 	}
 	b.rec.Phase = string(phase)
+	b.rec.PhaseReason = ""
+	if phase == audit.SandboxPhaseError {
+		b.rec.PhaseReason = errorPhaseReason(cond)
+	}
 	// The record written below keeps the hook counts reached so far.
 	b.noteHookCountsLocked()
 	id := b.identity()
@@ -454,13 +472,113 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		m.flushDestinations(rec.Name)
 	}
 	if !unchanged {
+		msg := lifecycleMessage(rec.Name, phase)
+		if phase == audit.SandboxPhaseError {
+			// Why, and the way on: OpenShell neither stops nor starts a
+			// sandbox in its error phase (GAP-0278).
+			if rec.PhaseReason != "" {
+				msg += " (" + rec.PhaseReason + ")"
+			}
+			msg += "; " + errorPhaseWayOn(rec.Name, rec.WorkdirMode, rec.PhaseReason)
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
-			Message: lifecycleMessage(rec.Name, phase),
+			Message: msg,
 		})
+	}
+	if unflushed {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "MEDIUM",
+			Reason: sandboxapi.ReasonUnflushedStop, Message: unflushedStopMessage(rec.Name)})
 	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
+}
+
+// errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase,
+// which it can neither stop nor start: its container stopped (a Docker
+// restart stops every one) or its workload failed. Deleting it keeps the
+// folder's changes, and with --keep-snapshot the undo point; a copy's work
+// that was never pulled goes with it.
+func errorPhaseWayOn(name, mode, reason string) string {
+	if reason == overlayDiskFullText {
+		return overlayDiskWayOn(name)
+	}
+	way := "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed): " +
+		"`defenseclaw sandbox delete " + name + " --keep-snapshot` keeps the undo point and the folder's changes, then run again"
+	if mode == config.OpenShellWorkdirCopy {
+		way = "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed), " +
+			"and its copy's work that was not pulled cannot be read any more: `defenseclaw sandbox delete " + name + "`, then run again"
+	}
+	return way
+}
+
+// unflushedStopMessage is the feed's warning about the MicroVM name that
+// went down without DefenseClaw stopping it.
+func unflushedStopMessage(name string) string {
+	return "⚠ " + name + "'s MicroVM went down without DefenseClaw stopping it (the OpenShell gateway restarted, for one), so what it wrote " +
+		"in its last seconds may be missing or end in zero bytes: check those files before you bring the work back (its review flags the ones " +
+		"that end in zero bytes). `defenseclaw sandbox stop` flushes first, and so do DefenseClaw's own gateway restarts"
+}
+
+// errorPhaseReason is why a sandbox is in OpenShell's error phase, in
+// words: its full MicroVM disk, or what its conditions say (cut at 200
+// characters).
+func errorPhaseReason(cond *audit.SandboxCondition) string {
+	if cond == nil {
+		return ""
+	}
+	said := strings.TrimSpace(strings.Trim(strings.TrimSpace(cond.Reason)+": "+strings.TrimSpace(cond.Message), ": "))
+	if overlayDiskFull(said) {
+		return overlayDiskFullText
+	}
+	return truncate(sandboxapi.DisplayText(said), 200)
+}
+
+// overlayDiskFullText is why a MicroVM whose own disk is full does not
+// start. OpenShell's error is the guest console: "setting up writable
+// overlay root ... touch: cannot touch '/newroot/etc/passwd': Read-only
+// file system" (GAP-0297).
+const overlayDiskFullText = "its own disk is full: the MicroVM writes its changes to an overlay disk of its own, and could not set up its root on it"
+
+// overlayDiskFull reports whether OpenShell's account of a failed start
+// (an error, a condition) is a MicroVM's overlay disk that has no room
+// left: the guest could not write its root on it.
+func overlayDiskFull(said string) bool {
+	return strings.Contains(said, "writable overlay root") &&
+		(strings.Contains(said, "Read-only file system") || strings.Contains(said, "No space left on device"))
+}
+
+// overlayDiskWayOn is what to do about the MicroVM name whose own disk is
+// full: OpenShell cannot start it again, so its work cannot be read.
+func overlayDiskWayOn(name string) string {
+	return "a MicroVM stopped with its disk full cannot start again, so its work that was not pulled cannot be read any more: " +
+		"`defenseclaw sandbox delete " + name + "`, then run again; overlay_disk_mib under [openshell.drivers.vm] in the gateway's gateway.toml " +
+		"sizes the disk of new sandboxes (`defenseclaw sandbox doctor` shows it). Free space in a running MicroVM before it stops " +
+		"(`defenseclaw sandbox exec <name> -- df -h /`)"
+}
+
+// overlayDiskRefusal is a start that failed because the MicroVM's own
+// disk is full, as people read it, or nil (the guest console OpenShell
+// returns is no message for them).
+func overlayDiskRefusal(name string, err error) error {
+	if err == nil || !overlayDiskFull(err.Error()) {
+		return nil
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: name + " cannot start: " + overlayDiskFullText, Detail: overlayDiskWayOn(name)}
+}
+
+// errorPhaseRefusal is OpenShell's refusal to stop or start the sandbox
+// name in its error phase as people read it ("Conflict: sandbox must be
+// Stopped, Completed, or a failed main-process Error to start"), or nil.
+func errorPhaseRefusal(name, mode, reason string, err error) error {
+	if err == nil || !openshell.IsConflict(err) || !strings.Contains(err.Error(), "current phase: Error") {
+		return nil
+	}
+	msg := name + " is in OpenShell's error state"
+	if reason != "" {
+		msg += ": " + reason
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg, Detail: errorPhaseWayOn(name, mode, reason)}
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {
@@ -678,6 +796,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		CreatedAt: r.CreatedAt, Session: r.Sessions, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
 		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard), ProcessTree: b.processTreeOn(),
 		Launch:      sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
+		PhaseReason: r.PhaseReason,
 		Credentials: slices.Clone(r.Credentials), HostPorts: slices.Clone(r.HostPorts),
 	}
 	if spec, ok := harness.Get(r.Harness); ok {
@@ -720,6 +839,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
+		ModelKeyRejected: b.hooks.modelRejected, ModelKeyRejectedAt: b.hooks.modelRejectedAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
 		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,

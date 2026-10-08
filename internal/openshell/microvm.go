@@ -149,10 +149,16 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 		// What a switch to MicroVMs needs is checked when the doctor
 		// offers one.
 		vmDriver := Check{ID: CheckIDVMDriver, Title: "MicroVM driver", Status: StatusSkip, Detail: "the gateway runs the docker driver"}
+		skip := "the gateway runs the docker driver (a switch to MicroVMs sets it)"
+		if r.config == nil && r.running.Name == "" {
+			// Neither its configuration nor the gateway says which driver
+			// it runs: docker is only the default (GAP-0191).
+			skip = "the gateway's compute driver is " + r.configUnknown()
+			vmDriver.Detail = skip
+		}
 		if landlock.Status != StatusPass {
 			vmDriver = r.vmDriverCheck(ctx)
 		}
-		skip := "the gateway runs the docker driver (a switch to MicroVMs sets it)"
 		checks = []Check{landlock, docker, r.buildKit, hostNet, sharing, vmDriver,
 			{ID: CheckIDVMIdentity, Title: "MicroVM sandbox user", Status: StatusSkip, Detail: skip},
 			{ID: CheckIDVMResources, Title: "MicroVM resources", Status: StatusSkip, Detail: skip}, disk}
@@ -601,9 +607,15 @@ func (r *doctorRun) vmDiskCheck() Check {
 		return c
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), dir)
-	if n, size := preparedDisks(filepath.Join(dir, "images")); n > 0 {
+	if n, size := preparedDisks(filepath.Join(dir, "images"), false); n > 0 {
 		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes and those an earlier OpenShell release prepared",
 			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size), pruneCommand)
+	}
+	if n, size := preparedDisks(filepath.Join(dir, "images"), true); n > 0 {
+		// A first start that failed or was cancelled leaves its own
+		// (GAP-0218).
+		c.Detail += fmt.Sprintf("; %s take %s (a start under way, or one that failed: `%s` removes those unchanged for 15 minutes)",
+			plural(n, "half-prepared MicroVM disk", "half-prepared MicroVM disks"), humanBytes(size), pruneCommand)
 	}
 	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
 		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
@@ -635,14 +647,15 @@ const PreparedDiskPrefix = "sandbox-prepared-rootfs-"
 
 // preparedDisks counts the root disks the driver prepared from images under
 // dir (PreparedDiskPrefix) and the disk they take (allocated, not their
-// larger sparse size).
-func preparedDisks(dir string) (n int, size uint64) {
+// larger sparse size); with staging, the half-prepared ones (.staging
+// directories) instead.
+func preparedDisks(dir string, staging bool) (n int, size uint64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, 0
 	}
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), PreparedDiskPrefix) || strings.Contains(e.Name(), ".staging") {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), PreparedDiskPrefix) || strings.Contains(e.Name(), ".staging") != staging {
 			continue
 		}
 		n++

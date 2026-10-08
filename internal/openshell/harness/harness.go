@@ -403,6 +403,31 @@ type Spec struct {
 	// directFetches are requests the pinned harness makes around the
 	// egress proxy that it does without (DirectFetch).
 	directFetches []DirectFetch
+	// toolHosts are hosts a tool of the harness calls on every use
+	// (ToolHost).
+	toolHosts []ToolHost
+}
+
+// ToolHost is a host one of the harness's own tools calls on every use,
+// whatever the tool's target: Claude Code's WebFetch asks its vendor's API
+// whether each URL is safe to fetch. An allowlist profile that refuses the
+// host breaks the tool for every site, which read as the site's refusal
+// (GAP-0234, GAP-0263).
+type ToolHost struct {
+	Host string
+	// What says what refusing it breaks, for the feed and the agent.
+	What string
+}
+
+// ToolHostOf says what refusing host breaks, when it is one of the
+// harness's tool hosts.
+func (s *Spec) ToolHostOf(host string) (string, bool) {
+	for _, t := range s.toolHosts {
+		if strings.EqualFold(t.Host, host) {
+			return t.What, true
+		}
+	}
+	return "", false
 }
 
 // DirectFetch is a request the pinned harness binary makes on its own with

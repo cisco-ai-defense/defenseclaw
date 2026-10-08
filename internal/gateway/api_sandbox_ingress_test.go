@@ -1696,3 +1696,26 @@ func TestSandboxIngressCopyModeNeverTouchesHostFS(t *testing.T) {
 			readable.extras, unreadable.extras)
 	}
 }
+
+// TestSandboxModelErrorKeepsTheClassAndStatus (GAP-0271): a StopFailure
+// hook hands the manager the error class and HTTP status of the model API
+// failure, never the message; other events hand it nothing.
+func TestSandboxModelErrorKeepsTheClassAndStatus(t *testing.T) {
+	for _, c := range []struct {
+		event   string
+		payload map[string]interface{}
+		class   string
+		status  int
+	}{
+		{"StopFailure", map[string]interface{}{"error": "authentication_failed",
+			"last_assistant_message": "Please run /login · API Error: 401 Invalid bearer token"}, "authentication_failed", 401},
+		{"StopFailure", map[string]interface{}{"error": "Bad class!", "error_details": `API Error: 403 {"Message":"denied"}`}, "unknown", 403},
+		{"StopFailure", map[string]interface{}{"error": "server_error"}, "server_error", 0},
+		{"Stop", map[string]interface{}{"error": "authentication_failed", "last_assistant_message": "API Error: 401"}, "", 0},
+	} {
+		class, status := sandboxModelError(agentHookRequest{HookEventName: c.event, Payload: c.payload})
+		if class != c.class || status != c.status {
+			t.Errorf("%s %v = %q, %d; want %q, %d", c.event, c.payload, class, status, c.class, c.status)
+		}
+	}
+}

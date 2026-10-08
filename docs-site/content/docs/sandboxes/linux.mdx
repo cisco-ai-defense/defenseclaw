@@ -283,7 +283,10 @@ and runs as the `openshell-gateway` user service of the account that
 started it. A machine runs one gateway, so only that account can run
 sandboxes: a second account's gateway cannot get the port. On a second
 account, `sandbox setup` and `sandbox doctor` say that the gateway's port
-is held by a process of another account, and start nothing.
+is held by a process of another account, and start nothing. The doctor
+skips the checks that follow from it (`not checked: the OpenShell gateway
+on this machine is another account's`): the gateway, its registration and
+Docker, whose fixes would not help.
 
 To hand sandboxes to another account, stop the gateway in the account that
 runs it:
@@ -321,7 +324,7 @@ machine.
 | `the DefenseClaw daemon is not running` (also at the end of `sandbox setup`), or `the DefenseClaw gateway has not started on this account yet` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
 | `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
-| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. The Python harnesses (Hermes Agent, OpenHands, OmniGent) carry a DefenseClaw workaround. Other Python programs in the sandbox, such as `pip`, keep failing until an OpenShell release after 0.1.2 fixes it. |
+| Inside a sandbox on a kernel older than 5.19 (RHEL 9 runs 5.14), a Python program fails every HTTPS request with `[Errno 95] Operation not supported` | OpenShell 0.1 can't tell a program on those kernels whom its connection goes to, and Python's `ssl` module asks before every handshake. DefenseClaw works around it in the Python harnesses (Hermes Agent, OpenHands, OmniGent) and in the image's own Python: `python3`, `pip` and the virtual environments you make with them. A Python you download inside the sandbox, for example with `uv python install`, keeps failing until an OpenShell release after 0.1.2 fixes it: use the image's `python3`, or `uv pip`, which is not affected. |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

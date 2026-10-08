@@ -54,6 +54,27 @@ func wantFlags(t *testing.T, rep *ReviewReport, want map[string]Flag) {
 	}
 }
 
+// TestReviewLeavesAToolCacheOut (GAP-0275): `npm test` under nyc wrote
+// node_modules/.cache, and every session's review flagged node_modules/ as
+// changed packages although nothing was installed. A tool's cache is no
+// package change; a new package still is.
+func TestReviewLeavesAToolCacheOut(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\nnode_modules/\n")
+	e.commit("ignore node_modules")
+	writeFile(t, e.project, "node_modules/left-pad/index.js", "module.exports = 1\n")
+	mustSnapshot(t, e, "s1")
+	writeFile(t, e.project, "node_modules/.cache/nyc/run.json", "{}\n")
+	if f, ok := flagByLabel(review(t, e, "s1", nil), "node_modules/"); ok {
+		t.Fatalf("a tool cache flagged node_modules/: %+v", f)
+	}
+	writeFile(t, e.project, "node_modules/evil/index.js", "require('child_process')\n")
+	if _, ok := flagByLabel(review(t, e, "s1", nil), "node_modules/"); !ok {
+		t.Fatal("a new package was not flagged")
+	}
+}
+
 func TestReviewFlagsHostExecutableChanges(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
@@ -237,6 +258,72 @@ func TestReviewAndUndoPlainFolder(t *testing.T) {
 	}
 }
 
+// TestReviewNamesTheFileALifecycleScriptRuns (GAP-0217): a session added
+// a postinstall script that runs scripts/check.js and created that file;
+// the review named the script but not the file every npm install runs.
+func TestReviewNamesTheFileALifecycleScriptRuns(t *testing.T) {
+	pkg := map[bool]string{false: `{"scripts":{"test":"node test.js"}}`, true: `{"scripts":{"test":"node test.js","postinstall":"node ./scripts/check.js && echo done"}}`}
+	content := func(c TreeChange, after bool) ([]byte, bool) {
+		if c.Path == "app/package.json" {
+			return []byte(pkg[after]), true
+		}
+		return nil, false
+	}
+	flags := classifyChanges([]TreeChange{
+		{Path: "app/package.json", Status: "M", OldMode: "100644", NewMode: "100644"},
+		{Path: "app/scripts/check.js", Status: "A", NewMode: "100644"},
+		{Path: "app/test.js", Status: "A", NewMode: "100644"},
+	}, content, nil)
+	var check, test *Flag
+	for i := range flags {
+		switch flags[i].Label {
+		case "app/scripts/check.js":
+			check = &flags[i]
+		case "app/test.js":
+			test = &flags[i]
+		}
+	}
+	if check == nil || check.Severity != SeverityHigh || check.Detail != "runs automatically on every install from scripts.postinstall of app/package.json; the session created it, and the script that runs it" {
+		t.Fatalf("scripts/check.js flag = %+v (flags %+v)", check, flags)
+	}
+	if test != nil {
+		t.Fatalf("a file only a plain npm script runs was flagged: %+v", test)
+	}
+}
+
+// TestReviewFindingsAreOnChangedLines (GAP-0224): a user's own commit
+// appended a comment to docs/index.md during the session, and the review
+// reported the file's old include directive (line 12) as the sandbox's
+// MEDIUM path traversal. A finding on a line the file had before is left
+// out; one on a new line, or naming no line, stays.
+func TestReviewFindingsAreOnChangedLines(t *testing.T) {
+	before := []byte("# Docs\n{% include-markdown \"../README.md\" %}\n")
+	after := []byte("# Docs\n{% include-markdown \"../README.md\" %}\n<!-- note -->\nload(\"../../etc/passwd\")\n")
+	found := []ScanFinding{{Path: "docs/index.md", Location: "docs/index.md:2", Title: "Potential path traversal"},
+		{Path: "docs/index.md", Location: "docs/index.md:4", Title: "Potential path traversal"},
+		{Path: "docs/index.md", Title: "no line"}}
+	got := onChangedLines(found, before, after)
+	if len(got) != 2 || got[0].Location != "docs/index.md:4" || got[1].Title != "no line" {
+		t.Fatalf("kept %+v", got)
+	}
+}
+
+// TestReviewListsTheCommitsSinceTheUndoPoint (GAP-0223): a commit the
+// user made on the host during a live-mounted session read as the
+// session's work ("HEAD moved (0f12df4 → 4d2bdf3)"). The review lists the
+// commits HEAD gained, so the user can tell their own.
+func TestReviewListsTheCommitsSinceTheUndoPoint(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	mustSnapshot(t, e, "s1")
+	writeFile(t, e.project, "docs/index.md", "# docs\n")
+	e.commit("me: plain own commit")
+	rep := review(t, e, "s1", nil)
+	if len(rep.Commits) != 1 || !strings.HasSuffix(rep.Commits[0], " me: plain own commit") || rep.HeadBefore == rep.HeadAfter {
+		t.Fatalf("commits = %q (head %s → %s)", rep.Commits, rep.HeadBefore, rep.HeadAfter)
+	}
+}
+
 func TestClassifyChangesUnits(t *testing.T) {
 	noContent := func(TreeChange, bool) ([]byte, bool) { return nil, false }
 	flags := classifyChanges([]TreeChange{
@@ -300,6 +387,32 @@ func TestReviewIgnoresMountPinsInBothOrders(t *testing.T) {
 	writeFileMode(t, e.project, ".git/hooks/pre-commit", "#!/bin/sh\n", 0o755)
 	if f, ok := flagByLabel(review(t, e, "s2", []ContentScanner{}), ".git/hooks"); !ok || f.Kind != RiskGitControl {
 		t.Fatalf("hook change not reported: %+v", f)
+	}
+}
+
+// GAP-0257: a masked secret file of a git project (.npmrc, git-ignored,
+// left out of the snapshot's walk) was reported "created or changed" and
+// HIGH by every review, though the host file never changed: the review's
+// walk did not leave it out. A real change to another ignored sentinel is
+// still flagged.
+func TestReviewLeavesMaskedFilesOut(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", ".npmrc\n.envrc\n")
+	e.commit("ignore")
+	writeFile(t, e.project, ".npmrc", "//registry.example/:_authToken=dccert-decoy-npm\n")
+	opts := e.snapOpts("s1")
+	opts.Skip = []string{".npmrc"}
+	if _, err := Snapshot(bg, opts); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, e.project, ".envrc", "export X=1\n")
+	rep := review(t, e, "s1", []ContentScanner{})
+	if f, ok := flagByLabel(rep, ".npmrc"); ok {
+		t.Fatalf("an unchanged masked file was flagged: %+v", f)
+	}
+	if _, ok := flagByLabel(rep, ".envrc"); !ok {
+		t.Fatalf("a new ignored sentinel was not flagged: %+v", rep.Flags)
 	}
 }
 

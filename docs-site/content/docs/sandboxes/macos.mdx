@@ -211,7 +211,7 @@ On a Mac set up through Homebrew, the output looks like this:
   ✓ MicroVM sandbox user       sandboxes run as 501:20, your user
   ✓ MicroVM resources          every MicroVM gets 4 vCPUs, 4096 MiB of memory and a 16384 MiB disk for its changes
   ✓ Disk space                 37.8 GiB free under ~/.local/state/openshell/vm-driver
-  - systemd linger             Homebrew services run while you are logged in
+  - Login session              Homebrew services, the OpenShell gateway among them, run while you are logged in
   ✓ Gateway service            nvidia/openshell/openshell started
   ✓ OpenShell CLI              0.1.2 at /opt/homebrew/bin/openshell
   ✓ SSH connection sharing     off for the OpenShell sessions DefenseClaw runs (ssh -o ControlMaster=no -o ControlPath=none -o ControlPersist=no); your ssh configuration shares none for host sandbox either
@@ -276,7 +276,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
-  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t); each one also rings the bell here
 ```
 
 The copy is a shallow git clone of your project plus your working tree, with
@@ -327,8 +327,10 @@ code:
 | `s` skip | Nothing changes. The work stays in the sandbox for later. |
 
 Changes that can run code on your machine, such as git hooks, build scripts
-and editor settings, or that hold what looks like a secret, are applied only
-after a second yes.
+and editor settings, or that hold what looks like a secret, are applied to
+your folder only after a second yes. A branch or a patch file gets a note to
+review the flagged files instead (a branch that would take a secret into
+the history still asks).
 
 After an apply:
 
@@ -381,6 +383,32 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
   Docker driver cannot start on MicroVMs, so setup lists them first; after
   the switch they can only be deleted.
 
+## One OpenShell gateway per Mac
+
+OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs
+as the Homebrew service of the account that started it. A Mac runs one
+gateway, so only that account can run sandboxes. In a second account,
+`defenseclaw sandbox doctor` says that the gateway's port is held by a
+process of another account. When the Homebrew prefix belongs to the first
+account, the doctor also says that its gateway configuration belongs to
+that account, so the compute driver is not known in the second account.
+The checks that follow from the gateway (its registration, the gateway
+itself, Docker Desktop) are skipped (`not checked: the OpenShell gateway on
+this machine is another account's`), and `sandbox setup` stops at that one
+line instead of asking you to start Docker Desktop or register the gateway.
+
+To hand sandboxes to another account, stop the gateway in the account that
+runs it:
+
+```bash
+brew services stop nvidia/openshell/openshell
+```
+
+Then run `defenseclaw sandbox setup` in the other account. When that
+account cannot use the Homebrew prefix, setup says which account owns it.
+Several users on one machine are tracked upstream in
+[NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+
 ## Common problems
 
 | You see | Do this |
@@ -392,7 +420,12 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | **Docker file sharing** fails: your temporary folder is not shared with Docker Desktop | Add the folder it names in Docker Desktop → Settings → Resources → File sharing. `/var/folders` and `/tmp` are shared by default. |
 | `no sandbox can start on this gateway: it runs sandboxes on the docker driver` | Run `defenseclaw sandbox setup` and answer yes to the MicroVM question. |
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
+| A first run fails after about 5 minutes with `ProvisioningTimedOut: Provisioning repair window expired after 300 seconds` | The volume most often ran full while the MicroVM disk was prepared (several first starts at once each need one). Check **Disk space** in `defenseclaw sandbox doctor`, then run `defenseclaw sandbox image prune`: it also removes the half-prepared disks that failed or cancelled first starts leave in `~/.local/state/openshell/vm-driver/images`, once nothing has written to them for 15 minutes. |
+| ``<name> cannot start: its own disk is full …`` (start, connect or pull), and `sandbox status` shows `Phase error: its own disk is full …` | The MicroVM stopped with its overlay disk full, and a MicroVM cannot start on a full disk, so its work that was not pulled cannot be read any more. Delete it (`defenseclaw sandbox delete <name>`) and run again; raise `overlay_disk_mib` for new sandboxes. While a sandbox runs, `defenseclaw sandbox exec <name> -- df -h /` shows how full its disk is: free space, or pull its work, before it stops. |
+| The feed and the session summary say ``<name>'s MicroVM went down without DefenseClaw stopping it …``, or a pull's review flags a file that ``ends in N zero bytes`` | The OpenShell gateway restarted under the MicroVM (`brew services restart`, an upgrade, a crash), which stops it without flushing its disk: files written in its last seconds can come back cut short, with a tail of zero bytes. Check those files, and have the agent write them again before you bring the work back. `defenseclaw sandbox stop`, and the gateway restarts DefenseClaw makes, flush first. |
 | **MicroVM resources** warns that an agent that builds code may need more | Raise `vcpus`, `mem_mib` or `overlay_disk_mib` under `[openshell.drivers.vm]` in `~/.config/openshell/gateway.toml`, then restart the gateway (`brew services restart nvidia/openshell/openshell`). |
+| The **Gateway service** check says `127.0.0.1:17670, the gateway's port, is held by a process of another account` | Another account on this Mac runs its OpenShell gateway. See [one OpenShell gateway per Mac](#one-openshell-gateway-per-mac). |
+| **Gateway service** fails: `` `brew services` refuses to run in a tmux session that has no access to this account's macOS login session `` | Run the doctor outside tmux, or in a tmux you start from Terminal in your desktop session. |
 
 The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

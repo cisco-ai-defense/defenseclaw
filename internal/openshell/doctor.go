@@ -162,6 +162,9 @@ type DoctorReport struct {
 	// MicroVM is what OpenShell's MicroVM driver needs on this Mac (nil
 	// off macOS).
 	MicroVM *MicroVMHost `json:"microvm,omitempty"`
+	// GatewayPortElsewhere is set when another account holds the gateway's
+	// port: the gateway that answers there is that account's.
+	GatewayPortElsewhere bool `json:"gateway_port_elsewhere,omitempty"`
 }
 
 // OK reports whether no check failed.
@@ -527,9 +530,10 @@ type doctorRun struct {
 	service *ServiceState
 
 	// config is the gateway configuration read up front (nil when it
-	// cannot be read; checkGatewayConfig says why), configured the compute
-	// driver it selects.
+	// cannot be read: configErr; checkGatewayConfig says why), configured
+	// the compute driver it selects.
 	config     *GatewayConfigState
+	configErr  error
 	configured ComputeDriver
 	// running is the compute driver the answering gateway reports, once
 	// checkGateway has asked (zero Name until then, or when it reports one
@@ -558,8 +562,9 @@ type doctorRun struct {
 	// startedApprox is set when started came from ps (to the second).
 	startedApprox bool
 	// portHeld is set when something else holds the gateway's port while
-	// its service is stopped (checkService).
-	portHeld bool
+	// its service is stopped (checkService); portOther when another
+	// account does (report.GatewayPortElsewhere).
+	portHeld, portOther bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -595,6 +600,8 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		if st.ComputeDriver != "" {
 			r.configured = st.ComputeDriver
 		}
+	} else {
+		r.configErr = err
 	}
 	r.report.ConfiguredDriver, r.report.Driver = r.configured, r.configured
 	r.checkUser()
@@ -620,8 +627,44 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
+	r.deferToGatewayOwner()
 	r.report.Driver = r.driver()
 	return r.report
+}
+
+// gatewayOwnedElsewhere is the detail of a check deferToGatewayOwner skips.
+const gatewayOwnedElsewhere = "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+
+// deferToGatewayOwner skips the failed and warned checks that another
+// account's gateway on the port decides. This account can neither reach
+// nor register that gateway, and what those checks would advise (register
+// it again, start Docker Desktop here, restart the gateway) does not help:
+// the doctor counted four failures, three with contradicting fixes, where
+// one cause has one way on, which the Gateway service check gives
+// (GAP-0288, GAP-0296).
+func (r *doctorRun) deferToGatewayOwner() {
+	if !r.portOther {
+		return
+	}
+	for i := range r.report.Checks {
+		c := &r.report.Checks[i]
+		if (c.Status == StatusFail || c.Status == StatusWarn) && gatewayDependent(c.ID) {
+			c.Status, c.Detail, c.Fix = StatusSkip, gatewayOwnedElsewhere, nil
+		}
+	}
+}
+
+// gatewayDependent reports whether a check judges what this account's own
+// gateway would need or does: Docker for its sandboxes, the registration
+// and its credentials, the gateway's answers and configuration.
+func gatewayDependent(id string) bool {
+	switch id {
+	case CheckIDDocker, CheckIDDockerBuildKit, CheckIDDockerHostNetwork, CheckIDDockerFileSharing,
+		CheckIDVMIdentity, CheckIDVMResources, CheckIDRegistration, CheckIDMTLS,
+		CheckIDGatewayVersion, CheckIDGatewayDriver, CheckIDGlobalPolicy, CheckIDBindMounts, CheckIDTelemetry:
+		return true
+	}
+	return false
 }
 
 func (r *doctorRun) checkPlatform() bool {
@@ -1029,7 +1072,10 @@ func (r *doctorRun) checkLinger(ctx context.Context) {
 	c := Check{ID: CheckIDLinger, Title: "systemd linger"}
 	defer func() { r.add(c) }()
 	if r.GOOS != "linux" {
-		c.Status, c.Detail = StatusSkip, "Homebrew services run while you are logged in"
+		// A Mac has no systemd: the row says what keeps the gateway
+		// running there (GAP-0193).
+		c.Title = "Login session"
+		c.Status, c.Detail = StatusSkip, "Homebrew services, the OpenShell gateway among them, run while you are logged in"
 		return
 	}
 	name, err := r.Username()
@@ -1055,8 +1101,17 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	st, err := r.Gateway.ServiceState(ctx)
 	if err != nil {
 		c.Status, c.Detail = StatusFail, err.Error()
-		if r.GOOS == "linux" {
+		switch {
+		case r.GOOS == "linux":
 			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}
+		case errors.Is(err, ErrBrewServicesTmux):
+			c.Fix = &Fix{Summary: "run the doctor outside tmux, or in a tmux started from Terminal in your desktop session"}
+		}
+		// Whatever the service manager says, another account's gateway on
+		// the port is what keeps this account's from running (GAP-0192).
+		if held, other := r.gatewayPortHeld(); other {
+			c.Detail, c.Fix, r.portHeld, r.portOther = held, r.portHeldFix(true), true, true
+			r.report.GatewayPortElsewhere = true
 		}
 		return
 	}
@@ -1077,7 +1132,8 @@ func (r *doctorRun) checkService(ctx context.Context) {
 			// would only restart over and over.
 			c.Detail += "; " + held
 			c.Fix = r.portHeldFix(other)
-			r.portHeld = true
+			r.portHeld, r.portOther = true, other
+			r.report.GatewayPortElsewhere = other
 		}
 	case !st.Enabled:
 		c.Status, c.Detail = StatusWarn, st.Unit+" runs but does not start at login"
@@ -1670,10 +1726,22 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		}
 		version.Status = StatusFail
 		switch {
+		case err != nil && r.portOther:
+			// The gateway on the port is another account's, with its own
+			// CA: no registration of this account's can reach it
+			// (GAP-0201), and the Gateway service check gives the one way
+			// on (GAP-0288).
+			version.Status, version.Detail = StatusSkip, gatewayOwnedElsewhere
+			skipRest(gatewayOwnedElsewhere)
+			return
 		case err != nil && credentialFailure(err):
 			version.Detail = "the gateway refused DefenseClaw's TLS credentials: " + err.Error()
 			version.Fix = &Fix{Summary: "register the local gateway again, so the CLI's client certificate matches the gateway's CA",
 				Command: fmt.Sprintf("openshell gateway remove %s && openshell gateway add %s --local --name %s", r.reg.Name, shellQuote(r.reg.Endpoint), r.reg.Name)}
+		case err != nil && strings.Contains(err.Error(), "connection refused"):
+			// Nothing listens: in words, not the gRPC dial error (GAP-0226).
+			version.Detail = "the gateway is not running: nothing listens on " + r.reg.Endpoint
+			version.Fix = r.gatewayRecoveryFix()
 		case err != nil:
 			version.Detail = "the gateway is not answering: " + err.Error()
 			version.Fix = r.gatewayRecoveryFix()
@@ -1788,6 +1856,11 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 	if err != nil {
 		mounts.Status, mounts.Detail = StatusFail, err.Error()
 		tele.Status, tele.Detail = StatusSkip, "gateway configuration unreadable"
+		if errors.Is(err, ErrForeignGatewayConfig) {
+			// Nothing this account could change (GAP-0191): the gateway
+			// to run sandboxes on is the other account's.
+			mounts.Status, mounts.Detail = StatusSkip, r.configUnknown()
+		}
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
@@ -1858,6 +1931,16 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		mounts.Status, mounts.Detail = StatusPass, "enabled for the docker driver"
 	}
 	r.telemetryCheck(ctx, &tele, st, envErr)
+}
+
+// configUnknown says why the gateway's settings, its compute driver among
+// them, are not known here: another account's configuration this account
+// may not read, or one that cannot be read at all.
+func (r *doctorRun) configUnknown() string {
+	if errors.Is(r.configErr, ErrForeignGatewayConfig) {
+		return "not known here: " + strings.TrimPrefix(r.configErr.Error(), "openshell: ")
+	}
+	return "not known here: the gateway configuration is unreadable"
 }
 
 // telemetryCheck compares OpenShell's usage telemetry with

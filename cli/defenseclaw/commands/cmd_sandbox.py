@@ -367,7 +367,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             '"sandbox logs" still shows it.'
         ),
         args=(_Arg("name"),),
-        flags=(_Flag("yes", "bool", "stop without asking when a detached run is still going", short="y"),),
+        flags=(_Flag("yes", "bool", "stop without asking when a detached run or a session in another terminal is still going", short="y"),),
     ),
     _Cmd(
         ("start",),

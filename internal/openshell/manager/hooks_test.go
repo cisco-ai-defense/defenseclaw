@@ -848,6 +848,35 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	}
 }
 
+// TestHookSilenceIgnoresAnIdleHarnessTelemetry (GAP-0220): a Codex session
+// idle at its prompt after its last hook kept exporting OTLP, and 13 minutes
+// later raised a HIGH hook_silence finding. Telemetry exports are no work;
+// a model call after them still is.
+func TestHookSilenceIgnoresAnIdleHarnessTelemetry(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "idlebox"})
+	b := e.boxOf("idlebox")
+	e.m.ObserveIngress(e.binding("idlebox"), sandboxauth.RouteHook)
+	for range 20 {
+		advance(time.Minute)
+		e.m.ObserveIngress(e.binding("idlebox"), sandboxauth.RouteOTLP)
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 0 || e.get("idlebox").Hooks.Silent {
+		t.Fatalf("an idle harness exporting telemetry raised %d hook_silence finding(s)", n)
+	}
+	model := ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}
+	for range 11 {
+		e.m.ocsfEvent(t.Context(), b, model, now())
+		advance(time.Minute)
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 1 {
+		t.Fatalf("model calls without hooks raised %d hook_silence finding(s), want 1", n)
+	}
+}
+
 // TestHookSilenceSeesTurnsOnAKeptConnection (GAP-0094): a harness with its
 // hooks switched off kept one model connection open and made 28 model
 // calls in 9 minutes; only its NET records name its binary, so the check

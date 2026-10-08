@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -875,6 +876,10 @@ func (m *Manager) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest
 		out.Pack = eff.Pack.Name
 	}
 	for _, c := range req.Checks {
+		if d, ok := hostPortTest(rec, eff, c); ok {
+			out.Decisions = append(out.Decisions, d)
+			continue
+		}
 		chk := eff.CheckEgress(pol.Decider, pol.Principal, c.Host, c.Port)
 		out.Decisions = append(out.Decisions, sandboxapi.PolicyDecision{
 			PolicyCheck: c, Allowed: chk.Allowed, Rule: string(chk.Rule), Match: chk.Match, Source: chk.Source,
@@ -882,6 +887,27 @@ func (m *Manager) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest
 		})
 	}
 	return out, nil
+}
+
+// hostPortTest is what a policy test says of a --host-port the sandbox was
+// started with: approved, the user opened it; otherwise its first
+// connection raises an ask (hostPortDenied), not the plain host_internal
+// block the egress check reads (GAP-0265). ok is false for any other
+// destination.
+func hostPortTest(rec record, eff *packs.Effective, c sandboxapi.PolicyCheck) (d sandboxapi.PolicyDecision, ok bool) {
+	if triage.NormalizeHost(c.Host) != openshellHostAlias || c.Port <= 0 || !slices.Contains(rec.Flags.HostPorts, c.Port) ||
+		eff == nil || eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: c.Port}) != nil {
+		return d, false
+	}
+	port := strconv.Itoa(c.Port)
+	d = sandboxapi.PolicyDecision{PolicyCheck: c, Rule: "host_port", Source: "--host-port " + port}
+	if _, approved := rec.ApprovedRules[hostPortRule(c.Port)]; approved {
+		d.Allowed, d.Reason = true, "you approved the sandbox's --host-port "+port
+		return d, true
+	}
+	d.Ask = true
+	d.Reason = "port " + port + " is a --host-port of this sandbox: its first connection raises an ask you answer with `defenseclaw sandbox approvals`, and is allowed once approved"
+	return d, true
 }
 
 // directProvider names the provider of the sandbox whose OpenShell rule

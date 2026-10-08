@@ -78,7 +78,7 @@ Sandbox myapp-1c2d · Claude Code · skip-permissions ON · network: open + bloc
             Not visible: everything else on this machine
   Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)
             opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too
-  Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t)
+  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-1c2d (or `defenseclaw tui`: 7, then t); each one also rings the bell here
 ```
 
 </Tab>
@@ -254,7 +254,7 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
 ```text
   Pulling myapp-1c2d's work…
 Session ended · 14 tool calls · 2 new sites contacted · 3 files changed (+41 −6)
-Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
   ✓ applied 3 changes to ~/code/myapp
   your previous working tree is kept at refs/defenseclaw/copy/myapp-1c2d/pre-apply; `defenseclaw sandbox undo myapp-1c2d` reverts the apply
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-1c2d   delete: defenseclaw sandbox delete myapp-1c2d
@@ -264,6 +264,7 @@ Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch f
 - `b` puts it on a new branch, `dc/myapp-1c2d`.
 - `p` writes a patch file.
 - `s` leaves it in the sandbox for a later `sandbox pull`.
+- `d` shows the diff, then asks again.
 
 The end of a real session on a Mac, for a sandbox started with
 `--name myapp-claude`, after three blocked sites, two of them AI services the
@@ -374,7 +375,16 @@ myapp-7f3a is stopped; this is the log of its detached run started 07:15, kept w
 ## If the hooks cannot reach DefenseClaw
 
 The sandbox hooks fail closed. If DefenseClaw's daemon stops during a
-session, every tool call is blocked, and your terminal says so:
+session, every tool call is blocked, and the harness shows why with each
+blocked call:
+
+```text
+defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there (`defenseclaw sandbox doctor` says what is wrong)
+```
+
+The terminal's title says so too, and the bell rings (Claude Code keeps the
+title for itself). When not one hook of the session got through, the run
+also prints:
 
 ```text
 [defenseclaw] ⚠ DefenseClaw hooks are not reaching the daemon; every tool call is being blocked (<reason>). Run: defenseclaw sandbox doctor

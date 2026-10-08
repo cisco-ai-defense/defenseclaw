@@ -224,7 +224,10 @@ func (a *App) printPolicyTest(r *policyTestReport) {
 			dest += " (" + d.Binary + ")"
 		}
 		decision := "allowed"
-		if !d.Allowed {
+		switch {
+		case d.Ask:
+			decision = "asks (`" + CommandName + " approvals`)"
+		case !d.Allowed:
 			decision = "blocked"
 			if d.Unblockable {
 				decision += " (`" + CommandName + " unblock` lifts it)"

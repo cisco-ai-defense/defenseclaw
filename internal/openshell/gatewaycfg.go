@@ -1886,7 +1886,7 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	}
 	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Timeout: time.Minute})
 	if err != nil {
-		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, strings.TrimSpace(string(out)))
+		return nil, brewServicesError(err, out)
 	}
 	var infos []struct {
 		Running    bool   `json:"running"`
@@ -1905,6 +1905,27 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	st.Installed = i.File != "" || i.Loaded || i.Registered
 	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, brewStatusText(i.Status)
 	return st, nil
+}
+
+// ErrBrewServicesTmux marks `brew services` refusing to run in a tmux
+// session that has no access to the account's macOS login session (a tmux
+// server started over ssh, for one): Homebrew checks that with pbpaste.
+var ErrBrewServicesTmux = errors.New("`brew services` refuses to run in a tmux session that has no access to this account's macOS login session")
+
+// brewServicesError is a failed `brew services info` in one line:
+// Homebrew's own "Error:" line, not the usage text it prints first
+// (GAP-0192).
+func brewServicesError(err error, out []byte) error {
+	msg := strings.TrimSpace(string(out))
+	for _, line := range strings.Split(msg, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Error:"); ok {
+			msg = strings.TrimSpace(rest)
+		}
+	}
+	if strings.Contains(msg, "cannot run under tmux") {
+		return fmt.Errorf("openshell: brew services info %s: %w", GatewayFormula, ErrBrewServicesTmux)
+	}
+	return fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, msg)
 }
 
 // brewStatusText says a `brew services` status in words: "none" is a
@@ -2035,11 +2056,25 @@ func readGatewayFileOf(path string, foreign bool) ([]byte, fs.FileInfo, error) {
 		return nil, nil, fmt.Errorf("openshell: %s %w", path, errForeignGatewayFile)
 	}
 	data, err := safefile.ReadRegularFileBounded(path, maxGatewayFileBytes)
+	if foreign && errors.Is(err, fs.ErrPermission) {
+		// The Homebrew prefix's copy of the account that set the prefix
+		// up, private to it (GAP-0191): its gateway is that account's.
+		owner := ownerName(info)
+		if owner == "" {
+			owner = "another account"
+		}
+		return nil, nil, fmt.Errorf("openshell: %s belongs to %s: %w", path, owner, ErrForeignGatewayConfig)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("openshell: read %s: %w", path, err)
 	}
 	return data, info, nil
 }
+
+// ErrForeignGatewayConfig marks a gateway configuration of another account
+// that this one may not read: on a Mac whose Homebrew prefix that account
+// set up, the gateway (one runs on a machine) is that account's.
+var ErrForeignGatewayConfig = errors.New("this account may not read another account's gateway configuration")
 
 var envAssignment = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$`)
 

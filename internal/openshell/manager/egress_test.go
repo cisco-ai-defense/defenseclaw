@@ -923,6 +923,41 @@ func TestRepeatedRefusalsAreFolded(t *testing.T) {
 	}
 }
 
+// GAP-0199: a pip retry loop OpenShell refused seven times in seven seconds
+// made seven MEDIUM alerts and seven feed lines. Repeats of one refusal (the
+// destination and the program) fold into the first record and line, and one
+// more names their count; another program's refusal is its own.
+func TestRepeatedOpenShellRefusalsAreFolded(t *testing.T) {
+	fastFlush(t)
+	e := liveEnv(t, "retrybox", nil)
+	now := time.Now()
+	for range 7 {
+		e.ocsf("retrybox", "NET:OPEN [MED] DENIED /usr/bin/python3(42) -> pypi.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+	}
+	e.ocsf("retrybox", "NET:OPEN [MED] DENIED /usr/bin/curl(43) -> pypi.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
+	refused := func(match func(audit.SandboxEgressEvent) bool) int {
+		return egressRecords(e, "retrybox", func(r audit.SandboxEgressEvent) bool {
+			return r.Blocked && r.Host == "pypi.org" && (match == nil || match(r))
+		})
+	}
+	if n, feed := refused(nil), len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")); n != 2 || feed != 2 {
+		t.Fatalf("%d records and %d feed lines for 7 repeats and one other program, want 2 each", n, feed)
+	}
+	// The folded repeats are recorded before they are published to the feed.
+	eventually(t, "the folded repeats", func() bool {
+		e.m.sink.flushOpenShell(t.Context(), time.Now())
+		return refused(func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "(and 5 more like it)") }) == 1 &&
+			len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")) == 3
+	})
+	if n, feed := refused(nil), e.events("retrybox", sandboxapi.ActivityEgressBlocked, ""); n != 3 || len(feed) != 3 ||
+		!strings.HasSuffix(feed[2].Message, "(and 5 more like it)") {
+		t.Fatalf("%d records, feed %+v", n, feed)
+	}
+	if got := destinationKinds(t, e, "retrybox")["pypi.org"]; got.Refused != 8 {
+		t.Fatalf("destination = %+v, want each refusal counted", got)
+	}
+}
+
 // A sandbox refused for thousands of distinct destinations is paced on its
 // own: another sandbox's refusal is recorded and shown, and the feed tells
 // how many of the flood it held back.

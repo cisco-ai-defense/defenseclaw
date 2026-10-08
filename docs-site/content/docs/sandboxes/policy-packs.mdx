@@ -1277,7 +1277,12 @@ Sandboxes run only on installs where the user owns `config.yaml`. There the
 admin block applies to every run, but the user can edit or remove it. Use it
 for team defaults and to prevent mistakes, not to stop a determined user.
 `defenseclaw sandbox doctor`, `sandbox status`, and `sandbox policy explain`
-say which kind of block applies on a machine.
+say which kind of block applies on a machine. The doctor's **Organization
+policy** row also names each constraint in force, for example:
+
+```text
+  ✓ Organization policy        advisory (you own config.yaml and can change it): profile balanced or stricter, harnesses claudecode, codex only, copy mode for ~/customers/**, 1 blocked host, at most 4 CPUs and 8Gi memory, locked: profile
+```
 
 See [Sandbox policy pushdown](/docs/enterprise/configuration#sandbox-policy-pushdown)
 for rolling the admin block out to managed machines.

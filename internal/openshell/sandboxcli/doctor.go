@@ -107,6 +107,19 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	}
 	rep := a.HostDoctor(ctx, d)
 	if st != nil {
+		switch gw := rep.Get(openshell.CheckIDGatewayVersion); {
+		case st.unavailable && rep.GatewayPortElsewhere:
+			// The daemon's connection error is the other account's
+			// certificate refusal (GAP-0201): say what it means, as a
+			// consequence of that one cause (GAP-0288).
+			st.check.Status, st.check.Fix = openshell.StatusSkip, nil
+			st.check.Detail = "running, but sandboxes are unavailable: the OpenShell gateway on its port is another account's (see Gateway service)"
+		case st.unavailable && gw != nil && gw.Status == openshell.StatusFail:
+			// The daemon's reason repeats the Gateway check's error: one
+			// cause, counted once, with its fix there (GAP-0226).
+			st.check.Status, st.check.Fix = openshell.StatusSkip, nil
+			st.check.Detail = "running; it serves sandboxes once the OpenShell gateway answers (see Gateway)"
+		}
 		rep.Checks = append(rep.Checks, st.check)
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
@@ -118,7 +131,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 }
 
 type statusProbe struct {
-	listening bool
+	// listening is set when the daemon holds its listeners; unavailable
+	// when it runs but serves no sandbox.
+	listening, unavailable bool
 	// available is set when the daemon serves sandboxes; ingress is its
 	// hook ingress address.
 	available bool
@@ -142,17 +157,31 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
 	}
-	var bad []string
+	var bad, errored []string
 	running := 0
 	for _, sb := range list {
 		if sb.Phase == "ready" {
 			running++
+		}
+		if sb.Phase == "error" {
+			errored = append(errored, sb.Name)
 		}
 		if sb.Hooks.Unreachable {
 			bad = append(bad, sb.Name+": "+firstNonEmpty(sb.Hooks.UnreachableReason, "no hook request reaches DefenseClaw"))
 		}
 	}
 	switch {
+	case len(errored) > 0 && len(bad) == 0:
+		// A sandbox OpenShell lost (its container stopped: a Docker
+		// restart) can be neither stopped nor started (GAP-0278).
+		c.Status = openshell.StatusWarn
+		verb := " is in"
+		if len(errored) > 1 {
+			verb = " are in"
+		}
+		c.Detail = strings.Join(errored, ", ") + verb + " OpenShell's error state (the container stopped: Docker restarted, or the workload failed), " +
+			"where OpenShell can neither stop nor start " + itThem(errored)
+		c.Fix = &openshell.Fix{Summary: "delete " + itThem(errored) + " (`" + CommandName + " delete NAME --keep-snapshot` keeps a mounted project's undo point) and run again"}
 	case len(bad) > 0:
 		c.Status = openshell.StatusFail
 		c.Detail = "hooks do not reach the ingress " + firstNonEmpty(ingress, "(unknown)") + ", so every tool call fails closed: " + strings.Join(bad, "; ")
@@ -182,7 +211,7 @@ func (a *App) probeDaemon(ctx context.Context) *statusProbe {
 			c.Status, c.Detail = openshell.StatusWarn, "openshell.enabled is false: sandboxes are off"
 			c.Fix = &openshell.Fix{Summary: "turn sandboxes on", Command: CommandName + " setup"}
 		case !st.Available:
-			p.listening = st.IngressAddr != ""
+			p.listening, p.unavailable = st.IngressAddr != "", true
 			c.Status, c.Detail = openshell.StatusFail, "running, but sandboxes are unavailable: "+firstNonEmpty(st.Reason, "not connected to OpenShell")
 		case st.DockerGroupMissing:
 			p.listening, p.available, p.ingress = true, true, st.IngressAddr
@@ -407,11 +436,69 @@ func (a *App) adminCheck() openshell.Check {
 		c.Detail = "no openshell.admin constraints"
 		return c
 	}
-	c.Detail = string(s.Authority)
-	if s.Detail != "" {
-		c.Detail += ": " + s.Detail
+	// What is in force, and once whose it is: the row said "advisory:
+	// openshell.admin is enforced but advisory" and named no constraint
+	// (GAP-0252).
+	whose := "advisory (you own config.yaml and can change it)"
+	if s.Authority == packs.AuthorityAuthoritative {
+		whose = "authoritative (an administrator owns config.yaml)"
 	}
+	c.Detail = whose + ": " + strings.Join(adminConstraints(a.Cfg.OpenShell.Admin), ", ")
 	return c
+}
+
+// adminConstraints names each openshell.admin constraint in force, briefly.
+func adminConstraints(ad config.OpenShellAdminConfig) []string {
+	var out []string
+	no := func(allowed *bool, what string) {
+		if allowed != nil && !*allowed {
+			out = append(out, what)
+		}
+	}
+	if ad.RequiredPack != "" {
+		p := "pack " + ad.RequiredPack + " required"
+		if ad.RequiredPackDigest != "" {
+			p += " (pinned)"
+		}
+		out = append(out, p)
+	}
+	if ad.MinProfile != "" {
+		out = append(out, "profile "+ad.MinProfile+" or stricter")
+	}
+	if len(ad.AllowedHarnesses) > 0 {
+		out = append(out, "harnesses "+strings.Join(ad.AllowedHarnesses, ", ")+" only")
+	}
+	no(ad.AllowYolo, "no skip-permissions")
+	no(ad.AllowMount, "copy mode only")
+	no(ad.AllowHostPorts, "no --host-port")
+	no(ad.AllowUnblock, "no unblocks")
+	no(ad.AllowLearnMode, "no learn mode")
+	if len(ad.RequireCopyFor) > 0 {
+		out = append(out, "copy mode for "+strings.Join(firstN(ad.RequireCopyFor, 2), ", "))
+	}
+	if n := len(ad.EgressBlock); n > 0 {
+		out = append(out, plural(int64(n), "blocked host", "blocked hosts"))
+	}
+	if n := len(ad.EgressAllowOnly); n > 0 {
+		out = append(out, "only "+plural(int64(n), "allowed host", "allowed hosts"))
+	}
+	if ad.BlockLargeUploads {
+		out = append(out, "large uploads blocked")
+	}
+	if r := ad.MaxResources; r != (config.OpenShellResourcesConfig{}) {
+		var caps []string
+		if r.CPU != "" {
+			caps = append(caps, r.CPU+" CPUs")
+		}
+		if r.Memory != "" {
+			caps = append(caps, r.Memory+" memory")
+		}
+		out = append(out, "at most "+strings.Join(caps, " and "))
+	}
+	if len(ad.Locked) > 0 {
+		out = append(out, "locked: "+strings.Join(ad.Locked, ", "))
+	}
+	return out
 }
 
 // Doctor is `sandbox doctor`.

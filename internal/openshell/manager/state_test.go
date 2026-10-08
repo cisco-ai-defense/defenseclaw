@@ -435,6 +435,24 @@ func switchGateway(t *testing.T, e *harnessEnv, gw *Gateway) {
 	e.m.dropGateway(cur, &types.StatusError{Code: types.ErrorUnavailable, Message: "reconnecting"})
 }
 
+// GAP-0202: with the OpenShell gateway gone (stopped for a hand-over, or
+// another account's on its port) a sandbox last seen ready or provisioning
+// read so in list and status for minutes; its phase is not known then.
+func TestPhaseIsUnknownWhileTheGatewayIsDown(t *testing.T) {
+	e := liveEnv(t, "gonebox", nil)
+	cur, err := e.m.gateway(t.Context())
+	must(t, err)
+	e.connErr = errors.New("connection refused")
+	e.m.dropGateway(cur, &types.StatusError{Code: types.ErrorUnavailable, Message: "the gateway stopped"})
+	if got := e.get("gonebox"); got.Phase != "unknown" {
+		t.Fatalf("get = %q, want unknown", got.Phase)
+	}
+	list, err := e.m.List(t.Context())
+	if err != nil || len(list) != 1 || list[0].Phase != "unknown" {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+}
+
 // On another gateway or workspace the daemon keeps the sandboxes it created
 // elsewhere (reported missing) and adopts them again once back.
 func TestReconcileKeepsSandboxesOfAnotherGateway(t *testing.T) {

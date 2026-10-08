@@ -105,6 +105,13 @@ func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 	if sb.Phase != "ready" {
 		return true, true, nil
 	}
+	// A session attached in another terminal ends with the stop: the stop
+	// asked about a detached run only (GAP-0277, GAP-0285).
+	if n := a.attachedSessions(sb.Name); n > 0 {
+		if ok, err := a.confirmEnding(attachedText(sb.Name, n)+"; stopping the sandbox ends "+them(n), "Stop anyway?", yes); err != nil || !ok {
+			return false, false, err
+		}
+	}
 	run, err := a.detachedRun(ctx, cli, sb)
 	if err != nil {
 		// Without an answer the stop goes ahead, as it did before runs
@@ -126,6 +133,29 @@ func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 		}
 	}
 	return true, run.State != sandboxapi.RunRunning, nil
+}
+
+// attachedText names the sessions attached to sandbox name in other
+// terminals (attachedSessions).
+func attachedText(name string, n int) string {
+	return plural(int64(n), "terminal is", "terminals are") + " attached to " + name + " (a harness session or `" + CommandName + " connect --shell`)"
+}
+
+func them(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// confirmEnding asks, defaulting to no, before a command ends what what
+// names; without a terminal, or with yes, it says so and goes on.
+func (a *App) confirmEnding(what, question string, yes bool) (bool, error) {
+	if a.IO.TTY && !yes {
+		return a.ask(what+". "+question, false, false)
+	}
+	a.warn(what)
+	return true, nil
 }
 
 func (a *App) startedText(started int64) string {

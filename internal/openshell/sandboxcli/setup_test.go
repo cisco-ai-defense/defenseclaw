@@ -220,6 +220,34 @@ func TestSetupNonInteractive(t *testing.T) {
 		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude")
 }
 
+// TestSetupStopsAtAnotherAccountsGateway (GAP-0296): a second account on a
+// Mac whose gateway is the first account's was told to start Docker
+// Desktop. Setup stops at the gateway's owner instead, before any machine
+// check that gateway decides, and starts nothing.
+func TestSetupStopsAtAnotherAccountsGateway(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.IO.TTY = false
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.GatewayPortElsewhere = true
+		for i := range r.Checks {
+			switch c := &r.Checks[i]; c.ID {
+			case openshell.CheckIDDocker:
+				c.Status, c.Detail = openshell.StatusSkip, "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+			case openshell.CheckIDGatewayService:
+				c.Status, c.Detail = openshell.StatusFail, "127.0.0.1:17670, the gateway's port, is held by a process of another account"
+				c.Fix = &openshell.Fix{Summary: "one OpenShell gateway runs on a machine, under the account that started it"}
+			}
+		}
+	})
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, Yes: true})
+	if err == nil || ta.gateway.applied != 0 || len(ta.images.built) != 0 {
+		t.Fatalf("setup = %v, gateway applied %d, images %v", err, ta.gateway.applied, ta.images.built)
+	}
+	has(t, ta.output(), "Gateway service: 127.0.0.1:17670, the gateway's port, is held by a process of another account",
+		"→ one OpenShell gateway runs on a machine, under the account that started it")
+	lacks(t, ta.output(), "Docker Desktop")
+}
+
 // TestSetupSwitchesAnUndrivenGatewayToDocker: a gateway whose configuration
 // pins a driver DefenseClaw does not drive (podman, from its install) is
 // switched to docker in setup's one plan (GAP-1264).
@@ -1564,6 +1592,51 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	}
 	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OK || len(rep.Checks) < 10 {
 		t.Fatalf("doctor json = %+v, %v", rep, err)
+	}
+}
+
+// GAP-0226: with the gateway's user service gone, the Gateway row and the
+// daemon row each printed the raw gRPC dial error, and the summary counted
+// one cause three times. The daemon row now leans on the Gateway row.
+// TestDoctorNamesTheOrganizationConstraints (GAP-0252): the row said
+// "advisory: openshell.admin is enforced but advisory: you own config.yaml"
+// and named none of the constraints. It says whose the block is once, and
+// lists each constraint in force.
+func TestDoctorNamesTheOrganizationConstraints(t *testing.T) {
+	ta := newTestApp(t, "")
+	off := false
+	ta.Cfg.OpenShell.Admin = config.OpenShellAdminConfig{MinProfile: "balanced", AllowedHarnesses: []string{"claudecode", "codex"},
+		AllowYolo: &off, EgressBlock: []string{"paste.example"}, RequireCopyFor: []string{"~/customers/**"},
+		MaxResources: config.OpenShellResourcesConfig{CPU: "4", Memory: "8Gi"}, Locked: []string{"profile"}}
+	c := ta.adminCheck()
+	want := "advisory (you own config.yaml and can change it): profile balanced or stricter, harnesses claudecode, codex only, " +
+		"no skip-permissions, copy mode for ~/customers/**, 1 blocked host, at most 4 CPUs and 8Gi memory, locked: profile"
+	if c.Detail != want {
+		t.Fatalf("detail = %q\nwant     %q", c.Detail, want)
+	}
+}
+
+func TestDoctorCountsADownGatewayOnce(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available = false
+	ta.daemon.status.Reason = `the OpenShell gateway is not available: openshell: health: Unavailable: connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:17670: connect: connection refused"`
+	ta.HostDoctor = hostReport(func(rep *openshell.DoctorReport) {
+		gw := rep.Get(openshell.CheckIDGatewayVersion)
+		gw.Status, gw.Detail = openshell.StatusFail, "the gateway is not running: nothing listens on https://127.0.0.1:17670"
+	})
+	ta.images.recs = readyImages(ta)
+	_ = ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON})
+	var rep struct{ Checks []openshell.Check }
+	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(rep.Checks, func(c openshell.Check) bool { return c.ID == CheckIDDaemon })
+	if i < 0 {
+		t.Fatalf("no daemon row in %+v", rep.Checks)
+	}
+	if c := rep.Checks[i]; c.Status != openshell.StatusSkip || c.Fix != nil || strings.Contains(c.Detail, "connection refused") ||
+		!strings.Contains(c.Detail, "once the OpenShell gateway answers (see Gateway)") {
+		t.Fatalf("daemon row = %+v", c)
 	}
 }
 

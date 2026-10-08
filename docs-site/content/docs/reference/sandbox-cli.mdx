@@ -278,6 +278,10 @@ Removes superseded harness images.
   sandbox is recorded with that image, and it never removes the driver's
   other state there. A start of an image whose disk is gone prepares it
   again (about a minute).
+- **Half-prepared MicroVM disks.** It removes the `.staging` folders that
+  a first start which failed or was cancelled (a full volume, Ctrl-C) left
+  there, once nothing has written to them for 15 minutes, and says how much
+  it freed. The doctor's **Disk space** check counts them.
 - `--dry-run` says what it would remove, disks included.
 
 ```bash
@@ -814,7 +818,10 @@ defenseclaw sandbox list
 
 Without a name, shows the sandbox subsystem: whether it is on and reachable,
 the OpenShell gateway, the listener addresses, the default pack and profile,
-the organization policy, and counts. With a name, shows that sandbox in
+the organization policy, and counts. With a name, a running sandbox's
+detached run (`run --detach`) is named first when it has one: still going,
+or finished with its exit status, which leaves the sandbox running (and a
+mounted folder held) until you stop or delete it. It shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
 policy, hook tamper tier, hook traffic, the verdicts per hook event under
 the harness's own event names ("Hook events  PreToolUse 12 · PostToolUse 11
@@ -844,8 +851,10 @@ defenseclaw sandbox status myapp-7f3a --output json
 ### `sandbox stop`
 
 Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
-detached run is still going, `stop` asks first on a terminal (`--yes` skips
-the question; without a terminal it warns). The stop marks the run
+detached run is still going, or a session runs in it from another terminal
+(a harness session, or `connect --shell`), `stop` names it and asks first on
+a terminal (`--yes` skips the question; without a terminal it warns), and
+`delete` names such a session in its question. The stop marks the run
 interrupted and keeps its log for `sandbox logs`, as every stop does.
 
 For a copy-mode sandbox that no detached run and no other session is using,
@@ -863,7 +872,7 @@ defenseclaw sandbox stop myapp-7f3a
 {/* AUTOGEN-BEGIN: sandbox-flags stop */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
-| `-y`, `--yes` | switch |  | Stop without asking when a detached run is still going. |
+| `-y`, `--yes` | switch |  | Stop without asking when a detached run or a session in another terminal is still going. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox start`
@@ -929,7 +938,12 @@ Shows the activity feed of every sandbox, or one: destinations reached (✓)
 and blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
 calls, findings such as hooks that stopped reaching DefenseClaw, lifecycle
 changes (a sandbox being created, becoming ready, stopping, or being deleted),
-and workspace events such as an undo or a copy-mode upload. A destination
+and workspace events such as an undo or a copy-mode upload. The feed lives
+in the DefenseClaw daemon's memory: after the daemon restarts it starts
+over, and for a sandbox older than that, `activity` says so first (`the
+feed starts when the DefenseClaw daemon last started (HH:MM:SS); what
+happened before is in defenseclaw-gateway audit export …`). The audit store
+keeps every event. A destination
 shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
 `example.com:80`, so an HTTPS and an HTTP request refused at the same host
 are two different lines. An IPv6 address with its port is bracketed:
@@ -976,13 +990,24 @@ boundary, and says what each one is:
   time the policy refuses it, MEDIUM the first time the sandbox reaches it
   (a refusal and then a contact raise one of each);
 - otherwise **blocked** when it was only ever refused (the KIND cell says
-  whose list refused it, for example `blocked (paste site)`), or **other**.
+  whose list refused it, for example `blocked (paste site)`), else the
+  category the egress proxy allowed it under or, when it allowed it without
+  one (the open profile), the category DefenseClaw's curated allowlist gives
+  the host (for example `package registry` for `pypi.org`), else **other**.
 
 The PROVIDER column names the AI provider, or is `-`.
 
 Each row shows the requests and refusals both boundaries counted, the bytes
 the proxy relayed, and the last binary OpenShell named making the
-connection. The binary is what the process in the sandbox claims to be.
+connection (a long path is cut from the left, so the program name stays).
+Requests the proxy allowed and the host did not take (it refused or
+dropped the connection, did not answer, or its name did not resolve) count
+as `N failed upstream` (`failed` in `--output json`): an outage, not a
+block. The first one of a host also puts a line on the activity feed
+(`example.org: the connection failed upstream, not blocked by DefenseClaw
+(it refused the connection)`), and the `Egress` line of `sandbox status`
+counts them.
+The binary is what the process in the sandbox claims to be.
 With the [process tree](/docs/sandboxes/policy-packs) on, the binary column
 shows that process and its parents instead (`curl ← bash ← claude`), and
 `--output json` adds them (`lineage`). OpenShell names no process id for a
@@ -1138,8 +1163,9 @@ unified diff too.
 For a copy-mode sandbox (every sandbox on a Mac) `review` previews what
 `sandbox pull` would bring back, the same review and the changed files, and
 applies nothing; a stopped sandbox is started to read its work and stopped
-again. `-o json` then prints the pull's result, as `pull -o json` does, and
-`sandbox pull NAME --patch-out FILE` writes the diff.
+again. The review's flags and findings show, and `--diff` prints the diff
+of that work. `-o json` then prints the pull's result, as `pull -o json`
+does, and `sandbox pull NAME --patch-out FILE` writes the diff to a file.
 
 ```bash
 defenseclaw sandbox review myapp-7f3a
@@ -1205,11 +1231,17 @@ sandbox. Choose one mode to bring the work back:
   alone and exits `4`: the changes go to `<name>.patch` in your folder and,
   in a git project, to branch `dc/<name>`.
 - `--branch` (branch `dc/<name>`) or `--branch-name NAME`. A folder that is
-  not a git repository has no branch mode.
+  not a git repository has no branch mode. The branch starts at the commit
+  the copy was made from, without the folder's uncommitted edits of that
+  time (they stay in your working tree), unless the sandbox changed them
+  further; `pull` says which.
 - `--patch-out FILE`.
 
-Changes that can run code on your machine need your confirmation, or
-`--accept-sensitive` without a terminal.
+Changes that can run code on your machine need your confirmation for
+`--apply`, or `--accept-sensitive` without a terminal. `--branch` and
+`--patch-out` print a note to review the flagged files and go on (nothing
+runs from a branch or a patch file), unless a branch would take what looks
+like a secret into the history, which asks too.
 
 **After an apply.** Once an `--apply` (or the apply at a session's end) has
 put the work in your folder:
@@ -1475,6 +1507,9 @@ same decider the egress proxy uses, so it can't disagree with it.
 `--sandbox NAME` tests that sandbox's policy, its unblocks included, through
 the daemon, and names a provider of the sandbox (its model endpoint, a
 `--credential` binding) that opens the destination directly around the proxy.
+A port the sandbox was started with `--host-port` (on
+`host.openshell.internal`) reads `asks` until you approve its first
+connection, then `allowed` (rule `host_port`).
 Without it, `--pack`, `--profile`, and `--harness` resolve the policy a run in
 this folder would get, with this machine's `config.yaml` (or the defaults)
 and the folder's repository policy, and no daemon is needed, so CI can check

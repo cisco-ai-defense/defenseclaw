@@ -502,7 +502,7 @@ keeps its log, so "sandbox logs" still shows it.`,
 			return app.Stop(ctx, o)
 		}),
 	}
-	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run is still going")
+	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run or a session in another terminal is still going")
 	return cmd
 }
 

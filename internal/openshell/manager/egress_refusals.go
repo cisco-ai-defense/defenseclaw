@@ -64,7 +64,19 @@ type EgressRefusal struct {
 	// up; later refusals of the host within the window are told with it.
 	Cut  bool
 	Sent int64
+	// Note marks what is no egress block of DefenseClaw's but is told the
+	// same way: NoteSSH, NoteAsked, NoteDeclined ("" for a block).
+	Note string
 }
+
+// What an EgressRefusal tells besides a block: OpenShell refused SSH, whose
+// remedy is HTTPS (GAP-0216); a connection waits for the user to answer an
+// ask (GAP-0268); the user declined the ask (GAP-0236).
+const (
+	NoteSSH      = "ssh"
+	NoteAsked    = "asked"
+	NoteDeclined = "declined"
+)
 
 // refusalMemory is the recent CONNECT refusals of every sandbox binding.
 type refusalMemory struct {
@@ -93,6 +105,8 @@ type refusedHost struct {
 	// (EgressRefusal.Cut).
 	cut  bool
 	sent int64
+	// note is EgressRefusal.Note (noteDirect).
+	note string
 }
 
 func newRefusalMemory() *refusalMemory {
@@ -148,6 +162,46 @@ func (r *refusalMemory) note(e egress.Event, now time.Time) {
 				// A refusal after the cut: the cut is what to tell.
 				next.cut, next.sent = true, h.sent
 			}
+		default:
+			kept = append(kept, h)
+		}
+	}
+	if len(kept) >= maxRefusedHosts {
+		kept = append(kept[:0], kept[len(kept)-maxRefusedHosts+1:]...)
+	}
+	b.hosts = append(kept, next)
+}
+
+// noteDirect keeps a sandbox binding's connection to host and port that is
+// no egress block of DefenseClaw's, as note says (NoteSSH, NoteAsked,
+// NoteDeclined): the agent sees only a connection error ("Permission
+// denied", "Couldn't connect") and tried the same again, or said all was
+// well. Its next post-tool hook tells it what happened.
+func (r *refusalMemory) noteDirect(bindingID, sandbox, host string, port int, note string, now time.Time) {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if bindingID == "" || !refusalHost(host) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b := r.byBinding[bindingID]
+	if b == nil {
+		if len(r.byBinding) >= maxRefusalBindings {
+			r.evictStalest()
+		}
+		b = &bindingRefusals{}
+		r.byBinding[bindingID] = b
+	}
+	b.sandbox, b.last = sandbox, now
+	next := refusedHost{host: host, port: port, note: note, at: now}
+	kept := b.hosts[:0]
+	for _, h := range b.hosts {
+		switch {
+		case now.Sub(h.at) > egressRefusalWindow:
+		case h.host == host && h.port == port:
+			// A repeat is told once; other news of the destination (the
+			// user declined what was asked) is told again.
+			next.told = h.told && h.note == note
 		default:
 			kept = append(kept, h)
 		}
@@ -215,6 +269,25 @@ func (r *refusalMemory) take(bindingID, name string, now time.Time) []refusedHos
 	return out
 }
 
+// forgetNote drops a binding's untold note of kind note about host and
+// port: an ask the user answered before the agent was told it waits.
+func (r *refusalMemory) forgetNote(bindingID, host string, port int, note string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b := r.byBinding[bindingID]
+	if b == nil {
+		return
+	}
+	kept := b.hosts[:0]
+	for _, h := range b.hosts {
+		if h.note == note && h.host == host && h.port == port && !h.told {
+			continue
+		}
+		kept = append(kept, h)
+	}
+	b.hosts = kept
+}
+
 // forget drops a binding's refusals (its sandbox is gone).
 func (r *refusalMemory) forget(bindingID string) {
 	r.mu.Lock()
@@ -243,14 +316,40 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 		}
 		honored = p.Decider == nil || p.Decider.UnblocksAllowed()
 	}
+	harnessName := ""
+	m.mu.Lock()
+	if b := m.boxes[name]; b != nil {
+		harnessName = b.rec.Harness
+	}
+	m.mu.Unlock()
 	var out []EgressRefusal
 	for _, h := range m.refusals.take(bindingID, name, m.now()) {
+		switch h.note {
+		case NoteSSH:
+			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NoteSSH, Note: NoteSSH,
+				What: "SSH, which does not leave a sandbox", Remedy: "use HTTPS instead: a git remote https://" + h.host + "/OWNER/REPO.git" +
+					" (an npm github: or git+ssh dependency: git+https://" + h.host + "/OWNER/REPO.git)"})
+			continue
+		case NoteAsked:
+			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NoteAsked, Note: NoteAsked,
+				What: "waits for the user's approval", Remedy: "tell the user, and try again once they approve it (`defenseclaw sandbox approvals`)"})
+			continue
+		case NoteDeclined:
+			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NoteDeclined, Note: NoteDeclined,
+				What: "the user declined it", Remedy: "do not try it again unless the user says so"})
+			continue
+		}
 		if _, lifted := m.EgressUnblock(bindingID, name, h.host); lifted {
 			continue
 		}
+		what := refusalWhat(h.category)
+		if tool, ok := toolHostOf(harnessName, h.host); ok {
+			// Not the site the agent fetched (GAP-0234, GAP-0263).
+			what += "; " + tool
+		}
 		out = append(out, EgressRefusal{
 			Host: h.host, Port: h.port, Category: string(h.category),
-			What:   refusalWhat(h.category),
+			What:   what,
 			Remedy: refusalRemedy(h, name, honored),
 			Cut:    h.cut, Sent: h.sent,
 		})

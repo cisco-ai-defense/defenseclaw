@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -128,6 +129,9 @@ type CopyRecord struct {
 	// applied to the copy and to the capture Apply merges into.
 	LineEndings map[string]string `json:"line_endings,omitempty"`
 	HeldBack    []string          `json:"held_back,omitempty"`
+	// Unmasked are the files that look like secrets --unmask shared with
+	// the sandbox, which the run names so the user can confirm them.
+	Unmasked []string `json:"unmasked,omitempty"`
 	// Withheld counts the committed blobs left out of the shipped history
 	// (see withholdHistory); the copy is then a partial clone.
 	Withheld   int        `json:"withheld,omitempty"`
@@ -351,15 +355,24 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		Warnings: warnings,
 	}
 	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
-	if err := ensurePrivateDir(dir); err != nil {
-		return nil, "", err
-	}
+	// A refused copy (too large, a secret it cannot hold back) of a
+	// sandbox that has no data yet leaves no directory: teardown listed
+	// it as the leftover data of a sandbox that never existed (GAP-0274).
+	sandboxDir := lay.sandboxDir(opts.Name)
+	fresh := !pathExists(sandboxDir)
 	ok := false
 	defer func() {
 		if !ok {
 			_ = removeTree(dir)
+			if fresh {
+				_ = os.Remove(lay.copyDir(opts.Name))
+				_ = os.Remove(sandboxDir)
+			}
 		}
 	}()
+	if err := ensurePrivateDir(dir); err != nil {
+		return nil, "", err
+	}
 	stageRoot := filepath.Join(dir, "stage")
 	if err := os.Mkdir(stageRoot, 0o700); err != nil {
 		return nil, "", err
@@ -573,6 +586,33 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if err := copyFiles(rec.Project, stage, files); err != nil {
 		return err
 	}
+	// A submodule's working tree is not copied: its path is an empty
+	// folder, as git leaves an uninitialized submodule, so the baseline
+	// keeps its commit and a sandbox that initializes it changes nothing
+	// (GAP-0250). The copy says so.
+	var submodules []string
+	for p, mode := range trackedSet {
+		if mode != modeGitlink {
+			continue
+		}
+		dir := filepath.Join(stage, filepath.FromSlash(p))
+		if !within(dir, stage) {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		submodules = append(submodules, p)
+	}
+	if n := len(submodules); n > 0 {
+		sort.Strings(submodules)
+		them, their := "them", "their"
+		if n == 1 {
+			them, their = "it", "its"
+		}
+		rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s not copied: %s (the sandbox sees %s uninitialized; `git submodule update --init` there fetches %s from %s remote)",
+			plural(n, "submodule is", "submodules are"), strings.Join(firstN(submodules, 5), ", "), them, them, their))
+	}
 	if head != "" {
 		if err := sg.run(ctx, "read-tree", "HEAD"); err != nil {
 			return err
@@ -761,6 +801,24 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	held, err := detectSecretsIn(root, candidates, scanOpts)
 	if err != nil {
 		return nil, nil, err
+	}
+	// What --unmask shared, and what it named that the copy does not take
+	// (git-ignored files never go): both were silent (GAP-0248).
+	unmaskOnly := scanOpts
+	unmaskOnly.unmask = nil
+	rec.Unmasked = nil
+	for _, rel := range candidates {
+		if unmaskedBy(scanOpts.unmask, rel) {
+			if would, err := detectSecretsIn(root, []string{rel}, unmaskOnly); err == nil && len(would) > 0 {
+				rec.Unmasked = append(rec.Unmasked, rel)
+			}
+		}
+	}
+	for _, u := range scanOpts.unmask {
+		if !slices.ContainsFunc(candidates, func(rel string) bool { return unmaskedBy([]string{u}, rel) }) {
+			rec.Warnings = append(rec.Warnings, "--unmask "+u+" matched no file the copy takes (a copy takes git's view of the folder: "+
+				"tracked files and untracked ones git does not ignore), so it shared nothing")
+		}
 	}
 	heldSet := toSet(held)
 	var files []stagedFile

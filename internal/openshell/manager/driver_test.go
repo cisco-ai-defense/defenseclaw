@@ -302,6 +302,24 @@ func TestIdentityNamesTheDriverAndTheImageThatRuns(t *testing.T) {
 	}
 }
 
+// GAP-0219: a first start on a full Mac ended with OpenShell's
+// ProvisioningTimedOut alone; on the vm driver the error says what to check.
+func TestProvisioningTimeoutNamesTheDisk(t *testing.T) {
+	vm, _ := openshell.LookupDriver("vm")
+	docker, _ := openshell.LookupDriver("docker")
+	timedOut := errors.New(`sandbox "x" is in error state; OpenShell says: ProvisioningTimedOut: Provisioning repair window expired after 300 seconds`)
+	if err := provisioningFailure(vm, upstream("wait for sandbox x", timedOut)); !strings.Contains(err.Error(), "Disk space in `defenseclaw sandbox doctor`") ||
+		!strings.Contains(err.Error(), "defenseclaw sandbox image prune") {
+		t.Fatalf("vm: %v", err)
+	}
+	for _, err := range []error{provisioningFailure(docker, upstream("wait for sandbox x", timedOut)),
+		provisioningFailure(vm, upstream("wait for sandbox x", errors.New("deadline exceeded")))} {
+		if strings.Contains(err.Error(), "image prune") {
+			t.Fatalf("hint on another failure: %v", err)
+		}
+	}
+}
+
 // A sandbox's policy is re-resolved with the driver it was created on, not
 // the connected gateway's, and a new one with the connected gateway's.
 func TestResolutionUsesTheRecordsDriver(t *testing.T) {

@@ -132,8 +132,10 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 
 // List returns every sandbox, refreshed from OpenShell when it is reachable.
 func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
+	live := false
 	if gw, err := m.gateway(ctx); err == nil {
 		if sbs, err := m.listManaged(ctx, gw); err == nil {
+			live = true
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
@@ -152,7 +154,11 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	accepted := make([]*acceptedSnapshot, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
-			out = append(out, m.view(b))
+			v := m.view(b)
+			if !live {
+				unconfirmedPhase(&v)
+			}
+			out = append(out, v)
 			bindings = append(bindings, b.rec.BindingID)
 			shared = append(shared, sharedLimitsOf(b))
 			accepted = append(accepted, b.rec.Accepted)
@@ -177,6 +183,7 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	m.mu.Lock()
 	retained := b.retained
 	m.mu.Unlock()
+	live := retained
 	if gw, err := m.gateway(ctx); err == nil && !retained {
 		sb, err := gw.Client.GetSandbox(ctx, name)
 		m.mu.Lock()
@@ -188,12 +195,28 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 			b.missing = true
 		}
 		m.mu.Unlock()
-		if err != nil && !openshell.IsNotFound(err) {
+		live = err == nil || openshell.IsNotFound(err)
+		if !live {
 			m.dropGateway(gw, err)
 		}
 	}
 	v := m.viewOf(b)
+	if !live {
+		unconfirmedPhase(&v)
+	}
 	return &v, nil
+}
+
+// unconfirmedPhase is the phase of a sandbox the OpenShell gateway could not
+// be asked about: a running or starting phase last seen is not known to hold
+// any more (the gateway stopped, or another account's took its port), so it
+// reads unknown, not provisioning or ready for as long as the gateway is
+// down (GAP-0202). A stopped or missing sandbox stays so.
+func unconfirmedPhase(v *sandboxapi.Sandbox) {
+	switch v.Phase {
+	case "ready", "provisioning":
+		v.Phase = string(audit.SandboxPhaseUnknown)
+	}
 }
 
 // Stop stops a sandbox and keeps it (and its mounts and binding) for a
@@ -309,7 +332,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name := b.rec.Name
+	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -324,6 +347,9 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
+		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
+			return e
+		}
 		return upstream("stop sandbox "+name, err)
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
@@ -369,7 +395,16 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 	b.sb = sb
 	m.mu.Unlock()
 	if phase := auditPhase(sb.Status.Phase); phase != pending && phase != audit.SandboxPhaseUnknown {
-		m.lifecycle(ctx, b, phase, trigger, false, nil, sb.Status.ExitCode)
+		// A failing condition explains an error phase (statusEvent), which
+		// the status then names (GAP-0297).
+		var cond *audit.SandboxCondition
+		for _, c := range sb.Status.Conditions {
+			if phase == audit.SandboxPhaseError && !strings.EqualFold(c.Status, "true") {
+				cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+				break
+			}
+		}
+		m.lifecycle(ctx, b, phase, trigger, false, cond, sb.Status.ExitCode)
 	}
 }
 
@@ -519,6 +554,8 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if digest != rec.LLMDigest {
 		m.mu.Lock()
 		b.rec.LLMDigest = digest
+		// The rejection was of the old key.
+		b.hooks.forgetModelRejection()
 		m.mu.Unlock()
 		if err := m.saveRecord(b); err != nil {
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
@@ -583,11 +620,18 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+		if e := errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
+			return e
+		}
 		return upstream("start sandbox "+rec.Name, err)
 	}
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)
 	if err != nil {
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+		if e := overlayDiskRefusal(rec.Name, err); e != nil {
+			m.logf("sandbox %s: %v", rec.Name, err)
+			return e
+		}
 		return upstream("wait for sandbox "+rec.Name, err)
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {

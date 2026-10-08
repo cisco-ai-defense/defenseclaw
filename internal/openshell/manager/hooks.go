@@ -62,6 +62,11 @@ type HookDecision struct {
 	WouldBlock bool
 	Severity   string
 	Reason     string
+	// ModelError and ModelStatus are the model API failure a turn-ending
+	// hook event reports: the error class of Claude Code's StopFailure
+	// (authentication_failed, rate_limit, ...) and the HTTP status.
+	ModelError  string
+	ModelStatus int
 }
 
 // ObserveIngress records an authenticated ingress request, the hook-coverage
@@ -85,11 +90,12 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 	case sandboxauth.RouteNotify:
 		box.hooks.lastNotify = now
 	case sandboxauth.RouteOTLP:
-		// Not a sign of work for the reachability check: the Codex TUI
-		// exports OTLP from its start, before the first prompt that fires
-		// its hooks. A model call is (watch.go).
+		// No sign of work, for the reachability check or the silence one:
+		// the Codex TUI exports OTLP from its start, before the first prompt
+		// that fires its hooks, and on and on while it waits at its prompt,
+		// which made an idle session's hooks "silent" (GAP-0220). Its model
+		// calls are its work (watch.go).
 		box.hooks.lastOTLP = now
-		box.noteActiveLocked(now)
 	}
 	name := box.rec.Name
 	m.mu.Unlock()
@@ -130,7 +136,12 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		if prompt {
 			b.hooks.promptBlocked++
 		}
+		rejected := b.observeModelAnswerLocked(d, m.now())
 		m.mu.Unlock()
+		if rejected != "" {
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Event: d.Event,
+				Severity: "MEDIUM", Reason: sandboxapi.ReasonModelKeyRejected, Message: "⚠ " + rejected})
+		}
 		if blocked {
 			// A blocked prompt (or other non-tool hook event) is a block
 			// of the session too: the feed shows every DefenseClaw block.
@@ -583,7 +594,8 @@ func (b *box) noteActiveLocked(at time.Time) {
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
 // harness has been at work (OCSF network events of the harness's own
-// binaries, its connections to the egress proxy among them, native OTLP;
+// binaries, its connections to the egress proxy among them, and its model
+// calls, but not its OTLP exports, which an idle harness makes too;
 // OCSF process events of those binaries count too, but OpenShell 0.1
 // reports only the processes its supervisor starts, never the ones a
 // harness runs, so work without network traffic goes unseen) for the
