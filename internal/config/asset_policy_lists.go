@@ -39,6 +39,7 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 		return "", AssetPolicyRule{}
 	}
 	in.unicodeNames = !c.SecureClientIntegration()
+	in.legacyConnectorMatch = c.SecureClientIntegration()
 	var p AssetTypePolicy
 	switch normalizeAssetToken(in.TargetType) {
 	case "mcp":
@@ -150,7 +151,8 @@ func assetRuleMatchesAnyName(rule AssetPolicyRule, in AssetPolicyInput) bool {
 // once aliases are normalized (claude-code and claude_code are claudecode,
 // open-hands and open_hands are openhands). asset_policy rules compare
 // connectors this way, as the Python lists do (connector_paths.normalize):
-// the runtime always passes the canonical name.
+// the runtime always passes the canonical name. Secure Client asset rules
+// keep their pre-v9 trimmed, case-insensitive comparison.
 func SameConnector(a, b string) bool {
 	return normalizeConnectorKey(a) == normalizeConnectorKey(b)
 }
