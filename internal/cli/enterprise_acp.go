@@ -153,7 +153,13 @@ func enterpriseACPGoneAccount(enrollment enterpriseACPEnrollment) (what, selecto
 	if sid := strings.TrimSpace(enrollment.target.sid); sid != "" {
 		return enrollment.principal + " has no profile on this computer any more", "--sid " + sid
 	}
-	return enrollment.principal + " no longer exists", fmt.Sprintf("--uid %d", enrollment.target.uid)
+	selector = fmt.Sprintf("--uid %d", enrollment.target.uid)
+	if enterpriseACPUIDMayBeHidden() {
+		// A directory that does not answer gives the same "no such
+		// account" (GAP-0838).
+		return enrollment.principal + " does not resolve (it was deleted, or the directory that holds it does not answer)", selector
+	}
+	return enrollment.principal + " no longer exists", selector
 }
 
 func resolveEnterpriseACPEnrollment(requireAuthorization bool) (enterpriseACPEnrollment, error) {

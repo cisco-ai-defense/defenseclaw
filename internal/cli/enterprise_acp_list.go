@@ -46,8 +46,10 @@ func init() {
 type enterpriseACPListedEnrollment struct {
 	acp.EnterpriseEnrollment
 	User string `json:"user,omitempty"`
-	// Account is "present", "deleted" (no account has the uid or SID) or
-	// "unknown" (the lookup failed, or the principal names no account).
+	// Account is "present", "deleted" (no account has the uid or SID),
+	// "unresolved" (no account was found, but the directory could not be
+	// confirmed reachable) or "unknown" (the lookup failed, or the principal
+	// names no account).
 	Account string `json:"account"`
 	// TokenCopy and Setup are "present"/"missing" and "done"/"not run", or
 	// "unknown" when the user's files could not be read.
@@ -77,6 +79,7 @@ func runEnterpriseACPList(cmd *cobra.Command, _ []string) error {
 	for _, enrollment := range enrollments {
 		rows = append(rows, describeEnterpriseACPEnrollment(enrollment))
 	}
+	settleEnterpriseACPListedAccounts(cmd.Context(), rows)
 	if enterpriseACPJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"ok": true, "enrollments": rows, "invalid": invalid})
 	}
@@ -90,6 +93,8 @@ func runEnterpriseACPList(cmd *cobra.Command, _ []string) error {
 			switch {
 			case row.Account == "deleted":
 				user += " (account deleted)"
+			case row.Account == "unresolved":
+				user += " (does not resolve)"
 			case row.User != "":
 				user = row.User + " (" + row.Principal + ")"
 			}

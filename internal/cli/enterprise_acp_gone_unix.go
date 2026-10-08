@@ -33,6 +33,63 @@ var enterpriseACPHomeForUID = func(uid int) (home string, found bool, err error)
 	return account.Home, true, nil
 }
 
+// enterpriseACPUIDMayBeHidden reports a host with a directory: a lookup that
+// finds no account with the uid is then not proof that it was deleted, since
+// a directory that does not answer gives the same answer (GAP-0838).
+func enterpriseACPUIDMayBeHidden() bool { return enterpriseHooksEnumerateDirectoryConfigured() }
+
+// settleEnterpriseACPListedAccounts keeps "deleted" only where a lookup that
+// found no account is definitive, as the enumerator decides before it
+// revokes: no local account has the uid, and the directory, if this host has
+// one, answered for another account of the listing. With the directory
+// unreachable every directory account read "account deleted", the signal
+// to revoke by hand (GAP-0838).
+func settleEnterpriseACPListedAccounts(ctx context.Context, rows []enterpriseACPListedEnrollment) {
+	missing := false
+	for _, row := range rows {
+		missing = missing || row.Account == "deleted"
+	}
+	if !missing {
+		return
+	}
+	local, localErr := enterpriseHooksEnumerateLocalAccounts(ctx)
+	localUIDs := map[int]bool{}
+	for _, uid := range local {
+		localUIDs[uid] = true
+	}
+	directoryAnswered := false
+	for _, row := range rows {
+		if uid, ok := enterpriseACPPrincipalUID(row.Principal); ok && row.Account == "present" && !localUIDs[uid] {
+			directoryAnswered = true
+		}
+	}
+	directory := enterpriseHooksEnumerateDirectoryConfigured()
+	for i := range rows {
+		uid, ok := enterpriseACPPrincipalUID(rows[i].Principal)
+		if rows[i].Account != "deleted" || !ok {
+			continue
+		}
+		note := ""
+		switch {
+		case localErr != nil || localUIDs[uid]:
+			note = "the account does not resolve, but the local account database could not be read or still lists it; nothing was revoked"
+		case directory && !directoryAnswered:
+			note = "the account does not resolve and the directory could not be confirmed reachable, so DefenseClaw cannot tell " +
+				"whether it was deleted; nothing is revoked while the directory does not answer"
+		default:
+			continue
+		}
+		rows[i].Account, rows[i].TokenCopy, rows[i].Setup, rows[i].Note = "unresolved", "unknown", "unknown", note
+	}
+}
+
+// enterpriseACPPrincipalUID reads the uid of a uid:N principal.
+func enterpriseACPPrincipalUID(principal string) (int, bool) {
+	kind, value, _ := strings.Cut(principal, ":")
+	uid, err := strconv.Atoi(value)
+	return uid, kind == "uid" && err == nil && uid >= 0
+}
+
 // enterpriseACPDescribePrincipal names the account of a uid:N principal;
 // replaceable in tests.
 var enterpriseACPDescribePrincipal = func(principal string) (enterpriseACPAccount, error) {
