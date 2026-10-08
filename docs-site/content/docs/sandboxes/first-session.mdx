@@ -362,12 +362,24 @@ delete a copy whose work you did not bring back.
 
 ## Run without a terminal
 
-`--prompt` runs the harness headless with one prompt and streams its output.
-The sandbox is deleted at the end unless you pass `--keep`:
+`--prompt` runs the harness headless with one prompt and streams its output:
 
 ```bash
 defenseclaw sandbox run codex --prompt "fix the failing tests"
 ```
+
+When the run changed a mounted folder and you started it in a terminal, it
+ends with the same `Keep changes?` question as a session, and `u` undoes
+them. Once nothing is left in the sandbox to bring back or undo, because
+you kept the changes or there were none, the sandbox is deleted, and its
+undo point with it, so a later `sandbox undo NAME` finds no sandbox:
+
+```text
+  ✓ kept: the changes stay in the folder, and the next session takes a new undo point
+  ✓ sandbox myapp-7f3a deleted: nothing is left in it to bring back or undo (a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it)
+```
+
+Pass `--keep` to keep the sandbox and its undo point.
 
 `--detach` starts a run in the background. `sandbox logs` shows its output,
 and keeps the end of it after the sandbox stops:
