@@ -601,6 +601,11 @@ func (s *Sidecar) publishGeneration(g *Generation) {
 	}
 	publishGeneration(g)
 	s.generation.Store(g)
+	// Sandbox and security-action records need the applied policy stamp even
+	// when the install watcher is disabled or has no directories to watch.
+	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return livePolicyDigestV8(), livePolicyGenerationV8()
+	})
 }
 
 // activeRulePackKey is the composed-pack key of the pack the shared scanners
@@ -3653,9 +3658,6 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		return nil
 	})
 	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
-	})
-	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
 		return livePolicyDigestV8(), livePolicyGenerationV8()
 	})
 	if enrolled != nil {
