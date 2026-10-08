@@ -2404,6 +2404,9 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
             os.chmod(bridge_bin, 0o755)
         except OSError:
             pass
+    from defenseclaw.bundle_refresh import ensure_splunk_bridge_container_access
+
+    report.errors.extend(f"seed splunk-bridge: {e}" for e in ensure_splunk_bridge_container_access(dest))
     report.splunk_bridge_dest = dest
 
 

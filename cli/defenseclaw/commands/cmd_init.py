@@ -2844,6 +2844,10 @@ def _seed_splunk_bridge(data_dir: str) -> None:
     bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
     if os.path.isfile(bridge_bin):
         os.chmod(bridge_bin, 0o755)
+    from defenseclaw.bundle_refresh import ensure_splunk_bridge_container_access
+
+    for error in ensure_splunk_bridge_container_access(dest):
+        click.echo(f"  Splunk bridge: {error}", err=True)
     click.echo(f"  Splunk bridge: seeded in {dest}")
 
 

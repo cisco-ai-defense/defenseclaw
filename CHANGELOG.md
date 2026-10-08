@@ -201,6 +201,15 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Local Splunk starts when the CLI was installed under a private umask.**
+  The package's files arrived 0600 and setup copied them so into
+  `~/.defenseclaw/splunk-bridge/splunk/`, which the container mounts and reads
+  as non-root users, so Splunk restarted on `Permission denied:
+  '/tmp/defaults/default.yml'` while `defenseclaw setup splunk --logs` waited
+  four minutes. Setup and init now make that folder readable to the
+  container (0755 folders, 0644 files, 0755 scripts; `env/.env` stays
+  private), and the bridge stops as soon as the container keeps restarting,
+  with its last log lines.
 - **Security: hooks keep the gateway token and the hook payload off process
   command lines and out of child environments.** The Claude Code,
   Antigravity, Copilot, Cursor, Devin, Hermes, Kiro and OpenHands shell

@@ -191,6 +191,40 @@ _SPLUNK_BRIDGE_PRESERVE: tuple[str, ...] = (
 _SPLUNK_BRIDGE_DEST_REL: str = "splunk-bridge"
 
 
+def ensure_splunk_bridge_container_access(dest: str) -> list[str]:
+    """Make the bridge's bind-mounted Splunk assets readable by the container.
+
+    docker-compose.local.yml mounts ``splunk/`` (``default.yml``, the
+    ansible plays and the app the bridge packages from it) read-only, and
+    the container reads it as non-root users. A package extracted under a
+    private umask leaves those files 0600, so the container could not read
+    ``default.yml`` and restarted without end (GAP-0341; the app tarball
+    keeps the source modes too). As for the local observability stack, the
+    enclosing data directory stays 0700; ``splunk/`` holds no secret (the
+    HEC token and password come from ``env/.env``, which this never
+    touches): directories 0755, files in a ``bin`` folder and ``*.sh``
+    0755, other files 0644. Links are left alone.
+    """
+    errors: list[str] = []
+    root = os.path.join(dest, "splunk")
+    if os.name == "nt" or os.path.islink(root) or not os.path.isdir(root):
+        return errors
+    for current, _dirs, files in os.walk(root, followlinks=False):
+        targets = [(current, 0o755)]
+        for name in files:
+            path = os.path.join(current, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                continue
+            executable = name.endswith(".sh") or os.path.basename(current) == "bin"
+            targets.append((path, 0o755 if executable else 0o644))
+        for path, mode in targets:
+            try:
+                os.chmod(path, mode)
+            except OSError as exc:
+                errors.append(f"chmod {os.path.relpath(path, dest)}: {exc}")
+    return errors
+
+
 def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
     """Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundled source.
 
@@ -225,6 +259,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
                 os.chmod(bridge_bin, 0o755)
             except OSError as exc:
                 result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+        result.errors.extend(ensure_splunk_bridge_container_access(dest))
         result.refreshed = True
         result.refreshed_paths.append("(initial seed)")
         return result
@@ -245,6 +280,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
             os.chmod(bridge_bin, 0o755)
         except OSError as exc:
             result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+    result.errors.extend(ensure_splunk_bridge_container_access(dest))
 
     return result
 
