@@ -522,6 +522,7 @@ func (h *hostPlane) joinToolCall(event plane.Event) {
 		UID:       uid,
 		At:        at,
 		Hashes:    shellCommandHashes(event.Cmdline),
+		Shell:     isShellName(tactics.BaseName(firstNonEmptyString(event.Exe, firstField(event.Cmdline), event.Name))),
 	}, func(peerPID int) (int, bool) {
 		peer, ok := h.tracker.Lineage(peerPID, "")
 		if !ok {
@@ -554,6 +555,15 @@ func commandWordCmdline(cmdline string) string {
 // isHookLauncher reports a command line that runs a DefenseClaw hook.
 func isHookLauncher(cmdline string) bool {
 	return strings.Contains(cmdline, "defenseclaw-hook ") || strings.Contains(cmdline, "/.defenseclaw/hooks/")
+}
+
+// firstField is a command line's first word without its quotes.
+func firstField(cmdline string) string {
+	fields := strings.Fields(cmdline)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Trim(fields[0], `"'`)
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -696,6 +706,11 @@ type hookExec struct {
 	// Hashes are the hashes of the shell commands its command line may be
 	// running (shellCommandHashes).
 	Hashes []string
+	// Shell marks a shell (sh, bash, ...). A shell tool's call runs in one,
+	// so only a shell can take a command decision by agent and time: the
+	// agent's own helpers (Claude Code's file index runs its own binary as
+	// ripgrep, git) start beside a tool call, often just before it.
+	Shell bool
 }
 
 // hookRing is a bounded ring of managed hook decisions.
@@ -727,9 +742,10 @@ func (r *hookRing) record(decision HookDecision) {
 // join matches a tool-call process to the oldest decision it can belong to:
 // exact when its shell command hashes equal a decision's of the same agent
 // (or, when the decision's hook process is not in the lineage table, of the
-// same user and connector), temporal when only the agent and the time agree.
-// A command decision joins one process; a decision for a tool that runs no
-// command (a search spawning rg) can label several, within a short window.
+// same user and connector), temporal when only the agent and the time agree,
+// and for a command decision only when the process is a shell. A command
+// decision joins one process; a decision for a tool that runs no command (a
+// search spawning rg) can label several, within a short window.
 // rootOf resolves a hook process pid to its agent's session root.
 func (r *hookRing) join(exec hookExec, rootOf func(pid int) (int, bool)) HookJoin {
 	r.mu.Lock()
@@ -768,7 +784,7 @@ func (r *hookRing) join(exec hookExec, rootOf func(pid int) (int, bool)) HookJoi
 		if entry.CommandHash != "" && containsString(exec.Hashes, entry.CommandHash) && (sameRoot || sameUser) {
 			exact = entry
 		}
-		if sameRoot && (entry.CommandHash != "" || age <= hookUntimedWindow) {
+		if sameRoot && ((entry.CommandHash != "" && exec.Shell) || (entry.CommandHash == "" && age <= hookUntimedWindow)) {
 			timed = entry
 		}
 	}

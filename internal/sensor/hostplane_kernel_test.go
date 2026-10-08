@@ -336,6 +336,60 @@ func TestHookJoinExactTemporalAndNone(t *testing.T) {
 	}
 }
 
+// TestHookJoinSurvivesTheAgentsOwnHelpers pins GAP-0023: after the user
+// approves a Bash call at Claude Code's prompt, Claude starts its file index
+// (its own binary run as ripgrep) and git just before the tool's shell. Those
+// helpers must not use up the tool call's decision, so the shell still joins
+// exactly however long the approval took.
+func TestHookJoinSurvivesTheAgentsOwnHelpers(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	const marker = "/home/dev/tg2work/dccert-block-marker"
+	approved := base.Add(28 * time.Second)
+	script := []plane.Event{
+		{Kind: plane.KindExec, PID: 1400, PPID: 1, Name: "2.1.292", Exe: claudeExe, ExecID: "root", UID: uidp(1001), At: base},
+		{Kind: plane.KindExec, PID: 1401, PPID: 1400, Name: "defenseclaw-hook", Exe: "/opt/defenseclaw/bin/defenseclaw-hook",
+			Cmdline: "/opt/defenseclaw/bin/defenseclaw-hook hook --connector claudecode --enterprise-managed",
+			Hook:    plane.HookVerified, ExecID: "hook", ParentExecID: "root", UID: uidp(1001), At: base},
+		{Kind: plane.KindExec, PID: 1402, PPID: 1400, Name: "2.1.292", Exe: claudeExe,
+			Cmdline: claudeExe + " --no-config --files --follow --hidden --glob !.git/", ExecID: "index", ParentExecID: "root",
+			UID: uidp(1001), At: approved},
+		{Kind: plane.KindExec, PID: 1403, PPID: 1400, Name: "git", Exe: "/usr/bin/git",
+			Cmdline: "/usr/bin/git -c core.hooksPath=/dev/null ls-files", ExecID: "git", ParentExecID: "root",
+			UID: uidp(1001), At: approved.Add(time.Millisecond)},
+		{Kind: plane.KindExec, PID: 1404, PPID: 1400, Name: "bash", Exe: "/usr/bin/bash",
+			Cmdline: claudeToolShell("cat " + marker), ExecID: "tool", ParentExecID: "root", UID: uidp(1001),
+			At: approved.Add(9 * time.Millisecond)},
+		{Kind: plane.KindExec, PID: 1405, PPID: 1404, Name: "cat", Exe: "/usr/bin/cat", Cmdline: "/usr/bin/cat " + marker,
+			ExecID: "cat", ParentExecID: "tool", UID: uidp(1001), At: approved.Add(10 * time.Millisecond)},
+		{Kind: plane.KindFileRead, PID: 1405, Path: "/home/dev/.aws/credentials", ExecID: "cat", UID: uidp(1001),
+			At: approved.Add(10 * time.Millisecond)},
+	}
+	source := newFake(fullCoverage(), script...)
+	host := newHost(source)
+	host.hooks = newHookRing(hookRingSize, hookRingWindow)
+	host.hooks.record(HookDecision{
+		Connector: "claudecode", SessionID: "sess-1", ToolInvocationID: "approved-tool",
+		CommandHash: HookCommandHash("cat " + marker), PeerPID: 1401, PeerUID: 1001, At: base, Action: "allow",
+	})
+	drainAll(t, host, len(script))
+
+	findings := host.harvest(approved.Add(time.Minute), 1)
+	if len(findings) != 1 {
+		t.Fatalf("got %d findings", len(findings))
+	}
+	for _, activity := range findings[0].Activities {
+		if activity.Tactic != tactics.CredentialAccess {
+			continue
+		}
+		if join := activity.Hook; join == nil || !join.Seen || join.Confidence != HookJoinExact || join.ToolInvocationID != "approved-tool" {
+			t.Fatalf("approved tool call join = %+v, want exact approved-tool", join)
+		}
+		return
+	}
+	t.Fatalf("no credential access activity in %+v", findings[0].Activities)
+}
+
 // TestHookCommandHashMatchesTheForwardedShell pins that the gateway's hash of
 // a hook decision's command equals the hash the host plane reads off the
 // helper's redacted command line, for Claude's eval form and Codex's -lc form,
@@ -399,6 +453,20 @@ func TestHookRingJoinRules(t *testing.T) {
 	}
 	if join := ring.join(exec, rootOf); join.Seen {
 		t.Fatalf("third join = %+v, want none", join)
+	}
+	// A command decision is taken by time only by a shell: the agent's own
+	// helper beside the tool call gets nothing and leaves it for the tool's
+	// shell (GAP-0023).
+	ring.record(HookDecision{ToolInvocationID: "approved", CommandHash: HookCommandHash("make lint"), PeerPID: 10, At: base.Add(2 * time.Second)})
+	if join := ring.join(hookExec{RootPID: 100, At: base.Add(4 * time.Second), Hashes: []string{HookCommandHash("rg --files")}}, rootOf); join.Seen {
+		t.Fatalf("a helper process took a command decision by time: %+v", join)
+	}
+	if join := ring.join(hookExec{RootPID: 100, At: base.Add(4 * time.Second), Shell: true, Hashes: []string{HookCommandHash("make lint")}}, rootOf); join.ToolInvocationID != "approved" || join.Confidence != HookJoinExact {
+		t.Fatalf("the tool's shell join = %+v, want exact approved", join)
+	}
+	ring.record(HookDecision{ToolInvocationID: "reworded", CommandHash: HookCommandHash("make docs"), PeerPID: 10, At: base.Add(3 * time.Second)})
+	if join := ring.join(hookExec{RootPID: 100, At: base.Add(5 * time.Second), Shell: true}, rootOf); join.ToolInvocationID != "reworded" || join.Confidence != HookJoinTemporal {
+		t.Fatalf("a shell whose command was cut short: join = %+v, want temporal reworded", join)
 	}
 	// Another agent's decision never joins, by hash or by time.
 	ring.record(HookDecision{ToolInvocationID: "other", CommandHash: hash, PeerPID: 20, At: base.Add(6 * time.Second)})
