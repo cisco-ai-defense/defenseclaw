@@ -364,6 +364,10 @@ func TestInterruptedRotationIsSettledByTheNextRun(t *testing.T) {
 	result := Run(ctx, h.env, Options{Action: ActionRotateCredentials})
 	h.onProof = nil
 	requireError(t, result, codeRotation)
+	// GAP-0513: the interrupt is the cause, and the rollback is named.
+	if got := messagesOf(result.Errors, codeRotation); !strings.Contains(got, "the run was interrupted; it was rolled back and key ") || strings.Contains(got, "exit -1") {
+		t.Fatalf("interrupted rotation error = %q", got)
+	}
 	h.requireNoRotationLeft()
 	if h.committedKey() != h.keyA || h.rendered["alice"] != idA || !slices.Equal(h.liveKeyIDs(), []string{idA}) || slices.Contains(h.events, "refused alice") {
 		t.Fatalf("an interrupted rotation did not settle on key A: users=%v events=%v", h.rendered, h.events)
