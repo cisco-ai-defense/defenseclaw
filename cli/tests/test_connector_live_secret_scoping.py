@@ -62,26 +62,24 @@ def test_unix_live_secrets_are_connector_scoped_and_not_job_wide() -> None:
     seed = _step(live, "Seed DefenseClaw env")
     assert seed["env"] == {
         "MATRIX_CONNECTOR": "${{ matrix.connector }}",
-        "OPENAI_API_KEY": _secret_expression("OPENAI_API_KEY", "codex", "opencode", "openhands"),
+        "OPENAI_API_KEY": _secret_expression("OPENAI_API_KEY", "codex", "opencode"),
         "ANTHROPIC_API_KEY": _secret_expression("ANTHROPIC_API_KEY", "claudecode"),
         "AMP_API_KEY": _secret_expression("AMP_API_KEY", "amp"),
         "CURSOR_API_KEY": _secret_expression("CURSOR_API_KEY", "cursor"),
-        "LLM_API_KEY": _secret_expression("LLM_API_KEY", "openhands"),
     }
 
     driver = _step(live, "Live driver")
     assert driver["env"] == {
-        "OPENAI_API_KEY": _secret_expression("OPENAI_API_KEY", "codex", "opencode", "openhands"),
+        "OPENAI_API_KEY": _secret_expression("OPENAI_API_KEY", "codex", "opencode"),
         "ANTHROPIC_API_KEY": _secret_expression("ANTHROPIC_API_KEY", "claudecode"),
         "AMP_API_KEY": _secret_expression("AMP_API_KEY", "amp"),
         "CURSOR_API_KEY": _secret_expression("CURSOR_API_KEY", "cursor"),
         "COPILOT_GITHUB_TOKEN": _secret_expression("COPILOT_GITHUB_TOKEN", "copilot"),
-        "LLM_API_KEY": _secret_expression("LLM_API_KEY", "openhands"),
-        "AZURE_OPENAI_API_KEY": _secret_expression("AZURE_OPENAI_API_KEY", "codex", "openhands"),
-        "AWS_BEARER_TOKEN_BEDROCK": _secret_expression("AWS_BEARER_TOKEN_BEDROCK", "claudecode", "openhands"),
-        "AWS_ACCESS_KEY_ID": _secret_expression("AWS_ACCESS_KEY_ID", "claudecode", "openhands"),
-        "AWS_SECRET_ACCESS_KEY": _secret_expression("AWS_SECRET_ACCESS_KEY", "claudecode", "openhands"),
-        "AWS_SESSION_TOKEN": _secret_expression("AWS_SESSION_TOKEN", "claudecode", "openhands"),
+        "AZURE_OPENAI_API_KEY": _secret_expression("AZURE_OPENAI_API_KEY", "codex"),
+        "AWS_BEARER_TOKEN_BEDROCK": _secret_expression("AWS_BEARER_TOKEN_BEDROCK", "claudecode"),
+        "AWS_ACCESS_KEY_ID": _secret_expression("AWS_ACCESS_KEY_ID", "claudecode"),
+        "AWS_SECRET_ACCESS_KEY": _secret_expression("AWS_SECRET_ACCESS_KEY", "claudecode"),
+        "AWS_SESSION_TOKEN": _secret_expression("AWS_SESSION_TOKEN", "claudecode"),
     }
 
     cursor = _step(live, "Validate Cursor headless hooks")
@@ -101,7 +99,6 @@ def test_seeded_env_contains_only_the_current_connector_keys() -> None:
     assert _case_writes(seed_script, "claudecode") == {"ANTHROPIC_API_KEY"}
     assert _case_writes(seed_script, "amp") == {"AMP_API_KEY"}
     assert _case_writes(seed_script, "cursor") == {"CURSOR_API_KEY"}
-    assert _case_writes(seed_script, "openhands") == {"OPENAI_API_KEY", "LLM_API_KEY"}
     assert _case_writes(seed_script, "copilot|hermes|devin|antigravity") == set()
     for alternative_secret in (
         "AZURE_OPENAI_API_KEY",
