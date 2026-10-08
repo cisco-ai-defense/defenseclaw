@@ -77,6 +77,19 @@ func TestNotRootResultLeavesOutTheDeploymentState(t *testing.T) {
 	if fields["ok"] != false || fields["errors"] == nil {
 		t.Fatalf("the refusal itself is missing: %s", document)
 	}
+	r.PreserveNotRootDeploymentState = true
+	document, err = json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(document, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"installed", "services", "readiness", "enrollment"} {
+		if _, ok := fields[name]; !ok {
+			t.Errorf("Secure Client not_root result lacks %s: %s", name, document)
+		}
+	}
 }
 
 func TestResultMarshalJSONKeepsAmpersandLiteral(t *testing.T) {
