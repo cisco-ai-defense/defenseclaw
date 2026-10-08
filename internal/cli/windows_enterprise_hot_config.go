@@ -235,7 +235,8 @@ func windowsEnterpriseHotConfigAdopted(ctx context.Context) bool {
 		out, _ := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
 		if json.Unmarshal(out, &report) == nil && report.Digest != "" && report.Digest == report.GatewayReportedDigest &&
-			report.GatewayLastReloadError == "" && (report.ConfigGeneration == 0 || report.ConfigGenerationRecorded) {
+			report.GatewayLastReloadError == "" && report.ConfigGeneration > 0 && report.ConfigGenerationRecorded &&
+			report.GatewayReportedConfigGeneration == report.ConfigGeneration {
 			return true
 		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {

@@ -28,19 +28,30 @@ import (
 // hotConfigHost stages an installed config and a supplied one, and stubs what
 // a config-only ensure touches outside them.
 type hotConfigHost struct {
-	configPath string
-	writes     []string
-	adopted    bool
+	configPath  string
+	writes      []string
+	adopted     bool
+	digestCalls int
+	adoptAfter  int
 }
 
 // digest is what the installed CLI's policy digest prints: the policy the
 // installed config computes to, and the one the gateway reports.
 func (host *hotConfigHost) digest(context.Context) ([]byte, error) {
+	host.digestCalls++
 	reported := "sha256:" + strings.Repeat("a", 64)
 	if host.adopted {
 		reported = "sha256:" + strings.Repeat("b", 64)
 	}
-	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) + `","config_generation":2,"config_generation_recorded":true,"gateway_reported_digest":"` + reported + `"}`), nil
+	generation := len(host.writes) + 10
+	gatewayGeneration := generation
+	if host.adoptAfter > 0 && host.digestCalls < host.adoptAfter {
+		gatewayGeneration--
+	}
+	return []byte(`{"effective_digest":"sha256:` + strings.Repeat("b", 64) +
+		`","config_generation":` + strconv.Itoa(generation) +
+		`,"config_generation_recorded":true,"gateway_reported_digest":"` + reported +
+		`","gateway_reported_config_generation":` + strconv.Itoa(gatewayGeneration) + `}`), nil
 }
 
 func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *windowsEnterpriseLifecycleOptions) {
@@ -184,6 +195,23 @@ func TestWindowsEnterpriseEnsureAppliesFormattingOnlyConfigWithoutRestart(t *tes
 	}
 	if got, _ := os.ReadFile(host.configPath); string(got) != next {
 		t.Fatalf("config.yaml = %q, want supplied bytes", got)
+	}
+	if !result.OK || result.Policy == nil || !result.Policy.Applied {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+// GAP-0647: a credential edit can keep the digest while the gateway still
+// uses the previous generation. Ensure waits for the new generation.
+func TestWindowsEnterpriseEnsureWaitsForCredentialGeneration(t *testing.T) {
+	const previous = "config_version: 9\nllm:\n  provider: openai\n  api_key: old-test-key\n"
+	const next = "config_version: 9\nllm:\n  provider: openai\n  api_key: new-test-key\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted, host.adoptAfter = true, 3
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if host.digestCalls < 3 || len(stub.calls) != 2 || stub.calls[1][1] != "Verify" {
+		t.Fatalf("digest polls %d, installer runs %q: want adoption before verify", host.digestCalls, stub.calls)
 	}
 	if !result.OK || result.Policy == nil || !result.Policy.Applied {
 		t.Fatalf("result = %+v", result)
