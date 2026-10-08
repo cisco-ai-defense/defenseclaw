@@ -1525,6 +1525,7 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
 
 _BOOL_FIELD_KEYS = frozenset(
     {
+        "admission.defaults.allow_list_bypass_scan",
         "notifications.enabled",
         "notifications.block_enforced",
         "notifications.block_would_block",
