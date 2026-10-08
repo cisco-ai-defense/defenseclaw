@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -16,6 +17,9 @@ import (
 // A revoke of a signed-out Windows user records the user's copy, and the
 // enumerator removes it once the user is signed in (GAP-0718).
 func TestEnterpriseACPUserCopyRemovedAtNextSignIn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows credential store needs an installer-protected service tree")
+	}
 	previousCfg := cfg
 	t.Cleanup(func() { cfg = previousCfg })
 	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
@@ -44,6 +48,9 @@ func TestEnterpriseACPUserCopyRemovedAtNextSignIn(t *testing.T) {
 // The Windows enumerator revokes the enrollments of a deleted account and
 // keeps every other one (GAP-0367).
 func TestRevokeEnterpriseACPEnrollmentsOfDeletedSIDs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows credential store needs an installer-protected service tree")
+	}
 	dataDir := t.TempDir()
 	const gone, present = "S-1-5-21-1-2-3-1117", "S-1-5-21-1-2-3-1118"
 	for _, principal := range []string{"sid:" + gone, "sid:" + present, "uid:1117"} {
