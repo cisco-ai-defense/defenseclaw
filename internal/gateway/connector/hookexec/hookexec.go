@@ -42,6 +42,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -304,6 +305,10 @@ type Options struct {
 	// request budget must include (the standalone foreign-hook guard's scan
 	// runs before Run). Zero starts the budget when Run is called.
 	StartedAt time.Time
+	// AssetFacts renders the assetfacts.Header value for a payload: what the
+	// standalone gateway, a service account, cannot read in this user's
+	// home. It is sent by standalone managed hooks only.
+	AssetFacts func(connector string, payload []byte) string
 }
 
 // Run executes the hook described by opts and returns the process exit code.
@@ -826,6 +831,11 @@ func sendHookRequest(
 		req.Header.Set("tracestate", v)
 	}
 	setUserIdentityHeaders(req, opts)
+	if opts.AssetFacts != nil && opts.ManagedEnterprise && !secureClientHook(opts) {
+		if value := opts.AssetFacts(opts.Connector, payload); value != "" {
+			req.Header.Set(assetfacts.Header, value)
+		}
+	}
 
 	return opts.HTTPClient.Do(req)
 }

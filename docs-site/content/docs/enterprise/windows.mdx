@@ -612,6 +612,10 @@ per-user install:
   periodic rescan is running.
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
+- The audit rows of these scans name the user whose profile holds the asset:
+  the `scan` and `scan-finding` rows carry `user.id` (the SID) and
+  `defenseclaw.user.name`, the `scan` row ends with `judge=<model>` when the
+  LLM judge ran, and the `quarantine` row ends with `user=<account>`.
 
 Standard users have no `skill`, `mcp` or `plugin` commands on a managed
 computer. An administrator scans a folder or a remote MCP server with the

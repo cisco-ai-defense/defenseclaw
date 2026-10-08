@@ -156,6 +156,13 @@ response, so the events do not all have the same effect:
 | `Stop` | `decision: "block"` prevents stopping and continues with the reason as a new continuation prompt. |
 | `SessionEnd` (0.145+) | Advisory observation only. Output cannot steer Codex or keep the thread open, and the hook has a three-second host maximum. |
 
+Codex loads a skill without a hook event of its own. DefenseClaw refuses a
+skill on `asset_policy.skill.denied` when it is selected as `$name` and when a
+tool call reads its folder, which is how Codex follows a skill asked for in
+plain words; see
+[Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)
+for what a hook cannot see.
+
 <Callout>
 Codex has no native ask surface here. Confirm verdicts become an alert/system message with `raw_action` preserved so operators can review the original action in audit or the TUI. That review cannot resume the hook call.
 </Callout>

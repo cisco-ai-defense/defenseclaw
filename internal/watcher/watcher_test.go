@@ -195,6 +195,26 @@ func TestAdmission_BlockedSkill(t *testing.T) {
 	}
 }
 
+// GAP-0581: a copy of a denied skill in a folder with another name, whose
+// SKILL.md still declares the denied name, is refused like the original.
+func TestAdmission_BlockedSkillByDeclaredName(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "epa-deny"})
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+
+	skillPath := filepath.Join(skillDir, "epa-alias")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillPath, "SKILL.md"), []byte("---\nname: epa-deny\ndescription: lab\n---\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "epa-alias", Path: skillPath, Timestamp: time.Now()})
+	if result.Verdict != VerdictBlocked {
+		t.Fatalf("verdict %q (%s), want blocked", result.Verdict, result.Reason)
+	}
+}
+
 func TestAdmission_AllowedSkill(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
@@ -1372,5 +1392,22 @@ func TestBlockReasonNamesTheDecidingFinding(t *testing.T) {
 	if err != nil || entry == nil || !strings.Contains(entry.Reason, "LOW_ANALYZABILITY Critically low analyzability score") ||
 		strings.Contains(entry.Reason, "DATA-READ") {
 		t.Fatalf("journal %+v (err %v), want the reason to name only the HIGH finding", entry, err)
+	}
+}
+
+// GAP-0575: a managed gateway's scan rows name the user whose folder held
+// the asset and the judge model the scan ran with.
+func TestWatcherScanCorrelationNamesOwnerAndJudge(t *testing.T) {
+	home := t.TempDir()
+	w := &InstallWatcher{}
+	w.SetAssetOwners([]AssetOwner{{Home: home, ID: "S-1-5-21-1-1001", IDKind: "windows_sid", Name: "dcw-epw1"}})
+	corr := w.ownedScanCorrelation(audit.ScanCorrelation{}, &scanner.ScanResult{
+		Target: filepath.Join(home, ".claude", "skills", "epa-crit"), JudgeModel: "bedrock/haiku",
+	})
+	if corr.UserName != "dcw-epw1" || corr.UserID != "S-1-5-21-1-1001" || corr.UserIDKind != "windows_sid" || corr.JudgeModel != "bedrock/haiku" {
+		t.Fatalf("correlation = %+v, want the owner and the judge", corr)
+	}
+	if other := w.ownedScanCorrelation(audit.ScanCorrelation{}, &scanner.ScanResult{Target: t.TempDir()}); other.UserName != "" || other.UserID != "" {
+		t.Fatalf("an asset outside every enrolled home got an owner: %+v", other)
 	}
 }

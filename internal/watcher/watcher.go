@@ -35,6 +35,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -132,6 +133,9 @@ type InstallWatcher struct {
 	// startupRescanDone is set after the first rescan cycle (rescan goroutine
 	// only).
 	startupRescanDone bool
+	// lastDenyLists is the denied skill and plugin lists the previous rescan
+	// cycle applied to installed assets (rescan goroutine only).
+	lastDenyLists string
 	// startupAdmitRoots are the skill and plugin roots that already held
 	// baselines when the startup rescan began (rescan goroutine only).
 	startupAdmitRoots map[InstallType][]string
@@ -197,6 +201,9 @@ type InstallWatcher struct {
 	// that holds it (GAP-0132). Empty means every root belongs to
 	// watcherConnectorName.
 	rootConnectors []rootConnector
+	// assetOwners names the account of each enrolled home, longest home
+	// first (SetAssetOwners).
+	assetOwners []AssetOwner
 
 	// mcpServers lists the MCP servers admission and the rescan see. Nil
 	// reads the connector config in the gateway's own home.
@@ -257,6 +264,52 @@ type rootConnector struct {
 // missing it was neither blocked nor audited (GAP-0571). Call before Run.
 func (w *InstallWatcher) AdmitNewRootsAtStartup(roots []string) {
 	w.newRoots = append([]string(nil), roots...)
+}
+
+// AssetOwner is the account whose home holds watched assets.
+type AssetOwner struct {
+	Home, ID, IDKind, Name string
+}
+
+// SetAssetOwners names the account of each enrolled home. A managed gateway
+// watches every enrolled user's folders, so its scan, scan-finding and
+// quarantine rows name the user whose asset it was (GAP-0575). Call it
+// before Run.
+func (w *InstallWatcher) SetAssetOwners(owners []AssetOwner) {
+	w.assetOwners = w.assetOwners[:0]
+	for _, owner := range owners {
+		if home := strings.TrimSpace(owner.Home); home != "" {
+			owner.Home = filepath.Clean(home)
+			w.assetOwners = append(w.assetOwners, owner)
+		}
+	}
+	sort.Slice(w.assetOwners, func(i, j int) bool { return len(w.assetOwners[i].Home) > len(w.assetOwners[j].Home) })
+}
+
+// ownerOf is the account whose home holds path.
+func (w *InstallWatcher) ownerOf(path string) (AssetOwner, bool) {
+	if w == nil || w.secureClientActive() {
+		return AssetOwner{}, false
+	}
+	for _, owner := range w.assetOwners {
+		if watcherPathAtOrBelow(path, owner.Home) {
+			return owner, true
+		}
+	}
+	return AssetOwner{}, false
+}
+
+// ownedScanCorrelation adds the asset's owner and the judge model of the
+// scan to a watcher scan correlation (GAP-0575).
+func (w *InstallWatcher) ownedScanCorrelation(correlation audit.ScanCorrelation, result *scanner.ScanResult) audit.ScanCorrelation {
+	if w == nil || result == nil || w.secureClientActive() {
+		return correlation
+	}
+	correlation.JudgeModel = result.JudgeModel
+	if owner, ok := w.ownerOf(result.Target); ok {
+		correlation.UserID, correlation.UserIDKind, correlation.UserName = owner.ID, owner.IDKind, owner.Name
+	}
+	return correlation
 }
 
 // newScanner resolves the scanner for evt via the injectable factory, falling
@@ -1071,6 +1124,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	assetDecision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           evt.Name,
+		DeclaredNames:  declaredAssetNames(cfg, evt),
 		Connector:      connector,
 		SourcePath:     evt.Path,
 		RuntimeSurface: "watcher",
@@ -1248,7 +1302,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 // rows in the actions table, unchanged.
 func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent, targetType, connector string) policy.AdmissionInput {
 	block, allow := policy.AssetPolicyListsFor(cfg, w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
-		TargetType: targetType, Name: evt.Name, Connector: connector, SourcePath: evt.Path,
+		TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(cfg, evt),
+		Connector: connector, SourcePath: evt.Path,
 	}))
 	input := policy.AdmissionInput{
 		TargetType: targetType,
@@ -1264,6 +1319,21 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 		input.VerifyFirstParty()
 	}
 	return input
+}
+
+// declaredAssetNames is the name a skill folder declares in its SKILL.md
+// when it differs from the folder name. A denied rule matches it too, so a
+// copy of a denied skill in a folder with another name is refused like the
+// original (GAP-0581). A Secure Client host keeps the folder-name match of
+// main (issue #1092).
+func declaredAssetNames(cfg *config.Config, evt InstallEvent) []string {
+	if evt.Type != InstallSkill || cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
+	if name := assetfacts.DeclaredSkillName(evt.Path); name != "" && !config.SameAssetName(name, evt.Name) {
+		return []string{name}
+	}
+	return nil
 }
 
 // withMCPDefinition adds how an MCP server starts (URL, command, args,
@@ -1976,11 +2046,16 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 }
 
 func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {
+	details := fmt.Sprintf("dest=%s", destPath)
+	if owner, ok := w.ownerOf(evt.Path); ok && owner.Name != "" {
+		// The row says whose asset it was (GAP-0575).
+		details += " user=" + owner.Name
+	}
 	event := audit.Event{
 		Action:   string(action),
 		Target:   evt.Path,
 		Actor:    "defenseclaw",
-		Details:  fmt.Sprintf("dest=%s", destPath),
+		Details:  details,
 		Severity: "INFO",
 	}
 	if action != audit.ActionQuarantine {
@@ -2100,7 +2175,7 @@ func (w *InstallWatcher) logScan(
 	}
 	return w.logger.LogScanWithCorrelation(
 		ctx, result, verdict,
-		watcherScanCorrelation(ctx, "", w.eventConnector(evt)),
+		w.ownedScanCorrelation(watcherScanCorrelation(ctx, "", w.eventConnector(evt)), result),
 	)
 }
 

@@ -257,6 +257,14 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "asset-policy-deny")
 
+    def test_denied_rule_matches_the_decomposed_spelling(self):
+        # GAP-0432: names compare after Unicode NFC, as the gateway does.
+        policy = self._asset_policy(denied=[SimpleNamespace(name="epa-caf\u00e9")])
+        d = evaluate_admission(
+            self.pe, target_type="skill", name="epa-cafe\u0301", asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
+
     def test_connector_allowed_rule_overrides_global_denied_rule(self):
         policy = self._asset_policy(
             denied=[SimpleNamespace(name="tool")],

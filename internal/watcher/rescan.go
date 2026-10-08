@@ -148,6 +148,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	// Scanner fingerprints depend on the target *type*, not the individual
 	// target, so compute them at most once per kind per cycle.
 	fpCache := make(map[string]string)
+	denyListsChanged := w.denyListsChanged()
 
 	var (
 		countMu          sync.Mutex
@@ -168,6 +169,15 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	for _, evt := range targets {
 		if ctx.Err() != nil {
 			break
+		}
+		if denyListsChanged && w.deniedByAssetList(evt) {
+			// An installed asset the new lists deny is refused now, as one
+			// that appears after the change would be, without waiting for
+			// its content to change (GAP-0627).
+			fmt.Fprintf(os.Stderr, "[rescan] %s %s is on the denied list; running install admission\n", evt.Type, evt.Name)
+			w.notifyAdmission(w.runAdmission(ctx, evt))
+			count(evt, rescanScanned)
+			continue
 		}
 		if w.admitsNewAtStartup(evt) {
 			// Added while the gateway was stopped: admitted by
@@ -201,6 +211,47 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		len(targets), scanned, skipped)
 	_ = w.logger.LogAction(string(audit.ActionRescan), "",
 		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
+}
+
+// denyListsChanged reports whether asset_policy.skill.denied or
+// plugin.denied differ from the lists the previous cycle applied; the first
+// cycle counts as a change, so a deny added while the gateway was stopped
+// applies at start. A Secure Client host keeps the cycle of main (issue
+// #1092).
+func (w *InstallWatcher) denyListsChanged() bool {
+	cfg := w.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	raw, err := json.Marshal([][]config.AssetPolicyRule{cfg.AssetPolicy.Skill.Denied, cfg.AssetPolicy.Plugin.Denied})
+	if err != nil {
+		return false
+	}
+	changed := string(raw) != w.lastDenyLists
+	w.lastDenyLists = string(raw)
+	return changed
+}
+
+// deniedByAssetList reports an installed skill or plugin on a denied list.
+// MCP servers are refused at the hook (asset_policy_runtime.go).
+func (w *InstallWatcher) deniedByAssetList(evt InstallEvent) bool {
+	switch {
+	case evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path):
+		return false
+	case evt.Type == InstallPlugin && (w.isManagedArtifact(evt.Path) || w.isOwnPlugin(evt.Path)):
+		return false
+	case evt.Type != InstallSkill && evt.Type != InstallPlugin:
+		return false
+	}
+	cfg := w.liveConfig()
+	if cfg == nil {
+		return false
+	}
+	verdict, _ := cfg.AssetListDecision(config.AssetPolicyInput{
+		TargetType: string(evt.Type), Name: evt.Name, DeclaredNames: declaredAssetNames(cfg, evt),
+		Connector: w.eventConnector(evt), SourcePath: evt.Path,
+	})
+	return verdict == config.AssetListDeny
 }
 
 // watchRootMarkerType is the target_snapshots type of the marker row saying
@@ -1545,9 +1596,9 @@ func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.S
 	if w == nil || w.logger == nil || result == nil {
 		return ""
 	}
-	correlation := watcherScanCorrelation(
+	correlation := w.ownedScanCorrelation(watcherScanCorrelation(
 		ctx, rescanRunID(), watcherConnectorName(w.cfg),
-	)
+	), result)
 	err := w.logger.LogScanWithCorrelation(ctx, result, result.Verdict, correlation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)

@@ -250,6 +250,34 @@ func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name strin
 	return MCPServerEntry{}, false
 }
 
+// LookupMCPServerUnderHome is LookupMCPServerForConnector for a user whose
+// home is not this process's: a standalone gateway runs as a service
+// account and answers the hooks of every user, so the server a hook names
+// is the one that user's agent configures (GAP-0576). Claude Code and
+// Codex are read; for other connectors ok is false.
+func LookupMCPServerUnderHome(connector, home, workspaceDir, name string) (MCPServerEntry, bool) {
+	name, home = strings.TrimSpace(name), strings.TrimSpace(home)
+	if name == "" || !filepath.IsAbs(home) {
+		return MCPServerEntry{}, false
+	}
+	var entries []MCPServerEntry
+	switch normalizeConnectorKey(connector) {
+	case "claudecode":
+		entries = readMCPServersClaudeCodeAt(filepath.Join(home, ".claude.json"),
+			filepath.Join(home, ".claude", "settings.json"), workspaceDir)
+	case "codex":
+		entries = readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+	default:
+		return MCPServerEntry{}, false
+	}
+	for _, entry := range entries {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
+	return MCPServerEntry{}, false
+}
+
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
 	switch normalizeConnectorKey(connector) {
 	case "claudecode":
@@ -1007,10 +1035,16 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 // --- Connector-specific MCP readers ---
 
 func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
+	return readMCPServersClaudeCodeAt(claudeCodeMCPStatePath(),
+		filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json"), workspaceDir), nil
+}
+
+// readMCPServersClaudeCodeAt reads Claude Code's servers from its state
+// file and settings.json at the given paths and the project .mcp.json.
+func readMCPServersClaudeCodeAt(statePath, settingsPath, workspaceDir string) []MCPServerEntry {
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
-	statePath := claudeCodeMCPStatePath()
 	local, user, stateErr := readMCPFromClaudeState(statePath, cwd)
 	if stateErr == nil {
 		// Claude's documented precedence is local, project, then user.
@@ -1034,12 +1068,11 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 	// Some Claude installations also carry a top-level user registry in
 	// settings.json. Keep it as the final user layer so the CLI state registry
 	// retains precedence while this additional source still fills missing names.
-	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
 	}
 
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries)
 }
 
 func claudeCodeMCPStatePath() string {
@@ -1167,6 +1200,12 @@ func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
+	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir), nil
+}
+
+// readMCPServersCodexAt reads Codex's servers from the user config.toml at
+// userPath and the project layers of workspaceDir.
+func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
 	// their entries take precedence, then the user layer fills remaining names.
@@ -1181,11 +1220,10 @@ func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
 		}
 	}
-	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
 	if e, err := ReadMCPFromCodexUserConfigTOML(userPath); err == nil {
 		entries = append(entries, e...)
 	}
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries)
 }
 
 func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {

@@ -413,10 +413,12 @@ def _same_name(rule_name: str, name: str, target_type: str) -> bool:
     case-insensitively (``_asset_rule_matches``), tool names exactly
     (``tool_decision``). An exact compare left a denied ``MySkill`` in place
     on an unblock or allow of ``myskill``, which still matched it (GAP-0319)."""
+    from defenseclaw.enforce.admission import asset_name_key
+
     rule_name, name = (rule_name or "").strip(), (name or "").strip()
     if target_type == "tool":
         return rule_name == name
-    return rule_name.lower() == name.lower()
+    return asset_name_key(rule_name) == asset_name_key(name)
 
 
 def _same_asset(rule: Any, name: str, connector: str, target_type: str) -> bool:
