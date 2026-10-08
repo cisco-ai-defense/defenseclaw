@@ -1312,6 +1312,23 @@ carry only counts and a summary of the same list. The runtime API also lists
 the last 100 attributed events (`customer_kernel_events`). The `status --json`
 output carries the same section.
 
+### Cost on the host
+
+The `observe`, `controls` and `controls-burnin` policies hook `file_open`, so
+every open on the computer, by any process, runs their path filters in the
+kernel. Measured in the live round on a t3.xlarge (RHEL 9.8, Tetragon 1.7.1,
+four customer policies loaded in both runs), with `enforce` and all four
+DefenseClaw policies loaded against mode `off`:
+
+| Workload | Mode `off` | `enforce`, four policies | Difference |
+| --- | --- | --- | --- |
+| `open` and `close` of one file, 300,000 times | 6.2 to 6.3 µs per open | 14.4 to 14.8 µs per open | about +8.3 µs per open (2.3 times) |
+| Reading 60,000 files under `/usr` with `cat` | 0.81 to 0.85 s | 1.23 to 1.25 s | about +48 percent wall time |
+
+Workloads that open many files, such as builds, indexers and package
+installs, feel it most. Measure it on a pilot ring in `observe` before you
+widen it.
+
 ### Failure behavior
 
 | Event | Behavior |

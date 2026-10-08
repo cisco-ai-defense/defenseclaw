@@ -72,6 +72,10 @@ says otherwise. Per-user installs never connect to Tetragon.
     and `enforce`. Tetragon 1.6.x, Ubuntu 22.04/24.04 and arm64 support
     `consume` only. All of these are expected, not verified yet. RHEL 8 falls
     back to `cn_proc` and `fanotify`.
+  - Cost: the `file_open` policies run on every open on the computer.
+    Measured on a t3.xlarge with all four DefenseClaw policies in `enforce`:
+    about +8.3 µs per open (2.3 times mode `off`), and +48 percent wall time
+    for a job that reads 60,000 files; see the guide's "Cost on the host".
 - **Readiness check and fleet onboarding.** `enterprise linux tetragon verify
   [--ready-for consume|observe|enforce]` checks one computer, one line per
   check with the command that fixes a failure, and exits non-zero when a check
