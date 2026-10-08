@@ -238,6 +238,35 @@ def test_local_dashboards_and_rules_use_active_v8_event_sources() -> None:
     assert "severity: critical" in managed_aid_alert
 
 
+def test_kernel_tables_keep_their_no_data_sentence_out_of_empty_cells() -> None:
+    # GAP-0025: a table's fieldConfig.defaults.noValue is also what Grafana
+    # prints in an empty cell, so a kernel event with no hook join showed "No
+    # agent events in range" in its Hook join column. Each kernel table keeps
+    # the sentence for an empty table and gives empty text cells a short
+    # placeholder; the hook join reads "none".
+    seen = 0
+    for name in ("defenseclaw-ai-runtime.json", "defenseclaw-blocked-events.json"):
+        def walk(panels: list) -> None:
+            nonlocal seen
+            for panel in panels:
+                walk(panel.get("panels", []))
+                field_config = panel.get("fieldConfig", {})
+                exprs = " ".join(target.get("expr", "") for target in panel.get("targets", []))
+                if panel.get("type") != "table" or "kernel" not in (exprs + panel.get("title", "")).lower():
+                    continue
+                if not field_config.get("defaults", {}).get("noValue"):
+                    continue
+                seen += 1
+                overrides = field_config.get("overrides", [])
+                strings = [o for o in overrides if o.get("matcher") == {"id": "byType", "options": "string"}]
+                assert strings and strings[0]["properties"] == [{"id": "noValue", "value": "-"}], panel["title"]
+                if "hook_join" in exprs:
+                    hook = [o for o in overrides if o.get("matcher") == {"id": "byName", "options": "Hook join"}]
+                    assert hook and hook[0]["properties"] == [{"id": "noValue", "value": "none"}], panel["title"]
+        walk(_dashboard(name).get("panels", []))
+    assert seen >= 5
+
+
 def test_security_dashboard_exposes_generated_ai_defense_metrics() -> None:
     dashboard = _dashboard("defenseclaw-security.json")
     attempts = _panel(dashboard, "AI Defense attempts / min")

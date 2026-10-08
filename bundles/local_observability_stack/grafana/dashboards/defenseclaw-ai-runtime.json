@@ -1185,7 +1185,20 @@
             "align": "left"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "string"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "showHeader": true
@@ -1963,7 +1976,20 @@
             "align": "left"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "string"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "showHeader": true,
@@ -2059,6 +2085,18 @@
           }
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "string"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -2500,7 +2538,32 @@
             "align": "left"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "string"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hook join"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "none"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "showHeader": true,
