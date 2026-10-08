@@ -306,7 +306,13 @@ rules on Linux and macOS:
    from a copy of a shipped pack: `policies/guardrail/default`, `strict` or
    `permissive` in the DefenseClaw source release of the version you deploy,
    or the `share/policies/guardrail` folder above on a host where DefenseClaw
-   is already installed. The packages ship no copy before they install, so
+   is already installed. Create the parent before copying: packages do not
+   create the administrator's `policies/guardrail` directory. For example on
+   macOS, run `sudo mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail`
+   before `sudo cp -R /opt/cisco/defenseclaw/share/policies/guardrail/default
+   /opt/cisco/defenseclaw/etc/policies/guardrail/<name>`. On Linux, use
+   `/etc/defenseclaw/policies/guardrail` and the `/opt/defenseclaw/share/`
+   source instead. The packages ship no copy before they install, so
    for a first install put the pack in place before the package (with your
    MDM, for example) or install with the built-in packs first and switch
    `rule_pack_dir` afterwards. Keep every file and folder owned by root,
