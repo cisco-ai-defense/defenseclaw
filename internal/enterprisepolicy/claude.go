@@ -226,9 +226,9 @@ func readClaudeFileSources(opts Options) ([]claudeSource, error) {
 	if data, exists, err := readPolicyFile(opts, base); err != nil {
 		return nil, err
 	} else if exists {
-		doc, err := decodeOrderedObject(data)
+		doc, err := decodeOrderedObject(bytes.TrimPrefix(data, utf8BOM))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w (Claude Code refuses to start with an unparsable managed settings file)", base, err)
+			return nil, fmt.Errorf("%s: %w; DefenseClaw cannot check Claude Code's managed settings until this file parses as JSON: fix it, then rerun", base, err)
 		}
 		sources = append(sources, claudeSource{name: base, doc: doc})
 	}
@@ -255,14 +255,20 @@ func readClaudeFileSources(opts Options) ([]claudeSource, error) {
 		if !exists {
 			continue
 		}
-		doc, err := decodeOrderedObject(data)
+		doc, err := decodeOrderedObject(bytes.TrimPrefix(data, utf8BOM))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w (Claude Code refuses to start with an unparsable managed drop-in)", file, err)
+			return nil, fmt.Errorf("%s: %w; DefenseClaw cannot check Claude Code's managed settings until this drop-in parses as JSON: fix it, then rerun", file, err)
 		}
 		sources = append(sources, claudeSource{name: file, doc: doc})
 	}
 	return sources, nil
 }
+
+// utf8BOM starts a file a Windows editor saved as "UTF-8 with BOM". Claude
+// Code and Codex read such a managed file (and its CRLF line ends), so
+// DefenseClaw does too: it refused one, failed verify for every user and
+// claimed Claude Code would not start (GAP-0914, GAP-0917).
+var utf8BOM = []byte("\xef\xbb\xbf")
 
 // claudeEffectiveScalar returns the last file-based value for key.
 func claudeEffectiveScalar(sources []claudeSource, key string) (any, string) {

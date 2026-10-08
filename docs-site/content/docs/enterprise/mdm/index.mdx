@@ -464,7 +464,11 @@ the policy folder; re-stage the pack before a reinstall.
 Run Unix `detect.sh` as root. A standard user gets `unknown` in value/Jamf
 format. `--min-version` requires a dotted release such as `1.0.0`; a bad
 value exits `2`. With `--require-healthy`, lifecycle lock contention reports
-`busy` (exit `75` in exit format), so retry after the apply finishes.
+`busy` (exit `75` in exit format), so retry after the apply finishes. On
+Linux, `--require-healthy` also reports `unhealthy` while dpkg lists the
+package half-configured or half-installed, or rpm lists two versions of it
+(an install or upgrade cut short, for example by a power loss), so the MDM
+runs the deployment again; until then apt refuses every other package.
 
 MDMs ask two different questions. Answer each with the mechanism that fits.
 

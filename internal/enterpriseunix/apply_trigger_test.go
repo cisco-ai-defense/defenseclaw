@@ -200,3 +200,18 @@ func TestAPackageUpgradeDoesNotLeaveTheDailyVerifyFailed(t *testing.T) {
 	}
 	requireError(t, h.run(Options{Action: ActionVerify}), codeBusy)
 }
+
+// Right after an administrator replaced config.yaml, status and verify failed
+// with "modified after install ... run repair" while the apply trigger was
+// still applying the change; a repair then fought the apply (GAP-0919).
+func TestStatusAndVerifyWhileTheApplyTriggerRunsAreBusyNotFailed(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.activating = map[string]bool{unitApplyService: true}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if len(r.Errors) != 1 || r.Errors[0].Code != codeBusy || !strings.Contains(r.Errors[0].Message, "configuration change is being applied") {
+			t.Fatalf("%s during an apply: %+v", action, r.Errors)
+		}
+	}
+}

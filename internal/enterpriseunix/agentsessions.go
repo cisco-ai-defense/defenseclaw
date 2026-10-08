@@ -41,6 +41,13 @@ var agentCLINames = map[string]bool{
 	"devin": true, "hermes": true, "openhands": true, "omnigent": true, "agy": true, "kiro-cli": true,
 }
 
+// agentsReadingHooksLive pick up DefenseClaw's hooks without a restart: a
+// Codex session open before the install was inspected at once (its managed
+// requirements are read per turn), so naming it, or the Codex app-server
+// daemon an old auto-update left behind, asked users to restart sessions
+// that were already inspected (GAP-0936).
+var agentsReadingHooksLive = map[string]bool{"codex": true}
+
 // scriptHosts run an agent CLI given as their first argument.
 var scriptHosts = map[string]bool{"node": true, "nodejs": true, "bun": true, "deno": true, "python": true, "python3": true}
 
@@ -59,8 +66,17 @@ func agentCLIOf(argv []string) string {
 	if !scriptHosts[name] && !strings.HasPrefix(name, "python3.") {
 		return ""
 	}
-	for _, argument := range argv[1:] {
-		if strings.HasPrefix(argument, "-") {
+	for index, argument := range argv[1:] {
+		switch {
+		case argument == "-c" || argument == "-m":
+			// Hermes' launcher runs its own Python with `-I -c` and a
+			// bootstrap that imports hermes_cli, so no argument names the
+			// agent and it was never listed (GAP-0936).
+			if index+2 < len(argv) && strings.Contains(argv[index+2], "hermes_cli") {
+				return "hermes"
+			}
+			return ""
+		case strings.HasPrefix(argument, "-"):
 			continue
 		}
 		script := strings.TrimSuffix(filepath.Base(argument), filepath.Ext(argument))
@@ -92,7 +108,7 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 	}
 	var out []agentSession
 	for _, session := range all {
-		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) {
+		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) || agentsReadingHooksLive[session.Agent] {
 			continue
 		}
 		out = append(out, session)

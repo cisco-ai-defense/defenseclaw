@@ -114,15 +114,21 @@ func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeHostFile(t, h, "/proc/stat", fmt.Sprintf("cpu 0 0 0 0\nbtime %d\n", activated.Add(-time.Hour).Unix()))
-	agent := func(pid string, ticks int64) {
-		writeHostFile(t, h, "/proc/"+pid+"/cmdline", "claude\x00--resume\x00")
+	agent := func(pid, cmdline string, ticks int64) {
+		writeHostFile(t, h, "/proc/"+pid+"/cmdline", cmdline)
 		writeHostFile(t, h, "/proc/"+pid+"/stat", fmt.Sprintf("%s (claude) S 1 %s %s%d 0 0", pid, pid, strings.Repeat("0 ", 16), ticks))
 	}
-	agent("4321", 100)          // started an hour before the activation
-	agent("4322", 3600*100+600) // started after it
+	agent("4321", "claude\x00--resume\x00", 100)          // started an hour before the activation
+	agent("4322", "claude\x00--resume\x00", 3600*100+600) // started after it
+	// Hermes runs its bootstrap with `python3 -I -c`; Codex reads the
+	// managed hooks without a restart, and so does its app-server daemon
+	// (GAP-0936).
+	agent("4323", "/home/u/.hermes/tools/python/bin/python3\x00-I\x00-c\x00import os\nfrom hermes_cli.main import main\x00", 100)
+	agent("4324", "/home/u/.codex/packages/app-server-daemon/releases/0.161.0/codex\x00app-server\x00", 100)
 	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
-	if !strings.Contains(got, "claude (pid 4321)") || strings.Contains(got, "4322") {
-		t.Fatalf("status does not name exactly the older agent session: %q", got)
+	if !strings.Contains(got, "claude (pid 4321)") || !strings.Contains(got, "hermes (pid 4323)") ||
+		strings.Contains(got, "4322") || strings.Contains(got, "4324") {
+		t.Fatalf("status does not name exactly the older uninspected sessions: %q", got)
 	}
 }
 

@@ -108,6 +108,17 @@ const AgentHostHeader = "X-DefenseClaw-Agent-Host"
 // unclassified call omits it.
 const AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
 
+// ClientRefusalHeader carries, on the standalone hook socket, a refusal the
+// hook made itself before it could send the event: the gateway records it
+// (audit row and log line) and answers 403. Only
+// ManagedUserNamespaceReason is accepted.
+const ClientRefusalHeader = "X-DefenseClaw-Client-Refusal"
+
+// ManagedUserNamespaceReason is the refusal of a hook that runs in a private
+// user namespace (unshare -U, a sandbox tool): from there it cannot check the
+// root-owned runtime state, whose owners read as the overflow uid.
+const ManagedUserNamespaceReason = "enterprise_managed_user_namespace"
+
 // AgentSurfaceHeaderValue returns surface when it is cli, desktop or
 // extension, else "".
 func AgentSurfaceHeaderValue(surface string) string {
@@ -1785,6 +1796,10 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 			// The service is also stopped while a lifecycle transaction is
 			// pending, which starting it does not fix (GAP-0509).
 			"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do."
+	case reason == ManagedUserNamespaceReason:
+		// The setup is fine; the agent's process is the problem (GAP-0923).
+		cause, advice = "this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket",
+			"Start the agent from your normal login session; if this continues, contact your administrator."
 	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":

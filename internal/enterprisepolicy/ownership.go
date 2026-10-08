@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -257,11 +258,24 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 			return false, err
 		}
 	}
+	// A directory above the file that users cannot list or pass (an
+	// administrator's chmod 0700) hides the policy from every agent.
+	dirsRestored := false
+	if problem := publishedDirProblem(opts, path); problem != "" {
+		restored, err := restorePublishedDirs(opts, path)
+		if err != nil {
+			return changed, err
+		}
+		if len(restored) > 0 {
+			dirsRestored = true
+			state.detail("restored %s to mode 0755 so every user's agent can read %s (%s)", strings.Join(restored, ", "), path, problem)
+		}
+	}
 	record.PostimageSHA256 = sha256Hex(rendered)
 	if err := saveRecord(opts, record); err != nil {
-		return changed, err
+		return changed || dirsRestored, err
 	}
-	return changed, nil
+	return changed || dirsRestored, nil
 }
 
 // ownershipRecordNames lists the ownership records connector's machine
@@ -292,6 +306,7 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 	if opts.PolicyFor(connector).Ownership != config.MachinePolicyOwnershipMerge {
 		return
 	}
+	dirsReported := map[string]bool{}
 	for _, name := range ownershipRecordNames(opts, connector) {
 		record, err := loadRecord(opts, name)
 		if err != nil || record == nil {
@@ -305,8 +320,44 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 			state.Drift = true
 			state.conflict("%s has %s; DefenseClaw publishes it with mode 0644, owned by root, so every user's agent can read it; the next lifecycle run that applies changes (ensure, repair or reconcile) restores it", record.Path, problem)
 		}
+		if problem := publishedDirProblem(opts, record.Path); problem != "" && !dirsReported[problem] {
+			dirsReported[problem] = true
+			state.Drift = true
+			state.conflict("users cannot read %s: %s, so their agents run without DefenseClaw's machine policy there; DefenseClaw keeps the directories above the files it publishes at mode 0755, owned by root, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) restores them", record.Path, problem)
+		}
 	}
 	state.finish()
+}
+
+// RestorePublishedPolicyDirs gives the directories above every policy file
+// DefenseClaw publishes (ownership: merge) back the mode 0755 users need to
+// read it. The hook guardian runs it on each pass, so an administrator's
+// chmod 0700 of /etc/claude-code/managed-settings.d does not leave Claude
+// Code without managed settings until the next repair (GAP-0913). It returns
+// the directories it changed.
+func RestorePublishedPolicyDirs(opts Options) ([]string, error) {
+	var restored []string
+	var errs []error
+	for _, name := range append(targetNames(), companionNames()...) {
+		if opts.PolicyFor(name).Ownership != config.MachinePolicyOwnershipMerge {
+			continue
+		}
+		for _, recordName := range ownershipRecordNames(opts, name) {
+			record, err := loadRecord(opts, recordName)
+			if err != nil || record == nil {
+				continue
+			}
+			if _, err := os.Lstat(platformPath(opts, record.Path)); err != nil {
+				continue
+			}
+			dirs, err := restorePublishedDirs(opts, record.Path)
+			restored = appendUnique(restored, dirs...)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", record.Path, err))
+			}
+		}
+	}
+	return restored, errors.Join(errs...)
 }
 
 // restoreOrStrip removes DefenseClaw's content from path. When the file is

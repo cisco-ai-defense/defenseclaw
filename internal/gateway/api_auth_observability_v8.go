@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -363,6 +364,7 @@ func apiAuthenticationFailureLogReason(reason string) string {
 		managedHookReasonRootDenied,
 		managedHookReasonLedgerUnavailable,
 		managedHookReasonConnectorUnknown,
+		hookexec.ManagedUserNamespaceReason,
 		userScopedIdentityMismatchReason,
 		userScopedListenerProofRefusedReason,
 		"invalid_scoped_header_token",

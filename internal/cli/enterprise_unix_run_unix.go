@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -163,7 +164,7 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 	// config the installed binary refuses: repair applies the same config
 	// again, and the config_refused error above names the fix.
 	if repairCommand != "" && result.Installed && !lifecycleResultHasError(result, "lifecycle_busy") &&
-		!lifecycleResultHasError(result, "config_refused") && !configOnlyProblems(result) &&
+		!lifecycleResultHasError(result, "config_refused") && !repairCannotFixProblems(result) &&
 		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
 		target := "them"
 		if len(result.Errors) == 1 {
@@ -261,11 +262,11 @@ func lifecycleResultHasWarning(result *enterprisestatus.Result, code string) boo
 	return false
 }
 
-// configOnlyProblems reports whether every error of result is a config
-// problem (no connector enabled, a rejected config.yaml). Its line already
-// says to change config.yaml and run ensure; repair does not fix it
-// (GAP-0265).
-func configOnlyProblems(result *enterprisestatus.Result) bool {
+// repairCannotFixProblems reports whether every error of result is one
+// repair does not fix: a config problem (no connector enabled, a rejected
+// config.yaml), whose line says to change config.yaml and run ensure
+// (GAP-0265), or a file the administrator owns.
+func repairCannotFixProblems(result *enterprisestatus.Result) bool {
 	configProblems := map[string]bool{}
 	for _, warning := range result.Warnings {
 		if warning.Code == "no_connectors_enabled" || warning.Code == "config_rejected" {
@@ -273,7 +274,10 @@ func configOnlyProblems(result *enterprisestatus.Result) bool {
 		}
 	}
 	for _, e := range result.Errors {
-		if !configProblems[e.Message] {
+		// A file the administrator owns (ownership: verify_only) is fixed by
+		// deploying the export the problem names; repair never writes it
+		// (GAP-0918).
+		if !configProblems[e.Message] && !strings.Contains(e.Message, "missing_defenseclaw_hooks:") {
 			return false
 		}
 	}

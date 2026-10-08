@@ -346,6 +346,14 @@ enumerator enrolls accounts with a uid of 501 or higher by default. See
 waiting for the next minute, run
 `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`.
 
+A `guardrail.profile_assignments` group this Mac does not know (renamed or
+deleted in the directory) selects nobody, so its members get the default
+profile. `status` and `verify` warn `profile_assignment_unmatched` for it,
+with the same list `enterprise macos profile-explain --user <account>
+--connector <connector>` shows under `warnings`, and the gateway log
+(`/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`) has a `[guardrail]` line for
+it. The managed Mac has no `defenseclaw guardrail profile` commands.
+
 See [Status and verify](/docs/enterprise/operations#status-and-verify) and
 [Logs and events](/docs/enterprise/operations#logs-and-events) for
 monitoring.

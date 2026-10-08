@@ -209,6 +209,15 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if err := lifecycleFailure(noConnector, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("no connector enabled: %q, want no repair advice", err)
 	}
+	// GAP-0918: repair never writes a verify_only file; its problem names
+	// the export instead.
+	verifyOnly := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	verifyOnly.Installed = true
+	verifyOnly.AddError("verify_failed", "DefenseClaw hooks are not in place in vendor machine policy for codex, so codex runs without them; missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only)")
+	verifyOnly.Finish("linux", 0)
+	if err := lifecycleFailure(verifyOnly, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("verify_only: %q, want no repair advice", err)
+	}
 }
 
 // A verify that found another lifecycle run holding the lock printed an

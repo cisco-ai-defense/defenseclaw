@@ -629,3 +629,74 @@ func TestVerifyOnlyCodexNamesTheExportAndEnsureAppliesItsReturn(t *testing.T) {
 		t.Fatalf("record machine policy connectors %v", record.MachinePolicyConnectors)
 	}
 }
+
+// A CIS-style chmod 0700 of managed-settings.d made Claude Code skip every
+// managed setting while policy verify, verify, status and repair all said the
+// deployment was healthy (GAP-0913).
+func TestVerifyFailsAndRepairRestoresAnUnreadableClaudeDropInDirectory(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	writeFreshLedger(t, h)
+	dir := h.env.P(path.Dir(claudeDropIn))
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, "users cannot read") {
+		t.Fatalf("verify does not report the unreadable directory: %s", got)
+	}
+	if status := h.run(Options{Action: ActionStatus}); status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status reads complete with the drop-in directory unreadable: %+v", status.Warnings)
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("repair left %s at %v (%v)", dir, info.Mode(), err)
+	}
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}
+
+// A company drop-in that sets disableAllHooks (or a Codex requirements file
+// that turns the lock off) made enterprise policy verify fail while
+// enterprise linux verify exited 0 and status read security_complete true,
+// and the marker prompt was answered (GAP-0909, GAP-0912).
+func TestStatusAndVerifyFailWhenCompanyPolicyTurnsDefenseClawHooksOff(t *testing.T) {
+	for name, override := range map[string]func(h *testHost) error{
+		"claude disableAllHooks drop-in": func(h *testHost) error {
+			return os.WriteFile(h.env.P(path.Dir(claudeDropIn)+"/96-company-disableall.json"), []byte(`{"disableAllHooks": true}`), 0o644)
+		},
+		"codex lock off": func(h *testHost) error {
+			return os.WriteFile(h.env.P(codexRequirements), []byte(strings.Replace(h.read(codexRequirements),
+				"allow_managed_hooks_only = true", "allow_managed_hooks_only = false", 1)), 0o644)
+		},
+	} {
+		h := newTestHost(t, "linux")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode", "codex")}))
+		writeFreshLedger(t, h)
+		if err := override(h); err != nil {
+			t.Fatal(err)
+		}
+		requireError(t, h.run(Options{Action: ActionVerify}), codeVerify)
+		if status := h.run(Options{Action: ActionStatus}); status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+			t.Fatalf("%s: status reads complete: %+v", name, status.Warnings)
+		}
+	}
+}
+
+// ownership: off for an enabled connector left status and verify green with
+// no note while its sessions ran without DefenseClaw's hooks (GAP-0922).
+func TestStatusWarnsForAnEnabledConnectorWithMachinePolicyOwnershipOff(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	off := strings.Replace(h.read(h.env.Layout.ConfigPath), "  profile: standalone\n",
+		"  profile: standalone\n  machine_policy:\n    connectors:\n      claudecode:\n        ownership: \"off\"\n", 1)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(file, []byte(off), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: file}))
+	writeFreshLedger(t, h)
+	verify := h.run(Options{Action: ActionVerify})
+	if !strings.Contains(messagesOf(verify.Warnings, codeMachinePolicyOff), "claudecode sessions run without DefenseClaw's hooks") {
+		t.Fatalf("verify does not warn about ownership off: %+v", verify.Warnings)
+	}
+}
