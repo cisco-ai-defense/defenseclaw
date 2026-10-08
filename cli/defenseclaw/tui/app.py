@@ -312,8 +312,8 @@ TOKENS = DEFAULT_TOKENS
 def _config_error_summary(path: Path, error: Exception) -> str:
     """Keep the actionable config failure visible at 80 columns."""
 
-    match = re.search(r"\bline (\d+)\b", str(error))
-    location = f" line {match.group(1)}" if match else ""
+    lines = re.findall(r"\bline (\d+)\b", str(error))
+    location = f" line {lines[-1]}" if lines else ""
     return f"{path.name}{location} is invalid; run defenseclaw config validate"
 
 
