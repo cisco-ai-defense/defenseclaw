@@ -33,7 +33,7 @@ func TestAdmissionIssuesAreStatusWarnings(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := &enterprisestatus.Result{}
-	appendAdmissionIssueWarnings(result, dataDir)
+	appendAdmissionIssueWarnings(result, dataDir, filepath.Join(dataDir, "guardian"))
 	if len(result.Warnings) != 2 || result.Warnings[0].Code != "asset_not_quarantined" ||
 		!strings.Contains(result.Warnings[0].Message, "DCLAB\\dcad-pw1 ("+present+")") ||
 		result.Warnings[1].Code != "asset_not_scanned" || !strings.Contains(result.Warnings[1].Message, "MCP server notes") {

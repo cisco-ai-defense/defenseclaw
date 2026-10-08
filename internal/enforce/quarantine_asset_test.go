@@ -331,6 +331,10 @@ func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
 		!strings.Contains(result.Error, "deferred") {
 		t.Fatalf("deferred answer = %+v, %v", result, err)
 	}
+	// GAP-0795: the deferred request keeps why, for enterprise windows status.
+	if deferred := channel.DeferredRemovals(); len(deferred) != 1 || deferred[0].Deferred != "the owner is signed out" {
+		t.Fatalf("deferred removals %+v, want one saying why", deferred)
+	}
 	if err := os.Remove(requestPath); err != nil { // the gateway collected its answer
 		t.Fatal(err)
 	}
@@ -349,7 +353,7 @@ func TestDeferredQuarantineRemovalIsRetriedUntilItSucceeds(t *testing.T) {
 	signedIn = true
 	channel.ServeDeferred(retry)
 	channel.ServeDeferred(retry)
-	if retries != 2 {
+	if retries != 2 || len(channel.DeferredRemovals()) != 0 {
 		t.Fatalf("deferred removal ran %d times, want 2 (kept while signed out, dropped once removed)", retries)
 	}
 }

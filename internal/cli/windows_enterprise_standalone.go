@@ -296,7 +296,7 @@ func runWindowsEnterpriseStandaloneAction(
 			}
 		}
 		if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
-			appendAdmissionIssueWarnings(result, layout.DataDir)
+			appendAdmissionIssueWarnings(result, layout.DataDir, layout.GuardianAuthDir)
 		}
 	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)

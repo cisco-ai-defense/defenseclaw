@@ -656,12 +656,17 @@ per-user install:
   guardian removes the original as that user, after checking that it is in a
   watched folder and matches the copy. A folder that an administrator or a
   SYSTEM job copied into the profile, and so owns, is removed the same way,
-  as long as the user may delete it. For a signed-out user it uses an S4U
-  logon; a Microsoft Entra ID account has none, so the guardian removes the
-  folder when that user next signs in, and `hook-guardian.log` says so
-  (`deferred: ... removes the folder when that user next signs in`, then
-  `removed now that the user is signed in`). Two users with a skill or plugin
-  of the same name each get their own quarantine copy.
+  as long as the user may delete it. A user with a disconnected session
+  counts as signed in. For a signed-out user it uses an S4U logon: MSV1_0 for
+  a local account, Kerberos for an Active Directory account (by its user
+  principal name, through a domain controller). A Microsoft Entra ID account
+  has no S4U logon, and Windows can refuse one, for example when no domain
+  controller answers; the guardian then removes the folder when that user
+  next signs in. `hook-guardian.log` says why (`deferred: ... the owner of
+  <user> is signed out, and ...`, then `removed now that the user is signed
+  in`), and until then `enterprise windows status` and `verify` warn with
+  `asset_removal_deferred`. Two users with a skill or plugin of the same name
+  each get their own quarantine copy.
 - A scan that fails (the scanner exits, or the gateway service cannot read
   the folder) blocks the asset and disables it at runtime, as a rejected
   verdict does: a blocked MCP server's tool calls are refused and a blocked

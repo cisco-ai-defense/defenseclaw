@@ -126,10 +126,50 @@ func resolveWindowsEnterpriseS4UTargetToken(target *windows.SID) (windows.Token,
 	if err != nil {
 		return 0, err
 	}
-	pkg := "Kerberos"
 	if strings.EqualFold(domain, computer) {
-		pkg = "MICROSOFT_AUTHENTICATION_PACKAGE_V1_0"
+		return windowsS4ULogonToken(target, "MICROSOFT_AUTHENTICATION_PACKAGE_V1_0", account, domain)
 	}
+	// Kerberos S4U names the client by its user principal name; the
+	// pre-Windows 2000 form (DOMAIN, sAMAccountName) is the fallback. A
+	// signed-out Active Directory user was refused with the second form
+	// alone (GAP-0795).
+	var upnErr error
+	if upn, err := windowsAccountUPN(domain, account); err == nil {
+		token, logonErr := windowsS4ULogonToken(target, "Kerberos", upn, "")
+		if logonErr == nil {
+			return token, nil
+		}
+		upnErr = fmt.Errorf("as %s: %w", upn, logonErr)
+	}
+	token, err := windowsS4ULogonToken(target, "Kerberos", account, domain)
+	if err != nil && upnErr != nil {
+		return 0, fmt.Errorf("%w; %v", err, upnErr)
+	}
+	return token, err
+}
+
+// windowsAccountUPN asks the domain for the user principal name of
+// domain\account.
+func windowsAccountUPN(domain, account string) (string, error) {
+	name, err := windows.UTF16PtrFromString(domain + `\` + account)
+	if err != nil {
+		return "", err
+	}
+	size := uint32(512)
+	buffer := make([]uint16, size)
+	if err := windows.TranslateName(name, windows.NameSamCompatible, windows.NameUserPrincipal, &buffer[0], &size); err != nil {
+		return "", err
+	}
+	upn := windows.UTF16ToString(buffer)
+	if !strings.Contains(upn, "@") {
+		return "", fmt.Errorf("enterprise hooks: %s\\%s has no user principal name", domain, account)
+	}
+	return upn, nil
+}
+
+// windowsS4ULogonToken runs one S4U logon with pkg for user (and domain,
+// when set) and returns an impersonation token.
+func windowsS4ULogonToken(target *windows.SID, pkg, account, domain string) (windows.Token, error) {
 	request, requestSize, err := windowsS4ULogonBuffer(account, domain)
 	if err != nil {
 		return 0, err

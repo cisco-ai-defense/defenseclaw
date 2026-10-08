@@ -23,6 +23,7 @@ import (
 var (
 	windowsEnterpriseMutationIdentityCheck = requireWindowsEnterpriseLocalSystem
 	windowsEnterpriseTargetTokenResolver   = resolveWindowsEnterpriseTargetToken
+	windowsEnterpriseSessionTokenResolver  = resolveWindowsEnterpriseSessionToken
 	windowsEnterpriseSetThreadToken        = windows.SetThreadToken
 	windowsEnterpriseRevertThreadToken     = windows.RevertToSelf
 	windowsEnterpriseLockOSThread          = runtime.LockOSThread
@@ -449,6 +450,25 @@ func windowsEnterpriseTokenIntegrityRID(token windows.Token) (uint32, error) {
 }
 
 func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, error) {
+	return resolveWindowsEnterpriseTargetTokenIn(target, false)
+}
+
+// resolveWindowsEnterpriseSessionToken also takes the token of a
+// disconnected session: its user is still signed in. The guardian deferred a
+// quarantine removal for a user with a disconnected RDP session as if that
+// user were signed out (GAP-0795).
+func resolveWindowsEnterpriseSessionToken(target *windows.SID) (windows.Token, error) {
+	return resolveWindowsEnterpriseTargetTokenIn(target, true)
+}
+
+// withWindowsEnterpriseSessionImpersonation is
+// withWindowsEnterpriseTargetImpersonation under the token of an active or
+// disconnected session.
+func withWindowsEnterpriseSessionImpersonation(target *windows.SID, expectedHome string, fn func() error) error {
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseSessionTokenResolver, fn)
+}
+
+func resolveWindowsEnterpriseTargetTokenIn(target *windows.SID, disconnected bool) (windows.Token, error) {
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
 	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
@@ -460,7 +480,7 @@ func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, er
 	sessionIDs := make([]uint32, 0, count)
 	if count > 0 && sessions != nil {
 		for _, session := range unsafe.Slice(sessions, count) {
-			if session.State == windows.WTSActive {
+			if session.State == windows.WTSActive || (disconnected && session.State == windows.WTSDisconnected) {
 				sessionIDs = append(sessionIDs, session.SessionID)
 			}
 		}

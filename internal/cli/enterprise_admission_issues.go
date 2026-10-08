@@ -6,6 +6,7 @@ package cli
 import (
 	"os"
 
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
@@ -16,7 +17,16 @@ import (
 // skill the gateway could not scan or move, or rejected with take_action
 // false, stayed in a user's folder (GAP-0825, GAP-0826, GAP-0774).
 // A skill or plugin no longer in its folder is not reported.
-func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir string) {
+func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir, guardianDir string) {
+	// A quarantine whose original the hook guardian removes when the user
+	// next signs in, and why it waits (GAP-0795).
+	for _, request := range enforce.QuarantineRemovalChannelFor(dataDir, guardianDir).DeferredRemovals() {
+		if _, err := os.Lstat(request.SourcePath); err != nil {
+			continue
+		}
+		result.AddWarning("asset_removal_deferred", "the "+request.TargetType+" "+request.SourcePath+
+			" is in quarantine and blocked, but its original folder stays until the guardian can remove it: "+request.Deferred)
+	}
 	issues, err := watcher.ReadAdmissionIssues(dataDir)
 	if err != nil {
 		result.AddWarning("admission_state_unreadable", "could not read the install watcher's admission state: "+err.Error())

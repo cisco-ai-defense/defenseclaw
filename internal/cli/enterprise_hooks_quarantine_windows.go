@@ -99,8 +99,8 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 
 // removeEnrolledQuarantinedSource checks a request against the enrolled
 // users' watched folders and the quarantine store, then removes the source as
-// the user who owns it, with remove. A signed-out user without an S4U logon
-// defers the removal to the next sign-in.
+// the user who owns it, with remove. A signed-out user Windows gives no S4U
+// logon for defers the removal to the next sign-in.
 func removeEnrolledQuarantinedSource(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
 	roots := gateway.EnrolledWatchRoots(current)
 	dirs := make([]string, 0, len(roots))
@@ -115,8 +115,8 @@ func removeEnrolledQuarantinedSource(current *config.Config, request enforce.Qua
 		if strings.EqualFold(filepath.Clean(root.Dir), filepath.Clean(rootDir)) {
 			err := remove(root.SID, root.Home, source)
 			if errors.Is(err, enterprisehooks.ErrEnrolledUserSignedOut) {
-				return fmt.Errorf("%w: the owner of %s is signed out and the account has no S4U logon (a Microsoft Entra ID account); the guardian removes the folder when that user next signs in",
-					enforce.ErrQuarantineRemovalDeferred, filepath.Base(root.Home))
+				return fmt.Errorf("%w: %s", enforce.ErrQuarantineRemovalDeferred,
+					enterprisehooks.SignedOutRemovalReason(root.SID, filepath.Base(root.Home), err))
 			}
 			return err
 		}
