@@ -1075,13 +1075,16 @@ def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
         assert panel["fieldConfig"]["defaults"]["displayName"] == "${__field.labels." + label + "}", panel["title"]
 
 
-def test_merged_loki_tables_name_their_value_columns() -> None:
-    # GAP-0178: a Loki instant query has no table format, so a table that
-    # merges several shows each value column as "Value #<refId>" until
-    # organize renames it by that name. The Sandboxes Destinations table
-    # renamed "ALLOWED" (the Prometheus tables' renameByRegex before the
-    # merge), so its headers read Value #ALLOWED and its unit, colour and
-    # sort settings matched nothing.
+def test_merged_tables_name_their_value_columns() -> None:
+    # GAP-0178: a table that merges several queries shows each value column
+    # as "Value #<refId>" until organize renames it by that name. The
+    # Sandboxes Destinations table renamed "ALLOWED", so its headers read
+    # Value #ALLOWED and its unit, colour and sort settings matched nothing.
+    # GAP-0066: the Prometheus tables Per-connector traffic and Per-connector
+    # verdict summary ran renameByRegex before the merge, where the
+    # "Value #<refId>" names do not exist yet, so their headers read
+    # Value #INGEST, Value #TOTAL and so on. organize also orders by the names
+    # it is given, not by the names it renames to.
     checked = 0
     for path in sorted(DASHBOARD_DIR.glob("*.json")):
         board = json.loads(path.read_text(encoding="utf-8"))
@@ -1089,15 +1092,17 @@ def test_merged_loki_tables_name_their_value_columns() -> None:
         for panel in panels:
             steps = panel.get("transformations", [])
             targets = panel.get("targets", [])
-            if panel.get("type") != "table" or not any(step["id"] == "merge" for step in steps):
+            ids = [step["id"] for step in steps]
+            if panel.get("type") != "table" or "merge" not in ids or len(targets) < 2:
                 continue
-            if not targets or any((target.get("datasource") or {}).get("type") != "loki" for target in targets):
-                continue
-            renames = next(step for step in steps if step["id"] == "organize")["options"]["renameByName"]
+            assert "renameByRegex" not in ids[: ids.index("merge")], (path.name, panel["title"], ids)
+            options = next(step for step in steps if step["id"] == "organize")["options"]
+            renames = options["renameByName"]
             for target in targets:
                 assert f"Value #{target['refId']}" in renames, (path.name, panel["title"], target["refId"])
+            assert not set(options.get("indexByName", {})) & (set(renames.values()) - set(renames)), (path.name, panel["title"])
             checked += 1
-    assert checked
+    assert checked >= 6
 
 
 def test_rename_by_regex_steps_use_grafanas_option_names() -> None:

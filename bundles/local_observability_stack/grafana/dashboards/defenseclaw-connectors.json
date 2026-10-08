@@ -511,7 +511,7 @@
           "refId": "INGEST",
           "instant": true,
           "format": "table",
-          "expr": "sum by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m])) * 60"
+          "expr": "sum by (connector) (label_replace(rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[5m]), \"connector\", \"$1\", \"source\", \"(.*)\")) * 60"
         },
         {
           "refId": "HOOKS",
@@ -527,13 +527,6 @@
         }
       ],
       "transformations": [
-        {
-          "id": "renameByRegex",
-          "options": {
-            "regex": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
         {
           "id": "merge"
         },
@@ -564,17 +557,16 @@
               "os_type": true
             },
             "renameByName": {
-              "source": "connector",
               "connector": "connector",
-              "INGEST": "records/min",
-              "HOOKS": "hooks/min",
-              "TOKENS": "tokens/min"
+              "Value #INGEST": "records/min",
+              "Value #HOOKS": "hooks/min",
+              "Value #TOKENS": "tokens/min"
             },
             "indexByName": {
               "connector": 0,
-              "records/min": 1,
-              "hooks/min": 2,
-              "tokens/min": 3
+              "Value #INGEST": 1,
+              "Value #HOOKS": 2,
+              "Value #TOKENS": 3
             }
           }
         }
