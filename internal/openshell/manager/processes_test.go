@@ -55,13 +55,13 @@ func sampleOf(procs ...string) *collection {
 func TestProcessTreeMergesSamples(t *testing.T) {
 	tree := newProcTree()
 	t0 := time.Now()
-	started, exited := tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 30 bash"), t0, t0)
+	started, exited := tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 30 bash"), t0, t0, false)
 	if len(started) != 3 || len(exited) != 0 {
 		t.Fatalf("first sample started %d exited %d", len(started), len(exited))
 	}
 	// 43 ended, and its pid now runs another process (another start time).
 	t1 := t0.Add(5 * time.Second)
-	started, exited = tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 99 python3"), t1, t1)
+	started, exited = tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 99 python3"), t1, t1, false)
 	if len(started) != 1 || started[0].Comm != "python3" || len(exited) != 1 || exited[0].Comm != "bash" {
 		t.Fatalf("second sample started %+v exited %+v", started, exited)
 	}
@@ -71,7 +71,7 @@ func TestProcessTreeMergesSamples(t *testing.T) {
 	tree.mu.Lock()
 	tree.live[77] = &procNode{PID: 77, Comm: "late", FirstSeen: t2.Add(time.Second), Source: audit.SandboxProcessSourceOCSF}
 	tree.mu.Unlock()
-	_, exited = tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 99 python3"), t2, t2.Add(2*time.Second))
+	_, exited = tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 99 python3"), t2, t2.Add(2*time.Second), false)
 	if len(exited) != 0 {
 		t.Fatalf("exited %+v, want the late process kept", exited)
 	}
@@ -86,7 +86,7 @@ func TestProcessTreeMergesSamples(t *testing.T) {
 func TestProcessTreeKeepsLiveProcessesOnAPartialSample(t *testing.T) {
 	tree := newProcTree()
 	t0 := time.Now()
-	tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 30 node", "44 42 40 python3"), t0, t0)
+	tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "43 42 30 node", "44 42 40 python3"), t0, t0, false)
 	head := collectSchema + "\nT 100 1700000000\nP 1 0 1000 10\nPc 1 init\nP 42 1 1000 20\nPc 42 claude\n"
 	partial := map[string]func() (*collection, error){
 		"cut": func() (*collection, error) {
@@ -103,12 +103,12 @@ func TestProcessTreeKeepsLiveProcessesOnAPartialSample(t *testing.T) {
 			t.Fatal(err)
 		}
 		at := time.Now()
-		if _, exited := tree.merge(c, at, at); len(exited) != 0 || !tree.truncated {
+		if _, exited := tree.merge(c, at, at, false); len(exited) != 0 || !tree.truncated {
 			t.Fatalf("%s sample: exited %+v truncated %v, want none ended", name, exited, tree.truncated)
 		}
 	}
 	at := time.Now()
-	if _, exited := tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "44 42 40 python3"), at, at); len(exited) != 1 || exited[0].PID != 43 || tree.truncated {
+	if _, exited := tree.merge(sampleOf("1 0 10 init", "42 1 20 claude", "44 42 40 python3"), at, at, false); len(exited) != 1 || exited[0].PID != 43 || tree.truncated {
 		t.Fatalf("complete sample: exited %+v, want 43", exited)
 	}
 }
@@ -120,11 +120,11 @@ func TestProcessTreeIsBounded(t *testing.T) {
 		procs = append(procs, fmt.Sprintf("%d 1 %d p%d", i+2, i+1, i))
 	}
 	now := time.Now()
-	started, _ := tree.merge(sampleOf(procs...), now, now)
+	started, _ := tree.merge(sampleOf(procs...), now, now, false)
 	if len(started) != procTreeMaxLive || len(tree.live) != procTreeMaxLive || !tree.truncated {
 		t.Fatalf("live = %d started = %d truncated = %v, want the bound of %d", len(tree.live), len(started), tree.truncated, procTreeMaxLive)
 	}
-	_, exited := tree.merge(sampleOf("1 0 1 init"), now.Add(time.Second), now.Add(time.Second))
+	_, exited := tree.merge(sampleOf("1 0 1 init"), now.Add(time.Second), now.Add(time.Second), false)
 	if len(exited) != procTreeMaxLive || len(tree.exited) != procTreeMaxExited {
 		t.Fatalf("exited %d kept %d, want the last %d kept", len(exited), len(tree.exited), procTreeMaxExited)
 	}
@@ -148,7 +148,7 @@ func TestProcessTreeStaysBoundedAcrossPartialSamples(t *testing.T) {
 			t.Fatal(err)
 		}
 		at := now.Add(time.Duration(round) * time.Second)
-		started, exited := tree.merge(c, at, at)
+		started, exited := tree.merge(c, at, at, false)
 		if len(tree.live) > procTreeMaxLive || len(exited) != 0 || !tree.truncated {
 			t.Fatalf("round %d: live = %d started = %d exited = %d truncated = %v, want at most %d live",
 				round, len(tree.live), len(started), len(exited), tree.truncated, procTreeMaxLive)
@@ -158,7 +158,7 @@ func TestProcessTreeStaysBoundedAcrossPartialSamples(t *testing.T) {
 		t.Fatalf("live = %d, want the bound of %d", len(tree.live), procTreeMaxLive)
 	}
 	at := now.Add(time.Minute)
-	started, exited := tree.merge(sampleOf("1 0 1 init", "90000 1 5 claude"), at, at)
+	started, exited := tree.merge(sampleOf("1 0 1 init", "90000 1 5 claude"), at, at, false)
 	if len(started) != 2 || len(exited) != procTreeMaxLive || len(tree.live) != 2 || tree.truncated {
 		t.Fatalf("complete sample: started %d exited %d live %d truncated %v", len(started), len(exited), len(tree.live), tree.truncated)
 	}

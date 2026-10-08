@@ -80,6 +80,11 @@ const (
 	// time (whole seconds) may be off by that much (GAP-0174).
 	lineageStartWindow = 5 * time.Second
 	lineageClockSlack  = time.Second
+	// hookCallMemory is how long a hook call the kernel feed folded is
+	// remembered after it ended: a sample taken during the call can be
+	// merged up to processSampleTimeout later. maxHookCalls bounds them.
+	hookCallMemory = processSampleTimeout + processSampleInterval
+	maxHookCalls   = 64
 )
 
 // procNode is one process of the tree. startTicks is its start in clock
@@ -102,6 +107,10 @@ type procNode struct {
 	Hook                 bool
 	HookTools            int
 	HookUnexpected       bool
+	// held marks a process only a sample saw while the kernel feed streams,
+	// whose start is not recorded yet: it may belong to a hook call the
+	// feed folds, which the feed reports only when the call ends (hookCall).
+	held bool
 }
 
 // procTree is one sandbox's process tree.
@@ -123,6 +132,20 @@ type procTree struct {
 	byExec map[string]*procNode
 	byHost map[int]*procNode
 	kernel kernelCounts
+	// held are the processes whose start waits one sample (procNode.held),
+	// in the order the samples found them; calls are the hook calls the
+	// feed folded in the last hookCallMemory.
+	held  []*procNode
+	calls []hookCall
+}
+
+// hookCall is one call of DefenseClaw's hook script the kernel feed folded
+// into one row: its in-sandbox pid and parent's (the launch shell), its
+// user, its program's comm as a sample reads it, and when it ran.
+type hookCall struct {
+	pid, ppid, uid int
+	comm           string
+	start, end     time.Time
 }
 
 // kernelCounts are what one sandbox's tree took from the kernel feed: execs
@@ -174,10 +197,13 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 	m.mu.Lock()
 	on := b.processTreeOn() && b.phase == audit.SandboxPhaseReady && !b.deleted && !b.retained
 	name := b.rec.Name
+	hold := on && kernelFeedApplies(b)
 	m.mu.Unlock()
 	if !on {
 		return 0, false
 	}
+	// The feed's lock is not taken under Manager.mu.
+	hold = hold && m.kfeed.streaming()
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return 0, false
@@ -204,7 +230,7 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 	t := b.tree()
 	id := b.identity()
 	m.mu.Unlock()
-	started, exited := t.merge(col, start, m.now())
+	started, exited := t.merge(col, start, m.now(), hold)
 	m.recordProcesses(ctx, b, id, t, started, exited)
 	return took, true
 }
@@ -217,10 +243,24 @@ func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, b
 // not show every process: it ends none. Whatever the samples, the tree holds
 // at most procTreeMaxLive live processes: a new one past the bound is left
 // out (the tree says it is truncated) until others end.
-func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exited []*procNode) {
+//
+// With hold (the kernel feed streams this sandbox's execs), a process only
+// the sample shows is recorded one sample later: the feed reports a hook
+// call it folds only when the call ends, and the sample may have caught the
+// call's launch shell, forks and tools meanwhile (GAP-0095). The processes
+// of such a call are dropped (foldLocked); the others are recorded at the
+// next sample, with the time they were first seen.
+func (t *procTree) merge(c *collection, sampledAt, now time.Time, hold bool) (started, exited []*procNode) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.sampledAt = now
+	// What the previous sample held has waited a sample: record it now
+	// (before an exit this sample finds).
+	for _, node := range t.held {
+		node.held = false
+		started = append(started, node)
+	}
+	t.held = nil
 	complete := c.Ended && !c.ProcessesCapped && len(c.Processes) <= procTreeMaxLive
 	t.truncated = !complete
 	if complete {
@@ -248,7 +288,7 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 				t.truncated = true
 				continue
 			}
-			node = &procNode{PID: p.PID, FirstSeen: now, Source: audit.SandboxProcessSourceSample}
+			node = &procNode{PID: p.PID, FirstSeen: now, Source: audit.SandboxProcessSourceSample, held: hold}
 			t.live[p.PID] = node
 		}
 		node.PPID, node.UID, node.startTicks, node.Start = p.PPID, p.UID, p.StartTicks, c.started(p)
@@ -262,11 +302,95 @@ func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exit
 		if len(p.Args) > 0 {
 			node.Cmdline = redaction.CommandLine(p.Args, maxCmdlineBytes)
 		}
-		if fresh {
+		switch {
+		case fresh && node.held:
+			t.held = append(t.held, node)
+		case fresh:
 			started = append(started, node)
 		}
 	}
+	// A call that ended before this sample was merged was taken while the
+	// call ran.
+	t.calls = slices.DeleteFunc(t.calls, func(call hookCall) bool { return now.Sub(call.end) > hookCallMemory })
+	for _, call := range t.calls {
+		t.foldLocked(call)
+	}
 	return started, exited
+}
+
+// releaseLocked records a held process now: it is the kernel feed's, ended
+// otherwise than by a sample, or its tree ends. It reports whether the
+// process was held. Callers hold t.mu.
+func (t *procTree) releaseLocked(node *procNode) bool {
+	if !node.held {
+		return false
+	}
+	node.held = false
+	t.held = slices.DeleteFunc(t.held, func(n *procNode) bool { return n == node })
+	return true
+}
+
+// foldLocked drops the held processes that belong to a hook call the kernel
+// feed folded (GAP-0095): the call itself (a sample merged after the feed
+// reported it), its launch shell (the call's parent), every process under
+// it, and a fork of the hook script that the same sample found orphaned
+// (its parent ended while the sample read /proc, so the kernel moved it to
+// a subreaper among the call's ancestors). Each one was first seen while
+// the call ran, by a user's sample of the call's own user. A held process
+// was never recorded, so nothing recorded is withdrawn; anything else is
+// recorded at the next sample. Callers hold t.mu.
+func (t *procTree) foldLocked(call hookCall) {
+	if len(t.held) == 0 || call.pid <= 0 {
+		return
+	}
+	during := func(n *procNode) bool {
+		return n.UID == call.uid && !n.FirstSeen.Before(call.start.Add(-lineageClockSlack)) && !n.FirstSeen.After(call.end.Add(hookCallMemory))
+	}
+	held := make(map[int]*procNode, len(t.held))
+	for _, n := range t.held {
+		held[n.PID] = n
+	}
+	under := func(n *procNode) bool {
+		for p, depth := n, 0; p != nil && depth < maxLineageDepth; depth++ {
+			if p.PPID == call.pid {
+				return true
+			}
+			p = held[p.PPID]
+		}
+		return false
+	}
+	ancestors := map[int]bool{1: true}
+	for pid, depth := call.ppid, 0; pid > 0 && depth < maxLineageDepth && !ancestors[pid]; depth++ {
+		ancestors[pid] = true
+		node := t.byPIDLocked(pid, "")
+		if node == nil {
+			break
+		}
+		pid = node.PPID
+	}
+	fold := map[*procNode]bool{}
+	samples := map[time.Time]bool{}
+	for _, n := range t.held {
+		if during(n) && (n.PID == call.pid || n.PID == call.ppid || under(n)) {
+			fold[n] = true
+			samples[n.FirstSeen] = true
+		}
+	}
+	for _, n := range t.held {
+		if !fold[n] && during(n) && samples[n.FirstSeen] && call.comm != "" && n.Comm == call.comm && ancestors[n.PPID] {
+			fold[n] = true
+		}
+	}
+	if len(fold) == 0 {
+		return
+	}
+	t.held = slices.DeleteFunc(t.held, func(n *procNode) bool { return fold[n] })
+	for n := range fold {
+		n.held = false
+		if t.live[n.PID] == n {
+			delete(t.live, n.PID)
+		}
+	}
 }
 
 // exitLocked moves a live process to the exited ones, the least recently
@@ -329,6 +453,9 @@ func (m *Manager) observeOCSFProcess(ctx context.Context, b *box, r ocsf.Record,
 		}
 	case "TERMINATE":
 		if node != nil {
+			if t.releaseLocked(node) {
+				started = append(started, node)
+			}
 			exited = append(exited, t.exitLocked(node, at, r.ExitCode))
 		}
 	}
@@ -388,11 +515,20 @@ func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started,
 		}
 	}
 	var node *procNode
+	claimed := false
 	if f.PID > 0 {
 		if current := t.live[f.PID]; current != nil {
 			if current.ExecID == "" && (current.Exe == "" || current.Exe == binary || !current.FirstSeen.Before(at.Add(-time.Second))) {
 				node = current
+				// A sample's process not recorded yet is the feed's: it is
+				// recorded as the feed names it.
+				if claimed = t.releaseLocked(current); claimed {
+					node.Source = audit.SandboxProcessSourceTetragon
+				}
 			} else {
+				if t.releaseLocked(current) {
+					started = append(started, current)
+				}
 				exited = append(exited, t.exitLocked(current, at, nil))
 			}
 		}
@@ -443,7 +579,7 @@ func (t *procTree) kernelExecLocked(f sandboxfeed.Frame, at time.Time) (started,
 	if node.PID > 0 {
 		t.kernel.pinned++
 	}
-	if fresh {
+	if fresh || claimed {
 		started = append(started, node)
 	}
 	return started, exited
@@ -464,6 +600,19 @@ func (t *procTree) kernelExitLocked(f sandboxfeed.Frame, at time.Time) []*procNo
 	}
 	if f.Hook {
 		node.Hook, node.HookTools = true, max(f.HookTools, 0)
+		if node.PID > 0 {
+			call := hookCall{pid: node.PID, ppid: node.PPID, uid: node.UID, start: node.Start, end: at}
+			if call.start.IsZero() || call.start.After(node.FirstSeen) {
+				call.start = node.FirstSeen
+			}
+			if node.Exe != "" {
+				call.comm = truncate(path.Base(node.Exe), commBytes)
+			}
+			t.foldLocked(call)
+			if t.calls = append(t.calls, call); len(t.calls) > maxHookCalls {
+				t.calls = slices.Delete(t.calls, 0, len(t.calls)-maxHookCalls)
+			}
+		}
 	}
 	return []*procNode{t.exitLocked(node, at, f.ExitCode)}
 }
@@ -480,6 +629,11 @@ func (m *Manager) endProcessTree(b *box) {
 	}
 	now := m.now()
 	t.mu.Lock()
+	started := t.held
+	for _, node := range started {
+		node.held = false
+	}
+	t.held = nil
 	var exited []*procNode
 	for _, node := range t.live {
 		exited = append(exited, t.exitLocked(node, now, nil))
@@ -489,7 +643,7 @@ func (m *Manager) endProcessTree(b *box) {
 	}
 	t.mu.Unlock()
 	if ctx := m.running(); ctx != nil {
-		m.recordProcesses(ctx, b, id, t, nil, exited)
+		m.recordProcesses(ctx, b, id, t, started, exited)
 	}
 }
 

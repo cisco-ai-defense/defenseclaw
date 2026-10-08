@@ -289,6 +289,17 @@ func (k *kernelFeed) status(frame sandboxfeed.Frame) {
 	k.state.Dropped += max(frame.Dropped, 0)
 }
 
+// streaming reports whether the feed is connected and its Tetragon stream is
+// up: the trees then take every exec and exit from it.
+func (k *kernelFeed) streaming() bool {
+	if k == nil || k.dial == nil {
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.state.Connected && k.state.Tetragon == sandboxfeed.TetragonConnected
+}
+
 // view is the feed's part of a process list; nil while it is not installed
 // (or cannot be on this host).
 func (k *kernelFeed) view() *sandboxapi.ProcessKernelFeed {
