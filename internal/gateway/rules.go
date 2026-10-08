@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -679,15 +680,15 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 // maxEntityMatchesPerRule bounds the matches counted for one rule in one result.
 const maxEntityMatchesPerRule = 1000
 
-// countRuleEntities counts the distinct values the connector content rules
-// match in text: an address that two rules match counts once, and a rule that
-// matches the same value twice counts it once. A findings list holds one entry
+// countRuleEntitiesFor counts distinct sensitive values matched by the
+// selected profile's entity rules in text. A value matched by two rules
+// or twice by one rule counts once. A findings list holds one entry
 // per rule, so it cannot say how many values a result carries.
-func countRuleEntities(connector, text string) int {
+func countRuleEntitiesFor(ctx context.Context, connector, text string) int {
 	if text == "" || ManagedEnterpriseActive() {
 		return 0
 	}
-	generation := snapshotRulePackGeneration(connector)
+	generation := snapshotRulePackGenerationFor(ctx, connector)
 	if generation == nil {
 		return 0
 	}
@@ -695,7 +696,7 @@ func countRuleEntities(connector, text string) int {
 	seen := make(map[string]struct{})
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
-		if !options.allowsCategory(cat.Name) {
+		if cat.Name != "secret" && cat.Name != "enterprise-data" && cat.Name != "pii" {
 			continue
 		}
 		for ruleIndex := range cat.Rules {

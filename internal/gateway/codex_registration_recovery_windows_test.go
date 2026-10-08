@@ -21,10 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/fsnotify/fsnotify"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -112,6 +114,105 @@ func (*codexRegistrationAcceptanceConnector) HookConfigReferenceNeedles(connecto
 
 func (*codexRegistrationAcceptanceConnector) HookAPIPath() string {
 	return "/api/v1/codex/hook"
+}
+
+// A policy change must refresh an intact Codex registration without claiming
+// that the operator tampered with its Windows hook files.
+func TestWindowsCodexFailModePolicyRefreshIsNotTampering(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	dataDir := filepath.Join(root, "defenseclaw-home")
+	codexHome := filepath.Join(root, "codex-home")
+	runtimeHome := filepath.Join(root, "runtime-home")
+	launcherDir := filepath.Join(runtimeHome, ".local", "bin")
+	for _, dir := range []string{dataDir, codexHome, launcherDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testenv.SetHome(t, runtimeHome)
+	trustConfig, err := json.Marshal(map[string]interface{}{
+		"ai_discovery": map[string]interface{}{
+			"require_trusted_binary_paths": true,
+			"trusted_binary_prefixes":      []string{dataDir},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), append(trustConfig, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(codexHome, "config.toml")
+	previousConfigPath := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = configPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = previousConfigPath })
+	t.Setenv("CODEX_HOME", codexHome)
+
+	token, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := connector.NewCodexConnector()
+	opts := connector.SetupOpts{
+		DataDir: dataDir, APIAddr: "127.0.0.1:18970",
+		APIToken: token, HookAPIToken: token, HookAPITokenScoped: true,
+		HookFailMode: "open",
+	}
+	prepareCodexSetupPolicyFixture(t, dataDir, &opts)
+	if err := os.Link(opts.AgentExecutable, filepath.Join(launcherDir, "defenseclaw-hook.exe")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dataDir
+	cfg.Gateway.Token = "test-gateway-token"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.HookFailMode = "open"
+	setupSidecar := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
+	if err := setupSidecar.setupOneConnector(t.Context(), conn, opts, cfg.Gateway.Token, guardrail.NewRulePackCache()); err != nil {
+		t.Fatalf("initial Codex setup: %v", err)
+	}
+	if current, err := connector.HookRuntimeRegistrationCurrent(opts, conn, version.Current().BinaryVersion); err != nil || !current {
+		t.Fatalf("initial runtime evidence: current=%v err=%v", current, err)
+	}
+
+	store, err := audit.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(store)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	guard := NewHookConfigGuard(logger, nil, time.Hour)
+	if !guard.Start(ctx, conn, opts) {
+		t.Fatal("Codex guard did not start")
+	}
+	defer guard.Stop()
+	policySidecar := &Sidecar{}
+	policySidecar.bindHookRuntimePolicyResolver(guard)
+	action := cloneConfig(cfg)
+	action.Guardrail.Mode = "action"
+	action.Guardrail.HookFailMode = "closed"
+	policySidecar.publishConfig(action)
+	if err := guard.RefreshPolicy(ctx); err != nil {
+		t.Fatalf("refresh Codex policy: %v", err)
+	}
+	if lock := connector.LoadHookContractLockEntry(dataDir, "codex"); lock.HookFailMode != "closed" {
+		t.Fatalf("refreshed hook mode = %q, want closed", lock.HookFailMode)
+	}
+	events, err := store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "connector-hook-tampered" {
+			t.Fatalf("policy refresh recorded tampering: %+v", event)
+		}
+	}
 }
 
 func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndRestart(t *testing.T) {

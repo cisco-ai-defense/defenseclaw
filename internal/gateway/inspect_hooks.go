@@ -413,7 +413,7 @@ func (a *APIServer) alertSensitiveToolResult(r *http.Request, tool, output strin
 	if verdict == nil || a.logger == nil {
 		return
 	}
-	details, ok := a.sensitiveToolResultAlert(profileRequestConnector(r.Context()), tool, verdict.Severity, len(verdict.Findings), output)
+	details, ok := a.sensitiveToolResultAlert(r.Context(), profileRequestConnector(r.Context()), tool, verdict.Severity, verdict.Findings, output)
 	if !ok {
 		return
 	}
@@ -430,7 +430,7 @@ func (a *APIServer) alertSensitiveHookToolResult(ctx context.Context, connectorN
 		return
 	}
 	result := stringifyHookValue(firstValue(req.Payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
-	details, ok := a.sensitiveToolResultAlert(connectorName, req.ToolName, resp.Severity, len(resp.Findings), result)
+	details, ok := a.sensitiveToolResultAlert(ctx, connectorName, req.ToolName, resp.Severity, resp.Findings, result)
 	if !ok {
 		return
 	}
@@ -480,17 +480,10 @@ func toolResultAlertSeverity(severity string) string {
 	}
 }
 
-// sensitiveToolResultAlert returns the audit details of a
-// tool-result-pii-alert when the rule pack the connector enforces lists the
-// tool in sensitive_tools with result_inspection and the output of the tool
-// carries at least min_entities_for_alert distinct sensitive values. The event
-// router does the same for OpenClaw tool_result frames; the inspect endpoint
-// and the connector hooks share this decision, so guardrail.rules.sensitive_tools
-// is live on every connector. The values are counted from the rule matches in
-// the output, so the LLM judge being on or off does not change the count
-// (GAP-0182); a result flagged only by another lane counts its findings. The
-// row carries the count, never the matched text.
-func (a *APIServer) sensitiveToolResultAlert(connectorName, tool, severity string, findings int, output string) (string, bool) {
+// sensitiveToolResultAlert checks the same composed rule pack and entity rules
+// that scanned this request. Findings from a judge or another category do not
+// prove a sensitive value; only matched entity values count.
+func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
 	g := a.generation()
 	if g == nil {
 		return "", false
@@ -498,6 +491,24 @@ func (a *APIServer) sensitiveToolResultAlert(connectorName, tool, severity strin
 	pack := g.RulePacks["conn:"+connectorName]
 	if pack == nil {
 		pack = g.RulePacks["global"]
+	}
+	if g.Profiles != nil {
+		resolved := resolvedGuardrailProfileFrom(ctx)
+		if resolved == nil || resolved.set != g.Profiles {
+			resolved = resolveGuardrailProfileFor(ctx, g.Profiles)
+		}
+		if resolved != nil && resolved.derived != nil {
+			key := effectiveRulePackKey(resolved.derived, connectorName)
+			if key != effectiveRulePackKey(g.Profiles.base, connectorName) {
+				if selected := g.Profiles.packs[key]; selected != nil {
+					pack = selected
+				} else if retry := g.Profiles.missing[key]; retry != nil {
+					if selected := retry.rulePack(time.Now()); selected != nil {
+						pack = selected
+					}
+				}
+			}
+		}
 	}
 	entry := pack.LookupSensitiveTool(tool)
 	if entry == nil || !entry.ResultInspection {
@@ -507,9 +518,15 @@ func (a *APIServer) sensitiveToolResultAlert(connectorName, tool, severity strin
 	if minEntities <= 0 {
 		minEntities = 1
 	}
-	entities := countRuleEntities(connectorName, output)
-	if entities == 0 {
-		entities = findings
+	entities := countRuleEntitiesFor(ctx, connectorName, output)
+	if entities == 0 && output != "" {
+		// A judge can identify PII that has no deterministic pattern. Only
+		// its PII findings may stand in for matched values.
+		for _, finding := range findings {
+			if strings.HasPrefix(finding, "JUDGE-PII-") {
+				entities++
+			}
+		}
 	}
 	if entities < minEntities {
 		return "", false

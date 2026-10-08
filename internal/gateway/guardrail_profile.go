@@ -289,6 +289,14 @@ func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories 
 	return compiled
 }
 
+// rulePack returns the composed pack behind the rules the retry published.
+func (r *profileRulePackRetry) rulePack(now time.Time) *guardrail.RulePack {
+	if r.rules(now) == nil {
+		return nil
+	}
+	return r.pack.Load()
+}
+
 // pendingRulePackNote is the explain warning for a profile whose rule pack
 // for connectorName has not loaded yet, or "".
 func (set *guardrailProfileSet) pendingRulePackNote(profile string, cfg *config.Config, connectorName string) string {

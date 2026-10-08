@@ -22,7 +22,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -462,6 +464,105 @@ func TestInspectToolResponse_SensitiveToolRaisesResultAlert(t *testing.T) {
 	}
 }
 
+// A connector-only assignment selects its profile before a hook result is
+// finalized. The alert must use that profile's sensitive-tool configuration.
+func TestHookToolResultAlertUsesSelectedProfile(t *testing.T) {
+	stubProfileSources(t)
+	packDir := filepath.Join(t.TempDir(), "contractors")
+	writeRulePackFixtureFile(t, packDir, "rules/entities.yaml", `version: 1
+category: enterprise-data
+rules:
+  - id: PROFILE-ENTITY
+    pattern: 'profile_entity_[a-z]+'
+    title: profile entity
+    severity: HIGH
+    confidence: 0.99
+    tags: [pii]
+`)
+	cfg := config.DefaultConfig()
+	enabled := true
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"contractors": {RulePackDir: packDir, Rules: &config.GuardrailRulesConfig{
+			SensitiveTools: []config.GuardrailSensitiveTool{{
+				Name: "crm_export", ResultInspection: &enabled,
+				MinEntitiesForAlert: 2,
+			}},
+		}},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
+	}
+	store, logger := testStoreAndLogger(t)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api.store, api.logger = store, logger
+	set := api.guardrailProfileSet()
+	if set == nil {
+		t.Fatal("profile set was not built")
+	}
+	base, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{Profiles: set, RulePacks: map[string]*guardrail.RulePack{"global": base}}
+	})
+	ctx := api.withGuardrailProfileDecision(t.Context(), "codex")
+	req := agentHookRequest{ToolName: "crm_export", HookEventName: "PostToolUse",
+		Payload: map[string]interface{}{"tool_response": "profile_entity_a profile_entity_b"}}
+	api.alertSensitiveHookToolResult(ctx, "codex", req, agentHookResponse{Severity: "HIGH", Findings: []string{"ENT-EMAIL-BULK"}})
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" && event.Target == "crm_export" &&
+			strings.Contains(event.Details, "entities=2") {
+			return
+		}
+	}
+	t.Fatalf("profile-sensitive tool produced no two-entity alert: %+v", events)
+}
+
+// A finding from another inspection lane does not prove a sensitive value.
+func TestHookToolResultAlertIgnoresNonEntityFinding(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{
+			"global": {SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{
+				{Name: "crm_export", ResultInspection: true, MinEntitiesAlert: 1},
+			}}},
+		}}
+	})
+	req := agentHookRequest{ToolName: "crm_export", HookEventName: "PostToolUse",
+		Payload: map[string]interface{}{"tool_response": "ordinary output"}}
+	api.alertSensitiveHookToolResult(t.Context(), "codex", req,
+		agentHookResponse{Severity: "HIGH", Findings: []string{"PROMPT-INJECTION"}})
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			t.Fatalf("non-entity finding produced PII alert: %+v", event)
+		}
+	}
+
+	// The judge's typed PII finding still counts when regex has no match.
+	api.alertSensitiveHookToolResult(t.Context(), "codex", req,
+		agentHookResponse{Severity: "HIGH", Findings: []string{"JUDGE-PII-EMAIL"}})
+	events, err = store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			return
+		}
+	}
+	t.Fatal("judge PII finding produced no alert")
+}
+
 // TestHookToolResultRaisesSensitiveToolAlert pins GAP-0041 on the connector hook
 // endpoints: the Claude Code and Codex PostToolUse results finalize through
 // finalizeAgentHook, which raises the same alert as the inspect route, for a
@@ -508,7 +609,7 @@ func TestHookToolResultRaisesSensitiveToolAlert(t *testing.T) {
 		{"claudecode", "PostToolUse", "other_tool", findings, nil},
 		{"claudecode", "PreToolUse", "listed_tool", findings, nil},
 		{"claudecode", "PostToolUse", "listed_tool", findings[:1], nil},
-		{"claudecode", "PostToolUse", "listed_tool", findings, nil},
+		{"claudecode", "PostToolUse", "listed_tool", findings, emails},
 		{"codex", "PostToolUse", "listed_tool", findings[1:], emails},
 	} {
 		req := agentHookRequest{ConnectorName: c.connector, HookEventName: c.event, ToolName: c.tool, Payload: c.payload}
@@ -589,7 +690,8 @@ func TestHookToolResultAlertsFromEvaluatedResponse(t *testing.T) {
 			HookEventName: "PostToolUse", ToolName: tool, ToolResponse: response,
 		}))
 		for connector, resp := range map[string]agentHookResponse{"claudecode": claude, "codex": codex} {
-			req := agentHookRequest{ConnectorName: connector, HookEventName: "PostToolUse", ToolName: tool}
+			req := agentHookRequest{ConnectorName: connector, HookEventName: "PostToolUse", ToolName: tool,
+				Payload: map[string]interface{}{"tool_response": response}}
 			api.finalizeAgentHook(t.Context(), connector, req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
 		}
 	}
