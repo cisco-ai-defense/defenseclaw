@@ -254,6 +254,11 @@ The enumerator applies these checks to each account, in this order:
 5. Group filters: `exclude_groups` wins; when `include_groups` is not
    empty, only members pass. Accounts in `include_users` are filtered here
    too.
+
+An account that stops passing `include_groups` keeps its existing enrollment
+rows until three consecutive enumerator cycles miss it. At the five-minute
+cycle this takes about 10 to 15 minutes; an enumerator restart runs a cycle
+immediately.
 6. The home directory must be under a home root, owned by the user, not a
    link, and not writable by group or others. No parent directory may be
    writable by everyone.
