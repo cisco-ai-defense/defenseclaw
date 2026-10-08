@@ -307,6 +307,9 @@ def uninstall_cmd(
         raise SystemExit(1)
 
     _execute_plan(plan)
+    if plan.connectors:
+        # The plan said so; the end says it again, once it is true (GAP-0255).
+        ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
     _render_kept_and_next_steps(plan)
 
 
@@ -1488,6 +1491,12 @@ def _teardown_connectors(
     return tuple(out)
 
 
+_OPEN_SESSION_NOTE = (
+    "an agent session that is open now goes on without DefenseClaw (its hooks fail and nothing checks "
+    "its tool calls): close it first, or restart it once DefenseClaw is back"
+)
+
+
 def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     # "Plan" (not "Uninstall plan") — the command banner above already names
     # the operation (Uninstall / Reset), so repeating it here is redundant and,
@@ -1502,7 +1511,13 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     display_connectors = plan.connectors
     teardown = ", ".join(display_connectors) if display_connectors else "no"
     ux.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
-    if plan.sandbox_teardown:
+    if display_connectors:
+        # An open Codex session ran on after the uninstall with every hook
+        # failing, and its next marker command ran (GAP-0255).
+        ux.echo(f"      {ux.dim('·')} {_OPEN_SESSION_NOTE}")
+    if plan.platform_name == "win32" and not plan.sandbox_teardown:
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    no (OpenShell sandboxes do not run on Windows)")
+    elif plan.sandbox_teardown:
         ux.echo(f"  • {ux.bold('sandbox teardown:')}    yes (OpenShell itself is kept)")
         # Teardown runs with --yes: work a copy-mode sandbox holds is gone
         # with it, so say where to see it before the confirmation.

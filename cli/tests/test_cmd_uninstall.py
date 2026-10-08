@@ -705,6 +705,18 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
         self.assertNotIn(plan.binary_targets[2], rendered)
         self.assertIn("deferred cleanup", rendered)
 
+    def test_the_plan_warns_an_open_agent_session_goes_on_without_defenseclaw(self):
+        # GAP-0255: an open Codex session ran on after the uninstall, every
+        # hook failing, and the plan, the confirmation and the end said nothing.
+        plan = cmd_uninstall.UninstallPlan(
+            platform_name="win32", connector="codex", connectors=("codex",), data_dir="C:\\Users\\test\\.defenseclaw",
+        )
+        with capture_click_output() as output:
+            cmd_uninstall._render_plan(plan, dry_run=True)
+        rendered = output.getvalue()
+        self.assertIn("an agent session that is open now goes on without DefenseClaw", rendered)
+        self.assertIn("sandbox teardown:    no (OpenShell sandboxes do not run on Windows)", rendered)
+
     def test_windows_stop_uses_exact_gateway_and_waits_for_release(self):
         with tempfile.TemporaryDirectory() as tmp:
             gateway = Path(tmp) / "defenseclaw-gateway.exe"

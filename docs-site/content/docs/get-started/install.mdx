@@ -343,9 +343,14 @@ Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
 `skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
 `mcp-scanner-api` and `litellm`) from `~/.local/bin`.
 
-Uninstall also removes DefenseClaw's OpenShell sandboxes and images. When
-Docker or OpenShell is gone or broken, add `--skip-sandbox-teardown` to leave
-them, and remove them later with `defenseclaw-gateway sandbox teardown`.
+Uninstall also removes DefenseClaw's OpenShell sandboxes and images (on
+Linux and macOS; there are none on Windows). When Docker or OpenShell is gone
+or broken, add `--skip-sandbox-teardown` to leave them, and remove them later
+with `defenseclaw-gateway sandbox teardown`.
+
+Close your agent sessions first. One that stays open goes on without
+DefenseClaw: its hooks fail and nothing checks its tool calls. The plan and
+the end of the uninstall both say so.
 
 ## Next
 
