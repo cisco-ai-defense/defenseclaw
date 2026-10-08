@@ -153,7 +153,7 @@ func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testin
 	}
 	enterpriseWindowsEnumerateGroupCacheWriter = func(string, *enterprisehooks.WindowsEnrollmentGroupCache) (bool, error) { return true, nil }
 	var published *enterprisehooks.WindowsEnrollmentGroupCache
-	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ func(string) error, _ func(string, ...any)) error {
+	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
 		published = cache
 		return nil
 	}
@@ -292,5 +292,48 @@ func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfDroppedProfiles(t *test
 	}
 	if strings.Join(revoked, ",") != "bob" {
 		t.Fatalf("revoked = %v, want only the profile the cycle dropped", revoked)
+	}
+}
+
+// A profile the enrollment excludes loses the gateway's inventory read
+// access even when no manifest ever listed it (an earlier install on a
+// cloned image granted it), once while it stays excluded (GAP-1024).
+func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfExcludedProfilesOnce(t *testing.T) {
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"carol"}})
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	carol := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1004336348-1177238915-682003330-1003", UserHome: `C:\Users\carol`}
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousRevoker := enterpriseWindowsInventoryReadRevoker
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsInventoryReadRevoker = previousRevoker
+		enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+	})
+	enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		opts.ReportExcluded(carol)
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
+	revoked := 0
+	enterpriseWindowsInventoryReadRevoker = func(excluded enterprisehooks.Manifest) error {
+		if len(excluded.Targets) != 1 || excluded.Targets[0].SID != carol.SID {
+			t.Fatalf("revoked %+v, want carol", excluded.Targets)
+		}
+		revoked++
+		return nil
+	}
+	for cycle := 0; cycle < 2; cycle++ {
+		if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+	}
+	if revoked != 1 {
+		t.Fatalf("revoked %d times over two cycles, want once", revoked)
 	}
 }

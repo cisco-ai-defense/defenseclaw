@@ -821,6 +821,7 @@ func applyWindowsEnterpriseInstallerReport(
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseHookRuntimeAccess(result)
 		}
+		applyWindowsEnterpriseDiscoveryHomeDirs(result)
 	}
 	applyWindowsEnterpriseGatewayStartFailure(result, report)
 	applyWindowsEnterpriseAPIPortHolders(result, report)
@@ -1466,6 +1467,69 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 				label, filepath.Join(account.Home, ".defenseclaw")))
 		}
 	}
+}
+
+// windowsEnterpriseDiscoveryHomeDirs reads ai_discovery.home_dirs of the
+// installed config; tests replace it.
+var windowsEnterpriseDiscoveryHomeDirs = func() ([]string, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	body, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseConfigProfileLimit)
+	if err != nil {
+		return nil, err
+	}
+	var document struct {
+		AIDiscovery struct {
+			HomeDirs []string `yaml:"home_dirs"`
+		} `yaml:"ai_discovery"`
+	}
+	if err := yaml.Unmarshal(body, &document); err != nil {
+		return nil, err
+	}
+	return document.AIDiscovery.HomeDirs, nil
+}
+
+// applyWindowsEnterpriseDiscoveryHomeDirs warns about each
+// ai_discovery.home_dirs entry that is neither an enrolled account's profile
+// nor a folder inside one. The gateway scans every enrolled profile without
+// it; an entry only adds a folder, whose findings name no user, and an
+// excluded account's profile is never scanned (GAP-0969).
+func applyWindowsEnterpriseDiscoveryHomeDirs(result *enterprisestatus.Result) {
+	homes, err := windowsEnterpriseDiscoveryHomeDirs()
+	if err != nil || len(homes) == 0 {
+		return
+	}
+	accounts, err := windowsEnterpriseManifestAccounts()
+	if err != nil {
+		return
+	}
+	for _, home := range homes {
+		home = strings.TrimSpace(home)
+		if home == "" || windowsEnterpriseInsideEnrolledProfile(accounts, home) {
+			continue
+		}
+		result.AddWarning("ai_discovery_home_dir_not_enrolled", fmt.Sprintf(
+			"ai_discovery.home_dirs names %s, which is not the profile of an enrolled account; AI Discovery scans every "+
+				"enrolled profile without home_dirs, so this entry only adds a folder whose findings name no user, and the "+
+				"profile of an account enterprise.enrollment.exclude_users names is never scanned: remove the entry unless "+
+				"the folder is meant as an extra scan root", home))
+	}
+}
+
+func windowsEnterpriseInsideEnrolledProfile(accounts []windowsEnterpriseManifestAccount, path string) bool {
+	path = filepath.Clean(path)
+	for _, account := range accounts {
+		profile := filepath.Clean(strings.TrimSpace(account.Home))
+		if profile == "." {
+			continue
+		}
+		if strings.EqualFold(path, profile) || strings.HasPrefix(strings.ToLower(path), strings.ToLower(profile)+`\`) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsEnterpriseEnrolledConnectors returns the hook connectors the

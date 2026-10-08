@@ -341,7 +341,13 @@ process started from one, carries that profile's account (`user.id` is the
 account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 `defenseclaw.user.name` the account name). Folders outside the granted ones,
 such as the profile root that `scan_roots: ["~"]` names, are skipped
-without failing the scan.
+without failing the scan. Only enrolled profiles are read: the profile of an
+account that `enterprise.enrollment.exclude_users` names is not, the
+processes in its sessions are left out, and the components it reported
+before are reported `removed` once; the enumerator also takes away the read
+access an earlier install granted it. `ai_discovery.home_dirs` adds folders
+to the enrolled profiles and never replaces them, and a folder inside an
+excluded profile is not read.
 
 ### Tunable knobs
 
@@ -446,16 +452,23 @@ The enabled state of a row is one of `enabled`, `disabled`,
 
 ### Whose plugins
 
-Each row carries the user it belongs to: the home's owner, or on a managed
-host the account the guardian or the gateway scanned. One user can never
-appear in another user's rows: a planted extension folder changes only its own
-owner's inventory.
+Each per-user row carries the user it belongs to: the home's owner, or on a
+managed host the account the guardian or the gateway scanned. One user can
+never appear in another user's rows: a planted extension folder changes only
+its own owner's inventory.
 
 | Install | Who scans | Whose homes |
 | --- | --- | --- |
 | Per-user (OSS) | The user's own gateway | That user's home only |
 | Standalone enterprise, Linux and macOS | The hook guardian, as each enrolled user | Each enrolled user's home. It does not follow links out of the home |
 | Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each enrolled profile; Visual Studio installs under Program Files are machine-wide |
+
+A machine-wide row belongs to no account. A Visual Studio extension
+installed for all users under `Program Files` is listed once, however many
+users are enrolled, with `scope` `machine`, no `user` or `user_id`, and an
+enabled state of `unknown`. `--user` never returns it, `counts.users` does not
+count it, and its `ide.plugin.*` records are exported without `user.id` or any
+`defenseclaw.user.*` attribute.
 
 A managed Windows gateway reads the same IDE sources as a per-user scan, and
 the enabled state comes from the same places. The hook enumerator grants its

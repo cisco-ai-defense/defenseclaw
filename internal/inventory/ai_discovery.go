@@ -176,10 +176,26 @@ type AIDiscoveryOptions struct {
 	// stays as it was: the historical editor-extension detector and no
 	// IDE inventory.
 	SecureClient bool
+	// IncludeUserEmail is ai_discovery.include_user_email: a managed scan
+	// reads the Claude Code and Codex account address of each profile owner
+	// from that owner's profile and puts it on the owner's signals
+	// (stampOwnerEmails). The Secure Client profile never reads it here.
+	IncludeUserEmail bool
+	// ExcludeUsers is enterprise.enrollment.exclude_users of the standalone
+	// profile. A managed Windows scan reads no profile of an excluded
+	// account and drops its processes, as the hook enumerator enrolls none
+	// of them (GAP-1024).
+	ExcludeUsers []string
 	// homeOwners names the account of each profile in HomeDirs when the
 	// platform enumerated them for a service-context scan (managed Windows).
 	// Signals found under a profile carry its account.
 	homeOwners []discoveryHomeOwner
+	// excludedOwners are the profiles ExcludeUsers took off homeOwners.
+	excludedOwners []discoveryHomeOwner
+	// extraHomes are the operator's ai_discovery.home_dirs on a managed
+	// scan outside the Secure Client profile: they add to the platform's
+	// profile list instead of replacing it (GAP-0969).
+	extraHomes []string
 	// platformHomes marks HomeDirs as the platform's profile list, which
 	// every full scan reads again (refreshPlatformHomes).
 	platformHomes bool
@@ -367,8 +383,12 @@ type AISignal struct {
 	// UserID (a uid) and UserName name the account a per-user scan ran as.
 	// The gateway takes both from the guardian's spool record, never from
 	// the scan's own output.
-	UserID       string `json:"user_id,omitempty"`
-	UserName     string `json:"user,omitempty"`
+	UserID   string `json:"user_id,omitempty"`
+	UserName string `json:"user,omitempty"`
+	// UserEmail is the Claude Code or Codex account address read from the
+	// owner's own profile when ai_discovery.include_user_email is on
+	// (stampOwnerEmails, ScanUserHome). It is not kept in the state file.
+	UserEmail    string `json:"user_email,omitempty"`
 	EvidenceHash string `json:"-"`
 	// ModelProvenanceHubResolvedAt is an internal freshness marker for optional
 	// Hub enrichment. It is mirrored by aiStoredSignal but never returned by the
@@ -608,6 +628,9 @@ type ContinuousDiscoveryService struct {
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   AIDiscoveryObservabilityV8
 
+	// emailNotes are the per-user scan's include_user_email warnings
+	// (noteUnreadableEmail).
+	emailNotes map[string]string
 	// userHomeScan marks the guardian's per-user scan (ScanUserHome): it runs
 	// as the home's owner, but its report lands in the managed inventory,
 	// so the IDE scan follows no link out of the home (GAP-0396).
@@ -805,6 +828,8 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		DataDir:                     cfg.DataDir,
 		HomeDir:                     home,
 		HomeDirs:                    append([]string{}, ad.HomeDirs...),
+		IncludeUserEmail:            ad.IncludeUserEmail,
+		ExcludeUsers:                standaloneExcludeUsers(cfg),
 		ManagedEnterprise:           managed.IsManagedEnterprise(cfg.DeploymentMode),
 		StandaloneEnterprise:        cfg.StandaloneEnterprise(),
 		UserScanDir:                 UserScanDirForConfig(cfg),
@@ -869,17 +894,17 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// the current process's own ~ is the only scan surface, so a
 	// developer running a local build does not silently start reading
 	// their coworkers' dotdirs on a shared workstation.
-	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
+	//
+	// Outside the Secure Client profile ai_discovery.home_dirs adds folders
+	// to that list. It replaced the list, so an administrator who named the
+	// profiles (as the connector email opt-in said to) lost the owner of
+	// every row and one removal record per known component (GAP-0969).
+	if opts.ManagedEnterprise && (len(opts.HomeDirs) == 0 || !opts.SecureClient) {
 		opts.platformHomes = true
-		if owners := discoveryHomeOwnersLookup(opts.StandaloneEnterprise); len(owners) > 0 {
-			platformHomes := make([]string, 0, len(owners))
-			for _, owner := range owners {
-				platformHomes = append(platformHomes, owner.Home)
-			}
-			opts.HomeDirs = platformHomes
-			opts.HomeDir = platformHomes[0]
-			opts.homeOwners = owners
+		if !opts.SecureClient {
+			opts.extraHomes = cleanDiscoveryHomes(opts.HomeDirs)
 		}
+		opts.applyPlatformHomeOwners(discoveryHomeOwnersLookup(opts.StandaloneEnterprise))
 	}
 	// Dedupe HomeDirs and ensure HomeDir participates so single-user
 	// installs (unmanaged / dev) keep working without a config change.
@@ -989,15 +1014,7 @@ func (s *ContinuousDiscoveryService) refreshPlatformHomes() {
 	if !s.opts.platformHomes {
 		return
 	}
-	owners := discoveryHomeOwnersLookup(s.opts.StandaloneEnterprise)
-	if len(owners) == 0 {
-		return
-	}
-	homes := make([]string, 0, len(owners))
-	for _, owner := range owners {
-		homes = append(homes, owner.Home)
-	}
-	s.opts.HomeDirs, s.opts.HomeDir, s.opts.homeOwners = homes, homes[0], owners
+	s.opts.applyPlatformHomeOwners(discoveryHomeOwnersLookup(s.opts.StandaloneEnterprise))
 }
 
 func (s *ContinuousDiscoveryService) homesToScan() []string {
@@ -1222,6 +1239,7 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 		full,
 		priorModelAPIFingerprints(prev.Signals),
 	)
+	s.stampOwnerEmails(signals)
 	var hubOutcomes []huggingFaceLookupOutcome
 	if full && s.modelProvenanceHub != nil {
 		started := time.Now()
@@ -1763,8 +1781,11 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		out = append(out, sig)
 		counts[sig.State]++
 		emittedFps[sig.Fingerprint] = true
+		stored := sig
+		// The address is read again at every scan, never kept on disk.
+		stored.UserEmail = ""
 		current[sig.Fingerprint] = aiStoredSignal{
-			AISignal: sig, RawPaths: rawPathsForSignal(sig, s.opts.StoreRawLocalPaths),
+			AISignal: stored, RawPaths: rawPathsForSignal(sig, s.opts.StoreRawLocalPaths),
 			PrivacyScopeKnown:        !s.opts.SecureClient && s.privacyScopeKnown(sig),
 			PrivacyScopeHashes:       s.privacyScopesForSignal(sig),
 			StoredModelAPISourceHash: sig.ModelAPISourceHash,
@@ -2125,7 +2146,7 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	// parse error also propagates because a malformed MCP config
 	// leaves the operator with zero item rows for a real surface,
 	// which downstream must not read as "no MCP servers configured".
-	names, parseErr := readMCPServerNamesWithErr(path)
+	names, parseErr := readMCPServerNamesWithErr(path, sig.SupportedConnector)
 	var partial bool
 	var coverageReason string
 	if parseErr != nil {
@@ -2175,14 +2196,14 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 // readMCPServerNamesWithErr returns the server names an MCP config declares,
 // with the parser's error state so signalFromMCPConfigPath can distinguish
 // "unparseable" from "no servers declared".
-func readMCPServerNamesWithErr(path string) ([]string, error) {
+func readMCPServerNamesWithErr(path, connector string) ([]string, error) {
 	// An empty MCP config declares no server; it is not malformed.
 	// Antigravity leaves a 0-byte mcp_config.json, which read as a
 	// parse error and so as an MCP server row (GAP-2337).
 	if isBlankFile(path) {
 		return nil, nil
 	}
-	entries, err := parseMCPConfigForNames(path)
+	entries, err := parseMCPConfigForNames(path, connector)
 	if err != nil {
 		return nil, err
 	}
@@ -2203,13 +2224,17 @@ func isBlankFile(path string) bool {
 }
 
 // parseMCPConfigForNames dispatches to the right config parser for
-// `path` and returns MCP server entries. Kept alongside the detector
-// so future signature-catalog additions (new MCP config shapes) can
+// `path` and returns MCP server entries. connector is the signature's
+// supported connector: an Amp settings file shares its name with Claude
+// Code's but keeps its servers under amp.mcpServers. Kept alongside the
+// detector so future signature-catalog additions (new MCP config shapes) can
 // extend the switch in one place without changing the caller.
-func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
+func parseMCPConfigForNames(path, connector string) ([]config.MCPServerEntry, error) {
 	lower := strings.ToLower(path)
 	base := strings.ToLower(filepath.Base(path))
 	switch {
+	case normalizeAIID(connector) == "amp" && (strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".jsonc")):
+		return config.ReadMCPFromAmpSettings(path)
 	case strings.HasSuffix(lower, ".toml"):
 		return config.ReadMCPFromCodexConfigTOML(path)
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
@@ -2659,6 +2684,7 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	if windowsSnapshot {
 		classifyWindowsProcesses(procs, s.catalog)
 		s.attributeProcessOwners(procs)
+		procs = s.withoutExcludedAccounts(procs)
 	}
 	now := time.Now().UTC()
 	var out []AISignal
@@ -4347,7 +4373,7 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 	for i := range report.Signals {
 		report.Signals[i].Source = AISourceExternal
 		// Account attribution comes only from the guardian's per-user scans.
-		report.Signals[i].UserID, report.Signals[i].UserName = "", ""
+		report.Signals[i].UserID, report.Signals[i].UserName, report.Signals[i].UserEmail = "", "", ""
 		// Provenance country/publisher claims are catalog-controlled. An
 		// external discovery client may supply the model ID, but it cannot
 		// impersonate a higher-confidence publisher rule on outbound events.

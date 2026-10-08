@@ -1281,7 +1281,7 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	for i := range report.Signals {
 		report.Signals[i].UserName = "mallory"
 	}
-	if err := SanitizeUserScanReport(&report, catalog, false); err != nil {
+	if err := SanitizeUserScanReport(&report, catalog, false, false); err != nil {
 		t.Fatalf("SanitizeUserScanReport: %v", err)
 	}
 	if report.IDEInventory == nil || len(report.IDEInventory.Plugins) != 1 || report.IDEInventory.Plugins[0].UserName != "" {
@@ -1357,7 +1357,7 @@ func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
 	spool := t.TempDir()
 	now := time.Now().UTC()
 	report := ScanUserHome(context.Background(), t.TempDir(), "alice", 1001, UserScanOptions{}, nil)
-	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+	if err := SanitizeUserScanReport(&report, nil, false, false); err != nil {
 		t.Fatal(err)
 	}
 	report.Summary.FilesScanned = 7

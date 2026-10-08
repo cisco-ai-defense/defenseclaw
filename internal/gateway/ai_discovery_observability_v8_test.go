@@ -517,6 +517,51 @@ func TestContinuousAIDiscoveryV8CarriesModelProvenanceAcrossLifecycleFamilies(t 
 	}
 }
 
+// The owner's connector address reaches the per-cycle observation while
+// ai_discovery.include_user_email is on, and never a record without an owner
+// (GAP-0961, GAP-1025).
+func TestContinuousAIDiscoveryV8ObservationCarriesTheOwnerEmail(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Cleanup(func() { SetUserEmailCollectionEnabled(false) })
+	for _, enabled := range []bool{true, false} {
+		SetUserEmailCollectionEnabled(enabled)
+		capture := &endpointInventoryCapture{}
+		adapter := &aiDiscoveryV8Adapter{runtime: capture}
+		signal := func(id, user string) inventory.AISignal {
+			return inventory.AISignal{
+				SignalID: id, SignatureID: "codex", Category: inventory.SignalPackageDependency, Vendor: "OpenAI",
+				Product: "Codex", Confidence: .9, State: inventory.AIStateSeen, Detector: "config",
+				SupportedConnector: "codex", UserID: user, UserName: user, UserEmail: "rs4a@example.test",
+			}
+		}
+		report := inventory.AIDiscoveryReport{
+			Summary: inventory.AIDiscoverySummary{ScanID: "scan-email", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok", TotalSignals: 2, ActiveSignals: 2},
+			Signals: []inventory.AISignal{signal("owned", "1001"), signal("unowned", "")},
+		}
+		if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+			t.Fatal(err)
+		}
+		observed := 0
+		for _, record := range capture.snapshot() {
+			if record.EventName() != "ai_component.observed" {
+				continue
+			}
+			observed++
+			body := canonicalBody(t, record)
+			want := ""
+			if enabled && body[observability.TelemetryAttributeDefenseClawAIComponentID] == "owned" {
+				want = "rs4a@example.test"
+			}
+			if got, _ := body[observability.TelemetryAttributeDefenseClawUserEmail].(string); got != want {
+				t.Errorf("enabled=%t %v email=%q want %q", enabled, body[observability.TelemetryAttributeDefenseClawAIComponentID], got, want)
+			}
+		}
+		if observed != 2 {
+			t.Fatalf("enabled=%t: %d ai_component.observed records, want 2", enabled, observed)
+		}
+	}
+}
+
 func asSidecarObservabilityError(err error, target **sidecarObservabilityError) bool {
 	value, ok := err.(*sidecarObservabilityError)
 	if ok {

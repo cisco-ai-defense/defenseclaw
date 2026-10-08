@@ -80,6 +80,12 @@ type IdentitySpoolRecord struct {
 	// matching alone reads it (GAP-0635).
 	AccountDomain string                      `json:"account_domain,omitempty"`
 	Facts         useridentity.DirectoryFacts `json:"facts"`
+	// ConnectorEmails maps "claudecode" and "codex" to the account address
+	// the SYSTEM enumerator read from that connector's file in the
+	// account's own profile, while ai_discovery.include_user_email is on
+	// (Windows). The gateway service cannot read Claude Code's file, which
+	// lives in the profile root (GAP-1025).
+	ConnectorEmails map[string]string `json:"connector_emails,omitempty"`
 }
 
 // identitySpoolClockSlack is how far in the future a record may be dated
@@ -182,6 +188,11 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 	}
 	if !strings.EqualFold(record.Key, key) {
 		return record, errors.New("identity spool record names another account")
+	}
+	for connector, email := range record.ConnectorEmails {
+		if (connector != "claudecode" && connector != "codex") || !useridentity.ValidEmail(email) {
+			return record, errors.New("identity spool record names an invalid connector address")
+		}
 	}
 	record.Facts.Assurance = useridentity.AssuranceVerified
 	return record, nil

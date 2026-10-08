@@ -214,8 +214,8 @@ Secure Client profile every profile keeps all five, as before 1.0.
 
 `ai_discovery.include_user_principal` and `ai_discovery.include_user_email` decide
 whether the gateway attaches the principals and available email at all, for every
-destination at once. Email is available from per-profile inventory when
-`ai_discovery.home_dirs` is configured, or from Cursor hook payloads.
+destination at once. Email comes from the inventory of a managed host (each
+enrolled account's own Claude Code and Codex files), or from Cursor hook payloads.
 The client address and the tenant ID have no switch. To send
 a principal to a trusted local Loki but not to Galileo or another SaaS destination,
 turn the option on and give the destinations that must not receive it the
