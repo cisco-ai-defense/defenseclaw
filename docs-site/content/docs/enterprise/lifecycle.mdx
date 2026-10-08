@@ -118,7 +118,8 @@ sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD
 Run the new release's `defenseclaw-gateway` from the extracted folder. The
 payload must be owned by root and must not be writable by group or others,
 so extract it into a root-only folder, as above, never into a shared one
-such as `/var/tmp`.
+such as `/var/tmp`. The folder must also allow execution: on a CIS host
+`/tmp` and `/var/tmp` are mounted `noexec`.
 
 ### macOS
 

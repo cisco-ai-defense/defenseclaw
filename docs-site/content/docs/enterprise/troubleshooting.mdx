@@ -182,6 +182,7 @@ codes above. For the full contract, see [Exit codes](/docs/enterprise/mdm#exit-c
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | The lifecycle did not start or printed no result |
 | `mdm_secret_failed` | Storing the credential failed: on Windows after the deployment applied; on Linux and macOS before the config was applied |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | The private staging folder or the Intune content is not as expected |
+| `mdm_staging_noexec` | Linux: the staging folder is on a `noexec` mount, so the payload's gateway cannot run there; pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm |
 
 Wrapper logs: `/var/log/defenseclaw-enterprise-mdm.log` on Linux,
 `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` on macOS, and

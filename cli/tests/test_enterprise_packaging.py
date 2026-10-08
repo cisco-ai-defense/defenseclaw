@@ -1247,6 +1247,7 @@ dc_validate_args() {{ :; }}
 id() {{ echo 0; }}
 mktemp() {{ command mktemp -d '{tmp_path}/stage.XXXXXX'; }}
 dc_cleanup() {{ :; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{tmp_path}'; }}
 dc_sweep_stages() {{ :; }}
 dc_stat_uid() {{ echo 0; }}
 dc_log() {{ :; }}
