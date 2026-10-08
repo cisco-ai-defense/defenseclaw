@@ -295,6 +295,9 @@ type choice struct {
 // says what that leaves as it is.
 var errInterrupted = errors.New("interrupted")
 
+// errNoAnswer is a question whose input ended (Ctrl-D) before an answer.
+var errNoAnswer = errors.New("no answer (end of input)")
+
 // IsInterrupted reports a question the user answered with Ctrl-C.
 func IsInterrupted(err error) bool { return errors.Is(err, errInterrupted) }
 
@@ -458,7 +461,7 @@ func (a *App) readLineNow() (string, error) {
 	s, err := a.reader.ReadString('\n')
 	if err != nil && (s == "" || !errors.Is(err, io.EOF)) {
 		if errors.Is(err, io.EOF) {
-			return "", errors.New("no answer (end of input)")
+			return "", errNoAnswer
 		}
 		return "", err
 	}
