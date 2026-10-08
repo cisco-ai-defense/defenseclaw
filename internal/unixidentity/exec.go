@@ -44,22 +44,6 @@ type commandResult struct {
 // Tests replace it; production uses runTrustedCommand.
 type commandRunner func(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error)
 
-// commandEnvKey is the context key of extra environment for the trusted
-// commands run with that context (withCommandEnv).
-type commandEnvKey struct{}
-
-// withCommandEnv returns ctx with env ("NAME=value") added to the fixed
-// environment of the trusted commands run with it.
-func withCommandEnv(ctx context.Context, env ...string) context.Context {
-	return context.WithValue(ctx, commandEnvKey{}, append(commandEnv(ctx), env...))
-}
-
-// commandEnv is the extra environment withCommandEnv put in ctx.
-func commandEnv(ctx context.Context) []string {
-	env, _ := ctx.Value(commandEnvKey{}).([]string)
-	return env[:len(env):len(env)]
-}
-
 // outputFilter wraps the bounded stdout of one command, so that output the
 // caller does not read never counts against the limit.
 type outputFilter func(io.Writer) io.Writer
@@ -129,7 +113,7 @@ func runTrustedCommand(ctx context.Context, path string, args []string, filters 
 	ctx, cancel := context.WithTimeout(ctx, defaultCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Env = append([]string{"PATH=/usr/bin:/bin", "LC_ALL=C", "LANG=C"}, commandEnv(ctx)...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C", "LANG=C"}
 	cmd.Dir = "/"
 	stdout := &limitedBuffer{limit: defaultOutputLimit}
 	stderr := &limitedBuffer{limit: stderrLimit}

@@ -43,7 +43,7 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 		ResolvedAt: now,
 	}
 	if record, ok := readIdentitySpoolFactsForAccount(key, account.Username, now); ok {
-		return mergeSpoolFacts(own, record.Facts), nil
+		return mergeSpoolFacts(own, record), nil
 	}
 	return own, nil
 }
