@@ -392,3 +392,40 @@ func TestSpoolRecordInAnotherSSSDDomainClearsOwnRealm(t *testing.T) {
 		t.Errorf("merged = %+v; want the realm and principal of the same domain", merged)
 	}
 }
+
+// GAP-1027: when the guardian's identity record lists a new group set (a
+// user signed out and in again), the cached facts are dropped at the next
+// request instead of serving the old groups for the rest of the TTL.
+func TestSpoolGroupChangeDropsCachedFacts(t *testing.T) {
+	dir := t.TempDir()
+	key := "S-1-5-21-1-2-3-1105"
+	write := func(groups ...string) {
+		t.Helper()
+		data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+			Key: key, User: `DCLAB\dcad-w3w2`, UpdatedAt: time.Now().UTC(), Facts: useridentity.DirectoryFacts{Groups: groups},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, key+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldValidate, previousDir := validateManagedGuardianAuthorization, currentIdentitySpoolDir()
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	setIdentitySpoolDir(dir)
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate; setIdentitySpoolDir(previousDir) })
+	write(`DCLAB\Domain Users`)
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		record, _ := readIdentitySpoolFacts(key, time.Now())
+		return record.Facts, nil
+	})
+	if facts, ok := cache.get(key, true); !ok || len(facts.Groups) != 1 {
+		t.Fatalf("first lookup = %+v, %v", facts, ok)
+	}
+	write(`DCLAB\Domain Users`, `DCLAB\dc-w3w-pilot`)
+	forgetOnSpoolGroupChange(cache, key, time.Now().Add(time.Minute))
+	if facts, ok := cache.get(key, true); !ok || len(facts.Groups) != 2 {
+		t.Fatalf("after a new sign-in the cache served %+v, %v; want the new group set", facts, ok)
+	}
+}

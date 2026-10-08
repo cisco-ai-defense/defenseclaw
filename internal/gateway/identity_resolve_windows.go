@@ -32,7 +32,11 @@ func windowsDirectoryFacts(sid string, block bool) (useridentity.DirectoryFacts,
 	if !strings.HasPrefix(sid, "S-1-") {
 		return useridentity.DirectoryFacts{}, false
 	}
-	return peerDirectoryCache().get(sid, block)
+	cache := peerDirectoryCache()
+	// A new sign-in token's groups replace the cached ones at once
+	// (GAP-1027).
+	forgetOnSpoolGroupChange(cache, sid, time.Now())
+	return cache.get(sid, block)
 }
 
 // peerDirectoryCache is the cache the hook path reads directory facts from,
