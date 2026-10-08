@@ -371,8 +371,9 @@ operator-owned policy directory. `guardrail protection enable` adds the pack's
 name to `guardrail.rules.protections` for the scope (global, one connector, or a
 profile with `--profile`). The gateway layers the pack's rules on the scope's
 rule pack in memory, replacing base rules with the same ID, and writes no
-directory to disk. `guardrail protection disable NAME` takes it out again and
-`guardrail protection list` shows which scope has which pack on. The staged SSH
+directory to disk. `guardrail protection disable NAME` takes it out of that
+scope. If a wider scope enables the pack, disable it there; a narrower scope
+cannot turn it off. `guardrail protection list` shows which scope has which pack on. The staged SSH
 contract is refused. None of this adds another value to `defenseclaw setup guardrail
 --rule-pack`, which accepts only `default`, `permissive`, and `strict`. For a
 Policy Creator export, validate the pack, review the declared trust boundary,
