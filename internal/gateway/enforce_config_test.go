@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"gopkg.in/yaml.v3"
 )
 
 // enforceTestAPI is an APIServer over a temp config.yaml holding body, with
@@ -181,5 +182,37 @@ func TestEnforceUnblockListedURLRule(t *testing.T) {
 	want := []configwrite.Change{{Path: "asset_policy.mcp.denied", Value: []map[string]any{}}}
 	if code != http.StatusOK || !reflect.DeepEqual(*recorded, want) {
 		t.Fatalf("unblock = %d %v, changes %#v; want %#v", code, out, *recorded, want)
+	}
+}
+
+// A listed URL is a selector, not the MCP server name.
+func TestEnforceBlockListedMCPURLKeepsSelector(t *testing.T) {
+	url := "https://example.invalid/mcp"
+	api, recorded := enforceTestAPI(t, "asset_policy:\n  mcp:\n    allowed:\n      - {url: https://example.invalid/mcp}\n")
+	api.scannerCfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{URL: url}}
+	w := httptest.NewRecorder()
+	api.handleEnforceAllowed(w, httptest.NewRequest(http.MethodGet, "/enforce/allowed", nil))
+	var entries []enforcementEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil || len(entries) != 1 {
+		t.Fatalf("listed rules = %v %s", err, w.Body.String())
+	}
+	code, out := enforceRequest(t, api.handleEnforceBlock, http.MethodPost,
+		`{"target_type":"mcp","target_name":"`+entries[0].TargetName+`"}`)
+	if code != http.StatusOK || out["status"] != "blocked" {
+		t.Fatalf("block = %d %v", code, out)
+	}
+	raw, err := yaml.Marshal((*recorded)[0].Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rules []config.AssetPolicyRule
+	if err := yaml.Unmarshal(raw, &rules); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = rules
+	verdict, _ := cfg.AssetListDecision(config.AssetPolicyInput{TargetType: "mcp", Name: "notes", URL: url})
+	if verdict != config.AssetListDeny || len(rules) != 1 || rules[0].Name != "" || rules[0].URL != url {
+		t.Fatalf("denied=%+v verdict=%q, want URL-only deny", rules, verdict)
 	}
 }
