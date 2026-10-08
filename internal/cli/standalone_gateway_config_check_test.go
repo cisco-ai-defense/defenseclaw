@@ -74,6 +74,13 @@ func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
 		t.Fatalf("config with trust.mode AUTHENTICODE = %v, want the schema location", err)
 	}
 
+	// A syntax error names its line (GAP-0607).
+	tabbed := writeStandaloneGatewayCheckConfig(t, "deployment_mode: managed_enterprise\nguardrail:\n\tconnectors: {}\n")
+	err = validateStandaloneGatewayConfig(tabbed, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), "at line 3:") || !strings.Contains(err.Error(), "yaml_syntax_invalid") {
+		t.Fatalf("tab-indented config = %v, want its line and yaml_syntax_invalid", err)
+	}
+
 	missingPack := filepath.Join(t.TempDir(), "missing-pack")
 	noPack := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
 		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+missingPack+"'", 1))

@@ -117,14 +117,20 @@ func judgeOf(g *Generation, fallback *LLMJudge) *LLMJudge {
 	return fallback
 }
 
-// policyStampGeneration is the generation whose digest a record emitted
-// under ctx carries: the pinned one, else the live one. nil before the first
-// generation and under the Secure Client integration.
-func policyStampGeneration(ctx context.Context) *Generation {
-	g := pinnedGeneration(ctx)
-	if g == nil {
-		g = currentGeneration()
+// requestGeneration is the generation a request decides with: the one
+// pinned on ctx, else the live one (a component outside a gateway).
+func requestGeneration(ctx context.Context) *Generation {
+	if g := pinnedGeneration(ctx); g != nil {
+		return g
 	}
+	return currentGeneration()
+}
+
+// policyStampGeneration is the generation whose digest a record emitted
+// under ctx carries: requestGeneration. nil before the first generation and
+// under the Secure Client integration.
+func policyStampGeneration(ctx context.Context) *Generation {
+	g := requestGeneration(ctx)
 	if g == nil || g.Config == nil || g.Config.SecureClientIntegration() {
 		return nil
 	}
