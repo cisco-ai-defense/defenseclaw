@@ -136,8 +136,8 @@ func runSandboxKernelFeedInstall(cmd *cobra.Command) error {
 	if result.Check != "" {
 		fmt.Fprintf(out, "  %s\n", result.Check)
 	}
-	fmt.Fprintf(out, "  sandboxes started with --process-tree (or a pack's observe.process_tree) now record every exec and exit;\n")
-	fmt.Fprintf(out, "  check with `%s sandbox kernel-feed status`; remove with `sudo %s sandbox kernel-feed uninstall`\n", gateway, gateway)
+	fmt.Fprintf(out, "  sandboxes started with --process-tree (or a pack's observe.process_tree)\n  now record every exec and exit\n")
+	fmt.Fprintf(out, "  check:  %s sandbox kernel-feed status\n  remove: sudo %s sandbox kernel-feed uninstall\n", gateway, gateway)
 	return nil
 }
 
@@ -191,11 +191,13 @@ func runSandboxKernelFeedStatus(cmd *cobra.Command, output string) error {
 
 func printSandboxKernelFeedStatus(out io.Writer, r sandboxKernelFeedStatus) {
 	fmt.Fprintln(out, "Sandbox kernel feed")
+	// Short lines with the next step (GAP-0034, GAP-0035); the error behind a
+	// reason stays in --json (detail).
 	if !r.Installed {
-		fmt.Fprintf(out, "  installed:  no; install it with `%s` (a unix-socket Tetragon is needed)\n", r.InstallCommand)
+		fmt.Fprintf(out, "  installed:  no; install it (a unix-socket Tetragon is needed):\n      %s\n", r.InstallCommand)
 	} else {
-		fmt.Fprintf(out, "  installed:  yes, %s is %s (%s %s)\n", sandboxfeed.UnitName, firstNonEmptyText(r.Active, "unknown"),
-			r.Binary, firstNonEmptyText(r.Version, "of an unknown version"))
+		fmt.Fprintf(out, "  installed:  yes, %s is %s\n", sandboxfeed.UnitName, firstNonEmptyText(r.Active, "unknown"))
+		fmt.Fprintf(out, "  binary:     %s %s\n", r.Binary, firstNonEmptyText(r.Version, "of an unknown version"))
 	}
 	switch {
 	case r.Reachable:
@@ -206,13 +208,35 @@ func printSandboxKernelFeedStatus(out io.Writer, r sandboxKernelFeedStatus) {
 		fmt.Fprintf(out, "  feed:       answers (build %s, protocol %d); its Tetragon stream is %s\n",
 			firstNonEmptyText(r.Build, "unknown"), r.Protocol, tetragon)
 	case r.Installed || r.Reason != sandboxfeed.ReasonNotInstalled:
-		fmt.Fprintf(out, "  feed:       not readable by this account: %s (%s)\n", r.Reason, r.Detail)
+		what, next := kernelFeedProblem(r.Reason)
+		fmt.Fprintf(out, "  feed:       %s\n", what)
+		if next != "" {
+			fmt.Fprintf(out, "              %s\n", next)
+		}
 	}
 	fmt.Fprintf(out, "  gateway:    %s, protocol %d (reads %d and %d)\n", firstNonEmptyText(r.GatewayVersion, "dev"),
 		r.GatewayProtocol, r.GatewayProtocol, r.GatewayProtocol-1)
 	if r.UpdateNeeded {
-		fmt.Fprintf(out, "  %s the feed is older than this gateway or speaks another protocol; update it: %s\n", Style("!", "fg=yellow", "bold"), r.InstallCommand)
+		fmt.Fprintf(out, "  %s the feed is older than this gateway or speaks another protocol; update it:\n      %s\n", Style("!", "fg=yellow", "bold"), r.InstallCommand)
 	}
+}
+
+// kernelFeedProblem says why the feed is not read, by its reason, and what
+// to do when there is something to do (next, a line of its own).
+func kernelFeedProblem(reason string) (what, next string) {
+	switch reason {
+	case sandboxfeed.ReasonVersionSkew:
+		return "not used: it speaks another protocol (" + reason + ")", ""
+	case sandboxfeed.ReasonNotPermitted:
+		return "not readable by this account (" + reason + ")", "join the " + sandboxfeed.DockerGroup + " group, then log in again"
+	case sandboxfeed.ReasonUntrusted:
+		return "refused (" + reason + ")", "its socket or folder is not root's, or others can write it"
+	case sandboxfeed.ReasonUnavailable:
+		return "does not answer (" + reason + ")", "sudo systemctl status " + sandboxfeed.UnitName
+	case sandboxfeed.ReasonNotInstalled:
+		return "no socket (" + reason + ")", ""
+	}
+	return "not used (" + reason + ")", ""
 }
 
 func firstNonEmptyText(values ...string) string {

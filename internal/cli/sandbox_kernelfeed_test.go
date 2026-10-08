@@ -139,6 +139,38 @@ func TestSandboxKernelFeedInstallStatusUninstall(t *testing.T) {
 	}
 }
 
+// GAP-0034, GAP-0035: each reason says what it is and what to do, in a line
+// that fits a terminal; the error behind it stays in --json.
+func TestSandboxKernelFeedStatusSaysWhyInShortLines(t *testing.T) {
+	for reason, want := range map[string]string{
+		sandboxfeed.ReasonVersionSkew:  "not used: it speaks another protocol (kernel_feed_version_skew)",
+		sandboxfeed.ReasonNotPermitted: "not readable by this account (kernel_feed_not_permitted)\n              join the docker group, then log in again",
+		sandboxfeed.ReasonUntrusted:    "refused (kernel_feed_untrusted)",
+		sandboxfeed.ReasonUnavailable:  "does not answer (kernel_feed_unavailable)\n              sudo systemctl status " + sandboxfeed.UnitName,
+		sandboxfeed.ReasonNotInstalled: "no socket",
+	} {
+		var out strings.Builder
+		printSandboxKernelFeedStatus(&out, sandboxKernelFeedStatus{
+			Status: sandboxfeed.Status{Installed: true, Active: "active", Binary: "/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper",
+				Version: "1.0.40", Reason: reason, Detail: "sandboxfeed: not permitted to read the feed: lstat /run/x: permission denied",
+				GatewayVersion: "1.0.40", GatewayProtocol: sandboxfeed.ProtocolVersion, UpdateNeeded: reason == sandboxfeed.ReasonVersionSkew},
+			InstallCommand: "sudo /home/dccert-user/.local/bin/defenseclaw-gateway sandbox kernel-feed install",
+		})
+		text := out.String()
+		if !strings.Contains(text, want) || strings.Contains(text, "lstat") || strings.Contains(text, "sandboxfeed:") {
+			t.Errorf("%s:\n%s", reason, text)
+		}
+		if reason != sandboxfeed.ReasonNotPermitted && strings.Contains(text, "not readable by this account") {
+			t.Errorf("%s reads as a permission problem:\n%s", reason, text)
+		}
+		for _, line := range strings.Split(text, "\n") {
+			if n := len([]rune(line)); n > 100 {
+				t.Errorf("%s: a %d-column line: %q", reason, n, line)
+			}
+		}
+	}
+}
+
 func TestSandboxKernelFeedRefusals(t *testing.T) {
 	gateway, calls := kernelFeedTest(t, 1000)
 	out, err := runKernelFeed(t, "install")

@@ -138,24 +138,27 @@ func (a *App) processSourceNote(list *sandboxapi.ProcessList) {
 	k := list.Kernel
 	switch {
 	case k == nil:
+	// Short lines: the note sits under a table cut to the terminal's width
+	// and must not wrap mid-word at 80 columns (GAP-0028); a command gets a
+	// line of its own, so it can be copied whole.
 	case k.Connected && k.Tetragon == "connected":
-		a.note(fmt.Sprintf("source: kernel (Tetragon, through the sandbox kernel feed): every exec and exit is recorded, "+
-			"%d so far (%d with their pid in the sandbox); the %ds sample fills in the rest", k.Execs, k.Pinned, list.IntervalSeconds))
+		a.note("source: kernel (Tetragon, through the sandbox kernel feed): every exec and exit is recorded,")
+		a.note(fmt.Sprintf("%d so far (%d with their pid in the sandbox); the %ds sample fills in the rest", k.Execs, k.Pinned, list.IntervalSeconds))
 		if k.Dropped > 0 {
 			a.warn(fmt.Sprintf("the kernel feed lost %d records (Tetragon's rate limit or a slow reader)", k.Dropped))
 		}
 		if k.UpdateCommand != "" {
-			a.note("the kernel feed is older than this gateway; update it: " + k.UpdateCommand)
+			a.note("the kernel feed is older than this gateway; update it:")
+			a.note("  " + k.UpdateCommand)
 		}
 		return
 	case k.Connected:
 		a.warn("the sandbox kernel feed is connected, but its Tetragon is not (" + firstNonEmpty(k.TetragonReason, "unavailable") + ")")
+	case k.UpdateCommand != "":
+		a.warn("the sandbox kernel feed is not used (" + k.Reason + "); update it:")
+		a.note("  " + k.UpdateCommand)
 	default:
-		hint := ""
-		if k.UpdateCommand != "" {
-			hint = "; update it: " + k.UpdateCommand
-		}
-		a.warn("the sandbox kernel feed is not used (" + k.Reason + ")" + hint)
+		a.warn("the sandbox kernel feed is not used (" + k.Reason + ")")
 	}
 	a.note(sampled)
 }

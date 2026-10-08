@@ -41,11 +41,11 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 		},
 		"older feed": {
 			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Connected: true, Tetragon: "connected", UpdateCommand: "sudo /x/defenseclaw-gateway sandbox kernel-feed install"},
-			want:   []string{"source: kernel", "update it: sudo /x/defenseclaw-gateway sandbox kernel-feed install"},
+			want:   []string{"source: kernel", "update it:\n", "  sudo /x/defenseclaw-gateway sandbox kernel-feed install"},
 		},
 		"skew": {
 			kernel: &sandboxapi.ProcessKernelFeed{Source: "tetragon", Reason: "kernel_feed_version_skew", UpdateCommand: "sudo /x/defenseclaw-gateway sandbox kernel-feed install"},
-			want:   []string{"not used (kernel_feed_version_skew); update it: sudo", "sampled every 5s"},
+			want:   []string{"not used (kernel_feed_version_skew); update it:\n", "  sudo /x/defenseclaw-gateway sandbox kernel-feed install", "sampled every 5s"},
 			never:  []string{"source: kernel"},
 		},
 		"tetragon down": {
@@ -67,6 +67,12 @@ func TestPsNamesTheKernelFeedSource(t *testing.T) {
 		for _, never := range c.never {
 			if strings.Contains(out.String(), never) {
 				t.Errorf("%s: output has %q:\n%s", name, never, out)
+			}
+		}
+		// GAP-0028: no line of the source note wraps at 100 columns.
+		for _, line := range strings.Split(out.String(), "\n") {
+			if n := len([]rune(line)); n > 100 {
+				t.Errorf("%s: a %d-column line: %q", name, n, line)
 			}
 		}
 	}
