@@ -65,8 +65,11 @@ type Compiled struct {
 	// Notes explain what was left out and why (no anchors, a path outside its
 	// home, a lint finding), for status.
 	Notes []string
-	// OverLimit counts roots left out of a pid anchor by the PID budget.
-	OverLimit int
+	// OverLimit counts roots left out of a pid anchor by the PID budget, and
+	// OverLimitPIDs are their pids: they are not waiting for a policy load
+	// (kernel_session_policy_pending), they do not fit (GAP-0089).
+	OverLimit     int
+	OverLimitPIDs []int
 	// Anchored counts roots in a pid anchor per uid.
 	Anchored map[int]int
 }
@@ -119,7 +122,8 @@ func Compile(in Input) (Compiled, error) {
 		}
 		tp, meta, notes, over := compileControls(fsys, set, in, *scope, homes)
 		out.Notes = append(out.Notes, notes...)
-		out.OverLimit += over
+		out.OverLimit += len(over)
+		out.OverLimitPIDs = append(out.OverLimitPIDs, over...)
 		if len(tp.Spec.LsmHooks) == 0 {
 			return nil
 		}
@@ -459,7 +463,7 @@ func validBinary(p string) bool {
 // grouped four at a time, packed into repeated hooks of at most five
 // selectors. The SSH NoPost exemption precedes SSH key selectors in each
 // relevant hook.
-func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[int]string) (tracingPolicy, Policy, []string, int) {
+func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[int]string) (tracingPolicy, Policy, []string, []int) {
 	var notes []string
 	uidSet := map[int]bool{}
 	for _, uid := range scope.UIDs {
@@ -474,7 +478,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	sort.Ints(uids)
 	tp := basePolicy()
 	if len(uids) == 0 {
-		return tp, Policy{}, append(notes, "controls: no enrolled user"), 0
+		return tp, Policy{}, append(notes, "controls: no enrolled user"), nil
 	}
 	// A binary selector can carry only one uid set. Keep its binaries from
 	// one uid: taking the union of both would deny one enrolled user's
@@ -498,8 +502,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 			}
 		}
 	}
-	var pids []int
-	over := 0
+	var pids, over []int
 	pidOnly := false
 	for _, root := range in.Roots {
 		if !uidSet[root.UID] || !scope.allows(root.Connector) {
@@ -514,7 +517,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 			continue
 		}
 		if len(pids) >= MaxPIDs {
-			over++
+			over = append(over, root.PID)
 			continue
 		}
 		pids = append(pids, root.PID)
@@ -538,8 +541,8 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		binList = nil
 		binaryUID = 0
 	}
-	if over > 0 {
-		notes = append(notes, fmt.Sprintf("%s:%d", WarnRootsOverLimit, over))
+	if len(over) > 0 {
+		notes = append(notes, fmt.Sprintf("%s:%d", WarnRootsOverLimit, len(over)))
 	}
 	// Only a session the binaries cannot cover is left to monitor; a native
 	// root of the binary uid is denied through its binary.

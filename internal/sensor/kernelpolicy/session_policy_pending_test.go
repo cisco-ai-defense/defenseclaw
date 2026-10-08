@@ -11,6 +11,7 @@
 package kernelpolicy
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -136,11 +137,45 @@ func TestDisplacedRootStaysPendingBeyondPIDBudget(t *testing.T) {
 	// the bounded policy. The displaced live root must now stop clean time.
 	h.procs = append(h.procs, codexProc(8000, 1, 50, 1001))
 	h.pass()
-	if s := userState(h, 1001); s.Reason != WarnSessionPolicyPending {
+	// The displaced root does not fit: it is over the limit, not waiting
+	// for a load (GAP-0089).
+	if s := userState(h, 1001); s.Reason != WarnRootsOverLimit {
 		t.Fatalf("uncovered existing root did not pause burn-in: %+v", s)
 	}
 	h.accrueTick()
 	if got := h.covered(1001); got != 24*time.Hour {
 		t.Fatalf("user covered %v with an uncovered root, want the 24h measured before (no accrual, no restart)", got)
+	}
+}
+
+// A session over the PID budget is reported as over the limit only: it is
+// not waiting for a policy load, so kernel_session_policy_pending and its
+// advice (a load failure) do not apply. A session that may still fit is
+// pending until the next pass compiles it (GAP-0089).
+func TestOverLimitSessionIsNotReportedPending(t *testing.T) {
+	h := newHarness(t, observeIntent(), baseTargets)
+	for i := 0; i <= MaxPIDs; i++ {
+		h.procs = append(h.procs, codexProc(7000+i, 1, uint64(100+i), 1001))
+	}
+	h.pass()
+	if !h.has(fmt.Sprintf("%s:1", WarnRootsOverLimit)) || h.has(WarnSessionPolicyPending) {
+		t.Fatalf("nine sessions: warnings %v, want only %s:1", h.status().Warnings, WarnRootsOverLimit)
+	}
+	if s := userState(h, 1001); s.State != UIDMonitor || s.Reason != WarnRootsOverLimit {
+		t.Fatalf("nine sessions: user %+v, want monitor, %s", s, WarnRootsOverLimit)
+	}
+	h.accrueTick()
+	if got := h.covered(1001); got != 0 {
+		t.Fatalf("a user with a session over the limit accrued %v", got)
+	}
+	// A tenth session is pending until a pass finds it does not fit either.
+	h.procs = append(h.procs, codexProc(7100, 1, 300, 1001))
+	h.ctl.rescan()
+	if !h.has(WarnSessionPolicyPending+":1") || userState(h, 1001).Reason != WarnSessionPolicyPending {
+		t.Fatalf("new session before the pass: warnings %v, user %+v", h.status().Warnings, userState(h, 1001))
+	}
+	h.pass()
+	if h.has(WarnSessionPolicyPending) || userState(h, 1001).Reason != WarnRootsOverLimit {
+		t.Fatalf("after the pass: warnings %v, user %+v", h.status().Warnings, userState(h, 1001))
 	}
 }

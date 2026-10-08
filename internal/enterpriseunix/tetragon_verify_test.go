@@ -250,6 +250,11 @@ func TestTetragonReadinessChecks(t *testing.T) {
 			in.State.UIDs[0].Reason = kernelpolicy.WarnSessionPolicyPending
 			in.State.UIDs[0].CoveredSeconds = 0
 		}, []want{{checkAgents, checkWarn, "covered time is paused until its process id is in an enabled policy"}}},
+		// GAP-0089: a session over the limit does not wait for a load.
+		{"session over the limit", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) {
+			*in = withUsers(*in)
+			in.State.UIDs[0].Reason = kernelpolicy.WarnRootsOverLimit
+		}, []want{{checkAgents, checkWarn, "dcr-std1 run more than 8 agent sessions at once; the monitor controls measure 8, so covered time is paused until fewer run"}}},
 		{"nobody enrolled", "observe", "observe", nil, []want{{checkAgents, checkWarn, "no user is enrolled"}}},
 		{"no agent for enforce", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.UIDs = []kernelpolicy.UIDStatus{{UID: 1001, User: "dcr-std1", Connectors: []string{"claudecode"},

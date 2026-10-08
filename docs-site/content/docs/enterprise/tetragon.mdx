@@ -1419,8 +1419,11 @@ execution.
 Known limits of these controls:
 
 - At most eight running agent sessions are anchored in one monitor controls
-  policy. Further roots are reported as `kernel_roots_over_limit`; their user's
-  covered burn-in time pauses until every live root is measured. Eight roots
+  policy. Further roots are reported as `kernel_roots_over_limit` (and that
+  is the user's reason in `status` and `verify`, not
+  `kernel_session_policy_pending`: they do not wait for a load, they do not
+  fit); their user's covered burn-in time pauses until every live root is
+  measured. Eight roots
   use two `file_open` hooks on the measured Tetragon 1.7.1 host. More hooks
   loaded but cost more than the budget described below.
 - A new agent session may wait a minute or two for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; the user's earlier covered time stays. If loading fails, the warning remains until the policy is repaired.

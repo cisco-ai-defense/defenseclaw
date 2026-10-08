@@ -538,6 +538,10 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 			}
 		}
 	}
+	c.overLimit = map[int]bool{}
+	for _, pid := range compiled.OverLimitPIDs {
+		c.overLimit[pid] = true
+	}
 	c.refreshPending(false)
 	keptWarnings := c.st.Warnings[:0:0]
 	for _, warning := range c.st.Warnings {
@@ -623,7 +627,7 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 		c.warn(fmt.Sprintf("%s:%d", WarnRootsOverLimit, compiled.OverLimit))
 	}
 	pending := 0
-	for _, n := range c.pending {
+	for _, n := range c.waitingLoad {
 		pending += n
 	}
 	if pending > 0 {
@@ -794,7 +798,7 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 		}
 		status.AnchoredRoots = c.alive[uid]
 		if c.pending[uid] > 0 {
-			status.State, status.Reason = UIDMonitor, WarnSessionPolicyPending
+			status.State, status.Reason = UIDMonitor, pendingReason(c.waitingLoad[uid])
 		}
 		if status.State == UIDEnforcing && !c.hasAnchor(uid, plan, compiled) {
 			// Ready, but the enforcing policy cannot deny for this user: it

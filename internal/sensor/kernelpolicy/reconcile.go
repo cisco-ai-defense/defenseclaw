@@ -148,9 +148,14 @@ type Controller struct {
 	enabled    map[int]bool
 	alive      map[int]int
 	pending    map[int]int
-	seenRoots  map[rootKey]bool
-	waiting    map[rootKey]bool
-	warmup     map[int]bool
+	// overLimit are the pids of the roots the last compile left out for the
+	// PID budget, and waitingLoad counts per user the pending roots that are
+	// not among them: those wait for a policy load, the others do not fit.
+	overLimit   map[int]bool
+	waitingLoad map[int]int
+	seenRoots   map[rootKey]bool
+	waiting     map[rootKey]bool
+	warmup      map[int]bool
 	// ticks are when each user's latest burn-in ticks were credited, and
 	// scans the times of the last three root scans: a session found waiting
 	// for the controls policy takes back the ticks it may have run in
@@ -212,24 +217,26 @@ func New(cfg Config) *Controller {
 	}
 	cfg.Intervals = cfg.Intervals.withDefaults()
 	c := &Controller{
-		cfg:        cfg,
-		tracker:    NewTracker(),
-		recorded:   map[string]bool{},
-		retryAt:    map[string]time.Time{},
-		lastPIDs:   map[int]bool{},
-		lastNative: map[int]map[string]nativeAnchor{},
-		enabled:    map[int]bool{},
-		alive:      map[int]int{},
-		pending:    map[int]int{},
-		seenRoots:  map[rootKey]bool{},
-		waiting:    map[rootKey]bool{},
-		warmup:     map[int]bool{},
-		ticks:      map[int][]time.Time{},
-		progressAt: map[int]time.Time{},
-		nudge:      make(chan struct{}, 1),
-		burn:       LoadBurnin(cfg.Dirs),
-		names:      map[string]known{},
-		totals:     map[string]int64{},
+		cfg:         cfg,
+		tracker:     NewTracker(),
+		recorded:    map[string]bool{},
+		retryAt:     map[string]time.Time{},
+		lastPIDs:    map[int]bool{},
+		lastNative:  map[int]map[string]nativeAnchor{},
+		enabled:     map[int]bool{},
+		alive:       map[int]int{},
+		pending:     map[int]int{},
+		overLimit:   map[int]bool{},
+		waitingLoad: map[int]int{},
+		seenRoots:   map[rootKey]bool{},
+		waiting:     map[rootKey]bool{},
+		warmup:      map[int]bool{},
+		ticks:       map[int][]time.Time{},
+		progressAt:  map[int]time.Time{},
+		nudge:       make(chan struct{}, 1),
+		burn:        LoadBurnin(cfg.Dirs),
+		names:       map[string]known{},
+		totals:      map[string]int64{},
 	}
 	sweepInterruptedWrites(cfg.Dirs.State, cfg.Now(), cfg.Logger)
 	if err := readJSON(cfg.Dirs.StateFile(), &c.st); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -893,7 +900,7 @@ func (c *Controller) rescan() bool {
 // Tetragon reported enabled. A scan publishes the pending state immediately,
 // before a potentially slow add or replacement RPC finishes.
 func (c *Controller) refreshPending(publish bool) {
-	pending := map[int]int{}
+	pending, waitingLoad := map[int]int{}, map[int]int{}
 	live := map[rootKey]bool{}
 	c.tallyMu.Lock()
 	for _, root := range c.roots.Roots {
@@ -923,7 +930,12 @@ func (c *Controller) refreshPending(publish bool) {
 			delete(c.waiting, key)
 		}
 		if c.waiting[key] {
+			// A root over the PID budget pauses its user's burn-in like any
+			// other unmeasured one, but is reported as over the limit only.
 			pending[root.UID]++
+			if !c.overLimit[root.PID] {
+				waitingLoad[root.UID]++
+			}
 		}
 	}
 	for key := range c.seenRoots {
@@ -932,16 +944,11 @@ func (c *Controller) refreshPending(publish bool) {
 			delete(c.waiting, key)
 		}
 	}
-	changed := len(pending) != len(c.pending)
-	if !changed {
-		for uid, n := range pending {
-			if c.pending[uid] != n {
-				changed = true
-				break
-			}
-		}
+	changed := len(pending) != len(c.pending) || len(waitingLoad) != len(c.waitingLoad)
+	for uid, n := range pending {
+		changed = changed || c.pending[uid] != n || c.waitingLoad[uid] != waitingLoad[uid]
 	}
-	c.pending = pending
+	c.pending, c.waitingLoad = pending, waitingLoad
 	covered := map[int]int64{}
 	for uid := range pending {
 		covered[uid] = int64(c.burn.Covered(uid) / time.Second)
@@ -958,20 +965,30 @@ func (c *Controller) refreshPending(publish bool) {
 	}
 	c.st.Warnings = kept
 	total := 0
-	for _, n := range pending {
+	for _, n := range waitingLoad {
 		total += n
 	}
 	if total > 0 {
 		c.warn(fmt.Sprintf("%s:%d", WarnSessionPolicyPending, total))
 	}
 	for i := range c.st.UIDs {
-		if pending[c.st.UIDs[i].UID] > 0 {
-			c.st.UIDs[i].State = UIDMonitor
-			c.st.UIDs[i].Reason = WarnSessionPolicyPending
-			c.st.UIDs[i].CoveredSeconds = covered[c.st.UIDs[i].UID]
+		if uid := c.st.UIDs[i].UID; pending[uid] > 0 {
+			c.st.UIDs[i].State, c.st.UIDs[i].Reason = UIDMonitor, pendingReason(waitingLoad[uid])
+			c.st.UIDs[i].CoveredSeconds = covered[uid]
 		}
 	}
 	c.persist()
+}
+
+// pendingReason is the reason of a user whose burn-in a live root pauses:
+// waiting for a policy load when one of them does (n > 0), else every such
+// root is over the PID budget and will not enter the policy until another
+// session ends (GAP-0089).
+func pendingReason(waitingLoad int) string {
+	if waitingLoad > 0 {
+		return WarnSessionPolicyPending
+	}
+	return WarnRootsOverLimit
 }
 
 // maxRecentTicks bounds the burn-in ticks remembered per user for
