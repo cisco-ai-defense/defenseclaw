@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -340,6 +341,31 @@ func (c *Config) assetPolicyFor(connector, targetType string) (AssetTypePolicy, 
 // downgrade guard.
 func (c *Config) EffectiveAssetTypePolicy(connector, targetType string) (AssetTypePolicy, bool) {
 	return c.assetPolicyFor(connector, targetType)
+}
+
+// Validate rejects ambiguous per-connector keys before runtime policy
+// resolution. Alias collisions otherwise make enforcement depend on map order.
+func (c *AssetPolicyConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.Connectors))
+	for name := range c.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("asset_policy.connectors: empty connector name is not allowed")
+		}
+		norm := normalizeConnectorKey(name)
+		if prev, ok := seen[norm]; ok {
+			return fmt.Errorf("asset_policy.connectors: %q and %q refer to the same connector %q; keep only one", prev, name, norm)
+		}
+		seen[norm] = name
+	}
+	return nil
 }
 
 // connectorOverride returns the per-connector override block for the named
