@@ -7508,7 +7508,7 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
     # The module and .pth shim were verified above, so the row names only the
     # live-server state and what to do about it.
     _emit(
-        "warn" if live_status == "bound" or tmux_requirement else live_status,
+        "warn" if live_status == "bound" else live_status,
         "OmniGent policy",
         f"native-degraded; {live_detail}{tmux_requirement}",
         r=r,
