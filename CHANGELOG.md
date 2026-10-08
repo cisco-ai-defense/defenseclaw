@@ -1325,6 +1325,9 @@ deleted.
 - Claude Code skills and rules kept in a project (`.claude/skills`,
   `.claude/rules`) are listed by name like the ones in `~/.claude`, in a
   sandbox's project and in each `ai_discovery.scan_roots` folder.
+- The AI discovery Grafana board's Sandbox box narrows only the sandbox
+  signals table and the per-signal log; the sections and panels it does not
+  narrow say (all names) in their titles, as on the Sandboxes board.
 - Opt-in process tree: a pack's new `observe.process_tree: true` (off in
   `open`, `balanced` and `strict`) or `sandbox run --process-tree` samples the
   sandbox's processes every 5 seconds while it runs (every 15 seconds on a

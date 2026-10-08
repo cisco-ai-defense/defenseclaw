@@ -328,7 +328,7 @@
       {
         "name": "sandbox",
         "label": "Sandbox",
-        "description": "DefenseClaw sandbox name. Applies to the Loki panels: the sandbox signals table and the per-signal log. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox. All keeps the host's own records in the per-signal log. Sandbox identities are never metric labels, so the metric panels count the host and its sandboxes together.",
+        "description": "DefenseClaw sandbox name. Applies to the sandbox signals table and the per-signal log; the rows and panels marked (all names) ignore it. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox. All keeps the host's own records in the per-signal log. Sandbox identities are never metric labels, so the metric panels count the host and its sandboxes together.",
         "type": "query",
         "datasource": {
           "type": "loki",
@@ -368,7 +368,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Detection at a glance",
+      "title": "Detection at a glance (all names)",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -642,7 +642,7 @@
     },
     {
       "type": "row",
-      "title": "Discovery throughput + latency",
+      "title": "Discovery throughput + latency (all names)",
       "gridPos": {
         "x": 0,
         "y": 5,
@@ -752,7 +752,7 @@
     },
     {
       "type": "row",
-      "title": "Signals discovered",
+      "title": "Signals discovered (all names)",
       "gridPos": {
         "x": 0,
         "y": 22,
@@ -937,7 +937,7 @@
     },
     {
       "type": "row",
-      "title": "Components & confidence (Bayesian engine)",
+      "title": "Components & confidence (Bayesian engine) (all names)",
       "gridPos": {
         "x": 0,
         "y": 41,
@@ -1226,7 +1226,7 @@
     },
     {
       "type": "row",
-      "title": "IDE plugins",
+      "title": "IDE plugins (all names)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -1670,7 +1670,7 @@
     },
     {
       "type": "row",
-      "title": "Operational health (files / dedupe / errors)",
+      "title": "Operational health (files / dedupe / errors) (all names)",
       "gridPos": {
         "x": 0,
         "y": 95,
@@ -1793,7 +1793,7 @@
     },
     {
       "type": "row",
-      "title": "Recent scan traces (Tempo)",
+      "title": "Recent scan traces (Tempo) (all names)",
       "gridPos": {
         "x": 0,
         "y": 112,
@@ -1933,7 +1933,7 @@
     },
     {
       "type": "logs",
-      "title": "AI discovery summary log",
+      "title": "AI discovery summary log (all names)",
       "description": "Canonical v8 summary records emitted once per completed scan (`event.name=ai.discovery.completed`). Severity and bounded body fields describe the scan result; Loki exposes dotted body attributes with underscores.",
       "datasource": {
         "type": "loki",
@@ -1995,7 +1995,7 @@
     },
     {
       "type": "logs",
-      "title": "Gateway ai_discovery events (Loki)",
+      "title": "Gateway ai_discovery events (Loki) (all names)",
       "description": "Canonical v8 discovery stream: `ai.discovery.completed` summaries and `ai_component.*` signal changes with bounded discovery and component fields.",
       "datasource": {
         "type": "loki",

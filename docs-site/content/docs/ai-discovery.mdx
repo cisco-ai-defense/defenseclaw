@@ -817,7 +817,8 @@ sandbox and component, from the `ai_component.*` records that carry
 `defenseclaw.sandbox.name`. The `$sandbox` box narrows that table and the
 per-signal log to one sandbox; All keeps the host's own records in the log.
 The metric panels count the host's and the sandboxes' signals together:
-sandbox names are never metric labels.
+sandbox names are never metric labels. They, and every other panel the box
+does not narrow, say **(all names)** in their title or their section's.
 
 ![Grafana AI Agent Usage & Detection board, Sandbox signals section: a row for each AI component found inside the sandbox, with its vendor, product, component category and whether the record says it was discovered or removed](/images/grafana/ai-discovery-sandbox.png)
 

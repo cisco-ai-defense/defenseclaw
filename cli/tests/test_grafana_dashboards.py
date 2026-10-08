@@ -1014,6 +1014,22 @@ def test_ai_discovery_dashboard_shows_sandbox_signals() -> None:
     assert 'defenseclaw_sandbox_name=~"$sandbox"' in expr and 'defenseclaw_sandbox_name!=""' in expr
 
 
+def test_ai_discovery_board_marks_what_ignores_the_sandbox_box() -> None:
+    # GAP-0342: with one sandbox picked, the headline and metric panels kept
+    # their fleet-wide values with nothing to say so. What does not follow the
+    # Sandbox box is marked (all names) in its title or its row's, as on the
+    # Sandboxes board, and what follows it is not.
+    board = _dashboard("defenseclaw-ai-discovery.json")
+    row = ""
+    for panel in board["panels"]:
+        if panel.get("type") == "row":
+            row = panel["title"]
+        for child in ([] if panel.get("type") == "row" else [panel]) + panel.get("panels", []):
+            follows = any("$sandbox" in target.get("expr", "") for target in child.get("targets", []))
+            marked = "(all names)" in child["title"] or "(all names)" in row
+            assert follows != marked, (row, child["title"])
+
+
 def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
     # GAP-0141: with one row in range (one finding kind) Grafana drops the
     # series name of a Loki instant bar gauge; each bar takes its label.
