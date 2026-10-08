@@ -502,7 +502,7 @@ Some policy sources outrank the files DefenseClaw writes.
 
 | Connector | Source | OS | Accepted when |
 | --- | --- | --- | --- |
-| Claude Code | `com.anthropic.claudecode` managed preferences in `/Library/Managed Preferences` | macOS | It contains DefenseClaw's hooks, or sets `"managedSourcesBehavior": "merge"` (Claude Code 2.1.242 or later) |
+| Claude Code | `com.anthropic.claudecode` managed preferences in `/Library/Managed Preferences` | macOS | It contains DefenseClaw's hooks, or sets `"managedSourcesBehavior": "merge"` (Claude Code 2.1.242 or later). With `version_floor: enforce` (the default), a merge profile must also set `"requiredMinimumVersion"` to the floor `policy verify` names, because builds older than 2.1.242 read only the profile. The `--format plist` export embeds the hooks and the floor instead |
 | Claude Code | Server-managed settings from the claude.ai console | All | Not visible on the machine; prove the result with `--live` |
 | Claude Code | `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` | Windows | Never; see [Windows differences](#windows-differences) |
 | Codex | `com.openai.codex` managed preferences (`requirements_toml_base64`) in `/Library/Managed Preferences` | macOS | It contains DefenseClaw's managed hooks. Export them with `--format plist`. |
