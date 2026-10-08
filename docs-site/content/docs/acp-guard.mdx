@@ -322,18 +322,43 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp list
 Revocation deletes the service-side credential first, so a copied or cached
 token stops working even if the user-side cleanup is interrupted. The user's
 private copy is written as that user. Enrolling again after a revocation
-issues a new credential.
+issues a new credential. On Windows, only a signed-in user's copy can be
+removed: a revoke of a signed-out user exits 0, says the copy stays until the
+next sign-in, and the hook enumerator removes it then (the copy no longer
+works in the meantime).
+
+A user has one enrollment per editor and agent. Enrolling the same user,
+editor and agent under another profile replaces the earlier enrollment and
+says so; its credential stops working, and the user runs the new setup
+command.
+
+An enrollment belongs to the account's uid on Linux and macOS and to its SID
+on Windows, not to its name. Renaming an account keeps its enrollment: run
+the setup command again as the renamed user if the home moved (`list` and
+`verify` show setup as not done until then). Linux and macOS reuse a freed
+uid, often at once, so **revoke the enrollments of an account before its uid
+can be given to a new account** (`enterprise acp revoke --uid <uid> ...`);
+otherwise the new account inherits them.
 
 When an account is deleted, its ACP enrollments go the way of its hook
 enrollments: the hook enumerator revokes them after three cycles in a row find
 the account gone (10 to 15 minutes), and `enterprise linux repair` or
 `enterprise macos repair` revokes them at once. A lookup that fails, or a
-directory that cannot be confirmed reachable, keeps them. To revoke one by
-hand, `--uid` alone is enough for an account that no longer exists:
+directory that cannot be confirmed reachable, keeps them. On Windows the
+enumerator revokes the enrollments of a deleted local account at its next
+cycle; a domain account deleted in the directory keeps them, because an
+unreachable domain controller looks the same. To revoke one by hand, `--uid`
+alone (Linux, macOS) or `--sid` alone (Windows) is enough for an account that
+no longer exists:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise acp revoke \
   --uid 1051 --client zed --agent kiro --profile kiro-only
+```
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise acp revoke `
+  --sid S-1-5-21-1111111111-2222222222-3333333333-1117 --client zed --agent kiro --profile kiro-only
 ```
 
 The managed Windows payload, the macOS managed runtime and the Linux deb, rpm
