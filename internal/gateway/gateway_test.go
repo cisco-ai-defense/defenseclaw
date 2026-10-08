@@ -4958,6 +4958,37 @@ func TestHandleGuardrailEvaluate_CleanInput(t *testing.T) {
 	}
 }
 
+func TestHandleGuardrailEvaluateEmptyRegoUsesFallback(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "rego"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(guardrailEvaluateRequest{
+		EvaluationID: "eval-empty-rego", Direction: "prompt", Mode: "action",
+		ScannerMode: "local", LocalResult: &policy.GuardrailScanResult{Severity: "NONE"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, generation := range []bool{false, true} {
+		api, _ := newGuardrailEventV8TestAPI(t)
+		api.scannerCfg = &config.Config{PolicyDir: root}
+		if generation {
+			api.SetGenerationSource(func() *Generation { return &Generation{} })
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", bytes.NewReader(body))
+		response := httptest.NewRecorder()
+		api.handleGuardrailEvaluate(response, request)
+		var out policy.GuardrailOutput
+		if err := json.Unmarshal(response.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != http.StatusOK || out.Action != "allow" || out.Severity != "NONE" {
+			t.Fatalf("generation=%v: status=%d, verdict=%+v", generation, response.Code, out)
+		}
+	}
+}
+
 func TestHandleGuardrailEvaluate_BadJSON(t *testing.T) {
 	_, logger := testStoreAndLogger(t)
 	api := &APIServer{health: NewSidecarHealth(), logger: logger}

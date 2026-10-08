@@ -818,9 +818,15 @@ func (a *APIServer) generation() *Generation {
 func (a *APIServer) preparedPolicy(ctx context.Context) (*policy.Prepared, error) {
 	if a.generationSource != nil {
 		g := a.generation()
-		if g == nil || g.OPA == nil {
-			if g != nil && g.opaError != "" {
+		if g == nil {
+			return nil, errors.New("policy is not loaded")
+		}
+		if g.OPA == nil {
+			if g.opaError != "" {
 				return nil, errors.New(g.opaError)
+			}
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() {
+				return nil, policy.ErrNoModules
 			}
 			return nil, errors.New("policy is not loaded")
 		}
@@ -3362,10 +3368,9 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	// severity-derived decision that allows clean/missing scanner
 	// results and downgrades MEDIUM/HIGH to alert. That converted
 	// every policy outage into a quiet enforcement bypass for
-	// action-mode prompts. We now fail closed: any configured
-	// policy directory whose engine/eval fails returns block in
-	// action mode (and an explicit alert in observe mode for
-	// audit visibility).
+	// action-mode prompts. Load and evaluation failures still
+	// fail closed. An empty Rego directory is config-only mode,
+	// matching generation loading, so it uses the fallback below.
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
 		if a.scannerCfg.SecureClientIntegration() {
 			// Secure Client keeps the engine load error of main (issue #1092).
@@ -3375,23 +3380,23 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 			}
 		}
 		prepared, err := a.preparedPolicy(ctx)
-		if err != nil {
+		if err == nil {
+			out, evalErr := prepared.EvaluateGuardrail(ctx, input)
+			if evalErr != nil {
+				return policyOutageVerdict(input,
+					fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
+			}
+			return out, nil
+		}
+		if a.scannerCfg.SecureClientIntegration() || !errors.Is(err, policy.ErrNoModules) {
 			return policyOutageVerdict(input,
 				fmt.Sprintf("policy engine load failed: %v", err)), nil
 		}
-		out, evalErr := prepared.EvaluateGuardrail(ctx, input)
-		if evalErr != nil {
-			return policyOutageVerdict(input,
-				fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
-		}
-		return out, nil
+		// No Rego is config-only mode, as it is during generation loading.
 	}
 
-	// No policy directory configured at all — keep the legacy
-	// severity-derived fallback. Operators that want strict
-	// fail-closed behavior on missing policy must configure a
-	// PolicyDir; the absence of one is treated as "no policy"
-	// rather than "policy outage".
+	// No Rego modules (or no policy directory): use the config-driven
+	// severity fallback. Other load and evaluation errors fail closed.
 	sev := "NONE"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
