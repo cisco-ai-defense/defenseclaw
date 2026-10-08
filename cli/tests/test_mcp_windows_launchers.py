@@ -169,6 +169,35 @@ def test_failed_start_prints_the_server_stderr_tail(capsys: pytest.CaptureFixtur
     assert "[npx stderr] Error: None of the specified directories are accessible" in capsys.readouterr().err
 
 
+def test_failed_start_reads_only_bounded_stderr_tail(capsys: pytest.CaptureFixture[str]) -> None:
+    class BoundedLog:
+        def __init__(self) -> None:
+            self.position = 100_000
+            self.buffer = self
+            self.read_sizes: list[int] = []
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            assert whence in (0, 2)
+            self.position = self.position + offset if whence == 2 else offset
+            return self.position
+
+        def flush(self) -> None:
+            pass
+
+        def tell(self) -> int:
+            return self.position
+
+        def read(self, size: int = -1) -> bytes:
+            self.read_sizes.append(size)
+            assert size == 4096
+            return b"last line\n"
+
+    log = BoundedLog()
+    mcp._echo_server_stderr_tail(log, "npx")
+    assert log.read_sizes == [4096]
+    assert "[npx stderr] last line" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "command",
     ["npx.bat", "npx.ps1", r"C:\tools\npx", "node"],

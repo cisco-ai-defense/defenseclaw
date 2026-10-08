@@ -844,8 +844,12 @@ def _echo_server_stderr_tail(errlog: Any, launcher: str, max_lines: int = 8) -> 
     the scan result and sent to the audit sinks.
     """
     try:
-        errlog.seek(0)
-        lines = [line.rstrip() for line in errlog.read()[-4096:].splitlines() if line.strip()]
+        errlog.flush()
+        raw = errlog.buffer
+        raw.seek(0, os.SEEK_END)
+        end = raw.tell()
+        raw.seek(max(0, end - 4096))
+        lines = [line.rstrip() for line in raw.read(4096).decode("utf-8", "replace").splitlines() if line.strip()]
     except (OSError, ValueError):
         return
     for line in lines[-max_lines:]:
