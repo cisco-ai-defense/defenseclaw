@@ -188,6 +188,7 @@ func TestIdentityDirectoryCacheDropsAGoneAccountOnceTheDirectoryAnswers(t *testi
 		return useridentity.DirectoryFacts{ResolvedAt: now}, nil
 	})
 	cache.gone = func(err error) bool { return errors.Is(err, gone) }
+	cache.confirmGone = true
 	cache.now = func() time.Time { return now }
 	cache.get("1001", true)
 	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "1001" {
@@ -197,6 +198,26 @@ func TestIdentityDirectoryCacheDropsAGoneAccountOnceTheDirectoryAnswers(t *testi
 	cache.get("1002", true)
 	if h := cache.health(); h.Failing != 0 {
 		t.Fatalf("after the directory answered for another account: %+v, want nothing failing", h)
+	}
+}
+
+// A successful local NSS lookup does not prove that a missed AD account is gone.
+func TestIdentityDirectoryCacheLocalAnswerDoesNotClearDirectoryFailure(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	gone := errors.New("NSS account not found")
+	cache := newIdentityCache(func(key string) (useridentity.DirectoryFacts, error) {
+		if key == "ad-uid" {
+			return useridentity.DirectoryFacts{}, gone
+		}
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, ResolvedAt: now}, nil
+	})
+	cache.gone = func(err error) bool { return errors.Is(err, gone) }
+	cache.now = func() time.Time { return now }
+	cache.get("ad-uid", true)
+	now = now.Add(time.Second)
+	cache.get("local-uid", true)
+	if h := cache.health(); h.Failing != 1 || len(h.Accounts) != 1 || h.Accounts[0] != "ad-uid" {
+		t.Fatalf("local answer hid AD lookup failure: %+v", h)
 	}
 }
 

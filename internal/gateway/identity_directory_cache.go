@@ -86,7 +86,8 @@ type identityCache[T any] struct {
 	maxAge time.Duration
 	// gone, when set, marks a lookup error in which the directory answered
 	// that the account does not exist.
-	gone func(error) bool
+	gone        func(error) bool
+	confirmGone bool
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
@@ -114,6 +115,7 @@ func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts
 	cache := newIdentityCache(resolve)
 	cache.maxAge = identityDirectoryMaxAge
 	cache.gone = definitiveMissingAccount
+	cache.confirmGone = reliableMissingAccountConfirmation()
 	cache.logf = func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
 	}
@@ -364,10 +366,9 @@ func (c *identityCache[T]) health() identityCacheHealth {
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
 			continue
 		}
-		if entry.gone && c.answeredAt.After(entry.lastFailedAt) {
-			// The directory answered for another account after it said this
-			// one does not exist: the account is gone, the directory is not
-			// failing (GAP-0696).
+		if c.confirmGone && entry.gone && c.answeredAt.After(entry.lastFailedAt) {
+			// On a backend where another answer confirms this absence, the
+			// account is gone and the directory is not failing (GAP-0696).
 			continue
 		}
 		h.Failing++
