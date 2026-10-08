@@ -280,6 +280,19 @@ func windowsEnterpriseInvalidRuntimeBundleNextStep(original string) string {
 		") to DefenseClaw support"
 }
 
+// windowsEnterpriseMissingArtifactNextStep names the next step when a
+// lifecycle found a recorded DefenseClaw binary missing (an antivirus
+// quarantine, for example) and had no payload to restore it from: the
+// installed CLI carries none, and the Intune Fix script printed only "still
+// failing (lifecycle_error)" (GAP-0935).
+func windowsEnterpriseMissingArtifactNextStep(original string, hasPayload bool) string {
+	if !strings.Contains(original, "recorded managed artifact is missing") || hasPayload {
+		return ""
+	}
+	return ". The installed CLI carries no payload to restore it from. Next step: run DefenseClaw Setup of the installed release as LocalSystem: " +
+		windowsEnterpriseStandaloneSetupName + " /repair JSON=1 (or /ensure CONFIG=<config.yaml> JSON=1); it restores the file from its own payload"
+}
+
 // windowsEnterpriseLifecycleLogPath is the lifecycle log Setup and the CLI
 // write, as an administrator finds it.
 const windowsEnterpriseLifecycleLogPath = `C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log`
@@ -423,9 +436,20 @@ func windowsEnterpriseStandaloneNextStep(
 			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
 			" and run a DefenseClaw Setup whose gateway carries its release version as LocalSystem: " + command + recovers
 	default:
+		if windowsEnterpriseRunningAsLocalSystem() {
+			// This run was the LocalSystem recovery the default step names;
+			// repeating it unchanged fails the same way (GAP-0920).
+			return lead + " This run was LocalSystem and its recovery did not finish, so running it again unchanged fails the same way." +
+				" Next step: correct what the error above names (the path and the account), then run " + command +
+				"; if it names neither, send the lifecycle log (" + windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
+		}
 		return lead + " Next step: run DefenseClaw Setup (this release or a newer one) as LocalSystem: " + command + recovers
 	}
 }
+
+// windowsEnterpriseRunningAsLocalSystem reports a lifecycle running as
+// LocalSystem; set on Windows, replaceable in tests.
+var windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
 
 // windowsEnterpriseStoppedServiceNextStep names what starts the stopped
 // DefenseClaw services again when status or verify fails on them

@@ -216,6 +216,33 @@ try {
             }
             Reset-TestRoots
 
+            # GAP-0915: an empty folder an earlier removal left under Program
+            # Files carries the default inherit-only CREATOR OWNER entry; it
+            # grants nothing, so the existing-root check takes the folder
+            # over. Without the switch (Secure Client) it is still refused.
+            $leftover = [IO.Path]::Combine($Root, 'pf-leftover')
+            [void][IO.Directory]::CreateDirectory($leftover)
+            $leftoverSecurity = [Security.AccessControl.DirectorySecurity]::new()
+            $leftoverSecurity.SetSecurityDescriptorSddlForm(
+                'O:BAG:BAD:(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)',
+                [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+            )
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $leftover -AclObject $leftoverSecurity
+            $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+            try {
+                Assert-DefenseClawPathAcl -Path $leftover -AllowedWriterSIDs $writers -AllowUsersRead -AllowInheritance -IgnoreCreatorTemplates
+            }
+            catch {
+                $failures.Add("the CREATOR OWNER template blocked a default-ACL folder: $($_.Exception.Message)")
+            }
+            try {
+                Assert-DefenseClawPathAcl -Path $leftover -AllowedWriterSIDs $writers -AllowUsersRead -AllowInheritance
+                $failures.Add('the strict check accepted the CREATOR OWNER template')
+            }
+            catch {
+            }
+            Reset-TestRoots
+
             # A junction is renamed as a link; its target is never followed.
             $target = [IO.Path]::Combine($Root, 'junction-target')
             New-TestDirectory $target 'BA'
@@ -223,10 +250,18 @@ try {
             New-TestDirectory $vendor 'BA'
             [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $lock -Target $target)
             Assert-TestPaths 'junction lock directory' (Get-TestSquatPaths) @('Cisco\DefenseClaw-Lifecycle')
+            $script:DefenseClawSquattedRootNotes = @()
             Move-DefenseClawStandaloneSquattedRoots -Squatted @(Get-DefenseClawStandaloneSquattedRoots)
             if ([IO.Directory]::Exists($lock) -or
                 -not [IO.File]::Exists([IO.Path]::Combine($target, 'keep.txt'))) {
-                $failures.Add('junction was not renamed as a link, or its target changed')
+                $failures.Add('junction was not removed as a link, or its target changed')
+            }
+            # GAP-0904: the link is removed, not left renamed in ProgramData,
+            # and the result says what it was and where it pointed.
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $vendor -Force -Filter 'DefenseClaw-Lifecycle.untrusted-*').Count -ne 0 -or
+                @($script:DefenseClawSquattedRootNotes).Count -ne 1 -or
+                [string]$script:DefenseClawSquattedRootNotes[0] -notlike "removed the link $lock that *pointed at*junction-target*") {
+                $failures.Add("planted junction left behind or not reported: $(@($script:DefenseClawSquattedRootNotes) -join ' | ')")
             }
             Reset-TestRoots
 

@@ -578,6 +578,38 @@ func windowsCodexRequirementsContainExactManagedHook(
 	return false, nil
 }
 
+// adoptWindowsCodexOrphanedRequirements is the standalone answer to Codex
+// requirements that still hold this deployment's exact DefenseClaw hooks
+// with no ownership record: a purge that ran without the state root left
+// requirements.toml and the managed runtime state behind, and the next
+// fresh ensure refused 1603 with no file and no way out (GAP-0938). The
+// preimage to adopt is the file without DefenseClaw's own changes; existed
+// reports whether anything else is left in it (an administrator's keys), so
+// a later removal restores those and deletes a file DefenseClaw created.
+// Secure Client (no hook contract) keeps the refusal.
+func adoptWindowsCodexOrphanedRequirements(
+	current []byte,
+	opts WindowsCodexMachineRequirementsOptions,
+) ([]byte, bool, error) {
+	if strings.TrimSpace(opts.HookContractID) == "" {
+		return nil, false, errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata")
+	}
+	preimage, _, err := removeWindowsCodexRequirementsOwnedChanges(current, nil, opts)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s holds DefenseClaw's Codex hooks from a removed deployment and they could not be separated from the rest (%w); "+
+			"remove DefenseClaw's [hooks] entries from it (or the file, if DefenseClaw created it) and %s, then run Setup /ensure again",
+			opts.RequirementsPath, err, opts.ManagedStatePath)
+	}
+	left, err := parseWindowsCodexRequirements(preimage)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(left) == 0 {
+		return nil, false, nil
+	}
+	return preimage, true, nil
+}
+
 func removeWindowsCodexRequirementsOwnedChanges(
 	current []byte,
 	baseline []byte,

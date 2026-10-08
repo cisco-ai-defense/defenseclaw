@@ -331,7 +331,7 @@ func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 		if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
 			return answer
 		}
-		return fmt.Errorf("failed to load config: %w", err)
+		return fmt.Errorf("failed to load config: %w", describeManagedConfigLoadError(err))
 	}
 	version.SetBinaryVersion(appVersion)
 

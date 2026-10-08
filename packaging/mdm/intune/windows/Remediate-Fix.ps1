@@ -326,6 +326,12 @@ try {
         $summary = "still failing ($codes)"
         $first = @($document.errors) | Select-Object -First 1
         if ($null -ne $first -and $first.message) { $summary += ": $($first.message)" }
+        # A DefenseClaw binary went missing (an antivirus quarantine): the
+        # installed CLI has no payload to restore it from, so say what does
+        # (GAP-0935).
+        if ([string]$run.StdOut -match 'managed artifact is missing|managed path is missing' -and $summary -notmatch '/repair') {
+            $summary += ' Next step: run the DefenseClaw Setup of this release with /repair JSON=1 as LocalSystem (for example a reinstall of the Win32 app); it restores the missing file from its payload.'
+        }
     }
 } catch { $summary = "exit $code, no lifecycle result" }
 $line = "DefenseClaw $($deployment.Version): $summary"

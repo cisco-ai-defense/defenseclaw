@@ -352,8 +352,10 @@ func runWindowsEnterpriseLifecycle(
 	// On a standalone host, a standard account cannot change the managed
 	// deployment whatever file it passes, so the elevation refusal comes
 	// before --config is read, parsed or compiled (GAP-0120). Uninstall
-	// likewise refuses before loading the installer module (GAP-0640).
-	if (windowsEnterpriseMutationAction(action) || action == "uninstall") && !windowsEnterpriseIsElevated() &&
+	// likewise refuses before loading the installer module (GAP-0640), and
+	// so does reconcile, which ran the module and answered 1603 with
+	// installed:false for a deployment that exists (GAP-0931).
+	if (windowsEnterpriseMutationAction(action) || action == "uninstall" || action == "reconcile") && !windowsEnterpriseIsElevated() &&
 		managed.IsStandaloneProfile(opts.profile) {
 		// A trusted Secure Client record already makes this request invalid.
 		// Preserve its profile refusal before the standalone elevation check.

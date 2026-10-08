@@ -793,6 +793,14 @@ func (stub *ensureStub) install(t *testing.T) {
 		windowsEnterpriseEnsureDriftDetector = originalDrift
 		windowsEnterprisePolicyDigest = originalPolicy
 	})
+	originalHookRuntime := windowsEnterpriseHookRuntimeDir
+	originalCopies := windowsEnterpriseRemoveReplacementCopies
+	t.Cleanup(func() {
+		windowsEnterpriseHookRuntimeDir = originalHookRuntime
+		windowsEnterpriseRemoveReplacementCopies = originalCopies
+	})
+	windowsEnterpriseHookRuntimeDir = func() (string, error) { return "", nil }
+	windowsEnterpriseRemoveReplacementCopies = func() []string { return nil }
 	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, nil }
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
 	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
@@ -1817,6 +1825,8 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", "", 5},
 		// GAP-0640: uninstall answers the same, before the module loads.
 		{"uninstall", "standalone", "elevation_required", "a standard account cannot uninstall the managed deployment", "", 5},
+		// GAP-0931: reconcile too, not 1603 with installed:false.
+		{"reconcile", "standalone", "elevation_required", "a standard account cannot reconcile the managed deployment", "", 5},
 		// GAP-0120: the refusal does not wait for --config to be read.
 		{"ensure", "standalone", "elevation_required", "a standard account cannot ensure the managed deployment", `C:\Users\alice\does-not-compile.yaml`, 5},
 		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, "", 1639},
@@ -2242,5 +2252,93 @@ func TestWindowsEnterpriseStandardUserStandaloneRepairOnSecureClient(t *testing.
 		!strings.Contains(output.String(), "this host carries a secure_client enterprise deployment") ||
 		strings.Contains(output.String(), "elevation_required") {
 		t.Fatalf("repair --profile standalone: %v, output %q; want profile conflict", err, output.String())
+	}
+}
+
+// GAP-0864: the verify JSON the Intune Detect script reads carries each
+// service's start mode, as the Unix lifecycle reports it, so a stopped and
+// disabled guardian reads "(start disabled)". The report line is the shape
+// the lifecycle module prints for standalone status and verify.
+func TestWindowsEnterpriseVerifyJSONCarriesServiceStartModes(t *testing.T) {
+	line := `{"schema_version":1,"ok":false,"action":"verify","installed":true,"transaction_pending":false,` +
+		`"gateway_service":"DefenseClawGateway","guardian_service":"DefenseClawHookGuardian",` +
+		`"gateway_service_state":"running","guardian_service_state":"stopped",` +
+		`"enumerator_service":"DefenseClawHookEnumerator","enumerator_service_state":"running",` +
+		`"sensor_helper_service":"DefenseClawSensorHelper","sensor_helper_service_state":"running",` +
+		`"service_start_modes":{"DefenseClawGateway":"auto","DefenseClawHookGuardian":"disabled",` +
+		`"DefenseClawHookEnumerator":"auto","DefenseClawSensorHelper":"auto"},` +
+		`"errors":["service DefenseClawHookGuardian startup mode drift: 4, expected 2"]}`
+	report, err := parseWindowsEnterpriseInstallerReport([]byte(line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("verify", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(result, nil, report, windowsEnterpriseStandaloneRun{})
+	body, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Services []struct {
+			Name      string `json:"name"`
+			State     string `json:"state"`
+			StartMode string `json:"start_mode"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	modes := map[string]string{}
+	for _, service := range document.Services {
+		modes[service.Name] = service.State + "/" + service.StartMode
+	}
+	if modes["DefenseClawHookGuardian"] != "stopped/disabled" || modes["DefenseClawGateway"] != "running/auto" {
+		t.Fatalf("services = %s", body)
+	}
+}
+
+// GAP-0865: a config that moves gateway.api_port of an installed deployment
+// is refused before ensure stops anything, with the installed port and the
+// way to keep it.
+func TestPlanWindowsEnterpriseEnsureRefusesAnAPIPortChange(t *testing.T) {
+	original := windowsEnterpriseConfigAPIPort
+	t.Cleanup(func() { windowsEnterpriseConfigAPIPort = original })
+	windowsEnterpriseConfigAPIPort = func(path string) (int, error) {
+		if path == "" {
+			return 18970, nil
+		}
+		return 18971, nil
+	}
+	opts := windowsEnterpriseLifecycleOptions{
+		profile: "standalone", resolvedProfile: "standalone", productVersion: "1.4.0", configPath: `C:\stage\config.yaml`,
+	}
+	status := windowsEnterpriseInstallerReport{OK: true, Installed: true, InstalledVersion: "1.4.0"}
+	_, err := planWindowsEnterpriseEnsure(&status, &opts, `C:\stage\install-enterprise.ps1`)
+	if err == nil || !errors.Is(err, errWindowsEnterpriseInvalidArguments) ||
+		!strings.Contains(err.Error(), "gateway.api_port from 18970 to 18971") || !strings.Contains(err.Error(), "no service was stopped") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// GAP-0935: a verify that fails on the same release (an antivirus quarantine
+// removed defenseclaw-hook.exe) repairs with this run's payload, which the
+// planner found identical to the recorded one, so the missing file comes
+// back; a pending-transaction repair still takes no sources.
+func TestWindowsEnterpriseEnsureRepairAfterAFailedVerifyKeepsThePayload(t *testing.T) {
+	failed := installedStatus("verify")
+	failed["ok"] = false
+	failed["errors"] = []string{`managed path is missing: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failed, installedStatus("repair")}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure: %v\n%s", err, stdout.String())
+	}
+	if len(stub.calls) != 3 || stub.calls[2][1] != "Repair" ||
+		!strings.Contains(strings.Join(stub.calls[2], " "), `-HookBinary C:\stage\defenseclaw-hook.exe`) {
+		t.Fatalf("installer runs %q", stub.calls)
 	}
 }

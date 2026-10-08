@@ -255,10 +255,14 @@ type WindowsACPUserCopy struct {
 }
 
 // WindowsManagedACPUserCopies lists every local profile whose
-// .defenseclaw\acp folder the managed ACP enrollment made, signed in or
-// not: the folder is a plain folder its account does not own (the
-// enrollment creates it for the gateway service). A per-user folder the
-// account made itself is not listed. A purge removes these copies (GAP-0773):
+// .defenseclaw\acp folder holds managed ACP state, signed in or not,
+// revoked or ACP-only: a plain folder its account does not own (the
+// enrollment created it for the gateway service), or one the account's own
+// `enterprise acp setup` run created, which holds the managed token copy
+// (<client>-<agent>.token) or contract locks without a per-user install's
+// .token. Owner alone missed every account whose setup command made the
+// folder, so the purge left their token copies and locks (GAP-0773). A
+// per-user install's folder is not listed. A purge removes these copies:
 // once the gateway is gone nothing accepts the tokens.
 func WindowsManagedACPUserCopies() ([]WindowsACPUserCopy, error) {
 	names, err := windowsProfileListSubkeyReader()
@@ -281,12 +285,39 @@ func WindowsManagedACPUserCopies() ([]WindowsACPUserCopy, error) {
 			continue
 		}
 		owner, err := windowsPathOwnerNoFollow(acpDir)
-		if err != nil || owner.Equals(sid) {
+		if err != nil {
+			continue
+		}
+		if owner.Equals(sid) && !windowsACPFolderHoldsManagedState(acpDir) {
 			continue
 		}
 		copies = append(copies, WindowsACPUserCopy{SID: sidText, Home: home})
 	}
 	return copies, nil
+}
+
+// windowsACPFolderHoldsManagedState reports a .defenseclaw\acp folder with
+// the files `enterprise acp setup` writes: a managed token copy
+// (<client>-<agent>.token), or contract locks without the .token a
+// per-user install writes.
+func windowsACPFolderHoldsManagedState(acpDir string) bool {
+	entries, err := os.ReadDir(acpDir)
+	if err != nil {
+		return false
+	}
+	perUserToken, locks := false, false
+	for _, entry := range entries {
+		name := strings.ToLower(entry.Name())
+		switch {
+		case name == ".token":
+			perUserToken = true
+		case strings.HasSuffix(name, ".contract-lock.json"):
+			locks = true
+		case strings.HasSuffix(name, ".token") && strings.Contains(strings.TrimSuffix(name, ".token"), "-"):
+			return true
+		}
+	}
+	return locks && !perUserToken
 }
 
 // PurgeWindowsACPUserState removes the account's DefenseClaw ACP folder

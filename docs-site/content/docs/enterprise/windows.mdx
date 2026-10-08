@@ -178,6 +178,12 @@ connectors protects nothing: `status` warns `no_connectors_enabled` and
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+Choose `gateway.api_port` before the first install. Every user's agent hooks
+and the Cursor machine hooks are bound to the installed port, so Setup
+`/ensure` refuses a config that changes it on an installed computer before
+it stops any service (exit 1639). To move the port, uninstall DefenseClaw and
+install it again with the new value.
+
 Without `guardrail.rule_pack` or `policy_dir`, as here, the gateway uses
 the rule packs built into it. A rule-pack directory you name (a
 `guardrail.custom_packs` entry, or `<policy_dir>/guardrail/<preset>`) must exist, be
@@ -283,6 +289,14 @@ protected folder, checks every file against its embedded manifest, and runs
 the lifecycle from there. See [Payload trust](#payload-trust) for how the
 lifecycle decides which files to trust. It also generates the target manifest from the
 profiles on the computer, so you never write `targets.yaml`.
+
+An empty `C:\Program Files\Cisco\DefenseClaw` an earlier removal left (it
+carries the default Program Files permissions, including the inherit-only
+`CREATOR OWNER` entry) is taken over: Setup replaces its owner and
+permissions with SYSTEM and Administrators and installs into it. A folder
+another account can write is still refused before any change, and the
+message names the account, its access and the `icacls` command that clears
+it.
 
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
@@ -782,6 +796,21 @@ says so. Until the transaction is recovered, users' agents block with
 `enterprise_managed_gateway_not_running`; starting the gateway service by
 hand does not help.
 
+Every lifecycle stops the DefenseClaw services before it changes anything.
+A service whose process does not answer the stop request within 30 seconds
+(a hung or suspended process) is ended the way Windows ends a stuck stop,
+and the lifecycle continues; the result names each such process in a
+`service_process_terminated` warning.
+
+A hardening script that removes `NT SERVICE\DefenseClawGateway` from
+`C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
+starting. `status` and `verify` both fail and name the folder and the
+missing entry. `repair`, Setup `/ensure` and the recovery of a pending
+transaction put the deployment's own permissions back on those folders and
+their files before they restart the services. A key or folder that another
+account can open is refused instead, and the message names the path, the
+account and the `icacls` commands that remove it.
+
 The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
 that it cannot prove DefenseClaw wrote: a file or folder it did not create,
 a file other than a DefenseClaw hook file whose owner or permissions changed,
@@ -1081,6 +1110,13 @@ in `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`. Files that name another
 deployment's hook binary stay. The `machine_state_remaining` warning names
 anything it could not remove, and why.
 
+Codex's `C:\ProgramData\OpenAI\Codex\requirements.toml` can hold your own
+keys as well, so a purge without the deployment record leaves it. The next
+Setup `/ensure` adopts it: it separates DefenseClaw's hooks (the ones that
+name this deployment's hook binary) from the rest, records the rest as the
+file to restore on uninstall, and continues. A file DefenseClaw created on
+its own is deleted again by that later uninstall.
+
 If `C:\ProgramData\Cisco\DefenseClaw` was deleted by hand, uninstall
 finds no recorded deployment. It still removes the four services, the
 binaries, DefenseClaw's Claude Code files in
@@ -1090,6 +1126,12 @@ calling the removed hook. It cannot tell DefenseClaw's files in an
 account's `%USERPROFILE%\.defenseclaw` from the account's own, so with
 `PURGE=1` the `per_user_state_remaining` warning names each such folder
 for you to remove instead.
+
+While a program runs a DefenseClaw executable from
+`C:\Program Files\Cisco\DefenseClaw\bin`, `/uninstall` (with or without
+`PURGE=1`) fails with `uninstall_in_use` before it stops any service, and
+names the program, its process id, the account and the program that started
+it. Close it (or sign the account out) and run the uninstall again.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
