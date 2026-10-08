@@ -35,8 +35,8 @@ import (
 	"time"
 	"unicode"
 
-	"golang.org/x/text/unicode/norm"
 	"github.com/open-policy-agent/opa/ast"
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
@@ -168,6 +168,9 @@ type MigrationRecord struct {
 	// Notes are behaviour changes the operator should know about (for
 	// example block_at now applies on every path).
 	Notes []string `json:"notes,omitempty"`
+	// Pending is true until the v9 config commit succeeds. A retry can
+	// finish a record left pending by an interruption after the commit.
+	Pending bool `json:"pending,omitempty"`
 	// Acknowledged is set by `defenseclaw config migrate --ack`.
 	Acknowledged bool `json:"acknowledged,omitempty"`
 }
@@ -242,6 +245,18 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue}
 	if already {
 		result.Record.FromVersion = ConfigVersionV9
+		if record, ok := readMigrationRecord(abs); ok && record.Pending &&
+			strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source)) {
+			record.Pending = false
+			if !in.DryRun && !in.InMemory {
+				recordPath := MigrationRecordPath(abs)
+				if err := writeMigrationRecord(recordPath, record); err != nil {
+					return result, err
+				}
+				result.Written = append(result.Written, recordPath)
+			}
+			result.Record = record
+		}
 		return result, nil
 	}
 	if err := ValidateCandidate(abs, migrated); err != nil {
@@ -342,7 +357,7 @@ func MigratedFrom(configPath, sourceSHA256, installedSHA256 string) bool {
 // records sourceSHA256 (hex) as the v8 input it migrated.
 func MigratedSource(configPath, sourceSHA256 string) bool {
 	record, ok := readMigrationRecord(configPath)
-	return ok && strings.EqualFold(record.SourceSHA256, sourceSHA256)
+	return ok && !record.Pending && strings.EqualFold(record.SourceSHA256, sourceSHA256)
 }
 
 func readMigrationRecord(configPath string) (MigrationRecord, bool) {
@@ -586,11 +601,18 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 		written = append(written, envPath)
 	}
-	// Provider CA files must exist before the committed config can reference
-	// them. The legacy overlay cannot supply TLS trust once config wins.
+	// Provider CA files and the evidence record must exist before the
+	// committed config can reference them. An obstructed record path then
+	// leaves the v8 config available for a retry.
 	if err := m.writeProviderCAs(&written); err != nil {
 		return written, err
 	}
+	recordPath := MigrationRecordPath(m.configPath)
+	m.record.Pending = true
+	if err := writeMigrationRecord(recordPath, m.record); err != nil {
+		return written, err
+	}
+	written = append(written, recordPath)
 	if _, err := txn.Commit(migrated, mode, m.record.Actor, "config_version 9 migration"); err != nil {
 		return written, err
 	}
@@ -639,11 +661,11 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			m.note("audit.db rows were copied to asset_policy but not cleared: %v", err)
 		}
 	}
-	recordPath := MigrationRecordPath(m.configPath)
+	// Mark the record committed and refresh notes from post-commit cleanup.
+	m.record.Pending = false
 	if err := writeMigrationRecord(recordPath, m.record); err != nil {
 		return written, err
 	}
-	written = append(written, recordPath)
 	return written, nil
 }
 

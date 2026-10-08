@@ -1251,9 +1251,9 @@ func TestMigrateV9PinsEditedProtectedRulePack(t *testing.T) {
 	}
 	var doc struct {
 		Guardrail struct {
-			RulePack string `yaml:"rule_pack"`
+			RulePack    string `yaml:"rule_pack"`
 			CustomPacks map[string]struct {
-				Path string `yaml:"path"`
+				Path   string `yaml:"path"`
 				Digest string `yaml:"digest"`
 			} `yaml:"custom_packs"`
 		} `yaml:"guardrail"`
@@ -1265,5 +1265,52 @@ func TestMigrateV9PinsEditedProtectedRulePack(t *testing.T) {
 	if ref == "strict" || doc.Guardrail.CustomPacks[ref].Path != pack ||
 		doc.Guardrail.CustomPacks[ref].Digest != "sha256:"+strings.Repeat("a", 64) {
 		t.Fatalf("edited protected pack was not pinned: %s", result.Migrated)
+	}
+}
+
+// The record is required evidence for a committed v9 config. A record path
+// failure must leave v8 in place so clearing the obstruction allows a retry.
+func TestMigrateV9RecordFailureCanRetry(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := MigrationRecordPath(configPath)
+	if err := os.Mkdir(recordPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+		t.Fatal("migration succeeded with an obstructed record path")
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "config_version: 8") {
+		t.Fatalf("config committed before the record: %s", raw)
+	}
+	if err := os.Remove(recordPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.ToVersion != ConfigVersionV9 || record.Pending {
+		t.Fatalf("retry did not write a committed v9 migration record: %+v", record)
+	}
+	// An interruption after the config commit can leave a durable pending
+	// record. Retrying the already-v9 file must finish that record.
+	record.Pending = true
+	if err := writeMigrationRecord(recordPath, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("finish pending record: %v", err)
+	}
+	if record, ok := readMigrationRecord(configPath); !ok || record.Pending {
+		t.Fatalf("pending record was not finished: %+v", record)
 	}
 }
