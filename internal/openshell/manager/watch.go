@@ -381,7 +381,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		var feed *sandboxapi.ActivityEvent
 		if r.Denied() && !quiet {
 			feed = &sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
-				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
+				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (" + openShellDenialText(r.Reason, host, r.Port) + ")",
 				Replayed: replayed}
 		}
 		if ev.Blocked && ev.Severity == "" && !replayed && m.sink != nil && m.sink.foldOpenShell(name, ev, feed) {
@@ -926,6 +926,20 @@ func ocsfSeverity(s ocsf.Severity) string {
 	default:
 		return "INFO"
 	}
+}
+
+// openShellDenialText is why OpenShell refused a direct connection, worded
+// as `sandbox activity` and the TUI word the event: the stored message read
+// "direct connection denied by OpenShell" where they read "no OpenShell
+// rule allows it" (GAP-0309).
+func openShellDenialText(reason, host string, port int) string {
+	switch {
+	case port == 22:
+		return sandboxapi.SSHBlockedText(host)
+	case strings.TrimSpace(reason) == "":
+		return "direct connection denied by OpenShell"
+	}
+	return sandboxapi.BlockedText(reason, host)
 }
 
 func schemeOf(raw string) string {

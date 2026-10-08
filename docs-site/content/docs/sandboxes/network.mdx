@@ -319,7 +319,11 @@ defenseclaw sandbox destinations myapp-7f3a
 defenseclaw sandbox policy explain
 ```
 
-`activity` is the live feed of sites, blocks, asks and findings. The
+`activity` is the live feed of sites, blocks, asks and findings. A burst
+of refusals of one site by one program (a retry loop) is one line, then
+one more a few seconds later that counts the rest (`✗ pypi.org (no
+OpenShell rule allows it) (and 5 more like it)`); `destinations` counts
+every refusal. The
 `Egress` row of `status` counts the sites contacted and blocked, the
 requests that failed upstream (allowed, and the site refused or dropped
 them, or did not answer: an outage, not a block) and the bytes sent and

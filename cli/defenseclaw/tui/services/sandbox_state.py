@@ -771,6 +771,8 @@ class ActivityRow:
     tool: str = ""
     severity: str = ""
     bytes_up: int = 0
+    # The refusals like this one folded into it ("(and N more like it)").
+    repeats: int = 0
     # An unblock (or an approved ask for the same host) lifted this block
     # since it happened; ``lifted_by`` says which.
     unblocked: bool = False
@@ -842,7 +844,8 @@ class ActivityRow:
             if not self.host:
                 return text or reason_label(self.reason) or "a destination was blocked"
             why = self.why
-            return host_port(self.host, self.port) + (f" ({why})" if why else "")
+            more = f" (and {self.repeats} more like it)" if self.repeats > 0 else ""
+            return host_port(self.host, self.port) + (f" ({why})" if why else "") + more
         if self.kind == "approval.requested":
             # The daemon's message is a whole sentence ("the sandbox asks to
             # reach port 5432 on your machine"), as the Go CLI prints it; a
@@ -905,6 +908,7 @@ def decode_activity(raw: Any) -> ActivityRow | None:
         tool=_text(item.get("tool")),
         severity=_text(item.get("severity")),
         bytes_up=_int(item.get("bytes_up")),
+        repeats=_int(item.get("repeats")),
     )
 
 

@@ -202,6 +202,10 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		case why != "":
 			b.WriteString(" (" + sandboxapi.BlockedText(why, ev.Host) + ")")
 		}
+		if ev.Repeats > 0 {
+			// The refusals folded into this line (GAP-0309).
+			b.WriteString(fmt.Sprintf(" (and %d more like it)", ev.Repeats))
+		}
 		if ev.Unblockable && ev.Host != "" && !sshPort(ev) {
 			scope := ""
 			if ev.Sandbox != "" {

@@ -556,6 +556,7 @@ func (s *egressSink) flushOpenShell(ctx context.Context, now time.Time) {
 		if r.feed != nil {
 			line := *r.feed
 			line.Message += more
+			line.Repeats = max(r.repeats-1, 0)
 			s.m.publishEgress(line)
 		}
 	}
@@ -860,7 +861,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
 				Source: sandboxapi.SourceProxy, Category: category, Rule: e.Rule, Unblockable: blocked && e.Unblockable,
-				Reason: truncate(e.Reason, 300), Message: msg,
+				Reason: truncate(e.Reason, 300), Message: msg, Repeats: repeats,
 			})
 		}
 		if what, ok := toolHostOf(harnessName, e.Host); ok && blocked && m.firstToolHostRefusal(b, e.Host) {

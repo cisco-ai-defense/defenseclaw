@@ -1202,6 +1202,9 @@ type ActivityEvent struct {
 	// it ends: BytesUp is what had been sent then, and the upload sent
 	// more than Threshold.
 	Threshold int64 `json:"threshold,omitempty"`
+	// Repeats counts the refusals like this one folded into it, after the
+	// first was reported on its own line ("(and N more like it)").
+	Repeats int `json:"repeats,omitempty"`
 	// Approval and hook fields.
 	ApprovalID string `json:"approval_id,omitempty"`
 	Tool       string `json:"tool,omitempty"`

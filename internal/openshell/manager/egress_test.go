@@ -949,8 +949,11 @@ func TestRepeatedOpenShellRefusalsAreFolded(t *testing.T) {
 		return refused(func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "(and 5 more like it)") }) == 1 &&
 			len(e.events("retrybox", sandboxapi.ActivityEgressBlocked, "")) == 3
 	})
+	// The folded line says how many it stands for, in the words of the
+	// first (GAP-0309).
 	if n, feed := refused(nil), e.events("retrybox", sandboxapi.ActivityEgressBlocked, ""); n != 3 || len(feed) != 3 ||
-		!strings.HasSuffix(feed[2].Message, "(and 5 more like it)") {
+		feed[2].Message != "✗ pypi.org (no OpenShell rule allows it) (and 5 more like it)" || feed[2].Repeats != 5 ||
+		feed[0].Message != "✗ pypi.org (no OpenShell rule allows it)" || feed[0].Repeats != 0 {
 		t.Fatalf("%d records, feed %+v", n, feed)
 	}
 	if got := destinationKinds(t, e, "retrybox")["pypi.org"]; got.Refused != 8 {
