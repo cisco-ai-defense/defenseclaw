@@ -84,6 +84,10 @@ type Mapper struct {
 	images     boundedMap[int, string]
 	hookProcs  boundedMap[string, *hookProcess]
 	hookTrust  bool
+	// hookScripts are the running runs of the Claude hook script, verified
+	// or not, by exec id; hookScriptsFull says one was not recorded.
+	hookScripts     map[string]*hookProcess
+	hookScriptsFull bool
 
 	supervisors map[string]*supervisorCount
 
@@ -114,6 +118,7 @@ func NewMapper(config MapperConfig) *Mapper {
 		collectors:  newBoundedMap[string, bool](tracked),
 		images:      newBoundedMap[int, string](tracked),
 		hookProcs:   newBoundedMap[string, *hookProcess](tracked),
+		hookScripts: map[string]*hookProcess{},
 		hookTrust:   true,
 		supervisors: map[string]*supervisorCount{},
 	}

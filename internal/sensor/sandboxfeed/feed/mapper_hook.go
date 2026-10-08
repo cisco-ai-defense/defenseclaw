@@ -48,20 +48,25 @@ type hookProcess struct {
 	// hostPID its pid on the host.
 	nsPID, hostPID int
 	injected       bool
-	role           hookRole
-	hook           *hookProcess
-	tools          int
-	verified       bool
-	pending        *sandboxfeed.Frame
-	frames         []Item
-	opened         time.Time
-	tainted        bool
-	finished       bool
-	owner          int
+	// container is the process's container id, as Tetragon reports it.
+	container string
+	role      hookRole
+	hook      *hookProcess
+	tools     int
+	verified  bool
+	pending   *sandboxfeed.Frame
+	frames    []Item
+	opened    time.Time
+	tainted   bool
+	finished  bool
+	owner     int
 }
 
 func hookInfo(p *pb.Process) *hookProcess {
-	i := &hookProcess{binary: p.GetBinary(), args: p.GetArguments(), parentID: p.GetParentExecId(), hostPID: int(p.GetPid().GetValue())}
+	i := &hookProcess{
+		binary: p.GetBinary(), args: p.GetArguments(), parentID: p.GetParentExecId(),
+		hostPID: int(p.GetPid().GetValue()), container: strings.TrimSpace(p.GetDocker()),
+	}
 	if p.GetUid() != nil {
 		i.uid, i.uidKnown = int(p.GetUid().GetValue()), true
 	}
@@ -151,6 +156,11 @@ func (m *Mapper) agentRoot(agent *hookProcess) bool {
 // forkOfHook recognizes a fork that never execed by its inherited program
 // and parent exec id. Only a fork of a verified hook or its known tools can
 // carry their mark; an unrelated child remains visible.
+//
+// Tetragon reports a fork only with its exit or as the parent of a process
+// it starts, so a fork whose own parent is a fork the feed has not seen yet
+// (a pipeline stage in a command substitution, `$(printf ... | jq ...)`,
+// where the hook script runs jq, head and curl) is placed by hookCallOf.
 func (m *Mapper) forkOfHook(parent *pb.Process) *hookProcess {
 	if !m.hookTrust {
 		return nil
@@ -161,20 +171,59 @@ func (m *Mapper) forkOfHook(parent *pb.Process) *hookProcess {
 	if existing, ok := m.hookProcs.get(parent.GetExecId()); ok {
 		return existing
 	}
-	ancestor, ok := m.hookProcs.get(parent.GetParentExecId())
-	if !ok || (ancestor.role != hookVerified && ancestor.role != hookTool) || ancestor.binary != parent.GetBinary() {
-		return nil
-	}
 	info := hookInfo(parent)
-	if !hookSameUID(info, ancestor) {
+	ancestor, ok := m.hookProcs.get(parent.GetParentExecId())
+	switch {
+	case ok:
+		if (ancestor.role != hookVerified && ancestor.role != hookTool) || ancestor.binary != parent.GetBinary() || !hookSameUID(info, ancestor) {
+			return nil
+		}
+		info.hook = ancestor.hook
+		if ancestor.role == hookVerified {
+			info.hook = ancestor
+		}
+	case parent.GetBinary() == sandboxClaudeHook && parent.GetParentExecId() != "":
+		if info.hook = m.hookCallOf(info); info.hook == nil {
+			return nil
+		}
+		// The unseen parent is a fork of the same call: its other children
+		// and its own exit join the call directly.
+		m.hookProcs.put(parent.GetParentExecId(), &hookProcess{
+			binary: sandboxClaudeHook, uid: info.uid, uidKnown: info.uidKnown, container: info.container,
+			role: hookTool, hook: info.hook,
+		})
+	default:
 		return nil
 	}
-	info.role, info.hook = hookTool, ancestor.hook
-	if ancestor.role == hookVerified {
-		info.hook = ancestor
-	}
+	info.role = hookTool
 	m.hookProcs.put(parent.GetExecId(), info)
 	return info
+}
+
+// hookCallOf names the hook call a fork of the hook script belongs to when
+// the forks between it and the script were not seen: the verified call of
+// the fork's container and user that is still running. A fork runs the
+// image it was forked from, so it descends from a run of the hook script in
+// its container (every run is in hookScripts until it ends). Nothing is
+// placed while that container and user have another run of the script that
+// was not verified (one the workload started) or that was released.
+func (m *Mapper) hookCallOf(fork *hookProcess) *hookProcess {
+	if m.hookScriptsFull || fork.container == "" || !fork.uidKnown {
+		return nil
+	}
+	var call *hookProcess
+	for _, run := range m.hookScripts {
+		if run.container != fork.container || !hookSameUID(run, fork) || run.finished {
+			continue
+		}
+		if run.role != hookVerified || run.tainted {
+			return nil
+		}
+		if call == nil || run.opened.After(call.opened) {
+			call = run
+		}
+	}
+	return call
 }
 
 // forgetHookProcess drops a process that ended from the ancestry table: its
@@ -186,12 +235,14 @@ func (m *Mapper) forkOfHook(parent *pb.Process) *hookProcess {
 func (m *Mapper) forgetHookProcess(execID string, hostPID int) {
 	info, ok := m.hookProcs.get(execID)
 	m.hookProcs.remove(execID)
+	delete(m.hookScripts, execID)
 	for depth := 0; ok && hostPID > 0 && depth < 16; depth++ {
 		parentID := info.parentID
 		if info, ok = m.hookProcs.get(parentID); !ok || info.hostPID != hostPID {
 			return
 		}
 		m.hookProcs.remove(parentID)
+		delete(m.hookScripts, parentID)
 	}
 }
 
@@ -240,6 +291,13 @@ func (m *Mapper) classifyHook(p, rawParent *pb.Process, frame *sandboxfeed.Frame
 	}
 	if frame.ExecID != "" {
 		m.hookProcs.put(frame.ExecID, info)
+		if p.GetBinary() == sandboxClaudeHook {
+			if len(m.hookScripts) >= tracked {
+				m.hookScriptsFull = true
+			} else {
+				m.hookScripts[frame.ExecID] = info
+			}
+		}
 	}
 }
 
@@ -378,6 +436,7 @@ func (m *Mapper) DisableHooks() []Item {
 // Processes already running lack verified ancestry and remain visible.
 func (m *Mapper) ResumeHooks() {
 	m.hookProcs = newBoundedMap[string, *hookProcess](tracked)
+	m.hookScripts, m.hookScriptsFull = map[string]*hookProcess{}, false
 	m.hookTrust = true
 }
 

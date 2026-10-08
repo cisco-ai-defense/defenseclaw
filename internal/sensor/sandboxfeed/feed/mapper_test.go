@@ -486,6 +486,12 @@ func TestMapperFoldsHooksOfTheClaudeTheSandboxStarted(t *testing.T) {
 	find := proc{pid: 9234, ktime: 4e8 + 2e6, docker: workload, binary: "/usr/bin/find", args: "/usr/local/lib/defenseclaw -mindepth 1", parent: &script}
 	subst := proc{pid: 9235, ktime: 4e8 + 3e6, docker: workload, binary: sandboxClaudeHook, args: script.args, parent: &script}
 	curl := proc{pid: 9236, ktime: 4e8 + 4e6, docker: workload, binary: "/usr/bin/curl", args: "-q -s", parent: &subst}
+	// $(printf ... | jq ...): jq's parent is the pipeline's fork, whose parent,
+	// the command substitution's fork, the feed sees only at its exit.
+	outer := proc{pid: 9237, ktime: 4e8 + 5e6, docker: workload, binary: sandboxClaudeHook, args: script.args, parent: &script}
+	stage := proc{pid: 9238, ktime: 4e8 + 6e6, docker: workload, binary: sandboxClaudeHook, args: script.args, parent: &outer}
+	printf := proc{pid: 9239, ktime: 4e8 + 7e6, docker: workload, binary: sandboxClaudeHook, args: script.args, parent: &outer}
+	jq := proc{pid: 9242, ktime: 4e8 + 8e6, docker: workload, binary: "/usr/bin/jq", args: "-r .hook_event_name", parent: &stage}
 	tool := proc{pid: 9240, ktime: 5e8, docker: workload, binary: "/bin/bash", args: `-c "eval '/bin/true ts4-user-marker'"`, parent: &agent}
 	marker := proc{pid: 9241, ktime: 5e8 + 1e6, docker: workload, binary: "/usr/bin/true", args: "ts4-user-marker", parent: &tool}
 
@@ -504,14 +510,20 @@ func TestMapperFoldsHooksOfTheClaudeTheSandboxStarted(t *testing.T) {
 			t.Fatalf("the workload was folded: %+v", f)
 		}
 	}
-	for _, p := range []proc{curl, subst, find} {
+	if got := m.Map(ctx, exitOf(printf, 0, "")); len(got) != 0 {
+		t.Fatalf("a pipeline fork's exit forwarded: %+v", got)
+	}
+	if got := m.Map(ctx, execOf(jq)); len(got) != 0 {
+		t.Fatalf("jq in a command substitution's pipeline forwarded: %+v", got)
+	}
+	for _, p := range []proc{curl, subst, find, jq, stage, outer} {
 		if got := m.Map(ctx, exitOf(p, 0, "")); len(got) != 0 {
 			t.Fatalf("hook process %s exit forwarded: %+v", p.binary, got)
 		}
 	}
 	got := m.Map(ctx, exitOf(script, 0, ""))
 	if len(got) != 2 || got[0].Frame.Kind != sandboxfeed.FrameExec || got[0].Frame.Binary != sandboxClaudeHook ||
-		!got[0].Frame.Hook || !got[1].Frame.Hook || got[1].Frame.HookTools != 2 {
+		!got[0].Frame.Hook || !got[1].Frame.Hook || got[1].Frame.HookTools != 3 {
 		t.Fatalf("hook summary = %+v", got)
 	}
 	if got := m.Map(ctx, exitOf(launcher, 0, "")); len(got) != 0 {
@@ -519,6 +531,33 @@ func TestMapperFoldsHooksOfTheClaudeTheSandboxStarted(t *testing.T) {
 	}
 	if f := one(t, m.Map(ctx, exitOf(marker, 0, ""))).Frame; f.Hook || f.HookTool {
 		t.Fatalf("the workload's exit was folded: %+v", f)
+	}
+}
+
+// A fork of the hook script whose parent fork was not seen joins the
+// running verified call only while no other run of the script of that
+// container and user is live: a run the workload started could be its
+// origin, so its tools stay visible.
+func TestMapperLeavesNestedHookForksVisibleBesideAnotherRun(t *testing.T) {
+	init := proc{pid: 9400, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	agent := proc{pid: 9401, ktime: 2e8, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	launcher := proc{pid: 9402, ktime: 3e8, docker: workload, binary: "/bin/sh", args: "-c " + sandboxClaudeHook, parent: &agent}
+	script := proc{pid: 9403, ktime: 4e8, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &launcher}
+	toolShell := proc{pid: 9404, ktime: 5e8, docker: workload, binary: "/bin/bash", args: `-c "eval 'claude-code-hook.sh < x'"`, parent: &agent}
+	ownRun := proc{pid: 9405, ktime: 6e8, docker: workload, binary: sandboxClaudeHook, args: "-p " + sandboxClaudeHook, parent: &toolShell}
+	outer := proc{pid: 9406, ktime: 7e8, docker: workload, binary: sandboxClaudeHook, args: script.args, parent: &ownRun}
+	stage := proc{pid: 9407, ktime: 8e8, docker: workload, binary: sandboxClaudeHook, args: script.args, parent: &outer}
+	jq := proc{pid: 9408, ktime: 9e8, docker: workload, binary: "/usr/bin/jq", parent: &stage}
+	m := hookMapper(init)
+	ctx := context.Background()
+	for _, p := range []proc{init, agent, launcher, script, toolShell, ownRun} {
+		m.Map(ctx, execOf(p))
+	}
+	if f := one(t, m.Map(ctx, execOf(jq))).Frame; f.Hook || f.HookTool {
+		t.Fatalf("a tool below an unverified run was folded: %+v", f)
+	}
+	if f := one(t, m.Map(ctx, exitOf(jq, 0, ""))).Frame; f.Hook || f.HookTool {
+		t.Fatalf("its exit was folded: %+v", f)
 	}
 }
 
