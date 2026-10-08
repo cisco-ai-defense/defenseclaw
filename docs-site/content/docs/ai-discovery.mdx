@@ -377,8 +377,9 @@ configured there, which its own scan of this machine never sees:
   `defenseclaw sandbox discover NAME` reads it now, and on Windows, which
   has no sandboxes, `--sandbox` exits 3 as `defenseclaw sandbox` does.
 - A sandbox signal's **Last active** is the last time the sandbox was read
-  while it ran (a process's is its start), not the date of the file: the
-  files an image ships carry the image's dates.
+  while it ran, a running process's too, not the date of the file: the
+  files an image ships carry the image's dates. A sandbox process's
+  **Runtime** `up=` counts from its start.
 - A stopped sandbox keeps what was found, without its processes; a deleted
   one's entries turn `gone` at once (the delete starts a scan, as
   `agent usage --refresh` does). `ai_discovery.enabled: false` turns this

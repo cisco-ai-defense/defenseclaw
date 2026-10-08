@@ -4386,13 +4386,16 @@ def _summarize_ai_usage_signals_full(
     return rows
 
 
-def _format_runtime(runtime: dict[str, Any]) -> str:
+def _format_runtime(runtime: dict[str, Any], *, live: bool = False) -> str:
     """Render the new ``runtime`` block compactly for the detail view.
 
     Format: ``pid=1234 user=alice up=3h12m`` — fields are dropped when
     the underlying value is missing so signatures from non-process
     detectors (which won't have a runtime block at all) just render an
     empty string and tests that don't seed runtime data stay stable.
+    ``live`` counts the uptime from the process's start: a sandbox's
+    process is as of the sandbox's last read, minutes old, and was running
+    then (GAP-0392).
     """
     if not runtime:
         return ""
@@ -4404,6 +4407,9 @@ def _format_runtime(runtime: dict[str, Any]) -> str:
     if user:
         parts.append(f"user={user}")
     uptime = runtime.get("uptime_sec")
+    started = _parse_iso_ts(runtime.get("started_at")) if live else None
+    if started is not None:
+        uptime = max(0, int(time.time() - started.timestamp()))
     if isinstance(uptime, (int, float)) and uptime > 0:
         parts.append(f"up={_humanize_seconds(int(uptime))}")
     comm = runtime.get("comm")
@@ -4786,7 +4792,7 @@ def _render_ai_usage_table(
                         sig.get("presence_score"), sig.get("presence_band")))
                     prev_conf_key = conf_key
             if has_runtime:
-                row.append(_format_runtime(runtime))
+                row.append(_format_runtime(runtime, live=sig.get("source") == "sandbox"))
             if has_last_active:
                 row.append(_format_relative_time(sig.get("last_active_at", "")))
             # Prefer the richer evidence records (basename + quality
@@ -4981,7 +4987,7 @@ def _render_ai_usage_plain(
                 str(sig.get("detector", "")),
                 _format_confidence(sig.get("identity_score"), sig.get("identity_band")),
                 _format_confidence(sig.get("presence_score"), sig.get("presence_band")),
-                _format_runtime(runtime),
+                _format_runtime(runtime, live=sig.get("source") == "sandbox"),
                 _format_relative_time(sig.get("last_active_at", "")),
                 evidence_cell,
             ])

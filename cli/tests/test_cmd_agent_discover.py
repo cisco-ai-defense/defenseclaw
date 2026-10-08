@@ -562,6 +562,23 @@ class AiUsageRendererTests(unittest.TestCase):
         self.assertIn("myapp-7f3a", out)
         self.assertNotIn("Cursor", out)
 
+    def test_sandbox_process_uptime_counts_from_its_start(self):
+        # GAP-0392: a sandbox process read 7 minutes ago showed up=4m59s (its
+        # uptime at that read) beside a Last active of its start.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.commands import cmd_agent
+
+        started = (datetime.now(timezone.utc) - timedelta(hours=2, minutes=5)).isoformat()
+        runtime = {"pid": 466, "uptime_sec": 299, "started_at": started}
+        self.assertTrue(cmd_agent._format_runtime(runtime, live=True).startswith("pid=466 up=2h"))
+        self.assertEqual(cmd_agent._format_runtime(runtime), "pid=466 up=4m59s")
+        found = _ai_signal(state="seen", category="active_process", product="Claude Code", vendor="Anthropic",
+                           detector="process")
+        found.update({"sandbox_name": "incident-um", "source": "sandbox", "runtime": runtime})
+        out = cmd_agent._render_ai_usage_table({"signals": [found]}, detail=True)
+        self.assertIn("pid=466 up=2h", out)
+
     def test_sandbox_filter_counts_that_sandbox_in_the_header(self):
         # GAP-0269: the header counted the whole machine above one sandbox's rows.
         from defenseclaw.commands import cmd_agent

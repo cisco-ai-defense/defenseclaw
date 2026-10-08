@@ -1137,8 +1137,12 @@ class AIDiscoveryPanelModel:
                 parts = [f"runtime: pid={signal.runtime.pid}"]
                 if signal.runtime.user:
                     parts.append(f"user={signal.runtime.user}")
-                if signal.runtime.uptime_sec:
-                    parts.append(f"up={humanize_age(timedelta(seconds=signal.runtime.uptime_sec))}")
+                uptime = timedelta(seconds=signal.runtime.uptime_sec)
+                if signal.sandbox_name and signal.runtime.started_at:
+                    # As of the sandbox's last read, and running then (GAP-0392).
+                    uptime = max(now - signal.runtime.started_at, timedelta(0))
+                if uptime:
+                    parts.append(f"up={humanize_age(uptime)}")
                 if signal.runtime.comm:
                     parts.append(f"comm={signal.runtime.comm}")
                 lines.append(" ".join(parts))
