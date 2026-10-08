@@ -3581,7 +3581,44 @@ def migrate(
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
+        _seal_windows_hook_credentials(data_dir)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _seal_windows_hook_credentials(data_dir: str) -> None:
+    """Give the hook credentials a 0.x Windows install wrote a private DACL.
+
+    0.8.x left ``hooks\\.hook-<scope>.token`` and ``.otlp-<scope>.token``
+    with the DACL they inherit from the folder. 1.x keeps those files, and
+    ``defenseclaw setup rotate-token`` refuses a hook credential whose DACL is
+    inheritable (GAP-0364). A file that only trusted principals can read gets
+    the owner-only DACL 1.x writes; any other is left as it is: the gateway
+    re-issues a token another account could read.
+    """
+
+    if os.name != "nt":
+        return
+    from defenseclaw.file_permissions import protect_private_file, windows_acl_custody_confidentiality_error
+
+    hooks = os.path.join(data_dir, "hooks")
+    try:
+        names = sorted(os.listdir(hooks))
+    except OSError:
+        return
+    for name in names:
+        folded = name.casefold()
+        if not folded.endswith(".token") or not folded.startswith((".hook-", ".otlp-")):
+            continue
+        path = os.path.join(hooks, name)
+        try:
+            if (
+                windows_acl_custody_confidentiality_error(path) != "Windows DACL is inheritable"
+                or windows_acl_custody_confidentiality_error(path, allow_inheritable=True) is not None
+            ):
+                continue
+            protect_private_file(path)
+        except OSError as exc:
+            ux.warn(f"Could not make {path} private ({exc}); 'defenseclaw setup rotate-token' refuses it until it is")
 
 
 def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
@@ -3709,6 +3746,8 @@ def _pending_migration_steps(
                 "this is a DefenseClaw 0.x install older than 0.8.5 and its version is unknown; "
                 "re-run with --from-version X.Y.Z"
             )
+        if applied is None:
+            _warn_from_version_newer(from_version or "")
         for ver, desc, fn in MIGRATIONS:
             # The v8 conversion is what makes the config v8, so a pre-v8 config
             # always needs it, whatever the cursor or --from-version claims.
@@ -3768,6 +3807,25 @@ def _legacy_applied_versions(data_dir: str) -> set[str] | None:
     if isinstance(applied, list):
         return {str(item.get("version") if isinstance(item, dict) else item) for item in applied}
     return None
+
+
+def _warn_from_version_newer(from_version: str) -> None:
+    """Warn when ``--from-version`` cannot be the 0.x release that wrote the data.
+
+    Only a 0.x config without a migration cursor reads the value (the steps up
+    to it are skipped), so a release newer than this one is a mistake only
+    here (GAP-1610). The installer passes the release it replaces, which is
+    newer on a downgrade, where the value is unused: no warning (GAP-0348).
+    """
+
+    from defenseclaw import __version__
+
+    if _ver_tuple(from_version)[:3] > _ver_tuple(__version__)[:3]:
+        ux.echo(
+            f"  ⚠ --from-version {from_version} is newer than this DefenseClaw ({__version__}), "
+            "but this configuration is from a 0.x release: name the release that wrote it, for example 0.8.4.",
+            err=True,
+        )
 
 
 def _configured_openclaw_home(config_path: str) -> str:

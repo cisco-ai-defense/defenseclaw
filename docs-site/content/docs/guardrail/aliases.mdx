@@ -49,7 +49,7 @@ defenseclaw setup cursor --no-restart        # apply config without bouncing the
 ```
 
 <Callout>
-These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already configured, setup asks whether to **Add** the new connector or **Replace** the old one. Add is the default, also under `--yes`; it keeps both connectors wired under `guardrail.connectors`. Pass `--replace` to switch instead.
+These aliases are shorthand for `setup guardrail --connector <name>` with connector-specific options. On a single-connector host that connector is the active posture. On a host with another hook or policy connector already configured, setup asks whether to **Add** the new connector or **Replace** the old one. Add is the default, also under `--yes`; it keeps both connectors wired under `guardrail.connectors`. Pass `--replace` to switch instead. Only the aliases add a connector to that roster: `setup guardrail --connector <name>` tunes a connector that is on it, and refuses one that is not with `No changes made` and the alias that adds it.
 </Callout>
 
 ### What a direct-to-upstream alias does

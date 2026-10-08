@@ -1474,13 +1474,17 @@ class SandboxesPanelModel:
         newest event first), so an index alone would point at another item
         after a refresh. When the item itself is gone, the view is marked so
         its next action key is refused rather than applied to a neighbour.
+        A view left empty has no neighbour: a row that comes later is the one
+        on screen under the cursor, as in a view just opened (GAP-0328).
         """
         for view, key in before.items():
             keys = self._item_keys(view)
             if key in keys:
                 self.cursors[view] = keys.index(key)
-            else:
+            elif keys:
                 self._selection_lost.add(view)
+            else:
+                self._selection_lost.discard(view)
         self._clamp()
 
     def shown(self) -> None:

@@ -215,6 +215,51 @@ def test_openclaw_restart_reports_what_happened(tmp_path: Path, output: str, rc:
     assert len(completed.stdout.strip().splitlines()) == 1
 
 
+@pytest.mark.parametrize(
+    ("listing", "expected"),
+    [
+        ('{"sandboxes": [{"name": "ub-live", "phase": "ready"}, {"name": "old", "phase": "stopped"}]}',
+         "WARN Sandbox ub-live is running: while the gateway restarts (usually under a minute) its hooks fail closed"),
+        ('{"sandboxes": [{"name": "b2", "phase": "ready"}, {"name": "a1", "phase": "ready"}]}',
+         "WARN 2 sandboxes are running (a1, b2): while the gateway restarts"),
+        ('{"sandboxes": [{"name": "old", "phase": "stopped"}]}', ""),
+        ("no daemon", ""),
+    ],
+)
+def test_running_sandboxes_are_named_before_the_gateway_restarts(tmp_path: Path, listing: str, expected: str) -> None:
+    # GAP-0352: an upgrade restarted the daemon under a running sandbox, whose
+    # hooks failed closed meanwhile; the user learned it from the end summary.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert 'warn_running_sandboxes\n    ask_yes_no "${question}"' in text
+    assert 'warn_running_sandboxes\nif [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]' in text
+    start = text.index("warn_running_sandboxes() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir, venv = tmp_path / "bin", tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    (tmp_path / "list.json").write_text(listing, encoding="utf-8")
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        f'#!/bin/sh\n[ "$*" = "sandbox list --output json" ] && cat "{tmp_path / "list.json"}"\n', encoding="utf-8"
+    )
+    gateway.chmod(0o755)
+    script = tmp_path / "warn.sh"
+    script.write_text(
+        f'set -euo pipefail\nBIN_DIR="{bin_dir}"\nVENV="{venv}"\n'
+        'gateway_pid() { printf 42; }\nwarn() { echo "WARN $*"; }\n' + func + "warn_running_sandboxes\n",
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    if expected:
+        assert completed.stdout.strip().startswith(expected), completed.stdout
+    else:
+        assert completed.stdout == "", completed.stdout
+
+
 def _release(tmp_path: Path, script: str) -> Path:
     release = tmp_path / "release"
     release.mkdir()

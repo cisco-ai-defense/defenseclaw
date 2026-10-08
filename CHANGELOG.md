@@ -82,6 +82,10 @@ stopped`. Nothing is changed; use the install command above.
 
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
+- Before an upgrade, reinstall or rollback on macOS or Linux restarts the
+  gateway, the installer names the OpenShell sandboxes that are running: their
+  hooks fail closed until the gateway is back, so their agents' tool calls are
+  refused meanwhile.
 
 ### Sandbox telemetry and destinations
 
@@ -201,6 +205,37 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **A PowerShell command with several statements reaches argv block rules.**
+  On Windows, where Codex runs its shell tool in PowerShell, a rule such as
+  `f.commands.exists(c, "<x>" in c.argv)` only reported a detection-only
+  finding for `Write-Output <x>; exit $LASTEXITCODE` or
+  `Get-Location; Write-Output <x>`: the second statement left the whole
+  command partial. Its statements are now judged one by one, up to the first
+  one that cannot be proved, as in the body of `pwsh -Command`.
+- **The `guardrail` commands confirm that the running gateway applied a
+  change.** `guardrail mode`, `block-at`, `alert-at`, `use-pack`,
+  `protection`, `rule` and `suppress` said the running gateway applies it now
+  while, after a 0.8.x upgrade, the gateway kept the previous setting. They
+  wait up to 10 seconds for it to report the saved config generation, and
+  otherwise say it did not apply it and name `defenseclaw-gateway restart`
+  (`mode` and the levels exit 1, `gateway: not_applied` in `--json`).
+  `defenseclaw doctor`'s stale Policy row names the generation it has not
+  applied.
+- **`setup guardrail --connector X` refuses a connector that is not set up.**
+  On an install whose `guardrail.connectors` roster lacked X it repointed the
+  guardrail connector without adding X, and the gateway restart dropped the
+  hooks of the connectors on the roster. It now changes nothing and names
+  `defenseclaw setup <x>`, which adds a connector (or `--replace`, which
+  switches).
+- **`defenseclaw setup rotate-token` after a 0.8.x upgrade on Windows.** The
+  upgrade gives the hook credential files 0.8.x wrote with an inherited DACL
+  the owner-only DACL 1.x writes, which rotation requires. A refusal now names
+  the file, the reason and the `icacls` (or `chmod`) command that fixes it.
+- **No `--from-version` warning on a downgrade.** `install.sh --local` of an
+  older build over a newer one printed `--from-version 1.0.31 is newer than
+  this DefenseClaw`, about a flag the user never typed. The warning remains
+  only where the value is read: a 0.x configuration without a migration
+  record.
 - **Local Splunk starts when the CLI was installed under a private umask.**
   The package's files arrived 0600 and setup copied them so into
   `~/.defenseclaw/splunk-bridge/splunk/`, which the container mounts and reads

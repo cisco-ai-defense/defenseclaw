@@ -17,7 +17,7 @@ from defenseclaw import config_inspect, ux
 from defenseclaw.commands import cmd_guardrail
 from defenseclaw.commands.cmd_migrate import migrate_cmd
 from defenseclaw.context import AppContext
-from defenseclaw.migrations import MigrationError, migrate
+from defenseclaw.migrations import MigrationError, _pending_migration_steps, migrate
 
 from tests.test_fail_mode_runtime import _runtime_cfg
 
@@ -67,13 +67,21 @@ def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:
         dcconfig.require_v8_config(path=str(path))
 
 
-def test_from_version_newer_than_this_release_warns(data_dir: Path) -> None:
-    # GAP-1610
-    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "999.0.0"])
-    assert result.exit_code == 0, result.output
-    assert "newer than this DefenseClaw" in result.stderr
-    older = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.0.1"])
-    assert "newer than this DefenseClaw" not in older.stderr
+def test_from_version_newer_than_this_release_warns_only_where_it_is_read(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GAP-0348: on a downgrade the installer passes the newer release it
+    # replaces; a 1.x config never reads it, so the run prints no warning.
+    path = data_dir / "config.yaml"
+    path.write_text(f"config_version: {dcconfig.CURRENT_CONFIG_VERSION}\n", encoding="utf-8")
+    downgrade = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "999.0.0"])
+    assert downgrade.exit_code == 0, downgrade.output
+    assert "--from-version" not in downgrade.stderr + downgrade.output
+    # GAP-1610: a 0.x config without a cursor skips the steps up to it, so warn there.
+    _pending_migration_steps(7, "999.0.0", str(data_dir), str(path), dcconfig.CURRENT_CONFIG_VERSION)
+    assert "--from-version 999.0.0 is newer than this DefenseClaw" in capsys.readouterr().err
+    _pending_migration_steps(7, "0.8.4", str(data_dir), str(path), dcconfig.CURRENT_CONFIG_VERSION)
+    assert "--from-version" not in capsys.readouterr().err
 
 
 def test_helper_timeout_is_not_reported_as_invalid(monkeypatch: pytest.MonkeyPatch) -> None:

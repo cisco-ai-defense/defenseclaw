@@ -28,14 +28,13 @@ cd ~/code/myapp
 defenseclaw sandbox run claude
 ```
 
-On a Mac, the run looks like this. The capture is from a real session whose
-sandbox was named with `--name myapp-claude` (without `--name` it would be
-`myapp-` plus a random suffix), that ran under the `balanced` pack with the
-process tree on (`--pack balanced --process-tree`), and whose model
-credential was an Amazon Bedrock key. Below the banner, Claude Code starts as
-usual.
+On a Mac, the run looks like this. The capture is from a real session for a
+Python project, whose sandbox was named with `--name pyhum-um` (without
+`--name` it would be the folder name plus a random suffix), that ran under the
+default `open` pack, and whose model credential was an Amazon Bedrock key.
+Below the banner, Claude Code starts as usual.
 
-![defenseclaw sandbox run claude --pack balanced --process-tree on a Mac: the copy is made with .env held back, then the banner shows the sandbox, the project copy, the model credential bound to its endpoint and how that endpoint is reached, and where asks appear, before Claude Code starts](/images/sandboxes/screens/terminal-run-banner.png)
+![defenseclaw sandbox run claude on a Mac: the copy-mode note, the copy made with secrets held back and the test caches left out, then the banner shows the sandbox, the project copy, the model credential bound to its endpoint and how that endpoint is reached, and where to watch for asks, before Claude Code starts](/images/sandboxes/screens/terminal-run-banner.png)
 
 The banner's lines, as text, for a default-named sandbox with an Anthropic
 API key:

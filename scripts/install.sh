@@ -463,6 +463,34 @@ stop_gateway() {
     [[ -z "$(gateway_pid || true)" ]]
 }
 
+warn_running_sandboxes() {
+    # A running sandbox's hooks fail closed while the gateway restarts, so its
+    # agent's tool calls are refused until the gateway is back. Name them
+    # before the question, not only in the session's end summary (GAP-0352).
+    local gateway="${BIN_DIR}/defenseclaw-gateway" names
+    [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
+    names="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
+import json, re, subprocess, sys
+try:
+    out = subprocess.run([sys.argv[1], "sandbox", "list", "--output", "json"], capture_output=True, text=True, timeout=10).stdout
+    rows = json.loads(out or "{}").get("sandboxes") or []
+except Exception:
+    rows = []
+print(" ".join(sorted(
+    r["name"] for r in rows
+    if isinstance(r, dict) and r.get("phase") == "ready"
+    and isinstance(r.get("name"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", r["name"])
+)))
+PY
+)" || return 0
+    set -- ${names}
+    case $# in
+        0) ;;
+        1) warn "Sandbox $1 is running: while the gateway restarts (usually under a minute) its hooks fail closed, so its agent's tool calls are refused until the gateway is back" ;;
+        *) warn "$# sandboxes are running ($(printf '%s, ' "$@" | sed 's/, $//')): while the gateway restarts (usually under a minute) their hooks fail closed, so their agents' tool calls are refused until the gateway is back" ;;
+    esac
+}
+
 APP_PATH=""
 # DEFENSECLAW_APP_PATH=none skips the macOS app (tests, CLI-only machines).
 if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
@@ -500,6 +528,7 @@ if [[ "${ROLLBACK}" == true ]]; then
         step "Rolling back to DefenseClaw ${back_to}"
         question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
+    warn_running_sandboxes
     ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
@@ -705,6 +734,7 @@ ok "DefenseClaw ${VERSION} is staged and checked"
 
 # ── Swap ─────────────────────────────────────────────────────────────────────
 
+warn_running_sandboxes
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
 elif [[ -n "${PREV_VERSION}" ]]; then
