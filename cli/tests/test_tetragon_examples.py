@@ -91,6 +91,21 @@ def test_hardening_play_follows_the_guide() -> None:
     assert [handler["name"] for handler in play["handlers"]] == ["Restart Tetragon"]
 
 
+def test_ring_variables_are_left_to_group_vars() -> None:
+    # GAP-0029: play vars outrank inventory group_vars in Ansible, so a ring
+    # variable the play also sets never takes effect (the pilot ring stayed in
+    # consume). Every variable the play's header lists for group_vars is read
+    # with a default instead.
+    text = _text(EXAMPLES / "defenseclaw-tetragon.yml")
+    ring_variables = set(re.findall(r"^#\s+(defenseclaw_[a-z_]+):", text, re.MULTILINE))
+    assert {"defenseclaw_tetragon_mode", "defenseclaw_tetragon_burn_in", "defenseclaw_tetragon_enforce_ack"} <= ring_variables
+    play = yaml.safe_load(text)[0]
+    assert not ring_variables & set(play.get("vars", {})), "a ring variable is pinned in the play's vars"
+    readiness = next(task for task in play["tasks"] if "tetragon" in task.get("ansible.builtin.command", {}).get("argv", []))
+    assert "defenseclaw_tetragon_mode | default('consume')" in readiness["ansible.builtin.command"]["argv"][-1]
+    assert "default('consume')" in readiness["when"]
+
+
 def _render(**variables: Any) -> str:
     jinja2 = pytest.importorskip("jinja2")
     # Ansible's template module trims the newline after a block tag.

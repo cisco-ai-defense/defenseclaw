@@ -307,7 +307,8 @@ variables go in `group_vars`, as the play's header shows.
     defenseclaw_format: "{{ 'deb' if ansible_facts['pkg_mgr'] == 'apt' else 'rpm' }}"
     defenseclaw_package: "defenseclaw-enterprise-{{ defenseclaw_version }}-linux-{{ defenseclaw_arch }}.{{ defenseclaw_format }}"
     defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
-    defenseclaw_tetragon_mode: consume
+    # The ring variables are not set here: play vars outrank group_vars, so a
+    # ring's mode would never take effect. They default where they are read.
   tasks:
     - name: Create the root-only staging folder
       ansible.builtin.file:
@@ -395,11 +396,11 @@ variables go in `group_vars`, as the play's header shows.
           - tetragon
           - verify
           - --ready-for
-          - "{{ defenseclaw_tetragon_mode }}"
+          - "{{ defenseclaw_tetragon_mode | default('consume') }}"
       register: defenseclaw_tetragon_ready
       changed_when: false
       failed_when: defenseclaw_tetragon_ready.rc != 0
-      when: defenseclaw_tetragon_mode != 'off'
+      when: (defenseclaw_tetragon_mode | default('consume')) != 'off'
 ```
 
 ```yaml title="config.yaml.j2"
