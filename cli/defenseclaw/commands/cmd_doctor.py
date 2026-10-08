@@ -1345,7 +1345,19 @@ def _check_sandbox_kernel_feed(
         tetragon = str(report.get("tetragon") or "unknown").strip()
         if report.get("tetragon_reason"):
             tetragon += f" ({report.get('tetragon_reason')})"
-        emit("pass", f"build {build}, protocol {report.get('protocol')}; its Tetragon stream is {tetragon}")
+        detail = f"build {build}, protocol {report.get('protocol')}; its Tetragon stream is {tetragon}"
+        if str(report.get("tetragon") or "").strip() != "connected":
+            # The feed answers but has nothing to send: sandbox ps falls back to
+            # the sample, so the row says so too (GAP-0086).
+            emit(
+                "warn",
+                detail,
+                "kernel-feed-tetragon-unavailable",
+                "ask the administrator to check Tetragon (`sudo systemctl status tetragon`); "
+                "the feed reconnects by itself, and sandbox process trees use the 5-second sample until then",
+            )
+            return
+        emit("pass", detail)
         return
     if reason == "kernel_feed_not_permitted":
         emit(

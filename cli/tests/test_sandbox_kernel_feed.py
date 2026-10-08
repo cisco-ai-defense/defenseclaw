@@ -141,3 +141,23 @@ def test_feed_row_pass_skip_and_unavailable(tmp_path: Path) -> None:
     assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-unavailable"
     (row,), _ = _feed_rows(tmp_path, "not json")
     assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-status-unavailable"
+
+
+def test_feed_row_warns_while_its_tetragon_is_not_connected(tmp_path: Path) -> None:
+    # GAP-0086: Tetragon stopped, the feed still answers; sandbox ps warns and
+    # uses the sample, so doctor warns with the next step instead of passing.
+    report = {
+        "installed": True,
+        "reachable": True,
+        "build": "1.2.0",
+        "protocol": 1,
+        "tetragon": "unavailable",
+        "tetragon_reason": "tetragon_unavailable",
+    }
+    (row,), _ = _feed_rows(tmp_path, report)
+    assert row["status"] == "warn" and row["reason_code"] == "kernel-feed-tetragon-unavailable"
+    assert "unavailable (tetragon_unavailable)" in row["detail"] and "1.2.0" in row["detail"]
+    assert "sudo systemctl status tetragon" in row["remediation"] and "5-second sample" in row["remediation"]
+    report = {"installed": True, "reachable": True, "build": "1.2.0", "protocol": 1}
+    (row,), _ = _feed_rows(tmp_path, report)
+    assert row["status"] == "warn" and "unknown" in row["detail"]

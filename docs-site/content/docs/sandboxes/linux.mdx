@@ -362,6 +362,14 @@ connected:
 | `kernel_feed_version_skew` | The feed speaks another protocol: run the `install` command it prints |
 | `kernel_feed_unsupported` | Not Linux |
 
+When the feed answers but its Tetragon stream is not connected (Tetragon is
+stopped, or its socket is gone), `kernel-feed status` says
+`its Tetragon stream is unavailable (tetragon_unavailable)`, `sandbox ps`
+warns and uses the 5-second sample, and `defenseclaw doctor` warns on the
+**Sandbox kernel feed** row. Ask the administrator to check Tetragon
+(`sudo systemctl status tetragon`). The feed reconnects by itself when
+Tetragon is back.
+
 ## One OpenShell gateway per machine
 
 OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670`
