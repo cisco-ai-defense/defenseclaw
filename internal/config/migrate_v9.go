@@ -2109,12 +2109,17 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 // writeRebasedRulePack writes a rebased pack to dir, which must not exist:
 // the files go to a sibling folder that is renamed into place.
 func writeRebasedRulePack(dir string, files map[string][]byte) error {
-	staging := dir + ".rebasing"
-	_ = os.RemoveAll(staging)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".rebasing-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
 	for rel, data := range files {
 		target := filepath.Join(staging, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			_ = os.RemoveAll(staging)
 			return err
 		}
 		if err := cfgtxn.WriteFileDurable(target, data, 0o600); err != nil {
@@ -2123,7 +2128,6 @@ func writeRebasedRulePack(dir string, files map[string][]byte) error {
 		}
 	}
 	if err := os.Rename(staging, dir); err != nil {
-		_ = os.RemoveAll(staging)
 		return err
 	}
 	return nil
