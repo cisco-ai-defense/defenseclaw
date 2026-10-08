@@ -25,9 +25,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// settingsReferenceURL is the enterprise settings reference; the managed
-// packages ship no per-user CLI to print the schema with.
-const settingsReferenceURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/configuration/#settings-reference"
+// settingsReferenceURL is the enterprise settings reference.
+const settingsReferenceURL = config.EnterpriseSettingsReferenceURL
 
 var configHeaderPattern = regexp.MustCompile(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
 
@@ -161,79 +160,12 @@ var errManagedEnvReference = errors.New("an observability destination reads a se
 // and the gateway failed to start into a rollback; unset, the refusal gave
 // per-user advice (GAP-0939).
 func (e *Env) managedEnvReferenceProblem(raw []byte, source string) (string, bool) {
-	var doc yaml.Node
-	if yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) == 0 {
-		return "", false
-	}
-	destinations := yamlMapChild(yamlMapChild(doc.Content[0], "observability"), "destinations")
-	if destinations == nil || destinations.Kind != yaml.SequenceNode {
-		return "", false
-	}
-	var found []string
-	line := 0
-	note := func(field string, node *yaml.Node) {
-		found = append(found, field)
-		if line == 0 {
-			line = node.Line
-		}
-	}
-	for index, destination := range destinations.Content {
-		if destination.Kind != yaml.MappingNode {
-			continue
-		}
-		label := fmt.Sprintf("observability.destinations[%d]", index)
-		if name := yamlMapChild(destination, "name"); name != nil && name.Kind == yaml.ScalarNode && name.Value != "" {
-			label += fmt.Sprintf(" (%s)", name.Value)
-		}
-		for _, pair := range [][2]string{{"token_env", "token_credential"}, {"bearer_env", "bearer_credential"}} {
-			node := yamlMapChild(destination, pair[0])
-			if node == nil || node.Kind != yaml.ScalarNode || strings.TrimSpace(node.Value) == "" {
-				continue
-			}
-			if credential := yamlMapChild(destination, pair[1]); credential != nil && strings.TrimSpace(credential.Value) != "" {
-				// Both fields: the documented sentence, naming the
-				// destination and both fields (GAP-0940).
-				where := source
-				if where == "" {
-					where = e.Layout.ConfigPath
-				}
-				return fmt.Sprintf("%s%s: %s sets both %s and %s; set either %s or %s, not both (on a managed host, %s). The settings reference: %s",
-					where, lineSuffix(node.Line), label, pair[1], pair[0], pair[1], pair[0], pair[1], settingsReferenceURL), true
-			}
-			note(label+" "+pair[0], node)
-		}
-		if headers := yamlMapChild(destination, "headers"); headers != nil && headers.Kind == yaml.MappingNode {
-			for i := 0; i+1 < len(headers.Content); i += 2 {
-				if value := headers.Content[i+1]; value.Kind == yaml.MappingNode && yamlMapChild(value, "env") != nil {
-					note(label+" header "+headers.Content[i].Value, value)
-				}
-			}
-		}
-	}
-	if len(found) == 0 {
-		return "", false
-	}
 	where := source
 	if where == "" {
 		where = e.Layout.ConfigPath
 	}
-	return fmt.Sprintf("%s%s: %s reads a secret from an environment variable, and a managed host never passes one to its services, "+
-		"so ensure refuses token_env, bearer_env and {env: NAME} headers. Store the secret with `%s enterprise secret set --name <name> --from-stdin` "+
-		"and reference it by name: token_credential (splunk_hec), bearer_credential (http_jsonl) or {credential: <name>} (a header). The settings reference: %s",
-		where, lineSuffix(line), strings.Join(found, ", "), filepath.Join(e.Layout.BinDir, binGateway), settingsReferenceURL), true
-}
-
-// yamlMapChild is the value of key in mapping node, or nil.
-func yamlMapChild(node *yaml.Node, key string) *yaml.Node {
-	if node == nil || node.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return node.Content[i+1]
-		}
-	}
-	return nil
+	store := "with `" + filepath.Join(e.Layout.BinDir, binGateway) + " enterprise secret set --name <name> --from-stdin`"
+	return config.ScanManagedEnvSecretReferences(raw).Refusal(where, store, settingsReferenceURL)
 }
 
 func lineSuffix(line int) string {
