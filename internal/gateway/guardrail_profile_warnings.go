@@ -293,11 +293,17 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 
 // unknownAssignmentGroups looks up each distinct group the assignments name
 // and warns for those exists reports as definitely absent, unless their
-// directory does not answer at all. SIDs and ids are not names and are not
-// looked up. qualify, when set, names the qualified form the host knows an
+// directory does not answer at all. Windows SIDs are checked by the LSA;
+// other platforms skip SIDs. Numeric group ids are not names. qualify, when
+// set, names the qualified form the host knows an
 // absent short name by, which the warning then suggests (GAP-0332).
 func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error),
 	qualify func(context.Context, string) string) []string {
+	return unknownAssignmentGroupsForOS(ctx, assignments, exists, qualify, runtime.GOOS)
+}
+
+func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error),
+	qualify func(context.Context, string) string, platform string) []string {
 	type unknownGroup struct {
 		assignment    int
 		group, domain string
@@ -309,7 +315,7 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 	for i, assignment := range assignments {
 		for _, group := range assignment.Match.Groups {
 			group = strings.TrimSpace(group)
-			if group == "" || strings.HasPrefix(strings.ToUpper(group), "S-1-") || strings.Trim(group, "0123456789") == "" {
+			if group == "" || (platform != "windows" && strings.HasPrefix(strings.ToUpper(group), "S-1-")) || strings.Trim(group, "0123456789") == "" {
 				continue
 			}
 			_, domain := useridentity.SplitQualifiedName(group)
@@ -340,7 +346,7 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 	silent := map[string]bool{} // by folded domain, once asked: its directory does not answer
 	for _, u := range unknown {
 		domainKey := foldKey(u.domain)
-		if u.domain != "" && !answered[domainKey] {
+		if platform != "windows" && u.domain != "" && !answered[domainKey] {
 			quiet, asked := silent[domainKey]
 			if !asked {
 				quiet = !directoryAnswers(ctx, u.group, u.domain, exists)

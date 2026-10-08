@@ -832,6 +832,22 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	}
 }
 
+func TestWindowsUnknownAssignmentChecksQualifiedNamesAndOldSIDs(t *testing.T) {
+	assignments := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{
+		`CORP\renamed-team`, "S-1-5-21-1-2-3-1104", `CORP\active-team`,
+	}}}}
+	var looked []string
+	exists := func(_ context.Context, name string) (bool, error) {
+		looked = append(looked, name)
+		return name == `CORP\active-team`, nil
+	}
+	warnings := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, "windows")
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "renamed-team") ||
+		!strings.Contains(warnings[1], "S-1-5-21-1-2-3-1104") || len(looked) != 3 {
+		t.Fatalf("warnings=%q lookups=%q", warnings, looked)
+	}
+}
+
 func TestUnknownAssignmentGroupsReportsIncompleteCheck(t *testing.T) {
 	groups := make([]string, profileGroupCheckMax+1)
 	for i := range groups {

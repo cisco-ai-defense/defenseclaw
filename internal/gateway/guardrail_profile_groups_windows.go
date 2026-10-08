@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	osuser "os/user"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
@@ -20,7 +21,13 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 	// Go's os/user.LookupGroup does not reliably resolve DOMAIN\name for
 	// the LocalSystem service. Ask the LSA directly, as profile explain does
 	// for accounts. Only ERROR_NONE_MAPPED proves the group is absent.
-	sid, _, _, err := windows.LookupSID("", name)
+	var sid *windows.SID
+	var err error
+	if strings.HasPrefix(strings.ToUpper(name), "S-1-") {
+		sid, err = windows.StringToSid(name)
+	} else {
+		sid, _, _, err = windows.LookupSID("", name)
+	}
 	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
 		return false, nil
 	}
@@ -28,6 +35,9 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 		return false, err
 	}
 	_, _, kind, err := sid.LookupAccount("")
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
