@@ -91,6 +91,14 @@ _GATEWAY_STOP_TIMEOUT_SECONDS = 45
 _UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
 _UV_NAMES_POSIX = ("uv", "uvx")
 _UV_RECORD_MAX_BYTES = 4096
+# The 0.8.x installer left uv (in the launchers' folder, with uv's default
+# cache and Python folders) and ~/.sigstore (from its temporary Cosign)
+# without a record. The upgrade from 0.8.x records them, and the uv files in
+# _UV_RECORD, only when the evidence shows that installer put them there
+# (scripts/install.sh, find_legacy_leftovers; GAP-0908). One claim per line:
+# "uv-cache", "uv-python <folder in uv's Python folder>" or "sigstore".
+_LEGACY_LEFTOVERS_RECORD = "legacy-install-leftovers"
+_LEGACY_LEFTOVERS_MAX_BYTES = 4096
 # The folders DefenseClaw created because they were missing (the gateway's
 # install watcher, connector setup); see the Go connector package's
 # watcher_created_dirs.go. Uninstall removes the ones still empty.
@@ -204,6 +212,10 @@ class UninstallPlan:
     # an earlier installer's uv downloaded there; `uv cache clean defenseclaw`
     # removes only those (--all --binaries; GAP-1411).
     uv_cache_entries: str = ""
+    # sigstore_cache is ~/.sigstore when the upgrade from 0.8.x recorded that
+    # the 0.8.x installer's temporary Cosign created it and nothing has
+    # written to it since (--all --binaries; GAP-0908).
+    sigstore_cache: str = ""
     # hook_temp_dirs are the scratch folders (defenseclaw-hook.*) DefenseClaw's
     # shell hooks left in the temp folders (--all; GAP-1411).
     hook_temp_dirs: tuple[str, ...] = ()
@@ -723,6 +735,7 @@ def _build_plan(
             if wipe_data and binaries and not preserve_data_entries
             else ""
         ),
+        sigstore_cache=_legacy_sigstore_cache(data_dir) if wipe_data and binaries else "",
         hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
         quarantined=_quarantined_copies(data_dir) if wipe_data and not preserve_data_entries else (),
     )
@@ -976,9 +989,12 @@ def _installer_uv_leftovers(
     uv_name = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)[0]
     if not any(os.path.basename(target) == uv_name for target in binary_targets):
         return ()
+    claims = _legacy_leftover_claims(data_dir)
     # Current installers keep uv's cache and Python in data_dir/.uv, so uv's
-    # default folders then hold the user's own uv data, never DefenseClaw's.
-    if os.path.isdir(os.path.join(data_dir, ".uv")):
+    # default folders then hold the user's own uv data, never DefenseClaw's,
+    # unless the upgrade from 0.8.x recorded that the 0.8.x installer's uv
+    # used them.
+    if os.path.isdir(os.path.join(data_dir, ".uv")) and "uv-cache" not in claims:
         return ()
     root = _normalized(install_root)
     for directory in os.get_exec_path():
@@ -989,10 +1005,70 @@ def _installer_uv_leftovers(
     if cache and not os.environ.get("UV_CACHE_DIR") and _plain_owned_dir(cache):
         leftovers.append(cache)
     if python_root and not os.environ.get("UV_PYTHON_INSTALL_DIR") and _plain_owned_dir(python_root):
-        base = _venv_base_python_dir(data_dir, python_root)
-        if base and _only_python(python_root, base):
+        legacy_python = claims.get("uv-python", "")
+        base = (
+            os.path.join(python_root, legacy_python) if legacy_python else _venv_base_python_dir(data_dir, python_root)
+        )
+        if base and os.path.isdir(base) and _only_python(python_root, base):
             leftovers.append(python_root)
+    if "uv-cache" in claims:
+        # uv's own installer, which the 0.8.x installer ran, left its receipt.
+        config = os.environ.get("XDG_CONFIG_HOME", "")
+        config = os.path.join(config if os.path.isabs(config) else os.path.expanduser("~/.config"), "uv")
+        receipt = os.path.join(config, "uv-receipt.json")
+        try:
+            names = os.listdir(config) if _plain_owned_dir(config) else []
+            with open(receipt, encoding="utf-8") as stream:
+                prefix = json.loads(stream.read(16_384)).get("install_prefix", "")
+        except (OSError, ValueError, AttributeError):
+            names, prefix = [], ""
+        if names == ["uv-receipt.json"] and isinstance(prefix, str) and _normalized(prefix) == root:
+            leftovers.append(config)
     return tuple(leftovers)
+
+
+def _legacy_leftover_claims(data_dir: str) -> dict[str, str]:
+    """Read the claims the upgrade from 0.8.x recorded (_LEGACY_LEFTOVERS_RECORD)."""
+    record = os.path.join(data_dir, _LEGACY_LEFTOVERS_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _LEGACY_LEFTOVERS_MAX_BYTES:
+            return {}
+        with open(record, encoding="utf-8", errors="strict") as stream:
+            lines = stream.read(_LEGACY_LEFTOVERS_MAX_BYTES).splitlines()
+    except (OSError, UnicodeError):
+        return {}
+    claims: dict[str, str] = {}
+    for line in lines:
+        key, _, value = line.strip().partition(" ")
+        if key in ("uv-cache", "sigstore") and not value:
+            claims[key] = ""
+        elif key == "uv-python" and value not in ("", ".", "..") and os.path.basename(value) == value:
+            claims[key] = value
+    return claims
+
+
+def _legacy_sigstore_cache(data_dir: str) -> str:
+    """Return ~/.sigstore when the 0.8.x installer's temporary Cosign made it, else "".
+
+    Only when the upgrade from 0.8.x recorded it, no cosign is on PATH, and
+    nothing in it is newer than that record: a Cosign that used it since
+    makes it the user's.
+    """
+    if "sigstore" not in _legacy_leftover_claims(data_dir) or shutil.which("cosign"):
+        return ""
+    path = os.path.expanduser("~/.sigstore")
+    if not _plain_owned_dir(path):
+        return ""
+    try:
+        recorded = os.lstat(os.path.join(data_dir, _LEGACY_LEFTOVERS_RECORD)).st_mtime
+        for root, dirs, files in os.walk(path):
+            for name in (*dirs, *files):
+                if os.lstat(os.path.join(root, name)).st_mtime > recorded:
+                    return ""
+    except OSError:
+        return ""
+    return path
 
 
 def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str, uv_leftovers: tuple[str, ...]) -> str:
@@ -1185,8 +1261,8 @@ def _deferred_interpreter_dirs(plan: UninstallPlan, base_python: str) -> list[st
     return [path for path in candidates if os.path.isdir(path) and _below(os.path.realpath(path), base_python)]
 
 
-def _remove_uv_leftovers(paths: tuple[str, ...]) -> None:
-    """Remove the uv folders the plan names, then their parents left empty."""
+def _remove_leftover_dirs(paths: tuple[str, ...]) -> None:
+    """Remove the uv and Sigstore folders the plan names, then their parents left empty."""
     for path in paths:
         try:
             _remove_tree_no_follow(path)
@@ -1593,7 +1669,9 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         for path in plan.setup_leftovers:
             ux.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
         for path in plan.uv_leftovers:
-            ux.echo(f"      {ux.dim('·')} {path} (what the installer's uv downloaded for DefenseClaw)")
+            ux.echo(f"      {ux.dim('·')} {path} (left by the installer's uv)")
+        if plan.sigstore_cache:
+            ux.echo(f"      {ux.dim('·')} {plan.sigstore_cache} (left by the 0.8.x installer's Cosign)")
         if plan.platform_name == "win32":
             ux.echo(
                 f"      {ux.dim('·')} the {plan.install_root} entry in your user Path, "
@@ -1736,7 +1814,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # Last: on Linux and macOS this CLI may run on the Python that goes.
         # On Windows that one is in use until the deferred helper exits,
         # which removes it then (_deferred_interpreter_dirs).
-        _remove_uv_leftovers(tuple(path for path in plan.uv_leftovers if not _holds_running_python(path)))
+        _remove_leftover_dirs(tuple(path for path in plan.uv_leftovers if not _holds_running_python(path)))
+    if plan.sigstore_cache:
+        _remove_leftover_dirs((plan.sigstore_cache,))
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
