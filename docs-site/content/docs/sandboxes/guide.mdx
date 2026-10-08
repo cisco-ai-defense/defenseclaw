@@ -1068,7 +1068,12 @@ your working tree, with secret files held back) and nothing reaches your
 folder until you bring the work back. What git ignores, such as
 `node_modules/`, `.venv/` and build output, and package caches are not
 copied: a line after the upload names them, and the dependencies are
-installed inside the sandbox. At the end of the session you choose how:
+installed inside the sandbox. The harness images have no Git LFS: a file
+the project tracks with LFS arrives in the copy as its real content, from
+your working tree, while the copy's history holds its LFS pointer, so
+`git status` inside shows it modified, and a commit made there would store
+the whole file instead of the pointer. Make commits that touch LFS files on
+your machine. At the end of the session you choose how:
 
 ```text
 Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)

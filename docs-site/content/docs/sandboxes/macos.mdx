@@ -393,6 +393,10 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
   `sandbox undo` reverts the last `pull --apply` instead.
 - **Some run flags do not apply.** `--context` is refused, and
   `--no-snapshot`, `--cpu` and `--memory` have no effect.
+- **No Git LFS inside.** An LFS file arrives in the copy as its real
+  content while the copy's history holds its pointer, so `git status`
+  inside shows it modified. Make commits that touch LFS files on your Mac
+  (see [work on a copy](/docs/sandboxes/guide#work-on-a-copy)).
 - **Experimental driver.** OpenShell calls the MicroVM driver experimental,
   and the doctor says so on every run.
 - **Not every harness runs.** A harness is used only after its image proves
