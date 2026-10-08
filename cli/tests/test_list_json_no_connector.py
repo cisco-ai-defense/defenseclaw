@@ -77,7 +77,10 @@ def test_ide_only_scan_without_connector_returns_rows_or_error(monkeypatch: pyte
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_tui_uses_ide_only_scan_only_for_an_empty_connector_roster() -> None:
+def test_tui_uses_full_scan_for_one_connector() -> None:
     full = ("aibom", "scan", "--json")
-    assert _inventory_scan_args(full, ()) == (*full, "--only", "ide_plugins")
-    assert _inventory_scan_args(full, (("codex", "observe"),)) == full
+    class Config:
+        def active_connectors(self) -> list[str]:
+            return ["codex"]
+    assert _inventory_scan_args(full, Config()) == full
+    assert _inventory_scan_args(full, None) == (*full, "--only", "ide_plugins")
