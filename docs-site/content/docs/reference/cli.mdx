@@ -1142,10 +1142,10 @@ init' does not apply. Nothing was changed.` and exit `3`.
 `defenseclaw doctor` in that state skips the per-user checks with the same
 notice and exits `3`; an administrator checks the device with
 `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS).
-`guardrail ...` writers and `policy activate` are refused on a managed device
-too; today they report it differently (`guardrail ...` as an ordinary user
-stops at `Failed to save config: managed_enterprise config changes require
-operating-system administrator privileges` with exit `1`). Read commands
+`guardrail ...` writers are also refused on a managed standalone device.
+For example, `guardrail block-at` prints `This device is managed: change
+config.yaml in the admin config (MDM or management plane), not on the device`
+and exits `3`. `policy activate` is refused there too. Read commands
 (`config get`, `config show`, `config validate`, `status`, `doctor`) work
 everywhere.
 

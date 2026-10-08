@@ -3,7 +3,6 @@
 import unittest
 from pathlib import Path
 
-
 DOCS = Path(__file__).resolve().parents[1] / "content/docs/reference"
 
 
@@ -55,6 +54,15 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("next hook event", section)
         self.assertIn("before repair", section)
         self.assertNotIn("editing one changes nothing", section)
+
+
+    def test_managed_guardrail_refusal_uses_exit_three(self):
+        text = (DOCS / "cli.mdx").read_text()
+        section = text.split("### Managed devices and exit code 3", 1)[1].split("## Registries", 1)[0]
+        self.assertIn("`guardrail ...` writers", section)
+        self.assertIn("exit `3`", section)
+        self.assertIn("change config.yaml in the admin config", section)
+        self.assertNotIn("with exit `1`", section)
 
 
 if __name__ == "__main__":
