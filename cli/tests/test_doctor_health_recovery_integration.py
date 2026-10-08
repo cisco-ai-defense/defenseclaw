@@ -850,6 +850,23 @@ def test_world_readable_dotenv_fails_the_private_files_row(tmp_path) -> None:
     assert "defenseclaw doctor --fix --yes" in exposed.checks[-1]["remediation"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_writable_dotenv_recommends_secure_replacement(tmp_path) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    dotenv = data_dir / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=x\n", encoding="utf-8")
+    os.chmod(dotenv, 0o666)
+
+    result = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, result)
+
+    row = result.checks[-1]
+    assert row["status"] == "fail"
+    assert "replace" in row["remediation"]
+    assert "doctor --fix" not in row["remediation"]
+
+
 def test_windows_private_files_distinguish_unsafe_acl_from_uninspected_acl(tmp_path, monkeypatch) -> None:
     data_dir = _private_data_dir(tmp_path)
     cfg = _cfg(data_dir)

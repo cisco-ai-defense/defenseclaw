@@ -2208,6 +2208,7 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     exposed: list[str] = []
     unverified: list[str] = []
     files: list[str] = []
+    dotenv_requires_review = False
     for path, is_dir in targets:
         try:
             info = os.lstat(path)
@@ -2223,12 +2224,16 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
                 else:
                     exposed.append(f"{path} (unsafe Windows ACL: {problem})")
                     files.append(path)
+                    if path == dotenv and ("write" in problem.lower() or "owner SID" in problem):
+                        dotenv_requires_review = True
             continue
         mode = stat.S_IMODE(info.st_mode)
         if mode & 0o077:
             exposed.append(f"{path} (mode {mode:04o})")
             if not is_dir:
                 files.append(path)
+                if path == dotenv and mode & 0o022:
+                    dotenv_requires_review = True
     if not exposed and not unverified:
         _emit(
             "pass",
@@ -2240,7 +2245,12 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         return
     steps = []
     if dotenv in files:
-        steps.append("defenseclaw doctor --fix --yes (rotates the exposed gateway token and makes .env private)")
+        if dotenv_requires_review:
+            steps.append(
+                f"review {dotenv}, replace it securely, then rotate its gateway token and other credentials"
+            )
+        else:
+            steps.append("defenseclaw doctor --fix --yes (rotates the exposed gateway token and makes .env private)")
     if unverified:
         steps.append("inspect the Windows ACLs of " + ", ".join(unverified))
     others = [path for path in files if path != dotenv]
