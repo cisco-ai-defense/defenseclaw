@@ -95,7 +95,7 @@ const (
 type PlaneHealth struct {
 	// Selected is the configured plane choice; it is internal bookkeeping,
 	// not part of the public snapshot shape.
-	Selected bool `json:"-"`
+	Selected  bool `json:"-"`
 	Plane     platform.Plane
 	Available bool
 	// Running distinguishes "this platform can do it" from "it is doing it

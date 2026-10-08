@@ -66,8 +66,8 @@ func (a *APIServer) contextWithSessionAgentV8(ctx context.Context, connector str
 // A native conversation ID is caller-controlled and may be shared by users.
 // Only an authenticated user can claim a retained hook agent for that session.
 func sameVerifiedRelationshipUser(ctx context.Context, meta llmEventMeta) bool {
-    subject, ok := verifiedSubjectFromContext(ctx)
-    return ok && meta.UserID != "" && meta.UserID == subject.UserID
+	subject, ok := verifiedSubjectFromContext(ctx)
+	return ok && meta.UserID != "" && meta.UserID == subject.UserID
 }
 
 func emitCorrelationRelationshipsV8WithEmitter(
