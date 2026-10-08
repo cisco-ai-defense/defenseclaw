@@ -363,6 +363,22 @@ def test_needs_enable_when_plane_c_is_not_selected() -> None:
     assert off.health_title() == "OFF"
 
 
+def test_linux_host_plane_hint_names_the_capability_cn_proc_needs() -> None:
+    # The cn_proc connector refuses an unprivileged subscriber (EPERM).
+    model = RuntimePanelModel(platform="linux")
+    model.set_snapshot(
+        {
+            "enabled": True,
+            "planes": [
+                {"plane": "c", "name": "agent actions", "available": True, "running": False,
+                 "reason": "not selected in ai_discovery.runtime.planes"},
+            ],
+        }
+    )
+    hint = model.plane_fix(model.snapshot.planes[0])
+    assert "CAP_NET_ADMIN" in hint and "CAP_SYS_ADMIN" in hint and "no grant" not in hint
+
+
 def test_the_app_defines_every_render_method_the_runtime_loader_calls() -> None:
     """A cheap guard against the same typo returning under a different name."""
     import inspect

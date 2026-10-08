@@ -186,7 +186,8 @@ type enterpriseRuntimeBackend struct {
 }
 
 // tetragonFallbackWords say why the native backend runs although Tetragon is
-// wanted, in the words of defenseclaw.kernel_sensor.fallback_text.
+// wanted, without the raw reason code (discovery and `defenseclaw-gateway
+// status` share them).
 var tetragonFallbackWords = map[string]string{
 	"tetragon_unavailable":         "Tetragon is not running or its info file is missing",
 	"tetragon_tcp_api":             "its API listens on TCP instead of a local socket",
@@ -206,8 +207,7 @@ func tetragonFallback(reason string) string {
 	return defaultStr(text, "no reason reported")
 }
 
-// readyETA is "~9 days" for a number of hours, as the Python shared module
-// words it; "" for no estimate.
+// readyETA is "~9 days" for a number of hours; "" for no estimate.
 func readyETA(hours *float64) string {
 	switch {
 	case hours == nil || *hours <= 0:
@@ -230,8 +230,8 @@ func usersNoun(n int) string {
 	return fmt.Sprintf("%d users", n)
 }
 
-// lines are the backend's lines under its plane, in the words of
-// `defenseclaw agent discovery runtime status` (defenseclaw.kernel_sensor).
+// lines are the backend's lines under its plane; `defenseclaw-gateway status`
+// reuses the kernel controls line.
 func (b *enterpriseRuntimeBackend) lines() []string {
 	if b == nil {
 		return nil

@@ -203,8 +203,8 @@ type aiRuntimePlane struct {
 }
 
 // aiRuntimeBackend is the wire shape of Plane C's backend, in the runtime
-// API and in /health ai_runtime.details.planes.c.backend. The CLI, the
-// doctor row and the TUI read these keys.
+// API and in /health ai_runtime.details.planes.c.backend. `enterprise linux
+// discovery` and `defenseclaw-gateway status` read these keys.
 type aiRuntimeBackend struct {
 	// Kind is tetragon or native.
 	Kind    string `json:"kind"`

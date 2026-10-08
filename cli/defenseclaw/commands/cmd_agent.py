@@ -2254,36 +2254,6 @@ def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
             ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
         else:
             ux.warn(f"{name}: unavailable -- {plane.get('reason') or 'no reason given'}", indent=indent)
-        _render_kernel_backend(plane.get("backend"), indent=indent + "  ")
-
-
-def _render_kernel_backend(backend: object, *, indent: str) -> None:
-    """The Plane C backend lines under the plane strip, when the gateway reports one.
-
-    Only the managed Linux sensor helper reports a backend; every other
-    gateway omits the field and this prints nothing. The words come from
-    :mod:`defenseclaw.kernel_sensor`, which doctor and the TUI share.
-    """
-    from defenseclaw import ux
-    from defenseclaw.kernel_sensor import (
-        kernel_controls_line,
-        kernel_sensor_summary,
-        paused_suffix,
-        your_policies_summary,
-    )
-
-    if not isinstance(backend, dict):
-        return
-    sensor = kernel_sensor_summary(backend)
-    if sensor:
-        ux.subhead(f"kernel sensor: {sensor}", indent=indent)
-    floor = backend.get("kernel_floor")
-    controls = kernel_controls_line(floor if isinstance(floor, dict) else None)
-    if controls:
-        ux.subhead(f"kernel controls: {controls}{paused_suffix(floor)}", indent=indent)
-    policies = your_policies_summary(backend)
-    if policies:
-        ux.subhead(f"your Tetragon policies: {policies} (DefenseClaw never changes them)", indent=indent)
 
 
 def _render_coverage(payload: dict, *, indent: str = "  ") -> None:

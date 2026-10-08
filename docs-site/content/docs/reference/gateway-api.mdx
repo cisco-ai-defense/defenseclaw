@@ -541,10 +541,9 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 On a managed Linux computer the Plane C entry of the snapshot carries a
 `backend` object. The same object is in `/health` under
 `ai_runtime.details.planes.c.backend`. `defenseclaw-gateway status` and
-`enterprise linux discovery` read it. `defenseclaw agent discovery runtime
-status`, `defenseclaw doctor` and the TUI Runtime panel format it in the same
-words, but in this release no `defenseclaw` command line reads a managed
-gateway, so they do not show it. Other computers omit it.
+`enterprise linux discovery` read it; the `defenseclaw` command line and TUI do
+not, because the managed packages ship neither in this release. Other computers
+omit it.
 
 ```json title="GET /health, ai_runtime.details.planes.c.backend (trimmed, values illustrative)"
 {

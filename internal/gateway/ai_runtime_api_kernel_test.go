@@ -66,7 +66,7 @@ func enforcingKernelState() *sensor.KernelState {
 }
 
 // TestRenderCarriesTheTetragonBackendOnPlaneC pins the backend contract the
-// CLI, the doctor row and the TUI decode: snake_case keys, loss always
+// Go CLI decodes (enterprise linux discovery, gateway status): snake_case keys, loss always
 // stated, and the kernel floor while the helper's reconciler runs.
 func TestRenderCarriesTheTetragonBackendOnPlaneC(t *testing.T) {
 	t.Parallel()

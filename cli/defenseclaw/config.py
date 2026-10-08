@@ -2985,9 +2985,8 @@ def runtime_plane_c_selected(runtime: Any) -> bool:
 # enterprise.tetragon: how the managed Linux sensor helper uses the Tetragon
 # the host already runs. Python has no enterprise mirror (only the lifecycle
 # acts on the block), so these read it as config.yaml writes it, for
-# `config get --effective` and doctor. They mirror Go's
+# `config get --effective`. They mirror Go's
 # EnterpriseTetragonConfig.Effective and Config.TetragonMode.
-TETRAGON_MODES: tuple[str, ...] = ("off", "consume", "observe", "enforce")
 TETRAGON_DEFAULTS: dict[str, str] = {
     "mode": "consume",
     "burn_in": "168h",
@@ -3025,12 +3024,6 @@ def _tetragon_acks(value: Any) -> str | list[str]:
     if not out:
         return ""
     return out[0] if len(out) == 1 else out
-
-
-def tetragon_configured_mode(document: Any) -> str:
-    """``enterprise.tetragon.mode`` as written, lowercased; ``consume`` when unset."""
-    value = tetragon_block(document).get("mode")
-    return (_tetragon_text(value).lower() if value is not None else "") or TETRAGON_DEFAULTS["mode"]
 
 
 def effective_tetragon(

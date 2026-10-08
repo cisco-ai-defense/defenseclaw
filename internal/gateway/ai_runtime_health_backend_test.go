@@ -21,7 +21,7 @@ import (
 
 // TestRuntimeHealthCarriesThePlaneCBackend: /health
 // ai_runtime.details.planes.c.backend is the runtime API's backend object,
-// with the kernel floor, because doctor and the TUI read exactly that path;
+// with the kernel floor, because `defenseclaw-gateway status` reads exactly that path;
 // a plane without a backend keeps its old keys.
 func TestRuntimeHealthCarriesThePlaneCBackend(t *testing.T) {
 	t.Parallel()

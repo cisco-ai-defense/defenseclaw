@@ -198,7 +198,7 @@ var (
 
 // tetragonCodes is the code table (SPEC-TETRAGON-UX 5.7).
 var tetragonCodes = map[string]tetragonCodeText{
-	kernelpolicy.WarnTetragonUnavailable: {Doctor: "tetragon-unavailable", Message: func(f tetragonFacts) string {
+	kernelpolicy.WarnTetragonUnavailable: {Message: func(f tetragonFacts) string {
 		return "Tetragon is not reachable from the sensor helper" + parenthesized(f.Detail) +
 			" (" + nativePlaneC + "; no kernel control is enforced); check it with " + literal("systemctl status tetragon") +
 			" and start it with " + literal("sudo systemctl start tetragon")
@@ -237,7 +237,7 @@ var tetragonCodes = map[string]tetragonCodeText{
 			literal(tetragonSetting("keep-sensors-on-exit", "false")) + ", then " + tetragonRestart() +
 			", then remove leftover pins under /sys/fs/bpf/tetragon"
 	}},
-	config.TetragonReasonPlaneCOff: {Doctor: "tetragon-plane-c-off", Message: func(f tetragonFacts) string {
+	config.TetragonReasonPlaneCOff: {Message: func(f tetragonFacts) string {
 		return "enterprise.tetragon.mode is " + defaultStr(f.Mode, "set") + ", but AI Discovery Plane C is off" +
 			" (the sensor helper runs with Tetragon off); " +
 			adminConfig("ai_discovery.runtime.enabled: true", "ai_discovery.runtime.enable_host_plane: true")
@@ -284,7 +284,7 @@ var tetragonCodes = map[string]tetragonCodeText{
 		return "the " + connector + " guardrail is not in action mode (its agents are observed, not enforced, by the kernel controls);" +
 			" to deny for it, " + adminConfig("guardrail.connectors."+connector+".mode: action") + ", or leave it monitor-only"
 	}},
-	kernelpolicy.WarnEnforcePaused: {Doctor: "kernel-enforce-paused", Message: func(f tetragonFacts) string {
+	kernelpolicy.WarnEnforcePaused: {Message: func(f tetragonFacts) string {
 		until, by := "until the next reboot", ""
 		if p := f.Pause; p != nil {
 			if !p.UntilReboot {
@@ -333,7 +333,7 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" (the sensor helper does not undo it); to hand it back to DefenseClaw, change enterprise.tetragon.enforce_ack or" +
 			" enterprise.tetragon.mode in the admin config and apply it"
 	}},
-	codeKernelPolicyNotApplied: {Doctor: "kernel-policy-not-applied", Variants: []string{variantDigest, variantMode, variantNotInSync, variantGeneration}, Message: func(f tetragonFacts) string {
+	codeKernelPolicyNotApplied: {Variants: []string{variantDigest, variantMode, variantNotInSync, variantGeneration}, Message: func(f tetragonFacts) string {
 		next := "; run " + gwEnsure + " so the helper restarts with this build's controls"
 		switch f.Variant {
 		case variantMode:
@@ -394,7 +394,7 @@ var tetragonCodes = map[string]tetragonCodeText{
 	codeEnrollmentUnreadable: {Message: func(tetragonFacts) string {
 		return "the sensor helper cannot read targets.yaml, or does not trust it (it keeps its last enrollment); run " + gwRepair
 	}},
-	codeKernelPolicyOrphaned: {Doctor: "kernel-policy-orphaned", Problem: true, Variants: []string{variantNotRunning, variantRetired, variantLeft, variantUnreadable}, Message: func(f tetragonFacts) string {
+	codeKernelPolicyOrphaned: {Problem: true, Variants: []string{variantNotRunning, variantRetired, variantLeft, variantUnreadable}, Message: func(f tetragonFacts) string {
 		names := strings.Join(f.Names, ", ")
 		switch f.Variant {
 		case variantRetired:

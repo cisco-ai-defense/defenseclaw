@@ -142,11 +142,12 @@ says otherwise. Per-user installs never connect to Tetragon.
   kernel feed installed, a **Sandbox kernel feed** row that prints the update
   command and warns while the feed's Tetragon stream is down;
   `defenseclaw config get --effective` lists `enterprise.tetragon.*`.
-  `agent discovery runtime status`, the TUI Runtime panel and doctor's managed
-  rows have the same Tetragon lines, but they do not show them in this release:
-  only a managed gateway reports Tetragon, and no `defenseclaw` command line
-  reads one (the managed Linux packages ship none, and a per-user command line
-  does not hold the deployment's gateway token).
+  The Python command line and TUI have no managed Tetragon lines in this
+  release: only a managed gateway reports Tetragon, and the managed Linux
+  packages ship no `defenseclaw` command line or TUI. A follow-up that adds the
+  Python CLI and TUI to the enterprise packages re-adds the TUI Runtime
+  panel's kernel lines, the `agent discovery runtime status` kernel lines and
+  doctor's managed Tetragon rows.
   `/health` and `GET /api/v1/ai-usage/runtime` carry `backend` and
   `policy.kernel`; the keys are in the
   [gateway API reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/gateway-api).

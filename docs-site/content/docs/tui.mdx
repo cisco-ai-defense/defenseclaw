@@ -81,13 +81,13 @@ Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
 
 The Runtime panel reads the same gateway as `agent discovery runtime status`.
-It shows no Tetragon lines in this release. Only a managed Linux gateway
-reports Tetragon, and no `defenseclaw` command line reads one: the managed
-packages ship no command line or TUI, and a per-user command line does not hold
-the deployment's gateway token. On managed Linux,
+It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
+the managed Linux packages ship no `defenseclaw` command line or TUI in this
+release. On managed Linux,
 `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
 prints the kernel sensor, the kernel controls and your own Tetragon policies,
-and `enterprise linux tetragon status` the rest; see
+`enterprise linux tetragon status` the rest, and `defenseclaw-gateway status`
+ends its Subsystems list with a `Kernel sensor:` line; see
 [Tetragon on a Linux fleet](/docs/enterprise/tetragon).
 
 ### IDE plugins
