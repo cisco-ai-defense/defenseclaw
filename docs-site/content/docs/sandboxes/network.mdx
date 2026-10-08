@@ -86,8 +86,8 @@ lists every step in full, including your organization's settings.
 
 ## Network profiles
 
-Every sandbox runs one policy pack. The built-in packs set the network
-profile and more:
+Every sandbox runs one policy pack. The three built-in packs are named after
+the network profile they set, and they set more:
 
 | Setting | Open (default) | Balanced | Strict |
 | --- | --- | --- | --- |
@@ -98,16 +98,22 @@ profile and more:
 | Your project | Mounted live | Mounted live | Copied |
 | Skip-permissions mode | On | On | Off: the harness keeps its prompts |
 
-Pick one for a run:
+Pick a whole pack for a run with `--pack`, or only its network profile with
+`--profile`:
 
 ```bash
-defenseclaw sandbox run claude --profile balanced
+defenseclaw sandbox run claude --pack balanced
 defenseclaw sandbox run claude --profile strict
 ```
 
-Or set it for every run with `openshell.profile` in
-`~/.defenseclaw/config.yaml`. On a Mac every run works on a copy, whichever
-pack it uses.
+`--pack` applies every row of the table. `--profile` changes only the first
+three rows (web access, the banner and connection requests) and keeps the
+rest of the pack the run uses: `--profile balanced` on the default open pack
+keeps its 25 MiB large-upload alert, the live project, skip-permissions mode
+and the open pack's hook-silence alert. The Policy row of `sandbox status NAME`
+shows both, for example `profile balanced, pack open`. Set them for every run with
+`openshell.pack` and `openshell.profile` in `~/.defenseclaw/config.yaml`. On a
+Mac every run works on a copy, whichever pack it uses.
 
 <Callout type="warn" title="The open profile is a deliberate trade-off">
 With `open`, an agent tricked by a prompt injection could send your code to
