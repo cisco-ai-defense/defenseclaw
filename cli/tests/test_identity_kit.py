@@ -538,3 +538,15 @@ def test_intune_assign_app_updates_existing_intent() -> None:
     assert calls[0][2]["intent"] == "uninstall"
     assert calls[0][2]["target"]["deviceAndAppManagementAssignmentFilterId"] == "filter-1"
     assert "settings" in calls[0][2]
+
+
+def test_intune_groups_reject_dynamic_group() -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, path: str, headers=None):
+            return [{"id": "group-1", "securityEnabled": True, "groupTypes": ["DynamicMembership"]}]
+
+    args = intune.build_parser().parse_args(["groups", "--name", "team", "--apply"])
+    with pytest.raises(SystemExit, match="static security group"):
+        intune.cmd_groups(Graph(), args)

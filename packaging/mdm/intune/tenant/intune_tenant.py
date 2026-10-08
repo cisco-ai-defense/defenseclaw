@@ -530,8 +530,14 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
         raise SystemExit("error: name at least one --name GROUP or --add-device DEVICE:GROUP")
     tag = plan_tag(args.apply)
     for name in args.name:
-        found = graph.get_all(f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id")
+        found = graph.get_all(
+            f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,securityEnabled,groupTypes"
+        )
+        if len(found) > 1:
+            raise SystemExit(f"error: {len(found)} groups are named {name!r}; use a unique name")
         if found:
+            if not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or []):
+                raise SystemExit(f"error: group {name!r} exists but is not a static security group")
             print(f"{tag}group {name}: exists")
         elif not args.apply:
             print(f"{tag}group {name}: would create a static security group")
@@ -556,7 +562,13 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
         devices = graph.get_all(f"{V1}/devices?$filter={odata_eq('displayName', device_name)}&$select=id,displayName")
         if len(devices) != 1:
             raise SystemExit(f"error: {len(devices)} Entra devices are named {device_name!r}; need exactly one")
-        found = graph.get_all(f"{V1}/groups?$filter={odata_eq('displayName', group_name)}&$select=id")
+        found = graph.get_all(
+            f"{V1}/groups?$filter={odata_eq('displayName', group_name)}&$select=id,securityEnabled,groupTypes"
+        )
+        if len(found) > 1:
+            raise SystemExit(f"error: {len(found)} groups are named {group_name!r}; use a unique name")
+        if found and (not found[0].get("securityEnabled") or "DynamicMembership" in (found[0].get("groupTypes") or [])):
+            raise SystemExit(f"error: group {group_name!r} is not a static security group")
         if not found:
             if args.apply:
                 raise SystemExit(f"error: group {group_name!r} does not exist; create it with --name first")
