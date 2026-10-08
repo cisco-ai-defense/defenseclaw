@@ -91,6 +91,37 @@ func TestWindowsScannerRuntimeMissingIsReported(t *testing.T) {
 	}
 }
 
+// GAP-0727: status and verify must not run a scanner executable from a
+// runtime directory that an unprivileged user can modify.
+func TestWindowsScannerRuntimeRejectsWritableRoot(t *testing.T) {
+	seam := windowsScannerRuntimeDir
+	t.Cleanup(func() { windowsScannerRuntimeDir = seam })
+	root := t.TempDir()
+	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	if err := os.WriteFile(target, []byte("not an executable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Grant standard users write access without changing the directory owner,
+	// so this test also runs from an unelevated Windows CI account.
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(root, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	windowsScannerRuntimeDir = func() (string, error) { return root, nil }
+	if got := readWindowsScannerRuntime(); got.State != "missing" {
+		t.Fatalf("writable scanner runtime state = %q, want missing", got.State)
+	}
+}
+
 // GAP-0311: the staged scanner executable is admitted like every other
 // payload file before the lifecycle copies it into the protected root and
 // runs it as an administrator. An unsigned one is refused in authenticode
