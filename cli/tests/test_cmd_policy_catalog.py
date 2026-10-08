@@ -36,6 +36,7 @@ def app(tmp_path, monkeypatch):
     ctx, tmp_dir, db_path = make_app_context(str(tmp_path / "dc"))
     os.makedirs(ctx.cfg.policy_dir, exist_ok=True)
     ctx.cfg.save = lambda: None
+    ctx.cfg.save_verified = lambda verify: verify("")
     yield ctx
     cleanup_app(ctx, db_path, tmp_dir)
 
@@ -245,6 +246,42 @@ def test_secure_client_activation_and_live_edit_sync_legacy_data(app, monkeypatc
     with open(path) as f:
         data = json.load(f)
     assert data["guardrail"]["block_threshold"] == 1
+
+
+def test_secure_client_activation_save_failure_keeps_opa_data(app, monkeypatch):
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: True)
+    rego = os.path.join(app.cfg.policy_dir, "rego")
+    os.makedirs(rego)
+    path = os.path.join(rego, "data.json")
+    with open(path, "w") as f:
+        json.dump({"config": {"policy_name": "default"}, "actions": {}}, f)
+    before = open(path, "rb").read()
+
+    def refused(_verify):
+        raise OSError("config save refused")
+
+    monkeypatch.setattr(app.cfg, "save_verified", refused)
+    with pytest.raises(OSError, match="config save refused"):
+        _invoke(app, ["activate", "strict", "--no-reload"])
+    assert open(path, "rb").read() == before
+
+
+def test_secure_client_activation_invalid_watch_keeps_opa_data(app, monkeypatch):
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda _cfg: True)
+    rego = os.path.join(app.cfg.policy_dir, "rego")
+    os.makedirs(rego)
+    path = os.path.join(rego, "data.json")
+    with open(path, "w") as f:
+        json.dump({"config": {"policy_name": "default"}, "actions": {}}, f)
+    before = open(path, "rb").read()
+    _custom_policy(app, "invalid-watch", lambda data: data["watch"].update(rescan_interval_min="invalid"))
+    with pytest.raises(ValueError):
+        _invoke(app, ["activate", "invalid-watch", "--no-reload"])
+    assert open(path, "rb").read() == before
 
 
 @pytest.mark.parametrize("content", [None, "{"])

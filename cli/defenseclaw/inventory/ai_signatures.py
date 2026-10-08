@@ -345,6 +345,7 @@ def install_signature_pack(
     data_dir: str | Path,
     signature_packs: list[str] | tuple[str, ...] = (),
     replace: bool = False,
+    secure_client: bool = False,
 ) -> Path:
     """Install *source* into the managed pack directory after validation.
 
@@ -361,7 +362,10 @@ def install_signature_pack(
         raise SignaturePackError(f"signature pack already installed: {dest}")
 
     dest_resolved = dest.resolve() if dest.exists() else dest.absolute()
-    existing = load_ai_signatures(signature_packs=[p for p in signature_packs if Path(p).expanduser() != dest])
+    existing = load_ai_signatures(
+        signature_packs=[p for p in signature_packs if Path(p).expanduser() != dest],
+        secure_client=secure_client,
+    )
     existing_ids = {sig.id: sig.source for sig in existing if Path(sig.source) != dest_resolved}
     conflicts = sorted(sig.id for sig in signatures if sig.id in existing_ids)
     if conflicts:
