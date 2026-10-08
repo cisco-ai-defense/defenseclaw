@@ -149,6 +149,9 @@ type lifecycle struct {
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
+	// machinePolicyErr is the error of the last vendor machine policy
+	// publish: a file DefenseClaw could not write its hooks into.
+	machinePolicyErr error
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1314,6 +1317,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The change that leaves the eligible users without a connector says so
 	// at once, as on Windows, not only at the next status (GAP-0266).
 	l.warnNoConnectorsEnabled(p.config)
+	if l.opts.Action == ActionRepair && l.machinePolicyErr != nil {
+		// repair exists to put the deployment back; a vendor file it could not
+		// put the hooks into (an administrator line that does not parse) is
+		// not repaired, and the next verify fails on it again (GAP-0531).
+		r.AddError(codeMachinePolicyIncomplete, "repair could not put DefenseClaw hooks back in vendor machine policy: "+
+			l.machinePolicyErr.Error()+"; the rest of the deployment is repaired")
+	}
 	return 0
 }
 

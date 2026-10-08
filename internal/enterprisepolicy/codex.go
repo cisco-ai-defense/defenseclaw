@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -563,7 +564,7 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 	admin := stripCodexOwned(current)
 	rendered, conflicts, err := renderCodex(opts, admin, policy)
 	if err != nil {
-		return state, err
+		return state, codexParseError(path, current, err)
 	}
 	if rendered == nil {
 		for _, c := range conflicts {
@@ -626,10 +627,27 @@ func (codexTarget) Verify(opts Options) (State, error) {
 		return state, nil
 	}
 	if err := inspectCodex(opts, current, policy, &state); err != nil {
-		return state, err
+		return state, codexParseError(path, current, err)
 	}
 	state.finish()
 	return state, nil
+}
+
+// codexParseError names the file and the line of a requirements.toml that
+// does not parse. An administrator line outside DefenseClaw's block is never
+// rewritten, so repair cannot fix it and the message says which line to fix
+// (GAP-0531). Other errors pass through.
+func codexParseError(path string, current []byte, err error) error {
+	var decode *toml.DecodeError
+	if !errors.As(err, &decode) {
+		return err
+	}
+	cfg := map[string]any{}
+	if fileErr := toml.Unmarshal(current, &cfg); errors.As(fileErr, &decode) {
+		row, column := decode.Position()
+		return fmt.Errorf("%s does not parse as TOML at line %d, column %d (%v); DefenseClaw does not rewrite administrator lines, so fix that line, then rerun", path, row, column, fileErr)
+	}
+	return fmt.Errorf("%s: %w", path, err)
 }
 
 func (codexTarget) RemoveOwned(opts Options) (State, error) {

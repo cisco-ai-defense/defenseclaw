@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -527,5 +528,23 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 		t.Fatalf("a removed home is reported pending: %+v", got.Warnings)
 	} else {
 		requireOK(t, got)
+	}
+}
+
+// An administrator line outside DefenseClaw's block that does not parse made
+// verify say "run repair", while repair exited 0 and changed nothing
+// (GAP-0531). repair now fails and names the line to fix.
+func TestRepairFailsOnAnUnparseableCodexRequirementsLine(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	path := h.env.P(codexRequirements)
+	lines := strings.Count(h.read(codexRequirements), "\n")
+	if err := os.WriteFile(path, []byte(h.read(codexRequirements)+"this is not toml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repair := h.run(Options{Action: ActionRepair})
+	requireError(t, repair, codeMachinePolicyIncomplete)
+	if got := messagesOf(repair.Errors, codeMachinePolicyIncomplete); !strings.Contains(got, fmt.Sprintf("line %d", lines+1)) {
+		t.Fatalf("repair does not name the line to fix: %s", got)
 	}
 }

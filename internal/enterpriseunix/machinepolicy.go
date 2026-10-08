@@ -262,6 +262,7 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 	if isCoded(err, codeMachinePolicy) {
 		return err
 	}
+	l.machinePolicyErr = err
 	reportMachinePolicy(r, p.intended, result, err)
 	for _, state := range result.States {
 		if state.Changed {
