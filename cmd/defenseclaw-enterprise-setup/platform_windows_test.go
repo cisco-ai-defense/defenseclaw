@@ -110,15 +110,22 @@ func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.
 			t.Fatalf("%q: Secure Client error changed: %v", value, secureClient)
 		}
 	}
-	// An existing input that fails the trust check is a security refusal
-	// (1603), not a command-line error, for either flavor.
+	// An existing input that fails the trust check stays a 1603 security
+	// refusal for the Secure Client Setup. The standalone Setup refuses it
+	// as every config the lifecycle will not take (1639) and names the
+	// account and the icacls fix, not a bare SID (GAP-0528, GAP-0562).
 	untrusted := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(untrusted, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := validateEnterpriseSetupInput(untrusted, "config")
 	var invalid enterpriseSetupInvalidArguments
-	if err == nil || errors.As(standaloneEnterpriseSetupInputError(true, err), &invalid) {
+	if err == nil || errors.As(standaloneEnterpriseSetupInputError(false, err), &invalid) {
 		t.Fatalf("untrusted config: %v", err)
+	}
+	standalone := standaloneEnterpriseSetupInputError(true, err)
+	if !errors.As(standalone, &invalid) || !strings.Contains(standalone.Error(), "icacls \""+filepath.Dir(untrusted)+"\"") ||
+		strings.Contains(standalone.Error(), "access mask") {
+		t.Fatalf("standalone untrusted config error = %v", standalone)
 	}
 }

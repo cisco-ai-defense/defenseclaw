@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 //go:embed payload/*
@@ -230,17 +232,19 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 		name = standaloneSetupArtifactName
 	}
 	if err != nil {
-		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
-		return enterpriseSetupArgumentFailureCode()
+		code := enterpriseSetupArgumentFailureCode()
+		writeEnterpriseSetupFailureFor(stdout, stderr, standalone, name, opts, err, code)
+		return code
 	}
 	exitCode, err := executeEnterpriseSetup(context.Background(), opts, stdout, stderr)
 	if err != nil {
-		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
+		code := enterpriseFailureExitCode
 		var invalid enterpriseSetupInvalidArguments
 		if errors.As(err, &invalid) {
-			return enterpriseInvalidArgsExitCode
+			code = enterpriseInvalidArgsExitCode
 		}
-		return enterpriseFailureExitCode
+		writeEnterpriseSetupFailureFor(stdout, stderr, standalone, name, opts, err, code)
+		return code
 	}
 	if exitCode != 0 {
 		return exitCode
@@ -643,6 +647,29 @@ func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts e
 		return
 	}
 	fmt.Fprintf(stderr, "%s: %v\n", name, err)
+}
+
+// writeEnterpriseSetupFailureFor reports a failure of Setup itself. With
+// JSON=1 the standalone Setup prints the lifecycle's schema-2 result, so an
+// MDM reads one shape whether Setup or the lifecycle refused (GAP-0562). It
+// reports no deployment state: nothing was inspected.
+func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, name string, opts enterpriseSetupOptions, err error, exitCode int) {
+	if !standalone || !opts.JSON || err == nil {
+		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(opts.Action))
+	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
+	code := "setup_failed"
+	var invalid enterpriseSetupInvalidArguments
+	if errors.As(err, &invalid) {
+		code = "invalid_arguments"
+	}
+	result.AddError(code, err.Error())
+	result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer, so installed, services and readiness are not evaluated; "+
+		name+" /status JSON=1 reports them")
+	result.Finish("windows", exitCode)
+	_ = json.NewEncoder(stdout).Encode(result)
 }
 
 // writeEnterpriseSetupUsage prints the Secure Client Setup usage.

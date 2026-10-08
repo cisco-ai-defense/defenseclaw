@@ -195,11 +195,36 @@ type enterpriseSetupPathError struct{ error }
 
 func (err enterpriseSetupPathError) Unwrap() error { return err.error }
 
-// standaloneEnterpriseSetupInputError reports a malformed or missing input
-// path as invalid arguments (1639) for the standalone Setup only.
+// enterpriseSetupUntrustedInput is an existing CONFIG=/MANIFEST= file Setup
+// will not take: a link or other non-regular file, or one a principal other
+// than Administrators, SYSTEM or TrustedInstaller owns or can change. Its
+// text is unchanged.
+type enterpriseSetupUntrustedInput struct {
+	label string
+	path  string
+	error
+}
+
+func (err enterpriseSetupUntrustedInput) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupInputError reports, for the standalone Setup
+// only, a malformed or missing input path and an input it will not take as
+// invalid arguments (1639), as the lifecycle reports every config it
+// refuses; an ownership or write-access refusal names the account and the
+// icacls fix (GAP-0528, GAP-0562). The Secure Client Setup keeps 1603.
 func standaloneEnterpriseSetupInputError(standalone bool, err error) error {
+	if !standalone {
+		return err
+	}
 	var path enterpriseSetupPathError
-	if standalone && errors.As(err, &path) {
+	if errors.As(err, &path) {
+		return enterpriseSetupInvalidArguments{err}
+	}
+	var untrusted enterpriseSetupUntrustedInput
+	if errors.As(err, &untrusted) {
+		if text, ok := managed.DescribeUntrustedSource(untrusted.label, untrusted.path, untrusted.error); ok {
+			return enterpriseSetupInvalidArguments{errors.New(text)}
+		}
 		return enterpriseSetupInvalidArguments{err}
 	}
 	return err
@@ -228,10 +253,10 @@ func validateEnterpriseSetupInput(value, label string) (string, error) {
 		return "", fmt.Errorf("inspect %s: %w", label, err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%s is not a regular non-link file: %s", label, full)
+		return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("%s is not a regular non-link file: %s", label, full)}
 	}
 	if err := managed.ValidateTrustedFilePath(full, label); err != nil {
-		return "", fmt.Errorf("refusing untrusted %s: %w", label, err)
+		return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("refusing untrusted %s: %w", label, err)}
 	}
 	return filepath.Clean(full), nil
 }

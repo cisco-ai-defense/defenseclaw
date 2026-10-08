@@ -153,6 +153,20 @@ func TestWindowsEnterpriseProfileFromConfig(t *testing.T) {
 	if err := resolveWindowsEnterpriseLifecycleProfile("install", opts); err != nil || opts.resolvedProfile != "secure_client" {
 		t.Fatalf("plain config resolved %q, %v", opts.resolvedProfile, err)
 	}
+	// GAP-0562, GAP-0571: a standalone config that is not UTF-8 (or not
+	// YAML) is the administrator's to fix: invalid arguments (1639) with the
+	// gateway compiler's explanation, not a 1603 YAML parser message.
+	originalSource := windowsEnterpriseStandaloneConfigSource
+	t.Cleanup(func() { windowsEnterpriseStandaloneConfigSource = originalSource })
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+	latin1 := filepath.Join(dir, "latin1.yaml")
+	if err := os.WriteFile(latin1, []byte("# caf\xe9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: latin1, profile: "standalone"})
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "save the file as UTF-8") {
+		t.Fatalf("Latin-1 standalone config: %v", err)
+	}
 }
 
 func TestWindowsEnterpriseStandaloneArguments(t *testing.T) {

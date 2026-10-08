@@ -481,3 +481,32 @@ func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0562: with JSON=1 the standalone Setup reports a refusal of its own in
+// the lifecycle's schema-2 shape (code, message, exit_code 1639), so an MDM
+// reads one shape whoever refused; the Secure Client Setup keeps schema 1.
+func TestStandaloneSetupFailureUsesTheLifecycleResultShape(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true}
+	refusal := enterpriseSetupInvalidArguments{errors.New("the config C:\\stage\\config.yaml is not protected")}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseInvalidArgsExitCode)
+	var result struct {
+		SchemaVersion int    `json:"schema_version"`
+		Action        string `json:"action"`
+		ExitCode      int    `json:"exit_code"`
+		Errors        []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.SchemaVersion != 2 || result.Action != "ensure" ||
+		result.ExitCode != enterpriseInvalidArgsExitCode || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		result.Errors[0].Message != refusal.Error() {
+		t.Fatalf("standalone failure = %s (%v)", stdout.String(), err)
+	}
+	stdout.Reset()
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, false, enterpriseSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	if !strings.HasPrefix(stdout.String(), `{"schema_version":1,`) {
+		t.Fatalf("Secure Client failure shape changed: %s", stdout.String())
+	}
+}

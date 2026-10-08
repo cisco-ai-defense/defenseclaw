@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -18,6 +19,21 @@ import (
 // windowsEnterpriseStandaloneLayoutForPreflight is replaceable in tests.
 var windowsEnterpriseStandaloneLayoutForPreflight = managed.StandaloneWindowsLayout
 
+// windowsEnterpriseStandaloneConfigSource refuses an administrator config
+// that a standard user could change before the lifecycle reads it, naming
+// the account and the icacls fix. The installer refused it later, as a
+// 1603 lifecycle error that named only a SID (GAP-0562). Tests replace it.
+var windowsEnterpriseStandaloneConfigSource = func(path string) error {
+	err := managed.ValidateTrustedFilePath(path, "config")
+	if err == nil {
+		return nil
+	}
+	if text, ok := managed.DescribeUntrustedSource("config", path, err); ok {
+		return errors.New(text)
+	}
+	return fmt.Errorf("refusing untrusted config: %w", err)
+}
+
 // windowsEnterpriseStandaloneConfigPreflight refuses a standalone install or
 // ensure whose config the gateway service could not load, before anything
 // changes. The compile runs with the pins the gateway service
@@ -27,6 +43,9 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
 		return nil
+	}
+	if err := windowsEnterpriseStandaloneConfigSource(configPath); err != nil {
+		return err
 	}
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()
 	if err != nil {

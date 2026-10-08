@@ -127,6 +127,17 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 	if path := strings.TrimSpace(opts.configPath); path != "" {
 		configured, err := readWindowsEnterpriseConfigProfile(path)
 		if err != nil {
+			var content windowsEnterpriseConfigContentError
+			if requested == managed.ProfileStandalone && errors.As(err, &content) {
+				// A file that does not parse, is not UTF-8 or is too large
+				// is the administrator's to fix: refuse it as invalid
+				// arguments (1639) with the gateway compiler's explanation,
+				// as every other config refusal (GAP-0562, GAP-0571).
+				if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {
+					err = compiled
+				}
+				return fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+			}
 			return err
 		}
 		if configured != "" {
@@ -437,6 +448,13 @@ func sameWindowsEnterpriseSignerSet(left, right []string) bool {
 	return true
 }
 
+// windowsEnterpriseConfigContentError is an administrator config whose
+// content cannot be read for its profile (too large, or not YAML). Its text
+// is unchanged.
+type windowsEnterpriseConfigContentError struct{ error }
+
+func (err windowsEnterpriseConfigContentError) Unwrap() error { return err.error }
+
 // readWindowsEnterpriseConfigProfile reads enterprise.profile from an
 // administrator-supplied config. The lifecycle validates the whole file
 // later; this only chooses which lifecycle validates it.
@@ -451,7 +469,7 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		return "", fmt.Errorf("read managed config %s: %w", path, err)
 	}
 	if len(body) > windowsEnterpriseConfigProfileLimit {
-		return "", fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)
+		return "", windowsEnterpriseConfigContentError{fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)}
 	}
 	var document struct {
 		Enterprise struct {
@@ -459,7 +477,7 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		} `yaml:"enterprise"`
 	}
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
-		return "", fmt.Errorf("parse managed config %s: %w", path, err)
+		return "", windowsEnterpriseConfigContentError{fmt.Errorf("parse managed config %s: %w", path, err)}
 	}
 	profile := managed.NormalizeEnterpriseProfile(document.Enterprise.Profile)
 	if profile != "" && profile != managed.ProfileSecureClient && profile != managed.ProfileStandalone {
