@@ -196,6 +196,9 @@ func runWindowsEnterprisePowerShell7(
 		if detail := windowsEnterpriseStderrCode(stderr.buffer.Bytes()); detail != "" {
 			return run, fmt.Errorf("%s (%w)", detail, runErr)
 		}
+		if detail := windowsEnterpriseExecutionPolicyRefusal(stderr.buffer.Bytes()); detail != "" {
+			return run, fmt.Errorf("%s (%w)", detail, runErr)
+		}
 		return run, runErr
 	}
 	return run, nil
@@ -258,6 +261,12 @@ func runWindowsEnterpriseStandaloneAction(
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+		if action == "status" || action == "verify" {
+			// The lifecycle never ran, so it changed nothing: report the
+			// recorded deployment and the service states instead of
+			// installed:false for a running deployment (GAP-0770).
+			applyWindowsEnterpriseRecordedDeployment(result)
+		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	if action == "uninstall" && windowsEnterpriseRecoveredFailedInstall(report) {
@@ -2030,6 +2039,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	statusReport, statusRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+		// Nothing ran: keep the recorded deployment in the result (GAP-0770).
+		applyWindowsEnterpriseRecordedDeployment(result)
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	plan, planErr := planWindowsEnterpriseEnsure(statusReport, opts, script)

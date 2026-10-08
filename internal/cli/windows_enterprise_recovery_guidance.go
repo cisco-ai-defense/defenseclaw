@@ -282,6 +282,35 @@ func windowsEnterpriseCommittedJournalNextStep(original string, installed bool) 
 	return step + " Next step: run Setup /ensure again; it removes the stale journal and converges."
 }
 
+// windowsEnterpriseANSIPattern matches the color sequences PowerShell may
+// write around an error record.
+var windowsEnterpriseANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// windowsEnterpriseExecutionPolicyRefusal explains a lifecycle that
+// PowerShell refused to start because of the machine execution policy. A
+// Group Policy scope (MachinePolicy or UserPolicy, for example AllSigned)
+// overrides the -ExecutionPolicy Bypass the lifecycle passes, so the script
+// never ran and printed no result; every action failed with only "exited
+// with code 1" (GAP-0770). It returns "" when stderr carries no such
+// refusal.
+func windowsEnterpriseExecutionPolicyRefusal(stderr []byte) string {
+	for _, line := range strings.Split(windowsEnterpriseANSIPattern.ReplaceAllString(string(stderr), ""), "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "cannot be loaded") ||
+			!(strings.Contains(lower, "digitally signed") || strings.Contains(lower, "execution polic") || strings.Contains(lower, "not trusted")) {
+			continue
+		}
+		if len(line) > 1024 {
+			line = line[:1024]
+		}
+		return "powershell_execution_policy: PowerShell refused to run the DefenseClaw lifecycle script (" + strings.TrimRight(line, ".") + ")." +
+			" A machine PowerShell execution policy set by Group Policy (MachinePolicy or UserPolicy, for example AllSigned) overrides the -ExecutionPolicy Bypass DefenseClaw passes, so nothing was changed." +
+			" Add the certificate that signs DefenseClaw to the Trusted Publishers store of the computer, or set that policy to RemoteSigned or Unrestricted, then run it again"
+	}
+	return ""
+}
+
 // windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
 // lifecycle refused to collect a managed runtime bundle it cannot confirm
 // belongs to this deployment (GAP-1419): the error named no file, no reason

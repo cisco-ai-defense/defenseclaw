@@ -141,3 +141,22 @@ func TestWindowsEnterpriseCommittedJournalNextStep(t *testing.T) {
 		t.Fatalf("not installed: %q", got)
 	}
 }
+
+// GAP-0770: a lifecycle that a Group Policy AllSigned execution policy kept
+// from starting names the policy and the signature cause, with the fix,
+// instead of "exited with code 1".
+func TestWindowsEnterpriseExecutionPolicyRefusal(t *testing.T) {
+	stderr := []byte("\x1b[31;1mSecurityError: File C:\\ProgramData\\DefenseClaw-Setup-1\\install-enterprise.ps1 cannot be loaded. The file C:\\ProgramData\\DefenseClaw-Setup-1\\install-enterprise.ps1 is not digitally signed. You cannot run this script on the current system.\x1b[0m\r\n")
+	got := windowsEnterpriseExecutionPolicyRefusal(stderr)
+	for _, want := range []string{"powershell_execution_policy: ", "is not digitally signed", "AllSigned", "Trusted Publishers", "nothing was changed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("refusal %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Fatalf("refusal keeps color sequences: %q", got)
+	}
+	if got := windowsEnterpriseExecutionPolicyRefusal([]byte("powershell7_required: install PowerShell 7\n")); got != "" {
+		t.Fatalf("other stderr = %q", got)
+	}
+}
