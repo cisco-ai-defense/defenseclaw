@@ -746,6 +746,72 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 	return windowsManagedRuntimeTarget{home: home, data: dataDir, sid: target}, nil
 }
 
+// PreflightWindowsManagedRuntimeRoots inspects, without changing anything,
+// the .defenseclaw folder of every enabled manifest target the way the
+// standalone install plan does, and returns the refusal the plan would
+// return for the first folder it would not take: one DefenseClaw did not
+// create, such as the data folder a per-user install left. The install
+// found it only after minutes of work, and a run that got further committed
+// and then failed on it (GAP-0741). A folder the plan takes over (one a
+// standalone purge kept, or one the account created itself before
+// enrollment) passes.
+func PreflightWindowsManagedRuntimeRoots(manifest Manifest) error {
+	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
+		return err
+	}
+	targets, err := resolveWindowsManagedRuntimeTargets(manifest)
+	if err != nil {
+		return err
+	}
+	return windowsManagedRuntimeSetupPrivilege(func() error {
+		for _, target := range targets {
+			if err := inspectWindowsManagedRuntimeRoot(target); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// inspectWindowsManagedRuntimeRoot is the read-only half of
+// planWindowsManagedRuntimeRoot for a standalone install plan.
+func inspectWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) error {
+	parent, err := openWindowsManagedRuntimeProfile(target)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(parent)
+	final, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess(), false)
+	if windowsManagedRuntimeRootMissing(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
+	}
+	defer windows.CloseHandle(final)
+	err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+	if err == nil || windowsManagedRuntimePurgeKeptAdoptable(final, target) || windowsManagedRuntimeAccountCreatedBaseline(final, target) {
+		return nil
+	}
+	return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+}
+
+// windowsManagedRuntimePurgeKeptAdoptable reports the folder shape
+// adoptWindowsManagedRuntimePurgeKeptRoot takes over: owned by the target
+// account, with the owner-private DACL a standalone purge leaves.
+func windowsManagedRuntimePurgeKeptAdoptable(final windows.Handle, target windowsManagedRuntimeTarget) bool {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(target.sid) {
+		return false
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor)
+	return err == nil && relaxed
+}
+
 // windowsManagedRuntimeAccountCreatedBaseline reports whether the opened
 // data directory is one the account created itself before enrollment
 // (windowsAccountCreatedDataDir), which the guardian adopts at enrollment.

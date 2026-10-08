@@ -963,7 +963,9 @@ each user remove their per-user install with
 `defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does
 not adopt a `%USERPROFILE%\.defenseclaw` folder that a per-user install left,
 and refuses that profile until the folder is gone (move it aside to keep its
-data). A folder the account created itself without any per-user product (the
+data). A first install checks every enrolled profile before it changes
+anything and stops in seconds, naming the folder and this command, with
+nothing installed. A folder the account created itself without any per-user product (the
 refused hook of an account that was not enrolled writes one) is not such a
 folder: Setup takes it over. A per-user gateway that still runs holds the gateway API port, and
 Setup names it in its `api_port_held` error. See

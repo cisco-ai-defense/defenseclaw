@@ -784,6 +784,7 @@ func applyWindowsEnterpriseInstallerReport(
 				message = text
 			}
 			message += windowsEnterprisePerUserDataDirNextStep(original, message)
+			message += windowsEnterpriseCommittedJournalNextStep(original, report.Installed)
 			message += windowsEnterpriseInvalidRuntimeBundleNextStep(original)
 		}
 		result.AddError(code, message)
@@ -2106,6 +2107,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		cleanupManifest = cleanup
 		actionOpts.manifestPath = manifestPath
+		if err := windowsEnterpriseStandaloneProfilesPreflight(manifestPath); err != nil {
+			cleanup()
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
 	}
 	if cleanupManifest != nil {
 		defer cleanupManifest()
@@ -2205,6 +2211,34 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterpriseStandaloneProfilesPreflight refuses a first install, in
+// seconds and before it changes anything, when a target profile holds a
+// .defenseclaw folder the install plan would refuse (a per-user install
+// left it). The refusal names the folder and the next step. Any other
+// inspection failure is left to the install, which reports it. Tests
+// replace it.
+var windowsEnterpriseStandaloneProfilesPreflight = func(manifestPath string) error {
+	manifest, _, err := loadWindowsTargetRuntimeManifest(manifestPath)
+	if err != nil {
+		return nil
+	}
+	return windowsEnterpriseProfilesPreflightRefusal(enterprisehooks.PreflightWindowsManagedRuntimeRoots(manifest))
+}
+
+// windowsEnterpriseProfilesPreflightRefusal turns the profile inspection
+// into the preflight refusal, or nil.
+func windowsEnterpriseProfilesPreflightRefusal(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		return nil
+	}
+	original := err.Error()
+	message := original
+	if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
+		message = text
+	}
+	return errors.New(message + windowsEnterprisePerUserDataDirNextStep(original, message) + " Nothing was changed.")
 }
 
 // planWindowsEnterpriseEnsure chooses the converging action from the

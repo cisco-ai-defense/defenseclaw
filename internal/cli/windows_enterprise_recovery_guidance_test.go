@@ -125,3 +125,19 @@ func TestWindowsEnterpriseInstallerBuildMismatchText(t *testing.T) {
 		t.Fatal("an unrelated error was rewritten")
 	}
 }
+
+// GAP-0741: a committed install whose lifecycle journal could not be retired
+// because of a per-user .defenseclaw folder says it is installed, names the
+// folder and its fix, and says that /ensure again converges.
+func TestWindowsEnterpriseCommittedJournalNextStep(t *testing.T) {
+	original := `Install committed, but its protected managed-hook lifecycle journal could not be retired: retire copilot managed runtime generations for SID S-1-5-21-1-2-3-1018: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\dcw-std2\.defenseclaw\hooks: access denied`
+	step := windowsEnterpriseCommittedJournalNextStep(original, true)
+	for _, want := range []string{"installed and running", `C:\Users\dcw-std2\.defenseclaw was left by a per-user`, "uninstall --all --binaries --yes", "run Setup /ensure again"} {
+		if !strings.Contains(step, want) {
+			t.Fatalf("next step %q, want %q", step, want)
+		}
+	}
+	if got := windowsEnterpriseCommittedJournalNextStep(original, false); got != "" {
+		t.Fatalf("not installed: %q", got)
+	}
+}

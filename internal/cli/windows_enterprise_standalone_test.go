@@ -2308,3 +2308,17 @@ func TestWindowsEnterpriseStandaloneRepairRulePackPreflight(t *testing.T) {
 		t.Fatalf("repair preflight with a pending transaction = %v, want it left to the recovery", err)
 	}
 }
+
+// GAP-0741: a profile folder the install plan would refuse is refused by
+// the preflight with the folder and the next step; other inspection
+// failures are left to the install.
+func TestWindowsEnterpriseProfilesPreflightRefusal(t *testing.T) {
+	err := windowsEnterpriseProfilesPreflightRefusal(errors.New(`enterprise hooks: reject noncanonical managed runtime baseline: C:\Users\dcw-ch1\.defenseclaw: unexpected DACL`))
+	if err == nil || !strings.Contains(err.Error(), `C:\Users\dcw-ch1\.defenseclaw`) ||
+		!strings.Contains(err.Error(), "uninstall --all --binaries --yes") || !strings.Contains(err.Error(), "Nothing was changed") {
+		t.Fatalf("refusal = %v", err)
+	}
+	if err := windowsEnterpriseProfilesPreflightRefusal(errors.New("enterprise hooks: resolve profile: not found")); err != nil {
+		t.Fatalf("other inspection failure = %v, want it left to the install", err)
+	}
+}

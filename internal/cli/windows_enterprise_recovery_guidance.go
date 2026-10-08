@@ -262,6 +262,26 @@ func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
 		" out of the profile, then run Setup again."
 }
 
+// windowsEnterpriseCommittedJournalNextStep says what an install, upgrade or
+// repair that committed but could not retire its managed-hook lifecycle
+// journal leaves, and how it converges. The result failed with 1603 while
+// DefenseClaw was installed and running, and named no remedy (GAP-0741). A
+// per-user .defenseclaw folder named in the error is the usual cause.
+func windowsEnterpriseCommittedJournalNextStep(original string, installed bool) string {
+	if !installed || !strings.Contains(original, "committed, but its protected managed-hook lifecycle journal could not be retired") {
+		return ""
+	}
+	step := ". The change is committed and DefenseClaw is installed and running; only the clean-up of its lifecycle journal failed."
+	if path := windowsEnterpriseFirstWindowsPath(original); path != "" {
+		if index := strings.Index(strings.ToLower(path), `\.defenseclaw`); index >= 0 {
+			folder := path[:index+len(`\.defenseclaw`)]
+			step += " " + folder + " was left by a per-user DefenseClaw install, whose permissions the managed install does not change:" +
+				" have that user run `defenseclaw uninstall --all --binaries --yes`, or move the folder out of the profile."
+		}
+	}
+	return step + " Next step: run Setup /ensure again; it removes the stale journal and converges."
+}
+
 // windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
 // lifecycle refused to collect a managed runtime bundle it cannot confirm
 // belongs to this deployment (GAP-1419): the error named no file, no reason
