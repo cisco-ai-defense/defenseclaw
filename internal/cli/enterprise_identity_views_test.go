@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // A managed host has no Python CLI: `enterprise <platform> profile-explain`
@@ -59,7 +61,7 @@ func TestEnterpriseAgentIdentitiesRejectsUnknownAccount(t *testing.T) {
 	cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[1])
 	cmd.SetArgs([]string{"--user", "nosuchuser99"})
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "no account named") || commandExitCode(err) != 2 {
+	if err == nil || !strings.Contains(err.Error(), "no account named") || commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 		t.Fatalf("agent identities error = %v", err)
 	}
 }
