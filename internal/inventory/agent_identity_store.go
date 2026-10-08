@@ -25,8 +25,9 @@ var agentIdentitiesDDL = []string{
 	// The sessions an agent identity has counted: the count is of distinct
 	// session ids, so a session resumed after a gateway restart, which the
 	// in-memory session registry sees as new, is not counted again.
-	`CREATE TABLE IF NOT EXISTS agent_identity_sessions (agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL, PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`,
+	`CREATE TABLE IF NOT EXISTS agent_identity_sessions (agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_first_seen ON agent_identity_sessions(first_seen)`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_last_seen ON agent_identity_sessions(last_seen)`,
 }
 
 // agentIdentityTimeLayout is fixed-width UTC so the stored strings order the
@@ -52,7 +53,7 @@ type AgentIdentityRecord struct {
 	// SessionIDs is, in a batch, the ids of those sessions (up to
 	// agentIdentityBatchSessionCap). The session registry lives in memory,
 	// so a session resumed after a gateway restart is new to it; the upsert
-	// counts only the ids the store has not counted for this agent.
+	// counts only ids the store has not retained for this agent.
 	SessionIDs []string `json:"-"`
 }
 
@@ -161,7 +162,7 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 		}
 		defer stmt.Close()
 		sessionStmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO agent_identity_sessions
-			(agent_id, session_id, first_seen) VALUES (?, ?, ?)`)
+			(agent_id, session_id, first_seen, last_seen) VALUES (?, ?, ?, ?)`)
 		if err != nil {
 			return err
 		}
@@ -178,7 +179,7 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 				first = last
 			}
 			// Sightings the batch holds no id for count as they are; each
-			// named session counts once, ever.
+			// named session counts once while its deduplication row is retained.
 			sessions := max(rec.SessionsSeen-int64(len(rec.SessionIDs)), 0)
 			lastNewSessionID := ""
 			lastSessionWasNamed := false
@@ -186,15 +187,22 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 				if sessionID == "" {
 					continue
 				}
-				inserted, err := sessionStmt.ExecContext(ctx, rec.AgentID, sessionID, formatAgentIdentityTime(last.Add(time.Duration(i)*time.Nanosecond)))
+				seen := formatAgentIdentityTime(last.Add(time.Duration(i) * time.Nanosecond))
+				inserted, err := sessionStmt.ExecContext(ctx, rec.AgentID, sessionID, seen, seen)
 				if err != nil {
 					return err
 				}
-				if added, err := inserted.RowsAffected(); err == nil {
-					sessions += added
-					if added > 0 {
-						lastNewSessionID = sessionID
-					}
+				added, err := inserted.RowsAffected()
+				if err != nil {
+					return err
+				}
+				sessions += added
+				if added > 0 {
+					lastNewSessionID = sessionID
+				} else if _, err := tx.ExecContext(ctx, `UPDATE agent_identity_sessions
+					SET last_seen = max(last_seen, ?) WHERE agent_id = ? AND session_id = ?`,
+					seen, rec.AgentID, sessionID); err != nil {
+					return err
 				}
 				if sessionID == rec.LastSessionID {
 					lastSessionWasNamed = true
@@ -245,10 +253,11 @@ func (s *InventoryStore) UpsertAgentIdentitiesAndExclude(
 	})
 }
 
-// PruneAgentIdentitySessions deletes deduplication rows whose identities
-// were pruned. Active identities retain every counted session ID so a
-// long-running chat cannot increase its cumulative count after retention.
-func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context) (int64, error) {
+// PruneAgentIdentitySessions deletes orphaned and expired deduplication
+// rows. A resumed chat refreshes last_seen, so it stays deduplicated while
+// active; sessions_seen remains a cumulative count after rows expire. A zero
+// cutoff deletes only orphaned rows.
+func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("inventory store: not open")
 	}
@@ -261,8 +270,9 @@ func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context) (int64,
 			return err
 		}
 		result, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions
-			WHERE NOT EXISTS (SELECT 1 FROM agent_identities
-				WHERE agent_identities.agent_id = agent_identity_sessions.agent_id)`)
+			WHERE last_seen < ? OR NOT EXISTS (SELECT 1 FROM agent_identities
+				WHERE agent_identities.agent_id = agent_identity_sessions.agent_id)`,
+			formatAgentIdentityTime(cutoff))
 		if err != nil {
 			return err
 		}

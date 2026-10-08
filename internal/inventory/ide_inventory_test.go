@@ -254,7 +254,7 @@ func TestIDEAIIndexFlagsJetBrainsAIAssistant(t *testing.T) {
 
 // A v3 inventory.db migrates in place: existing
 // rows survive and the new columns and tables are there.
-func TestInventoryStoreMigratesV3ToV5(t *testing.T) {
+func TestInventoryStoreMigratesV3ToV6(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inventory.db")
 	db, err := sql.Open("sqlite", path+inventoryPragmas)
 	if err != nil {
@@ -281,6 +281,15 @@ func TestInventoryStoreMigratesV3ToV5(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A pre-upgrade store may already have counted agent sessions.
+	if _, err := db.Exec(`CREATE TABLE agent_identity_sessions (
+		agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL,
+		PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO agent_identity_sessions VALUES ('agt-old', 'session-old', ?)`, now.Format(agentIdentityTimeLayout)); err != nil {
+		t.Fatal(err)
+	}
 	db.Close()
 
 	st, err := NewInventoryStore(path)
@@ -288,8 +297,12 @@ func TestInventoryStoreMigratesV3ToV5(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if v, _ := st.SchemaVersion(); v != 5 {
-		t.Fatalf("schema version = %d, want 5", v)
+	if v, _ := st.SchemaVersion(); v != 6 {
+		t.Fatalf("schema version = %d, want 6", v)
+	}
+	var sessionLastSeen string
+	if err := st.db.QueryRow(`SELECT last_seen FROM agent_identity_sessions WHERE agent_id = 'agt-old'`).Scan(&sessionLastSeen); err != nil || sessionLastSeen != now.Format(agentIdentityTimeLayout) {
+		t.Fatalf("migrated session last_seen = %q, err %v", sessionLastSeen, err)
 	}
 	var name string
 	var user sql.NullString
