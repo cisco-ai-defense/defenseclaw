@@ -848,8 +848,10 @@ defenseclaw sandbox status myapp-7f3a --output json
 ### `sandbox stop`
 
 Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
-detached run is still going, `stop` asks first on a terminal (`--yes` skips
-the question; without a terminal it warns). The stop marks the run
+detached run is still going, or a session runs in it from another terminal
+(a harness session, or `connect --shell`), `stop` names it and asks first on
+a terminal (`--yes` skips the question; without a terminal it warns), and
+`delete` names such a session in its question. The stop marks the run
 interrupted and keeps its log for `sandbox logs`, as every stop does.
 
 For a copy-mode sandbox that no detached run and no other session is using,
@@ -867,7 +869,7 @@ defenseclaw sandbox stop myapp-7f3a
 {/* AUTOGEN-BEGIN: sandbox-flags stop */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
-| `-y`, `--yes` | switch |  | Stop without asking when a detached run is still going. |
+| `-y`, `--yes` | switch |  | Stop without asking when a detached run or a session in another terminal is still going. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox start`

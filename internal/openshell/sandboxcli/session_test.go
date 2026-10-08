@@ -1179,6 +1179,30 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 // log on this machine, which `sandbox logs` reads once the sandbox is
 // stopped (manual test M1). The CLI no longer does either itself, so a stop
 // from the TUI, the macOS app or a tamper stop keeps it the same way.
+// TestStopAndDeleteNameAnAttachedSession (GAP-0277, GAP-0285): stop from a
+// second terminal ended an attached Claude Code session (or a connect
+// --shell) at once, and delete asked without a word about it. Both name
+// the attached terminal and ask, defaulting to no.
+func TestStopAndDeleteNameAnAttachedSession(t *testing.T) {
+	ta := newTestApp(t, "n\nn\n", sampleSandbox("box"))
+	runAnswers(ta, "run=none\n", "")
+	defer ta.holdSession("box")()
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "box"}))
+	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"box"}}))
+	if ta.calls("POST", "box/stop") != 0 || ta.calls("DELETE", "box") != 0 {
+		t.Fatalf("stop %d, delete %d calls: the attached session was ended", ta.calls("POST", "box/stop"), ta.calls("DELETE", "box"))
+	}
+	has(t, ta.output(), "1 terminal is attached to box (a harness session or `defenseclaw sandbox connect --shell`); stopping the sandbox ends it. Stop anyway? [y/N]",
+		"box keeps running", "1 terminal is attached to box (a harness session or `defenseclaw sandbox connect --shell`); deleting it ends it. Delete sandbox box")
+	// --yes goes on and says so.
+	ta.out.Reset()
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "box", Yes: true}))
+	if ta.calls("POST", "box/stop") != 1 {
+		t.Fatal("--yes did not stop")
+	}
+	has(t, ta.output(), "1 terminal is attached to box")
+}
+
 func TestStopWithALiveDetachedRun(t *testing.T) {
 	const log = "working on it\nstill working\n"
 	going := "run_started=1790000000\nrun=running\n"

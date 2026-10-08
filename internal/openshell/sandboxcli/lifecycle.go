@@ -740,6 +740,14 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
+		if n := a.attachedSessions(name); n > 0 {
+			// Its sessions in other terminals end with it (GAP-0285).
+			what := attachedText(name, n) + "; deleting it ends " + them(n)
+			question = what + ". " + question
+			if o.Yes {
+				a.warn(what + " (--yes)")
+			}
+		}
 		yes, err := a.confirm(question, o.Yes)
 		if err != nil {
 			return err
