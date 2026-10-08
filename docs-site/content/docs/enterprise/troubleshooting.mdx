@@ -139,8 +139,10 @@ Warnings do not fail an action. They appear in `warnings[]`.
 
 These appear in `status` and `verify` on Linux when the sensor helper uses
 Tetragon (see [Tetragon on a Linux fleet](/docs/enterprise/tetragon)).
-They are warnings. A problem with your Tetragon never fails `verify`, and
-`security_complete` does not depend on it. `defenseclaw doctor` shows the
+They are warnings. A problem with your Tetragon never fails
+`enterprise linux verify`, and `security_complete` does not depend on it.
+`enterprise linux tetragon verify`, the readiness check for a mode, does fail
+while Tetragon is down or refused. `defenseclaw doctor` shows the
 matching rows under **Kernel sensor (Tetragon)** where a `defenseclaw` command
 line is installed; the managed Linux packages ship none, so there the same
 information is in `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify` and

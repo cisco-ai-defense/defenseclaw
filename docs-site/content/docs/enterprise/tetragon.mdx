@@ -1289,14 +1289,16 @@ output carries the same section.
 
 | Event | Behavior |
 | --- | --- |
-| Tetragon stops | No kernel enforcement (fail open). Plane C falls back to `cn_proc` and `fanotify` in the same stream; status warns `tetragon_unavailable`; `verify` still passes |
-| Tetragon restarts | The policies it held are gone. The helper loads them again within a pass (about a minute), honoring the pause and any operator override |
-| The helper stops | Loaded policies keep running with the scope they had. Start the helper again, or run the cleanup above |
+| Tetragon stops | No kernel enforcement (fail open). Plane C falls back to `cn_proc` and `fanotify` in the same stream; status warns `tetragon_unavailable`. `enterprise linux verify` still passes; `tetragon verify` fails its Tetragon checks (running, socket, the helper reads Tetragon's events), so a ring gate on it stops until Tetragon is back |
+| Tetragon restarts | The policies it held are gone. The helper loads them again within a pass (about a minute), honoring the pause and any operator override. Agent sessions that were running are then monitored, not denied, until they restart (`kernel_sessions_predate_controls`) |
+| The helper stops | Loaded policies keep running with the scope they had. Start the helper again, or run the cleanup above. When it is back, the gateway re-attaches to its event stream within seconds |
 | Events are lost | Enforcement is unaffected. Coverage is reported as partial, and burn-in time stops |
 | A policy does not load | It stays in or returns to monitor mode and status reports `kernel_reconcile_failed`. `verify` fails with `kernel_policy_load_error:<name>` when Tetragon reports a DefenseClaw policy in its load-error or error state, in `observe` or `enforce`. A policy missing after a pass is only the warning `kernel_policy_not_applied` |
 
 A Tetragon outage is your computer's state, not DefenseClaw's, so it is a
-warning and never fails `verify` or `security_complete`.
+warning and never fails `enterprise linux verify` or `security_complete`.
+`tetragon verify` is the readiness check for a mode, and a mode that uses
+Tetragon is not ready while Tetragon is down.
 
 ### Privacy
 
