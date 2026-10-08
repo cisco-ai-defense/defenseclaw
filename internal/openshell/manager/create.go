@@ -561,7 +561,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellPolicyRejected, name, rejected.Message)
 			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected, Message: "OpenShell rejected the sandbox configuration", Detail: rejected.Message}
 		}
-		return nil, upstream("wait for sandbox "+name, err)
+		return nil, provisioningFailure(gw.Driver, upstream("wait for sandbox "+name, err))
 	}
 	if _, err := m.opts.Bindings.Update(binding.ID, func(s *sandboxauth.Spec) error { s.SandboxID = sb.ID; return nil }); err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "record the sandbox id on its binding: %v", err)
@@ -628,7 +628,8 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, release st
 	if s, ok := m.opts.Images.(imageSizer); ok {
 		size, _ = s.ImageSize(ctx, id)
 	}
-	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"); err != nil {
+	free, inFlight := image.FreeAfterStaging(dir, free, size, m.now())
+	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"+image.UnderWay(inFlight)); err != nil {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: err.Error()}
 	}
 	return nil
@@ -1202,6 +1203,20 @@ func workspaceError(err error) error {
 	default:
 		return &sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: "prepare the project folder", Detail: err.Error()}
 	}
+}
+
+// provisioningFailure adds what to check to a first start OpenShell gave
+// up provisioning (ProvisioningTimedOut) on a driver that prepares a disk
+// from each image (the vm driver): on a volume that ran full the error
+// named neither the disk nor what frees it (GAP-0219).
+func provisioningFailure(d openshell.Driver, err error) error {
+	var e *sandboxapi.Error
+	if d.ImageCache == "" || !errors.As(err, &e) || !strings.Contains(e.Detail, "ProvisioningTimedOut") {
+		return err
+	}
+	e.Detail += ". The first start of an image prepares a MicroVM disk of about 5 GB, and a full volume stops it: check Disk space in " +
+		"`defenseclaw sandbox doctor`, and free space with `defenseclaw sandbox image prune` (it also removes the half-prepared disks of failed starts)"
+	return e
 }
 
 func upstream(op string, err error) error {

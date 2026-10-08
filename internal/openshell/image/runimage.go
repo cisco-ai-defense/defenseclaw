@@ -512,6 +512,9 @@ type VMDisk struct {
 	OpenShell string
 	// Bytes is the space it takes on disk.
 	Bytes int64
+	// Changed is when a staging directory's contents last changed
+	// (VMStaging; zero for a prepared disk).
+	Changed time.Time
 }
 
 // PreparedBy reports whether the vm driver of release boots d: true unless
@@ -610,6 +613,105 @@ func RemoveVMDisk(d VMDisk) error {
 		return fmt.Errorf("openshell image: %s is not a directory", d.Path)
 	}
 	return os.RemoveAll(d.Path)
+}
+
+// VMStagingIdle is how long a staging directory of the vm driver (VMStaging)
+// stays unchanged before it counts as left behind: a preparation writes to
+// it for about a minute, and OpenShell gives up on a provisioning after 300
+// seconds.
+const VMStagingIdle = 15 * time.Minute
+
+// VMStaging lists the directories under cacheDir where the vm driver
+// prepares a root disk, "<a VMDisks name>.staging-<epoch>-<n>", with the
+// space each takes and when anything under it last changed (Changed). A
+// first start that failed or was cancelled (a full volume, a Ctrl-C) leaves
+// its own behind, which the driver never resumes (GAP-0218).
+func VMStaging(cacheDir string) []VMDisk {
+	if cacheDir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return nil
+	}
+	var out []VMDisk
+	for _, e := range entries {
+		base, _, staging := strings.Cut(e.Name(), ".staging")
+		if !staging || !e.IsDir() {
+			continue
+		}
+		d, _, ok := vmDisk(cacheDir, base)
+		if !ok {
+			continue
+		}
+		d.Path = filepath.Join(cacheDir, e.Name())
+		d.Bytes, d.Changed = treeBytes(d.Path), treeChanged(d.Path)
+		out = append(out, d)
+	}
+	return out
+}
+
+// RemoveVMStaging removes a staging directory VMStaging listed, which must
+// still be a directory (not a link) named as the vm driver names them.
+func RemoveVMStaging(d VMDisk) error {
+	base, _, staging := strings.Cut(filepath.Base(d.Path), ".staging")
+	if _, _, ok := vmDisk(filepath.Dir(d.Path), base); !ok || !staging {
+		return fmt.Errorf("openshell image: %s is not a staging directory of the vm driver", d.Path)
+	}
+	info, err := os.Lstat(d.Path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("openshell image: %s is not a directory", d.Path)
+	}
+	return os.RemoveAll(d.Path)
+}
+
+// FreeAfterStaging is free less what the vm driver's preparations under
+// way in cacheDir (VMStaging changed within VMStagingIdle of now) still
+// write, each up to a disk of an image of imageBytes (0: unknown), and how
+// many there are: three first starts at once each saw room for its own
+// disk and filled the volume together (GAP-0219).
+func FreeAfterStaging(cacheDir string, free, imageBytes uint64, now time.Time) (uint64, int) {
+	need, _, _ := openshell.VMDiskRoom(imageBytes)
+	n := 0
+	for _, d := range VMStaging(cacheDir) {
+		if now.Sub(d.Changed) >= VMStagingIdle {
+			continue
+		}
+		n++
+		left := need - min(need, uint64(max(d.Bytes, 0)))
+		free -= min(free, left)
+	}
+	return free, n
+}
+
+// UnderWay is what a disk-room message adds for inFlight preparations
+// under way (FreeAfterStaging): "" for none.
+func UnderWay(inFlight int) string {
+	switch inFlight {
+	case 0:
+		return ""
+	case 1:
+		return ", after the MicroVM disk preparation under way"
+	}
+	return fmt.Sprintf(", after the %d MicroVM disk preparations under way", inFlight)
+}
+
+// treeChanged is when anything under root last changed.
+func treeChanged(root string) time.Time {
+	var last time.Time
+	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info, err := d.Info(); err == nil && info.ModTime().After(last) {
+			last = info.ModTime()
+		}
+		return nil
+	})
+	return last
 }
 
 // treeBytes is the space the files under root take on disk (sparse root

@@ -278,6 +278,10 @@ Removes superseded harness images.
   sandbox is recorded with that image, and it never removes the driver's
   other state there. A start of an image whose disk is gone prepares it
   again (about a minute).
+- **Half-prepared MicroVM disks.** It removes the `.staging` folders that
+  a first start which failed or was cancelled (a full volume, Ctrl-C) left
+  there, once nothing has written to them for 15 minutes, and says how much
+  it freed. The doctor's **Disk space** check counts them.
 - `--dry-run` says what it would remove, disks included.
 
 ```bash
