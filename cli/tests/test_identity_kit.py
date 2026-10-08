@@ -280,6 +280,28 @@ def test_entra_apply_records_password_before_user_creation(tmp_path: Path, monke
     assert calls == []
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_himmelblau_check_fails_for_missing_account(tmp_path: Path) -> None:
+    source = (ENTRA.parent / "setup-himmelblau.sh").read_text(encoding="ascii")
+    config = tmp_path / "himmelblau.conf"
+    config.write_text("[global]\ndomain = example.test\ncn_name_mapping = false\n", encoding="ascii")
+    nsswitch = tmp_path / "nsswitch.conf"
+    nsswitch.write_text("passwd: files himmelblau\ngroup: files himmelblau\n", encoding="ascii")
+    script = tmp_path / "setup-himmelblau.sh"
+    script.write_text(source.replace("CONF=/etc/himmelblau/himmelblau.conf", f"CONF={config}")
+                      .replace("/etc/nsswitch.conf", str(nsswitch)), encoding="ascii")
+    systemctl = tmp_path / "systemctl"
+    systemctl.write_text("#!/bin/sh\necho active\n", encoding="ascii")
+    systemctl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(script), "check", "--user", "dc-no-such-user-91402"],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+    )
+    assert result.returncode == 1, result.stdout
+
+
 def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatch) -> None:
     intune = _load(INTUNE)
     graph = intune.Graph("token")

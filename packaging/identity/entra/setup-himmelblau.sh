@@ -205,18 +205,30 @@ do_install() {
 }
 
 do_check() {
+  local status=0 state account
   echo "Daemons:"
   for unit in "${SERVICES[@]}"; do
-    printf '  %-18s %s\n' "$unit" "$(systemctl is-active "$unit" 2>/dev/null || true)"
+    state=$(systemctl is-active "$unit" 2>/dev/null) || true
+    printf '  %-18s %s\n' "$unit" "${state:-unknown}"
+    [ "$state" = active ] || status=1
   done
   echo "NSS (/etc/nsswitch.conf):"
   grep -E '^(passwd|group):' /etc/nsswitch.conf 2>/dev/null | sed 's/^/  /' || echo "  not readable"
+  if ! grep -Eq '^passwd:.*himmelblau' /etc/nsswitch.conf 2>/dev/null; then
+    echo "  warning: himmelblau is not on the passwd line, so no Entra account reaches DefenseClaw"
+    status=1
+  fi
   if ! grep -Eq '^group:.*himmelblau' /etc/nsswitch.conf 2>/dev/null; then
     echo "  warning: himmelblau is not on the group line, so no Entra group reaches DefenseClaw"
+    status=1
   fi
   echo "Config ($CONF):"
   if [ -r "$CONF" ]; then
     grep -E '^(domain|domains|cn_name_mapping|pam_allow_groups)[[:space:]]*=' "$CONF" | sed 's/^/  /' || true
+    if ! grep -Eq '^(domain|domains)[[:space:]]*=[[:space:]]*[^[:space:]]' "$CONF"; then
+      echo "  missing: a tenant domain is required"
+      status=1
+    fi
     if ! grep -Eq '^cn_name_mapping[[:space:]]*=[[:space:]]*false' "$CONF"; then
       echo "  note: cn_name_mapping is not false, so accounts carry no UPN for DefenseClaw users entries"
     fi
@@ -225,12 +237,19 @@ do_check() {
     fi
   else
     echo "  missing: the daemon does not start without a domain"
+    status=1
   fi
   if [ -n "$user_name" ]; then
     echo "Account $user_name:"
-    id "$user_name" 2>&1 | sed 's/^/  /' || true
+    if account=$(id "$user_name" 2>&1); then
+      printf '%s\n' "$account" | sed 's/^/  /'
+    else
+      printf '%s\n' "$account" | sed 's/^/  /'
+      status=1
+    fi
     echo "  (getent group NAME finds no Entra group by design; getent group GID does)"
   fi
+  return "$status"
 }
 
 case "$command" in
