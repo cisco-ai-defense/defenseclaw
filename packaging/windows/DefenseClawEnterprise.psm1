@@ -3480,6 +3480,11 @@ function Grant-DefenseClawStateAncestorTraverse {
     Assert-DefenseClawStateAncestorTraverse `
         -Path $Path `
         -GatewayServiceSID $GatewayServiceSID
+    # The standalone vendor directory also needs the standard users' check
+    # entry (GAP-0578); never on the Secure Client profile.
+    if (Test-DefenseClawStandaloneVendorDirectory -Path $Path) {
+        Grant-DefenseClawStandaloneVendorUsersRead -Path $Path
+    }
 }
 
 function Assert-DefenseClawStateAncestorTraverse {
@@ -6100,9 +6105,6 @@ function Set-DefenseClawManagedAcls {
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID
-        if (Test-DefenseClawStandaloneVendorDirectory -Path $ancestor) {
-            Grant-DefenseClawStandaloneVendorUsersRead -Path $ancestor
-        }
     }
     if (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.ManagedIPCDirectory `
