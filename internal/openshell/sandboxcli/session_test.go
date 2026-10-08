@@ -25,7 +25,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -477,6 +479,26 @@ func TestTheSummaryOffersNoUnblockOfAHostUnblockedSince(t *testing.T) {
 		"✗ DefenseClaw blocked again.example.com (webhook catcher)"+cmd("again.example.com")+"\n",
 		"✗ DefenseClaw blocked still.example.com (webhook catcher)"+cmd("still.example.com")+"\n")
 	lacks(t, ta.output(), cmd("webhook.site"), cmd("Hooks.Example.COM"))
+}
+
+// GAP-0221: a second Ctrl-C during the pull of a copy killed its git, and
+// the session said the bundle "does not apply to the uploaded history: git
+// bundle: signal: interrupt". A child the interrupt ended reads as such.
+func TestKilledByInterrupt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signals")
+	}
+	run := func(script string) error {
+		err := exec.Command("sh", "-c", script).Run()
+		return fmt.Errorf("workspace: the result bundle does not apply to the uploaded history: %w",
+			&workspace.GitError{Args: []string{"bundle", "verify"}, ExitCode: -1, Err: err})
+	}
+	if !killedByInterrupt(run("kill -INT $$")) {
+		t.Fatal("a git ended by SIGINT is not an interrupt")
+	}
+	if killedByInterrupt(run("exit 1")) || killedByInterrupt(run("kill -TERM $$")) {
+		t.Fatal("another failure counted as an interrupt")
+	}
 }
 
 // GAP-0196: under the open profile OpenShell refused pypi.org until

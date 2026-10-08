@@ -23,12 +23,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
 	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -39,6 +41,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
+
+// killedByInterrupt reports an error of a command a Ctrl-C ended: the
+// terminal sends SIGINT to its whole foreground group, the git that a pull
+// runs included.
+func killedByInterrupt(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return errors.Is(err, errInterrupted) || errors.Is(err, openshell.ErrInterrupted)
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == syscall.SIGINT
+}
 
 // RunDir is where detached runs keep their output inside the sandbox.
 const RunDir = harness.RunDir
@@ -1502,7 +1516,14 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.println(s.summaryLine(after, nil))
 		s.printHookReach(after, endedElsewhere)
 		s.printNotices()
-		a.warn("could not pull the sandbox's changes: " + err.Error())
+		if killedByInterrupt(err) {
+			// The Ctrl-C reached the git the pull runs (GAP-0221): not a
+			// bundle that does not apply.
+			s.interrupted = true
+			a.warn("interrupted: nothing was brought back, and the work is still in the sandbox")
+		} else {
+			a.warn("could not pull the sandbox's changes: " + err.Error())
+		}
 		a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
 		s.keepUnpulled()
 		return s.finish(ctx, false)
