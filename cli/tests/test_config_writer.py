@@ -551,3 +551,15 @@ def test_empty_skill_first_party_list_survives_config_save(tmp_path, monkeypatch
     cfg.save()
     assert yaml.safe_load(open(path, encoding="utf-8"))["admission"]["skill"]["first_party_allow_list"] == []
     assert config_module.load(data_dir=str(tmp_path)).admission.skill.first_party_allow_list == []
+
+
+def test_config_actor_uses_os_identity_when_environment_is_forged(monkeypatch):
+    if os.name == "nt":
+        expected = config_writer.current_actor().removeprefix("cli:")
+    else:
+        import pwd
+
+        expected = pwd.getpwuid(os.geteuid()).pw_name
+    monkeypatch.setenv("LOGNAME", "pretend")
+    monkeypatch.setenv("USER", "pretend")
+    assert config_writer.current_actor() == f"cli:{expected}"
