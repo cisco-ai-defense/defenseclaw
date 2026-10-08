@@ -204,14 +204,16 @@ func (c *Controller) notePause(pause PauseState) {
 // someone else. The helper then never puts it back: the override lasts until
 // the intent (mode or approval) changes. A Tetragon restart is not an
 // operator action: its gRPC-added policies are simply gone, and this pass
-// re-adds them.
+// re-adds them. A delete outranks an earlier set-mode: an operator who
+// deletes the monitor copy a set-mode override left has deleted the family,
+// and it stays away too (GAP-0065).
 func (c *Controller) detectOverrides(listed []LoadedPolicy, agent Agent) {
 	byName := map[string]LoadedPolicy{}
 	for _, lp := range listed {
 		byName[lp.Name] = lp
 	}
 	override := func(family Family, kind OverrideKind, policy string) {
-		if _, done := c.st.Overrides[family]; done {
+		if o, done := c.st.Overrides[family]; done && (o.Kind != OverrideMonitor || kind != OverrideDeleted) {
 			return
 		}
 		if c.st.Overrides == nil {

@@ -351,6 +351,37 @@ func TestOperatorDeleteIsNeverReAdded(t *testing.T) {
 	}
 }
 
+// GAP-0065: set-mode monitor, then a delete of the monitor copy the helper
+// keeps loaded for that override. The delete is an operator delete like any
+// other: the family stays away, and status says it was deleted.
+func TestOperatorDeleteAfterSetModeIsNeverReAdded(t *testing.T) {
+	h := enforcing(t)
+	controls, _ := h.tg.find(FamilyControls)
+	h.tg.setMode(controls.Name, LoadedMonitor)
+	h.pass()
+	h.pass()
+	copyOf, ok := h.tg.find(FamilyControls)
+	if !ok || copyOf.Mode.Enforcing() {
+		t.Fatalf("after set-mode the controls should stay loaded in monitor: %+v", copyOf)
+	}
+	h.tg.remove(copyOf.Name)
+	h.pass()
+	if o, ok := h.status().Overrides[FamilyControls]; !ok || o.Kind != OverrideDeleted {
+		t.Fatalf("overrides = %v, want controls deleted", h.status().Overrides)
+	}
+	for _, when := range []string{"first pass", "second pass"} {
+		if p, ok := h.tg.find(FamilyControls); ok {
+			t.Fatalf("%s: the deleted monitor copy came back: %+v", when, p)
+		}
+		h.pass()
+	}
+	h.start(h.intent)
+	h.pass()
+	if _, ok := h.tg.find(FamilyControls); ok {
+		t.Fatal("after a helper restart: the deleted monitor copy came back")
+	}
+}
+
 func TestPauseMovesControlsToMonitorFirstAndSurvivesRestarts(t *testing.T) {
 	h := enforcing(t)
 	first, _ := h.tg.find(FamilyControls)
