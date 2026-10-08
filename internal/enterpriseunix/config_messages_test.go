@@ -147,3 +147,32 @@ func TestUninstallKeptLineNamesAccounts(t *testing.T) {
 		t.Fatalf("kept line:\n%s", summary)
 	}
 }
+
+// installMessage runs a first install with raw as the config and returns
+// the config_invalid message.
+func installMessage(t *testing.T, h *testHost, raw string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "admin.yaml")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: path})
+	requireError(t, r, codeConfig)
+	if exists(h.env.P(h.env.Layout.ConfigPath)) {
+		t.Fatal("a refused config was installed")
+	}
+	return r.Errors[0].Message
+}
+
+// GAP-0829: a malformed agent identity names the assignment, the value and
+// the form.
+func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {
+	h := newTestHost(t, "linux")
+	raw := string(DefaultConfig(h.env.Layout)) + "  profiles:\n    strict:\n      mode: action\n" +
+		"  profile_assignments:\n    - profile: strict\n      match:\n        agents: [agt-49fb88f74f28975]\n"
+	got := installMessage(t, h, raw)
+	if !strings.Contains(got, `guardrail.profile_assignments[0].match.agents[0] is "agt-49fb88f74f28975"`) ||
+		!strings.Contains(got, "agt- followed by 16 lowercase hexadecimal digits") {
+		t.Fatalf("agent identity: %s", got)
+	}
+}

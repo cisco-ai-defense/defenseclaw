@@ -472,6 +472,10 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 			return "a value of type " + value
 		}
 	case "pattern":
+		if current == "^agt-[0-9a-f]{16}$" {
+			// An agent identity (GAP-0829).
+			return "an agent identity: agt- followed by 16 lowercase hexadecimal digits"
+		}
 		return "a value matching the schema-declared pattern"
 	case "minimum", "maximum":
 		return v8SchemaNumberRange(parent)
