@@ -161,9 +161,21 @@ type proxyState struct {
 	// the guard ends without internals (GAP-0351). Off on a Secure Client
 	// host, which keeps the guard of main (issue #1092).
 	peerProtocolFixes bool
-	// uncheckedNoticeSent records that an observe-mode user was told once
-	// that nothing is being checked (GAP-0354).
-	uncheckedNoticeSent bool
+	// uncheckedNotified holds the sessions an observe-mode user was told
+	// that nothing is being checked, until checking works again. One flag
+	// for the whole guard told only the first thread: an editor that keeps
+	// one guard for every thread (Zed) showed nothing in a new thread after
+	// a revoke (GAP-0354).
+	uncheckedNotified map[string]bool
+}
+
+// checkingResumed re-arms the unchecked notice after an evaluation worked.
+func (s *proxyState) checkingResumed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.uncheckedNotified) > 0 {
+		s.uncheckedNotified = nil
+	}
 }
 
 // errAbortedTurnFrame marks a frame of a turn the guard already ended. It is
@@ -571,11 +583,21 @@ func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg
 		return
 	}
 	session := promptSessionID(msg)
+	if session == "" {
+		return
+	}
 	s.mu.Lock()
-	sent := s.uncheckedNoticeSent
-	s.uncheckedNoticeSent = sent || session != ""
+	sent := s.uncheckedNotified[session]
+	if !sent {
+		if s.uncheckedNotified == nil {
+			s.uncheckedNotified = map[string]bool{}
+		}
+		if len(s.uncheckedNotified) < MaxPendingIDs {
+			s.uncheckedNotified[session] = true
+		}
+	}
 	s.mu.Unlock()
-	if sent || session == "" {
+	if sent {
 		return
 	}
 	why := "the gateway did not accept the ACP token"
@@ -781,6 +803,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			// The session is ending: an evaluation the shutdown cancelled
 			// is not a gateway problem to report (GAP-0351).
 			return nil
+		}
+		if evalErr == nil && state.peerProtocolFixes {
+			state.checkingResumed()
 		}
 		if evalErr != nil {
 			if errors.Is(evalErr, ErrBindingRefused) && state.peerProtocolFixes {

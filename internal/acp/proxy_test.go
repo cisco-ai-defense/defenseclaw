@@ -691,5 +691,17 @@ func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
 		if mode == ModeObserve && (strings.Count(text, "not checking this session") != 1 || strings.Count(forwarded.String(), "session/prompt") != 2) {
 			t.Fatalf("observe mode: want one notice and both prompts forwarded: client=%s agent=%s", text, forwarded.String())
 		}
+		if mode == ModeObserve {
+			// A new thread of the same running guard is told too (Zed keeps
+			// one guard for every thread).
+			client.Reset()
+			other := strings.NewReader(strings.Replace(strings.Replace(prompt, `"s1"`, `"s2"`, 1), `"id":3`, `"id":5`, 1) + "\n")
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, other, &forwarded, &client); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(client.String(), "not checking this session") {
+				t.Fatalf("a new thread was not told: %s", client.String())
+			}
+		}
 	}
 }
