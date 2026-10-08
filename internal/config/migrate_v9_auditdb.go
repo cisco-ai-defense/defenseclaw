@@ -17,11 +17,15 @@
 package config
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/url"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,23 +34,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// v9AutomaticInstallReasons start the reason of an install block or allow
-// that a scan verdict wrote up to 1.0: the gateway watcher ("auto-block:")
-// and the CLI scan, install and mcp set paths (which also recorded
-// scan-clean allows). Such a row is the enforcement journal, not operator
-// intent, and stays in the table.
-var v9AutomaticInstallReasons = []string{
-	"auto-block", "post-scan:", "post-install scan:", "scan:", "scan clean or within policy",
-}
+// Automatic scan reasons have fixed formats. Operator reasons are arbitrary
+// text, so a shared prefix alone cannot identify a scan verdict.
+var v9AutomaticReasonPattern = regexp.MustCompile(`^(?:post-scan: |post-install scan: |scan: )[0-9]+ findings, max=[A-Z]+$`)
+var v9WatchReasonPattern = regexp.MustCompile(`^auto-block: watch detected [A-Z]+ findings(?: \(scanner=[^)]+\))?$`)
 
 func v9AutomaticInstallReason(reason string) bool {
 	reason = strings.TrimSpace(reason)
-	for _, prefix := range v9AutomaticInstallReasons {
-		if strings.HasPrefix(reason, prefix) {
-			return true
-		}
-	}
-	return false
+	return reason == "scan clean or within policy" ||
+		v9AutomaticReasonPattern.MatchString(reason) ||
+		v9WatchReasonPattern.MatchString(reason)
 }
 
 // auditDBDSN is the file: URI of the audit database. The path goes through
@@ -72,10 +69,14 @@ func readV9ActionRows(path string) ([]v9ActionRow, error) {
 		return nil, err
 	}
 	defer db.Close()
-	query := `SELECT id, target_type, target_name, COALESCE(source_path, ''), actions_json, COALESCE(reason, ''), connector FROM actions`
+	return readV9ActionRowsDB(db)
+}
+
+func readV9ActionRowsDB(db *sql.DB) ([]v9ActionRow, error) {
+	query := `SELECT id, target_type, target_name, COALESCE(source_path, ''), actions_json, COALESCE(reason, ''), connector FROM actions ORDER BY id`
 	rows, err := db.Query(query)
 	if err != nil && strings.Contains(err.Error(), "no such column") {
-		rows, err = db.Query(`SELECT id, target_type, target_name, COALESCE(source_path, ''), actions_json, COALESCE(reason, ''), '' FROM actions`)
+		rows, err = db.Query(`SELECT id, target_type, target_name, COALESCE(source_path, ''), actions_json, COALESCE(reason, ''), '' FROM actions ORDER BY id`)
 	}
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
@@ -106,20 +107,55 @@ func readV9ActionRows(path string) ([]v9ActionRow, error) {
 	return out, rows.Err()
 }
 
-// clearV9ActionRows removes the install field of the moved rows in one
-// transaction, deleting rows left with no state. It runs after the config
-// commit, so the rows are never lost.
+// lockV9ActionRows holds a write reservation across the final row check,
+// config commit, and cleanup. A changed snapshot requires a fresh plan.
+func lockV9ActionRows(ctx context.Context, path string, snapshot []v9ActionRow) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", auditDBDSN(path, "_pragma=busy_timeout(5000)"))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err = db.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	current, err := readV9ActionRowsDB(db)
+	if err != nil || !slices.EqualFunc(snapshot, current, func(a, b v9ActionRow) bool {
+		return a.id == b.id && a.targetType == b.targetType &&
+			a.targetName == b.targetName && a.sourcePath == b.sourcePath &&
+			a.reason == b.reason && a.connector == b.connector &&
+			maps.Equal(a.state, b.state)
+	}) {
+		_, _ = db.Exec("ROLLBACK")
+		_ = db.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("audit.db operator rows changed while migration ran; run it again")
+	}
+	return db, nil
+}
+
+// clearV9ActionRows removes the install field of moved rows in a transaction.
 func clearV9ActionRows(path string, moved []v9ActionRow) error {
 	db, err := sql.Open("sqlite", auditDBDSN(path, "_pragma=busy_timeout(5000)"))
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	tx, err := db.Begin()
-	if err != nil {
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("BEGIN IMMEDIATE"); err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { _, _ = db.Exec("ROLLBACK") }()
+	if err := clearV9ActionRowsDB(db, moved); err != nil {
+		return err
+	}
+	_, err = db.Exec("COMMIT")
+	return err
+}
+
+func clearV9ActionRowsDB(db *sql.DB, moved []v9ActionRow) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, row := range moved {
 		state := map[string]string{}
@@ -129,15 +165,15 @@ func clearV9ActionRows(path string, moved []v9ActionRow) error {
 			}
 		}
 		if len(state) == 0 {
-			if _, err := tx.Exec(`DELETE FROM actions WHERE id = ?`, row.id); err != nil {
+			if _, err := db.Exec(`DELETE FROM actions WHERE id = ?`, row.id); err != nil {
 				return fmt.Errorf("delete actions row %s: %w", row.id, err)
 			}
 			continue
 		}
 		encoded, _ := json.Marshal(state)
-		if _, err := tx.Exec(`UPDATE actions SET actions_json = ?, updated_at = ? WHERE id = ?`, string(encoded), now, row.id); err != nil {
+		if _, err := db.Exec(`UPDATE actions SET actions_json = ?, updated_at = ? WHERE id = ?`, string(encoded), now, row.id); err != nil {
 			return fmt.Errorf("update actions row %s: %w", row.id, err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
