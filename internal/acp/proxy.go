@@ -560,7 +560,8 @@ func (s *proxyState) refusalReason(opts ProxyOptions, err error) string {
 			"so it was not delivered. Ask your administrator to enroll you for this editor and agent."
 	case errors.Is(err, ErrCredentialRejected) && opts.Managed:
 		return prefix + "the gateway did not accept this editor's ACP credential: your administrator may have revoked " +
-			"your access. It was not delivered. Contact your administrator."
+			"your access. It was not delivered. Ask your administrator to enroll you again; running setup cannot restore " +
+			"a revoked credential."
 	case errors.Is(err, ErrCredentialRejected):
 		rerun := "Run defenseclaw acp setup for this editor and agent again."
 		if opts.SetupCommand != "" {
@@ -614,6 +615,9 @@ func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg
 	}
 	next := "Contact your administrator."
 	switch {
+	case opts.Managed && errors.Is(err, ErrCredentialRejected):
+		// Setup cannot restore a revoked credential (GAP-0905).
+		next = "Ask your administrator to enroll you again; running setup cannot restore a revoked credential."
 	case errors.Is(err, ErrCredentialOtherAccount):
 		next = "Ask your administrator to enroll you for this editor and agent."
 	case !opts.Managed && opts.SetupCommand != "":

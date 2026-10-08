@@ -92,19 +92,20 @@ func TestManagedGuardStartFailureNamesTheGatewaySetup(t *testing.T) {
 		guardExecutable, managedACPStandaloneLayout, loadACPStandaloneDescriptor = previous, previousLayout, previousLoad
 	})
 	guardExecutable = func() (string, error) { return filepath.Join(dir, "defenseclaw-acp"), nil }
+	// Windows has no runtime descriptor: a guard in the standalone bin
+	// folder is managed (GAP-0902).
 	managedACPStandaloneLayout = func() (managed.StandaloneLayout, error) {
-		return managed.StandaloneLayout{DescriptorPath: filepath.Join(dir, "managed-runtime.json")}, nil
+		return managed.StandaloneLayout{DescriptorPath: filepath.Join(dir, "managed-runtime.json"), BinDir: dir}, nil
 	}
-	loadACPStandaloneDescriptor = func(string) (*managed.RuntimeDescriptor, error) {
-		return &managed.RuntimeDescriptor{Profile: managed.ProfileStandalone}, nil
-	}
+	loadACPStandaloneDescriptor = func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor }
+	missing := &tokenCopyError{path: filepath.Join(dir, "zed-hermes.token"), err: errors.New("stat token file: no such file")}
 	var startup *startupError
-	if !errors.As(newStartupError(errors.New("stat token file: no such file"), "zed", "hermes", "ih3acp", "observe", lock), &startup) {
+	if !errors.As(newStartupError(missing, "zed", "hermes", "ih3acp", "observe", lock), &startup) {
 		t.Fatal("want a startup error")
 	}
-	if !strings.Contains(startup.message, "enterprise acp enroll") || !strings.Contains(startup.message, want) ||
-		strings.Contains(startup.message, "defenseclaw acp ") {
-		t.Fatalf("the managed remediation names commands this host lacks: %q", startup.message)
+	if !strings.Contains(startup.message, "enroll you again (enterprise acp enroll)") || !strings.Contains(startup.message, want) ||
+		!strings.Contains(startup.message, "setup cannot restore it") || strings.Contains(startup.message, "defenseclaw acp ") {
+		t.Fatalf("the managed remediation names commands this host lacks or sends the user to setup: %q", startup.message)
 	}
 }
 

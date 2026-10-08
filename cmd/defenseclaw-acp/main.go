@@ -124,12 +124,22 @@ func newStartupError(err error, clientID, agentID, profile, mode, contractLock s
 		next := fmt.Sprintf("If your administrator revoked or has not enrolled %s for you, ask them to run "+
 			"enterprise acp enroll; then run %s (the command the enrollment reports), or delete this editor entry.",
 			pair, setup)
-		if errors.Is(err, acp.ErrRuntimeContractMissing) {
+		var tokenCopy *tokenCopyError
+		switch {
+		case errors.Is(err, acp.ErrRuntimeContractMissing):
 			return &startupError{err: err, message: fmt.Sprintf(
 				"DefenseClaw ACP guard is not set up for %s (the binding was removed). %s", pair, next)}
+		case errors.As(err, &tokenCopy):
+			// Setup cannot restore a missing credential copy, and the text
+			// sent the user to run it (GAP-0902).
+			return &startupError{err: err, message: fmt.Sprintf(
+				"DefenseClaw ACP guard could not start for %s: your copy of its ACP credential (%s) cannot be used (%v). "+
+					"Running setup cannot restore it: ask your administrator to enroll you again (enterprise acp enroll), "+
+					"then run %s (the command the enrollment reports).", pair, tokenCopy.path, err, setup)}
 		}
 		return &startupError{err: err, message: fmt.Sprintf(
-			"DefenseClaw ACP guard could not start for %s: %v. %s", pair, err, next)}
+			"DefenseClaw ACP guard could not start for %s: %v. Run %s to set this editor entry up again; if that does not "+
+				"help, ask your administrator to run enterprise acp enroll for you again, or delete this editor entry.", pair, err, setup)}
 	}
 	if errors.Is(err, acp.ErrRuntimeContractMissing) {
 		return &startupError{err: err, message: fmt.Sprintf(
@@ -141,21 +151,43 @@ func newStartupError(err error, clientID, agentID, profile, mode, contractLock s
 		pair, err, setup)}
 }
 
-// standaloneManagedGatewayCommand uses the administrator-owned standalone
-// descriptor as the profile gate. Secure Client has no such descriptor and
-// keeps the startup error bytes from main, including for old managed locks.
+// tokenCopyError is a user's copy of the credential the guard cannot use.
+type tokenCopyError struct {
+	path string
+	err  error
+}
+
+func (e *tokenCopyError) Error() string { return e.err.Error() }
+func (e *tokenCopyError) Unwrap() error { return e.err }
+
+// standaloneManagedGatewayCommand names the gateway of a standalone managed
+// deployment, or "". Secure Client keeps the startup error bytes from main,
+// including for old managed locks.
 func standaloneManagedGatewayCommand(contractLock string) string {
 	if managed.IsSecureClientProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
 		return ""
 	}
 	layout, err := managedACPStandaloneLayout()
-	if err != nil {
-		return ""
-	}
-	if _, err := loadACPStandaloneDescriptor(layout.DescriptorPath); err != nil {
+	if err != nil || !standaloneManagedHost(layout) {
 		return ""
 	}
 	return managedGatewayCommand(contractLock)
+}
+
+// standaloneManagedHost reports a standalone managed deployment: its
+// administrator-owned runtime descriptor, or this guard running from the
+// standalone install's own bin folder, which a Secure Client install never
+// uses. Windows has no runtime descriptor, so every guard text there named
+// the per-user commands that computer does not have (GAP-0902, GAP-0905).
+func standaloneManagedHost(layout managed.StandaloneLayout) bool {
+	if _, err := loadACPStandaloneDescriptor(layout.DescriptorPath); err == nil {
+		return true
+	}
+	if strings.TrimSpace(layout.BinDir) == "" || acp.SecureClientHost() {
+		return false
+	}
+	guard, err := guardExecutable()
+	return err == nil && sameGuardPath(filepath.Dir(guard), layout.BinDir)
 }
 
 var loadACPStandaloneDescriptor = managed.LoadRuntimeDescriptor
@@ -321,29 +353,30 @@ func run(args []string) error {
 		return fail(errors.New("--token-file is required for guarded ACP execution"))
 	}
 	clean := filepath.Clean(*tokenFile)
+	failToken := func(err error) error { return fail(&tokenCopyError{path: clean, err: err}) }
 	info, err := os.Lstat(clean)
 	if err != nil {
-		return fail(fmt.Errorf("stat token file: %w", err))
+		return failToken(fmt.Errorf("stat token file: %w", err))
 	}
 	if !info.Mode().IsRegular() {
-		return fail(errors.New("token file is not a regular file"))
+		return failToken(errors.New("token file is not a regular file"))
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return fail(errors.New("token file permissions are too broad"))
+		return failToken(errors.New("token file permissions are too broad"))
 	}
 	if err := safefile.ValidatePrivateFile(clean); err != nil {
-		return fail(errors.New("token file protection is unsafe"))
+		return failToken(errors.New("token file protection is unsafe"))
 	}
 	if info.Size() > 16<<10 {
-		return fail(errors.New("token file is unexpectedly large"))
+		return failToken(errors.New("token file is unexpectedly large"))
 	}
 	body, err := safefile.ReadRegularFileBounded(clean, 16<<10)
 	if err != nil {
-		return fail(fmt.Errorf("read token file: %w", err))
+		return failToken(fmt.Errorf("read token file: %w", err))
 	}
 	token := strings.TrimSpace(string(body))
 	if token == "" {
-		return fail(errors.New("token file is empty"))
+		return failToken(errors.New("token file is empty"))
 	}
 	evaluator, err := acp.NewHTTPEvaluator(*gateway, token)
 	if err != nil {
