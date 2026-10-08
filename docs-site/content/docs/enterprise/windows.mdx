@@ -683,10 +683,14 @@ per-user install:
   admission finishes. While the folder is still there, `enterprise windows
   status` and `verify` warn with `asset_not_scanned` or
   `asset_not_quarantined`, naming the account and the path.
-- With `gateway.watcher.skill.take_action` (or `plugin`) false a rejected
-  asset stays installed and usable, and `enterprise windows status` and
-  `verify` warn with `asset_rejected_not_enforced`; once it is true again the
-  gateway admits the asset again and enforces the verdict.
+- With `gateway.watcher.<type>.take_action: false` a rejected asset is only
+  recorded (`verdict=rejected (take_action disabled, no gateway action)`) and
+  stays usable. When an `ensure` turns `take_action` back on, the first rescan
+  admits each such asset again and blocks or quarantines it as for a new
+  install. The `watcher-block` row ends with `rejected while take_action was
+  off, enforced once it was turned on`. Until then `enterprise windows status`
+  and `verify` warn with `asset_rejected_not_enforced` for a skill or plugin
+  still in its folder.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
   user adds goes through admission within about 30 seconds, also while a

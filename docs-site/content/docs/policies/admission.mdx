@@ -88,10 +88,13 @@ Where it runs: the gateway's install watcher checks a skill, plugin or MCP
 server when it appears in a watched directory, and the `defenseclaw` install
 and scan commands run the same check. The watcher applies a `rejected` verdict
 only while `gateway.watcher.skill.take_action` (or `plugin` / `mcp`) is true,
-which is the default; with it false, the verdict is recorded and nothing else
-happens. A skill or plugin rejected that way is enforced when `take_action` is
-true again (the watcher restarts on the change and admits it again), and until
-then a managed computer's `status` and `verify` warn with
+which is the default; with it false, the verdict is recorded and the asset
+stays in place. When `take_action` is turned back on, the watcher restarts, and
+its first rescan runs admission again for each asset rejected while it was off
+and applies the actions, as for a new install. The `watcher-block` row ends
+with `rejected while take_action was off, enforced once it was turned on`. This
+needs the periodic rescan (`watch.rescan_enabled`, on by default). Until then
+a managed computer's `status` and `verify` warn with
 `asset_rejected_not_enforced`.
 
 ## The admission block

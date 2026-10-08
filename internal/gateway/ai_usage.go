@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
@@ -776,16 +777,17 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 // nameIDERows names the account of each row as agent identities do, so one
 // user reads the same in both lists and their TUI tabs (GAP-0278). The rows
 // are the handler's copies; the inventory keeps the bare name its telemetry
-// carries.
+// carries. A row of an account whose uid another account holds now keeps
+// the name it was scanned with (GAP-0947).
 func nameIDERows(plugins []inventory.IDEPlugin, installs []inventory.IDEInstallation) {
 	name := hostAccountNamer()
 	for i := range plugins {
-		if n := name(plugins[i].UserID); n != "" {
+		if n := name(plugins[i].UserID); n != "" && !agentidentity.UIDReassigned(plugins[i].UserID, plugins[i].UserName, n) {
 			plugins[i].UserName = n
 		}
 	}
 	for i := range installs {
-		if n := name(installs[i].UserID); n != "" {
+		if n := name(installs[i].UserID); n != "" && !agentidentity.UIDReassigned(installs[i].UserID, installs[i].UserName, n) {
 			installs[i].UserName = n
 		}
 	}

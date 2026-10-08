@@ -71,6 +71,9 @@ func TestManagedHookPeerHomeResolvesTheCallersHome(t *testing.T) {
 func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	created := 0
 	directoryUp := true
+	stamp, restoreStamp := "before", managedHookPeerAccountsStamp
+	managedHookPeerAccountsStamp = func() string { return stamp }
+	t.Cleanup(func() { managedHookPeerAccountsStamp = restoreStamp })
 	now := time.Unix(1_000_000, 0)
 	cache := &managedHookPeerHomeCache{
 		newResolver: func() unixidentity.Resolver {
@@ -85,6 +88,7 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 		homesFile: filepath.Join(t.TempDir(), "managed_peer_homes.json"),
 	}
 	cache.lookup(1001)
+	cache.rememberName(1001, "alice")
 	cache.lookup(1001)
 	if created != 1 {
 		t.Fatalf("resolver created %d times inside the TTL", created)
@@ -93,6 +97,13 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	cache.lookup(1001)
 	if created != 2 {
 		t.Fatalf("resolver not refreshed after the TTL (created %d)", created)
+	}
+	// A uid removed and handed to a new account inside the TTL is looked up
+	// again as soon as the account database changes (GAP-0947).
+	stamp = "after userdel and useradd"
+	cache.lookup(1001)
+	if created != 3 {
+		t.Fatalf("resolver not refreshed after the account database changed (created %d)", created)
 	}
 	// A directory outage answers "no such account": the uid keeps its last
 	// home, so its config root and agent identity do not move (GAP-0314).
@@ -107,8 +118,9 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	// A gateway that starts during the outage reads the homes the last one
 	// persisted, so the agent identity still does not move.
 	restarted := &managedHookPeerHomeCache{newResolver: cache.newResolver, now: cache.now, homesFile: cache.homesFile}
-	if home := restarted.lookup(1001); home != "/home/alice" {
-		t.Fatalf("lookup after a restart during the outage = %q, want /home/alice", home)
+	if home := restarted.lookup(1001); home != "/home/alice" || restarted.lastName(1001) != "alice" {
+		t.Fatalf("lookup after a restart during the outage = %q, name %q; want /home/alice and alice",
+			home, restarted.lastName(1001))
 	}
 }
 

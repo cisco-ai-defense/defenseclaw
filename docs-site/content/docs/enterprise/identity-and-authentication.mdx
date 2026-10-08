@@ -150,7 +150,7 @@ and upgrades.
 
 <Flow
   direction="TB"
-  caption="One person can run many agents, each agent many sessions, and each session sub-agents. A sub-agent shares its parent's agent ID and links to its parent and root. The agent ID is a hash of four facts the gateway already holds."
+  caption="One person can run many agents, each agent many sessions, and each session sub-agents. A sub-agent shares its parent's agent ID and links to its parent and root. The agent ID is a hash of facts the gateway already holds."
 >
   <Node id="h" kind="operator">{`Person\nuser.id, principal`}</Node>
   <Node id="in" kind="generic">{`Machine ID, connector\nconfig root`}</Node>
@@ -166,13 +166,22 @@ and upgrades.
 | Level | Attribute | How the ID is made |
 | --- | --- | --- |
 | Person | `user.id`, `defenseclaw.user.principal` | From the OS, as above |
-| Agent | `defenseclaw.agent.identity.id` | `agt-` and 16 hex digits of a SHA-256 over the machine ID, the verified user, the connector and the connector's config root in that user's home |
+| Agent | `defenseclaw.agent.identity.id` | `agt-` and 16 hex digits of a SHA-256 over the machine ID, the verified user, the connector and the connector's config root in that user's home. On Linux and macOS the user is its uid and account name |
 | Session | `defenseclaw.agent.instance_id` | `ais-` and 16 hex digits of a SHA-256 over the agent ID and the session ID |
 | Sub-agent | `defenseclaw.agent.instance_id`, with the parent and root links below | `ais-` over the parent instance and the sub-agent ID. A sub-agent that runs in a session of its own gets the `ais-` of that session. It shares its parent's `agt-` |
 
 The machine ID comes from `/etc/machine-id`, the Windows `MachineGuid` or the
 macOS `IOPlatformUUID`. A config root the agent claims, such as a
 `CLAUDE_CONFIG_DIR` override, is recorded as a hint and never changes the ID.
+Linux and macOS give a removed account's uid to the next account created, so
+the account name, as `getent passwd` shows it for the uid, is part of the ID
+there: the new account gets agent IDs of its own, also in the removed
+account's home, and an `agents` profile assignment of the removed account
+never applies to it. Renaming the account starts new agent IDs too. The
+removed account's agent identities stay listed under its name, with
+`"retired": true`, and inventory records of its installs carry no agent ID.
+A Windows SID is never reused, so a renamed Windows account keeps its agent
+IDs.
 Two users who reuse the same session ID get different `ais-` IDs and different
 agents: the main agent's ID is made from the user's `agt-`, the connector and
 the session ID, so `gen_ai.agent.id` and the lineage IDs below differ too. A
