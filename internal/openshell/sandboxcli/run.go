@@ -1481,7 +1481,8 @@ func (a *App) copyStageOptions(flags packs.Flags, name string) (workspace.StageO
 	home, _ := a.Home()
 	return workspace.StageOptions{
 		Project: flags.Project, Name: name, DataDir: a.dataDir(), Home: home, GitDepth: eff.Workspace.GitDepth,
-		MaxBytes: int64(eff.Workspace.MaxUploadMB) << 20, Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Replace: true,
+		MaxBytes: int64(eff.Workspace.MaxUploadMB) << 20, Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask,
+		UnmaskAsked: flags.Unmask, Replace: true,
 	}, nil
 }
 

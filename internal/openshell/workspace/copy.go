@@ -94,6 +94,11 @@ type StageOptions struct {
 	Unmask             []string
 	Detector           SecretDetector
 	DisableContentScan bool
+	// UnmaskAsked are the run's own --unmask values: Stage warns for each
+	// that matches no file the copy takes. The pack's entries are defaults
+	// (committed templates such as .env.example) most projects do not have,
+	// so a warning for each was noise on every copy run (GAP-0308).
+	UnmaskAsked []string
 	// Replace discards an existing copy record of the same name once the
 	// new copy is staged (a failed Stage leaves it as it was). A replaced
 	// uploaded copy is remembered (CopyRecord.Replaced) until the new one is
@@ -382,6 +387,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	scanOpts := secretScanOptions{
 		patterns: opts.Masks, unmask: normalizeUnmask(opts.Unmask, real), maskTracked: true,
 		detector: opts.Detector, contentScan: !opts.DisableContentScan,
+		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real),
 	}
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
@@ -828,7 +834,7 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 			}
 		}
 	}
-	for _, u := range scanOpts.unmask {
+	for _, u := range scanOpts.unmaskAsked {
 		if !slices.ContainsFunc(candidates, func(rel string) bool { return unmaskedBy([]string{u}, rel) }) {
 			rec.Warnings = append(rec.Warnings, "--unmask "+u+" matched no file the copy takes (a copy takes git's view of the folder: "+
 				"tracked files and untracked ones git does not ignore), so it shared nothing")

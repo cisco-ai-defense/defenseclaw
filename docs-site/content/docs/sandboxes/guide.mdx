@@ -1433,7 +1433,7 @@ sandbox. Approve only a port whose service you know.
 
 | Flag | Effect |
 | --- | --- |
-| `--unmask GLOB` | Share a hidden secret file with the sandbox (repeatable). On a copy the run names each secret-looking file it shared, and says so when a glob matched no file the copy takes: a copy never takes git-ignored files, unmasked or not. |
+| `--unmask GLOB` | Share a hidden secret file with the sandbox (repeatable). On a copy the run names each secret-looking file it shared, and says so when a glob you gave matched no file the copy takes: a copy never takes git-ignored files, unmasked or not. The pack's own `workspace.unmask` entries (templates such as `.env.example`) get no such line. |
 | `--no-mcp` | Leave the harness's MCP servers behind. |
 | `--env KEY=VALUE` | A non-secret environment variable for the sandbox (repeatable). |
 | `--no-snapshot` | Skip the pre-session snapshot, and with it undo (mount mode). |

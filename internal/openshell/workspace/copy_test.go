@@ -251,7 +251,10 @@ func TestStageNamesWhatUnmaskShared(t *testing.T) {
 	writeFile(t, e.project, ".env", "TOKEN=dccert-decoy\n")
 	writeFile(t, e.project, "local.env", "TOKEN=dccert-decoy\n")
 	opts := e.stageOpts("c1")
-	opts.Unmask = []string{".env", "local.env"}
+	// .env.example is a pack default the project lacks: no warning for it,
+	// only for what the run asked (GAP-0308).
+	opts.Unmask = []string{".env", "local.env", ".env.example"}
+	opts.UnmaskAsked = []string{".env", "local.env"}
 	rec, err := Stage(bg, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -259,7 +262,8 @@ func TestStageNamesWhatUnmaskShared(t *testing.T) {
 	if strings.Join(rec.Unmasked, ",") != ".env" || slices.Contains(rec.HeldBack, ".env") {
 		t.Fatalf("unmasked %v, held back %v", rec.Unmasked, rec.HeldBack)
 	}
-	if !slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.HasPrefix(w, "--unmask local.env matched no file the copy takes") }) {
+	if !slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.HasPrefix(w, "--unmask local.env matched no file the copy takes") }) ||
+		slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.Contains(w, ".env.example") }) {
 		t.Fatalf("warnings = %v", rec.Warnings)
 	}
 }
