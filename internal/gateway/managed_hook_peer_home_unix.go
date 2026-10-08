@@ -244,6 +244,9 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 		return useridentity.DirectoryFacts{}, false
 	}
 	key := strconv.Itoa(uid)
+	if !identityFactsEnabled.Load() {
+		return c.directoryCache().get(key, block)
+	}
 	if account, ok := c.account(uid); ok {
 		holder := account.Name + "\x00" + account.Home
 		c.mu.Lock()

@@ -434,6 +434,9 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 
 	meta := richHookToolV8Meta()
 	// A non-ASCII account name reaches every destination (GAP-0587).
+	previousFacts := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previousFacts) })
 	meta.UserID, meta.UserIDKind, meta.UserName = "1002", "posix_uid", "dcad-eo\u00e9"
 	arguments := `{"command":"curl http://169.254.169.254/latest/meta-data/"}`
 	ctx := withHookToolCallCapture(t.Context(), &hookToolCallCapture{})

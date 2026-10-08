@@ -66,6 +66,10 @@ var discoveryAccountName = platformDiscoveryAccountName
 // gateway started in discovery and the IDE inventory, and --user with the
 // new name found none of its rows, until a restart (GAP-0702).
 func (s *ContinuousDiscoveryService) refreshHomeOwnerNames() {
+	if s.opts.SecureClient {
+		// Secure Client keeps main's names, read once at start.
+		return
+	}
 	for i := range s.opts.homeOwners {
 		owner := &s.opts.homeOwners[i]
 		if name := strings.TrimSpace(discoveryAccountName(owner.UserID, owner.Home)); name != "" {

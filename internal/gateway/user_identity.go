@@ -332,6 +332,28 @@ func v8UserEmail(email string) observability.Optional[string] {
 	return observability.Present(email)
 }
 
+// v8UserName renders the account name for defenseclaw.user.name. A name in
+// any script other than ASCII is kept when the gateway collects identity
+// facts (observability.OptionalUserName, GAP-0587): the ASCII identifier
+// rule of each producer dropped it from every record and sink. An ASCII name,
+// and every name under Secure Client, keeps the producer's own rule, so those
+// records do not change.
+func v8UserName(name string, ascii func(string) observability.Optional[string]) observability.Optional[string] {
+	if identityFactsEnabled.Load() && !isASCIIText(name) {
+		return observability.OptionalUserName(name)
+	}
+	return ascii(name)
+}
+
+func isASCIIText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 // v8UserIDKind renders the id namespace for a v8 builder input. The attribute
 // is a closed enum, so anything outside it is omitted rather than passed
 // through.

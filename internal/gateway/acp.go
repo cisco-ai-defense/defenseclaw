@@ -475,7 +475,7 @@ func acpAgentInvokeInputV8(
 	caller := auditCallerIdentity(ctx)
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-	input.DefenseClawUserName = observability.OptionalUserName(caller.Name)
+	input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)))
 	caller.Identity.applyTo(&input)
 	return input

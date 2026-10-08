@@ -293,7 +293,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			// lifecycle records can be split by user like the observations.
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
 			DefenseClawUserIDKind: v8UserIDKind(discoveryUserIDKind(signal.UserID)),
-			DefenseClawUserName:   observability.OptionalUserName(signal.UserName),
+			DefenseClawUserName:   v8UserName(signal.UserName, aiDiscoveryV8OptionalText),
 			// The agent identity of the connector install the signal belongs
 			// to, so discovery joins that agent's decisions.
 			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID)),
@@ -412,7 +412,12 @@ var (
 	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
 	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+	ideV8UserNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
 )
+
+func ideV8UserName(value string) observability.Optional[string] {
+	return ideV8Optional(value, ideV8UserNamePattern, 256)
+}
 
 func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observability.Optional[string] {
 	value = strings.TrimSpace(value)
@@ -481,7 +486,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawAIDiscoveryScanID: aiDiscoveryV8Optional(summary.ScanID),
 			UserID:                       ideV8Optional(plugin.UserID, ideV8UserPattern, 256),
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
-			DefenseClawUserName:          observability.OptionalUserName(plugin.UserName),
+			DefenseClawUserName:          v8UserName(plugin.UserName, ideV8UserName),
 		}
 		inventoryIdentity(plugin.UserID).applyTo(&base)
 		switch plugin.State {

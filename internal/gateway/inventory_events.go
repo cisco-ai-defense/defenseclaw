@@ -986,7 +986,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
 			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
 			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
-			DefenseClawUserName:                             observability.OptionalUserName(component.userName),
+			DefenseClawUserName:                             v8UserName(component.userName, aiDiscoveryV8OptionalText),
 			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),

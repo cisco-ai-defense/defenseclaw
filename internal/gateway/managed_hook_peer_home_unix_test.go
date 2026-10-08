@@ -257,6 +257,9 @@ func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
 // groups as soon as the account cache names it, not the old holder's
 // cached facts for up to 15 minutes.
 func TestManagedHookPeerDirectoryForgetsAReplacedAccount(t *testing.T) {
+	previousFacts := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previousFacts) })
 	name := "eli-old"
 	now := time.Unix(1_000_000, 0)
 	cache := &managedHookPeerHomeCache{
