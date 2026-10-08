@@ -1053,12 +1053,13 @@ func (l *lifecycle) replaceWritableConfig(record *Deployment, p *plan) ([]byte, 
 	if trusted == nil {
 		return nil, nil
 	}
+	// A folder another account can write lets it put another file there.
+	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
 	if p.configFromInstalled && readErr == nil && sha256Bytes(current) != record.ConfigSHA256 {
 		return trusted, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
 			env.Layout.ConfigPath, p.configWritable, env.lifecycleCommand(ActionEnsure))}
-	}
-	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
-		return nil, &codedError{code: codeApply, err: err}
 	}
 	// A refused edit stays current (status and verify report it) when the
 	// new file replaces the reverted one.
