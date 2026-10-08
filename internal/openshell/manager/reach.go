@@ -209,9 +209,24 @@ func (m *Manager) noteSettingsReload(b *box, at time.Time) {
 // (another daemon's ingress profile) explains no denial. Callers hold
 // Manager.mu.
 func (m *Manager) reloadMappingLocked(b *box, now time.Time) bool {
+	return b.reloadedLocked(now) && b.rec.HostAlias != nil && slices.Contains(b.rec.HostAlias.Ports, m.opts.IngressPort)
+}
+
+// reloadedLocked reports that OpenShell reloaded b's settings within
+// reloadMappingWindow of now (noteSettingsReload), or that a global
+// provider profile import of this daemon's reset them (beforeGlobalImport).
+// Callers hold Manager.mu.
+func (b *box) reloadedLocked(now time.Time) bool {
 	at := b.reach.reloaded
-	return !at.IsZero() && now.Sub(at) < reloadMappingWindow &&
-		b.rec.HostAlias != nil && slices.Contains(b.rec.HostAlias.Ports, m.opts.IngressPort)
+	return !at.IsZero() && now.Sub(at) < reloadMappingWindow
+}
+
+// reloadedRecently is reloadedLocked at the manager's clock.
+func (m *Manager) reloadedRecently(b *box) bool {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return b.reloadedLocked(now)
 }
 
 // confirmMappingDenialLocked turns an ingress mapping denial nothing

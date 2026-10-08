@@ -1380,6 +1380,41 @@ func TestPolicyReloadCutsAreNoBlocks(t *testing.T) {
 	}
 }
 
+// A settings reload, or a global provider profile import (another
+// sandbox's), drops the transparent mappings of the names a running sandbox
+// looked up: its harness's next model connection was denied
+// (transparent_tcp_mapping_denied) and read as DefenseClaw blocking the
+// model host, a site blocked in the session's summary, while the call was
+// retried and worked (GAP-0379). It is audited as the end of a connection
+// the client makes again; past the reload's window the denial is a block.
+func TestAMappingDenialAfterAReloadIsNoBlock(t *testing.T) {
+	r := newReachEnv(t)
+	denied := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> bedrock-mantle.us-east-1.api.aws:443 [reason:transparent_tcp_mapping_denied]"
+	blocks := func() (int, int) {
+		return len(r.events(r.name, sandboxapi.ActivityEgressBlocked, "")), r.get(r.name).Egress.Blocked
+	}
+	r.line("CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:7 new_revision:7 policy_changed:false provider_env_changed:true]")
+	r.advance(10 * time.Second)
+	r.line(denied)
+	cut := where(&r.tel.mu, &r.tel.egress, func(ev audit.SandboxEgressEvent) bool {
+		return !ev.Blocked && ev.Terminated && ev.DecisionCode == "SANDBOX_EGRESS_TERMINATED" && strings.Contains(ev.Reason, "mapped the sandbox's names again")
+	})
+	if lines, n := blocks(); lines != 0 || n != 0 || len(cut) != 1 {
+		t.Fatalf("after a reload: feed %d, blocked %d, audited cuts %d; want the denial audited only", lines, n, len(cut))
+	}
+	r.advance(reloadMappingWindow)
+	r.line(denied)
+	if lines, n := blocks(); lines != 1 || n != 1 {
+		t.Fatalf("past the reload's window: feed %d, blocked %d; want a block", lines, n)
+	}
+	r.m.beforeGlobalImport(t.Context(), "defenseclaw-test-profile")
+	r.advance(time.Second)
+	r.line(denied)
+	if lines, n := blocks(); lines != 1 || n != 1 {
+		t.Fatalf("after a global profile import: feed %d, blocked %d; want no new block", lines, n)
+	}
+}
+
 // Denials of this install's own ports are no blocked sites, also without
 // the mapping record, which after a restart comes from the sandbox record.
 func TestOwnPortDenialsAreNoBlocks(t *testing.T) {
