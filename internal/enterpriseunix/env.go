@@ -161,6 +161,9 @@ const (
 	TrustAdminFile TrustKind = iota
 	// TrustRuntimeDir is a directory the service account may own.
 	TrustRuntimeDir
+	// TrustRulePack is an administrator rule pack: its folders above, and
+	// every folder and file in it (see rulePackTrust).
+	TrustRulePack
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -372,6 +375,8 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedFilePath(path, "managed file")
 	case TrustRuntimeDir:
 		return managed.ValidateTrustedRuntimeDir(path, "managed runtime directory")
+	case TrustRulePack:
+		return rulePackTrust(path)
 	}
 	return fmt.Errorf("unknown trust kind %d", kind)
 }
