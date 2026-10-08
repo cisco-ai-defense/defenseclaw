@@ -34,12 +34,18 @@ import (
 const llmBaseURLProviderName = "custom-gateway"
 
 // buildGenerationProviders is a generation's LLM provider registry: the
-// embedded providers.json, a legacy operator overlay that config has not
-// absorbed yet (configs.LoadProviders skips a derived one), then
-// llm_providers from config, then llm.base_url's host when nothing above
-// knows it.
+// embedded providers.json, the legacy operator overlay for non-managed
+// profiles (configs.LoadProviders skips a derived one), then llm_providers
+// from config, then llm.base_url's host when nothing above knows it.
+// Managed v9 uses only config.yaml additions (GAP-0443).
 func buildGenerationProviders(cfg *config.Config) (*generationProviders, error) {
-	reg, err := configs.LoadProviders()
+	var reg *configs.ProvidersConfig
+	var err error
+	if cfg != nil && cfg.ConfigVersion == config.ConfigVersionV9 && cfg.StandaloneEnterprise() {
+		reg, err = configs.LoadEmbeddedProviders()
+	} else {
+		reg, err = configs.LoadProviders()
+	}
 	if err != nil || reg == nil {
 		reg = &configs.ProvidersConfig{}
 	}

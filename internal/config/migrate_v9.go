@@ -2699,11 +2699,23 @@ func (m *v9Migrator) appendAssetRule(root *yaml.Node, row v9ActionRow, list stri
 func (m *v9Migrator) addAssetRule(root *yaml.Node, origin, from string, row v9ActionRow, list, name, connector string) {
 	target := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "asset_policy"), row.targetType), list)
 	for _, existing := range v9SeqItems(target) {
-		if yamlScalarValue(v8YAMLMapValue(existing, "name")) == name &&
-			yamlScalarValue(v8YAMLMapValue(existing, "connector")) == connector {
-			m.moved(origin, from, "asset_policy."+row.targetType+"."+list, name)
-			return
+		if yamlScalarValue(v8YAMLMapValue(existing, "name")) != name ||
+			yamlScalarValue(v8YAMLMapValue(existing, "connector")) != connector {
+			continue
 		}
+		// An allow pinned to another path is a distinct rule. A name-only
+		// comparison would drop it and then clear its audit install action.
+		if list == "allowed" && row.targetType != AdmissionTypeTool {
+			paths := v9SeqItems(v8YAMLMapValue(existing, "source_path_contains"))
+			if row.sourcePath == "" && len(paths) != 0 {
+				continue
+			}
+			if row.sourcePath != "" && (len(paths) != 1 || yamlScalarValue(paths[0]) != row.sourcePath) {
+				continue
+			}
+		}
+		m.moved(origin, from, "asset_policy."+row.targetType+"."+list, name)
+		return
 	}
 	item := v9Mapping("name", v9Scalar(name))
 	if connector != "" {
