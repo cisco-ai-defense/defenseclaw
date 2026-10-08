@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -828,6 +829,22 @@ def test_audit_check_and_repair_plan_reject_world_readable_database(tmp_path) ->
     assert result.checks[0]["remediation"] == f"chmod 600 {cfg.audit_db}"
     assert planned.state == "blocked"
     assert planned.blockers == ("audit-db-custody-invalid",)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
+def test_doctor_fix_makes_an_exposed_device_key_private(tmp_path) -> None:
+    # GAP-0560: doctor named the exposed device.key but no repair fixed it.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    key = data_dir / "device.key"
+    key.write_bytes(b"k" * 32)
+    os.chmod(key, 0o640)
+    rows = _DoctorResult()
+    cmd_doctor._check_private_file_exposure(cfg, rows)
+    assert "doctor --fix --yes" in rows.checks[-1]["remediation"]
+    assert cmd_doctor._fix_private_state_files(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_private_state_files(cfg, assume_yes=True)[0] == "pass"
+    assert stat.S_IMODE(os.lstat(key).st_mode) == 0o600
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode exposure")
