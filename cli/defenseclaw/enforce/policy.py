@@ -90,10 +90,20 @@ class PolicyEngine:
     def is_allowed(self, target_type: str, name: str) -> bool:
         return self.is_allowed_for_connector(target_type, name, "")
 
-    def is_blocked_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
+    def is_blocked_for_connector(
+        self, target_type: str, name: str, connector: str = "", *,
+        source_path: str = "", url: str = "", command: str = "",
+        args: list[str] | None = None, transport: str = "",
+    ) -> bool:
         if self._legacy_rows():
             return self._journal_install_is(target_type, name, connector, "block")
-        return self._operator_decision(target_type, name, connector) == asset_lists.LIST_DENY
+        if target_type == "tool":
+            return self._operator_decision(target_type, name, connector) == asset_lists.LIST_DENY
+        return asset_lists.list_decision(
+            self._asset_policy(), target_type, name, connector,
+            source_path=source_path, url=url, command=command, args=args or [],
+            transport=transport,
+        )[0] == asset_lists.LIST_DENY
 
     def is_allowed_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
         if self._legacy_rows():
