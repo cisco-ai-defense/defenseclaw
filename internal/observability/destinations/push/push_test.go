@@ -27,8 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 )
 
 type capturedRequest struct {
@@ -369,6 +372,80 @@ func TestSplunkHECMultiRecordWireStaysWithinConservativeEstimate(t *testing.T) {
 	}
 }
 
+func TestHEC503RetainsBatchAcrossBackoffUntilRecovery(t *testing.T) {
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var times []time.Time
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		mu.Lock()
+		times = append(times, time.Now())
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		if calls.Add(1) <= 3 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(writer, "busy")
+			return
+		}
+		_, _ = io.WriteString(writer, `{"code":0}`)
+	}))
+	defer server.Close()
+	adapter, err := NewSplunkHEC(context.Background(), SplunkHECConfig{
+		Destination: "hec-retry", Endpoint: server.URL, Token: "test-token",
+		Network: NetworkOptions{AllowPrivateNetworks: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := config.ObservabilityV8EffectiveDestination{
+		Name: "hec-retry", Kind: config.ObservabilityV8DestinationSplunkHEC,
+		Transport: config.ObservabilityV8TransportPlan{
+			Batch: &config.ObservabilityV8BatchSource{
+				MaxQueueSize: 32, MaxQueueBytes: 4_198_400,
+				MaxExportBatchSize: 1, MaxExportBatchBytes: 4_263_936,
+				ScheduledDelayMS: 1,
+			},
+		},
+	}
+	compiled, ok := observabilityruntime.CompiledDispatcherConfig(
+		destination, 1, observability.SignalLogs, nil,
+	)
+	if !ok || compiled.Retry.MaxAttempts < 4 || compiled.Retry.InitialBackoff < time.Second {
+		t.Fatalf("HEC retry policy does not retain a 503 batch: %+v, ok=%t", compiled.Retry, ok)
+	}
+	compiled.Retry.Jitter = func(delay time.Duration, _ int) time.Duration { return delay / 2 }
+	dispatcher, err := delivery.NewDispatcher(compiled, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.Activate()
+	if result := dispatcher.Enqueue(projectedPayload(t, "hec-retry-record", `{"record_id":"hec-retry-record"}`)); !result.Accepted() {
+		t.Fatalf("enqueue = %+v", result)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := dispatcher.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(times) != 4 || dispatcher.Counters().Delivered != 1 || dispatcher.Counters().Dropped != 0 {
+		t.Fatalf("HEC attempts=%d counters=%+v", len(times), dispatcher.Counters())
+	}
+	for index := 1; index < len(times); index++ {
+		if times[index].Sub(times[index-1]) < time.Duration(1<<(index-1))*time.Second-time.Millisecond*100 {
+			t.Fatalf("HEC retries were too close: %v", times)
+		}
+		if bodies[index] != bodies[0] {
+			t.Fatal("retry changed the immutable HEC batch")
+		}
+	}
+}
+
 func TestStatusAndHECAcknowledgementClassifications(t *testing.T) {
 	statusTests := map[int]delivery.DeliveryResult{
 		200: {Outcome: delivery.OutcomeDelivered},
@@ -439,9 +516,9 @@ func TestAdaptersCloseResponseBodiesOnSuccessAndFailure(t *testing.T) {
 		wantCode  delivery.FailureCode
 	}{
 		{"http success", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 204, "ignored", 1, 0, ""},
-		{"http failure", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 500, "secret failure body", 0, 1, delivery.FailureCodeHTTPRetryable},
+		{"http failure", httpAdapter, func(client *http.Client) { httpAdapter.client = client }, 500, "secret failure body", 0, 0, delivery.FailureCodeHTTPRetryable},
 		{"hec success", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 200, `{"code":0}`, 1, 0, ""},
-		{"hec failure", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 500, "secret failure body", 0, 1, delivery.FailureCodeHTTPRetryable},
+		{"hec failure", hecAdapter, func(client *http.Client) { hecAdapter.client = client }, 500, "secret failure body", 0, 0, delivery.FailureCodeHTTPRetryable},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -455,7 +532,8 @@ func TestAdaptersCloseResponseBodiesOnSuccessAndFailure(t *testing.T) {
 			counters, health := deliverBatchHealth(
 				t, "body-close-"+string(rune('a'+index)), test.adapter, `{"record_id":"one"}`,
 			)
-			if counters.Delivered != test.delivered || counters.Rejected != test.rejected {
+			if counters.Delivered != test.delivered || counters.Rejected != test.rejected ||
+				(test.status == 500 && counters.Dropped != 1) {
 				t.Fatalf("counters=%+v", counters)
 			}
 			if health.LastFailureCode != test.wantCode {
@@ -806,7 +884,7 @@ func TestTimeoutAfterServerReceivesBodyTerminatesAmbiguousAttempt(t *testing.T) 
 	if err := dispatcher.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if counters := dispatcher.Counters(); counters.Rejected != 1 {
+	if counters := dispatcher.Counters(); counters.Dropped != 1 {
 		t.Fatalf("counters=%+v", counters)
 	}
 	if err := dispatcher.Close(ctx); err != nil {

@@ -7387,6 +7387,23 @@ def _omnigent_runtime_readiness(cfg, *, config_path: str | None = None) -> tuple
     return _omnigent_live_config_evidence(config_path)
 
 
+def _omnigent_tmux_requirement() -> str:
+    """Report the managed terminal prerequisite without inspecting user sessions."""
+    if os.name == "nt":
+        return ""
+    binary = shutil.which("tmux")
+    if not binary:
+        return "; managed terminals require tmux 3.3 or newer (tmux is missing)"
+    try:
+        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "; managed terminals require tmux 3.3 or newer (version unavailable)"
+    match = re.search(r"tmux (\d+)\.(\d+)", result.stdout)
+    if not match or tuple(map(int, match.groups())) < (3, 3):
+        return "; managed terminals require tmux 3.3 or newer (RHEL 9 ships 3.2a)"
+    return ""
+
+
 def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
     """Verify managed artifacts and bind them to the live server config."""
     locations, lock_detail = _omnigent_lock_locations(cfg)
@@ -7476,12 +7493,13 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
             _emit("fail", "OmniGent policy", drift, r=r)
             return
     live_status, live_detail = _omnigent_runtime_readiness(cfg, config_path=config_path)
+    tmux_requirement = _omnigent_tmux_requirement()
     # The module and .pth shim were verified above, so the row names only the
     # live-server state and what to do about it.
     _emit(
-        "warn" if live_status == "bound" else live_status,
+        "warn" if live_status == "bound" or tmux_requirement else live_status,
         "OmniGent policy",
-        f"native-degraded; {live_detail}",
+        f"native-degraded; {live_detail}{tmux_requirement}",
         r=r,
         remediation=(
             "start or restart the OmniGent server so it loads the DefenseClaw policy, then rerun "
@@ -10018,6 +10036,11 @@ def _check_observability_v8_status(
             if live.display_reason:
                 detail += f"/{live.display_reason}"
             detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
+            if destination.kind == "splunk_hec" and live.last_error_class in {"http_rejected", "hec_ack_rejected"}:
+                detail += (
+                    "; HEC rejected an event: check that the index exists and the token can write to it; "
+                    f"run defenseclaw observability destination test {shlex.quote(destination.name)} --write-probe"
+                )
             if live_state == "unavailable" and destination.kind != "sqlite":
                 tag = "warn"
             elif live_state in {"degraded", "initializing", "draining"}:
@@ -10026,7 +10049,7 @@ def _check_observability_v8_status(
                 tag = "fail"
             if live.circuit_state == "half_open":
                 tag = "warn"
-                detail += "; one bounded recovery probe is in progress"
+                detail += "; awaiting or running one bounded recovery probe"
             local_stack_stopped = _local_observability_stack_stopped(destination, live, tag)
             if local_stack_stopped:
                 # Nothing to repair: the bundled stack is not running, and
@@ -10040,7 +10063,7 @@ def _check_observability_v8_status(
                     "unsafe_endpoint",
                 }:
                     tag = "fail"
-                elif tag == "pass":
+                else:
                     tag = "warn"
                 destination_arg = shlex.quote(destination.name)
                 detail += (

@@ -1023,7 +1023,18 @@ def _request_over_socket(
             return
         if inspect_hec:
             if not 200 <= status < 300:
-                raise DestinationTestError("remote_rejected", "the destination rejected the synthetic probe")
+                if status == 400:
+                    encoded = response.read(_MAX_RESPONSE_BODY + 1)
+                    if len(encoded) <= _MAX_RESPONSE_BODY:
+                        try:
+                            rejection = json.loads(encoded)
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            rejection = None
+                        if isinstance(rejection, dict) and rejection.get("code") == 7:
+                            raise DestinationTestError(
+                                "remote_rejected", "HEC rejected the index (code 7); check the configured --index"
+                            )
+                raise DestinationTestError("remote_rejected", f"HEC rejected the synthetic probe (HTTP {status})")
             encoded = response.read(_MAX_RESPONSE_BODY + 1)
             if len(encoded) > _MAX_RESPONSE_BODY:
                 raise DestinationTestError("remote_rejected", "the destination returned an invalid acknowledgement")

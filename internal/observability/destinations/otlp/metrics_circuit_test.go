@@ -440,11 +440,11 @@ func TestMetricLocalOversizeDoesNotAdvanceOrStrandCircuit(t *testing.T) {
 		t.Fatalf("local oversize error=%v", err)
 	}
 	afterLocal := exporter.deliveryHealthSnapshot()
-	if afterLocal.CircuitState != delivery.CircuitOpen ||
+	if afterLocal.CircuitState != delivery.CircuitHalfOpen ||
 		afterLocal.ConsecutiveFailures != 1 ||
 		afterLocal.LastFailureClass != delivery.FailureClassAuthentication ||
 		!afterLocal.CircuitOpenUntil.Equal(opened.CircuitOpenUntil) ||
-		afterLocal.Reason != string(delivery.HealthReasonDeliveryFailed) {
+		afterLocal.Reason != string(delivery.HealthReasonCircuitHalfOpen) {
 		t.Fatalf("local oversize changed destination circuit=%+v", afterLocal)
 	}
 	if inner.calls.Load() != 1 || exporter.Counters().RejectedOversize != 1 {
