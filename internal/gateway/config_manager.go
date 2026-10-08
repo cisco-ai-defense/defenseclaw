@@ -965,7 +965,10 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if recorded {
 		m.appliedGeneration, m.appliedGenerationKnown = appliedGeneration, true
 	}
-	if m.logger != nil {
+	// Rebuilding a referenced asset does not change config.yaml. Secure
+	// Client keeps its legacy reload action; other profiles must not emit
+	// a config.change.applied record for the previous writer.
+	if m.logger != nil && (next.SecureClientIntegration() || !bytes.Equal(m.appliedRaw, source.raw)) {
 		if recorded && !next.SecureClientIntegration() {
 			_ = m.logger.LogActivity(activity)
 		} else {
