@@ -1839,6 +1839,12 @@ func (a *APIServer) hookLifecycleSnapshot(source, sessionID, agentID string) (ll
 // identity constraint; only a caller without one may select the shallowest
 // retained agent for that conversation.
 func (a *APIServer) hookSessionStateSnapshot(source, sessionID, agentID string) (hookSessionState, bool) {
+	return a.hookSessionStateSnapshotMatching(source, sessionID, agentID, nil)
+}
+
+// A parent lookup filters candidates before choosing the shallowest retained
+// agent. Session IDs are caller-supplied and can overlap across identities.
+func (a *APIServer) hookSessionStateSnapshotMatching(source, sessionID, agentID string, child *llmEventMeta) (hookSessionState, bool) {
 	if a == nil || strings.TrimSpace(source) == "" || strings.TrimSpace(sessionID) == "" {
 		return hookSessionState{}, false
 	}
@@ -1846,7 +1852,8 @@ func (a *APIServer) hookSessionStateSnapshot(source, sessionID, agentID string) 
 	defer a.llmPromptMu.Unlock()
 	if agentID != "" {
 		key := hookSessionStateKey(llmEventMeta{Source: source, SessionID: sessionID, AgentID: agentID})
-		if snapshot, ok := a.hookSessionStates[key]; ok {
+		if snapshot, ok := a.hookSessionStates[key]; ok &&
+			(child == nil || sameHookIdentity(snapshot.meta, *child)) {
 			return snapshot, true
 		}
 		return hookSessionState{}, false
@@ -1855,7 +1862,8 @@ func (a *APIServer) hookSessionStateSnapshot(source, sessionID, agentID string) 
 	found := false
 	for i := len(a.hookSessionStateOrder) - 1; i >= 0; i-- {
 		snapshot, ok := a.hookSessionStates[a.hookSessionStateOrder[i]]
-		if !ok || snapshot.meta.Source != source || snapshot.meta.SessionID != sessionID {
+		if !ok || snapshot.meta.Source != source || snapshot.meta.SessionID != sessionID ||
+			(child != nil && !sameHookIdentity(snapshot.meta, *child)) {
 			continue
 		}
 		if !found || snapshot.meta.AgentDepth < selected.meta.AgentDepth {
@@ -1876,12 +1884,12 @@ func (a *APIServer) reconcileHookParent(meta llmEventMeta) llmEventMeta {
 		return meta
 	}
 	parentSessionID := firstNonEmpty(meta.ParentSessionID, meta.SessionID)
-	snapshot, ok := a.hookSessionStateSnapshot(meta.Source, parentSessionID, meta.ParentAgentID)
+	snapshot, ok := a.hookSessionStateSnapshotMatching(meta.Source, parentSessionID, meta.ParentAgentID, &meta)
 	if !ok && strings.TrimSpace(meta.ParentSessionID) != "" && !meta.ParentAgentReported {
 		// Some native connectors provide only parent_session_id. In that case,
 		// and only that case, resolve the shallowest retained agent in the
 		// explicitly named parent conversation.
-		snapshot, ok = a.hookSessionStateSnapshot(meta.Source, parentSessionID, "")
+		snapshot, ok = a.hookSessionStateSnapshotMatching(meta.Source, parentSessionID, "", &meta)
 	}
 	if !ok {
 		return meta
