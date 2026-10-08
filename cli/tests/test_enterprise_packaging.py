@@ -1209,7 +1209,10 @@ def test_linux_preremove_keeps_its_result_only_when_the_uninstall_failed(tmp_pat
 @pytest.mark.parametrize("secret_rc", [0, 75])
 def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_path: Path, os_dir: str, secret_rc: int) -> None:
     wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
-    functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_run_lifecycle", "dc_main"))
+    functions = "\n".join(
+        _shell_function(wrapper, name)
+        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_binaries_damaged", "dc_main")
+    )
     log = tmp_path / "calls.log"
     gateway = tmp_path / "defenseclaw-gateway"
     gateway.write_text(f"""#!/bin/sh
@@ -1231,6 +1234,7 @@ dc_validate_args() {{ :; }}
 id() {{ echo 0; }}
 mktemp() {{ command mktemp -d '{tmp_path}/stage.XXXXXX'; }}
 dc_cleanup() {{ :; }}
+dc_sweep_stages() {{ :; }}
 dc_stat_uid() {{ echo 0; }}
 dc_log() {{ :; }}
 dc_trusted_path() {{ :; }}
