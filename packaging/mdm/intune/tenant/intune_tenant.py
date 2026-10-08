@@ -757,9 +757,6 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
         matching = [a for a in existing if a.get("target", {}).get("groupId") == group["id"]]
         if len(matching) > 1:
             raise SystemExit(f"error: {len(matching)} assignments target {args.group!r}; resolve them in Intune")
-        if matching and args.daily_at is None:
-            print(f"{args.name} assignment to {args.group}: unchanged")
-            return 0
         at = args.daily_at or "02:00"
         schedule = {
             "@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
@@ -767,21 +764,23 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             "time": at + ":00",
             "useUtc": False,
         }
+        if matching and args.daily_at is None:
+            schedule = matching[0].get("runSchedule") or schedule
         wanted = {
-            "target": {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
+            "target": matching[0]["target"] if matching else {"@odata.type": GROUP_TARGET, "groupId": group["id"]},
             "runRemediationScript": True,
             "runSchedule": schedule,
         }
-        if matching and matching[0].get("runSchedule") == schedule:
+        if matching and all(matching[0].get(key) == value for key, value in wanted.items()):
             print(f"{args.name} assignment to {args.group}: unchanged")
         elif not args.apply or script_id is None:
-            print(f"[plan] would assign {args.name!r} to group {args.group}, daily at {at}")
+            print(f"[plan] would assign {args.name!r} to group {args.group} with remediation enabled")
         else:
             keep = [{k: a[k] for k in ("target", "runRemediationScript", "runSchedule") if k in a} for a in kept]
             graph.request(
                 "POST", f"{collection}/{script_id}/assign", {"deviceHealthScriptAssignments": keep + [wanted]}
             )
-            print(f"assigned {args.name!r} to group {args.group}, daily at {at}")
+            print(f"assigned {args.name!r} to group {args.group} with remediation enabled")
     if not args.apply:
         print("Nothing was changed. Run again with --apply to make these changes.")
     return 0

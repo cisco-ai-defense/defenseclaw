@@ -1341,3 +1341,35 @@ def test_intune_remediation_rerun_uploads_changed_default_scripts(monkeypatch: p
     assert writes == [("PATCH", "/beta/deviceManagement/deviceHealthScripts/script-1",
                        {"detectionScriptContent": intune.b64(scripts["Remediate-Detect.ps1"]),
                         "remediationScriptContent": intune.b64(scripts["Remediate-Fix.ps1"])})]
+
+
+def test_intune_remediation_reenables_detection_only_assignment(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
+    writes = []
+    old = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
+           "runRemediationScript": False,
+           "runSchedule": {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
+                           "interval": 1, "time": "03:00:00", "useUtc": False}}
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [old]
+            return [{"id": "script-1"}]
+
+        def get(self, _path):
+            return {"detectionScriptContent": intune.b64(b"script"),
+                    "remediationScriptContent": intune.b64(b"script")}
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
+    assert intune.cmd_remediation(Graph(), args) == 0
+    assert len(writes) == 1
+    assert writes[0][2]["deviceHealthScriptAssignments"][0]["runRemediationScript"] is True
+    assert writes[0][2]["deviceHealthScriptAssignments"][0]["runSchedule"] == old["runSchedule"]
