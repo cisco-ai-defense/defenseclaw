@@ -506,8 +506,33 @@ func noteWindowsEnterpriseMigration(opts *windowsEnterpriseLifecycleOptions, bef
 		return
 	}
 	var record config.MigrationRecord
-	if json.Unmarshal(trimWindowsJSONBOM(after), &record) == nil && record.ActionsRowsIgnored > 0 {
-		opts.localEnforcementEntriesIgnored = record.ActionsRowsIgnored
+	if json.Unmarshal(trimWindowsJSONBOM(after), &record) != nil {
+		return
+	}
+	opts.localEnforcementEntriesIgnored = record.ActionsRowsIgnored
+	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
+		opts.configMigration = &record
+		opts.configMigrationPath = layout.ConfigPath
+	}
+}
+
+// addWindowsEnterpriseMigrationChange says in changes what a migration in
+// this run wrote, as the Unix lifecycle does; the Windows result had only an
+// ensure_upgrade drift:config warning (GAP-0472). Values that disagreed are
+// a warning: migration-v9.json lists what was kept and what was lost.
+func addWindowsEnterpriseMigrationChange(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	migration := opts.configMigration
+	if migration == nil || len(result.Errors) != 0 {
+		return
+	}
+	path := opts.configMigrationPath
+	result.Changes = append(result.Changes, fmt.Sprintf(
+		"migrated %s to config_version 9 (%d values moved, %d conflicts; the v8 file is kept as %s%s, the --config a rollback to a config_version 8 release needs)",
+		path, len(migration.Moved), len(migration.Conflicts), path, config.ConfigV8BackupSuffix))
+	if len(migration.Conflicts) != 0 {
+		result.AddWarning("config_migration_conflicts", fmt.Sprintf(
+			"%d values disagreed while migrating %s to config_version 9; %s lists what was kept and what was lost",
+			len(migration.Conflicts), path, config.MigrationRecordPath(path)))
 	}
 }
 
@@ -1365,6 +1390,7 @@ func finishWindowsEnterpriseStandalone(
 	failureCode int,
 ) error {
 	applyWindowsStandaloneScannerRuntime(result, opts)
+	addWindowsEnterpriseMigrationChange(result, opts)
 	if opts.localEnforcementEntriesIgnored > 0 {
 		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
 			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",

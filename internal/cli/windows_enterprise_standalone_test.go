@@ -2101,6 +2101,7 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 		}
 		return windowsEnterpriseStandaloneRun{Output: []byte(`{"schema_version":1,"ok":true,"action":"upgrade"}`)}, nil
 	}
+	var changes []string
 	ignored := func() []enterprisestatus.Message {
 		opts := &windowsEnterpriseLifecycleOptions{jsonOutput: true}
 		if _, _, err := runWindowsEnterpriseStandaloneInstaller(context.Background(), &cobra.Command{}, opts,
@@ -2111,6 +2112,7 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 		command.SetOut(&bytes.Buffer{})
 		result := newWindowsEnterpriseStandaloneResult("upgrade", opts)
 		_ = finishWindowsEnterpriseStandalone(command, opts, result, 0)
+		changes = result.Changes
 		var found []enterprisestatus.Message
 		for _, warning := range result.Warnings {
 			if warning.Code == config.LocalEnforcementEntriesIgnored {
@@ -2123,9 +2125,13 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 	if got := ignored(); len(got) != 1 || !strings.HasPrefix(got[0].Message, "2 local block/allow entries in audit.db are ignored") {
 		t.Fatalf("migrating run warnings = %+v", got)
 	}
+	// GAP-0472: the result says what the migration wrote, as on Linux.
+	if len(changes) != 1 || !strings.HasPrefix(changes[0], "migrated "+configPath+" to config_version 9") {
+		t.Fatalf("migrating run changes = %q", changes)
+	}
 	migrate = false
-	if got := ignored(); len(got) != 0 {
-		t.Fatalf("a run that migrated nothing warned %+v", got)
+	if got := ignored(); len(got) != 0 || len(changes) != 0 {
+		t.Fatalf("a run that migrated nothing warned %+v or changed %q", got, changes)
 	}
 }
 
