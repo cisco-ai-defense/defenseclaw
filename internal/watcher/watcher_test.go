@@ -1280,6 +1280,41 @@ func TestScanCutOffByTheWatcherStoppingDoesNotQuarantine(t *testing.T) {
 	}
 }
 
+// failingScanner fails every scan the way a crashed scanner does.
+type failingScanner struct{ countingScanner }
+
+func (s *failingScanner) Scan(context.Context, string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return nil, fmt.Errorf("%s exited 1", s.name)
+}
+
+// GAP-0662, GAP-0825: a scan that fails blocks the asset and disables it at
+// runtime for its connector, as a rejected verdict does: the hook refuses a
+// blocked MCP server, and a skill the gateway could not move out does not
+// load. The next scan that succeeds releases it.
+func TestScanFailureDisablesTheAssetAtRuntime(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
+	evt := InstallEvent{Type: InstallMCP, Name: "notes", Path: "mcp:codex:notes", Connector: "codex", Timestamp: time.Now()}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked || res.RuntimeAction != "block" {
+		t.Fatalf("failed scan: result %+v, want blocked with a runtime block", res)
+	}
+	entry, err := store.GetActionForConnector("mcp", "notes", "codex")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" {
+		t.Fatalf("journal %+v (err %v), want install block and runtime disable for codex", entry, err)
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+	if res := w.runAdmission(context.Background(), evt); res.Verdict == VerdictBlocked {
+		t.Fatalf("clean scan: result %+v, want the block released", res)
+	}
+	if entry, err := store.GetActionForConnector("mcp", "notes", "codex"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
+		t.Fatalf("journal after a clean scan %+v (err %v), want no block", entry, err)
+	}
+}
+
 // gateScanner holds every scan until release is closed and records the
 // largest number of scans that ran at once.
 type gateScanner struct {

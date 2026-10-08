@@ -1324,10 +1324,16 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		// Treat scanner failures as fail-closed: enforce a block
 		// (which quarantines + disables per fallback policy) before
 		// surfacing the verdict to the sidecar.
-		reason := fmt.Sprintf("scanner failure (fail-closed): %v", err)
-		if w.secureClientActive() {
+		reason := scanFailureReason + err.Error()
+		secureClient := w.secureClientActive()
+		if secureClient {
 			w.enforceBlock(ctx, evt)
 		} else {
+			// Block and disable it at runtime as a rejected verdict does,
+			// before the move that may fail: a blocked MCP server stayed
+			// callable and a skill the gateway could not read or move
+			// still loaded (GAP-0662, GAP-0825).
+			w.recordScanFailureBlock(evt, targetType, reason)
 			// The reason goes on the quarantine record (skill info) and
 			// in an alert, not only in gateway.log (GAP-0376).
 			w.enforceBlockWith(ctx, evt, true, reason)
@@ -1347,8 +1353,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			Reason:        reason,
 			InstallAction: "block",
 		}
+		if !secureClient {
+			res.RuntimeAction = "block"
+		}
 		return res
 	}
+	w.releaseScanFailureBlock(evt, targetType)
 
 	// Phase 3: post-scan evaluation. Re-read the live config so a block or
 	// allow added while the scan was running wins.
@@ -1771,6 +1781,41 @@ func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	w.enforceBlockWith(ctx, evt, true, "")
 }
 
+// scanFailureReason leads the journal reason of an asset blocked and
+// disabled because its scan failed; the next scan that succeeds releases
+// that block and its verdict decides (releaseScanFailureBlock).
+const scanFailureReason = "scanner failure (fail-closed): "
+
+// recordScanFailureBlock journals the install block and runtime disable of
+// an asset whose scan failed, for the connector that holds it.
+func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, reason string) {
+	if w.store == nil {
+		return
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", reason)
+	_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "runtime", "disable", reason)
+	_ = w.store.SetSourcePathForConnector(targetType, evt.Name, scope, evt.Path)
+}
+
+// releaseScanFailureBlock clears the block and runtime disable a failed scan
+// of this asset left, once a scan of it succeeds. The Secure Client profile
+// journals no such block.
+func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType string) {
+	if w.secureClientActive() || w.store == nil {
+		return
+	}
+	scope := w.journalScope(w.eventConnector(evt))
+	entry, err := w.store.GetActionForConnector(targetType, evt.Name, scope)
+	if err != nil || entry == nil || !strings.HasPrefix(entry.Reason, scanFailureReason) ||
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
+		return
+	}
+	for _, field := range []string{"runtime", "install"} {
+		_ = w.store.ClearActionFieldForConnector(targetType, evt.Name, scope, field)
+	}
+}
+
 // quarantineFailedReason and errLinkRemoved lead the journal reason of a
 // blocked asset the watcher could not move into quarantine storage, and of a
 // linked one it took out of the folder; skill list and skill info show them
@@ -2165,11 +2210,12 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 		if entry.Actions.File != "" {
 			return false
 		}
-		// A block whose quarantine move failed, or whose link the watcher
-		// removed, was never restored by an operator: a copy that shows up
-		// again is quarantined (GAP-0394 keeps file=quarantine off the
-		// journal until the move succeeds).
-		if strings.HasPrefix(entry.Reason, quarantineFailedReason) || strings.HasPrefix(entry.Reason, errLinkRemoved.Error()) {
+		// A block whose quarantine move failed, whose link the watcher
+		// removed, or whose scan failed was never restored by an operator: a
+		// copy that shows up again is quarantined (GAP-0394 keeps
+		// file=quarantine off the journal until the move succeeds).
+		if strings.HasPrefix(entry.Reason, quarantineFailedReason) || strings.HasPrefix(entry.Reason, errLinkRemoved.Error()) ||
+			strings.HasPrefix(entry.Reason, scanFailureReason) {
 			return false
 		}
 		if entry.SourcePath != "" && sameWatcherPath(entry.SourcePath, evt.Path) {
