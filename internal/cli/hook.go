@@ -162,12 +162,9 @@ func newHookSessionFactsCmd() *cobra.Command {
 		Use:         "session-facts",
 		Short:       "Print this session's claimed session facts (invoked by the shell hooks)",
 		Hidden:      true,
-		Annotations: map[string]string{secureClientAbsentAnnotation: "session-facts"},
+		Annotations: map[string]string{secureClientAbsentAnnotation: "true"},
 		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if secureClientHost() {
-				return fmt.Errorf("unknown command %q for %q", "session-facts", "hook")
-			}
 			_, err := io.WriteString(cmd.OutOrStdout(), useridentity.CurrentSessionFactsHeader())
 			return err
 		},

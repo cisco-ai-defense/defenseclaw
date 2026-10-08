@@ -21,8 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 func TestOpenCursorHookInputFile(t *testing.T) {
@@ -309,21 +307,5 @@ func TestNotifyCommandRegisteredAndHidden(t *testing.T) {
 	}
 	if err := cmd.Args(cmd, []string{`{"type":"agent-turn-complete"}`}); err != nil {
 		t.Errorf("notify command rejected one JSON payload argument: %v", err)
-	}
-}
-
-// Secure Client keeps main's hook command tree, where session-facts is absent.
-func TestSecureClientOmitsHookSessionFactsCommand(t *testing.T) {
-	previousHost := secureClientHost
-	t.Cleanup(func() { secureClientHost = previousHost })
-	secureClientHost = func() bool { return true }
-	root := &cobra.Command{Use: "defenseclaw-gateway"}
-	hook := newHookCmd()
-	root.AddCommand(hook)
-	keepCommandTreeOfMainOnSecureClient(root)
-	for _, command := range hook.Commands() {
-		if command.Name() == "session-facts" {
-			t.Fatal("Secure Client exposes hook session-facts")
-		}
 	}
 }

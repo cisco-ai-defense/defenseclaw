@@ -378,9 +378,11 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	acpGroup.AddCommand(&cobra.Command{Use: "enroll"}, &cobra.Command{Use: "setup", Annotations: enterpriseACPSetupCmd.Annotations})
 	enterprise.AddCommand(group, acpGroup)
 	root.AddCommand(enterprise)
+	hook := newHookCmd()
+	root.AddCommand(hook)
 	secureClientHost = func() bool { return false }
 	keepCommandTreeOfMainOnSecureClient(root)
-	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 {
+	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || hook.Commands()[0].Name() != "session-facts" {
 		t.Fatalf("standalone groups have %d and %d commands, want the identity views and setup too", got, len(acpGroup.Commands()))
 	}
 	secureClientHost = func() bool { return true }
@@ -388,6 +390,9 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" ||
 		discovery.Flag("user").Usage != "list one account's signals (account name or SID)" {
 		t.Fatalf("Secure Client group = %v, --user %q, want discovery only with the usage of main", got, discovery.Flag("user").Usage)
+	}
+	if len(hook.Commands()) != 0 {
+		t.Fatal("Secure Client retained hook session-facts")
 	}
 	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
 		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
