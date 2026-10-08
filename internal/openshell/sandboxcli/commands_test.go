@@ -411,6 +411,17 @@ func TestUndo(t *testing.T) {
 				RefChanges: []workspace.RefChange{{Ref: "refs/heads/fix", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
 			want: []string{"revert  main.go", "reset HEAD (main) from bbbbbbb back to aaaaaaa", "restore 1 branch or tag: fix",
 				"stop box first (its harness session ends)"}},
+		// GAP-0225: under --keep-refs the plan said "restore" for the refs it
+		// keeps, and a run that changed only refs asked to restore nothing.
+		{name: "keep refs", input: "y\n", opts: UndoOptions{KeepRefs: true}, undos: 2,
+			undo: &workspace.UndoResult{HeadBefore: before, HeadAfter: after, BranchBefore: "main", BranchAfter: "main", RefsKept: true,
+				RefChanges: []workspace.RefChange{{Ref: "refs/tags/v7.7.7", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
+			want: []string{"keep 1 branch or tag: v7.7.7 (as the session left them: --keep-refs)", "keep HEAD as the session left it (--keep-refs)",
+				"left 1 branch or tag as the session made them (--keep-refs)"},
+			not: []string{"restore 1 branch or tag", "reset HEAD"}},
+		{name: "only refs under keep refs", opts: UndoOptions{KeepRefs: true}, undos: 1,
+			undo: &workspace.UndoResult{Preview: true, RefsKept: true, RefChanges: []workspace.RefChange{{Ref: "refs/heads/scratch/two", After: after}}},
+			want: []string{"nothing to undo", "--keep-refs leaves its 1 branch or tag as the session made them"}},
 		{name: "json restore", input: "y\n", opts: UndoOptions{Output: OutputJSON}, undos: 2, stopped: true,
 			want: []string{"revert  README.md", "stop box first (its harness session ends)", "Stop box and restore "}},
 		{name: "json declined", input: "n\n", opts: UndoOptions{Output: OutputJSON}, undos: 1, want: []string{"revert  README.md", "nothing changed"}},

@@ -132,6 +132,9 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 			return nil
 		}
 		a.ok("nothing to undo: " + o.Name + "'s folder matches its undo point")
+		if r := preview.Result; r != nil && r.RefsKept && len(r.RefChanges) > 0 {
+			a.note("--keep-refs leaves its " + plural(int64(len(r.RefChanges)), "branch or tag", "branches and tags") + " as the session made them")
+		}
 		return nil
 	}
 	a.printUndo(preview.Result, true)
@@ -183,6 +186,9 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 		a.note("stopped " + o.Name)
 	}
 	a.ok("restored: " + undoDone(res, "see above"))
+	if res.Result != nil && res.Result.RefsKept && len(res.Result.RefChanges) > 0 {
+		a.note("left " + plural(int64(len(res.Result.RefChanges)), "branch or tag", "branches and tags") + " as the session made them (--keep-refs)")
+	}
 	if res.Result != nil {
 		if c := res.Result.PostCommit; c != "" {
 			a.note("the session's state is kept in commit " + shortOID(c) + ": `git -C " + a.tildePath(firstNonEmpty(res.Result.Project, preview.Result.Project)) +
@@ -364,6 +370,8 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 		a.line("  " + undoVerb(c.Status) + " " + c.Path)
 	}
 	switch {
+	case r.RefsKept && (r.HeadBefore != r.HeadAfter || r.BranchBefore != r.BranchAfter):
+		a.line("  keep HEAD as the session left it (--keep-refs)")
 	case r.BranchBefore != "" && r.BranchBefore != r.BranchAfter:
 		a.line("  switch back to branch " + r.BranchBefore + " at " + firstNonEmpty(shortCommit(r.HeadBefore), "its undo point's commit"))
 	case r.HeadBefore != r.HeadAfter && r.HeadBefore != "":
@@ -379,7 +387,16 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 		for _, rc := range r.RefChanges {
 			refs = append(refs, strings.TrimPrefix(strings.TrimPrefix(rc.Ref, "refs/heads/"), "refs/tags/"))
 		}
-		a.line("  restore " + plural(int64(n), "branch or tag", "branches and tags") + ": " + strings.Join(firstN(refs, 6), ", "))
+		verb := "restore "
+		if r.RefsKept {
+			// --keep-refs leaves them as the session made them (GAP-0225).
+			verb = "keep "
+		}
+		line := "  " + verb + plural(int64(n), "branch or tag", "branches and tags") + ": " + strings.Join(firstN(refs, 6), ", ")
+		if r.RefsKept {
+			line += " (as the session left them: --keep-refs)"
+		}
+		a.line(line)
 	}
 	if n := len(r.ControlChanges); n > 0 {
 		a.line("  reset " + plural(int64(n), "git control file", "git control files") + ": " + strings.Join(firstN(r.ControlChanges, 6), ", "))

@@ -68,6 +68,9 @@ type UndoResult struct {
 	BranchBefore string      `json:"branch_before,omitempty"`
 	BranchAfter  string      `json:"branch_after,omitempty"`
 	RefChanges   []RefChange `json:"ref_changes,omitempty"`
+	// RefsKept is set when UndoOptions.KeepRefs leaves HEAD and RefChanges
+	// as the session made them.
+	RefsKept bool `json:"refs_kept,omitempty"`
 	// ControlChanges are agent-writable git control files that are reset.
 	ControlChanges []string `json:"control_changes,omitempty"`
 	// PinnedChanges are read-only-mounted git files that changed anyway,
@@ -106,9 +109,10 @@ type UndoResult struct {
 // Empty reports whether undo has nothing to put back: the folder matches
 // the snapshot, apart from any Unrestored changes.
 func (r *UndoResult) Empty() bool {
-	return len(r.Changes) == 0 && len(r.RefChanges) == 0 && len(r.ControlChanges) == 0 &&
-		len(r.NestedRepos) == 0 && len(r.LostObjects) == 0 &&
-		r.HeadBefore == r.HeadAfter && r.BranchBefore == r.BranchAfter && !r.removesIgnored()
+	// Under KeepRefs the branches, tags and HEAD stay as they are.
+	refs := r.RefsKept || (len(r.RefChanges) == 0 && r.HeadBefore == r.HeadAfter && r.BranchBefore == r.BranchAfter)
+	return len(r.Changes) == 0 && refs && len(r.ControlChanges) == 0 &&
+		len(r.NestedRepos) == 0 && len(r.LostObjects) == 0 && !r.removesIgnored()
 }
 
 // Unrestored are the changes undo cannot put back (see Ignored).
@@ -429,6 +433,7 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		res.Changes = append(res.Changes, c)
 	}
 	res.RefChanges = refChanges(gs.Refs, st.refs)
+	res.RefsKept = opts.KeepRefs
 	if res.ControlChanges, err = controlChanges(gs); err != nil {
 		return err
 	}
