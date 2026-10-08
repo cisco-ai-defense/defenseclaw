@@ -199,6 +199,26 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 // windowsScannerRuntimeReader is readWindowsScannerRuntime; a seam for tests.
 var windowsScannerRuntimeReader = readWindowsScannerRuntime
 
+// windowsScannerRuntimeACLCheck checks that only administrators and
+// LocalSystem can change the installed runtime root and executable; a seam
+// for tests, whose temporary folders are not.
+var windowsScannerRuntimeACLCheck = func(root, target string) error {
+	if err := managed.ValidateTrustedRuntimeDir(root, "scanner runtime"); err != nil {
+		return err
+	}
+	return managed.ValidateTrustedFilePath(target, "scanner runtime executable")
+}
+
+// windowsInstalledScannerRuntimeCheck is every check made before the
+// lifecycle runs the installed executable: its access control, then that it
+// is the one the payload trust policy admitted (GAP-0311).
+func windowsInstalledScannerRuntimeCheck(root, target string) error {
+	if err := windowsScannerRuntimeACLCheck(root, target); err != nil {
+		return err
+	}
+	return managed.CheckScannerRuntimeAdmitted(root, target)
+}
+
 // windowsScannerRuntimeServiceCheck checks the runtime the way the gateway
 // service runs it: the trust check every scan makes, and that the service
 // account can read the runtime folder and the security descriptors of its
@@ -237,15 +257,30 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 	if err != nil {
 		return err
 	}
-	if got, err := windowsEnterpriseFileSHA256(target); err != nil || got != want {
+	// The installed copy is kept only when it has the staged bytes and the
+	// record says they were admitted. Otherwise the staged copy is admitted,
+	// installed when the bytes differ (a copy changed in place is restored),
+	// and recorded: every later run of the installed executable checks it
+	// against that record first (GAP-0311).
+	got, gotErr := windowsEnterpriseFileSHA256(target)
+	admitted, _ := managed.ReadScannerRuntimeAdmission(root)
+	if gotErr != nil || got != want || admitted != want {
 		if err := admitWindowsScannerRuntimePayload(source, want, opts); err != nil {
 			return err
 		}
-		if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
-			return err
+		if gotErr != nil || got != want {
+			if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
+				return err
+			}
+		}
+		if err := managed.WriteScannerRuntimeAdmission(root, want); err != nil {
+			return fmt.Errorf("record the admitted scanner runtime: %w", err)
 		}
 	}
 	if err := managed.ValidateTrustedFilePath(target, "scanner runtime"); err != nil {
+		return err
+	}
+	if err := managed.CheckScannerRuntimeAdmitted(root, target); err != nil {
 		return err
 	}
 	// prepare is a no-op once the runtime is unpacked; prune drops the
@@ -306,6 +341,11 @@ func windowsEnterpriseResultHasWarning(result *enterprisestatus.Result, code str
 // ready blocks and what restores it.
 func windowsScannerRuntimeUnavailable(state string) string {
 	const blocked = "so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed)"
+	if state == "untrusted" {
+		return "the skill, MCP and plugin scanner runtime executable is not the one the payload trust policy admitted " +
+			"(it was changed or replaced outside DefenseClaw), so DefenseClaw does not run it, " + blocked +
+			"; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to restore the payload copy"
+	}
 	if state == "not_prepared" {
 		return "the skill, MCP and plugin scanner runtime is installed but not prepared, " + blocked +
 			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to prepare it"
@@ -323,7 +363,7 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 	if current.State == "ready" {
 		return
 	}
-	if current.State == "missing" {
+	if current.State == "missing" || current.State == "untrusted" {
 		result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(current.State))
 		result.Scanners = current
 		return
@@ -331,7 +371,7 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 	root, err := windowsScannerRuntimeDir()
 	if err == nil {
 		target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
-		if err = managed.ValidateTrustedFilePath(target, "scanner runtime"); err == nil {
+		if err = windowsInstalledScannerRuntimeCheck(root, target); err == nil {
 			for _, step := range []string{"prepare", "prune"} {
 				if err = runWindowsScannerRuntime(target, step); err != nil {
 					break
@@ -558,8 +598,15 @@ func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
 	// Status and verify run this executable with elevated caller privileges.
 	// Check the runtime root as a protected directory, then the executable
 	// and its ancestors, before invoking even the read-only versions command.
-	if managed.ValidateTrustedRuntimeDir(root, "scanner runtime") != nil ||
-		managed.ValidateTrustedFilePath(target, "scanner runtime executable") != nil {
+	if windowsScannerRuntimeACLCheck(root, target) != nil {
+		return state
+	}
+	state.Policy, state.JudgeModel = readWindowsStandaloneScannerSettings()
+	// Then that it is the executable the payload trust policy admitted: an
+	// administrator-only folder does not stop an administrator, or a process
+	// running as one, from replacing it in place (GAP-0311).
+	if managed.CheckScannerRuntimeAdmitted(root, target) != nil {
+		state.State = "untrusted"
 		return state
 	}
 	state.State = "not_prepared"
@@ -577,7 +624,6 @@ func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
 			}
 		}
 	}
-	state.Policy, state.JudgeModel = readWindowsStandaloneScannerSettings()
 	return state
 }
 

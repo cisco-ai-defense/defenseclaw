@@ -616,27 +616,72 @@ func isClaudeSkillsPlugin(path string) bool {
 }
 
 func claudeSkillsPluginIdentity(path string) string {
-	fallback := filepath.Base(path) + "@skills-dir"
+	name := claudePluginManifestName(path)
+	if name == "" {
+		return filepath.Base(path) + "@skills-dir"
+	}
+	return name + "@skills-dir"
+}
+
+// claudePluginManifestName is the name .claude-plugin/plugin.json declares,
+// or "" when it declares none that can name a folder.
+func claudePluginManifestName(path string) string {
 	manifestPath := filepath.Join(path, ".claude-plugin", "plugin.json")
 	info, err := os.Lstat(manifestPath)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 1_048_576 {
-		return fallback
+		return ""
 	}
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		return fallback
+		return ""
 	}
 	var manifest struct {
 		Name string `json:"name"`
 	}
 	if json.Unmarshal(data, &manifest) != nil {
-		return fallback
+		return ""
 	}
 	name := strings.TrimSpace(manifest.Name)
 	if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
-		return fallback
+		return ""
 	}
-	return name + "@skills-dir"
+	return name
+}
+
+// declaredPluginNames are the names a plugin goes by besides its watcher
+// name. In a plugin cache (<cache>/<marketplace>/<plugin>/<version>, the
+// Claude Code layout) the watcher names it plugin@marketplace from a folder
+// named for its version, while claude plugin list shows plugin@marketplace
+// and an administrator writes the plugin name: a denied rule by the plugin
+// name, plugin@marketplace or the name its manifest declares matched none of
+// them (GAP-0778). Allowed rules still match the watcher name only.
+func declaredPluginNames(evt InstallEvent) []string {
+	var names []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || config.SameAssetName(name, evt.Name) {
+			return
+		}
+		for _, have := range names {
+			if config.SameAssetName(have, name) {
+				return
+			}
+		}
+		names = append(names, name)
+	}
+	if plugin, _, ok := strings.Cut(evt.Name, "@"); ok {
+		add(plugin)
+	}
+	path := filepath.Clean(evt.Path)
+	pluginDir := filepath.Dir(path)
+	marketplaceDir := filepath.Dir(pluginDir)
+	if strings.EqualFold(filepath.Base(filepath.Dir(marketplaceDir)), "cache") {
+		plugin, marketplace := filepath.Base(pluginDir), filepath.Base(marketplaceDir)
+		add(plugin)
+		add(plugin + "@" + marketplace)
+	}
+	add(claudePluginManifestName(path))
+	return names
 }
 
 func claudeWatcherPluginIdentity(root, path string) string {

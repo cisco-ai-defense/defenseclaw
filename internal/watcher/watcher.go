@@ -1443,7 +1443,13 @@ func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent,
 // original (GAP-0581). A Secure Client host keeps the folder-name match of
 // main (issue #1092).
 func declaredAssetNames(cfg *config.Config, evt InstallEvent) []string {
-	if evt.Type != InstallSkill || cfg == nil || cfg.SecureClientIntegration() {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
+	if evt.Type == InstallPlugin {
+		return declaredPluginNames(evt)
+	}
+	if evt.Type != InstallSkill {
 		return nil
 	}
 	if name := assetfacts.DeclaredSkillName(evt.Path); name != "" && !config.SameAssetName(name, evt.Name) {

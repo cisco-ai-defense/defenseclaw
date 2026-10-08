@@ -412,6 +412,17 @@ every skill, MCP server and plugin install is blocked: `status` warns and
 `verify` fails with `scanner_runtime_unavailable`, and Setup `/repair`
 installs it again.
 
+The lifecycle records the SHA-256 of the `defenseclaw-scanners.exe` it
+admitted (a valid Authenticode signature, or the digest the payload manifest
+pins) in `admission.json` in the scanner runtime folder. Before `status`,
+`verify`, `repair`, `ensure` or a scan runs the executable, it checks the file
+against that record. A copy changed or replaced in place, even by an
+administrator, is not run: the `Scanners:` state is `untrusted`, `verify`
+fails and `status`, `repair` and `ensure` from the installed CLI warn with
+`scanner_runtime_unavailable` (the Intune remediation script reports
+"not repaired"), and every skill, MCP server and plugin install is blocked
+until Setup `/repair` or `/ensure` installs the admitted copy again.
+
 ## Verify the install
 
 Run from an elevated PowerShell 7 session:
@@ -684,8 +695,40 @@ per-user install:
   off, enforced once it was turned on`.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
-  user adds goes through admission within about 30 seconds, also while a
+  user adds goes through admission, usually within two minutes, also while a
   periodic rescan is running, such as the first one after an upgrade.
+- The MCP scanner does not connect to loopback, private, link-local or
+  multicast addresses. An HTTP or SSE server on `localhost`, `127.0.0.1` or an
+  internal address (`10.x`, `172.16-31.x`, `192.168.x`, or a name that
+  resolves to one) is therefore never scanned: its scan fails and it is
+  blocked like any scanner failure. The `install-scan-error` row says
+  `the MCP scanner does not connect to loopback, private, link-local or
+  multicast addresses ... so the server was not scanned`, and
+  `install-blocked reason=scanner-error` follows. A stdio server (a `command`)
+  is scanned on the computer and is not affected. To admit a local or
+  internal server you trust, pin it in the admin config with its name and
+  URL (an allowed server is not scanned):
+
+  ```yaml title="Admin config"
+  asset_policy:
+    mcp:
+      allowed:
+        - name: notes
+          url: http://127.0.0.1:28561/mcp
+          reason: reviewed internal server
+  ```
+
+  or admit new MCP servers without a scan with
+  `admission.mcp.scan_on_install: false`. There is no setting that lets the
+  scanner connect to these addresses.
+- A stdio server started with `npx` or `uvx` is scanned only when the
+  launcher is installed for all users in a folder that only administrators
+  can change, such as Node.js in `C:\Program Files\nodejs` or uv under
+  `C:\Program Files`. A launcher in a user profile (uv installs `uvx.exe` in
+  `%USERPROFILE%\.local\bin` by default) fails the scan, and the server is
+  blocked (`MCPStdioLaunchError ... untrusted Windows path`). There is no
+  per-user trusted-paths list on a managed computer; install the launcher
+  under Program Files instead.
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the
@@ -719,6 +762,13 @@ Replace `<account>` with the actual Windows profile directory name, and
 `reviewed-skill` with the installed skill folder name in both fields.
 `source_path_contains` must match the reviewed copy's actual path; omit it
 only when the allow rule should cover every user's copy.
+
+For a Claude Code plugin from a marketplace, use `asset_policy.plugin` with
+the name `claude plugin list` shows, `plugin@marketplace`. A denied rule also
+matches the plugin name alone and the name in its
+`.claude-plugin/plugin.json`, and refuses the plugin at its version folder
+with `install-rejected ... source=admin-deny`; an allowed rule needs
+`plugin@marketplace`.
 
 - A blocked skill whose folder is still in place is released at the next
   periodic rescan (`watch.rescan_interval_min`, 60 minutes by default), or at

@@ -681,7 +681,7 @@ which combination to recommend.
 | `scanners.mcp_scanner.analyzers` | `[]` | A list of `api`, `yara`, `llm`, `behavioral` and `readiness`. `[]` is automatic: YARA, plus the LLM analyzer when its model and key are ready. |
 | `scanners.mcp_scanner.scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan prompts, resources or server instructions. |
 | `scanners.mcp_scanner.judge_source`, `llm` | `inherit` | As for the skill scanner. |
-| `scanners.mcp_scanner.yara` | bundled rules | `include_bundled` (default `true`) and `extra_rules`, a list of `{path, digest}` files pinned by digest. |
+| `scanners.mcp_scanner.yara` | bundled rules | `include_bundled` (default `true`) and `extra_rules`, a list of `{path, digest}` files pinned by digest. A scan loads a file only when it matches its digest; a config whose pin does not match is refused when it is applied, and the gateway rejects a reload while a file does not match. |
 
 The MCP scanner's `api` and `timeouts` blocks and the skill scanner's `timeouts.llm_s` were removed: no scan read them. The `api` analyzer uses `cisco_ai_defense`. A file that still holds them loads with them ignored, and `config set` refuses them.
 

@@ -283,6 +283,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: build configuration generation: %w", err)
 	}
+	if bootGen.scannerPinError != "" {
+		fmt.Fprintf(os.Stderr, "[sidecar] scanner file pin: %s (scans that load the file fail closed until it matches)\n", bootGen.scannerPinError)
+	}
 	// The boot judge and proxy read the provider registry before the
 	// generation is published.
 	applyGenerationProviders(bootGen.Providers)
@@ -1874,7 +1877,8 @@ func buildInitialSidecarJudge(
 // same effective digest and the same reason (if any) the Rego policy did not
 // load, so a new failure to load it is published, not swallowed.
 func generationUnchanged(live, next *Generation) bool {
-	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError
+	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError &&
+		live.scannerPinError == next.scannerPinError
 }
 
 func (s *Sidecar) applyConfigReloadSnapshot(
@@ -2007,6 +2011,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		rulePacks: rulePackCandidate,
 		profiles:  profileCandidate,
 		strictOPA: previousGen != nil && previousGen.opaError == "",
+		// A scanner file edited away from its pin, or a pin that does not
+		// match, rejects the reload like a stale custom_packs pin (GAP-0664).
+		strictScannerPins: previousGen != nil && previousGen.scannerPinError == "",
 	})
 	if err != nil {
 		recordGenerationBuildError(err)

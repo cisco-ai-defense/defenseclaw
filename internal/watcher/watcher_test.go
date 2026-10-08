@@ -216,6 +216,24 @@ func TestAdmission_BlockedSkillByDeclaredName(t *testing.T) {
 	}
 }
 
+// GAP-0778: a Claude Code marketplace plugin, which the watcher names
+// plugin@marketplace from a folder named for its version, is refused by a
+// denied rule with the plugin name an administrator writes.
+func TestAdmission_BlockedMarketplacePluginByPluginName(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.AssetPolicy.Plugin.Denied = append(cfg.AssetPolicy.Plugin.Denied, config.AssetPolicyRule{Name: "rvw8p"})
+	cache := filepath.Join(t.TempDir(), "plugins", "cache")
+	version := filepath.Join(cache, "rvw8mkt", "rvw8p", "1.0.0")
+	if err := os.MkdirAll(version, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	result := w.runAdmission(context.Background(), InstallEvent{Type: InstallPlugin, Name: "rvw8p@rvw8mkt", Path: version, Timestamp: time.Now()})
+	if result.Verdict != VerdictBlocked || !strings.Contains(result.Reason, "denied by asset policy") {
+		t.Fatalf("verdict %q (%s), want blocked by the denied rule before any scan", result.Verdict, result.Reason)
+	}
+}
+
 func TestAdmission_AllowedSkill(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 

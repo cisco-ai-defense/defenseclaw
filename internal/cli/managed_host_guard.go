@@ -361,9 +361,21 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 // each listed user through hooks, so `setup kiro` says so.
 func managedWindowsSetupRefusal(where string, args []string) error {
 	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
-	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "kiro") {
+	sub := ""
+	if len(args) > 0 {
+		sub = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	switch sub {
+	case "kiro":
 		detail = "On a managed Windows computer the guardian enrolls Kiro for each user when your administrator " +
 			"lists it in the deployment (guardrail.connectors.kiro); the ACP guard stays available for editors that start Kiro over ACP. "
+	case "trusted-paths":
+		// The MCP scanner printed this command as the remedy for an
+		// untrusted npx or uvx, and the refusal spoke of credentials
+		// (GAP-0779).
+		detail = "There is no per-user trusted-paths list here: the scanners start an MCP launcher (npx, uvx) installed for all " +
+			"users in a folder that only administrators can change, such as one under Program Files (Node.js installs npx in " +
+			"C:\\Program Files\\nodejs), so an administrator installs it there. "
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+

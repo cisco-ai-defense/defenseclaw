@@ -77,6 +77,9 @@ type Generation struct {
 	judge          *LLMJudge
 	// opaError is why a non-strict build has no OPA ("" when it has one).
 	opaError string
+	// scannerPinError is why a non-strict build found a pinned scanner file
+	// that does not match its digest ("" when every one matches).
+	scannerPinError string
 	// assetDirs are the directories the config watcher follows for this
 	// generation (rule packs and Rego modules).
 	assetDirs []string
