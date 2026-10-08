@@ -2601,7 +2601,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 	case "copilot":
 		return removeCopilotHookReferencesProfile(path, pluginSecureClientProfile(opts), hookScript)
 	case "openhands":
-		return removeJSONHookReferencesProfile(path, pluginSecureClientProfile(opts), hookScript)
+		return removeOpenHandsHookReferences(path, pluginSecureClientProfile(opts), hookScript)
 	case "devin":
 		return removeDevinHookReferences(path, devinOwnedHookCommands(opts, hookScript)...)
 	case "antigravity":
@@ -5084,6 +5084,14 @@ func removeJSONHookReferences(path string, hookScripts ...string) error {
 }
 
 func removeJSONHookReferencesProfile(path string, secureClient bool, hookScripts ...string) error {
+	return removeJSONHookReferencesWithMatchers(path, secureClient, false, hookScripts...)
+}
+
+func removeOpenHandsHookReferences(path string, secureClient bool, hookScript string) error {
+	return removeJSONHookReferencesWithMatchers(path, secureClient, true, hookScript)
+}
+
+func removeJSONHookReferencesWithMatchers(path string, secureClient, openHands bool, hookScripts ...string) error {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -5107,6 +5115,9 @@ func removeJSONHookReferencesProfile(path string, secureClient bool, hookScripts
 			if len(hooks) == 0 {
 				delete(pruned, "hooks")
 			}
+		}
+		if openHands {
+			pruneOpenHandsMatcherGroups(cfg, pruned)
 		}
 	}
 	if !secureClient && reflect.DeepEqual(pruned, cfg) {
@@ -5237,6 +5248,51 @@ func pruneNewlyEmptyHookEntries(before, after map[string]interface{}) {
 			}
 		}
 	}
+}
+
+// pruneOpenHandsMatcherGroups removes DefenseClaw's matcher group when its
+// hook list became empty. Existing empty groups and other group fields belong
+// to the operator and remain.
+func pruneOpenHandsMatcherGroups(before, after map[string]interface{}) {
+	for event, raw := range after {
+		groups, ok := raw.([]interface{})
+		oldGroups, oldOK := before[event].([]interface{})
+		if !ok || !oldOK {
+			continue
+		}
+		remaining := make([]interface{}, 0, len(groups))
+		for i, item := range groups {
+			group, groupOK := item.(map[string]interface{})
+			if groupOK && i < len(oldGroups) {
+				if oldGroup, ok := oldGroups[i].(map[string]interface{}); ok {
+					oldHooks, oldOK := oldGroup["hooks"].([]interface{})
+					newHooks, newOK := group["hooks"].([]interface{})
+					if oldOK && newOK && len(oldHooks) > 0 && len(newHooks) == 0 &&
+						matcherOnlyHookGroup(group) {
+						continue
+					}
+				}
+			}
+			remaining = append(remaining, item)
+		}
+		if len(oldGroups) > 0 && len(remaining) == 0 {
+			delete(after, event)
+		} else {
+			after[event] = remaining
+		}
+	}
+}
+
+func matcherOnlyHookGroup(group map[string]interface{}) bool {
+	if _, ok := group["matcher"]; !ok {
+		return false
+	}
+	for key := range group {
+		if key != "matcher" && key != "hooks" {
+			return false
+		}
+	}
+	return true
 }
 
 // removeHookScriptReferencesLegacy is main's JSON hook cleanup. Secure
