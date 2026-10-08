@@ -235,7 +235,7 @@ class ValidateConfigTests(unittest.TestCase):
         self.assertNotIn("schemas/config", res.output)
         self.assertNotIn("#\n#\n", res.output)
         self.assertIn("config_version: 8", res.output)
-        help_text = runner.invoke(cmd_config.config_reference, ["--help"]).output
+        help_text = " ".join(runner.invoke(cmd_config.config_reference, ["--help"]).output.split())
         self.assertIn("json-schema prints the schema of every", help_text)
 
     def test_yaml_syntax_refusal_names_the_bad_line_and_parser_reason(self):
