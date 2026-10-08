@@ -211,6 +211,14 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **The gateway prints the local Splunk sign-in only while its web UI
+  answers.** `defenseclaw-gateway start` and `restart` printed the "Splunk
+  Local Mode" block (Web UI, user, where the password is) whenever the
+  bridge's env file held a password, also after `setup splunk --disable`
+  stopped the container or after it was removed. The fallback that read
+  `DEFENSECLAW_LOCAL_USERNAME`/`DEFENSECLAW_LOCAL_PASSWORD` from
+  `~/.defenseclaw/.env` is gone: no supported release writes them there
+  (the local bridge reads them from its own env file).
 - **A PowerShell command with several statements reaches argv block rules.**
   On Windows, where Codex runs its shell tool in PowerShell, a rule such as
   `f.commands.exists(c, "<x>" in c.argv)` only reported a detection-only
