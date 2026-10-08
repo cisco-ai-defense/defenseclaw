@@ -4272,6 +4272,18 @@ func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes
 	return nil
 }
 
+// DeleteTargetSnapshot drops the rescan baseline of a target that left its
+// path, so a later copy at that path is a new install, not an unchanged one.
+func (s *Store) DeleteTargetSnapshot(targetType, targetPath string) error {
+	if _, err := s.execDB(context.Background(), "audit",
+		`DELETE FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
+		targetType, targetPath,
+	); err != nil {
+		return fmt.Errorf("audit: delete target snapshot: %w", err)
+	}
+	return nil
+}
+
 // ListNetworkEgressEvents returns recent egress events. Optionally filter by
 // hostname prefix (empty string returns all). Results are newest-first.
 func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEgressRow, error) {

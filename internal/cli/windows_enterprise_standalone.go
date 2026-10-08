@@ -532,8 +532,95 @@ func noteWindowsEnterpriseMigration(opts *windowsEnterpriseLifecycleOptions, bef
 		return
 	}
 	var record config.MigrationRecord
-	if json.Unmarshal(trimWindowsJSONBOM(after), &record) == nil && record.ActionsRowsIgnored > 0 {
-		opts.localEnforcementEntriesIgnored = record.ActionsRowsIgnored
+	if json.Unmarshal(trimWindowsJSONBOM(after), &record) != nil {
+		return
+	}
+	opts.localEnforcementEntriesIgnored = record.ActionsRowsIgnored
+	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
+		opts.configMigration = &record
+		opts.configMigrationPath = layout.ConfigPath
+	}
+}
+
+// addWindowsEnterpriseMissingCredentialWarnings warns credential_missing for
+// each protected credential the installed config names that is not stored:
+// the judge, the scanners or AI Defense then run without a key, silently,
+// while status printed the judge model as if it worked (GAP-0660). Only a
+// run that read the deployment says so; a standard account cannot read the
+// secrets folder.
+func addWindowsEnterpriseMissingCredentialWarnings(result *enterprisestatus.Result) {
+	switch result.Action {
+	case "status", "verify", "install", "upgrade", "repair", "ensure":
+	default:
+		return
+	}
+	if !result.Installed || windowsEnterpriseResultHasWarning(result, windowsEnterpriseHealthNotChecked) {
+		return
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return
+	}
+	body, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return
+	}
+	var document struct {
+		Enterprise struct {
+			Inspection struct {
+				AIDefense struct {
+					Enabled    bool   `yaml:"enabled"`
+					Credential string `yaml:"credential"`
+				} `yaml:"ai_defense"`
+				LLM struct {
+					Credential string `yaml:"credential"`
+				} `yaml:"llm"`
+			} `yaml:"inspection"`
+		} `yaml:"enterprise"`
+	}
+	if yaml.Unmarshal(trimWindowsJSONBOM(body), &document) != nil {
+		return
+	}
+	inspection := document.Enterprise.Inspection
+	aiDefense := ""
+	if inspection.AIDefense.Enabled {
+		aiDefense = inspection.AIDefense.Credential
+	}
+	for _, named := range []struct{ key, name, effect string }{
+		{"enterprise.inspection.llm.credential", inspection.LLM.Credential,
+			"the LLM judge and the skill, MCP and plugin scanners' LLM analyzers run without a key"},
+		{"enterprise.inspection.ai_defense.credential", aiDefense, "Cisco AI Defense inspection runs without a key"},
+	} {
+		name := strings.TrimSpace(named.name)
+		if !managed.ValidCredentialName(name) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(layout.SecretsDir, name)); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		result.AddWarning("credential_missing", fmt.Sprintf(
+			"the config names the protected credential %s (%s) but it is not stored, so %s; store it from an elevated prompt with `defenseclaw.exe enterprise secret set --name %s --from-file <key file>`",
+			name, named.key, named.effect, name))
+	}
+}
+
+// addWindowsEnterpriseMigrationChange says in changes what a migration in
+// this run wrote, as the Unix lifecycle does; the Windows result had only an
+// ensure_upgrade drift:config warning (GAP-0472). Values that disagreed are
+// a warning: migration-v9.json lists what was kept and what was lost.
+func addWindowsEnterpriseMigrationChange(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	migration := opts.configMigration
+	if migration == nil || len(result.Errors) != 0 {
+		return
+	}
+	path := opts.configMigrationPath
+	result.Changes = append(result.Changes, fmt.Sprintf(
+		"migrated %s to config_version 9 (%d values moved, %d conflicts; the v8 file is kept as %s%s, the --config a rollback to a config_version 8 release needs)",
+		path, len(migration.Moved), len(migration.Conflicts), path, config.ConfigV8BackupSuffix))
+	if len(migration.Conflicts) != 0 {
+		result.AddWarning("config_migration_conflicts", fmt.Sprintf(
+			"%d values disagreed while migrating %s to config_version 9; %s lists what was kept and what was lost",
+			len(migration.Conflicts), path, config.MigrationRecordPath(path)))
 	}
 }
 
@@ -1430,6 +1517,8 @@ func finishWindowsEnterpriseStandalone(
 	failureCode int,
 ) error {
 	applyWindowsStandaloneScannerRuntime(result, opts)
+	addWindowsEnterpriseMigrationChange(result, opts)
+	addWindowsEnterpriseMissingCredentialWarnings(result)
 	if opts.localEnforcementEntriesIgnored > 0 {
 		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
 			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",

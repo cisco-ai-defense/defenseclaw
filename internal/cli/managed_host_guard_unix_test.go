@@ -13,6 +13,8 @@
 package cli
 
 import (
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,6 +44,29 @@ func withUnixManagedHostDescriptor(t *testing.T) string {
 	})
 	t.Setenv(managed.DeploymentModeEnv, "")
 	return descriptor
+}
+
+func TestManagedConfigPermissionErrorNamesAdministrator(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	err := managedWindowsConfigLoadError(nil, fmt.Errorf("read config: %w", fs.ErrPermission))
+	if err == nil || !strings.Contains(err.Error(), "needs administrator access") || strings.Contains(err.Error(), "read v8 config") {
+		t.Fatalf("managed config permission error = %v", err)
+	}
+}
+
+func TestManagedStandardUserPolicyAndStatusRefuseBeforeUserConfig(t *testing.T) {
+	withUnixManagedHostDescriptor(t)
+	withManagedHostCallerUID(t, 1000)
+	restore := managedHostServiceUID
+	t.Cleanup(func() { managedHostServiceUID = restore })
+	managedHostServiceUID = func(string) (int, bool) { return 991, true }
+	for _, command := range []*cobra.Command{statusCmd, policyShowCmd, policyReloadCmd} {
+		err := command.PersistentPreRunE(command, nil)
+		if err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+			strings.Contains(err.Error(), "move this account's gateway") {
+			t.Fatalf("%s read a per-user deployment: %v", command.Name(), err)
+		}
+	}
 }
 
 // unixPlatformForTest names this OS the way the `enterprise` group does.
@@ -493,5 +518,28 @@ func TestEnterpriseIDEPluginsTellAStandardUserThatAnAdministratorRunsIt(t *testi
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal = %q, want %q", err, want)
 		}
+	}
+}
+
+// The managed gateway service reads the layout's config and data directory
+// even when a unit drop-in names others in its environment (GAP-0473).
+func TestManagedUnixGatewayIgnoresConfigAndHomeFromItsEnvironment(t *testing.T) {
+	layout := unixStandaloneLayoutForTest(t)
+	withUnixManagedHostDescriptor(t)
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.ConfigPathEnv, "/etc/other/config.yaml")
+	t.Setenv("DEFENSECLAW_HOME", "/etc/other")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, "")
+	var warn strings.Builder
+	pinManagedUnixGatewayInputs(&warn)
+	if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+		t.Fatalf("%s = %q, want %q", managed.ConfigPathEnv, got, layout.ConfigPath)
+	}
+	if got := os.Getenv("DEFENSECLAW_HOME"); got != layout.DataDir {
+		t.Fatalf("DEFENSECLAW_HOME = %q, want %q", got, layout.DataDir)
+	}
+	if !strings.Contains(warn.String(), "ignores DEFENSECLAW_CONFIG=/etc/other/config.yaml") {
+		t.Fatalf("warning = %q", warn.String())
 	}
 }

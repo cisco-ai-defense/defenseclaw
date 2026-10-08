@@ -65,6 +65,10 @@ type RulePack struct {
 	LocalPatterns *LocalPatterns
 	// filesDigest is FilesDigest, set by LoadRulePack.
 	filesDigest string
+	// manifestDigest is the sha256 of the pack's defenseclaw-pack.json, ""
+	// without one. Its posture sets the pack's default levels, so it is
+	// part of the pin and of Summary (GAP-0431).
+	manifestDigest string
 }
 
 // RulePackError is the safe, machine-readable error returned by the strict
@@ -284,6 +288,8 @@ type rulePackInventory struct {
 	files     map[string]diskRulePackFile
 	ruleFiles []string
 	totalSize int64
+	// manifest is the pack's defenseclaw-pack.json, nil without one.
+	manifest *diskRulePackFile
 }
 
 // LoadRulePack loads and validates a rule pack. An empty dir selects the
@@ -381,6 +387,18 @@ func LoadRulePack(dir string) (*RulePack, error) {
 
 	if err := rp.Validate(); err != nil {
 		return nil, err
+	}
+	// The manifest's posture changes the levels the gateway enforces, so a
+	// manifest added or edited changes the pin and the effective policy
+	// digest like any rule file (GAP-0431).
+	if manifest := inventory.manifest; manifest != nil {
+		data, err := readRulePackFile(*manifest)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(data)
+		rp.manifestDigest = hex.EncodeToString(sum[:])
+		fileSums[PackManifestFile] = rp.manifestDigest
 	}
 	rp.filesDigest = filesDigest(fileSums)
 	return rp, nil
@@ -512,6 +530,13 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		rel = filepath.ToSlash(rel)
 		if entry.Type()&os.ModeSymlink != 0 {
 			return rulePackErr(safeInventoryPath(rel), "file_type", "component must be a regular file")
+		}
+		if rel == PackManifestFile {
+			if !entry.Type().IsRegular() {
+				return rulePackErr(rel, "file_type", "component must be a regular file")
+			}
+			inventory.manifest = &diskRulePackFile{relPath: rel, full: full}
+			return nil
 		}
 		extension := strings.ToLower(path.Ext(rel))
 		if extension != ".yaml" && extension != ".yml" {
@@ -1427,12 +1452,14 @@ func (rp *RulePack) Summary() RulePackSummary {
 		SensitiveTools *SensitiveToolsConfig
 		RuleFiles      []RulesFileYAML
 		LocalPatterns  *LocalPatterns
+		Manifest       string `json:",omitempty"`
 	}{
 		Suppressions:   rp.Suppressions,
 		JudgeConfigs:   rp.JudgeConfigs,
 		SensitiveTools: rp.SensitiveTools,
 		RuleFiles:      ruleFiles,
 		LocalPatterns:  rp.LocalPatterns,
+		Manifest:       rp.manifestDigest,
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {

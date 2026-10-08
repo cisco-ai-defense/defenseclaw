@@ -226,6 +226,7 @@ writes for other tools, or `config.yaml` itself:
 | `doctor.connector.hook-scripts.restore-mode` | safe | Restores the owner execute bit on the generated hook scripts setup sealed. It does not re-render them. |
 | `doctor.connector.hook-scripts.regenerate` | safe | Re-renders the hook scripts of a connector whose script no longer matches the digest setup sealed (a hand edit, or a copy from another build), and seals the new digest. Fixes the Hook runtime files row. On a managed host `enterprise <os> repair` does this. |
 | `doctor.state.audit-db.reopen` | disruptive | Restarts the gateway when its `audit.db` was deleted or replaced on disk while it ran, so it writes to the file on disk again (SQLite keeps writing to the deleted file until then). Fixes the Audit store row. |
+| `doctor.state.private-files.protect` | safe | Makes `device.key`, its provenance files and `audit.db` readable by your account only (mode 0600, or a private Windows DACL), for example after an upgrade kept an older `device.key` that other accounts could read. Fixes the Private files row; an exposed `.env` goes through the gateway token rotation instead. |
 | `doctor.connector.proxy-lock.refresh` | disruptive | Drops the OpenClaw or ZeptoClaw entry of `hook_contract_lock.json` when it names another agent version than the one discovery found (after an upgrade or downgrade), and restarts the gateway so it records the installed version. Proxy connectors have no hook contract, so nothing else changes. |
 | `doctor.acp.guard.repin` | safe | Re-pins the upgraded ACP guard in the editor entries DefenseClaw wrote. |
 | `doctor.gateway.token-env.canonicalize` | safe | Saves the canonical gateway token provider in `config.yaml`. |
@@ -1132,8 +1133,8 @@ error: This device is managed: change config.yaml in the admin config (MDM or ma
 ```
 
 `skill`, `mcp`, `plugin` and `tool` `block`, `allow` and `unblock` are refused
-the same way, with the message `This device is managed: add it to asset_policy
-in the admin config (MDM or management plane)`, and exit `3`.
+the same way, with a message that the `asset_policy` block and allow lists are
+set in the admin config (MDM or management plane), and exit `3`.
 A standard user with no per-user config on a managed device is not sent to
 `defenseclaw init`: `init`, `quickstart` and every command that needs a config print `This
 device is managed: DefenseClaw is configured by your administrator (MDM or

@@ -305,8 +305,13 @@ apply a config the same way. In order, on Linux and macOS:
 4. **Keep the evidence of a migration.** When it migrated a version 8 file, it
    keeps the source as `config.yaml.v8.bak` (root-only) and writes
    `migration-v9.json` next to the config. The record lists every `moved`
-   value, every `conflicts` entry (`kept`, `lost`, `reason`) and the audit
-   rows it did not import (`actions_rows_ignored`). An inline scanner key in
+   value, every `conflicts` entry (`kept`, `lost`, `reason`), the audit rows
+   it imported (`actions_rows_moved`, always `0` on a managed computer) and,
+   when the managed computer's `audit.db` held local block or allow entries,
+   how many it left in place (`actions_rows_ignored`, with the
+   `local_enforcement_entries_ignored` warning). The result's `changes` list
+   names the migration on every OS, and conflicts add a
+   `config_migration_conflicts` warning on Windows. An inline scanner key in
    the version 8 file moves to the service `.env`. A `rego/data.json` left in
    the policy folder is read for the migration and ignored from version 9 on;
    `ensure` leaves the file where it is, so remove it. If your configuration
@@ -401,13 +406,26 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
   seconds) and says so; `ensure` leaves a healthy deployment running. The
   `--json` result carries the list as `changes`, and an `ensure` that
   re-applies the deployment lists its changes the same way.
+- **Disabled and masked units (Linux).** A DefenseClaw unit an administrator
+  disabled (`systemctl disable`) or masked (`systemctl mask`) is enabled or
+  unmasked again, and the result says so. `verify` names such a unit, also
+  when the hook socket keeps a disabled gateway running, and an `ensure` that
+  finds one re-applies the deployment instead of reporting `up_to_date`.
 - **Linux and macOS, payload installs.** `repair` keeps the installed binaries.
   If they no longer match the deployment record, it stops with
   `payload_invalid`. Run `repair --payload <dir>` with the same release's
   payload.
 - **Linux package installs.** To restore the binaries, reinstall the package:
   `sudo apt install --reinstall ./<package>.deb` or
-  `sudo dnf reinstall ./<package>.rpm`.
+  `sudo dnf reinstall ./<package>.rpm`. A power loss or reset during a
+  package upgrade can leave the binaries and units the package was writing
+  empty: `rpm -V defenseclaw-enterprise` flags them, the units show as masked,
+  and an empty `defenseclaw-gateway` prints nothing. Reinstall the package the
+  upgrade was installing, which also finishes the interrupted lifecycle
+  transaction (`recovered_interrupted_transaction`). The package flushes what
+  it unpacked to disk before its own install run starts, the MDM detection
+  script reports a host with empty binaries as not installed, and the MDM
+  wrapper reinstalls the same package version on such a host.
 - **Deleted accounts (Linux and macOS).** `repair` also removes the guardian
   targets of accounts that no longer exist. Otherwise they stay until the
   enumerator removes them, 10 to 15 minutes after the account is deleted:
@@ -451,12 +469,20 @@ restart fails closed.
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
 | Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
 
-Restart the gateway after you edit a rule pack or policy file in place.
+A running standalone gateway detects edits to a rule pack or policy file. If
+the pack is pinned, an in-place edit fails its digest check and the gateway
+keeps the previous policy generation. Stage the edited pack in a new folder,
+validate and pin its new digest, then apply it with `ensure --config`. A
+restart alone cannot apply a mismatched pack and may leave the gateway unable
+to start.
 Secrets and upgrades restart it on their own. On every OS, `ensure`
 applies a config change that only touches keys the gateway reloads in place
 (most of them) in the running gateway, without a restart, and waits until the
 gateway reports the new policy: the policy generation on `/health` and on
-decisions goes up by one. On Windows the change is applied the same way when
+decisions goes up by one. On Linux and macOS a file that differs only in
+bytes (comments, line endings, a BOM, quoting) is applied the same way: the
+config generation goes up, the effective policy digest stays, and the gateway
+keeps running. On Windows the change is applied the same way when
 the installed release is current and the supplied config differs from the
 installed one only in such keys: `ensure` replaces `config.yaml` with its
 access control kept, waits up to 30 seconds for the gateway to report the new
@@ -532,6 +558,13 @@ to keep the machine state for a reinstall instead.
   `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
   before you remove the package. The MDM `uninstall.sh --purge` does this
   for you.
+- **Lifecycle uninstall with the Linux package kept.** The package's
+  `/usr/lib/tmpfiles.d/defenseclaw.conf` names the `defenseclaw` account the
+  uninstall removed, so the uninstall writes an override of the same name in
+  `/etc/tmpfiles.d`: the next boot logs no errors for the missing account and
+  recreates no DefenseClaw folders. The next install (`ensure --from-package`,
+  or a reinstall of the package) removes the override, and so does removing
+  the package.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
 - **Registrations left (Linux and macOS).** Each user's registrations are
@@ -540,7 +573,10 @@ to keep the machine state for a reinstall instead.
   the uninstall stops before it removes the binaries those registrations run:
   the deployment record and state stay. Fix the cause, or remove
   DefenseClaw's entries from that user's agent config, and run the same
-  uninstall again. `ensure` restores the deployment instead.
+  uninstall again. `ensure` restores the deployment instead. A user's worker
+  that runs out of time (60 seconds; a large `~/.defenseclaw` on slow storage
+  after a reboot, say) is retried once with five minutes; one that times out
+  again says what usually holds it up.
 - **Per-user state (Linux and macOS).** `--purge` also removes everything
   DefenseClaw put in each enrolled user's home, as that user. It first stops
   the user's per-user gateway and watchdog, if one runs, and restores the

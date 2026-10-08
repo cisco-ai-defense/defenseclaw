@@ -244,7 +244,7 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 
 func runStart(cmd *cobra.Command, args []string) error {
 	coldStart := cmd != nil && hookColdStartRequested(cmd.Flags())
-	if coldStart && !hookColdStartSupported {
+	if coldStart && !hookColdStartSupported() {
 		return errHookColdStartUnsupported
 	}
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {

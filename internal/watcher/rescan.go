@@ -138,6 +138,9 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		defer func() { w.startupAdmitRoots = nil }()
 	}
 	targets := w.enumerateTargets()
+	if !w.startupRescanDone {
+		w.recordStartupMCP(targets)
+	}
 	if len(targets) == 0 {
 		w.markWatchRoots()
 		return
@@ -148,6 +151,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	// Scanner fingerprints depend on the target *type*, not the individual
 	// target, so compute them at most once per kind per cycle.
 	fpCache := make(map[string]string)
+	denyListsChanged := w.denyListsChanged()
 
 	var (
 		countMu          sync.Mutex
@@ -168,6 +172,15 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	for _, evt := range targets {
 		if ctx.Err() != nil {
 			break
+		}
+		if denyListsChanged && w.deniedByAssetList(evt) {
+			// An installed asset the new lists deny is refused now, as one
+			// that appears after the change would be, without waiting for
+			// its content to change (GAP-0627).
+			fmt.Fprintf(os.Stderr, "[rescan] %s %s is on the denied list; running install admission\n", evt.Type, evt.Name)
+			w.notifyAdmission(w.runAdmission(ctx, evt))
+			count(evt, rescanScanned)
+			continue
 		}
 		if w.admitsNewAtStartup(evt) {
 			// Added while the gateway was stopped: admitted by
@@ -201,6 +214,47 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		len(targets), scanned, skipped)
 	_ = w.logger.LogAction(string(audit.ActionRescan), "",
 		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
+}
+
+// denyListsChanged reports whether asset_policy.skill.denied or
+// plugin.denied differ from the lists the previous cycle applied; the first
+// cycle counts as a change, so a deny added while the gateway was stopped
+// applies at start. A Secure Client host keeps the cycle of main (issue
+// #1092).
+func (w *InstallWatcher) denyListsChanged() bool {
+	cfg := w.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	raw, err := json.Marshal([][]config.AssetPolicyRule{cfg.AssetPolicy.Skill.Denied, cfg.AssetPolicy.Plugin.Denied})
+	if err != nil {
+		return false
+	}
+	changed := string(raw) != w.lastDenyLists
+	w.lastDenyLists = string(raw)
+	return changed
+}
+
+// deniedByAssetList reports an installed skill or plugin on a denied list.
+// MCP servers are refused at the hook (asset_policy_runtime.go).
+func (w *InstallWatcher) deniedByAssetList(evt InstallEvent) bool {
+	switch {
+	case evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path):
+		return false
+	case evt.Type == InstallPlugin && (w.isManagedArtifact(evt.Path) || w.isOwnPlugin(evt.Path)):
+		return false
+	case evt.Type != InstallSkill && evt.Type != InstallPlugin:
+		return false
+	}
+	cfg := w.liveConfig()
+	if cfg == nil {
+		return false
+	}
+	verdict, _ := cfg.AssetListDecision(config.AssetPolicyInput{
+		TargetType: string(evt.Type), Name: evt.Name, DeclaredNames: declaredAssetNames(cfg, evt),
+		Connector: w.eventConnector(evt), SourcePath: evt.Path,
+	})
+	return verdict == config.AssetListDeny
 }
 
 // watchRootMarkerType is the target_snapshots type of the marker row saying
@@ -347,10 +401,13 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			if strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
 			path := filepath.Join(dir, e.Name())
+			if !e.IsDir() && !w.admitsLinkedAsset(path) {
+				continue
+			}
 			if isBundledSkillWatchPath(path) {
 				continue
 			}
@@ -381,7 +438,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	for _, dir := range w.pluginDirs {
 		if w.connectorForPath(dir) == "claudecode" {
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
-				if w.isOwnPlugin(plugin) {
+				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
 					continue
 				}
 				targets = append(targets, InstallEvent{
@@ -675,8 +732,10 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 // without invoking the scanner or writing a scan_results row.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpCache map[string]string) rescanOutcome {
 	if evt.Type == InstallMCP {
-		w.mcpMu.Lock()
-		defer w.mcpMu.Unlock()
+		if !w.claimMCP(evt.Path) {
+			return rescanSkipped // admitted by the added-server loop
+		}
+		defer w.releaseMCP(evt.Path)
 	}
 	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
 		return rescanSkipped
@@ -728,7 +787,8 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
-				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted {
+				moved := w.movedByAdmission(evt)
+				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted && !moved {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
 					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
@@ -753,6 +813,18 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
+	if !scan && w.allowRuleReleases(ctx, evt) {
+		fmt.Fprintf(os.Stderr, "[rescan] %s %s is allowed by a rule and still blocked; running install admission\n", evt.Type, evt.Name)
+		w.notifyAdmission(w.runAdmission(ctx, evt))
+		return rescanScanned
+	}
+	if !scan && w.quarantinedCopyIsBack(ctx, evt) {
+		// A baseline written before the original was removed (GAP-0551).
+		fmt.Fprintf(os.Stderr, "[rescan] %s %s was quarantined and is back; running install admission\n", evt.Type, evt.Name)
+		res := w.runAdmission(ctx, evt)
+		w.notifyAdmission(res)
+		return rescanScanned
+	}
 	if !scan {
 		// Nothing changed and the scanner fingerprint matches: skip the
 		// expensive scan entirely. compareSnapshots derives from the same
@@ -898,7 +970,7 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, scanID string) {
-	if snap == nil || scanID == "" {
+	if w.movedByAdmission(evt) || snap == nil || scanID == "" {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
@@ -1447,10 +1519,14 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 	case InstallMCP:
 		return w.snapshotMCPServer(evt)
 	default:
-		if _, err := os.Stat(evt.Path); err != nil {
+		path := addressablePath(evt.Path)
+		if w.admitsLinkedAsset(evt.Path) {
+			path = linkedAssetTarget(evt.Path)
+		}
+		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return SnapshotTarget(evt.Path)
+		return SnapshotTarget(path)
 	}
 }
 
@@ -1516,7 +1592,10 @@ func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEnt
 
 func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 	if evt.Type != InstallMCP {
-		return evt.Path
+		if w.admitsLinkedAsset(evt.Path) {
+			return linkedAssetTarget(evt.Path)
+		}
+		return addressablePath(evt.Path)
 	}
 	entry, err := w.lookupMCPServer(evt)
 	if err != nil {
@@ -1545,9 +1624,9 @@ func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.S
 	if w == nil || w.logger == nil || result == nil {
 		return ""
 	}
-	correlation := watcherScanCorrelation(
+	correlation := w.ownedScanCorrelation(watcherScanCorrelation(
 		ctx, rescanRunID(), watcherConnectorName(w.cfg),
-	)
+	), result)
 	err := w.logger.LogScanWithCorrelation(ctx, result, result.Verdict, correlation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)

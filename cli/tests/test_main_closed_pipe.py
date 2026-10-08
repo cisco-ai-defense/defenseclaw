@@ -10,7 +10,23 @@ import sys
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
 from defenseclaw import main as main_mod
+
+
+def test_managed_skill_block_without_user_config_names_asset_policy(monkeypatch):
+    from defenseclaw import config
+    from defenseclaw.enforce import asset_lists
+
+    def missing_config(*_args, **_kwargs):
+        raise config.ManagedNotInitializedError("defenseclaw init does not apply")
+
+    monkeypatch.setattr(config, "require_v8_config", missing_config)
+    monkeypatch.setattr(asset_lists, "audit_first_run_refusal", lambda *_args: None)
+    result = CliRunner().invoke(main_mod.cli, ["skill", "block", "dc-x"])
+    assert result.exit_code == 3
+    assert "asset_policy block and allow lists" in result.output
+    assert "defenseclaw init" not in result.output
 
 
 class _ClosedStdout:

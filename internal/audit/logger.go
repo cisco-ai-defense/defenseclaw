@@ -215,6 +215,11 @@ type ScanCorrelation struct {
 	UserID     string
 	UserIDKind string
 	UserName   string
+
+	// JudgeModel names the LLM judge model on the scan summary row
+	// (scanner.ScanResult.JudgeModel). The install watcher sets it, so an
+	// auditor sees from the row that the judge ran (GAP-0575).
+	JudgeModel string
 }
 
 // LogScan persists the forensic scan rows and emits the canonical v8 finding,

@@ -211,6 +211,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	for _, change := range result.Changes {
 		fmt.Fprintf(w, "  - %s\n", change)
 	}
+	if result.Action == enterpriseunix.ActionRotateCredentials && result.Noop && result.NoopReason == enterpriseunix.NoopNoCredentials {
+		fmt.Fprintln(w, "  no enrolled user holds a DefenseClaw credential yet: hooks use the hook socket, and the guardian creates the per-user key when it first gives a user one (agent telemetry, an in-agent plugin or ACP)")
+	}
 	if result.Action == enterpriseunix.ActionRepair && result.OK {
 		if len(result.Changes) == 0 {
 			fmt.Fprintln(w, "  nothing to repair")
@@ -367,7 +370,11 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 		}
+		caller := secretCallerPID()
 		mutate = func(ctx context.Context) error {
+			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
+				return err
+			}
 			// An identical value is not rewritten, so the output can say
 			// the credential already holds it (GAP-2373).
 			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
@@ -393,6 +400,20 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return err
 	}
 	return lifecycleFailure(result, opts.json, "")
+}
+
+// secretCallerPID is the parent of this process. A seam for tests.
+var secretCallerPID = os.Getppid
+
+// secretCallerGone refuses to store a credential once the process that ran
+// `secret set` has exited while the command waited for the lifecycle lock:
+// an MDM agent that killed its wrapper reported the run as failed, and the
+// orphaned command stored the key minutes later anyway (GAP-0632).
+func secretCallerGone(started, now int) error {
+	if started == now {
+		return nil
+	}
+	return errors.New("the process that started this command exited while it waited for the lifecycle lock, so the credential was not stored; run the command again")
 }
 
 // describeSecretChange labels a secret set or remove result with the command

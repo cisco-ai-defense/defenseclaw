@@ -70,7 +70,11 @@ lists each directive and the version it needs.
 
 The gateway runs as the `defenseclaw` system account. The lifecycle creates
 it with `systemd-sysusers`, or `useradd` as a fallback, and reuses an
-existing account.
+existing account that cannot sign in. An existing `defenseclaw` account with
+a login shell (anything other than `nologin` or `false`) is refused, and
+`status` and `verify` report one: whoever signs in as it could stop the
+gateway. Remove it with `userdel defenseclaw`, or give it the shell
+`/usr/sbin/nologin`, and run `ensure` again.
 
 The units:
 
@@ -399,6 +403,18 @@ read-only.
 Do not edit the units; `verify` reports local overrides. Put host-specific
 settings in a drop-in, and never widen the gateway sandbox: user discovery and
 hook repair are the guardian's job.
+
+- A drop-in may set the unit's ordering, resource limits, restart and timeout
+  tuning, and environment for the host (a proxy, a CA bundle). `status` and
+  `verify` list such drop-ins as the warning `unit_drop_in`.
+- Any other setting in a drop-in DefenseClaw did not write (`User`,
+  `ProtectHome`, `ExecStart`, `ReadWritePaths` and the rest of the sandbox),
+  and an `Environment` line that sets a `DEFENSECLAW_*` or loader variable,
+  fails `status` and `verify`, which name the file and the settings.
+- The managed gateway reads `/etc/defenseclaw/config.yaml` and
+  `/var/lib/defenseclaw` only. It ignores `DEFENSECLAW_CONFIG` and
+  `DEFENSECLAW_HOME` from its environment and logs a line for each value it
+  replaced.
 
 To inspect the sandbox:
 

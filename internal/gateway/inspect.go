@@ -1352,21 +1352,17 @@ func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *gu
 // failure/timeout is logged LOUDLY to stderr; the lane never silently
 // substitutes a clean pass.
 func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
-	if a == nil || content == "" {
+	judge := a.judgeFor(ctx)
+	if judge == nil || content == "" {
 		return nil
 	}
-	judge := a.hookJudge.Load()
+	// Gate on the configuration of the generation the judge came from: the
+	// request pins one, so a reload cannot pair a new gate with a nil or
+	// previous judge. A start-time scannerCfg can have another connector gate.
 	cfg := a.decisionConfig(ctx)
-	if g := a.generation(); g != nil && g.hookJudgeBound {
-		judge = g.hookJudge
+	if g := pinnedGeneration(ctx); g.published() && cfg != nil && !cfg.SecureClientIntegration() {
 		cfg = a.decisionConfigFrom(ctx, g.Config)
 	}
-	if judge == nil {
-		return nil
-	}
-	// Gate on the live configuration, like every other decision site. A hot
-	// reload swaps the judge with its configuration in the generation; a
-	// start-time scannerCfg can have a different connector gate.
 	if cfg == nil {
 		return nil
 	}

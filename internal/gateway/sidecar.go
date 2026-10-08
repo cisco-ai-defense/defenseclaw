@@ -81,6 +81,10 @@ type modelRouterHealthChecker interface {
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
+	// installWatcher is the running install watcher, nil while none runs;
+	// a reload that changes a denied list asks it to rescan (GAP-0627).
+	installWatcher atomic.Pointer[watcher.InstallWatcher]
+
 	startedAt  time.Time
 	cfg        *config.Config
 	cfgCurrent atomic.Pointer[config.Config]
@@ -534,10 +538,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	for name, compiled := range initialHarnessRules {
 		publishConnectorRulePackOverrides(name, compiled)
 	}
-	router.SetRulePack(rp)
 	router.SetHealth(sidecar.health)
 	sidecar.setEventRouter(router)
-	bootGen.hookJudge, bootGen.hookJudgeBound = hookJudge, true
+	// The boot generation carries the enforcement inputs just published to
+	// the process-wide scanners, so a request reads them with its digest.
+	bootGen.activeRules = initialRules
+	bootGen.activePatterns = initialPatterns
+	bootGen.judge = hookJudge
 	bootGen.Config = sidecar.publishConfig(cfg)
 	sidecar.publishGeneration(bootGen)
 	// Publish the process-global managed carve-out only after every fallible
@@ -593,6 +600,15 @@ func (s *Sidecar) Generation() *Generation {
 		return nil
 	}
 	return s.generation.Load()
+}
+
+// activeRulePack is the active rule pack of the published generation, else
+// the one the event router reads.
+func (s *Sidecar) activeRulePack() *guardrail.RulePack {
+	if g := s.Generation(); g != nil && g.active != nil {
+		return g.active
+	}
+	return s.router.rulePack()
 }
 
 func (s *Sidecar) publishGeneration(g *Generation) {
@@ -2060,17 +2076,53 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setAgentIdentityConfig(&next)
 	applyIdentityPosture(&next)
 
+	// The judge is wired before the generation is published: a request
+	// that pins the next generation runs its judge, already bound to the
+	// trace runtime (GAP-0455). The router reads it from the generation.
+	if judgeChanged {
+		if nextJudge != nil {
+			s.observabilityV8Mu.Lock()
+			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
+			if s.observabilityV8ConsumersDetached {
+				judgeRuntime = nil
+			}
+			nextJudge.bindJudgeTraceV8(judgeRuntime)
+			s.observabilityV8Mu.Unlock()
+		}
+		s.setSharedJudge(nextJudge)
+		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
+		if api := s.apiSnapshot(); api != nil {
+			api.SetHookJudge(nextJudge)
+		}
+		if proxy := s.proxySnapshot(); proxy != nil {
+			proxy.SetJudge(nextJudge)
+		}
+		nextGen.judge = nextJudge
+	} else if previousGen != nil {
+		nextGen.judge = previousGen.judge
+	} else {
+		nextGen.judge = s.sharedJudge()
+	}
+	if !rulePackChanged && previousGen != nil {
+		// The same pack stays: keep its compiled rules and patterns, which
+		// the process-wide scanners keep too.
+		nextGen.activeRules, nextGen.activePatterns = previousGen.activeRules, previousGen.activePatterns
+	}
+
 	appliedCfg := current
 	if !onlyReloadModeChange {
 		appliedCfg = s.publishConfig(&next)
 	}
 	nextGen.Config = appliedCfg
-	nextGen.hookJudge, nextGen.hookJudgeBound = s.sharedJudge(), true
-	if judgeChanged {
-		nextGen.hookJudge = nextJudge
-	}
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
+	if assetDenyListsChanged(oldCfg, appliedCfg) {
+		// Installed skills and plugins a new denied entry names are refused
+		// now, not when their content next changes (GAP-0627).
+		if w := s.installWatcher.Load(); w != nil {
+			w.RequestRescan()
+		}
+	}
 	if privateUpstreamsReload {
 		// Replace, rather than merge, so removing the last entry takes effect.
 		// Drop pooled transports as well: an already-idle connection otherwise
@@ -2098,35 +2150,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		}
 	}
 	if s.router != nil {
-		if rulePackChanged {
-			s.router.SetRulePack(rulePackCandidate.active)
-		}
 		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
 		s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
 		s.router.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
-	}
-
-	if judgeChanged {
-		if nextJudge != nil {
-			s.observabilityV8Mu.Lock()
-			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
-			if s.observabilityV8ConsumersDetached {
-				judgeRuntime = nil
-			}
-			nextJudge.bindJudgeTraceV8(judgeRuntime)
-			s.observabilityV8Mu.Unlock()
-		}
-		s.setSharedJudge(nextJudge)
-		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
-		if s.router != nil {
-			s.router.SetJudge(nextJudge)
-		}
-		if api := s.apiSnapshot(); api != nil {
-			api.SetHookJudge(nextJudge)
-		}
-		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.SetJudge(nextJudge)
-		}
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
@@ -2265,6 +2291,17 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	preparedCommitted = true
 	return nil
+}
+
+// assetDenyListsChanged reports a reload that changes
+// asset_policy.skill.denied or plugin.denied outside Secure Client, whose
+// watcher keeps the cycle of main (issue #1092).
+func assetDenyListsChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Denied, newCfg.AssetPolicy.Skill.Denied) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied)
 }
 
 // inspectorNeedsRebuild reports whether any field on
@@ -3043,6 +3080,7 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 			lifecycle = nil
 		}
 		proxy.bindObservabilityV8TraceMode(lifecycle, true)
+		proxy.generationSource = s.Generation
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
@@ -3069,6 +3107,7 @@ func (s *Sidecar) setEventRouter(router *EventRouter) {
 			lifecycle = nil
 		}
 		router.bindObservabilityV8Capabilities(emitter, lifecycle)
+		router.generationSource = s.Generation
 		// Operator tool and MCP blocks come from the live config.
 		if router.policy != nil {
 			router.policy = router.policy.WithConfig(s.currentConfig)
@@ -3275,12 +3314,6 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				// schema-aware Amp resolver instead of watching static defaults.
 				compTargets["skill"] = ampWatcherSkillDirs(cfg)
 				compTargets["plugin"] = cfg.PluginDirsForConnector("amp")
-			} else if strings.EqualFold(strings.TrimSpace(conn.Name()), "codex") {
-				// Codex also loads $CODEX_HOME/skills, the folder skill list
-				// shows; watch it when it exists (GAP-0392).
-				if dir := filepath.Join(connector.CodexHomeDir(), "skills"); isExistingDir(dir) {
-					compTargets["skill"] = append(compTargets["skill"], dir)
-				}
 			} else if strings.EqualFold(strings.TrimSpace(conn.Name()), "opencode") {
 				activeRoot := ""
 				if cfg != nil {
@@ -3347,11 +3380,6 @@ func watcherDefaultPluginDirs(cfg *config.Config, conn connector.Connector) []st
 		return cfg.PluginDirsForConnector(conn.Name())
 	}
 	return cfg.PluginDirs()
-}
-
-func isExistingDir(dir string) bool {
-	info, err := os.Stat(dir)
-	return err == nil && info.IsDir()
 }
 
 // watcherConnectors resolves every configured connector, owners of a shared
@@ -3662,7 +3690,10 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	})
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
+		w.SetAssetOwners(enrolled.owners)
 		w.SetMCPServerSource(enrolled.live.list)
+		// Retries a server whose admission could not run at the poll.
+		w.SetMCPDiscoveryPoll(true)
 	} else {
 		if len(conns) > 1 {
 			// Each folder belongs to the connector that lists it, so its
@@ -3717,7 +3748,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if enrolled != nil {
 		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, w, changed)
 	}
+	s.installWatcher.Store(w)
 	runErr := w.Run(watchCtx)
+	s.installWatcher.CompareAndSwap(w, nil)
 	s.health.SetWatcher(StateStopped, "", nil)
 	if errors.Is(runErr, context.Canceled) && ctx.Err() == nil {
 		runErr = nil
@@ -4057,7 +4090,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// NewSidecar strictly loaded and published the effective single-connector
 	// pack before returning. Runtime startup consumes that immutable candidate
 	// and never performs an implicit second disk load.
-	rp := s.router.rulePack()
+	rp := s.activeRulePack()
 	if rp == nil {
 		return fmt.Errorf("guardrail: validated cold-start rule pack is unavailable")
 	}
@@ -4625,7 +4658,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 
 	// NewSidecar has already strictly loaded and published the global pack.
 	// Per-connector candidates are loaded only by the isolated setup loop.
-	if s.router == nil || s.router.rulePack() == nil {
+	if s.activeRulePack() == nil {
 		return fmt.Errorf("multi-connector boot: validated global rule pack is unavailable")
 	}
 

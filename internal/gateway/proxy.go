@@ -92,11 +92,14 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
-	cfg     *config.GuardrailConfig
-	logger  *audit.Logger
-	health  *SidecarHealth
-	store   *audit.Store
-	dataDir string
+	// generationSource is the gateway's published generation; each request
+	// pins it in withProxyAgent. nil outside a gateway.
+	generationSource func() *Generation
+	cfg              *config.GuardrailConfig
+	logger           *audit.Logger
+	health           *SidecarHealth
+	store            *audit.Store
+	dataDir          string
 
 	observabilityV8Mu                  sync.RWMutex
 	observabilityV8Trace               lifecycleV8Runtime
@@ -540,6 +543,16 @@ type unverifiedProxyCallerKey struct{}
 
 func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 	ctx := r.Context()
+	// One generation decides the request: its rules, local patterns,
+	// profiles and the policy stamp of its records (GAP-0455). An unverified
+	// caller keeps the base guardrail of that same generation.
+	set := liveGuardrailProfiles.Load()
+	if p.generationSource != nil {
+		if g := p.generationSource(); g.published() {
+			ctx = withPinnedGeneration(ctx, g)
+			set = pinnedGeneration(ctx).Profiles
+		}
+	}
 	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) {
 		// A provider key admits model traffic but says nothing about who sent it.
 		// Keep the proxy's base guardrail and leave the owner's agent unclaimed.
@@ -553,7 +566,7 @@ func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 			sharedAgentIdentities.observe(facts, "", false)
 		}
 	}
-	return r.WithContext(withGuardrailProfile(ctx, liveGuardrailProfiles.Load(), connectorName))
+	return r.WithContext(withGuardrailProfile(ctx, set, connectorName))
 }
 
 // profileModeFor applies the request's identity-based guardrail profile to

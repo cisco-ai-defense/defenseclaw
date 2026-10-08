@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
@@ -34,6 +35,9 @@ const ledgerFreshness = 5 * time.Minute
 
 // codeUnitFailed names a DefenseClaw oneshot unit systemd reports failed.
 const codeUnitFailed = "unit_failed"
+
+// codeNotStarted names a deployment installed with --no-start.
+const codeNotStarted = "not_started"
 
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
@@ -81,7 +85,8 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
-	if pending, _ := env.loadPending(); pending != nil {
+	pending, _ := env.loadPending()
+	if pending != nil {
 		r.TransactionPending = true
 	}
 	if statusBusy {
@@ -110,10 +115,27 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	r.Installed = true
 	r.InstalledVersion = record.ProductVersion
+	if failure := env.lastPackageInstallFailure(); failure != "" {
+		// A package reinstall or upgrade the lifecycle refused (a full disk,
+		// a config it rejected) printed Complete and left status and verify
+		// green; only last-package-result.json said so (GAP-0469). The
+		// result stays until a later run succeeds.
+		r.AddWarning(codePackageInstallFailed, "the last package install, reinstall or upgrade did not apply: "+failure+
+			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
+	}
 	strict := l.opts.Action == ActionVerify
 	problems := l.verifyInstalled(ctx, record, strict)
+	l.warnLowDiskSpace()
+	dropInProblems, dropIns := l.unitDropIns(ctx, record)
+	problems = append(problems, dropInProblems...)
+	if len(dropIns) > 0 {
+		r.AddWarning(codeUnitDropIn, "local drop-ins change DefenseClaw units: "+strings.Join(dropIns, ", ")+"; they keep the units' account, sandbox and config")
+	}
 	l.describe(ctx, record, true)
 	problems = append(problems, l.describeMachinePolicy(record)...)
+	if machinePolicyIncomplete(r) {
+		r.SecurityComplete = false
+	}
 	if strict {
 		l.warnUnprivilegedUserNamespaces()
 	}
@@ -132,10 +154,26 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			}
 		}
 	}
+	if pending != nil {
+		// Mid-transaction files differ from the record because the run was
+		// interrupted, not because someone edited them (GAP-0468).
+		problems = append([]string{env.interruptedTransactionProblem(pending)}, withoutTransactionDrift(problems)...)
+	}
 	// A problem either action finds makes the deployment unhealthy, and
 	// both exit 1 for it; status leaves out verify's stricter checks.
+	reported := map[string]bool{}
 	for _, problem := range problems {
-		r.AddError(codeVerify, problem)
+		if !reported[problem] {
+			reported[problem] = true
+			r.AddError(codeVerify, problem)
+		}
+	}
+	if record.NoStart {
+		// Nothing runs, so no agent is protected; ensure reported it as a
+		// warning, and status and verify read ok with every service
+		// not_loaded (GAP-0542).
+		r.AddError(codeNotStarted, "the deployment was installed with --no-start, so its services are not running and agents are not protected; run `"+
+			env.lifecycleCommand(ActionRepair)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to start them")
 	}
 	if !record.NoStart && !r.Readiness.Gateway {
 		// A gateway that is down because the installed binary refuses the
@@ -149,6 +187,61 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddError(codeVerify, "a lifecycle transaction is pending; "+l.recoverPendingFromVerify(ctx))
 	}
 	return 0
+}
+
+// clearSupersededUnitFailures clears the failed state an earlier lifecycle
+// run left on the apply or daily verify oneshot once this run has left the
+// deployment healthy (committed, or found up to date). Left in place, every
+// verify kept warning unit_failed after a refused package upgrade was
+// recovered, or after a package upgrade interrupted the daily verify, until
+// an administrator ran systemctl reset-failed (GAP-0423, GAP-0585).
+func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
+	env := l.env
+	resetter, ok := env.Services.(failedResetter)
+	if !ok {
+		return
+	}
+	for _, unit := range env.Services.Units() {
+		if unit.Name != unitApplyService && unit.Name != unitVerifyService {
+			continue
+		}
+		if status, err := env.Services.Status(ctx, unit); err == nil && strings.HasPrefix(status.State, "failed") {
+			if resetter.ResetFailed(ctx, unit) == nil {
+				l.noteChange("cleared the failed state an earlier run left on %s", unit.Name)
+			}
+		}
+	}
+}
+
+// interruptedTransactionProblem names a transaction a reset or a killed run
+// left pending, and the commands that finish it.
+func (e *Env) interruptedTransactionProblem(pending *Pending) string {
+	action, phase, started := pending.Action, pending.Phase, pending.StartedAt
+	if action == "" {
+		action = "change"
+	}
+	if phase == "" {
+		phase = "unknown"
+	}
+	if started == "" {
+		started = "an unknown time"
+	}
+	return fmt.Sprintf("a lifecycle %s that started at %s was interrupted in its %s phase (a reset or a killed run), so files differ from the deployment record; "+
+		"`%s` rolls it back to the last committed deployment, and to apply the config it was applying run `%s --config <file>` again",
+		action, started, phase, e.lifecycleCommand("repair"), e.lifecycleCommand(ActionEnsure))
+}
+
+// withoutTransactionDrift drops the file and config drift an interrupted
+// transaction explains.
+func withoutTransactionDrift(problems []string) []string {
+	kept := problems[:0:0]
+	for _, problem := range problems {
+		if strings.HasSuffix(problem, " was modified after install") || strings.Contains(problem, "changed since it was applied") {
+			continue
+		}
+		kept = append(kept, problem)
+	}
+	return kept
 }
 
 // recoverPendingFromVerify starts the apply trigger for a transaction a
@@ -194,9 +287,11 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	case err != nil:
 		add("service account %s: %v", record.ServiceUser, err)
 	case !ok:
-		add("service account %s is missing", record.ServiceUser)
+		add("service account %s is missing, so the gateway cannot start; `%s` recreates it and restores the owners of its folders", record.ServiceUser, env.lifecycleCommand("repair"))
 	case account.UID != record.ServiceUID || account.GID != record.ServiceGID:
 		add("service account %s is %d:%d, deployment recorded %d:%d", record.ServiceUser, account.UID, account.GID, record.ServiceUID, record.ServiceGID)
+	case account.LoginShell != "":
+		add("%v", loginAccountError(account, env.lifecycleCommand("ensure")))
 	}
 
 	packageDrift, packageDriftChecked := "", false
@@ -217,6 +312,10 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 				if packageDrift != "" {
 					continue // one message below, not one per binary
 				}
+			}
+			if record.Channel == ChannelPackage && filepath.Dir(path) == env.Layout.BinDir {
+				add("%s was modified after install; %s", path, env.packageReinstallStep(record.ProductVersion))
+				continue
 			}
 			add("%s was modified after install", path)
 		}
@@ -251,6 +350,17 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	if err := env.Trust(env.P(env.Layout.ConfigPath), TrustAdminFile); err != nil {
 		add("config trust: %v", err)
 	}
+	// A pack file a standard user came to own (or that turned writable)
+	// changes enforcement at the next restart with no trace (GAP-0552).
+	for _, label := range config.RulePackCheckOrder(record.RulePacks) {
+		dir := record.RulePacks[label]
+		if dir == env.Layout.VendorPolicyDir || strings.HasPrefix(dir, env.Layout.VendorPolicyDir+"/") {
+			continue
+		}
+		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && !errors.Is(err, os.ErrNotExist) {
+			add("%s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
+		}
+	}
 	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err != nil {
 		add("config: %v", err)
 	} else if sha256Bytes(raw) != record.ConfigSHA256 && !inputsChanged {
@@ -273,6 +383,10 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		// deployment left in /etc/systemd/system over a packaged unit, say)
 		// replaces the definition this deployment installed.
 		for _, unit := range env.Services.Units() {
+			if unitMasked(ctx, env.Services, unit) {
+				add("%s is masked, so it cannot start; `%s` unmasks it (or run `systemctl unmask %s`)", unit.Name, env.lifecycleCommand("repair"), unit.Name)
+				continue
+			}
 			want := env.Services.DefinitionPath(unit, record.Channel)
 			if got := fragments.FragmentPath(ctx, unit); got != "" && !sameUnitFile(env, got, want) {
 				add("%s is loaded from %s instead of %s; remove the other unit file and run ensure", unit.Name, got, want)
@@ -731,7 +845,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
@@ -769,6 +883,10 @@ const codeDirectoryLookups = "directory_lookups_failing"
 const codeProfileAssignments = "profile_assignment_unmatched"
 const codeOptionalDestination = "optional_destination_failing"
 
+// codeJudgeFailing names an LLM judge whose recent calls all failed, or that
+// could not start.
+const codeJudgeFailing = "judge_failing"
+
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
 // that fail: the accounts without cached facts then run under the default
@@ -793,9 +911,30 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			Accounts []string `json:"accounts"`
 		} `json:"directory"`
 		ProfileWarnings []string `json:"profile_warnings"`
+		Guardrail       *struct {
+			Details struct {
+				State       string `json:"judge_state"`
+				Unavailable string `json:"judge_unavailable_reason"`
+				Recent      int    `json:"judge_recent_calls"`
+				Failed      int    `json:"judge_failed_calls"`
+				LastError   string `json:"judge_last_error"`
+				LastFailure string `json:"judge_last_failure_at"`
+			} `json:"details"`
+		} `json:"guardrail"`
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
+	}
+	// A judge that stops answering silently downgrades detection to the
+	// static rules; only /health and the journal said so (GAP-0626).
+	if g := health.Guardrail; g != nil {
+		switch d := g.Details; d.State {
+		case "failing":
+			l.result.AddWarning(codeJudgeFailing, fmt.Sprintf("the LLM judge failed its last %d calls (last at %s: %s); the rule packs still apply, but the judge's checks do not until it recovers: check the judge's provider credentials and network",
+				d.Failed, d.LastFailure, d.LastError))
+		case "unavailable":
+			l.result.AddWarning(codeJudgeFailing, "the LLM judge is unavailable ("+d.Unavailable+"); the rule packs still apply, but the judge's checks do not: check the judge settings and its provider credentials")
+		}
 	}
 	if health.Inspection != nil {
 		l.result.Inspection.Local = health.Inspection.Local

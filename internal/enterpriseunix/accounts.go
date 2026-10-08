@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,28 @@ type Account struct {
 	UID     int
 	GID     int
 	Created bool
+	// LoginShell is the shell of an account someone can sign in to (a shell
+	// other than nologin or false); "" for a service account.
+	LoginShell string
+	// Home is the account's home directory, named in the refusal.
+	Home string
+}
+
+// noLoginShells are the shells that refuse an interactive sign-in.
+var noLoginShells = map[string]bool{
+	"/usr/sbin/nologin": true, "/sbin/nologin": true, "/usr/bin/nologin": true,
+	"/bin/false": true, "/usr/bin/false": true, "/sbin/false": true,
+}
+
+// loginAccountError refuses an existing account someone can sign in to as
+// the gateway service account: whoever signs in as it could stop the
+// gateway, move its hook socket and read the managed config (GAP-0433).
+func loginAccountError(account Account, ensure string) error {
+	return fmt.Errorf("the existing account %s (uid %d, home %s) has the login shell %s, so it cannot run the DefenseClaw gateway: "+
+		"anyone who signs in as it could stop the gateway or move its hook socket. Remove it with `userdel %s` "+
+		"(DefenseClaw then creates a system account that cannot sign in), or give it a no-login shell with "+
+		"`usermod -s /usr/sbin/nologin %s`, then run `%s`",
+		account.Name, account.UID, account.Home, account.LoginShell, account.Name, account.Name, ensure)
 }
 
 // AccountManager resolves, creates and removes the service account.
@@ -75,11 +98,22 @@ func (a *linuxAccounts) Lookup(ctx context.Context, name string) (Account, bool,
 	if groupName := strings.SplitN(strings.TrimSpace(string(group.Stdout)), ":", 2)[0]; groupName != name {
 		return Account{}, false, fmt.Errorf("service account %s must have primary group %s, found %q", name, name, groupName)
 	}
-	return Account{Name: name, UID: uid, GID: gid}, true, nil
+	account := Account{Name: name, UID: uid, GID: gid, Home: fields[5]}
+	// An empty shell field is /bin/sh.
+	if shell := strings.TrimSpace(fields[6]); shell == "" || !noLoginShells[filepath.Clean(shell)] {
+		account.LoginShell = shell
+		if shell == "" {
+			account.LoginShell = "/bin/sh"
+		}
+	}
+	return account, true, nil
 }
 
 func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error) {
 	if account, ok, err := a.Lookup(ctx, name); err != nil || ok {
+		if err == nil && account.LoginShell != "" {
+			return Account{}, loginAccountError(account, a.env.lifecycleCommand("ensure"))
+		}
 		return account, err
 	}
 	// The account must exist before the transaction renders any file, so

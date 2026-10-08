@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -282,5 +283,32 @@ func TestGuardrailLevelsYAMLRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(string(empty), "block_at") || strings.Contains(string(empty), "alert_at") {
 		t.Fatalf("empty levels were written:\n%s", empty)
+	}
+}
+
+// GAP-0548: a custom_packs path written with .. loaded the same pack under
+// another effective policy digest; the loader keeps the clean path.
+func TestCustomPackPathIsCleanedOnLoad(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows paths are kept as written")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(home, ".defenseclaw"))
+	raw := []byte(`config_version: 9
+data_dir: ` + filepath.Join(home, "state") + `
+guardrail:
+  enabled: true
+  rule_pack: acme
+  custom_packs:
+    acme: {path: /etc/defenseclaw/policies/guardrail/../guardrail/acme/, digest: "sha256:` + strings.Repeat("a", 64) + `"}
+observability: {}
+`)
+	cfg, err := LoadRuntimeV8CandidateFromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Guardrail.CustomPacks["acme"].Path; got != "/etc/defenseclaw/policies/guardrail/acme" {
+		t.Fatalf("custom_packs.acme.path = %q", got)
 	}
 }

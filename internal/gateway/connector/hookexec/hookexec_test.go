@@ -2617,7 +2617,7 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 	stdout.Reset()
 	opts.Event = "preToolUse"
 	if code := failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason); code != 0 ||
-		!strings.Contains(stdout.String(), "ask your administrator to start the DefenseClaw gateway service") {
+		!strings.Contains(stdout.String(), "ask your administrator to check DefenseClaw on this computer") {
 		t.Fatalf("stopped gateway preToolUse = %d %q", code, stdout.String())
 	}
 }

@@ -103,6 +103,24 @@ func unitDisabled(ctx context.Context, services ServiceManager, unit Unit) bool 
 	return ok && reporter.Disabled(ctx, unit)
 }
 
+// maskReporter is implemented by service managers whose units can be masked
+// (systemd): a masked unit can be neither enabled nor started.
+type maskReporter interface {
+	Masked(ctx context.Context, unit Unit) bool
+	Unmask(ctx context.Context, unit Unit) error
+}
+
+func unitMasked(ctx context.Context, services ServiceManager, unit Unit) bool {
+	reporter, ok := services.(maskReporter)
+	return ok && reporter.Masked(ctx, unit)
+}
+
+// failedResetter is implemented by service managers that keep a unit's
+// failed state until it is cleared (systemd's reset-failed).
+type failedResetter interface {
+	ResetFailed(ctx context.Context, unit Unit) error
+}
+
 // restarter is implemented by service managers that restart a unit in one
 // job.
 type restarter interface {
@@ -303,6 +321,32 @@ func (m *systemdManager) PlannedRestart(ctx context.Context, unit Unit) bool {
 // Enabled reports whether the unit is enabled to start at boot.
 func (m *systemdManager) Enabled(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "enabled"
+}
+
+// ResetFailed clears a unit's failed state.
+func (m *systemdManager) ResetFailed(ctx context.Context, unit Unit) error {
+	return m.run(ctx, "reset-failed", unit.Name)
+}
+
+// Masked reports a masked unit (systemctl mask), persistent or runtime.
+func (m *systemdManager) Masked(ctx context.Context, unit Unit) bool {
+	return strings.HasPrefix(m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"], "masked")
+}
+
+// Unmask removes a persistent or runtime mask; systemctl reloads the unit
+// files itself.
+func (m *systemdManager) Unmask(ctx context.Context, unit Unit) error {
+	if m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "masked-runtime" {
+		return m.run(ctx, "unmask", "--runtime", unit.Name)
+	}
+	return m.run(ctx, "unmask", unit.Name)
+}
+
+// Disabled reports a unit an administrator disabled (systemctl disable). A
+// socket-activated gateway keeps running after `disable --now`, so only the
+// unit file state shows that it would not start at boot (GAP-0530).
+func (m *systemdManager) Disabled(ctx context.Context, unit Unit) bool {
+	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "disabled"
 }
 
 // FragmentPath is the unit file systemd loaded the unit from.

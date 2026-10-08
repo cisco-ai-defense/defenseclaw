@@ -58,6 +58,22 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 			t.Fatalf("ensure after the revert is not a no-op: %+v %+v", again.Errors, again.Warnings)
 		}
 	})
+	// A bad profile push left config.yaml 0666 and a standard user switched
+	// enforcement to observe; the apply trigger applied it (GAP-0524).
+	t.Run("writable by other accounts", func(t *testing.T) {
+		h := newTestHost(t, "darwin")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		applied := h.read(h.env.Layout.ConfigPath)
+		if err := os.Chmod(h.env.P(h.env.Layout.ConfigPath), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		editConfigInPlace(t, h, "mode: observe", "mode: action")
+		r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+		requireError(t, r, codeConfig)
+		if got := h.read(h.env.Layout.ConfigPath); got != applied || h.mode(h.env.Layout.ConfigPath) != 0o640 {
+			t.Fatalf("the edit written while config.yaml was 0666 was applied (%04o):\n%s", h.mode(h.env.Layout.ConfigPath), got)
+		}
+	})
 	t.Run("activation fails", func(t *testing.T) {
 		h := newTestHost(t, "linux")
 		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -112,8 +128,13 @@ func TestReassertedV8ConfigIsNotRewritten(t *testing.T) {
 	if got := h.read(h.env.Layout.ConfigPath); got != v8 {
 		t.Fatalf("the re-asserted v8 config was rewritten:\n%s", got)
 	}
-	if r := h.run(Options{Action: ActionEnsure, Reason: "path"}); !r.Noop {
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	if !r.Noop {
 		t.Fatalf("the kept v8 config does not settle: %+v", r.Changes)
+	}
+	// The settled run still says the file is version 8 (GAP-0540).
+	if !hasWarning(r, codeConfigV8) {
+		t.Fatalf("a run that read a config_version 8 file does not say so: %+v", r.Warnings)
 	}
 }
 
@@ -160,10 +181,13 @@ func TestRejectedConfigStaysReportedUntilConfigIsPushedAgain(t *testing.T) {
 		if again := h.run(Options{Action: ActionEnsure, Reason: "path"}); !again.Noop || !hasWarning(again, codeConfigRejected) {
 			t.Fatalf("ensure after the revert: noop=%v warnings=%+v", again.Noop, again.Warnings)
 		}
-		if status := h.run(Options{Action: ActionStatus}); !hasWarning(status, codeConfigRejected) ||
-			!hasMessage(status.Warnings, "api_port") || hasMessage(status.Warnings, "the lifecycle log says why") {
-			// The warning names the cause, not only the log (GAP-0689).
-			t.Fatalf("status does not report the rejected edit and why: %+v", status.Warnings)
+		status := h.run(Options{Action: ActionStatus})
+		if !hasWarning(status, codeConfigRejected) {
+			t.Fatalf("status does not report the rejected edit: %+v", status.Warnings)
+		}
+		// GAP-0587: the reason is named, not left to the lifecycle log.
+		if got := messagesOf(status.Warnings, codeConfigRejected); !strings.Contains(got, "api_port") || strings.Contains(got, "lifecycle log says why") {
+			t.Fatalf("the rejected edit's reason is not named: %q", got)
 		}
 		if verify := h.run(Options{Action: ActionVerify}); !hasMessage(verify.Errors, "rejected") {
 			t.Fatalf("verify does not fail on the rejected edit: %+v", verify.Errors)

@@ -129,6 +129,16 @@ class DoctorPolicyStateTests(unittest.TestCase):
                 cmd_doctor._check_policy_state(SimpleNamespace(data_dir=data_dir), result, live_health=None)
                 self.assertEqual(result.checks[0]["status"], want, result.checks[0])
 
+    def test_invalid_config_does_not_claim_gateway_stopped(self):
+        from defenseclaw.commands import cmd_doctor
+
+        result = _DoctorResult()
+        result.checks.append({"check_id": "doctor.config.validation", "status": "fail"})
+        with patch.object(cmd_doctor, "_emit_policy_without_gateway") as emit:
+            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health=None)
+        self.assertIn("live state was not checked", emit.call_args.args[3])
+        self.assertNotIn("gateway is not running", emit.call_args.args[3])
+
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
     def test_only_data_json_is_retired(self):
@@ -2619,14 +2629,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # post-repair health counts. The policy-changing repair is visible but
         # explicitly requires selection on the real run.
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 22)
+        self.assertEqual(len(result.repairs), 23)
         self.assertEqual(
             {record["state"] for record in result.repairs},
             {"applicable", "noop", "requires_confirmation"},
         )
         self.assertEqual(result.repair_summary.planned, 8)
         self.assertEqual(result.repair_summary.requires_confirmation, 1)
-        self.assertEqual(result.repair_summary.noop, 13)
+        self.assertEqual(result.repair_summary.noop, 14)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
             "connector residue",
@@ -2716,10 +2726,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 22)
+        self.assertEqual(len(result.repairs), 23)
         self.assertEqual(result.repair_summary.applied, 8)
         self.assertEqual(result.repair_summary.manual, 1)
-        self.assertEqual(result.repair_summary.noop, 13)
+        self.assertEqual(result.repair_summary.noop, 14)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         fix_residue.assert_not_called()

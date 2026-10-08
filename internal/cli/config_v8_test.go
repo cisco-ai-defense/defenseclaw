@@ -33,6 +33,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
+func TestReadConfigErrorDoesNotNameOldVersion(t *testing.T) {
+	_, err := readConfigV8Source(filepath.Join(t.TempDir(), "missing-config.yaml"))
+	if err == nil || strings.Contains(err.Error(), "v8") || !strings.Contains(err.Error(), "read config") {
+		t.Fatalf("config read error = %v", err)
+	}
+}
+
+func TestV9ValidationFailureNamesCurrentVersion(t *testing.T) {
+	err := &config.V8SchemaError{
+		Version: 9, Path: "$.guardrail.mode", Keyword: "enum",
+		Summary: "configuration violates the enum constraint",
+		Action:  "inspect the config_version 9 settings reference and correct this field",
+	}
+	failure := configV8ValidationFailure(err)
+	if failure.ConfigVersion != 9 || strings.Contains(failure.Reason, "v8") ||
+		!strings.Contains(failure.Reason, "config_version 9") {
+		t.Fatalf("v9 validation failure = %+v", failure)
+	}
+}
+
 func TestLoadConfigV8FileValidatesTargetRuntimeConnectorRoster(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")

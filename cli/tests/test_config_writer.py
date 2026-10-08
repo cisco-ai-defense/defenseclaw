@@ -477,6 +477,19 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     assert shown in _reference_page("cli.mdx")
 
 
+def test_plain_error_reports_length_and_write_directory() -> None:
+    import errno
+
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    too_long = V8ConfigError("config.yaml", "$.guardrail.block_message", "maxLength", "check the value")
+    assert config_writer.plain_error(too_long, value="B" * 5000) == (
+        "guardrail.block_message is longer than 4096 characters (it has 5000)"
+    )
+    denied = OSError(errno.EACCES, "Permission denied", "/home/u/.defenseclaw/.config.yaml.candidate-abc.yaml")
+    assert config_writer.plain_error(denied) == "cannot write in /home/u/.defenseclaw: permission denied"
+
+
 def test_edited_pack_error_names_narrow_repin():
     from defenseclaw.config_inspect import ConfigInspectError
 

@@ -2267,14 +2267,17 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     if unverified:
         steps.append("inspect the Windows ACLs of " + ", ".join(unverified))
     others = [path for path in files if path != dotenv]
-    if os.name == "nt":
-        if others:
-            steps.append("review ownership and remove untrusted permissions on " + ", ".join(others))
-    else:
-        if others:
-            steps.append("chmod 600 " + " ".join(others))
-        if any(item.startswith(f"{data_dir} (") for item in exposed):
-            steps.append(f"chmod 700 {data_dir}")
+    # doctor.state.private-files.protect (GAP-0560) removes read access for
+    # other accounts; another unsafe Windows ACL, such as a write grant or
+    # another owner, needs a review (GAP-0715).
+    fixable = [path for path in others if os.name != "nt" or _private_state_file_exposed(path)]
+    review = [path for path in others if path not in fixable]
+    if fixable:
+        steps.append("defenseclaw doctor --fix --yes (makes " + ", ".join(fixable) + " private)")
+    if review:
+        steps.append("review ownership and remove untrusted permissions on " + ", ".join(review))
+    if os.name != "nt" and any(item.startswith(f"{data_dir} (") for item in exposed):
+        steps.append(f"chmod 700 {data_dir}")
     _emit(
         "fail" if files else "warn",
         "Private files",
@@ -2289,6 +2292,66 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         reason_code="private-files-exposed" if exposed else "private-files-unverified",
         remediation="; ".join(steps),
     )
+
+
+def _private_state_files(cfg, data_dir: str) -> tuple[str, ...]:
+    """device.key, its provenance files and audit.db: private state other than .env."""
+    gateway = getattr(cfg, "gateway", None)
+    device_key = str(getattr(gateway, "device_key_file", "") or os.path.join(data_dir, "device.key"))
+    return (
+        device_key,
+        device_key + ".provenance",
+        os.path.join(data_dir, "device.provenance.secret"),
+        str(getattr(cfg, "audit_db", "") or os.path.join(data_dir, "audit.db")),
+    )
+
+
+def _private_state_file_exposed(path: str) -> bool:
+    from defenseclaw.file_permissions import windows_acl_confidentiality_error
+
+    if os.name == "nt":
+        problem = windows_acl_confidentiality_error(path)
+        return bool(problem) and "read" in problem.lower()
+    return bool(stat.S_IMODE(os.lstat(path).st_mode) & 0o077)
+
+
+def _fix_private_state_files(cfg, *, assume_yes: bool, plan_only: bool = False) -> tuple[str, str]:
+    """Make device.key, its provenance files and audit.db readable by this
+    account only. A Windows per-user upgrade kept an older device.key whose
+    DACL still granted BUILTIN\\Administrators read access, and nothing
+    repaired it (GAP-0560). .env has its own repair: an exposed one rotates
+    the gateway token."""
+    from defenseclaw.file_permissions import protect_private_file
+
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir or _doctor_managed(cfg):
+        return ("skip", "the installation owns the modes of its state files")
+    exposed: list[str] = []
+    for path in _private_state_files(cfg, data_dir):
+        try:
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                continue
+            if _private_state_file_exposed(path):
+                exposed.append(path)
+        except OSError:
+            continue
+    if not exposed:
+        return ("skip", "device.key and audit.db are readable by this account only")
+    names = ", ".join(exposed)
+    if plan_only:
+        return ("plan", f"make {names} readable by this account only")
+    if not assume_yes and not click.confirm(f"    Make {names} readable by this account only?", default=True):
+        return ("skip", "declined by user")
+    for path in exposed:
+        try:
+            protect_private_file(path)
+            still_exposed = _private_state_file_exposed(path)
+        except OSError as exc:
+            return ("fail", f"could not make {path} private: {exc}")
+        if still_exposed:
+            return ("fail", f"{path} is still readable by other accounts")
+    return ("pass", f"made {names} readable by this account only")
 
 
 def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
@@ -9529,7 +9592,12 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         return
     label = "Policy"
     if not isinstance(live_health, dict):
-        _emit_policy_without_gateway(cfg, r, label, "the gateway is not running")
+        reason = (
+            "live state was not checked while config.yaml is invalid; see the Config validation row"
+            if _config_validation_failed(r)
+            else "the gateway is not running"
+        )
+        _emit_policy_without_gateway(cfg, r, label, reason)
         return
     if r.sidecar_unverified:
         _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
@@ -11487,6 +11555,9 @@ def doctor(
     # still render inside their label context, so two peers sharing a pack
     # retain attribution without executing the authoritative helper twice.
     rule_pack_validation_cache: dict[str, object] = {}
+    inventory_health = None
+    if not _config_validation_failed(r) and _trusted_gateway_listener(cfg).trusted:
+        inventory_health = _live_gateway_health(cfg)
     for _c in inventory_connectors:
         if not _connector_enabled(cfg, _c):
             # Operator-disabled (guardrail disable --connector X): the Go boot
@@ -11510,6 +11581,7 @@ def doctor(
                 _c,
                 r,
                 rule_pack_validation_cache=rule_pack_validation_cache,
+                live_health=inventory_health,
             )
             _check_hook_contract_lock(cfg, _c, r)
             _check_hook_runtime_integrity(cfg, _c, r)
@@ -11903,6 +11975,17 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
             blockers=(plan.reason_code,),
         )
     if blocker := _recovery_gateway_blocker(cfg):
+        if _audit_store_replaced(_live_gateway_health(cfg)):
+            # The running gateway still holds the deleted file. The reopen
+            # repair restarts it and the gateway creates audit.db as it
+            # starts; a blocked plan here skipped that repair as a dependent
+            # of the service repair (GAP-0325).
+            return RepairDecision(
+                "noop",
+                "the running gateway still holds the deleted audit database; "
+                f"{_AUDIT_STORE_REOPEN_REPAIR_ID} restarts it and the gateway creates a new one",
+                effects=effects,
+            )
         return RepairDecision("blocked", blocker, effects=effects, blockers=(blocker,))
     return RepairDecision(
         "applicable",
@@ -12512,6 +12595,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             _fix_dotenv_perms,
             (),
             ("enforce owner-only credential-file custody",),
+            False,
+            False,
+        ),
+        (
+            "doctor.state.private-files.protect",
+            "private state files",
+            "safe",
+            _fix_private_state_files,
+            (),
+            ("make device.key, its provenance files and audit.db readable by this account only",),
             False,
             False,
         ),
@@ -13605,6 +13698,7 @@ def _check_connector_inventory(
     r: _DoctorResult,
     *,
     rule_pack_validation_cache: dict[str, object] | None = None,
+    live_health: dict | None = None,
 ) -> None:
     """Surface one connector and everything it resolves to.
 
@@ -13802,6 +13896,9 @@ def _check_connector_inventory(
         strategy = (getattr(gc, "detection_strategy", "") or "").strip() or "regex_judge"
         judge = getattr(gc, "judge", None)
         judge_enabled = bool(getattr(judge, "enabled", False)) if judge is not None else False
+        guardrail_health = live_health.get("guardrail") if isinstance(live_health, dict) else None
+        judge_details = guardrail_health.get("details") if isinstance(guardrail_health, dict) else None
+        judge_failing = isinstance(judge_details, dict) and judge_details.get("judge_state") == "failing"
         detail = f"strategy={strategy}"
         if not judge_enabled:
             detail += "; judge disabled (regex and Cisco AI Defense lanes only)"
@@ -13819,7 +13916,9 @@ def _check_connector_inventory(
                     "lane (regex and Cisco AI Defense lanes only); opt in: "
                     f"defenseclaw guardrail judge add {connector}"
                 )
-        _emit("pass", "Detection", detail, r=r)
+        if judge_enabled and judge_failing:
+            detail += "; judge failing: all recent calls failed, so only the rules decide"
+        _emit("warn" if judge_enabled and judge_failing else "pass", "Detection", detail, r=r)
 
 
 def _check_hook_contract_lock(

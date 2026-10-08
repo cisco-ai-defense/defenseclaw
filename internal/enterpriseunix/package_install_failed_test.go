@@ -67,34 +67,6 @@ func TestFailedPkgInstallVerifyNextStepsAgree(t *testing.T) {
 	}
 }
 
-// GAP-2410: uninstall (no --purge) after a failed first pkg install found
-// nothing to remove and still said to activate the deployment with `ensure
-// --from-package --config <file>`; it gives the finish step status and
-// verify give: install the pkg again, for its receipt.
-func TestFailedPkgInstallUninstallNoopNextStepsAgree(t *testing.T) {
-	h := newTestHost(t, "darwin")
-	dir := h.env.P(h.env.Layout.LifecycleDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	last := `{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"rule pack missing"}]}`
-	if err := os.WriteFile(filepath.Join(dir, lastPackageResultFile), []byte(last), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	writeHostFile(t, h, h.env.Layout.DescriptorPath, "{}")
-	r := h.run(Options{Action: ActionUninstall})
-	if !r.Noop || r.NoopReason != "not_installed" {
-		t.Fatalf("uninstall noop=%v reason=%q, want a not_installed no-op", r.Noop, r.NoopReason)
-	}
-	if failed := messagesOf(r.Warnings, codePackageInstallFailed); !strings.Contains(failed, "install the package again") {
-		t.Fatalf("package_install_failed warning = %q", failed)
-	}
-	leftovers := messagesOf(r.Warnings, codeLeftovers)
-	if leftovers == "" || strings.Contains(leftovers, "--config <file>") || !strings.Contains(leftovers, "as the "+codePackageInstallFailed+" warning says") {
-		t.Fatalf("unmanaged_leftovers warning = %q, want it to defer to the %s advice", leftovers, codePackageInstallFailed)
-	}
-}
-
 // dnf remove after a first rpm install that failed (config_invalid, rolled
 // back) left the rejected config.yaml, the state and log folders, the
 // lifecycle result, an empty drop-in folder and the service account: the
@@ -126,6 +98,31 @@ func TestUninstallAfterAFailedPackageInstallRemovesItsLeftovers(t *testing.T) {
 	}
 	if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
 		t.Error("the uninstall removed binaries the package owns")
+	}
+}
+
+// The same on macOS: the Jamf uninstall script answered noop not_installed
+// (with the finish step of GAP-2410) and left bin, the rejected
+// etc/config.yaml and lifecycle (GAP-0567).
+func TestMacOSUninstallAfterAFailedFirstPackageInstallRemovesItsLeftovers(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	bin := h.env.P(h.env.Layout.BinDir)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := h.payload("1.0.0")
+	for _, name := range []string{binGateway, binHook, binSensorHelper} {
+		if err := h.env.copyFileAtomic(filepath.Join(staged, name), filepath.Join(bin, name), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHostFile(t, h, h.env.Layout.ConfigPath, "config_version: 9\ngateway:\n  api_port: 18971\n")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"gateway.api_port 18971 must be 18970"}]}`)
+	r := h.run(Options{Action: ActionUninstall})
+	requireOK(t, r)
+	if r.Noop || exists(h.env.P(h.env.Layout.InstallRoot)) {
+		t.Fatalf("the uninstall after a failed first pkg install left %s (noop=%v)", h.env.Layout.InstallRoot, r.Noop)
 	}
 }
 
@@ -188,5 +185,20 @@ func TestRecoveringRunClearsTheFailedPackageResult(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.2")}))
 	if exists(last) || exists(activation) {
 		t.Fatal("a recovering run left the failed package result or the kept activation output in place")
+	}
+}
+
+// GAP-0469: a package reinstall the lifecycle refused (a full disk) printed
+// Complete and left status and verify green on the running deployment.
+func TestStatusWarnsThatTheLastPackageRunDidNotApply(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"apply_failed","message":"create snapshot: no space left on device"}]}`)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := messagesOf(h.run(Options{Action: action}).Warnings, codePackageInstallFailed)
+		if !strings.Contains(got, "did not apply: apply_failed: create snapshot: no space left on device") || !strings.Contains(got, "--from-package`") {
+			t.Fatalf("%s does not warn about the refused package run: %q", action, got)
+		}
 	}
 }

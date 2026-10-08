@@ -13,7 +13,9 @@
 # PowerShell exits); one it cannot remove is reported. GAP-2057: stale
 # DefenseClaw-Installer-<32 hex> staging folders in ProgramData and
 # DefenseClaw-Bootstrap-<32 hex> folders in Windows\Temp go the same way,
-# except the bootstrap folder this run's TEMP points into. GAP-0262: the
+# except the bootstrap folder this run's TEMP points into. GAP-0525: stale
+# DefenseClaw-Enterprise-Setup-<32 hex> staging folders go too, except young
+# or busy ones, which are reported. GAP-0262: the
 # hooks' runtime selector state and lock go, so the Claude Code folders they
 # kept go too. GAP-0575, GAP-0562: without a deployment record, the hook
 # machine state that names this scope's hook executable and the public
@@ -134,6 +136,106 @@ $failures = & $module {
         [void]@(Remove-DefenseClawStaleRunDirectories -ProgramData $programData -WindowsTemp $windowsTemp)
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ownBootstrap)) {
             $failures.Add("removed this run's bootstrap folder: $ownBootstrap")
+        }
+
+        # GAP-0525: the staging folder an interrupted Setup left goes once it
+        # is 30 minutes old; a younger one, and one a running Setup holds as
+        # its working directory, stay and are reported.
+        $setupStale = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('3' * 32))
+        $setupYoung = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('4' * 32))
+        $setupBusy = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('5' * 32))
+        foreach ($path in @($setupStale, $setupYoung, $setupBusy)) {
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($path, 'scratch'))
+        }
+        foreach ($path in @($setupStale, $setupBusy)) {
+            [IO.Directory]::SetCreationTimeUtc($path, [DateTime]::UtcNow.AddHours(-2))
+        }
+        $savedDirectory = [Environment]::CurrentDirectory
+        [Environment]::CurrentDirectory = $setupBusy
+        try {
+            $left = @(Remove-DefenseClawStaleRunDirectories -ProgramData $programData -WindowsTemp $windowsTemp)
+        }
+        finally {
+            [Environment]::CurrentDirectory = $savedDirectory
+        }
+        $setupLeft = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $programData -Directory -Filter 'DefenseClaw-Enterprise-Setup-*' |
+                Microsoft.PowerShell.Core\ForEach-Object { $_.FullName } | Microsoft.PowerShell.Utility\Sort-Object)
+        if (($setupLeft -join ';') -cne (@($setupYoung, $setupBusy) -join ';')) {
+            $failures.Add("Setup staging folders left: $($setupLeft -join '; ')")
+        }
+        foreach ($expected in @("${setupYoung}: created less than 30 minutes ago", "${setupBusy}: in use by a running Setup")) {
+            if (@($left | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith($expected) }).Count -ne 1) {
+                $failures.Add("Setup staging report lacks '$expected': $($left -join '; ')")
+            }
+        }
+
+        # GAP-0526: once a CLI uninstall's finalizer removed the install
+        # root, the empty C:\Program Files\Cisco it sat in goes; a Cisco
+        # folder that holds anything else stays.
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        $savedProgramFiles = $script:ProgramFiles
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF'
+            $vendor = [IO.Path]::Combine($script:ProgramFiles, 'Cisco')
+            [void][IO.Directory]::CreateDirectory($vendor)
+            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $vendor) {
+                $failures.Add('an empty Program Files\Cisco was kept after the install root went')
+            }
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendor, 'Other'))
+            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($vendor, 'Other')))) {
+                $failures.Add('a Program Files\Cisco holding another folder was removed')
+            }
+        }
+        finally {
+            $script:ProgramFiles = $savedProgramFiles
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
+        # GAP-0533: an uninstall that finds no recorded state still removes
+        # DefenseClaw's machine-wide hook files: the drop-ins that name this
+        # scope's hook, and the hook runtime folder with its connector
+        # folders (the ACL check and the tree removal are still replaced, as
+        # above).
+        $savedProgramFiles = $script:ProgramFiles
+        $savedProgramData = $script:ProgramData
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF533'
+            $script:ProgramData = Microsoft.PowerShell.Management\Join-Path $Scratch 'PD533'
+            $hook533 = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe'
+            $named533 = '{"hook_executable":"' + $hook533.Replace('\', '\\') + '"}'
+            $claudeDropIns = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d')
+            [void][IO.Directory]::CreateDirectory($claudeDropIns)
+            foreach ($leaf in @('90-defenseclaw.json', '.defenseclaw-managed-hooks.state', '.defenseclaw-managed-runtime-selector.state')) {
+                [IO.File]::WriteAllText([IO.Path]::Combine($claudeDropIns, $leaf), $named533)
+            }
+            [IO.File]::WriteAllText([IO.Path]::Combine($claudeDropIns, '00-defenseclaw-version-floor.json'), '{}')
+            $hookRuntime = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw-HookRuntime')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($hookRuntime, 'opencode'))
+            [IO.File]::WriteAllText([IO.Path]::Combine($hookRuntime, 'machine-policy.json'), '{}')
+            $layout533 = @{
+                StateRoot = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw')
+                HookPath = $hook533
+                CodexMachinePolicyDirectory = ''
+            }
+            $left = @(
+                @(Remove-DefenseClawUnattributedStandaloneHookRuntime -Layout $layout533) +
+                @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $layout533)
+            )
+            if ($left.Count -ne 0 -or
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode'))) -or
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath $hookRuntime)) {
+                $failures.Add("a state-absent uninstall left DefenseClaw's machine-wide hook files: $($left -join '; ')")
+            }
+        }
+        finally {
+            $script:ProgramFiles = $savedProgramFiles
+            $script:ProgramData = $savedProgramData
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
         }
 
         # GAP-0262 (the ACL check is still replaced, as above).

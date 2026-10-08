@@ -364,6 +364,10 @@ func TestInterruptedRotationIsSettledByTheNextRun(t *testing.T) {
 	result := Run(ctx, h.env, Options{Action: ActionRotateCredentials})
 	h.onProof = nil
 	requireError(t, result, codeRotation)
+	// GAP-0513: the interrupt is the cause, and the rollback is named.
+	if got := messagesOf(result.Errors, codeRotation); !strings.Contains(got, "the run was interrupted; it was rolled back and key ") || strings.Contains(got, "exit -1") {
+		t.Fatalf("interrupted rotation error = %q", got)
+	}
 	h.requireNoRotationLeft()
 	if h.committedKey() != h.keyA || h.rendered["alice"] != idA || !slices.Equal(h.liveKeyIDs(), []string{idA}) || slices.Contains(h.events, "refused alice") {
 		t.Fatalf("an interrupted rotation did not settle on key A: users=%v events=%v", h.rendered, h.events)
@@ -445,5 +449,17 @@ func TestOnKeyTakesOnlyThisPhasesBoundProof(t *testing.T) {
 		if done, fatal := onKey(attestation, key, "op1", enterprisehooks.CredentialPhaseRollback, manifest, want); done || fatal == "" {
 			t.Errorf("%s: accepted as proof (done=%v)", name, done)
 		}
+	}
+}
+
+// On a healthy macOS host whose users run only hook-based agents no user
+// holds a credential, and rotate-credentials failed rotation_failed (GAP-0541).
+func TestRotateCredentialsWithoutAKeyIsANoop(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	r := h.run(Options{Action: ActionRotateCredentials})
+	requireOK(t, r)
+	if !r.Noop || r.NoopReason != NoopNoCredentials {
+		t.Fatalf("rotation without a key: noop=%v reason=%q", r.Noop, r.NoopReason)
 	}
 }

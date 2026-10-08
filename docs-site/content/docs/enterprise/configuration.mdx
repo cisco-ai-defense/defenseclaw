@@ -49,6 +49,10 @@ copy in place: ensure only compares the file you supply.
 
 ## Files next to the config
 
+The source `config.yaml` is limited to 4 MiB (4,194,304 bytes) and 65,536
+parsed YAML nodes. An oversized or overly repetitive candidate is refused
+before it replaces the applied config.
+
 The config is the only file you write. The lifecycle keeps these records next
 to it. They are evidence of what was applied; nothing reads them back as policy,
 and you do not edit them:
@@ -58,7 +62,7 @@ and you do not edit them:
 | `config.generation.json` | The config generation: `generation`, `config_sha256`, `actor` (`lifecycle`, `migration`, or a user), `reason` and `written_at`. Every config write updates it |
 | `config.yaml.lock` | The lock every config writer takes |
 | `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only). Pass it as `--config` to go back to a release that reads version 8 |
-| `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --ack` marks it read |
+| `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --config /etc/defenseclaw/config.yaml --ack` marks it read on Linux; on macOS use `--config /opt/cisco/defenseclaw/etc/config.yaml` |
 
 They sit in `/etc/defenseclaw` on Linux, `/opt/cisco/defenseclaw/etc` on macOS
 and `C:\ProgramData\Cisco\DefenseClaw\etc` on Windows. On Linux and macOS the
@@ -174,9 +178,12 @@ version of the agent being installed for that user.
 
 <Callout type="warn" title="Leave an agent out entirely to leave it unprotected">
 On standalone enterprise hosts, `guardrail.connectors.<name>.enabled: false`
-disables the connector and removes its DefenseClaw machine policy. An empty
-connector entry (`{}`) enables it. To leave an agent unprotected, omit it from
-`guardrail.connectors` and `enterprise.machine_policy.connectors`, or set
+disables the connector and removes its DefenseClaw machine policy. For
+example, `guardrail.connectors.claudecode.enabled: false` removes Claude
+Code's machine policy and hooks as well as per-user enrollment, so Claude
+Code is then unprotected. An empty connector entry (`{}`) enables it. To
+leave an agent unprotected, omit it from `guardrail.connectors` and
+`enterprise.machine_policy.connectors`, or set
 `enterprise.machine_policy.connectors.<name>.ownership: "off"`. After applying
 a change, use `enterprise policy show` and `enterprise verify` to check which
 agents still have machine coverage.
@@ -186,6 +193,9 @@ The older single-agent key `guardrail.connector` also selects an agent.
 Use the map instead.
 
 ## Policy in the config
+
+On managed standalone hosts, `guardrail.hook_fail_mode: open` does not
+override fail-closed gateway peer verification when the gateway is down.
 
 The config also holds the policy the gateway enforces. On a managed host these
 are the only places to change it: the local config tools refuse, and the
@@ -381,12 +391,19 @@ rules on Linux and macOS:
    `rule_pack` afterwards. Keep every file and folder owned by root,
    not writable by group or others, and readable by the gateway (for example
    `0644` files in `0755` folders). The lifecycle refuses a pack inside
-   `data_dir`, which the gateway can write.
+   `data_dir`, which the gateway can write. Before it changes anything it
+   also refuses a pack whose folder, a folder above it, or any folder or file
+   inside it is a symlink, is writable by group or others, has an ACL entry
+   that grants write, or belongs to an account other than root (a pack copied
+   with `cp -a` keeps its owner), and names the path and the reason. `status`
+   and `verify` report a pack in use that no longer passes these checks.
 2. **Choose the levels.** The pack's posture (its manifest's posture, else
    its folder name) sets the default levels: `strict` blocks findings of
    MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only
    CRITICAL findings and alerts on HIGH ones, and any other pack blocks
-   CRITICAL findings and alerts on MEDIUM and above. `guardrail.block_at` and
+   CRITICAL findings and alerts on MEDIUM and above. The manifest is part of
+   the pack's pin, so validate the pack again after you add or change it.
+   `guardrail.block_at` and
    `alert_at` (or a connector's own) override them; see
    [Thresholds](/docs/policies/thresholds).
 3. **Validate the pack** with the gateway's own loader:
@@ -414,8 +431,18 @@ rules on Linux and macOS:
    ```
 
    The lifecycle refuses a pack that does not exist or whose digest does not
-   match, and restarts the services with the new pack. If the gateway cannot load it, `ensure` fails and the previous
-   config stays in force.
+   match, and applies the new pack in the running gateway, without a restart:
+   adding, replacing or removing a `custom_packs` entry, or switching
+   `rule_pack`, raises the policy generation like any reloadable key. If the
+   gateway cannot load it, `ensure` fails and the previous config stays in
+   force.
+
+On Windows, give the pack its own folder (not `data_dir` or the staging
+folder), quote its path with single quotes, and pin the digest that Setup
+prints when it refuses a placeholder, before the first install, or that
+`defenseclaw-gateway.exe rulepack validate --dir <pack>` prints once
+DefenseClaw is installed; see
+[Write the config](/docs/enterprise/windows#2-write-the-config).
 
 To change a pack that is in use, the safest route is the same as for a new
 one: create the edited copy in a new folder (for example

@@ -208,6 +208,27 @@ def _take_gateway_left_starting() -> bool:
     global _gateway_left_starting
     left, _gateway_left_starting = _gateway_left_starting, False
     return left
+
+
+# Set when the last restart's connector readiness failed because the Windows
+# hook launcher is missing (GAP-0378): neither the new nor the restored
+# configuration can pass readiness until the installer puts it back, so the
+# restart error and the rollback report name the installer (GAP-0549).
+_gateway_launcher_missing = False
+# The restart error for that case; the rollback recognises it by this text.
+_LAUNCHER_MISSING_RESTART_TEXT = "The DefenseClaw hook launcher (defenseclaw-hook.exe) is missing"
+
+
+def _note_gateway_launcher_missing() -> None:
+    global _gateway_launcher_missing
+    _gateway_launcher_missing = True
+
+
+def _take_gateway_launcher_missing() -> bool:
+    """Whether the last readiness failure was a missing hook launcher; clears it."""
+    global _gateway_launcher_missing
+    missing, _gateway_launcher_missing = _gateway_launcher_missing, False
+    return missing
 _GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 # `defenseclaw-gateway start|restart` stops the old gateway (up to 10 s), waits
@@ -9187,6 +9208,7 @@ def _rollback_failed_connector_application(
     restore_complete = True
     gateway_still_down = False
     openclaw_gateway_down = False
+    launcher_still_missing = False
     try:
         # Keep the hook lock the gateway published for the failed generation.
         # It is the gateway's teardown authority for that generation: with
@@ -9282,6 +9304,16 @@ def _rollback_failed_connector_application(
                 # GAP-1139: the restored config is in place; the gateway
                 # cannot start for the same reason the setup failed.
                 gateway_still_down = True
+            elif (
+                not _secret_safe
+                and exact_runtime
+                and str(exc) == str(cause)
+                and _LAUNCHER_MISSING_RESTART_TEXT in str(cause)
+            ):
+                # GAP-0549: the restored configuration needs the missing
+                # launcher too, so the restart fails the same way. That is no
+                # incomplete rollback; what the failed setup left is listed.
+                launcher_still_missing = True
             elif not _secret_safe and not exact_runtime and isinstance(exc, _OpenClawGatewayNotRunning):
                 # GAP-2477: defenseclaw-gateway is back on the restored config;
                 # only OpenClaw's own gateway is down, which is a note, not an
@@ -9297,6 +9329,7 @@ def _rollback_failed_connector_application(
     elif exact_runtime:
         rollback_errors.append("runtime reconciliation was skipped because restored authority was not exact")
 
+    left_changed: list[str] = []
     if exact_runtime:
         final_registration_locations = failed_registration_locations or ()
         verification_checks: list[tuple[str, Any]] = [
@@ -9309,13 +9342,19 @@ def _rollback_failed_connector_application(
                 lambda: _verify_restored_setup_runtime(app.cfg, snapshot, final_registration_locations),
             ),
         ]
+        # With the launcher still missing the gateway cannot republish the
+        # prior hook lock, so these differences are what stays changed until
+        # the installer runs, not rollback failures.
+        verification_errors = left_changed if launcher_still_missing else rollback_errors
         for label, check in verification_checks:
             try:
-                rollback_errors.extend(check())
+                verification_errors.extend(check())
             except BaseException as exc:  # Continue every independent verification.
                 if not isinstance(exc, Exception) and not _secret_safe:
                     raise
-                rollback_errors.append(f"{label} verification unavailable [{_setup_runtime_ref(type(exc).__name__)}]")
+                verification_errors.append(
+                    f"{label} verification unavailable [{_setup_runtime_ref(type(exc).__name__)}]"
+                )
     if len(rollback_errors) > _SETUP_ROLLBACK_MAX_FAILURES:
         rollback_errors = rollback_errors[: _SETUP_ROLLBACK_MAX_FAILURES - 1]
         rollback_errors.append("additional rollback failures were omitted at the bounded reporting limit")
@@ -9338,7 +9377,19 @@ def _rollback_failed_connector_application(
         )
     else:
         outcome = "restored the prior connector configuration and runtime"
-    if gateway_still_down and type(cause) is _GatewayRestartFailed and "defenseclaw-gateway" in str(cause):
+    if launcher_still_missing and not rollback_errors:
+        from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+        kept = "; ".join(error.rstrip(".") for error in left_changed[:_SETUP_ROLLBACK_MAX_FAILURES])
+        failure = click.ClickException(
+            "the DefenseClaw hook launcher (defenseclaw-hook.exe) is missing, so the gateway cannot verify the "
+            "connector hooks of the new or the previous configuration. Setup put the previous connector "
+            "configuration back"
+            + (f"; until the launcher is back, the hook lock stays as the failed setup left it ({kept})"
+               if kept else "")
+            + f". To fix it, {LAUNCHER_REINSTALL_STEP}; the gateway then verifies the hooks again."
+        )
+    elif gateway_still_down and type(cause) is _GatewayRestartFailed and "defenseclaw-gateway" in str(cause):
         # GAP-1808: one cause and one next step, not the restart error's
         # generic advice followed by a second, different one.
         failure = click.ClickException(
@@ -14259,9 +14310,8 @@ def _restart_services(
                 # The native launcher is gone; setup cannot put it back (GAP-0378).
                 from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
 
-                click.echo(
-                    f"  The DefenseClaw hook launcher (defenseclaw-hook.exe) is missing: {LAUNCHER_REINSTALL_STEP}."
-                )
+                _note_gateway_launcher_missing()
+                click.echo(f"  {_LAUNCHER_MISSING_RESTART_TEXT}: {LAUNCHER_REINSTALL_STEP}.")
             failed.append(f"{readiness_label} readiness")
 
     # Multi-connector global change: every active hook connector is affected
@@ -14404,6 +14454,7 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
     """Raise a ``ClickException`` (non-zero exit) when any service restart
     failed, so setup fails closed instead of silently reporting success
     against a gateway that never came back up (Avarice F-0142/F-0143)."""
+    launcher_missing = _take_gateway_launcher_missing()
     if not failed:
         return
     if failed == ["openclaw-gateway"]:
@@ -14420,11 +14471,18 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
             "applied yet. Check it with: defenseclaw-gateway status. If it does not become healthy, run: "
             "defenseclaw-gateway restart, then defenseclaw doctor."
         )
+    if launcher_missing:
+        from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+        # A gateway start cannot fix this; the installer can (GAP-0549).
+        next_step = f"{_LAUNCHER_MISSING_RESTART_TEXT}: {LAUNCHER_REINSTALL_STEP}."
+    else:
+        next_step = "Run `defenseclaw-gateway start`, then `defenseclaw doctor`, before relying on enforcement."
     raise _GatewayRestartFailed(
         "gateway restart/readiness failed for: "
         + ", ".join(failed)
         + ". The requested configuration was not verified as applied, so the agents may not be "
-        "protected. Run `defenseclaw-gateway start`, then `defenseclaw doctor`, before relying on enforcement."
+        "protected. " + next_step
     )
 
 

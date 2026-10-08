@@ -153,6 +153,20 @@ func TestWindowsEnterpriseProfileFromConfig(t *testing.T) {
 	if err := resolveWindowsEnterpriseLifecycleProfile("install", opts); err != nil || opts.resolvedProfile != "secure_client" {
 		t.Fatalf("plain config resolved %q, %v", opts.resolvedProfile, err)
 	}
+	// GAP-0562, GAP-0571: a standalone config that is not UTF-8 (or not
+	// YAML) is the administrator's to fix: invalid arguments (1639) with the
+	// gateway compiler's explanation, not a 1603 YAML parser message.
+	originalSource := windowsEnterpriseStandaloneConfigSource
+	t.Cleanup(func() { windowsEnterpriseStandaloneConfigSource = originalSource })
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+	latin1 := filepath.Join(dir, "latin1.yaml")
+	if err := os.WriteFile(latin1, []byte("# caf\xe9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: latin1, profile: "standalone"})
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "save the file as UTF-8") {
+		t.Fatalf("Latin-1 standalone config: %v", err)
+	}
 	// GAP-0607: a tab-indented config is refused 1639 (invalid arguments)
 	// with the line, like every other config the gateway cannot load;
 	// Secure Client keeps its result.
@@ -160,7 +174,7 @@ func TestWindowsEnterpriseProfileFromConfig(t *testing.T) {
 	if err := os.WriteFile(tabbed, []byte("deployment_mode: managed_enterprise\nguardrail:\n\tconnectors: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed, profile: "standalone"})
+	err = resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed, profile: "standalone"})
 	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "line 3") {
 		t.Fatalf("standalone tab-indented config: %v", err)
 	}
@@ -2104,6 +2118,7 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 		}
 		return windowsEnterpriseStandaloneRun{Output: []byte(`{"schema_version":1,"ok":true,"action":"upgrade"}`)}, nil
 	}
+	var changes []string
 	ignored := func() []enterprisestatus.Message {
 		opts := &windowsEnterpriseLifecycleOptions{jsonOutput: true}
 		if _, _, err := runWindowsEnterpriseStandaloneInstaller(context.Background(), &cobra.Command{}, opts,
@@ -2114,6 +2129,7 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 		command.SetOut(&bytes.Buffer{})
 		result := newWindowsEnterpriseStandaloneResult("upgrade", opts)
 		_ = finishWindowsEnterpriseStandalone(command, opts, result, 0)
+		changes = result.Changes
 		var found []enterprisestatus.Message
 		for _, warning := range result.Warnings {
 			if warning.Code == config.LocalEnforcementEntriesIgnored {
@@ -2126,9 +2142,13 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 	if got := ignored(); len(got) != 1 || !strings.HasPrefix(got[0].Message, "2 local block/allow entries in audit.db are ignored") {
 		t.Fatalf("migrating run warnings = %+v", got)
 	}
+	// GAP-0472: the result says what the migration wrote, as on Linux.
+	if len(changes) != 1 || !strings.HasPrefix(changes[0], "migrated "+configPath+" to config_version 9") {
+		t.Fatalf("migrating run changes = %q", changes)
+	}
 	migrate = false
-	if got := ignored(); len(got) != 0 {
-		t.Fatalf("a run that migrated nothing warned %+v", got)
+	if got := ignored(); len(got) != 0 || len(changes) != 0 {
+		t.Fatalf("a run that migrated nothing warned %+v or changed %q", got, changes)
 	}
 }
 
@@ -2153,5 +2173,52 @@ func TestWindowsSecureClientEnsureKeepsHistoricalPreflight(t *testing.T) {
 			strings.Contains(err.Error(), "elevation_required") {
 			t.Fatalf("profile %q: error %v", profile, err)
 		}
+	}
+}
+
+// GAP-0660: a config that names a protected credential nobody stored gets a
+// credential_missing warning in status, verify and the lifecycle results,
+// naming the credential and the command that stores it; a stored one, and
+// a run that did not read the deployment, get none.
+func TestWindowsEnterpriseWarnsAboutAMissingProtectedCredential(t *testing.T) {
+	dir := t.TempDir()
+	secrets := filepath.Join(dir, "secrets")
+	if err := os.Mkdir(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	body := "enterprise:\n  inspection:\n    llm:\n      credential: llm-judge\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secrets, "ai-defense-api-key"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seam := windowsEnterpriseHotConfigLayout
+	t.Cleanup(func() { windowsEnterpriseHotConfigLayout = seam })
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: configPath, ConfigDir: dir, SecretsDir: secrets}, nil
+	}
+	missing := func(action string, installed bool) []enterprisestatus.Message {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
+		result.Installed = installed
+		addWindowsEnterpriseMissingCredentialWarnings(result)
+		var found []enterprisestatus.Message
+		for _, warning := range result.Warnings {
+			if warning.Code == "credential_missing" {
+				found = append(found, warning)
+			}
+		}
+		return found
+	}
+	for _, action := range []string{"status", "verify", "ensure"} {
+		got := missing(action, true)
+		if len(got) != 1 || !strings.Contains(got[0].Message, "llm-judge (enterprise.inspection.llm.credential)") ||
+			!strings.Contains(got[0].Message, "enterprise secret set --name llm-judge") {
+			t.Fatalf("%s warnings = %+v", action, got)
+		}
+	}
+	if got := missing("status", false); len(got) != 0 {
+		t.Fatalf("a host with nothing installed warned %+v", got)
 	}
 }

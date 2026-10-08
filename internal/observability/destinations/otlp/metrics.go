@@ -400,6 +400,7 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
 	attemptContext, rejection := withRejectionCapture(attemptContext)
+	redialGRPC(attemptContext, exporter.connection)
 	err := exporter.inner.Export(attemptContext, metrics)
 	if err != nil {
 		exporter.counters.failed.Add(count)

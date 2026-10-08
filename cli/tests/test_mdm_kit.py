@@ -107,7 +107,11 @@ def test_unix_scripts_parse_and_lint(os_dir: str, name: str) -> None:
 
 def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json <"$secret"' in text
+    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >' in text
+    # The value reaches the lifecycle through a pipe, never a staged file
+    # that a killed run would leave behind (GAP-0632).
+    assert "printf '%s' \"$secret_data\" |" in text
+    assert '$DC_STAGE/secret"' not in text
     assert "--from-file" not in text
     # The inline-config block warns against credentials and there is no
     # inline-secret setting.
@@ -156,6 +160,19 @@ def test_unix_wrapper_failures_are_schema_results() -> None:
             assert [e["code"] for e in document["errors"]] == [error], (args, document)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file descriptors")
+@pytest.mark.parametrize("name", UNIX_SCRIPTS)
+def test_intune_repeated_file_descriptor_is_not_an_argument(name: str) -> None:
+    path = MDM / _host_os_dir() / name
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        script = f"/proc/self/fd/{descriptor}"
+        result = subprocess.run(["sh", script, script], pass_fds=(descriptor,), capture_output=True, text=True, timeout=30)
+    finally:
+        os.close(descriptor)
+    assert "unknown argument" not in result.stderr + result.stdout
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("os_dir", ["linux", "macos"])
 def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path: Path) -> None:
@@ -169,6 +186,67 @@ def test_unix_wrapper_creates_a_traversable_log_directory(os_dir: str, tmp_path:
     assert result.returncode == 0, result.stderr
     for directory in (log.parent.parent, log.parent):
         assert directory.stat().st_mode & 0o777 == 0o755, directory
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("http", "code", "reason"),
+    [(302, 0, "redirected (HTTP 302)"), (404, 22, "HTTP 404"), (0, 5, "proxy lookup failed (curl exit 5)")],
+)
+def test_unix_download_reports_status_without_url_query(
+    http: int, code: int, reason: str, tmp_path: Path
+) -> None:
+    curl = tmp_path / "curl"
+    curl.write_text(
+        "#!/bin/sh\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -D) header=$2; shift 2 ;;\n"
+        "    -o) output=$2; shift 2 ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "printf 'HTTP/2 %s\\n' \"$DC_TEST_HTTP\" >\"$header\"\n"
+        ": >\"$output\"\n"
+        "exit \"$DC_TEST_CODE\"\n",
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    download = _shell_function(_text(MDM / "linux" / "defenseclaw-enterprise.sh"), "dc_download")
+    script = (
+        f'DC_STAGE="{tmp_path}"\nDC_HTTPS_PROXY=""\n{download}\n'
+        f'dc_download "https://example.test/a.deb?sig=private" "{tmp_path / "a.deb"}" '
+        '|| printf "%s\\n" "$DC_DOWNLOAD_ERROR"\n'
+    )
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "DC_TEST_HTTP": str(http), "DC_TEST_CODE": str(code)}
+    result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, check=True)
+    assert reason in result.stdout and "private" not in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_lifecycle_retries_only_busy(tmp_path: Path) -> None:
+    retry = _shell_function(_text(MDM / "linux" / "defenseclaw-enterprise.sh"), "dc_run_lifecycle_retry")
+    script = f'''DC_TEST_COUNT="{tmp_path / "count"}"
+dc_log() {{ :; }}
+sleep() {{ :; }}
+dc_run_lifecycle() {{
+    count=$(cat "$DC_TEST_COUNT" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    echo "$count" >"$DC_TEST_COUNT"
+    [ "$count" -ge 2 ] || return 75
+}}
+{retry}
+dc_run_lifecycle_retry ignored
+'''
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0 and (tmp_path / "count").read_text().strip() == "2"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_busy_is_a_retry_signal() -> None:
+    report = _shell_function(_text(MDM / "linux" / "detect.sh"), "dc_report")
+    result = subprocess.run(["sh", "-c", f'DC_FORMAT=exit\n{report}\ndc_report 0 busy busy'], capture_output=True, text=True)
+    assert result.returncode == 75 and "busy" in result.stderr
 
 
 _PACKAGE_TOOL_STUBS = {
@@ -197,6 +275,7 @@ esac""",
         ("defenseclaw-enterprise.deb", "1.5.0", "1.4.0", False),
         ("defenseclaw-enterprise.deb", "1.4.0", "v1.4.0", True),
         ("defenseclaw-enterprise.deb", "1:1.4.0~rc1-1", "1.4.0-rc1", True),
+        ("defenseclaw-enterprise.deb", "1.0.901~SNAPSHOT-d03042625", "1.0.901-SNAPSHOT-d03042625", True),
         ("defenseclaw-enterprise.deb", "1.4.0~rc1", "1.4.0", False),
         ("defenseclaw-enterprise.rpm", "1.5.0-1", "1.4.0", False),
         ("defenseclaw-enterprise.rpm", "1.4.0~rc1-1", "1.4.0-rc1", True),
@@ -251,15 +330,86 @@ echo installed-ok
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("failure", ["disk_full", "downgrade"])
+def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path: Path) -> None:
+    # The Installer only says "The upgrade failed": a full data volume is
+    # refused before it runs (GAP-0539), and a refused downgrade reports the
+    # result the preinstall wrote, naming both versions (GAP-0538).
+    text = _text(MDM / "macos" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(
+        _shell_function(text, name)
+        for name in ("dc_busy_output", "dc_require_product_version", "dc_require_free_space",
+                     "dc_package_script_result", "dc_install_package")
+    )
+    stubs = dict(_PACKAGE_TOOL_STUBS)
+    stubs["pkgutil"] = """case "$1" in
+    --expand) mkdir -p "$3/x.pkg" && printf '<pkg-ref id="com.cisco.defenseclaw.enterprise" version="1.0.2" onConclusion="none">x.pkg</pkg-ref>\\n' >"$3/Distribution"
+        echo '<payload numberOfFiles="4" installKBytes="300000"/>' >"$3/x.pkg/PackageInfo" ;;
+    *) exit 1 ;;
+esac"""
+    stubs["df"] = 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/disk3 9000000 8000000 %s 90%% /\\n" "$DC_TEST_FREE"'
+    stubs["installer"] = """echo "installer -pkg" >>"$DC_TEST_LOG"
+printf '{"ok":false,"errors":[{"code":"downgrade_refused","message":"DefenseClaw 1.0.3 is installed; refusing to downgrade to 1.0.2"}]}\\n' >"$DC_TEST_RESULT"
+echo "installer: The upgrade failed."
+exit 1"""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in stubs.items():
+        stub = bin_dir / name
+        stub.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        stub.chmod(0o755)
+    log, result_file = tmp_path / "install.log", tmp_path / "last-package-result.json"
+    script = f"""
+DC_SCRIPT_OS=darwin
+DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
+DC_LINUX_PACKAGE=defenseclaw-enterprise DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
+DC_PRODUCT_VERSION='' DC_STAGE='{tmp_path}' DC_STAGED_SOURCE='{tmp_path / "defenseclaw-enterprise.pkg"}'
+DC_INSTALL_ROOT='{tmp_path / "opt" / "cisco" / "defenseclaw"}' DC_PACKAGE_RESULT='{result_file}' DC_RESULT=''
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+dc_log() {{ :; }}
+dc_extract_payload() {{ :; }}
+dc_emit_result() {{ cat "$DC_RESULT"; }}
+{functions}
+dc_install_package
+echo installed-ok
+"""
+    free = "150000" if failure == "disk_full" else "9000000"
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_FREE": free, "DC_TEST_LOG": str(log),
+           "DC_TEST_RESULT": str(result_file)}
+    result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    if failure == "disk_full":
+        assert "FAIL mdm_disk_full" in result.stdout and "MB is free" in result.stdout, result.stdout
+        assert not log.exists(), "the installer ran on a full volume"
+    else:
+        assert "downgrade_refused" in result.stdout and "refusing to downgrade to 1.0.2" in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_unix_detect_formats_without_an_installation() -> None:
     if os.geteuid() == 0 and Path("/opt/defenseclaw/bin/defenseclaw-gateway").exists():
         pytest.skip("a deployment is installed on this host")
     detect = str(MDM / _host_os_dir() / "detect.sh")
     result = _run([detect])
     assert result.returncode == 1 and result.stdout == ""
-    assert _run([detect, "--format", "value"]).stdout == "not-installed\n"
-    assert _run([detect, "--format", "jamf"]).stdout == "<result>not-installed</result>\n"
+    value = "not-installed" if os.geteuid() == 0 else "unknown"
+    assert _run([detect, "--format", "value"]).stdout == f"{value}\n"
+    assert _run([detect, "--format", "jamf"]).stdout == f"<result>{value}</result>\n"
     assert _run([detect, "--format", "yaml"]).returncode == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_rejects_malformed_minimum_version() -> None:
+    detect = str(MDM / _host_os_dir() / "detect.sh")
+    for value in ("", "abc", "1.x.0"):
+        result = _run([detect, "--min-version", value])
+        assert result.returncode == 2 and not result.stdout
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires a standard user")
+def test_unix_detect_standard_user_reports_unknown() -> None:
+    detect = str(MDM / _host_os_dir() / "detect.sh")
+    assert _run([detect, "--format", "value"]).stdout == "unknown\n"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -303,6 +453,16 @@ def test_windows_shared_helpers_start_the_cli_outside_the_install() -> None:
     region = _shared_region(_text(WINDOWS_SHARED[0]))
     assert "$info.WorkingDirectory = [System.Environment]::SystemDirectory" in region
     assert "GetDirectoryName($FilePath)" not in region
+
+
+def test_intune_package_resolves_output_before_using_dotnet_paths() -> None:
+    script = _text(MDM / "intune" / "windows" / "New-DefenseClawIntunePackage.ps1")
+    assert script.index("$OutputDirectory = [IO.Path]::GetFullPath") < script.index("$content = Join-Path")
+
+
+def test_intune_package_rejects_inline_key_before_copying_setup() -> None:
+    script = _text(MDM / "intune" / "windows" / "New-DefenseClawIntunePackage.ps1")
+    assert script.index("if ($configText -match") < script.index("New-Item -ItemType Directory -Path $content")
 
 
 # PowerShell 7 / .NET Core only constructs that break Windows PowerShell 5.1.
@@ -620,3 +780,18 @@ def test_macos_enterprise_pkg_is_signed_only_with_its_installer_identity(
     assert result.returncode == code, result.stdout + result.stderr
     assert message in result.stdout + result.stderr
     assert (out / "defenseclaw-enterprise-1.2.3-darwin-arm64.pkg").is_file() == (code == 0)
+
+
+def test_remediate_fix_does_not_report_a_missing_scanner_runtime_as_healthy() -> None:
+    """GAP-0631: the installed CLI's ensure succeeds with a
+    scanner_runtime_unavailable warning while verify keeps failing; the
+    remediation reports it as not repaired, exits 1603 and keeps the warning's
+    text, which names Setup /repair."""
+
+    text = (MDM / "intune" / "windows" / "Remediate-Fix.ps1").read_text(encoding="utf-8")
+    branch = text[text.index("$runtime = @($document.warnings)") :]
+    branch = branch[: branch.index("elseif ($document.ok -and $document.noop)")]
+    assert "$_.code -eq 'scanner_runtime_unavailable'" in branch
+    assert "$code = 1603" in branch
+    assert "$($runtime.message)" in branch
+

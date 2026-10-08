@@ -23,6 +23,23 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// UntrustedPrincipalError is a path element whose owner, or one of whose
+// write-like allow entries, names a principal the trust check does not
+// accept. Error keeps the text the Secure Client profile pins; the
+// standalone lifecycle reads the fields to name the account and the fix
+// (GAP-0528, GAP-0562).
+type UntrustedPrincipalError struct {
+	// Path is the file or folder that failed the check.
+	Path string
+	// SID is the untrusted principal.
+	SID string
+	// Owner is true for an untrusted owner and false for a write-like entry.
+	Owner bool
+	text  string
+}
+
+func (e *UntrustedPrincipalError) Error() string { return e.text }
+
 func ValidateTrustedConfigPath(path string) error {
 	return ValidateTrustedFilePath(path, "managed config")
 }
@@ -241,7 +258,12 @@ func validateTrustedWindowsPathElementWithWriter(
 		if allowedWriter != nil {
 			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
 		}
-		return fmt.Errorf("%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected)
+		return &UntrustedPrincipalError{
+			Path:  path,
+			SID:   sidString(owner),
+			Owner: true,
+			text:  fmt.Sprintf("%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected),
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -295,7 +317,11 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			continue
 		}
 		if !windowsTrustedOwner(sid) && !sameWindowsSID(sid, allowedWriter) {
-			return fmt.Errorf("%s: untrusted Windows principal %s has write-like access mask 0x%x", path, sidString(sid), uint32(ace.Mask))
+			return &UntrustedPrincipalError{
+				Path: path,
+				SID:  sidString(sid),
+				text: fmt.Sprintf("%s: untrusted Windows principal %s has write-like access mask 0x%x", path, sidString(sid), uint32(ace.Mask)),
+			}
 		}
 	}
 	return nil

@@ -13,6 +13,8 @@
 package enterpriseunix
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -61,5 +63,35 @@ func TestSensorHelperSyscallFilterAllowsFanotify(t *testing.T) {
 	}
 	if allow["@privileged"] {
 		t.Fatal("sensor helper allows all of @privileged; allow only the fanotify calls")
+	}
+}
+
+// GAP-0474: a drop-in that widened the gateway sandbox (User=root,
+// ProtectHome=false) or pointed it at another config was never named; only
+// its symptoms showed. A drop-in that keeps the unit as installed (a site
+// proxy) is listed as a warning.
+func TestStatusNamesDropInsThatChangeTheGatewayUnit(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	dir := h.env.P("/etc/systemd/system/" + unitGateway + ".d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"90-site-proxy.conf": "[Service]\nEnvironment=HTTPS_PROXY=http://proxy.example:3128\n",
+		"95-env.conf":        "[Service]\nEnvironment=DEFENSECLAW_CONFIG=/etc/other/config.yaml\n",
+		"96-widen.conf":      "[Service]\nProtectHome=false\nUser=root\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := h.run(Options{Action: ActionStatus})
+	got := messagesOf(status.Errors, codeVerify)
+	if !strings.Contains(got, "96-widen.conf changes "+unitGateway+" (ProtectHome, User)") || !strings.Contains(got, "95-env.conf changes "+unitGateway+" (Environment=DEFENSECLAW_CONFIG)") {
+		t.Fatalf("status does not name the drop-ins: %s", got)
+	}
+	if strings.Contains(got, "90-site-proxy.conf") || !strings.Contains(messagesOf(status.Warnings, codeUnitDropIn), "90-site-proxy.conf") {
+		t.Fatalf("the proxy drop-in is not a %s warning: errors %s warnings %v", codeUnitDropIn, got, status.Warnings)
 	}
 }

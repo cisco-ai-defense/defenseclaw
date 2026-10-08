@@ -202,6 +202,64 @@ func TestGRPCLogAdapterUsesGuardedConnectionAndProtobuf(t *testing.T) {
 	}
 }
 
+func TestGRPCLogAdapterRedialsWhenTheCollectorIsBack(t *testing.T) {
+	// GAP-0532: after the collector was reachable again, a destination kept
+	// failing until the channel's own reconnect backoff (up to 2 minutes)
+	// ran out, on top of the circuit cooldown.
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := reserved.Addr().String()
+	_ = reserved.Close()
+	factory := prepareTestFactory(t, Config{
+		Destination: "grpc-logs", Protocol: ProtocolGRPCProtobuf, Endpoint: address,
+		Selected: []observability.Signal{observability.SignalLogs},
+		Timeout:  2 * time.Second, TLS: TLSConfig{Insecure: true},
+		NetworkSafety: NetworkSafety{AllowPrivateNetworks: true},
+	}, Dependencies{})
+	adapter, err := factory.NewLogAdapter(context.Background(), testLogResourceSnapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adapter.Close(context.Background()) })
+	dispatcher, err := delivery.NewDispatcher(delivery.Config{
+		Destination: "grpc-logs", Enabled: true,
+		MaxQueueItems: 16, MaxQueueBytes: 8 * 1024 * 1024, MaxBatchItems: 4, MaxBatchBytes: 8 * 1024 * 1024,
+		ScheduledDelay: time.Millisecond, AttemptTimeout: 2 * time.Second,
+		Retry:   delivery.RetryPolicy{MaxAttempts: 1, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond},
+		Circuit: delivery.CircuitPolicy{TransientFailureThreshold: 32, OpenDuration: time.Second},
+	}, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.Activate()
+	// Fail while the collector is down long enough for the channel backoff to
+	// grow past two seconds.
+	enqueueOTLP(t, dispatcher, "record-down", `{"message":"down"}`)
+	deadline := time.Now().Add(5 * time.Second)
+	for dispatcher.Counters().Failed == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(4 * time.Second)
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	capture := &grpcLogCapture{requests: make(chan *collectorlogpb.ExportLogsServiceRequest, 4), headers: make(chan metadata.MD, 4)}
+	collectorlogpb.RegisterLogsServiceServer(server, capture)
+	go server.Serve(listener)
+	t.Cleanup(server.Stop)
+	enqueueOTLP(t, dispatcher, "record-up", `{"message":"up"}`)
+	select {
+	case <-capture.requests:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatalf("the first record after the collector came back was not delivered: %+v", dispatcher.Counters())
+	}
+}
+
 func TestGRPCTraceAndMetricExporterWireShapes(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

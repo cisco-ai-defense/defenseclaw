@@ -1701,7 +1701,7 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // its content rules come from the rule pack of the request's profile
 // (proxyRuleGeneration).
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
-	return scanLocalPatternsWithRules(direction, content, proxyRuleGeneration(ctx))
+	return scanLocalPatternsWithActivation(direction, content, proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx)))
 }
 
 // scanProxyContentRules is the content rule scan of a guardrail proxy
@@ -1714,6 +1714,16 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
+	return scanLocalPatternsWithActivation(direction, content, rules, nil)
+}
+
+// scanLocalPatternsWithActivation is scanLocalPatternsWithRules with the
+// local patterns of one generation (nil: the process-wide patterns).
+func scanLocalPatternsWithActivation(
+	direction, content string,
+	rules *compiledRulePackCategories,
+	activation *localPatternsActivation,
+) *ScanVerdict {
 	// managed_enterprise: local regex detection is disabled — Cisco AI
 	// Defense is authoritative. Return an allow verdict so any residual
 	// call site (router lane, etc.) produces no local signal.
@@ -1733,6 +1743,11 @@ func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePa
 	secPatterns := secretPatterns
 	exfPatterns := exfilPatterns
 	localPatternsMu.RUnlock()
+	if activation != nil {
+		injPatterns, injRegexes = activation.injectionPatterns, activation.injectionRegexes
+		piiPatterns, piiDRegexes = activation.piiRequestPatterns, activation.piiDataRegexes
+		secPatterns, exfPatterns = activation.secretPatterns, activation.exfilPatterns
+	}
 
 	// normalized defeats whitespace/slash-run evasions (Phase 7 of the
 	// multi-provider-adapters PR). Substring and regex matches use the

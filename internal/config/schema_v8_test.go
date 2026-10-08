@@ -13,6 +13,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,6 +21,15 @@ import (
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 	"gopkg.in/yaml.v3"
 )
+
+func TestV9SchemaErrorDoesNotPointToV8(t *testing.T) {
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nguardrail:\n  mode: ACTION\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Version != 9 ||
+		strings.Contains(err.Error(), "v8") || !strings.Contains(err.Error(), "config_version 9") {
+		t.Fatalf("v9 schema error = %v", err)
+	}
+}
 
 func TestConfigV8SchemaClassifiesEveryTopLevelGoConfigField(t *testing.T) {
 	var schema map[string]any

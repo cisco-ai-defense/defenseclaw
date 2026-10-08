@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -250,6 +251,10 @@ func TestVerifyNamesTheConnectorAndFileOfMachinePolicyDrift(t *testing.T) {
 	repair := "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair"
 	if !strings.Contains(about[0], "claudecode (") || !strings.Contains(about[0], claudeDropIn) || !strings.Contains(about[0], "`"+repair+"`") {
 		t.Fatalf("the problem does not name the connector, file and repair: %q", about[0])
+	}
+	// status agrees: the agent runs without hooks (GAP-0529).
+	if status := h.run(Options{Action: ActionStatus}); status.OK || status.SecurityComplete {
+		t.Fatalf("status with the drop-in gone: ok=%v security_complete=%v", status.OK, status.SecurityComplete)
 	}
 	requireOK(t, h.run(Options{Action: ActionRepair}))
 	if !exists(h.env.P(claudeDropIn)) {
@@ -527,5 +532,100 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 		t.Fatalf("a removed home is reported pending: %+v", got.Warnings)
 	} else {
 		requireOK(t, got)
+	}
+}
+
+// outrankedPolicy reports one connector the way enterprise policy verify sees
+// a higher-precedence managed-preferences profile without DefenseClaw hooks:
+// the entries are in place, but the connector is not covered.
+type outrankedPolicy struct {
+	MachinePolicyManager
+	connector string
+}
+
+func (p *outrankedPolicy) Verify(cfg *config.Config) (enterprisepolicy.Result, error) {
+	result, err := p.MachinePolicyManager.Verify(cfg)
+	for index := range result.States {
+		if state := &result.States[index]; state.Connector == p.connector {
+			state.Covered = false
+			state.HigherPrecedence = []string{"/Library/Managed Preferences/com.anthropic.claudecode.plist"}
+			state.Conflicts = append(state.Conflicts, "/Library/Managed Preferences/com.anthropic.claudecode.plist has higher precedence than file-based managed settings and does not include DefenseClaw's hooks")
+		}
+	}
+	return result, err
+}
+
+// enterprise policy verify failed on such a profile while status and verify
+// stayed green, and Claude Code ran without enforcement (GAP-0534).
+func TestStatusAndVerifyFailWhenAHigherPrecedenceSourceOutranksTheHooks(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	writeFreshLedger(t, h)
+	h.env.MachinePolicy = &outrankedPolicy{MachinePolicyManager: h.env.MachinePolicy, connector: "claudecode"}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, "com.anthropic.claudecode.plist has higher precedence") {
+		t.Fatalf("verify does not name the outranking profile: %s", got)
+	}
+	if status := h.run(Options{Action: ActionStatus}); status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status reads complete while the hooks are outranked: %+v", status.Warnings)
+	}
+}
+
+// An administrator line outside DefenseClaw's block that does not parse made
+// verify say "run repair", while repair exited 0 and changed nothing
+// (GAP-0531). repair now fails and names the line to fix.
+func TestRepairFailsOnAnUnparseableCodexRequirementsLine(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	path := h.env.P(codexRequirements)
+	lines := strings.Count(h.read(codexRequirements), "\n")
+	if err := os.WriteFile(path, []byte(h.read(codexRequirements)+"this is not toml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repair := h.run(Options{Action: ActionRepair})
+	requireError(t, repair, codeMachinePolicyIncomplete)
+	if got := messagesOf(repair.Errors, codeMachinePolicyIncomplete); !strings.Contains(got, fmt.Sprintf("line %d", lines+1)) {
+		t.Fatalf("repair does not name the line to fix: %s", got)
+	}
+}
+
+// Under ownership verify_only a deleted requirements.toml was reported as
+// "run repair", which never writes it, and the exported file deployed by hand
+// stayed unused until a repair (GAP-0536).
+func TestVerifyOnlyCodexNamesTheExportAndEnsureAppliesItsReturn(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	exported := h.read(codexRequirements)
+	verifyOnly := strings.Replace(h.read(h.env.Layout.ConfigPath), "  profile: standalone\n",
+		"  profile: standalone\n  machine_policy:\n    connectors:\n      codex:\n        ownership: verify_only\n", 1)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(file, []byte(verifyOnly), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: file}))
+	writeFreshLedger(t, h)
+	if err := os.Remove(h.env.P(codexRequirements)); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, "missing_defenseclaw_hooks") || !strings.Contains(got, "policy export --connector codex") {
+		t.Fatalf("verify does not name the export: %s", got)
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if exists(h.env.P(codexRequirements)) {
+		t.Fatal("repair wrote a verify_only file")
+	}
+	if err := os.WriteFile(h.env.P(codexRequirements), []byte(exported), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status := h.run(Options{Action: ActionStatus}); !strings.Contains(messagesOf(status.Warnings, codeMachinePolicyIncomplete), "does not use them yet") {
+		t.Fatalf("status does not say the returned hooks need ensure: %+v", status.Warnings)
+	}
+	if applied := h.run(Options{Action: ActionEnsure}); applied.Noop {
+		t.Fatal("ensure ignored the returned hooks")
+	}
+	if record, _ := h.env.loadDeployment(); !contains(record.MachinePolicyConnectors, "codex") {
+		t.Fatalf("record machine policy connectors %v", record.MachinePolicyConnectors)
 	}
 }

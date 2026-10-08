@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -765,6 +766,14 @@ def _canonical_mcp_transport(transport: Any, url: str = "", command: str = "") -
     return value
 
 
+def asset_name_key(name: Any) -> str:
+    """The form asset_policy compares skill, MCP and plugin names in: trimmed,
+    Unicode NFC and lower-cased (Go ``config.SameAssetName``). A rule written
+    in the composed spelling of a name like "café" matches the decomposed
+    spelling another tool wrote (GAP-0432)."""
+    return unicodedata.normalize("NFC", str(name or "").strip()).lower()
+
+
 def _asset_rule_matches(
     rule: Any,
     name: str,
@@ -780,7 +789,7 @@ def _asset_rule_matches(
     constrained = False
     if getattr(rule, "name", ""):
         constrained = True
-        if str(rule.name).strip().lower() != name.strip().lower():
+        if asset_name_key(rule.name) != asset_name_key(name):
             return False
     if getattr(rule, "connector", ""):
         constrained = True

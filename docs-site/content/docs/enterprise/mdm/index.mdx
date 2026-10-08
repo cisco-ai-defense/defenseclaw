@@ -422,7 +422,45 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | `1603` / — | The PowerShell 7 wrapper refused its host. The lifecycle applies the same checks. |
 
+## Stage a custom macOS rule pack
+
+If your config selects a custom pack, deliver it **before** the pkg and config
+are applied. Add a root MDM script that copies a trusted pack directory from
+your MDM payload into the administrator policy folder. Replace `PACK_SOURCE`
+with the staged payload path:
+
+```sh
+PACK_SOURCE=/path/to/mdm-payload/acme
+PACK_DEST=/opt/cisco/defenseclaw/etc/policies/guardrail/acme
+install -d -o root -g wheel -m 0755 "$PACK_DEST"
+cp -R "$PACK_SOURCE/." "$PACK_DEST/"
+chown -R root:wheel "$PACK_DEST"
+find "$PACK_DEST" -type d -exec chmod 0755 {} +
+find "$PACK_DEST" -type f -exec chmod 0644 {} +
+```
+
+Validate the pack on a reference Mac with
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir "$PACK_DEST"`
+after that binary is installed, and put its `custom_packs pin` value in the
+config. For the first installation, validate an identical copy on a reference
+Mac before assigning the new device. The pin covers the pack's own files.
+
+```yaml
+guardrail:
+  rule_pack: acme
+  custom_packs:
+    acme: {path: /opt/cisco/defenseclaw/etc/policies/guardrail/acme, digest: "sha256:<digest>"}
+```
+
+Re-run the stage script and update the pin before applying an edited pack. An
+uninstall removes the policy folder; re-stage the pack before a reinstall.
+
 ## Detection
+
+Run Unix `detect.sh` as root. A standard user gets `unknown` in value/Jamf
+format. `--min-version` requires a dotted release such as `1.0.0`; a bad
+value exits `2`. With `--require-healthy`, lifecycle lock contention reports
+`busy` (exit `75` in exit format), so retry after the apply finishes.
 
 MDMs ask two different questions. Answer each with the mechanism that fits.
 
@@ -511,7 +549,7 @@ those computers.
 | Windows | `mdm-wrapper.log`, same folder | The wrapper's steps |
 | Windows | `DefenseClaw` event log, source "DefenseClaw Lifecycle" | `100` installed, `101` upgraded, `102` repaired, `110` uninstalled (Application log only), `111` ensure no-op, `112` ensure applied, `120` unhealthy, `130` failed, `140` busy, `150` refused |
 | Windows | Application log, source "DefenseClaw Enterprise" | A legacy copy of each event |
-| Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`) | The wrapper's steps and results |
+| Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`) | Install and ensure results; uninstall removes this log, so use the MDM policy log for its result |
 | Linux | `/var/lib/defenseclaw-enterprise/last-package-result.json` and `last-package-result.log` | The package's own `ensure` |
 | Linux | `journalctl -u defenseclaw-enterprise-apply.service` and `-u defenseclaw-enterprise-verify.service` | Config-change runs and the daily verify |
 | macOS | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, `0600`) | The wrapper's steps and results |

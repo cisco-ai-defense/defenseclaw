@@ -31,8 +31,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
+
+func TestManagedWindowsPolicyEvaluatePinsAdministratorConfig(t *testing.T) {
+	withAuditExportManagedSeams(t, true, true)
+	restore := managedHostWindowsStandalone
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	t.Cleanup(func() { managedHostWindowsStandalone = restore })
+	// The Linux test process cannot open a Windows installation path. The
+	// pre-run still has to pin that path before the attempted load.
+	_ = policyEvaluateCmd.PersistentPreRunE(policyEvaluateCmd, nil)
+	if got := os.Getenv(managed.ConfigPathEnv); got != `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` {
+		t.Fatalf("managed policy evaluate read %q, want the administrator config", got)
+	}
+}
 
 const policyPathTestModule = `package defenseclaw
 

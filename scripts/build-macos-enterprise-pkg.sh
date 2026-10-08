@@ -147,7 +147,7 @@ if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; 
             }
             exit 0
         }'; then
-        message="DefenseClaw $installed is installed; refusing to downgrade to $package_version. For a deliberate rollback, create $marker as root first."
+        message="DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
         echo "$message" >&2
         # The Installer shows only a generic error, so leave the reason in
         # the package result an MDM detection or an administrator reads.

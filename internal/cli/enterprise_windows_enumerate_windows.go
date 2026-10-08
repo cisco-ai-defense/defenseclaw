@@ -232,6 +232,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", !cfg.SecureClientIntegration(), enumerationLoggerForStderr(stderr)); grantErr != nil {
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 			}
+			publishEnterpriseWindowsClaudeMCPServers(cfg, authored, stderr)
 		} else if cfg.StandaloneEnterprise() {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not load administrator targets for identity facts: %v\n", loadErr)
 		}
@@ -286,6 +287,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}); spoolErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
 		}
+		publishEnterpriseWindowsClaudeMCPServers(cfg, manifest, stderr)
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}
@@ -406,6 +408,10 @@ func runEnterpriseWindowsEnumerateInterval(
 
 	ticker := time.NewTicker(opts.interval)
 	defer ticker.Stop()
+	// Claude Code MCP servers are published between cycles too, so a server
+	// a user adds reaches install admission within a minute (GAP-0424).
+	mcpRefresh := time.NewTicker(enterpriseWindowsClaudeMCPSpoolInterval)
+	defer mcpRefresh.Stop()
 	// A sign-in (forwarded by the standalone service host through
 	// internal/winsession; never fires otherwise) runs one extra cycle after
 	// a settle delay, so a newly signed-in user is enrolled without waiting
@@ -439,6 +445,8 @@ func runEnterpriseWindowsEnumerateInterval(
 					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
 				}
 			}
+		case <-mcpRefresh.C:
+			refreshEnterpriseWindowsClaudeMCPServers(stderr, manifestPath)
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
@@ -447,6 +455,40 @@ func runEnterpriseWindowsEnumerateInterval(
 			}
 		}
 	}
+}
+
+// enterpriseWindowsClaudeMCPSpoolInterval is how often the Claude Code MCP
+// servers of enrolled users are published between enumeration cycles.
+const enterpriseWindowsClaudeMCPSpoolInterval = 30 * time.Second
+
+// publishEnterpriseWindowsClaudeMCPServers publishes the Claude Code MCP
+// servers of the users manifest enrolls for the gateway, whose service
+// account cannot read ~/.claude.json (GAP-0424). Standalone only: the Secure
+// Client profile gateway has no enrolled-user watcher.
+func publishEnterpriseWindowsClaudeMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+		return
+	}
+	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	if err := enterpriseWindowsClaudeMCPSpoolWriter(dir, manifest, enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+		fmt.Fprintf(stderr, format+"\n", args...)
+	}); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish Claude Code MCP servers: %v\n", err)
+	}
+}
+
+// refreshEnterpriseWindowsClaudeMCPServers republishes them from the last
+// published manifest.
+func refreshEnterpriseWindowsClaudeMCPServers(stderr io.Writer, manifestPath string) {
+	cfg, err := enterpriseWindowsEnumerateConfigLoader()
+	if err != nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return
+	}
+	manifest, err := enterprisehooks.LoadManifest(manifestPath)
+	if err != nil {
+		return
+	}
+	publishEnterpriseWindowsClaudeMCPServers(cfg, manifest, stderr)
 }
 
 // enumerationLoggerForStderr wraps the enumerator's per-drop logger
@@ -487,6 +529,7 @@ var (
 	enterpriseWindowsEnumerateGroupCacheLoader   = enterprisehooks.LoadWindowsEnrollmentGroupCache
 	enterpriseWindowsEnumerateGroupCacheWriter   = enterprisehooks.SaveWindowsEnrollmentGroupCache
 	enterpriseWindowsIdentitySpoolWriter         = enterprisehooks.WriteWindowsIdentitySpool
+	enterpriseWindowsClaudeMCPSpoolWriter        = enterprisehooks.WriteWindowsClaudeMCPSpool
 	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
 	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory

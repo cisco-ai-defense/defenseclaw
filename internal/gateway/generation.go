@@ -45,11 +45,7 @@ type Generation struct {
 	// conn:<c>, prof:<p> or prof:<p>/<c>.
 	RulePacks map[string]*guardrail.RulePack
 	Profiles  *guardrailProfileSet
-	// The hook judge is published with its policy so reload cannot pair a new
-	// judge gate with a nil or previous judge.
-	hookJudge      *LLMJudge
-	hookJudgeBound bool
-	OPA            *policy.Prepared
+	OPA       *policy.Prepared
 	// Admission is keyed by config.AdmissionType* (skill, mcp, plugin, tool).
 	Admission   map[string]policy.CompiledAdmission
 	AssetPolicy *config.AssetPolicyConfig
@@ -69,6 +65,16 @@ type Generation struct {
 	// active is the pack the shared scanners and the judge use: the single
 	// enabled connector's, else the global one.
 	active *guardrail.RulePack
+	// The enforcement inputs built with active: its compiled content rules
+	// and local patterns, the compiled rules of each connector the
+	// configuration manages (canonical names; nil at boot, where connector
+	// setup registers them) and the LLM judge with the active pack's
+	// prompts. A request reads them from the generation it pinned, with the
+	// digest its records carry (pinnedGeneration, GAP-0455).
+	activeRules    *compiledRulePackCategories
+	activePatterns *localPatternsActivation
+	connectorRules map[string]*compiledRulePackCategories
+	judge          *LLMJudge
 	// opaError is why a non-strict build has no OPA ("" when it has one).
 	opaError string
 	// assetDirs are the directories the config watcher follows for this

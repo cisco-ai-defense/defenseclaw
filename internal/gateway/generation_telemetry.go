@@ -16,25 +16,25 @@
 
 package gateway
 
-import "github.com/defenseclaw/defenseclaw/internal/observability"
+import (
+	"context"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+)
 
 // Decision records carry defenseclaw.policy.effective_digest and
-// defenseclaw.policy.generation from the live generation. Both are absent
-// before the first generation and under the Secure Client integration,
-// whose records stay unchanged.
+// defenseclaw.policy.generation from the generation their request pinned
+// (policyDigestV8); these read the live generation, for records outside a
+// request (asset admission, quarantine). Both are absent before the first
+// generation and under the Secure Client integration, whose records stay
+// unchanged.
 
 func livePolicyDigestV8() observability.Optional[string] {
-	if g := livePolicyGeneration(); g != nil && g.Digest != "" {
-		return observability.Present(g.Digest)
-	}
-	return observability.Absent[string]()
+	return policyDigestV8(context.Background())
 }
 
 func livePolicyGenerationV8() observability.Optional[int64] {
-	if g := livePolicyGeneration(); g != nil && g.N > 0 {
-		return observability.Present(int64(g.N))
-	}
-	return observability.Absent[int64]()
+	return policyGenerationV8(context.Background())
 }
 
 func livePolicyGeneration() *Generation {

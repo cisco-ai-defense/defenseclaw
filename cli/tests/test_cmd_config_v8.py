@@ -280,7 +280,9 @@ def test_reference_json_schema_uses_embedded_go_schema() -> None:
             ["reference", "observability", "--format", "json-schema"],
         )
     assert result.exit_code == 0
-    assert result.output == schema
+    # The CLI re-indents the schema and describes block_message limits
+    # (GAP-0395); the content is the embedded Go schema.
+    assert json.loads(result.output) == json.loads(schema)
 
 
 def test_config_path_projects_v8_paths_without_legacy_load(tmp_path: Path) -> None:

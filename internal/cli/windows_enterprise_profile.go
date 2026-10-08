@@ -126,14 +126,18 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
 		configured, err := readWindowsEnterpriseConfigProfile(path)
-		var syntax *windowsEnterpriseConfigSyntaxError
-		if err != nil && requested == managed.ProfileStandalone && errors.As(err, &syntax) {
-			// A config the gateway cannot load is refused like every other
-			// one, with the line and the reason (GAP-0607): 1639, which MDMs
-			// do not retry, not the 1603 a failed install returns.
-			return windowsEnterpriseInvalidArguments("%s; nothing was changed", err)
-		}
 		if err != nil {
+			var content windowsEnterpriseConfigContentError
+			if requested == managed.ProfileStandalone && errors.As(err, &content) {
+				// A file that does not parse (a tab-indented line, GAP-0607),
+				// is not UTF-8 or is too large is the administrator's to fix: refuse it as invalid
+				// arguments (1639) with the gateway compiler's explanation,
+				// as every other config refusal (GAP-0562, GAP-0571).
+				if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {
+					err = compiled
+				}
+				return fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+			}
 			return err
 		}
 		if configured != "" {
@@ -444,12 +448,12 @@ func sameWindowsEnterpriseSignerSet(left, right []string) bool {
 	return true
 }
 
-// windowsEnterpriseConfigSyntaxError is a managed config that is not valid
-// YAML. Its text is the parse error, unchanged.
-type windowsEnterpriseConfigSyntaxError struct{ err error }
+// windowsEnterpriseConfigContentError is an administrator config whose
+// content cannot be read for its profile (too large, or not YAML). Its text
+// is unchanged.
+type windowsEnterpriseConfigContentError struct{ error }
 
-func (e *windowsEnterpriseConfigSyntaxError) Error() string { return e.err.Error() }
-func (e *windowsEnterpriseConfigSyntaxError) Unwrap() error { return e.err }
+func (err windowsEnterpriseConfigContentError) Unwrap() error { return err.error }
 
 // readWindowsEnterpriseConfigProfile reads enterprise.profile from an
 // administrator-supplied config. The lifecycle validates the whole file
@@ -465,7 +469,7 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		return "", fmt.Errorf("read managed config %s: %w", path, err)
 	}
 	if len(body) > windowsEnterpriseConfigProfileLimit {
-		return "", fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)
+		return "", windowsEnterpriseConfigContentError{fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)}
 	}
 	var document struct {
 		Enterprise struct {
@@ -473,7 +477,7 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		} `yaml:"enterprise"`
 	}
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
-		return "", &windowsEnterpriseConfigSyntaxError{err: fmt.Errorf("parse managed config %s: %w", path, err)}
+		return "", windowsEnterpriseConfigContentError{fmt.Errorf("parse managed config %s: %w", path, err)}
 	}
 	profile := managed.NormalizeEnterpriseProfile(document.Enterprise.Profile)
 	if profile != "" && profile != managed.ProfileSecureClient && profile != managed.ProfileStandalone {

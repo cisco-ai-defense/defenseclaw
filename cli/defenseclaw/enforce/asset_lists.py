@@ -52,7 +52,7 @@ OP_CLEAR = "clear"
 TARGET_TYPES = ("skill", "mcp", "plugin", "tool")
 
 MANAGED_REFUSAL = (
-    "This device is managed: add it to asset_policy in the admin config "
+    "This device is managed: the asset_policy block and allow lists are set in the admin config "
     "(MDM or management plane)"
 )
 
@@ -413,10 +413,12 @@ def _same_name(rule_name: str, name: str, target_type: str) -> bool:
     case-insensitively (``_asset_rule_matches``), tool names exactly
     (``tool_decision``). An exact compare left a denied ``MySkill`` in place
     on an unblock or allow of ``myskill``, which still matched it (GAP-0319)."""
+    from defenseclaw.enforce.admission import asset_name_key
+
     rule_name, name = (rule_name or "").strip(), (name or "").strip()
     if target_type == "tool":
         return rule_name == name
-    return rule_name.lower() == name.lower()
+    return asset_name_key(rule_name) == asset_name_key(name)
 
 
 def _same_asset(rule: Any, name: str, connector: str, target_type: str) -> bool:

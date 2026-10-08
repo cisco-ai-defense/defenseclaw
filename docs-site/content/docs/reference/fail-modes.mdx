@@ -22,6 +22,9 @@ and invalid-response failures.
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
 
+On a managed standalone host, gateway peer verification remains fail-closed
+when the gateway is unavailable, even if `hook_fail_mode: open` is set.
+
 On a managed standalone host both variables are *tighten-only*: a value that
 makes hooks stricter is honored, and one that would loosen the administrator's
 posture is ignored. See [Environment variables](/docs/reference/env-vars).

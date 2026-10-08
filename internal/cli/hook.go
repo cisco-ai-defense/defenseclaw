@@ -98,6 +98,9 @@ func newHookCmd() *cobra.Command {
 			opts.HookSurface = strings.TrimSpace(hookSurface)
 			// Only the standalone binary explains an unenrolled account.
 			opts.ExplainUnenrolledAccount = enterpriseManaged && implicitEnterpriseManagedHook()
+			if enterpriseManaged {
+				opts.AssetFacts = hookAssetFacts
+			}
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
@@ -490,6 +493,13 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 	if trustedNativeState {
 		opts.GatewayRecovery = trustedNativeGatewayRecovery()
+		if opts.GatewayRecovery == nil && !enterpriseManaged {
+			// A PowerShell (install.ps1) per-user install publishes no
+			// protected hook runtime, so its hook had no cold start and a
+			// gateway that ended with the sign-in session stayed down
+			// (GAP-0377). Managed and Secure Client hooks never get here.
+			opts.GatewayRecovery = perUserGatewayRecovery()
+		}
 	}
 	if enterpriseManaged {
 		opts.ManagedEnterprise = true

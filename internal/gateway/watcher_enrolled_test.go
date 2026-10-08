@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -73,6 +74,20 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// GAP-0424: the gateway service cannot read ~/.claude.json on Windows;
+	// the enumerator publishes its servers, local scope included.
+	spoolDir := mkdir(enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(dataDir)))
+	project := filepath.Join(alice, "proj")
+	spool, err := enterprisehooks.MarshalClaudeMCPSpoolRecord("S-1-5-21-1-1001", []config.MCPServerEntry{
+		{Name: "proj-notes", Command: "notes-server", Project: project, SourceScope: "local"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spoolDir, "S-1-5-21-1-1001.json"), spool, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	wcfg := config.GatewayWatcherConfig{Enabled: true}
 	wcfg.Skill.Enabled = true
 	wcfg.Plugin.Enabled = true
@@ -114,9 +129,10 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	}
 	// Each user's server is its own watcher target, even with the same name.
 	servers, _ := set.live.list()
-	if len(servers) != 2 || servers[0].Connector != "claudecode" || servers[0].Home != alice ||
-		servers[1].Connector != "codex" || servers[1].Home != bob ||
-		watcher.MCPEventPath(servers[0]) == watcher.MCPEventPath(servers[1]) {
+	if len(servers) != 3 || servers[0].Connector != "claudecode" || servers[0].Home != alice ||
+		servers[1].Name != "proj-notes" || servers[1].Connector != "claudecode" || servers[1].Home != alice || servers[1].Project != project ||
+		servers[2].Connector != "codex" || servers[2].Home != bob ||
+		watcher.MCPEventPath(servers[0]) == watcher.MCPEventPath(servers[2]) {
 		t.Fatalf("enrolled MCP servers = %+v", servers)
 	}
 }

@@ -143,12 +143,23 @@ func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, 
 	// fill the rest of the correlation envelope) so asset-policy decisions
 	// are filterable per connector — previously the connector lived only
 	// inside the free-form details string and never reached Event.Connector.
-	_ = a.logger.LogEventCtx(ctx, audit.Event{
+	event := audit.Event{
 		Action:    string(audit.ActionAssetPolicy),
 		Target:    target,
 		Details:   details,
 		Connector: connector,
-	})
+	}
+	// The row names the caller under the keys of the hook_decision row of
+	// the same event, so one filter on the user finds both (GAP-0577).
+	// Secure Client rows keep the shape of main (issue #1092).
+	if !ManagedEnterpriseActive() {
+		structured := map[string]any{}
+		auditCallerIdentity(ctx).addTo(structured)
+		if len(structured) > 0 {
+			event.Structured = structured
+		}
+	}
+	_ = a.logger.LogEventCtx(ctx, event)
 }
 
 // enrichConnectorHookIdentitySpan stamps the per-connector forensic identity

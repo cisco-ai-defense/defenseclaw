@@ -12,10 +12,13 @@ package gateway
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -100,6 +103,21 @@ func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *test
 
 	if matched {
 		t.Fatalf("matched=%v decision=%+v, want runtime detection disabled to skip skill policy", matched, decision)
+	}
+
+	// GAP-0566: an explicit denied entry applies whatever runtime_detection
+	// says, for skills and for plugin commands.
+	cfg.AssetPolicy.Enabled = false
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-deny"}}
+	cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "epa-plug-deny"}}
+	for _, probe := range []skillRuntimeProbe{
+		{SkillName: "epa-deny", ToolName: "Skill", Surface: "hook", Matched: true},
+		{TargetType: "plugin", SkillName: "epa-plug-deny", Surface: "prompt_expansion", Matched: true},
+	} {
+		decision, matched := api.runtimeSkillAssetPolicyDecision("claudecode", probe)
+		if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+			t.Fatalf("%s %s: matched=%v decision=%+v, want an admin-deny block", probe.TargetType, probe.SkillName, matched, decision)
+		}
 	}
 }
 
@@ -666,5 +684,111 @@ func TestHookResponseRuleIDsCarriesAssetPolicyRule(t *testing.T) {
 	}
 	if got := hookResponseRuleIDs([]string{"CMD-1"}, "allow", nil); len(got) != 1 || got[0] != "CMD-1" {
 		t.Fatalf("no-asset rule IDs = %v", got)
+	}
+}
+
+// GAP-0577: an asset-policy audit row names the verified caller under the
+// keys the hook_decision row of the same event uses.
+func TestAssetPolicyAuditRowNamesTheCaller(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "dcr-epa1"})
+	api.logAssetPolicyAudit(ctx, "claudecode", "skill:epa-deny", "action=block source=admin-deny")
+	events, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action != string(audit.ActionAssetPolicy) {
+			continue
+		}
+		if event.Structured[auditUserIDKey] != "1001" || event.Structured[auditUserNameKey] != "dcr-epa1" || event.Connector != "claudecode" {
+			t.Fatalf("asset-policy row connector=%q structured=%v, want the caller", event.Connector, event.Structured)
+		}
+		return
+	}
+	t.Fatal("no asset-policy audit row")
+}
+
+// GAP-0570: a skill folder whose SKILL.md declares a denied name is denied
+// under its own folder name, and a declared name never admits a skill.
+func TestClaudeCodeSkillDeniedByDeclaredName(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "skills", "epa-alias")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: epa-deny\n---\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-deny"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1003, Home: home})
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: map[string]interface{}{"skill": "epa-alias"}}
+	if decision, matched := api.claudeCodeSkillAssetDecision(ctx, req); !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+		t.Fatalf("matched=%v decision=%+v, want an admin-deny block", matched, decision)
+	}
+
+	cfg.AssetPolicy.Skill.Denied = nil
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "epa-deny"}}
+	cfg.AssetPolicy.Enabled, cfg.AssetPolicy.Mode, cfg.AssetPolicy.Skill.Default = true, "action", "deny"
+	enableSkillRuntimeDetection(cfg)
+	if decision, matched := api.claudeCodeSkillAssetDecision(ctx, req); !matched || decision.Source != "default-deny" {
+		t.Fatalf("matched=%v decision=%+v, want the declared name not to admit epa-alias", matched, decision)
+	}
+}
+
+// GAP-0569: Codex asked for a denied skill in plain words reads its SKILL.md
+// with a shell command; the read is refused, other skill folders are not.
+func TestCodexReadOfDeniedSkillFolderIsBlocked(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-two", Connector: "codex"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: t.TempDir()})
+	read := func(command string) (config.AssetPolicyDecision, bool) {
+		return api.codexSkillAssetDecision(ctx, codexHookRequest{
+			HookEventName: "PreToolUse", ToolName: "Bash",
+			ToolInput: map[string]interface{}{"command": []interface{}{"bash", "-lc", command}},
+		})
+	}
+	if decision, matched := read("sed -n 1,200p ~/.codex/skills/epa-two/SKILL.md"); !matched || decision.Action != "block" || decision.Source != "admin-deny" {
+		t.Fatalf("matched=%v decision=%+v, want the denied skill folder refused", matched, decision)
+	}
+	if decision, matched := read("cat ~/.codex/skills/epa-ok/SKILL.md"); matched {
+		t.Fatalf("an allowed skill folder was refused: %+v", decision)
+	}
+}
+
+// GAP-0576: on a standalone gateway a url rule matches the server the
+// caller's agent configures: read in the caller's home, or, where the
+// gateway may not read it, as the standalone hook reported it.
+func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: "http://127.0.0.1:28561/mcp"}}
+	api := &APIServer{scannerCfg: cfg}
+	home, project := t.TempDir(), t.TempDir()
+	state := `{"projects":{"` + filepath.ToSlash(project) + `":{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28561/mcp"}}}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	call := func(ctx context.Context) bool {
+		_, matched := api.claudeCodeMCPAssetDecision(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", ToolName: "mcp__notes__count_words", CWD: project,
+		})
+		return matched
+	}
+	if !call(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})) {
+		t.Fatal("url deny did not match the server in the caller's home")
+	}
+	reported := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001}),
+		claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: &assetfacts.MCPServer{Name: "notes", URL: "http://127.0.0.1:28561/mcp"}})
+	if !call(reported) {
+		t.Fatal("url deny did not match the server the hook reported")
+	}
+	other := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1003}),
+		claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: &assetfacts.MCPServer{Name: "notes", URL: "http://127.0.0.1:28562/mcp"}})
+	if call(other) {
+		t.Fatal("url deny matched another user's server")
 	}
 }

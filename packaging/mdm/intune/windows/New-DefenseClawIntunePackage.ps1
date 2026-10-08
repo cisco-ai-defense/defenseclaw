@@ -36,6 +36,10 @@ param(
 
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
+if (-not [IO.Path]::IsPathRooted($OutputDirectory)) {
+    $OutputDirectory = Join-Path (Get-Location).ProviderPath $OutputDirectory
+}
+$OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 
 $setup = (Resolve-Path -LiteralPath $SetupPath).ProviderPath
 $pin = $Sha256.Trim().ToLowerInvariant()
@@ -51,6 +55,12 @@ if ($TrustMode -eq 'Authenticode') {
     if ($signers -notcontains $thumbprint) { throw "Setup is signed by certificate $thumbprint, which is not in -AllowedSigners" }
 }
 
+$configText = ''
+if ($ConfigPath) {
+    $configText = Get-Content -LiteralPath $ConfigPath -Raw
+    if ($configText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'config.yaml contains an inline api_key; the standalone profile rejects it and the package must not carry credentials' }
+}
+
 $content = Join-Path $OutputDirectory 'content'
 if (Test-Path -LiteralPath $content) { throw "$content already exists; use an empty -OutputDirectory" }
 New-Item -ItemType Directory -Path $content -Force | Out-Null
@@ -58,8 +68,6 @@ Copy-Item -LiteralPath $setup -Destination (Join-Path $content 'DefenseClawSetup
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-DefenseClawIntune.ps1') -Destination $content
 $configPin = ''
 if ($ConfigPath) {
-    $configText = Get-Content -LiteralPath $ConfigPath -Raw
-    if ($configText -match '(?im)^\s*api_key\s*:\s*\S') { throw 'config.yaml contains an inline api_key; the standalone profile rejects it and the package must not carry credentials' }
     Copy-Item -LiteralPath $ConfigPath -Destination (Join-Path $content 'config.yaml')
     $configPin = (Get-FileHash -LiteralPath (Join-Path $content 'config.yaml') -Algorithm SHA256).Hash.ToLowerInvariant()
 }

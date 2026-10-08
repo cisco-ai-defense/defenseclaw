@@ -471,6 +471,7 @@ func (exporter *SpanExporter) exportBatch(
 	exporter.counters.accepted.Add(uint64(len(spans)))
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
+	redialGRPC(attemptContext, exporter.connection)
 	err := exporter.inner.ExportSpans(attemptContext, spans)
 	recordRetryAttempts(&exporter.counters, observer, observability.SignalTraces, uint64(len(spans)), attempts.Load())
 	if err != nil {

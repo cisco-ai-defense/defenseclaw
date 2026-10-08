@@ -322,6 +322,23 @@ def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
     )
 
 
+def test_standalone_first_enumeration_has_a_longer_named_budget() -> None:
+    """GAP-0561: the first run of a new gateway on a cold device took more
+    than the default 300 seconds and the install failed with only "native
+    process timed out". The standalone profile allows 900 seconds for the
+    synchronous enumeration and names the step and the remedy; the Secure
+    Client profile keeps 300."""
+
+    module = _text(MODULE)
+    assert "$script:StandaloneEnumeratorRefreshTimeoutSeconds = 900" in module
+    body = _function_body(module, "Invoke-DefenseClawEnumeratorRefresh")
+    assert "$timeoutSeconds = 300" in body
+    assert "-TimeoutSeconds $timeoutSeconds" in body
+    assert "run the install again" in body
+    gateway = _function_body(module, "Invoke-DefenseClawGatewayCommand")
+    assert "-TimeoutSeconds $TimeoutSeconds" in gateway
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).

@@ -347,6 +347,13 @@ var agentAssetPolicyKeys = []string{
 // may show the agent: the asset name the agent itself asked for, or an enum.
 var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
 
+// agentAssetPolicyNamePattern is the shape of an asset_name the agent may be
+// shown: the plain shape, with letters, marks and digits of any script, so a
+// denied skill named "epa-café" reads as a sentence like an ASCII one instead
+// of the redacted key=value reason (GAP-0572). Spaces, quotes, controls and
+// format characters still fail the match and stay redacted.
+var agentAssetPolicyNamePattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
+
 // agentAssetPolicySubject words an asset-policy block reason
 // (assetPolicyResponseReason: "ASSET-POLICY reason_code=... asset_name=...")
 // for the agent ("MCP server github is not in the approved registry"), or
@@ -361,7 +368,11 @@ func agentAssetPolicySubject(reason string) string {
 	values := make(map[string]string, len(fields)-1)
 	for _, field := range fields[1:] {
 		key, value, ok := strings.Cut(field, "=")
-		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !agentAssetPolicyValuePattern.MatchString(value) {
+		pattern := agentAssetPolicyValuePattern
+		if key == "asset_name" {
+			pattern = agentAssetPolicyNamePattern
+		}
+		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !pattern.MatchString(value) {
 			return ""
 		}
 		values[key] = value

@@ -20,7 +20,10 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -59,6 +62,8 @@ type enrolledWatchSet struct {
 	mcp []config.MCPServerEntry
 	// live is what the running watcher reads; the poller refreshes it.
 	live *enrolledMCPServers
+	// owners names the account of each enrolled home (GAP-0575).
+	owners []watcher.AssetOwner
 }
 
 // enrolledMCPServers is the MCP server list a running watcher reads.
@@ -94,8 +99,15 @@ func (e enrolledWatchSet) dirsKey() string {
 	return strings.Join(parts, "\n")
 }
 
+// mcpKey changes only when a server changes: the entries are sorted, as
+// the Codex reader lists them in map order, which asked for a rescan on
+// almost every poll.
 func (e enrolledWatchSet) mcpKey() string {
-	raw, _ := json.Marshal(e.mcp)
+	entries := append([]config.MCPServerEntry(nil), e.mcp...)
+	sort.SliceStable(entries, func(i, j int) bool {
+		return watcher.MCPEventPath(entries[i]) < watcher.MCPEventPath(entries[j])
+	})
+	raw, _ := json.Marshal(entries)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -141,8 +153,9 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 	seenSkill := map[string]bool{}
 	seenPlugin := map[string]bool{}
 	seenMCP := map[string]bool{}
-	type userConnector struct{ home, connector string }
+	type userConnector struct{ home, connector, sid string }
 	var targets []userConnector
+	ownedHomes := map[string]bool{}
 	for _, target := range authorization.ProtectedTargets {
 		home := strings.TrimSpace(target.UserHome)
 		if home == "" && target.Result != nil {
@@ -152,7 +165,15 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !target.OK || home == "" || name == "" || !filepath.IsAbs(home) {
 			continue
 		}
-		targets = append(targets, userConnector{filepath.Clean(home), name})
+		targets = append(targets, userConnector{filepath.Clean(home), name, strings.TrimSpace(target.SID)})
+		if key := strings.ToLower(filepath.Clean(home)); !ownedHomes[key] {
+			ownedHomes[key] = true
+			owner := watcher.AssetOwner{Home: filepath.Clean(home), Name: strings.TrimSpace(target.User)}
+			if sid := strings.TrimSpace(target.SID); sid != "" {
+				owner.ID, owner.IDKind = sid, useridentity.KindWindowsSID
+			}
+			set.owners = append(set.owners, owner)
+		}
 	}
 	// A folder several connectors list (Amp and OpenCode also read Claude
 	// Code's ~/.claude/skills) belongs to the connector that owns its layout,
@@ -209,7 +230,11 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		}
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
-		for _, entry := range config.ReadUserMCPServersForHome(target.connector, target.home) {
+		entries := config.ReadUserMCPServersForHome(target.connector, target.home)
+		if target.connector == "claudecode" {
+			entries = append(entries, enrolledClaudeMCPServers(cfg, target.sid)...)
+		}
+		for _, entry := range entries {
 			entry.Home = target.home
 			key := watcher.MCPEventPath(entry)
 			if entry.Name == "" || entry.Bundled || seenMCP[key] {
@@ -220,6 +245,19 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		}
 	}
 	return set
+}
+
+// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
+// published for the account sid: the gateway service account cannot read
+// ~/.claude.json in the profile root, which holds the user-scope and
+// local-scope servers (GAP-0424).
+func enrolledClaudeMCPServers(cfg *config.Config, sid string) []config.MCPServerEntry {
+	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	servers, err := enterprisehooks.ReadClaudeMCPSpool(dir, sid, validateManagedGuardianAuthorization)
+	if err != nil {
+		return nil
+	}
+	return servers
 }
 
 // EnrolledWatchRoot is a skill or plugin folder a managed Windows gateway
@@ -294,10 +332,6 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 	ticker := time.NewTicker(enrolledWatchPollInterval)
 	defer ticker.Stop()
 	dirs, mcp := current.dirsKey(), current.mcpKey()
-	known := map[string]bool{}
-	for _, entry := range current.mcp {
-		known[entry.Name] = true
-	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -311,20 +345,12 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 			if key := next.mcpKey(); key != mcp {
 				mcp = key
 				current.live.set(next.mcp)
-				var added []string
-				for _, entry := range next.mcp {
-					if !known[entry.Name] {
-						added = append(added, entry.Name)
-					}
-				}
-				known = map[string]bool{}
-				for _, entry := range next.mcp {
-					known[entry.Name] = true
-				}
 				if w != nil {
 					// Admit a server the user added within this poll, not
-					// after the running rescan cycle (GAP-0254).
-					w.AdmitAddedMCPServers(added)
+					// after the running rescan cycle: every server without a
+					// baseline, so a second user adding a server named like
+					// another user is admitted too (GAP-0254).
+					w.DiscoverAddedMCPServers()
 					w.RequestRescan()
 				}
 			}

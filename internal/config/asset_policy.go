@@ -138,6 +138,18 @@ type AssetPolicyInput struct {
 	Args           []string
 	Transport      string
 	RuntimeSurface string
+
+	// DeclaredNames are other names the asset gives itself, such as the
+	// name in a skill's SKILL.md frontmatter. A denied rule matches Name
+	// or any of them, so a copy of a denied skill in a folder with another
+	// name is still denied (GAP-0570); allowed and registry rules match Name
+	// only, so a declared name never admits an asset.
+	DeclaredNames []string
+
+	// unicodeNames compares names after Unicode NFC normalisation
+	// (NormalizeAssetName, GAP-0432). EvaluateAssetPolicy and
+	// AssetListDecision set it outside Secure Client.
+	unicodeNames bool
 }
 
 type AssetPolicyDecision struct {
@@ -206,6 +218,7 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	if c == nil {
 		return out
 	}
+	in.unicodeNames = !c.SecureClientIntegration()
 	// The v9 lists replace audit.db operator actions and apply in every mode.
 	// Secure Client keeps the v8 evaluator's enabled and observe gates.
 	if !c.SecureClientIntegration() {
@@ -497,7 +510,7 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	hasConstraint := false
 	if rule.Name != "" {
 		hasConstraint = true
-		if !strings.EqualFold(strings.TrimSpace(rule.Name), strings.TrimSpace(in.Name)) {
+		if !sameRuleName(rule.Name, in.Name, in.unicodeNames) {
 			return false
 		}
 	}

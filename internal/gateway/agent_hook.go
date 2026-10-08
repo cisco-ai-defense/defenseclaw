@@ -228,6 +228,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// and the agent identity derived from both (never the payload).
 		// No-op without profiles.
 		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
+		// What a standalone hook read in its user's home for asset_policy
+		// (skill names, the MCP server definition): claims, never authority.
+		r = r.WithContext(withClaimedAssetFacts(r.Context(), r.Header))
 
 		// Run installs the same ordinary API ceiling globally. Keep the hook
 		// handler bounded as a standalone unit too because connector tests and
@@ -438,7 +441,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withAgentHost(ctx, r.Header)
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
-		if judge := a.hookJudge.Load(); judge != nil && shouldResetToolJudgeSession(req) {
+		if judge := a.judgeFor(ctx); judge != nil && shouldResetToolJudgeSession(req) {
 			judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
 		}
 		t0 := time.Now()
@@ -2117,7 +2120,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if judge := a.hookJudge.Load(); judge != nil && isToolJudgeIntentEvent(req.HookEventName) {
+		if judge := a.judgeFor(ctx); judge != nil && isToolJudgeIntentEvent(req.HookEventName) {
 			judge.ObserveSessionPrompt(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})

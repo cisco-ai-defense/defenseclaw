@@ -156,6 +156,9 @@ func configSchemaProblem(err error) (string, bool) {
 		}
 		return fmt.Sprintf("%s: %s: expected %s%s", where, field, schemaErr.Expected, got), true
 	}
+	if schemaErr.Keyword == "pattern" && (strings.HasSuffix(field, ".block_at") || strings.HasSuffix(field, ".alert_at")) {
+		return fmt.Sprintf("%s: %s must be one of CRITICAL, HIGH, MEDIUM, LOW", where, field), true
+	}
 	if schemaErr.Keyword != "enum" || !strings.HasPrefix(schemaErr.Expected, "one of ") {
 		return "", false
 	}

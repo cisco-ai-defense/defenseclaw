@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -184,6 +185,28 @@ func (c *Config) ReferencedRulePackDirs() map[string]string {
 		out["guardrail.custom_packs."+name+".path"] = strings.TrimSpace(pack.Path)
 	}
 	return out
+}
+
+// cleanCustomPackPaths writes every absolute guardrail.custom_packs path in
+// its clean form, so one pack has one effective policy digest however its
+// path is spelled (/etc/p/guardrail/../guardrail/acme, a trailing slash):
+// the digest covers the loaded config, and two spellings of one pack gave
+// two digests (GAP-0548). Windows paths are left as written: Clean there
+// also turns forward slashes into backslashes.
+func cleanCustomPackPaths(cfg *Config) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	for name, pack := range cfg.Guardrail.CustomPacks {
+		path := strings.TrimSpace(pack.Path)
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		if clean := filepath.Clean(path); clean != pack.Path {
+			pack.Path = clean
+			cfg.Guardrail.CustomPacks[name] = pack
+		}
+	}
 }
 
 // RulePackCheckOrder orders the keys of ReferencedRulePackDirs for a check:

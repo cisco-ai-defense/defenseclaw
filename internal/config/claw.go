@@ -250,6 +250,34 @@ func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name strin
 	return MCPServerEntry{}, false
 }
 
+// LookupMCPServerUnderHome is LookupMCPServerForConnector for a user whose
+// home is not this process's: a standalone gateway runs as a service
+// account and answers the hooks of every user, so the server a hook names
+// is the one that user's agent configures (GAP-0576). Claude Code and
+// Codex are read; for other connectors ok is false.
+func LookupMCPServerUnderHome(connector, home, workspaceDir, name string) (MCPServerEntry, bool) {
+	name, home = strings.TrimSpace(name), strings.TrimSpace(home)
+	if name == "" || !filepath.IsAbs(home) {
+		return MCPServerEntry{}, false
+	}
+	var entries []MCPServerEntry
+	switch normalizeConnectorKey(connector) {
+	case "claudecode":
+		entries = readMCPServersClaudeCodeAt(filepath.Join(home, ".claude.json"),
+			filepath.Join(home, ".claude", "settings.json"), workspaceDir)
+	case "codex":
+		entries = readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+	default:
+		return MCPServerEntry{}, false
+	}
+	for _, entry := range entries {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
+	return MCPServerEntry{}, false
+}
+
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
 	switch normalizeConnectorKey(connector) {
 	case "claudecode":
@@ -315,21 +343,48 @@ func (c *Config) ReadWatchedMCPServers(connectors []string) ([]MCPServerEntry, e
 // maxClaudeProjects bounds the projects claudeCodeProjectMCPServers reads.
 const maxClaudeProjects = 512
 
-// claudeCodeProjectMCPServers lists, for each project in Claude Code's state
-// file, the local-scope servers stored there and the project's .mcp.json.
+// claudeCodeProjectMCPServers lists, for each project in the Claude Code
+// state file, the local-scope servers stored there and the project .mcp.json.
 func claudeCodeProjectMCPServers() []MCPServerEntry {
 	data, err := os.ReadFile(claudeCodeMCPStatePath())
 	if err != nil {
 		return nil
 	}
-	var state struct {
-		Projects map[string]json.RawMessage `json:"projects"`
-	}
+	var state map[string]any
 	if json.Unmarshal(data, &state) != nil {
 		return nil
 	}
-	projects := make([]string, 0, len(state.Projects))
-	for project := range state.Projects {
+	return claudeStateProjectServers(state, func(project string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(project, ".mcp.json"))
+	})
+}
+
+// ClaudeStateMCPServers lists the MCP servers a Claude Code state file
+// (~/.claude.json) names: the user scope, the local scope of each project,
+// and the .mcp.json of each project, which readProjectMCP returns (nil skips
+// them). Entries are tagged claudecode; project servers carry their project.
+// The managed Windows enumerator, which runs as LocalSystem, reads the state
+// file for the gateway service, whose account cannot read it (GAP-0424).
+func ClaudeStateMCPServers(data []byte, readProjectMCP func(project string) ([]byte, error)) ([]MCPServerEntry, error) {
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	user, _ := readMCPFromAnyPaths(state, []string{"mcpServers"})
+	out := make([]MCPServerEntry, 0, len(user))
+	for _, entry := range dedupMCPEntries(user) {
+		entry.Connector = "claudecode"
+		out = append(out, entry)
+	}
+	return append(out, claudeStateProjectServers(state, readProjectMCP)...), nil
+}
+
+// claudeStateProjectServers lists the local-scope and .mcp.json servers of
+// every project in a decoded Claude Code state file.
+func claudeStateProjectServers(state map[string]any, readProjectMCP func(project string) ([]byte, error)) []MCPServerEntry {
+	projectStates, _ := state["projects"].(map[string]any)
+	projects := make([]string, 0, len(projectStates))
+	for project := range projectStates {
 		if filepath.IsAbs(project) {
 			projects = append(projects, project)
 		}
@@ -340,15 +395,21 @@ func claudeCodeProjectMCPServers() []MCPServerEntry {
 	}
 	var out []MCPServerEntry
 	for _, project := range projects {
-		var raw map[string]any
-		if json.Unmarshal(state.Projects[project], &raw) == nil {
+		if raw, ok := projectStates[project].(map[string]any); ok {
 			local, _ := readMCPFromAnyPaths(raw, []string{"mcpServers"})
 			for _, entry := range local {
 				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "local"
 				out = append(out, entry)
 			}
 		}
-		if shared, err := readMCPFromDotMCPJSON(filepath.Join(project, ".mcp.json")); err == nil {
+		if readProjectMCP == nil {
+			continue
+		}
+		data, err := readProjectMCP(project)
+		if err != nil {
+			continue
+		}
+		if shared, err := parseDotMCPJSON(data); err == nil {
 			for _, entry := range shared {
 				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
 				out = append(out, entry)
@@ -1007,10 +1068,16 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 // --- Connector-specific MCP readers ---
 
 func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
+	return readMCPServersClaudeCodeAt(claudeCodeMCPStatePath(),
+		filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json"), workspaceDir), nil
+}
+
+// readMCPServersClaudeCodeAt reads Claude Code's servers from its state
+// file and settings.json at the given paths and the project .mcp.json.
+func readMCPServersClaudeCodeAt(statePath, settingsPath, workspaceDir string) []MCPServerEntry {
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
-	statePath := claudeCodeMCPStatePath()
 	local, user, stateErr := readMCPFromClaudeState(statePath, cwd)
 	if stateErr == nil {
 		// Claude's documented precedence is local, project, then user.
@@ -1034,12 +1101,11 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 	// Some Claude installations also carry a top-level user registry in
 	// settings.json. Keep it as the final user layer so the CLI state registry
 	// retains precedence while this additional source still fills missing names.
-	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
 	}
 
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries)
 }
 
 func claudeCodeMCPStatePath() string {
@@ -1167,6 +1233,12 @@ func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
+	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir), nil
+}
+
+// readMCPServersCodexAt reads Codex's servers from the user config.toml at
+// userPath and the project layers of workspaceDir.
+func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
 	// their entries take precedence, then the user layer fills remaining names.
@@ -1181,11 +1253,10 @@ func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
 		}
 	}
-	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
 	if e, err := ReadMCPFromCodexUserConfigTOML(userPath); err == nil {
 		entries = append(entries, e...)
 	}
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries)
 }
 
 func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {
@@ -1578,7 +1649,11 @@ func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseDotMCPJSON(data)
+}
 
+// parseDotMCPJSON reads the servers of an .mcp.json document.
+func parseDotMCPJSON(data []byte) ([]MCPServerEntry, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err

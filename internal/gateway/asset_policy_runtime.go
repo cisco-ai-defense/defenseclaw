@@ -65,6 +65,9 @@ type skillRuntimeProbe struct {
 	// lookup. It must not widen ordinary asset-policy matching or record a
 	// loaded asset when no disable record exists.
 	RuntimeDisableOnly bool
+	// DeclaredNames are the names the skill declares in its SKILL.md
+	// (declaredSkillNames); a denied rule matches them too.
+	DeclaredNames []string
 }
 
 type runtimeAssetDecision struct {
@@ -91,6 +94,10 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	if !probe.Matched {
+		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
+	}
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
 
@@ -157,6 +164,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 			Matched:            true,
 			RuntimeDisableOnly: runtimeDisableOnly,
 		}
+		probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 		if decision, matched := a.evaluateNativeRuntimeSkillSelection(
 			ctx, "claudecode", req.SessionID, req.HookEventName,
 			runtimeProvenanceClaudeExpansion, probe,
@@ -206,6 +214,10 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	if !probe.Matched {
+		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
+	}
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
@@ -216,6 +228,7 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
 	return a.evaluateNativeRuntimeSkillSelection(
 		ctx, "codex", req.SessionID, req.HookEventName,
 		runtimeProvenanceCodexPromptSelection, probe,
@@ -228,14 +241,14 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		return config.AssetPolicyDecision{}, false
 	}
 	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor("mcp")
-	if !runtimeDetection.Enabled {
-		return config.AssetPolicyDecision{}, false
-	}
 	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
 		return config.AssetPolicyDecision{}, false
 	}
-	probe = a.resolveMCPProbeEndpoint(cfg, connector, probe)
-	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	if !runtimeDetection.Enabled && cfg.SecureClientIntegration() {
+		return config.AssetPolicyDecision{}, false
+	}
+	probe = a.resolveMCPProbeEndpoint(ctx, cfg, connector, probe)
+	input := config.AssetPolicyInput{
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
 		Connector:      connector,
@@ -244,7 +257,11 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		Args:           probe.Args,
 		Transport:      probe.Transport,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
-	})
+	}
+	if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
+		return config.AssetPolicyDecision{}, false
+	}
+	decision := cfg.EvaluateAssetPolicy(input)
 	// when MCP.Default is "deny" and the asset
 	// policy is itself in action mode, an unknown terminal MCP
 	// command MUST NOT be silently downgraded to allow just
@@ -284,14 +301,31 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 // this an approved server never matched at runtime and registry-required
 // blocked every MCP tool call (GAP-2488). A server the connector does not
 // list keeps the bare name and matches only name-only rules.
-func (a *APIServer) resolveMCPProbeEndpoint(cfg *config.Config, connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
-	if cfg == nil || !cfg.AssetPolicy.Enabled {
+//
+// The explicit lists apply with asset_policy disabled, so the server is
+// resolved whatever enabled says, and a standalone gateway resolves it in
+// the caller's configuration, not its own service profile: a url rule
+// never matched at the hook of a managed device (GAP-0576). Secure Client
+// keeps main: enabled gates the lookup, which reads the gateway's own home
+// (issue #1092).
+func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
+	if cfg == nil {
+		return probe
+	}
+	secureClient := cfg.SecureClientIntegration()
+	if !cfg.AssetPolicy.Enabled && (secureClient || !mcpListsPinEndpoint(cfg.AssetPolicy.MCP)) {
 		return probe
 	}
 	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
 		return probe
 	}
-	entry, ok := cfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	var entry config.MCPServerEntry
+	var ok bool
+	if secureClient {
+		entry, ok = cfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	} else {
+		entry, ok = a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
+	}
 	if !ok {
 		return probe
 	}
@@ -300,6 +334,20 @@ func (a *APIServer) resolveMCPProbeEndpoint(cfg *config.Config, connector string
 	probe.Args = entry.Args
 	probe.Transport = strings.TrimSpace(entry.Transport)
 	return probe
+}
+
+// mcpListsPinEndpoint reports whether a denied or allowed MCP rule matches
+// on how a server starts (url, command, args_prefix, transport), which a
+// name-only probe needs resolving for.
+func mcpListsPinEndpoint(p config.AssetTypePolicy) bool {
+	for _, rules := range [][]config.AssetPolicyRule{p.Denied, p.Allowed} {
+		for _, rule := range rules {
+			if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
@@ -335,20 +383,19 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
-	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor(targetType)
-	if !runtimeDetection.Enabled {
-		return config.AssetPolicyDecision{}, false
-	}
-	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
-		return config.AssetPolicyDecision{}, false
-	}
-	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	input := config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           probe.SkillName,
+		DeclaredNames:  probe.DeclaredNames,
 		Connector:      connector,
 		SourcePath:     probe.SourcePath,
 		RuntimeSurface: runtimeSurface,
-	})
+	}
+	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor(targetType)
+	if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
+		return config.AssetPolicyDecision{}, false
+	}
+	decision := cfg.EvaluateAssetPolicy(input)
 	// a Claude Code agent can pass a crafted
 	// skill_name like "/tmp/attacker/trusted-skill/SKILL.md" and
 	// the previous code stripped it down to the basename
@@ -439,6 +486,26 @@ func (a *APIServer) evaluateNativeRuntimeSkillSelection(
 		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 	}
 	return decision, matched
+}
+
+// runtimeAssetPolicyApplies reports whether a hook evaluates asset_policy
+// for an asset it identified. runtime_detection (enabled, terminal_commands)
+// governs the default, registry and approval rules; an explicit denied entry
+// applies whatever it says, as it does on the install watcher and the policy
+// API (GAP-0566). Secure Client keeps the runtime_detection gate of main for
+// every rule (issue #1092).
+func runtimeAssetPolicyApplies(cfg *config.Config, detection config.AssetRuntimeDetection, surface string, in config.AssetPolicyInput) bool {
+	if surface == "terminal" && !detection.TerminalCommands {
+		return false
+	}
+	if detection.Enabled {
+		return true
+	}
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	verdict, _ := cfg.AssetListDecision(in)
+	return verdict == config.AssetListDeny
 }
 
 func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {

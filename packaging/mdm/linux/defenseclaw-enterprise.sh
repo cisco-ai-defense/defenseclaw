@@ -47,6 +47,7 @@
 set -eu
 
 DC_SCRIPT_OS=linux # linux | darwin - the only line that differs between the copies
+DC_LOG_NAME=defenseclaw-enterprise.sh
 
 # ---- MDM settings ------------------------------------------------------------
 # Script-only MDMs (Intune platform scripts, Jamf policies, ...) upload this
@@ -90,10 +91,13 @@ readonly DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
 DC_CONFIG_STDIN=0
 DC_SECRET_STDIN=0
 DC_STAGE=""
+DC_CHILD=""
 DC_RESULT=""
 DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
+DC_INSTALL_ROOT=""     # the install tree whose volume the package fills
+DC_PACKAGE_RESULT=""   # the result the macOS package's own scripts write
 
 dc_platform() {
     case "$(uname -s)" in
@@ -132,13 +136,40 @@ dc_log() {
         ( umask 077; : >"$DC_LOG" ) 2>/dev/null || return 0
     fi
     [ -f "$DC_LOG" ] && [ ! -L "$DC_LOG" ] || return 0
-    printf '%s %s[%s] %s\n' "$(dc_now)" "${0##*/}" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
+    printf '%s %s[%s] %s\n' "$(dc_now)" "$DC_LOG_NAME" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
 }
 
 dc_cleanup() {
     if [ -n "$DC_STAGE" ] && [ -d "$DC_STAGE" ]; then
         rm -rf "$DC_STAGE"
     fi
+}
+
+# dc_stop_child: an interrupted run stops the lifecycle command it waits for,
+# so the command does not finish (or store a credential) after the run was
+# reported failed.
+dc_stop_child() {
+    [ -z "$DC_CHILD" ] || kill "$DC_CHILD" 2>/dev/null || true
+}
+
+# dc_sweep_stages <parent>: remove the staging folders of earlier runs that
+# were killed before their cleanup ran: root-owned, and either their run is
+# gone (the pid it recorded no longer runs) or, without a pid, a day old.
+dc_sweep_stages() {
+    for stale in "$1"/defenseclaw-mdm.*; do
+        [ -d "$stale" ] && [ ! -L "$stale" ] || continue
+        [ "$(dc_stat_uid "$stale")" = 0 ] || continue
+        owner=$(head -c 32 "$stale/pid" 2>/dev/null || true)
+        case "$owner" in
+            "" | *[!0-9]*)
+                [ -n "$(find "$stale" -maxdepth 0 -mmin +1440 2>/dev/null)" ] || continue
+                ;;
+            *)
+                ! kill -0 "$owner" 2>/dev/null || continue
+                ;;
+        esac
+        rm -rf "$stale"
+    done
 }
 
 dc_stat_uid() {
@@ -194,18 +225,43 @@ dc_lower() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
 
 dc_download() {
     url=$1 dest=$2
+    DC_DOWNLOAD_ERROR="download failed"
     case "$url" in https://*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "download URLs must use https://" ;; esac
     if command -v curl >/dev/null 2>&1; then
         set -- curl -fsS --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --retry-delay 5 \
-            --connect-timeout 30 --max-time 1800 -o "$dest"
+            --connect-timeout 30 --max-time 1800 -D "$DC_STAGE/download.headers" -o "$dest"
         [ -z "$DC_HTTPS_PROXY" ] || set -- "$@" --proxy "$DC_HTTPS_PROXY"
-        "$@" "$url"
+        if "$@" "$url" 2>"$DC_STAGE/download.err"; then result=0; else result=$?; fi
+        http_status=$(awk '/^HTTP\// {code=$2} END {print code}' "$DC_STAGE/download.headers" 2>/dev/null)
+        case "$http_status" in
+            3??) DC_DOWNLOAD_ERROR="download redirected (HTTP $http_status); use a URL that serves the file directly"; return 1 ;;
+        esac
+        [ "$result" = 0 ] && return 0
+        case "$http_status" in 4?? | 5??) DC_DOWNLOAD_ERROR="download failed: HTTP $http_status"; return 1 ;; esac
+        case "$result" in
+            5) reason="proxy lookup failed" ;; 6) reason="DNS lookup failed" ;;
+            7) reason="connection failed" ;; 18) reason="transfer ended early" ;;
+            28) reason="timed out" ;; 35) reason="TLS handshake failed" ;;
+            52) reason="server sent no response" ;; 56) reason="connection closed during transfer" ;;
+            60) reason="TLS certificate verification failed" ;;
+            *) reason="network error" ;;
+        esac
+        DC_DOWNLOAD_ERROR="download failed: $reason (curl exit $result)"
+        return 1
     elif command -v wget >/dev/null 2>&1; then
         if [ -n "$DC_HTTPS_PROXY" ]; then
-            https_proxy=$DC_HTTPS_PROXY wget -q --https-only --tries=3 --timeout=60 -O "$dest" "$url"
+            https_proxy=$DC_HTTPS_PROXY wget -q --server-response --max-redirect=0 --https-only --tries=3 --timeout=60 -O "$dest" "$url" 2>"$DC_STAGE/download.err" && return 0
         else
-            wget -q --https-only --tries=3 --timeout=60 -O "$dest" "$url"
+            wget -q --server-response --max-redirect=0 --https-only --tries=3 --timeout=60 -O "$dest" "$url" 2>"$DC_STAGE/download.err" && return 0
         fi
+        result=$?
+        http_status=$(awk '/^[[:space:]]*HTTP\// {code=$2} END {print code}' "$DC_STAGE/download.err")
+        case "$http_status" in
+            3??) DC_DOWNLOAD_ERROR="download redirected (HTTP $http_status); use a URL that serves the file directly" ;;
+            4?? | 5??) DC_DOWNLOAD_ERROR="download failed: HTTP $http_status" ;;
+            *) DC_DOWNLOAD_ERROR="download failed: wget exit $result" ;;
+        esac
+        return 1
     else
         dc_fail_result "$DC_EXIT_FAILURE" mdm_download_unavailable "neither curl nor wget is installed"
     fi
@@ -244,6 +300,13 @@ dc_usage() {
 }
 
 dc_parse_args() {
+    # Intune's Linux agent invokes sh /proc/self/fd/N /proc/self/fd/N.
+    # The second descriptor is its script argument, not an operator flag.
+    case "${1:-}" in
+        /proc/self/fd/*)
+            case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
+            ;;
+    esac
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --action)
@@ -325,13 +388,29 @@ dc_validate_args() {
     fi
 }
 
+# dc_binaries_damaged: the installed gateway or hook binary is empty, which
+# a power loss during a package upgrade leaves behind (GAP-0467). The same
+# package version then counts as not installed, so it is installed again.
+dc_binaries_damaged() {
+    bin_dir=$(dirname "$DC_GATEWAY")
+    for name in defenseclaw-gateway defenseclaw-hook; do
+        if [ -e "$bin_dir/$name" ] && [ ! -s "$bin_dir/$name" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 dc_layout() {
     if [ "$DC_SCRIPT_OS" = darwin ]; then
         DC_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+        DC_INSTALL_ROOT=/opt/cisco/defenseclaw
+        DC_PACKAGE_RESULT=/opt/cisco/defenseclaw/lifecycle/last-package-result.json
         DC_OS_GROUP=macos
         [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
     else
         DC_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway
+        DC_INSTALL_ROOT=/opt/defenseclaw
         DC_OS_GROUP=linux
         [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
     fi
@@ -374,7 +453,7 @@ dc_verify_signature() {
     signature="$DC_STAGE/source.sig"
     if [ -n "$DC_SIGNATURE_URL" ]; then
         dc_download "$DC_SIGNATURE_URL" "$signature" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "could not download the signature"
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "$DC_DOWNLOAD_ERROR (signature)"
     else
         if [ -z "$DC_SIGNATURE" ]; then
             [ -n "$DC_SOURCE" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a downloaded source needs --signature-url or --signature"
@@ -400,7 +479,7 @@ dc_stage_source() {
     DC_STAGED_SOURCE="$DC_STAGE/$name"
     if [ -n "$DC_SOURCE_URL" ]; then
         dc_download "$DC_SOURCE_URL" "$DC_STAGED_SOURCE" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "could not download the source"
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_download_failed "$DC_DOWNLOAD_ERROR (source)"
     else
         dc_stage_file "$DC_SOURCE" "$DC_STAGED_SOURCE" 1073741824 "source"
     fi
@@ -432,7 +511,7 @@ dc_require_product_version() {
 # rpm version names. The epoch and the Debian revision are dropped and the
 # "~" packages use for a prerelease reads as "-", so 1:1.4.0~rc1-1 is 1.4.0-rc1.
 dc_package_release_version() {
-    printf '%s' "$1" | sed -e 's/^[0-9][0-9]*://' -e 's/-[^-]*$//' -e 's/~/-/'
+    printf '%s' "$1" | sed -e 's/^[0-9][0-9]*://' -e 's/-[0-9][0-9]*$//' -e 's/~/-/'
 }
 
 # dc_install_package: install the staged package when its version differs
@@ -451,15 +530,22 @@ dc_install_package() {
             [ "$arch" = "$(dpkg --print-architecture)" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .deb is for $arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(dpkg-query -W -f='${Status} ${Version}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
-            if [ "$installed" = "install ok installed $version" ]; then
+            if [ "$installed" = "install ok installed $version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
-                if ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); then
+                attempt=1
+                while ! output=$(DEBIAN_FRONTEND=noninteractive dpkg -i "$file" 2>&1); do
+                    if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
+                        dc_log "package manager busy; retry $attempt of 2"
+                        attempt=$((attempt + 1))
+                        sleep 10
+                        continue
+                    fi
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "dpkg failed: $output"
-                fi
+                done
                 case "$installed" in
                     "install ok installed "*) dc_package_step "$(dc_package_release_version "${installed#install ok installed }")" "$(dc_package_release_version "$version")" ;;
                     *) dc_package_step "" "$(dc_package_release_version "$version")" ;;
@@ -474,21 +560,30 @@ dc_install_package() {
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
             dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
-            if [ "$installed" = "$version" ]; then
+            if [ "$installed" = "$version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
                 previous=""
+                replace=""
+                [ "$installed" != "$version" ] || replace=--replacepkgs
                 if rpm -q "$DC_LINUX_PACKAGE" >/dev/null 2>&1; then
                     previous=$(dc_package_release_version "$installed")
                 fi
                 # rpm -U refuses a downgrade, which keeps an older package
                 # from silently replacing a newer deployment.
-                if ! output=$(rpm -U --quiet "$file" 2>&1); then
+                attempt=1
+                while ! output=$(rpm -U --quiet $replace "$file" 2>&1); do
+                    if dc_busy_output "$output" && [ "$attempt" -lt 3 ]; then
+                        dc_log "package manager busy; retry $attempt of 2"
+                        attempt=$((attempt + 1))
+                        sleep 10
+                        continue
+                    fi
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "the package manager is busy; retry later"
                     fi
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "rpm failed: $output"
-                fi
+                done
                 dc_package_step "$previous" "$(dc_package_release_version "$version")"
             fi
             ;;
@@ -501,13 +596,21 @@ dc_install_package() {
             [ -n "$version" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the package does not contain $DC_MACOS_PACKAGE_ID"
             dc_require_product_version "$version"
             installed=$(pkgutil --pkg-info "$DC_MACOS_PACKAGE_ID" 2>/dev/null | sed -n 's/^version: //p')
-            if [ "$installed" = "$version" ]; then
+            if [ "$installed" = "$version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
+                dc_require_free_space "$(sed -n 's/.*installKBytes="\([0-9][0-9]*\)".*/\1/p' "$expanded"/*/PackageInfo 2>/dev/null | head -n 1)"
+                started="$DC_STAGE/installer.started"
+                : >"$started"
                 if ! output=$(installer -pkg "$file" -target / 2>&1); then
                     if dc_busy_output "$output"; then
                         dc_fail_result "$DC_EXIT_BUSY" mdm_package_manager_busy "another installation is running; retry later"
                     fi
+                    case "$output" in
+                        *"No space left"* | *"not enough space"* | *"not enough disk space"*)
+                            dc_fail_result "$DC_EXIT_FAILURE" mdm_disk_full "the installer ran out of disk space; free some space, then rerun: $output" ;;
+                    esac
+                    dc_package_script_result "$started"
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "installer failed: $output"
                 fi
                 dc_package_step "$installed" "$version"
@@ -518,6 +621,38 @@ dc_install_package() {
             return 0
             ;;
     esac
+}
+
+# dc_require_free_space <KB the package installs>: refuse before the package
+# manager runs when the volume of the install tree lacks room for the
+# package plus the lifecycle snapshot and logs. A full data volume failed the
+# Installer with its generic "The upgrade failed" text and left no lifecycle
+# result (GAP-0539).
+dc_require_free_space() {
+    case "$1" in '' | *[!0-9]*) return 0 ;; esac
+    [ -n "$DC_INSTALL_ROOT" ] || return 0
+    dir=$DC_INSTALL_ROOT
+    while [ ! -d "$dir" ]; do dir=$(dirname "$dir"); done
+    free=$(df -Pk "$dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    case "$free" in '' | *[!0-9]*) return 0 ;; esac
+    need=$(($1 + 102400))
+    [ "$free" -ge "$need" ] ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_disk_full "not enough free disk space on the volume of $DC_INSTALL_ROOT: the package needs about $((need / 1024)) MB and $((free / 1024)) MB is free; nothing was installed. Free some space, then rerun"
+}
+
+# dc_package_script_result <marker>: after a failed installer run, print the
+# result the package's preinstall or postinstall wrote during it and exit 1.
+# The Installer only says "an error occurred while running scripts", while
+# that result names the cause: a refused downgrade with both versions, or a
+# rejected config (GAP-0538).
+dc_package_script_result() {
+    result=$DC_PACKAGE_RESULT
+    [ -n "$result" ] && [ -f "$result" ] && [ ! -L "$result" ] || return 0
+    [ -n "$(find "$result" -newer "$1" 2>/dev/null)" ] || return 0
+    cp "$result" "$DC_STAGE/package-result.json" 2>/dev/null || return 0
+    DC_RESULT="$DC_STAGE/package-result.json"
+    dc_emit_result
+    exit "$DC_EXIT_FAILURE"
 }
 
 # dc_package_step <previous version> <installed version>: record that the
@@ -615,22 +750,39 @@ dc_run_lifecycle() {
     return "$status"
 }
 
+dc_run_lifecycle_retry() {
+    attempt=1
+    while :; do
+        status=0
+        dc_run_lifecycle "$@" || status=$?
+        [ "$status" = 75 ] && [ "$attempt" -lt 3 ] || break
+        dc_log "lifecycle busy; retry $attempt of 2"
+        attempt=$((attempt + 1))
+        sleep 10
+    done
+    return "$status"
+}
+
 dc_main() {
+    dc_layout
+    dc_log "start action=$DC_ACTION"
     dc_parse_args "$@"
+    dc_layout
     platform=$(dc_platform)
     [ "$platform" = "$DC_SCRIPT_OS" ] ||
         dc_fail_result "$DC_EXIT_INVALID" mdm_wrong_platform "this copy of the wrapper is for $DC_SCRIPT_OS, not $platform"
-    dc_layout
     dc_validate_args
     [ "$(id -u)" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_not_root "run as root (the MDM agent's system context)"
 
     stage_parent=/var/tmp
+    dc_sweep_stages "$stage_parent"
     DC_STAGE=$(mktemp -d "$stage_parent/defenseclaw-mdm.XXXXXX")
     trap dc_cleanup EXIT
-    trap 'exit 1' HUP INT TERM
+    trap 'dc_stop_child; exit 1' HUP INT TERM
     chmod 0700 "$DC_STAGE"
     [ "$(dc_stat_uid "$DC_STAGE")" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging directory is not root-owned"
-    dc_log "start action=$DC_ACTION"
+    printf '%s\n' "$$" >"$DC_STAGE/pid"
+    dc_log "validated action=$DC_ACTION"
 
     if [ "$DC_ACTION" != ensure ]; then
         dc_trusted_path "$DC_GATEWAY" ||
@@ -655,15 +807,24 @@ dc_main() {
             config=$inline
         fi
     fi
-    secret=""
+    # The credential stays in memory and reaches the lifecycle through a
+    # pipe: a staged copy outlived a run killed before its cleanup.
+    secret_data=""
     if [ -n "$DC_SECRET_NAME" ]; then
-        secret="$DC_STAGE/secret"
         if [ "$DC_SECRET_STDIN" = 1 ]; then
-            dc_read_bounded "$secret" "$DC_MAX_SECRET_BYTES" "secret"
+            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))")
         else
-            dc_stage_file "$DC_SECRET_FILE" "$secret" "$DC_MAX_SECRET_BYTES" "secret" trusted
+            case "$DC_SECRET_FILE" in /*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret must be an absolute path" ;; esac
+            if [ ! -f "$DC_SECRET_FILE" ] || [ -L "$DC_SECRET_FILE" ]; then
+                dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret is not a regular file: $DC_SECRET_FILE"
+            fi
+            dc_trusted_path "$DC_SECRET_FILE" ||
+                dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE"
+            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))" <"$DC_SECRET_FILE")
         fi
-        [ -s "$secret" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
+        [ "$(printf '%s' "$secret_data" | wc -c | tr -d ' ')" -le "$DC_MAX_SECRET_BYTES" ] ||
+            dc_fail_result "$DC_EXIT_INVALID" mdm_input_too_large "secret exceeds $DC_MAX_SECRET_BYTES bytes"
+        [ -n "$secret_data" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
     fi
 
     DC_CHANNEL_FLAG=""
@@ -680,6 +841,8 @@ dc_main() {
         gateway=$DC_PAYLOAD_GATEWAY
     elif ! dc_trusted_path "$gateway"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned"
+    elif dc_binaries_damaged; then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "the installed DefenseClaw binaries are empty, likely from a power loss during a package upgrade; run this script with the package as --source, or reinstall the package"
     fi
 
     # The credential is stored first: a config that references it (the AI
@@ -688,12 +851,16 @@ dc_main() {
     # the install gives the gateway access. Both steps wait for an apply
     # that the package's postinstall or the change itself started (the
     # apply path unit) instead of failing busy.
-    if [ -n "$secret" ]; then
+    if [ -n "$DC_SECRET_NAME" ]; then
         set +e
-        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json <"$secret" >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err"
+        printf '%s' "$secret_data" |
+            "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
+        DC_CHILD=$!
+        wait "$DC_CHILD"
         secret_status=$?
+        DC_CHILD=""
         set -e
-        rm -f "$secret"
+        secret_data=""
         if [ "$secret_status" != 0 ]; then
             detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
             case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
@@ -707,7 +874,7 @@ dc_main() {
     [ -z "$config" ] || set -- "$@" "--config=$config"
     [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
     status=0
-    dc_run_lifecycle "$gateway" "$@" || status=$?
+    dc_run_lifecycle_retry "$gateway" "$@" || status=$?
     [ "$status" != 0 ] || dc_annotate_package_step
     dc_emit_result
     return "$status"

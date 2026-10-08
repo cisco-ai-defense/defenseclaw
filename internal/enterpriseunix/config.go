@@ -372,6 +372,12 @@ func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error 
 		if dir == e.Layout.VendorPolicyDir || strings.HasPrefix(dir, e.Layout.VendorPolicyDir+"/") {
 			continue
 		}
+		// The gateway refuses an untrusted pack only when it starts, so
+		// ensure restarted it into a failed start and rolled back with a
+		// cause-less activation_failed (GAP-0546).
+		if err := e.Trust(e.P(dir), TrustRulePack); err != nil {
+			return fmt.Errorf("config %s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
+		}
 		if err := e.rulePackReadable(dir, account); err != nil {
 			return fmt.Errorf("config %s %q: %w", label, dir, err)
 		}

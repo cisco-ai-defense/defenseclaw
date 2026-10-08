@@ -41,16 +41,18 @@ const hotApplyTimeout = 20 * time.Second
 // restart starts the in-process counter over at 1 every time.
 //
 // The change is hot when the version, channel, binaries, unit files,
-// drop-ins, descriptor, secrets, resolved rule packs and machine policy all
-// stay as they are, no changed key is restart-required, and the gateway is
-// up and publishes its effective policy digest. Anything else, and every
-// repair, upgrade and install, stops and starts the services.
+// drop-ins, descriptor, secrets and machine policy all stay as they are, no
+// changed key is restart-required, and the gateway is up and publishes its
+// effective policy digest. Anything else, and every repair, upgrade and
+// install, stops and starts the services. A rule pack switch (rule_pack, a
+// custom_packs entry added, replaced or removed) is hot: the gateway builds
+// the packs into each generation (GAP-0550).
 func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *plan, adopting *adoption) bool {
 	env := l.env
 	if record == nil || adopting != nil || l.opts.Action != ActionEnsure || l.opts.NoStart || len(p.stale) > 0 ||
 		p.config.Migration != nil || p.config.SHA == record.ConfigSHA256 ||
 		p.version != record.ProductVersion || p.channel != record.Channel || p.secretsSHA != record.SecretsSHA256 ||
-		!sameStringMap(p.config.RulePacks, record.RulePacks) || !slices.Equal(p.machinePolicy, record.MachinePolicyConnectors) {
+		!slices.Equal(p.machinePolicy, record.MachinePolicyConnectors) {
 		return false
 	}
 	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
@@ -77,8 +79,11 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	if err != nil || sha256Bytes(previous) != record.ConfigSHA256 {
 		return false
 	}
+	// A file that differs only in bytes (a comment, CRLF, a BOM, quoting)
+	// changes no key: it is applied hot like any reloadable change, so the
+	// gateway is not restarted for a policy that stays the same (GAP-0545).
 	changed, err := configwrite.ChangedPaths(previous, p.config.Raw)
-	if err != nil || len(changed) == 0 || len(configwrite.ManagedRestartRequired(changed)) > 0 {
+	if err != nil || len(configwrite.ManagedRestartRequired(changed)) > 0 {
 		return false
 	}
 	gateway, ok := gatewayUnitOf(env.Services.Units())

@@ -42,6 +42,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -304,6 +305,10 @@ type Options struct {
 	// request budget must include (the standalone foreign-hook guard's scan
 	// runs before Run). Zero starts the budget when Run is called.
 	StartedAt time.Time
+	// AssetFacts renders the assetfacts.Header value for a payload: what the
+	// standalone gateway, a service account, cannot read in this user's
+	// home. It is sent by standalone managed hooks only.
+	AssetFacts func(connector string, payload []byte) string
 }
 
 // Run executes the hook described by opts and returns the process exit code.
@@ -826,6 +831,11 @@ func sendHookRequest(
 		req.Header.Set("tracestate", v)
 	}
 	setUserIdentityHeaders(req, opts)
+	if opts.AssetFacts != nil && opts.ManagedEnterprise && !secureClientHook(opts) {
+		if value := opts.AssetFacts(opts.Connector, payload); value != "" {
+			req.Header.Set(assetfacts.Header, value)
+		}
+	}
 
 	return opts.HTTPClient.Do(req)
 }
@@ -1398,8 +1408,16 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 	if reason == managedUIDUnregisteredReason {
 		why = unixUnenrolledAccountExplanation
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, why, reason)
 	explanation := "DefenseClaw: " + why
+	if managedStandaloneHook(opts) && reason == managedUIDUnregisteredReason {
+		explanation = "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + why + "."
+	}
+	// Claude Code shows a structured block without its hook-command prefix
+	// (GAP-0554, GAP-0636).
+	if sp.connector == "claudecode" && managedStandaloneHook(opts) {
+		return emitManagedClaudeBlock(opts, explanation)
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, why, reason)
 	if sp.connector == "codex" {
 		return emitCodexBlock(opts, explanation)
 	}
@@ -1709,6 +1727,9 @@ func ManagedGatewayNotRunning(err error) bool {
 // connector's usual fail-closed ones.
 func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer, reason string) int {
 	text := managedStandaloneFailClosedText(opts.Event, layer, reason)
+	if sp.connector == "claudecode" {
+		return emitManagedClaudeBlock(opts, text)
+	}
 	fmt.Fprintln(opts.Stderr, text)
 	switch sp.connector {
 	case "codex":
@@ -1729,12 +1750,28 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 	return emitHookResult(opts, sp, result)
 }
 
+// emitManagedClaudeBlock uses the same structured block shapes as a gateway
+// policy verdict, so Claude Code shows the reason without a hook-command prefix.
+func emitManagedClaudeBlock(opts Options, reason string) int {
+	encoded := mustJSONString(reason)
+	switch opts.Event {
+	case "UserPromptSubmit", "UserPromptExpansion":
+		fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s}\n", encoded)
+	case "PreToolUse":
+		fmt.Fprintf(opts.Stdout, "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":%s}}\n", encoded)
+	default:
+		fmt.Fprintln(opts.Stderr, reason)
+		return blockExit
+	}
+	return 0
+}
+
 // managedStandaloneFailClosedText is what a standalone managed hook (Unix or
 // Windows, managedPlainFailClosed) says when it fails closed: that DefenseClaw blocked the prompt or tool
-// call, why in plain words, what to do, and the internal reason last in
-// parentheses, e.g. "DefenseClaw blocked this prompt: the DefenseClaw
-// gateway is not available. Try again in a moment; if this continues,
-// contact your administrator. (enterprise_managed_gateway_peer_unverified)".
+// call, why in plain words and what to do, e.g. "DefenseClaw blocked this
+// prompt: the DefenseClaw gateway is not available. Try again in a moment;
+// if this continues, contact your administrator." The internal reason goes
+// to the hook-failure log only (GAP-0554).
 func managedStandaloneFailClosedText(event, layer, reason string) string {
 	var cause, advice string
 	switch {
@@ -1745,7 +1782,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 			"Try again; if this continues, contact your administrator."
 	case reason == managedGatewayNotRunningReason:
 		cause, advice = "the DefenseClaw gateway service is not running on this computer",
-			"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service."
+			// The service is also stopped while a lifecycle transaction is
+			// pending, which starting it does not fix (GAP-0509).
+			"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do."
 	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":
@@ -1754,7 +1793,7 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		cause, advice = "the DefenseClaw gateway is not available",
 			"Try again in a moment; if this continues, contact your administrator."
 	}
-	return "DefenseClaw blocked this " + hookEventSubject(event) + ": " + cause + ". " + advice + " (" + strings.TrimSpace(reason) + ")"
+	return "DefenseClaw blocked this " + hookEventSubject(event) + ": " + cause + ". " + advice
 }
 
 // hookEventSubject names what an agent hook event carries, in the words a

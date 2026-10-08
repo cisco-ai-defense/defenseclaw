@@ -134,6 +134,9 @@ installed. Every path keeps your configuration and data.
   the schema-v8 observability conversion that `0.8.5` introduced, and an
   installed local observability bundle is refreshed.
 - `config.yaml` becomes the only place your policy lives (`config_version: 9`).
+  Under the derived admission gate, LOW and INFO skill findings now allow.
+  With a judge, the skill scanner defaults to `quiet`; `warn` findings enter
+  the review queue.
   The installer first checks that your configuration can be migrated; for a
   version 8 file it also says how many values will move and how many conflicts
   there are. It then copies the admission actions and thresholds from
@@ -256,7 +259,10 @@ outside `config.yaml` into it: admission and thresholds from
 switches, and the operator block and allow entries from
 `audit.db`. It keeps `config.yaml.v8.bak`, renames the retired `data.json` to
 `data.json.migrated-v9`, and writes `migration-v9.json` with every value it
-moved and every conflict it settled. The upgrade summary prints one line, and
+moved and every conflict it settled. `config.yaml.v8.bak` is written once: a
+later migration keeps it and saves its own source as
+`config.yaml.v8.bak.<time>` and the earlier record as
+`migration-v9.<time>.json`. The upgrade summary prints one line, and
 `defenseclaw doctor` shows a **Config migration** row until you acknowledge the
 record with `defenseclaw config migrate --ack`. You can preview the result
 first with `defenseclaw config migrate --dry-run`. Until the file is migrated,
