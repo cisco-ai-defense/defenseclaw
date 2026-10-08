@@ -172,6 +172,31 @@ dc_report() { # <detected 0|1> <value> <reason>
     exit 1
 }
 
+# dc_package_interrupted prints why the package manager still holds the
+# DefenseClaw package mid-transaction, or nothing: dpkg left it half-configured
+# or half-installed (a power loss in its postinst), or rpm lists two versions
+# (an interrupted upgrade). apt refuses every other install until it is
+# finished, so detection must not report it healthy (GAP-0930).
+dc_package_interrupted() {
+    [ "$DC_SCRIPT_OS" = linux ] || return 0
+    if command -v dpkg-query >/dev/null 2>&1; then
+        state=$(dpkg-query -W -f='${Status}' defenseclaw-enterprise 2>/dev/null || true)
+        case "$state" in
+            "" | *" installed" | *" not-installed" | *" config-files") ;;
+            *)
+                printf 'dpkg reports the defenseclaw-enterprise package %s, so an install or upgrade was interrupted; run the deployment again (or dpkg --configure -a)' "${state##* }"
+                return 0
+                ;;
+        esac
+    fi
+    if command -v rpm >/dev/null 2>&1; then
+        count=$(rpm -q defenseclaw-enterprise 2>/dev/null | grep -c '^defenseclaw-enterprise-' || true)
+        if [ "${count:-0}" -gt 1 ]; then
+            printf 'rpm lists %s versions of defenseclaw-enterprise, so an upgrade was interrupted; run the deployment again' "$count"
+        fi
+    fi
+}
+
 # Intune's Linux agent may repeat its /proc/self/fd/N script descriptor.
 case "${1:-}" in
     /proc/self/fd/*)
@@ -216,6 +241,8 @@ if [ -n "$DC_MIN_VERSION" ] && ! dc_version_ge "$version" "$DC_MIN_VERSION"; the
     dc_report 0 outdated "installed version $version is older than $DC_MIN_VERSION"
 fi
 if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
+    package_problem=$(dc_package_interrupted)
+    [ -z "$package_problem" ] || dc_report 0 unhealthy "$package_problem"
     if verify=$("$gateway" enterprise "$group" verify --json 2>/dev/null </dev/null); then
         verify_status=0
     else
