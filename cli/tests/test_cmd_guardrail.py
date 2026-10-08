@@ -1639,6 +1639,17 @@ class StatusConnectorScopeTests(unittest.TestCase):
         self.assertNotIn("Codex", result.output)
         self.assertNotIn("codex", result.output)
 
+    def test_scoped_summary_matches_json(self):
+        app = self._multi()
+        app.cfg.guardrail.effective_enabled = lambda name: name == "hermes"
+        runner = CliRunner()
+        text = runner.invoke(cmd_guardrail.status_cmd, ["--connector", "codex"], obj=app)
+        machine = runner.invoke(cmd_guardrail.status_cmd, ["--connector", "codex", "--json"], obj=app)
+        self.assertEqual(text.exit_code, 0, text.output)
+        self.assertEqual(machine.exit_code, 0, machine.output)
+        self.assertIn("enabled:    no", text.output)
+        self.assertFalse(json.loads(machine.output)["enabled"])
+
     def test_scopes_case_insensitively(self):
         app = self._multi()
         result = CliRunner().invoke(
