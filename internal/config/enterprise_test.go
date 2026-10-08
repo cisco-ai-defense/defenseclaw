@@ -740,6 +740,25 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 // GAP-1193: a connector that inherits the global rule pack is not checked
 // again, so a refusal names guardrail.rule_pack_dir, or guardrail.rule_pack
 // when the global pack is selected by name (GAP-0039).
+func TestReferencedRulePackDirsIncludesApplicationProtection(t *testing.T) {
+	cfg := &Config{PolicyDir: "/etc/defenseclaw/policies"}
+	cfg.Guardrail.RulePack = "default"
+	cfg.ApplicationProtection.Enabled = true
+	cfg.ApplicationProtection.Guardrail.RulePack = "strict"
+	cfg.ApplicationProtection.Connectors = map[string]ApplicationProtectionConnectorConfig{
+		"codex": {Guardrail: PerConnectorGuardrailConfig{RulePack: "permissive"}},
+	}
+	dirs := cfg.ReferencedRulePackDirs()
+	for label, want := range map[string]string{
+		"application_protection.guardrail.rule_pack":                  filepath.Join(cfg.PolicyDir, "guardrail", "strict"),
+		"application_protection.connectors.codex.guardrail.rule_pack": filepath.Join(cfg.PolicyDir, "guardrail", "permissive"),
+	} {
+		if got := dirs[label]; got != want {
+			t.Errorf("%s = %q, want %q", label, got, want)
+		}
+	}
+}
+
 func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
 	got := RulePackCheckOrder(map[string]string{
 		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",

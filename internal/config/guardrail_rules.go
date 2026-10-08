@@ -150,7 +150,8 @@ func (c *Config) vendorRulePackDir(name string) string {
 // ReferencedRulePackDirs maps every rule-pack setting the gateway can load
 // to the directory it resolves to, keyed by the config path an
 // administrator wrote: the global pack, each connector, each guardrail
-// profile and its connectors, and every custom_packs entry. A v8
+// profile and its connectors, automatic-protection overlays, and every
+// custom_packs entry. A v8
 // rule_pack_dir is labelled as such; an empty directory selects the
 // embedded packs.
 func (c *Config) ReferencedRulePackDirs() map[string]string {
@@ -179,6 +180,14 @@ func (c *Config) ReferencedRulePackDirs() map[string]string {
 			if ref, ok := rulePackRefOf(pc); ok {
 				out[label(prefix+".connectors."+connector, pc)] = c.ResolveRulePackDir(ref)
 			}
+		}
+	}
+	if ref, ok := rulePackRefOf(c.ApplicationProtection.Guardrail); ok {
+		out[label("application_protection.guardrail", c.ApplicationProtection.Guardrail)] = c.ResolveRulePackDir(ref)
+	}
+	for connector, pc := range c.ApplicationProtection.Connectors {
+		if ref, ok := rulePackRefOf(pc.Guardrail); ok {
+			out[label("application_protection.connectors."+connector+".guardrail", pc.Guardrail)] = c.ResolveRulePackDir(ref)
 		}
 	}
 	for name, pack := range g.CustomPacks {
