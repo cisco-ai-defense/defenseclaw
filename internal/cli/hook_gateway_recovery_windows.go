@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
@@ -178,7 +179,7 @@ func sameHookRecoveryPath(left, right string) bool {
 // a minute after a failed start, and serializes concurrent starts.
 // DEFENSECLAW_GATEWAY_AUTOSTART=0 turns it off, as for the shell hooks.
 func perUserGatewayRecovery() func(context.Context, error) error {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_AUTOSTART"))) {
+	switch strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_GATEWAY_AUTOSTART"))) {
 	case "0", "false", "no", "off":
 		return nil
 	}
