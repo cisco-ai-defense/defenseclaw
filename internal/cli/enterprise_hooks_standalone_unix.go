@@ -75,15 +75,17 @@ func enterpriseHooksStandaloneUnixActive() bool {
 }
 
 // configureEnterpriseHooksStandaloneUnix switches the enterprisehooks
-// package to the standalone Unix rules once the config is loaded.
-func configureEnterpriseHooksStandaloneUnix(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// package to the standalone Unix rules once the config is loaded. The
+// resolver it installs outlives the command that installs it, so it is bound
+// to context.Background: each lookup gets its own timeout. A resolver bound
+// to the context of the caller failed every directory lookup once that
+// context ended ("getent timed out: context canceled" from policy show and
+// verify --user, GAP-0740).
+func configureEnterpriseHooksStandaloneUnix() {
 	active := enterpriseHooksStandaloneUnixActive()
 	enterprisehooks.SetStandaloneUnix(active)
 	if active {
-		enterprisehooks.SetStandaloneResolver(unixidentity.Default(ctx))
+		enterprisehooks.SetStandaloneResolver(unixidentity.Default(context.Background()))
 	}
 }
 

@@ -81,7 +81,7 @@ func enterpriseACPPersistentPreRun(cmd *cobra.Command, args []string) error {
 		// directory on the static gateway, as in the enterprise hooks
 		// commands; without it enroll, verify and revoke refused every
 		// such user (GAP-0269).
-		configureEnterpriseACPTargetLookup(cmd.Context())
+		configureEnterpriseACPTargetLookup()
 	}
 	return nil
 }
