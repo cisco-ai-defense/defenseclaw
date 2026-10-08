@@ -68,3 +68,27 @@ func TestComposeAppliesRulesLayersInOrder(t *testing.T) {
 		t.Fatalf("disabling every rule of one file = %v, files %d, want the file dropped and the pack valid", err, len(dropped.RuleFiles))
 	}
 }
+
+// A custom pack can choose any file name for a category. Protection layering
+// merges by the category that Validate treats as unique.
+func TestComposeProtectionMergesCategoryAcrossFilenames(t *testing.T) {
+	base, err := LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.RuleFiles = []*RulesFileYAML{{
+		Version: 1, Category: "enterprise-data", SourcePath: "/custom/rules/customer-data.yaml",
+		Rules: []RuleDefYAML{{ID: "DATA-LOCAL", Pattern: "local-marker", Title: "Local", Severity: "LOW", Confidence: 0.9, Tags: []string{"local"}}},
+	}}
+	protection := func(string) ([]ProtectionRuleFile, error) {
+		return []ProtectionRuleFile{{Name: "enterprise-data.yaml", Data: []byte(
+			"version: 1\ncategory: enterprise-data\nrules:\n  - id: DATA-PROTECTION\n    pattern: protection-marker\n    title: Protection\n    severity: HIGH\n    confidence: 0.9\n    tags: [protection]\n")}}, nil
+	}
+	got, err := Compose(base, protection, Customization{Protections: []string{"privacy-high-assurance"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.RuleFiles) != 1 || got.findRule("DATA-LOCAL") == nil || got.findRule("DATA-PROTECTION") == nil {
+		t.Fatalf("composition split a single category: %+v", got.RuleFiles)
+	}
+}
