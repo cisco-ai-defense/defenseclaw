@@ -9993,11 +9993,17 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
             "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
         )
     else:
+        # A running agent keeps the token it started with, so setup alone
+        # cannot stop a background server's attempts (GAP-0313).
         remediation = (
-            "attempts are recent: a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent "
-            "config usually causes this. Re-run 'defenseclaw setup <connector>' for each agent that "
-            "exports telemetry; if the count keeps growing, look for other OTLP senders pointed at "
-            "the gateway port"
+            "attempts are recent. An agent that was already running when its DefenseClaw token "
+            "changed (an upgrade, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
+            "token until it restarts: restart your agents and their background servers (Codex's "
+            "app-server outlives its sessions: run 'codex app-server daemon restart'). "
+            "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
+            "usually causes this: re-run 'defenseclaw setup <connector>' for each agent that "
+            "exports telemetry, then restart it; if the count keeps growing, look for other OTLP "
+            "senders pointed at the gateway port"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 

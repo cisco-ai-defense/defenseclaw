@@ -287,6 +287,15 @@ package_app() {
   )
 }
 
+# service_restart_count is how often the Splunk container has restarted
+# (0 when there is none).
+service_restart_count() {
+  local container_id
+  container_id="$(run_compose ps -a -q "${SERVICE_NAME}" 2>/dev/null | head -n 1 || true)"
+  [[ -n "${container_id}" ]] || { echo 0; return; }
+  docker inspect --format '{{.RestartCount}}' "${container_id}" 2>/dev/null || echo 0
+}
+
 wait_for_hec_ready() {
   local deadline
   deadline=$((SECONDS + 240))
@@ -301,6 +310,14 @@ wait_for_hec_ready() {
     )"
     if [[ "${status}" == "200" ]]; then
       return 0
+    fi
+    # Splunk does not restart while it starts: a container that keeps
+    # exiting never gets ready, so say so now with its last log lines
+    # instead of waiting out the deadline (GAP-0341).
+    if (( $(service_restart_count) >= 2 )); then
+      fail "the ${SERVICE_NAME} container keeps restarting, so Splunk never became ready; its last log lines:
+$(run_compose logs --no-color --no-log-prefix --tail 5 "${SERVICE_NAME}" 2>&1 | tail -n 5)
+all of them: docker logs $(compose_project_name)-${SERVICE_NAME}-1"
     fi
     sleep 5
   done

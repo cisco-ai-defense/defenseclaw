@@ -57,3 +57,28 @@ func TestDestinationsCountUpstreamFailures(t *testing.T) {
 		t.Fatalf("feed = %+v, want one INFO %q", got, want)
 	}
 }
+
+// TestAHostWhoseNameDidNotResolveIsADestination (GAP-0340): the proxy
+// reports only the failure of a request whose dial failed, so a name that
+// did not resolve was in the audit alone. It gets its row, counted as
+// failed upstream and not as a block, the status counts it and the feed
+// says once that the name did not resolve.
+func TestAHostWhoseNameDidNotResolveIsADestination(t *testing.T) {
+	e := liveEnv(t, "dnsbox", nil)
+	id, now := e.binding("dnsbox").ID, time.Now()
+	for range 3 {
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventFailed, Time: now, BindingID: id, SandboxName: "dnsbox", Method: "CONNECT",
+			Host: "does-not-exist.invalid", Port: 443, Status: http.StatusBadGateway, Error: "DNS resolution failed"}, 0)
+	}
+	if r := destinationKinds(t, e, "dnsbox")["does-not-exist.invalid"]; r.Failed != 3 || r.Kind != sandboxapi.DestinationOther {
+		t.Fatalf("row = %+v, want other with 3 failed upstream", r)
+	}
+	if s := e.get("dnsbox").Egress; s.UpstreamFailed != 3 || s.Blocked != 0 {
+		t.Fatalf("egress status = %+v, want 3 failed upstream and nothing blocked", s)
+	}
+	want := "⚠ does-not-exist.invalid: the connection failed upstream, not blocked by DefenseClaw (its name did not resolve); " +
+		"`defenseclaw sandbox destinations dnsbox` counts the failures"
+	if got := e.events("dnsbox", sandboxapi.ActivityFinding, sandboxapi.ReasonUpstreamFailed); len(got) != 1 || got[0].Message != want {
+		t.Fatalf("feed = %+v, want one %q", got, want)
+	}
+}

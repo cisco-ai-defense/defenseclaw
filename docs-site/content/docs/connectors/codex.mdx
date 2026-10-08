@@ -316,6 +316,13 @@ your own Codex configuration does not change.
   `OPENAI_API_KEY`), run `codex app-server daemon restart` from a shell that
   has the new key, then open Codex again. The request fails before any tool
   call, so DefenseClaw's hooks are not involved.
+- **`defenseclaw doctor` warns about rejected OTLP attempts after an upgrade
+  or setup.** The same daemon keeps the DefenseClaw telemetry credential it
+  started with, so after an upgrade or `defenseclaw setup` gives Codex a new
+  one it keeps exporting with the old one, and the **Native OTLP
+  credentials** row counts every refused attempt. Running setup again does not
+  change a running daemon: run `codex app-server daemon restart`. The row
+  clears 24 hours after the last refused attempt.
 - **Connections to OpenAI or the model provider when the gateway starts
   (Windows).** Each gateway start or restart with the Codex connector
   enabled runs Codex's app-server once to read Codex's effective

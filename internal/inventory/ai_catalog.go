@@ -100,7 +100,8 @@ type AISignature struct {
 	// no content scan) but each targets a specific agent-component surface:
 	//   - Codex: $CODEX_HOME/skills, ~/.agents/skills, project skill roots,
 	//     ~/.codex/plugins, and .codex/rules
-	//   - Claude Code: ~/.claude/skills, ~/.claude/rules
+	//   - Claude Code: ~/.claude/skills, ~/.claude/rules and the project's
+	//     .claude/skills and .claude/rules
 	//   - Cursor: ~/.cursor/rules, .cursor/rules
 	// Watcher-scanned skills/plugins live under the same directories, so an
 	// inventory hit here means "this endpoint has that surface configured

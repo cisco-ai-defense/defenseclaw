@@ -349,10 +349,13 @@ DESTINATIONS = {
 def test_the_detail_lists_the_destinations() -> None:
     model = SandboxesPanelModel()
     model.set_snapshot(
-        STATUS, [{**RUNNING, "egress": {"destinations": 23, "blocked": 1, "model_apis": 1, "shadow_ai": 1}}], []
+        STATUS,
+        [{**RUNNING, "egress": {"destinations": 23, "blocked": 1, "model_providers": 1, "harness_vendor": 2, "shadow_ai": 1}}],
+        [],
     )
     title, pairs = model.detail_pairs(DESTINATIONS)
-    assert dict(pairs)["Sites"] == "23 contacted, 1 blocked · AI: 1 model API, 1 shadow AI"
+    # Counted by the kinds the rows below name (GAP-0319).
+    assert dict(pairs)["Sites"] == "23 contacted, 1 blocked · AI: 1 model provider, 2 harness vendor hosts, 1 shadow AI"
     rows = [value for label, value in pairs if label == "Destination"]
     assert rows == [
         "api.openai.com — shadow AI (OpenAI) · 3 requests · /usr/bin/curl",

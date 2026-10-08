@@ -472,9 +472,11 @@ class SandboxRow:
     created_at: datetime | None = None
     destinations: int = 0
     blocked: int = 0
-    # The AI destinations: the model provider and the harness's vendor, and
-    # shadow AI (other AI APIs, inference-shaped hosts).
-    model_apis: int = 0
+    # The AI destinations by the kinds `sandbox destinations` names: the
+    # model provider, the harness's vendor, and shadow AI (other AI APIs,
+    # inference-shaped hosts).
+    model_providers: int = 0
+    harness_vendor: int = 0
     shadow_ai: int = 0
     pending_approvals: int = 0
     tool_calls: int = 0
@@ -678,7 +680,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         created_at=_time(item.get("created_at")),
         destinations=_int(egress.get("destinations")),
         blocked=_int(egress.get("blocked")),
-        model_apis=_int(egress.get("model_apis")),
+        model_providers=_int(egress.get("model_providers")),
+        harness_vendor=_int(egress.get("harness_vendor")),
         shadow_ai=_int(egress.get("shadow_ai")),
         pending_approvals=_int(item.get("pending_approvals")),
         tool_calls=_int(hooks.get("tool_calls")),
@@ -2073,11 +2076,15 @@ class SandboxesPanelModel:
 
 
 def _ai_sites_text(row: SandboxRow) -> str:
-    """The AI part of the Sites line: "" without AI destinations."""
-    if not row.model_apis and not row.shadow_ai:
-        return ""
-    text = f" · AI: {_plural(row.model_apis, 'model API', 'model APIs')}"
-    return text + (f", {row.shadow_ai} shadow AI" if row.shadow_ai else "")
+    """The AI part of the Sites line, by destination kind (GAP-0319): "" without AI destinations."""
+    parts = []
+    if row.model_providers:
+        parts.append(_plural(row.model_providers, "model provider", "model providers"))
+    if row.harness_vendor:
+        parts.append(_plural(row.harness_vendor, "harness vendor host", "harness vendor hosts"))
+    if row.shadow_ai:
+        parts.append(f"{row.shadow_ai} shadow AI")
+    return f" · AI: {', '.join(parts)}" if parts else ""
 
 
 # How a destination kind reads (sandboxapi Destination* kinds).

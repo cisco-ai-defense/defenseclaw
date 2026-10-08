@@ -94,7 +94,8 @@ stopped`. Nothing is changed; use the install command above.
   the opt-in process tree on, that process and its parents), survives
   daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
   sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
-  detail sum it up; the detail lists the hosts.
+  detail sum it up by the same kinds (`AI: 1 model provider, 1 harness
+  vendor host, 2 shadow AI`); the detail lists the hosts.
 - A sandbox's hook counts (`Hook traffic` and `Hook events` in `sandbox
   status NAME`, the tool calls in the TUI's Sandboxes list) survive daemon
   restarts like its destinations, so the end-of-session summary counts the
@@ -200,6 +201,21 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Local Splunk starts when the CLI was installed under a private umask.**
+  The package's files arrived 0600 and setup copied them so into
+  `~/.defenseclaw/splunk-bridge/splunk/`, which the container mounts and reads
+  as non-root users, so Splunk restarted on `Permission denied:
+  '/tmp/defaults/default.yml'` while `defenseclaw setup splunk --logs` waited
+  four minutes. Setup and init now make that folder readable to the
+  container (0755 folders, 0644 files, 0755 scripts; `env/.env` stays
+  private), and the bridge stops as soon as the container keeps restarting,
+  with its last log lines.
+- **`defenseclaw setup splunk --disable --logs` stops the local Splunk
+  container.** It ran the bridge's `down` without the env file the bridge
+  requires, ignored the failure and said the container stopped; it now passes
+  the file, checks the container is gone, and otherwise says why and how to
+  stop it. A setup re-run no longer takes DefenseClaw's own running Splunk
+  for a foreign holder of ports 8000 and 8088.
 - **Security: hooks keep the gateway token and the hook payload off process
   command lines and out of child environments.** The Claude Code,
   Antigravity, Copilot, Cursor, Devin, Hermes, Kiro and OpenHands shell
@@ -1321,6 +1337,12 @@ deleted.
   "(sandbox NAME)", the TUI's AI discovery panel keeps them apart and names
   the sandbox, and the `ai_component.*` telemetry records carry
   `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`.
+- Claude Code skills and rules kept in a project (`.claude/skills`,
+  `.claude/rules`) are listed by name like the ones in `~/.claude`, in a
+  sandbox's project and in each `ai_discovery.scan_roots` folder.
+- The AI discovery Grafana board's Sandbox box narrows only the sandbox
+  signals table and the per-signal log; the sections and panels it does not
+  narrow say (all names) in their titles, as on the Sandboxes board.
 - Opt-in process tree: a pack's new `observe.process_tree: true` (off in
   `open`, `balanced` and `strict`) or `sandbox run --process-tree` samples the
   sandbox's processes every 5 seconds while it runs (every 15 seconds on a

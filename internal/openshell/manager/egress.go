@@ -922,7 +922,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 				Port: e.Port, Source: sandboxapi.SourceProxy, Severity: "INFO", Reason: sandboxapi.ReasonToolHostRefused, Message: line})
 		}
 	case egress.EventClosed, egress.EventFailed:
-		m.egressEnded(ctx, ident, e)
+		m.egressEnded(ctx, b, ident, e)
 	case egress.EventLargeUpload:
 		if e.Terminated {
 			m.largeUploadBlocked(ctx, ident, e)
@@ -963,7 +963,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 // when the proxy cut it short), or the upstream failure the sandbox got a
 // 502 or 504 for (failed; timed out on a 504). The decision was recorded
 // when it opened.
-func (m *Manager) egressEnded(ctx context.Context, ident audit.SandboxIdentity, e egress.Event) {
+func (m *Manager) egressEnded(ctx context.Context, b *box, ident audit.SandboxIdentity, e egress.Event) {
 	ev := audit.SandboxEgressEvent{
 		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port, Scheme: egressScheme(e),
 		ResolvedIP: remoteIP(e.RemoteAddr), DecisionCode: "SANDBOX_EGRESS_ALLOWED", PolicyOutcome: policyOutcome(e),
@@ -990,7 +990,7 @@ func (m *Manager) egressEnded(ctx context.Context, ident audit.SandboxIdentity, 
 		m.touchDestinations(e.SandboxName)
 		return
 	}
-	if m.destinationFailed(e.SandboxName, e.Host) {
+	if m.destinationFailed(b, e) {
 		where := sandboxapi.HostPort(e.Host, e.Port)
 		m.publishEgress(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityFinding, Sandbox: e.SandboxName,
 			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, Severity: "INFO", Reason: sandboxapi.ReasonUpstreamFailed,

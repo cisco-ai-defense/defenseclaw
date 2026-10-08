@@ -47,7 +47,7 @@ What happens:
     **Docker preflight.** Verifies Docker is running and that ports `8000` (Splunk Web) and `8088` (HEC) are free.
   </Step>
   <Step>
-    **Bridge bootstrap.** `splunk-claw-bridge up` (shipped in `bundles/splunk_local_bridge/`) launches the container, waits for `/services/server/info`, and provisions an HEC token.
+    **Bridge bootstrap.** `splunk-claw-bridge up` (shipped in `bundles/splunk_local_bridge/`) launches the container, provisions an HEC token, and waits up to four minutes for HEC to accept an event. If the Splunk container keeps restarting, it stops at once and prints the container's last log lines.
   </Step>
   <Step>
     **Destination wiring.** Writes a logs-capable `kind: splunk_hec` v8 destination pointing at `http://127.0.0.1:8088/services/collector/event`, index `defenseclaw_local`, sourcetype `defenseclaw:json`. The reviewed private-network opt-in applies only to this local destination.
@@ -251,7 +251,8 @@ defenseclaw setup splunk --disable --o11y
 ```
 
 `--disable` disables the matching named destination (and stops the local container
-if you ran `--logs`). It does not touch other destinations.
+if you ran `--logs`; when it cannot, it says why and prints the `docker compose`
+command that stops it). It does not touch other destinations.
 
 ## Verify
 
@@ -272,7 +273,10 @@ of the Splunk projection.
 
 <Accordions>
   <Accordion title="Local Splunk container won't start (port 8000 in use)">
-    Stop the conflicting service or run `defenseclaw setup splunk --disable --logs` and re-run after freeing the port. There's no `--port` flag today; ports `8000` and `8088` are checked at boot.
+    Stop the conflicting service or run `defenseclaw setup splunk --disable --logs` and re-run after freeing the port. There's no `--port` flag today; ports `8000` and `8088` are checked at boot. DefenseClaw's own local Splunk holding them (an earlier setup that was interrupted) is no conflict: setup restarts it.
+  </Accordion>
+  <Accordion title="Setup stops: the splunk container keeps restarting">
+    The container exits during its own setup, so Splunk never gets ready, and setup shows the container's last log lines. Fix what they name; `docker logs defenseclaw-splunk-local-splunk-1` shows all of them. Setup makes the files it mounts into the container (`~/.defenseclaw/splunk-bridge/splunk/`) readable to the container's own users on every run, whatever your umask; `defenseclaw setup splunk --logs` again repairs a folder an earlier build left private (`Permission denied: '/tmp/defaults/default.yml'` in the log).
   </Accordion>
   <Accordion title="Enterprise HEC returns 403">
     Token is wrong or HEC isn't enabled on that Splunk endpoint. Test with curl: `curl -k $HEC_ENDPOINT -H "Authorization: Splunk $TOKEN" -d '{"event":"test"}'`. The CLI's `--skip-test` skips this same probe.

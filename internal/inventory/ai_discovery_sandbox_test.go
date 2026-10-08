@@ -288,6 +288,38 @@ func TestPlanSandboxScanNamesTheSandboxsPaths(t *testing.T) {
 	}
 }
 
+// A skill Claude Code keeps in the project (.claude/skills/<name>/SKILL.md)
+// is collected and named like one in its home (GAP-0280).
+func TestScanSandboxRootNamesClaudeCodeProjectSkills(t *testing.T) {
+	skipSandboxScansOnWindows(t)
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := SandboxScan{Home: "/sandbox", Workspace: "/sandbox/work/repo"}
+	plan, err := PlanSandboxScan(scan, SandboxScanOptions{}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(plan.Dirs, SandboxDir{Path: "/sandbox/work/repo/.claude/skills", Depth: sandboxSkillDepth}) {
+		t.Fatalf("dirs = %v, want the project's .claude/skills", plan.Dirs)
+	}
+	// The running agent backs the shared .claude/skills folder (GAP-1378).
+	scan.Root = t.TempDir()
+	scan.Processes = []SandboxProcess{{PID: 42, PPID: 1, Comm: "claude", StartedAt: time.Now().Add(-time.Minute)}}
+	writeSandboxTree(t, scan.Root, map[string]string{"/sandbox/work/repo/.claude/skills/dccert-demo/SKILL.md": "# dccert-block-marker\n"})
+	report, err := ScanSandboxRoot(context.Background(), scan, SandboxScanOptions{Mode: "enhanced"}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sig := range report.Signals {
+		if sig.Detector == "skill" && sig.Product == "Claude Code" && slices.Contains(sig.Basenames, "dccert-demo") {
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want the Claude Code project skill dccert-demo", report.Signals)
+}
+
 func sandboxScanFixture(t *testing.T) AIDiscoveryReport {
 	t.Helper()
 	root := t.TempDir()
