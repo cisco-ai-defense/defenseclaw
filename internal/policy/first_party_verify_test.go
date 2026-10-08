@@ -54,6 +54,28 @@ func TestVerifyFirstPartyTrustsOnlyTheShippedCodeGuard(t *testing.T) {
 	if got := verdict(); got != "allowed" {
 		t.Fatalf("shipped CodeGuard copy: verdict %q, want allowed", got)
 	}
+	if err := os.WriteFile(filepath.Join(install, "json.pyc"), []byte("extra bytecode"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := verdict(); got != "scan" {
+		t.Fatalf("shipped CodeGuard copy with added bytecode: verdict %q, want scan", got)
+	}
+	if err := os.Remove(filepath.Join(install, "json.pyc")); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(install, "__pycache__")
+	if err := os.Mkdir(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "json.pyc"), []byte("extra bytecode"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := verdict(); got != "scan" {
+		t.Fatalf("shipped CodeGuard copy with cached bytecode: verdict %q, want scan", got)
+	}
+	if err := os.RemoveAll(cache); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(install, "deploy.sh"), []byte("echo deploy\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
