@@ -12,3 +12,6 @@ import (
 )
 
 func definitiveMissingAccount(err error) bool { return errors.Is(err, windows.ERROR_NONE_MAPPED) }
+
+// ERROR_NONE_MAPPED is a definitive absent SID.
+func reliableMissingAccountConfirmation() bool { return true }

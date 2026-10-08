@@ -14,9 +14,12 @@ import (
 
 // definitiveMissingAccount reports a directory lookup error that says the uid
 // has no account: the NSS resolver's not-found, or os/user's unknown uid. The
-// cache counts it as a failing lookup only until the directory answers for
-// another account (GAP-0696, GAP-0712).
+// cache keeps it visible because a local NSS answer does not prove a remote
+// directory is healthy (GAP-0696, GAP-0712).
 func definitiveMissingAccount(err error) bool {
 	var unknown osuser.UnknownUserIdError
 	return unixidentity.IsNotFound(err) || errors.As(err, &unknown)
 }
+
+// Local NSS answers cannot confirm a remote account has gone.
+func reliableMissingAccountConfirmation() bool { return false }

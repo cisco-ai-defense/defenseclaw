@@ -86,7 +86,8 @@ type identityCache[T any] struct {
 	maxAge time.Duration
 	// gone, when set, marks a lookup error in which the directory answered
 	// that the account does not exist.
-	gone func(error) bool
+	gone        func(error) bool
+	confirmGone bool
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
@@ -114,6 +115,7 @@ func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts
 	cache := newIdentityCache(resolve)
 	cache.maxAge = identityDirectoryMaxAge
 	cache.gone = definitiveMissingAccount
+	cache.confirmGone = reliableMissingAccountConfirmation()
 	cache.logf = func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
 	}
@@ -157,13 +159,23 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		c.refreshLocked(key, entry)
 	}
 	if entry.ok {
-		facts, wait := entry.facts, entry.inflight
+		facts, wait, fetchedAt := entry.facts, entry.inflight, entry.fetchedAt
 		// An incomplete answer past its lifetime (a group no name answered
 		// for, as a directory outage leaves) is replaced before a blocking
 		// caller uses it again, so a group that answers again applies at the
-		// next request rather than the one after (GAP-0326).
-		if !block || wait == nil || !expired || c.lifetime(facts) != identityDirectoryIncompleteTTL {
+		// next request rather than the one after (GAP-0326). Expired
+		// partial groups also wait: old memberships can select a lenient profile.
+		partial := c.partial != nil && c.partial(facts)
+		incomplete := c.incomplete != nil && c.incomplete(facts)
+		if !block || !expired || (!partial && !incomplete) {
 			c.mu.Unlock()
+			return facts, true
+		}
+		if wait == nil {
+			c.mu.Unlock()
+			if partial {
+				return zero, false
+			}
 			return facts, true
 		}
 		c.mu.Unlock()
@@ -172,10 +184,16 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		select {
 		case <-wait:
 		case <-timer.C:
+			if partial {
+				return zero, false
+			}
 			return facts, true
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if partial && !entry.fetchedAt.After(fetchedAt) {
+			return zero, false
+		}
 		if entry.ok {
 			return entry.facts, true
 		}
@@ -364,10 +382,9 @@ func (c *identityCache[T]) health() identityCacheHealth {
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
 			continue
 		}
-		if entry.gone && c.answeredAt.After(entry.lastFailedAt) {
-			// The directory answered for another account after it said this
-			// one does not exist: the account is gone, the directory is not
-			// failing (GAP-0696).
+		if c.confirmGone && entry.gone && c.answeredAt.After(entry.lastFailedAt) {
+			// On a backend where another answer confirms this absence, the
+			// account is gone and the directory is not failing (GAP-0696).
 			continue
 		}
 		h.Failing++
