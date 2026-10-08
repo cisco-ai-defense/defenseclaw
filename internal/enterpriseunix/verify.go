@@ -265,6 +265,10 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		// deployment left in /etc/systemd/system over a packaged unit, say)
 		// replaces the definition this deployment installed.
 		for _, unit := range env.Services.Units() {
+			if unitMasked(ctx, env.Services, unit) {
+				add("%s is masked, so it cannot start; `%s` unmasks it (or run `systemctl unmask %s`)", unit.Name, env.lifecycleCommand("repair"), unit.Name)
+				continue
+			}
 			want := env.Services.DefinitionPath(unit, record.Channel)
 			if got := fragments.FragmentPath(ctx, unit); got != "" && !sameUnitFile(env, got, want) {
 				add("%s is loaded from %s instead of %s; remove the other unit file and run ensure", unit.Name, got, want)

@@ -103,6 +103,18 @@ func unitDisabled(ctx context.Context, services ServiceManager, unit Unit) bool 
 	return ok && reporter.Disabled(ctx, unit)
 }
 
+// maskReporter is implemented by service managers whose units can be masked
+// (systemd): a masked unit can be neither enabled nor started.
+type maskReporter interface {
+	Masked(ctx context.Context, unit Unit) bool
+	Unmask(ctx context.Context, unit Unit) error
+}
+
+func unitMasked(ctx context.Context, services ServiceManager, unit Unit) bool {
+	reporter, ok := services.(maskReporter)
+	return ok && reporter.Masked(ctx, unit)
+}
+
 // restarter is implemented by service managers that restart a unit in one
 // job.
 type restarter interface {
@@ -303,6 +315,20 @@ func (m *systemdManager) PlannedRestart(ctx context.Context, unit Unit) bool {
 // Enabled reports whether the unit is enabled to start at boot.
 func (m *systemdManager) Enabled(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "enabled"
+}
+
+// Masked reports a masked unit (systemctl mask), persistent or runtime.
+func (m *systemdManager) Masked(ctx context.Context, unit Unit) bool {
+	return strings.HasPrefix(m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"], "masked")
+}
+
+// Unmask removes a persistent or runtime mask; systemctl reloads the unit
+// files itself.
+func (m *systemdManager) Unmask(ctx context.Context, unit Unit) error {
+	if m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "masked-runtime" {
+		return m.run(ctx, "unmask", "--runtime", unit.Name)
+	}
+	return m.run(ctx, "unmask", unit.Name)
 }
 
 // Disabled reports a unit an administrator disabled (systemctl disable). A

@@ -1146,12 +1146,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 					err = fmt.Errorf("%w; %s", err, held)
 				}
 			}
-			if refusal := l.configRefusal(ctx); refusal != "" {
-				err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
-			}
-			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
-				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
-					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
+			if gatewayFailure(err) {
+				if refusal := l.configRefusal(ctx); refusal != "" {
+					err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
+				}
+				if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
+					err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
+						filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
+				}
 			}
 			return failAndRollback(codeActivate, err)
 		}
@@ -1520,12 +1522,22 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
 	for _, unit := range ordered {
+		// systemd refuses to enable or start a masked unit; the error said
+		// neither "masked" nor how to undo it (GAP-0475).
+		if unitMasked(ctx, env.Services, unit) {
+			if err := env.Services.(maskReporter).Unmask(ctx, unit); err != nil {
+				return &unitActivationError{unit: unit, err: fmt.Errorf("unmask %s: %w", unit.Name, err)}
+			}
+			l.noteChange("unmasked %s, which was masked and could not start", unit.Name)
+		}
+	}
+	for _, unit := range ordered {
 		if !unit.Activate {
 			continue
 		}
 		wasDisabled := unitDisabled(ctx, env.Services, unit)
 		if err := env.Services.Enable(ctx, unit); err != nil {
-			return fmt.Errorf("enable %s: %w", unit.Name, err)
+			return &unitActivationError{unit: unit, err: fmt.Errorf("enable %s: %w", unit.Name, err)}
 		}
 		if wasDisabled {
 			l.noteChange("re-enabled %s, which was disabled and would not start after a reboot", unit.Name)
@@ -1555,7 +1567,7 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 			continue
 		}
 		if err := env.Services.Start(ctx, unit); err != nil {
-			return fmt.Errorf("start %s: %w", unit.Name, err)
+			return &unitActivationError{unit: unit, err: fmt.Errorf("start %s: %w", unit.Name, err)}
 		}
 		if unit.Kind == "gateway" {
 			if err := l.waitGatewayReady(ctx, unit); err != nil {
@@ -1564,6 +1576,23 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		}
 	}
 	return nil
+}
+
+// unitActivationError is an activation failure of a unit that is not the
+// gateway: the gateway's output does not say why it failed.
+type unitActivationError struct {
+	unit Unit
+	err  error
+}
+
+func (e *unitActivationError) Error() string { return e.err.Error() }
+func (e *unitActivationError) Unwrap() error { return e.err }
+
+// gatewayFailure reports whether an activation error may come from the
+// gateway, so that its output and a config refusal explain it.
+func gatewayFailure(err error) bool {
+	var unitErr *unitActivationError
+	return !errors.As(err, &unitErr) || unitErr.unit.Kind == "gateway" || unitErr.unit.Kind == "socket"
 }
 
 func (l *lifecycle) waitGatewayReady(ctx context.Context, unit Unit) error {

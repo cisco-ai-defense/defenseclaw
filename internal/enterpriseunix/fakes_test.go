@@ -40,7 +40,9 @@ type fakeServices struct {
 	active  map[string]bool
 	enabled map[string]bool
 	// disabled units carry launchd's disabled override; Enable clears it.
-	disabled  map[string]bool
+	disabled map[string]bool
+	// masked units (systemctl mask) refuse Enable until Unmask.
+	masked    map[string]bool
 	calls     []string
 	failStart map[string]error
 	// failed units report systemd's failed state.
@@ -127,8 +129,25 @@ func (f *fakeServices) Disabled(_ context.Context, u Unit) bool {
 	return f.disabled[u.Name]
 }
 
+func (f *fakeServices) Masked(_ context.Context, u Unit) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.masked[u.Name]
+}
+
+func (f *fakeServices) Unmask(_ context.Context, u Unit) error {
+	f.record("unmask " + u.Name)
+	f.mu.Lock()
+	delete(f.masked, u.Name)
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeServices) Enable(_ context.Context, u Unit) error {
 	f.record("enable " + u.Name)
+	if f.Masked(context.Background(), u) {
+		return fmt.Errorf("systemctl enable %s: exit 1: Failed to enable unit: Unit file is masked", u.Name)
+	}
 	f.mu.Lock()
 	f.enabled[u.Name] = true
 	delete(f.disabled, u.Name)

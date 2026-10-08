@@ -70,3 +70,21 @@ func TestEnsureReEnablesADisabledSystemdUnitThatStillRuns(t *testing.T) {
 		t.Fatalf("ensure noop=%v changes=%q, want the gateway re-enabled", ensure.Noop, ensure.Changes)
 	}
 }
+
+// GAP-0475: a masked unit read as "loaded from /etc/systemd/system ...;
+// remove the other unit file" in verify, and repair failed to enable it with
+// a cause-less activation_failed.
+func TestVerifyNamesAMaskedUnitAndRepairUnmasksIt(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.masked = map[string]bool{unitGuardian: true}
+	verify := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, unitGuardian+" is masked") || !strings.Contains(got, "systemctl unmask "+unitGuardian) {
+		t.Fatalf("verify does not name the masked unit: %s", got)
+	}
+	repair := h.run(Options{Action: ActionRepair})
+	requireOK(t, repair)
+	if got := strings.Join(repair.Changes, "\n"); !strings.Contains(got, "unmasked "+unitGuardian) {
+		t.Fatalf("repair does not say it unmasked the unit: %q", repair.Changes)
+	}
+}

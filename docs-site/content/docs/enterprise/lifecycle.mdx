@@ -401,6 +401,11 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
   seconds) and says so; `ensure` leaves a healthy deployment running. The
   `--json` result carries the list as `changes`, and an `ensure` that
   re-applies the deployment lists its changes the same way.
+- **Disabled and masked units (Linux).** A DefenseClaw unit an administrator
+  disabled (`systemctl disable`) or masked (`systemctl mask`) is enabled or
+  unmasked again, and the result says so. `verify` names such a unit, also
+  when the hook socket keeps a disabled gateway running, and an `ensure` that
+  finds one re-applies the deployment instead of reporting `up_to_date`.
 - **Linux and macOS, payload installs.** `repair` keeps the installed binaries.
   If they no longer match the deployment record, it stops with
   `payload_invalid`. Run `repair --payload <dir>` with the same release's
