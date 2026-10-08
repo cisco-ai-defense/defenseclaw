@@ -577,6 +577,33 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if err := copyFiles(rec.Project, stage, files); err != nil {
 		return err
 	}
+	// A submodule's working tree is not copied: its path is an empty
+	// folder, as git leaves an uninitialized submodule, so the baseline
+	// keeps its commit and a sandbox that initializes it changes nothing
+	// (GAP-0250). The copy says so.
+	var submodules []string
+	for p, mode := range trackedSet {
+		if mode != modeGitlink {
+			continue
+		}
+		dir := filepath.Join(stage, filepath.FromSlash(p))
+		if !within(dir, stage) {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		submodules = append(submodules, p)
+	}
+	if n := len(submodules); n > 0 {
+		sort.Strings(submodules)
+		them, their := "them", "their"
+		if n == 1 {
+			them, their = "it", "its"
+		}
+		rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s not copied: %s (the sandbox sees %s uninitialized; `git submodule update --init` there fetches %s from %s remote)",
+			plural(n, "submodule is", "submodules are"), strings.Join(firstN(submodules, 5), ", "), them, them, their))
+	}
 	if head != "" {
 		if err := sg.run(ctx, "read-tree", "HEAD"); err != nil {
 			return err

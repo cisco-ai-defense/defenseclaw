@@ -160,6 +160,10 @@ func captureScript(rec *CopyRecord, bundle bool) string {
 		`if [ -f "$G/index" ]; then cp "$G/index" "$idx"; fi`,
 		`head=$(g rev-parse -q --verify 'HEAD^{commit}' || true)`,
 		`if [ ! -s "$idx" ] && [ -n "$head" ]; then GIT_INDEX_FILE="$idx" g read-tree "$head"; fi`,
+		// An uninitialized submodule whose empty folder is gone is not
+		// a removed submodule: its files never came into the copy
+		// (GAP-0250).
+		`GIT_INDEX_FILE="$idx" g ls-files -s | while read -r m o s p; do if [ "$m" = 160000 ] && [ ! -e "$W/$p" ]; then mkdir -p -- "$W/$p"; fi; done || true`,
 		`GIT_INDEX_FILE="$idx" g add ` + addArgs + ` -- . ` + strings.Join(excludes, " "),
 		`tree=$(GIT_INDEX_FILE="$idx" g write-tree)`,
 		`rm -f "$idx"`,

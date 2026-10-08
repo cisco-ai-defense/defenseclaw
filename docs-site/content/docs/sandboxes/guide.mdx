@@ -966,6 +966,11 @@ The sandbox is then stopped and kept. `--rm` does not delete a sandbox
 whose work was not brought back, and says so, and neither does the end of a
 headless run; delete it once you have pulled what you want.
 
+Submodules are not copied: the sandbox sees each one uninitialized (an
+empty folder), and the run says so. `git submodule update --init` in the
+sandbox fetches one from its remote, and a submodule whose commit did not
+change is not part of the work that comes back.
+
 Or later, with `pull`:
 
 ```bash

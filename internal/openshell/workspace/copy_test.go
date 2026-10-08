@@ -195,6 +195,42 @@ func TestStageRefusesOversizedFolders(t *testing.T) {
 	}
 }
 
+// GAP-0250: a copy left a submodule's working tree out without a word, and
+// the baseline recorded the submodule as removed, so a sandbox that
+// initialized it (or the pull of an untouched one) showed it as a change.
+// The copy says so, and the submodule's commit survives an untouched pull.
+func TestCopyKeepsAnUninitializedSubmodule(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	sha := e.git(e.project, "rev-parse", "HEAD")
+	e.git(e.project, "update-index", "--add", "--cacheinfo", "160000,"+sha+",vendor/hello")
+	writeFile(t, e.project, ".gitmodules", "[submodule \"vendor/hello\"]\n\tpath = vendor/hello\n\turl = https://example.invalid/hello.git\n")
+	e.git(e.project, "add", ".gitmodules")
+	e.git(e.project, "commit", "-q", "-m", "submodule")
+	rec, fs := launchCopy(t, e, "c1", nil)
+	if !slices.ContainsFunc(rec.Warnings, func(w string) bool { return strings.HasPrefix(w, "1 submodule is not copied: vendor/hello") }) {
+		t.Fatalf("warnings = %v", rec.Warnings)
+	}
+	// Even with its empty folder gone, the submodule is not removed.
+	if err := os.RemoveAll(fs.local(remoteRepo + "/vendor/hello")); err != nil {
+		t.Fatal(err)
+	}
+	if pr := pull(t, e, fs, "c1"); !pr.Empty() {
+		t.Fatalf("pull of an untouched copy = %+v", pr.Changes)
+	}
+	// The agent's `git submodule update --init` checks out the same commit.
+	sub := fs.local(remoteRepo + "/vendor/hello")
+	if out, err := exec.Command("git", "clone", "-q", e.project, sub).CombinedOutput(); err != nil {
+		t.Fatalf("clone: %v %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", sub, "checkout", "-q", sha).CombinedOutput(); err != nil {
+		t.Fatalf("checkout: %v %s", err, out)
+	}
+	if pr := pull(t, e, fs, "c1"); !pr.Empty() {
+		t.Fatalf("pull after the submodule was initialized = %+v", pr.Changes)
+	}
+}
+
 // GAP-0248: --unmask on a copy was silent both ways: a shared secret-looking
 // file got no line, and a pattern that matched only a git-ignored file
 // (never copied) said nothing. The record names both.
