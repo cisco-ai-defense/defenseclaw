@@ -279,8 +279,13 @@ func (c *ccacheReader) counted() string {
 func (c *ccacheReader) principal() (string, error) {
 	c.u32() // name type
 	count := c.u32()
-	if c.err == nil && (count == 0 || count > maxCCacheComponents) {
-		c.err = errCCacheFormat
+	if c.err != nil {
+		return "", c.err
+	}
+	// The count comes from a file the user controls: reject it before it
+	// sizes any allocation (GAP-0364).
+	if count == 0 || count > maxCCacheComponents {
+		return "", errCCacheFormat
 	}
 	realm := c.counted()
 	components := make([]string, 0, count)
