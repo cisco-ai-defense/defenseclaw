@@ -112,6 +112,8 @@ func SHA256Hex(raw []byte) string {
 type Txn struct {
 	path string
 	lock *os.File
+	// generationWrite permits a transaction-local durability fault in tests.
+	generationWrite func(string, []byte, os.FileMode) error
 }
 
 // Begin takes the writer lock for configPath, waiting up to timeout (zero
@@ -265,7 +267,48 @@ func (t *Txn) RecordGeneration(configSHA256, actor, reason string) (GenerationSt
 		return GenerationState{}, fmt.Errorf("configwrite: encode %s: %w", GenerationFileName, err)
 	}
 	encoded = append(encoded, '\n')
-	if err := WriteFileDurable(GenerationPath(t.path), encoded, 0o600); err != nil {
+	path := GenerationPath(t.path)
+	before, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return GenerationState{}, fmt.Errorf("configwrite: read %s before update: %w", path, readErr)
+	}
+	mode := os.FileMode(0o600)
+	if existed {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			return GenerationState{}, fmt.Errorf("configwrite: stat %s before update: %w", path, statErr)
+		}
+		mode = info.Mode().Perm()
+	}
+	write := t.generationWrite
+	if write == nil {
+		write = WriteFileDurable
+	}
+	if err := write(path, encoded, 0o600); err != nil {
+		// WriteFileDurable may have renamed the file before a directory fsync
+		// failed. Put the old record back before Commit restores config.yaml.
+		current, currentErr := os.ReadFile(path)
+		changed := currentErr == nil && (!existed || !bytes.Equal(current, before))
+		if errors.Is(currentErr, os.ErrNotExist) && existed {
+			changed = true
+		} else if currentErr != nil && !errors.Is(currentErr, os.ErrNotExist) {
+			return GenerationState{}, fmt.Errorf("%w; cannot inspect generation rollback: %v", err, currentErr)
+		}
+		if changed {
+			var restoreErr error
+			if existed {
+				restoreErr = WriteFileDurable(path, before, mode)
+			} else {
+				restoreErr = os.Remove(path)
+				if restoreErr == nil {
+					restoreErr = syncDir(filepath.Dir(path))
+				}
+			}
+			if restoreErr != nil {
+				return GenerationState{}, fmt.Errorf("%w; generation record could not be restored: %v", err, restoreErr)
+			}
+		}
 		return GenerationState{}, err
 	}
 	return next, nil

@@ -321,9 +321,10 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 		dirs, files := map[string]struct{}{}, map[string]struct{}{}
 		if m.assetDirs != nil {
 			for _, assetDir := range m.assetDirs() {
-				if assetDir = filepath.Clean(assetDir); assetDir != dir {
+				assetDir = filepath.Clean(assetDir)
+				dirs[assetDir] = struct{}{}
+				if assetDir != dir {
 					want[assetDir] = struct{}{}
-					dirs[assetDir] = struct{}{}
 				}
 			}
 		}
@@ -356,14 +357,16 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			return false
 		}
 	}
+	// Attach asset watches before reconciliation. Its first pass rebuilds
+	// referenced assets, including edits made between boot and watch setup.
+	syncAssetWatches()
 	if startupReady != nil {
-		if err := m.reconcileStartup(ctx, fsw); err != nil {
+		if err := m.reconcileStartup(ctx, fsw, startupAssetWatches{syncAssetWatches, isAsset}); err != nil {
 			signalConfigStartupReady(startupReady, err)
 			return err
 		}
 		signalConfigStartupReady(startupReady, nil)
 	}
-	syncAssetWatches()
 
 	// Best-effort watch on the AVC env_config.json parent directory.
 	// The dir may not exist yet (AVC packaging can drop it AFTER
@@ -589,15 +592,32 @@ func (a *assetWatches) removed(path string) {
 	}
 }
 
-func (m *ConfigManager) reconcileStartup(ctx context.Context, fsw *fsnotify.Watcher) error {
+type startupAssetWatches struct {
+	sync    func() bool
+	isAsset func(string) bool
+}
+
+func (m *ConfigManager) reconcileStartup(ctx context.Context, fsw *fsnotify.Watcher, watches ...startupAssetWatches) error {
 	if m == nil || fsw == nil {
 		return fmt.Errorf("config startup reconciliation is unavailable")
 	}
+	var assets startupAssetWatches
+	if len(watches) > 0 {
+		assets = watches[0]
+	}
+	hasAssets := m.assetDirs != nil || m.assetFiles != nil
 	for first := true; ; first = false {
-		if !first || !m.startupSourceUnchanged(ctx) {
+		if hasAssets {
+			if err := m.ReloadAssets(ctx, "startup_reconcile"); err != nil {
+				return err
+			}
+		} else if !first || !m.startupSourceUnchanged(ctx) {
 			if err := m.Reload(ctx, "startup_reconcile"); err != nil {
 				return err
 			}
+		}
+		if assets.sync != nil {
+			assets.sync()
 		}
 		timer := time.NewTimer(configReloadStartupQuietPeriod)
 		dirty := false
@@ -609,7 +629,9 @@ func (m *ConfigManager) reconcileStartup(ctx context.Context, fsw *fsnotify.Watc
 				}
 				return ctx.Err()
 			case event := <-fsw.Events:
-				if m.matches(event.Name) && event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
+				assetEvent := assets.isAsset != nil && assets.isAsset(event.Name)
+				if (m.matches(event.Name) || assetEvent) &&
+					event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) != 0 {
 					dirty = true
 				}
 			case watchErr := <-fsw.Errors:
