@@ -1156,21 +1156,38 @@ func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
 	}
 }
 
-// A DOMAIN\\user assignment uses the account domain reported by the verified
-// account name, not the first label of an unrelated DNS realm.
+// A DOMAIN\\user assignment uses the account domain the directory verified,
+// not the first label of an unrelated DNS realm. winbind with use default
+// domain = yes names the account bare and confirms its NetBIOS domain; an
+// account named DCLAB\\dcad-bob that no directory confirms (nslcd, a plain
+// LDAP domain of SSSD) is selected by its uid only (GAP-0456, GAP-0814).
 func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	subject := profileSubjectFromVerified(VerifiedSubject{
-		UserID: "1201", UserName: `CONTOSO\\alice`,
+		UserID: "1201", UserName: `CONTOSO\alice`,
 		Directory: useridentity.DirectoryFacts{
-			Domain: "corp.contoso.com", Principal: "alice@CORP.CONTOSO.COM",
+			Domain: "corp.contoso.com", AccountDomain: "CONTOSO", Principal: "alice@CORP.CONTOSO.COM",
 			ResolvedAt: time.Now(),
 		},
 	}, true)
-	if !userEntryMatches(&subject, `CONTOSO\\alice`) {
+	if !userEntryMatches(&subject, `CONTOSO\alice`) {
 		t.Fatal("the verified NetBIOS account domain did not match")
 	}
-	if userEntryMatches(&subject, `CORP\\alice`) {
+	if userEntryMatches(&subject, `CORP\alice`) {
 		t.Fatal("a DNS first label selected another account domain")
+	}
+	winbind := profileSubjectFromVerified(VerifiedSubject{UserID: "2003913", UserName: "dcad-eli7",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceWinbind, Domain: "dclab.test", AccountDomain: "DCLAB",
+			ResolvedAt: time.Now()}}, true)
+	if !userEntryMatches(&winbind, `DCLAB\dcad-eli7`) || userEntryMatches(&winbind, `OTHER\dcad-eli7`) {
+		t.Fatal("a bare winbind name must match DCLAB\\user of its confirmed NetBIOS domain only")
+	}
+	for _, source := range []string{useridentity.SourceNSSLDAP, useridentity.SourceSSSD} {
+		namesake := profileSubjectFromVerified(VerifiedSubject{UserID: "72001", UserName: `DCLAB\dcad-bob`,
+			Directory: useridentity.DirectoryFacts{Source: source, ResolvedAt: time.Now()}}, true)
+		if runtime.GOOS != "windows" && (userEntryMatches(&namesake, `DCLAB\dcad-bob`) || userEntryMatches(&namesake, "dcad-bob") ||
+			!userEntryMatches(&namesake, "72001")) {
+			t.Fatalf("%s account named DCLAB\\dcad-bob without a confirmed domain must match by uid only: %+v", source, namesake)
+		}
 	}
 	// macOS: the guardian record carries the NetBIOS domain the AD node
 	// names, so DCLAB\user matches the mobile account (GAP-0635).
