@@ -165,11 +165,10 @@ def _post_direct(body: bytes, headers: dict[str, str]) -> tuple[int, str, bytes]
         return exc.code, (exc.headers.get("Retry-After") if exc.headers else "") or "", b""
 
 
-# A gateway that is taking all the hook calls it can, or an account over its
-# hook budget, answers 429 before it evaluates the call. The bridge sends the
-# call again after the Retry-After it asks for (1 to 3 s), at most 3 times and
-# 6 s of waiting in all, inside OmniGent's policy deadline. The native hook
-# runner does the same (GAP-0205); without it a burst failed the call (GAP-0535).
+# Outside Secure Client, a 429 means the gateway has not evaluated the call.
+# Retry after 1 to 3 s, at most 3 times and 6 s of waiting in all, inside
+# OmniGent's policy deadline (GAP-0535). Secure Client keeps its original
+# single-request behavior.
 _BUSY_RETRIES = 3
 _BUSY_WAIT_BUDGET_SECONDS = 6
 
@@ -185,6 +184,8 @@ def _retry_after_seconds(value: str) -> int:
 def _post(body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
     send = _post_hook_socket if _HOOK_SOCKET else _post_direct
     status, retry_after, response_body = send(body, headers)
+    if _SECURE_CLIENT:
+        return status, response_body
     waited = 0
     for _ in range(_BUSY_RETRIES):
         if status != 429:
