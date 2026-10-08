@@ -630,3 +630,16 @@ func TestProfileAssignmentSchemaLimitFitsYAMLNodeBudget(t *testing.T) {
 		t.Fatalf("%d schema-permitted assignments rejected: %v", n, err)
 	}
 }
+
+func TestSecureClientV8RejectsLLMProviders(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\nllm_providers:\n  custom: [{name: marker, domains: [example.internal]}]\n")
+	err := requireV8YAMLError(t, raw, V8YAMLErrorLegacyKeyForbidden)
+	if err.Path != "$.llm_providers" {
+		t.Fatalf("error path = %q, want $.llm_providers", err.Path)
+	}
+	if _, err := LoadRuntimeV8FromBytes("config.yaml", raw); err == nil {
+		t.Fatal("runtime loader accepted Secure Client v8 llm_providers")
+	}
+}

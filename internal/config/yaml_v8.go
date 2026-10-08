@@ -205,9 +205,14 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 		return nil, err
 	}
 	if v9SecureClientDocument(root) {
-		// A Secure Client source stays on config_version 8 and keeps the
-		// legacy-key errors of main (issue #1092); elsewhere the schema
-		// refuses those keys.
+		// Secure Client stays on v8 and rejects v9-only provider routing.
+		if node := v8YAMLMapValue(root, "llm_providers"); node != nil {
+			return nil, v8Error(source, V8YAMLErrorLegacyKeyForbidden, "$.llm_providers", node,
+				"llm_providers is not accepted in Secure Client config_version 8",
+				"remove llm_providers from the Secure Client source")
+		}
+		// Keep the legacy-key errors of main (issue #1092); elsewhere
+		// the schema refuses those keys.
 		if err := rejectV8YAMLLegacyKeys(source, root); err != nil {
 			return nil, err
 		}
@@ -347,16 +352,16 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
-	switch {
-	case version >= v8YAMLConfigVersion && version <= MaxSupportedConfigVersion:
-		return nil
-	case version >= 0 && version < v8YAMLConfigVersion:
-		return v8Error(source, V8YAMLErrorVersionUpgrade, "$.config_version", value,
 	if version == ConfigVersionV9 && v9SecureClientDocument(root) {
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
 			"Secure Client supports config_version 8 only",
 			"use a Secure Client config_version 8 source")
 	}
+	switch {
+	case version >= v8YAMLConfigVersion && version <= MaxSupportedConfigVersion:
+		return nil
+	case version >= 0 && version < v8YAMLConfigVersion:
+		return v8Error(source, V8YAMLErrorVersionUpgrade, "$.config_version", value,
 			fmt.Sprintf("config_version %d is older than %d", version, v8YAMLConfigVersion),
 			"run `defenseclaw migrate`")
 	case version > MaxSupportedConfigVersion:
