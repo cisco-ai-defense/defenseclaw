@@ -287,6 +287,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	}
 	bootGen.activeRules = initialRules
 	bootGen.activePatterns = initialPatterns
+	if bootGen.scannerPinError != "" {
+		fmt.Fprintf(os.Stderr, "[sidecar] scanner file pin: %s (scans that load the file fail closed until it matches)\n", bootGen.scannerPinError)
+	}
 	// The boot judge and proxy read the provider registry before the
 	// generation is published.
 	applyGenerationProviders(bootGen.Providers)
@@ -1877,7 +1880,8 @@ func buildInitialSidecarJudge(
 // same effective digest and the same reason (if any) the Rego policy did not
 // load, so a new failure to load it is published, not swallowed.
 func generationUnchanged(live, next *Generation) bool {
-	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError
+	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError &&
+		live.scannerPinError == next.scannerPinError
 }
 
 func (s *Sidecar) applyConfigReloadSnapshot(
@@ -2011,6 +2015,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		rulePacks: rulePackCandidate,
 		profiles:  profileCandidate,
 		strictOPA: previousGen != nil && previousGen.opaError == "",
+		// A scanner file edited away from its pin, or a pin that does not
+		// match, rejects the reload like a stale custom_packs pin (GAP-0664).
+		strictScannerPins: previousGen != nil && previousGen.scannerPinError == "",
 	})
 	if err != nil {
 		recordGenerationBuildError(err)
@@ -3614,6 +3621,10 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 // remove a quarantined source in an enrolled user's folder.
 const guardianQuarantineRemovalTimeout = 30 * time.Second
 
+// guardianReadGrantTimeout bounds the wait for the hook guardian to let the
+// gateway read a skill or plugin folder moved into a watched folder.
+const guardianReadGrantTimeout = 15 * time.Second
+
 // runWatcherOnce runs one watcher until ctx ends, or until a managed
 // gateway's set of enrolled users' folders changes (restart is then true).
 func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) {
@@ -3651,9 +3662,13 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 			enrolled = &set
 			// The service reads the users' folders but may not delete in
 			// them: the hook guardian removes a quarantined source (GAP-0202).
-			enforce.SetQuarantineSourceRemover(enforce.QuarantineRemovalChannelFor(
-				cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir),
-			).Remover(guardianQuarantineRemovalTimeout))
+			channel := enforce.QuarantineRemovalChannelFor(cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
+			enforce.SetQuarantineSourceRemover(channel.Remover(guardianQuarantineRemovalTimeout))
+			if runtime.GOOS == "windows" {
+				// It also gives the service read access to a folder moved
+				// in with an access list of its own (GAP-0825).
+				enforce.SetAssetReadGranter(channel.ReadGranter(guardianReadGrantTimeout))
+			}
 			if src.Skill != watcherDirsFromConfig {
 				skillDirs = set.skillDirs
 			}

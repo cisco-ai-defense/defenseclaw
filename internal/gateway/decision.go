@@ -128,7 +128,6 @@ func guardrailActionForConnectorFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	findings = liftProvenAlertOnly(findings, operatorBlockAt(cfg, connector))
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForConnector(cfg, connector, severity, confirmable)
 	})
@@ -149,7 +148,6 @@ func guardrailContentAction(cfg *config.Config, connector, severity string, conf
 }
 
 func guardrailContentActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable bool) string {
-	findings = liftProvenAlertOnly(findings, operatorBlockAt(cfg, connector))
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailContentAction(cfg, connector, severity, confirmable)
 	})
@@ -179,43 +177,9 @@ func guardrailActionForGuardrailFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
-	findings = liftProvenAlertOnly(findings, !ManagedEnterpriseActive() && gc.EffectiveBlockAt(connector) != "")
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
 	})
-}
-
-// operatorBlockAt reports whether the operator set block_at for the scope of
-// connector (global, connector or profile) in cfg, a base or profile-derived
-// configuration. Secure Client keeps the rule pack levels.
-func operatorBlockAt(cfg *config.Config, connector string) bool {
-	return cfg != nil && !cfg.SecureClientIntegration() && cfg.Guardrail.EffectiveBlockAt(connector) != ""
-}
-
-// liftProvenAlertOnly makes every proven alert-only finding enforceable when
-// the operator set block_at. The shipped postures keep dual-use operations at
-// an alert, but a block level the operator chose is the documented single
-// threshold and decides every proven tool-call finding: a HIGH destructive
-// SQL statement under block_at HIGH blocks (GAP-0761). It returns findings
-// unchanged otherwise and never edits the slice of the caller.
-func liftProvenAlertOnly(findings []RuleFinding, operatorBlockAt bool) []RuleFinding {
-	if !operatorBlockAt {
-		return findings
-	}
-	var lifted []RuleFinding
-	for index, finding := range findings {
-		if !finding.provenAlertOnly() {
-			continue
-		}
-		if lifted == nil {
-			lifted = append([]RuleFinding(nil), findings...)
-		}
-		lifted[index].enforcement = findingEnforcementAllowed
-	}
-	if lifted == nil {
-		return findings
-	}
-	return lifted
 }
 
 // guardrailActionForFindings maps enforceable findings with actionFor and

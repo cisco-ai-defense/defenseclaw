@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -60,7 +61,41 @@ func installedScannerRuntime() (string, error) {
 	if err := managed.ValidateTrustedFilePath(path, "scanner runtime"); err != nil {
 		return "", err
 	}
+	// And only the executable the lifecycle admitted by the payload trust
+	// policy: one replaced in place by an administrator, or by a process
+	// running as one, fails every scan closed (GAP-0311).
+	if err := admittedScannerRuntime(root, path, info); err != nil {
+		return "", err
+	}
 	return path, nil
+}
+
+// admittedRuntime caches the last admitted executable, so a scan hashes the
+// runtime (hundreds of MB) again only after the file or its record changes.
+var admittedRuntime struct {
+	sync.Mutex
+	info   os.FileInfo
+	digest string
+}
+
+func admittedScannerRuntime(root, path string, info os.FileInfo) error {
+	recorded, err := managed.ReadScannerRuntimeAdmission(root)
+	if err != nil {
+		return err
+	}
+	admittedRuntime.Lock()
+	defer admittedRuntime.Unlock()
+	if cached := admittedRuntime.info; cached != nil && recorded != "" && recorded == admittedRuntime.digest &&
+		os.SameFile(cached, info) && cached.Size() == info.Size() && cached.ModTime().Equal(info.ModTime()) {
+		return nil
+	}
+	admittedRuntime.info, admittedRuntime.digest = nil, ""
+	digest, err := managed.CheckScannerRuntimeAdmittedDigest(root, path)
+	if err != nil {
+		return err
+	}
+	admittedRuntime.info, admittedRuntime.digest = info, digest
+	return nil
 }
 
 // resolveScannerRuntime binds a bare default scanner command to the scanner

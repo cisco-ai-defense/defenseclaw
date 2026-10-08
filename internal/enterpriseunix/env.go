@@ -71,6 +71,7 @@ var commandCandidates = map[string][]string{
 	"dpkg":             {"/usr/bin/dpkg", "/bin/dpkg"},
 	"rpm":              {"/usr/bin/rpm", "/bin/rpm"},
 	"restorecon":       {"/usr/sbin/restorecon", "/sbin/restorecon"},
+	"semodule":         {"/usr/sbin/semodule", "/sbin/semodule"},
 	"launchctl":        {"/bin/launchctl"},
 	"dscl":             {"/usr/bin/dscl"},
 	"pkgutil":          {"/usr/sbin/pkgutil"},
@@ -186,6 +187,9 @@ type Env struct {
 	Lchown func(path string, uid, gid int) error
 	// OwnerOf reports a path's uid and gid without following a symlink.
 	OwnerOf func(path string) (int, int, error)
+	// Fchown changes the owner of an open file: the state folders the service
+	// account can write are re-owned through descriptors (settleStateModes).
+	Fchown func(f *os.File, uid, gid int) error
 	// Trust runs the managed trust checks on a rooted path.
 	Trust func(path string, kind TrustKind) error
 	// HealthGet fetches the gateway /health document over the hook socket
@@ -284,6 +288,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.Lchown == nil {
 		e.Lchown = os.Lchown
+	}
+	if e.Fchown == nil {
+		e.Fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
 	}
 	if e.OwnerOf == nil {
 		e.OwnerOf = func(path string) (int, int, error) {

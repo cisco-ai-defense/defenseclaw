@@ -40,8 +40,11 @@ func TestWindowsFileProductVersionReadsAVersionResource(t *testing.T) {
 }
 
 func TestWindowsEnterpriseRepairRecordsTheInstalledVersion(t *testing.T) {
-	original := windowsEnterpriseInstalledProductVersion
-	t.Cleanup(func() { windowsEnterpriseInstalledProductVersion = original })
+	original, originalPending := windowsEnterpriseInstalledProductVersion, windowsEnterprisePendingRestoredVersion
+	t.Cleanup(func() {
+		windowsEnterpriseInstalledProductVersion, windowsEnterprisePendingRestoredVersion = original, originalPending
+	})
+	windowsEnterprisePendingRestoredVersion = func(*windowsEnterpriseLifecycleOptions) (string, bool) { return "", false }
 	installed, readErr := "1.3.0", error(nil)
 	windowsEnterpriseInstalledProductVersion = func(*windowsEnterpriseLifecycleOptions) (string, error) {
 		return installed, readErr
@@ -72,6 +75,13 @@ func TestWindowsEnterpriseRepairRecordsTheInstalledVersion(t *testing.T) {
 		if windowsEnterpriseRepairRecordingOptions("repair", standalone) != standalone {
 			t.Fatalf("unreadable installed version %q/%v changed the options", tc.version, tc.err)
 		}
+	}
+	// GAP-0767: a repair that recovers a pending transaction records the
+	// version its snapshot restores, not the half-replaced binary in place.
+	installed, readErr = "1.0.1811", nil
+	windowsEnterprisePendingRestoredVersion = func(*windowsEnterpriseLifecycleOptions) (string, bool) { return "1.0.1810", true }
+	if got := windowsEnterpriseRepairRecordingOptions("repair", standalone); got.productVersion != "1.0.1810" {
+		t.Fatalf("pending recovery records %q, want the restored 1.0.1810", got.productVersion)
 	}
 }
 

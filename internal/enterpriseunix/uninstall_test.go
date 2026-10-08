@@ -350,6 +350,10 @@ func TestPurgeAfterDefaultUninstallNamesTheAccountsItCannotClean(t *testing.T) {
 	if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
 		t.Fatal("the purge removed the binaries the rpm still owns")
 	}
+	// The rpm ships the managed OpenCode plugin too (GAP-0763).
+	if !exists(h.env.P(enterprisepolicy.OpenCodeManagedPluginPath(h.env.Layout))) {
+		t.Fatal("the uninstall removed the OpenCode plugin the rpm still owns")
+	}
 	if !exists(h.env.P("/home/alice/.defenseclaw")) {
 		t.Fatal("the purge deleted a home folder without an enrollment record")
 	}

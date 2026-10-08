@@ -2342,3 +2342,81 @@ func TestWindowsEnterpriseEnsureRepairAfterAFailedVerifyKeepsThePayload(t *testi
 		t.Fatalf("installer runs %q", stub.calls)
 	}
 }
+
+// stubWindowsEnterpriseRulePackPreflight points the preflight at a test
+// layout and a config that pins pack, and replaces the pack trust check.
+func stubWindowsEnterpriseRulePackPreflight(t *testing.T, trust func(dir, label, account string) error) (configPath, pack string) {
+	t.Helper()
+	pack = t.TempDir()
+	body := strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`, "  rule_pack: acme\n  custom_packs:\n    acme:\n      path: '"+pack+"'\n      digest: sha256:"+strings.Repeat("0", 64), 1)
+	configPath = writeStandaloneGatewayCheckConfig(t, body)
+	dataDir := t.TempDir()
+	originalLayout, originalSource, originalTrust := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource, windowsEnterpriseStandaloneRulePackTrust
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight = originalLayout
+		windowsEnterpriseStandaloneConfigSource = originalSource
+		windowsEnterpriseStandaloneRulePackTrust = originalTrust
+	})
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: dataDir, SecretsDir: filepath.Join(dataDir, "secrets")}, nil
+	}
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+	windowsEnterpriseStandaloneRulePackTrust = trust
+	return configPath, pack
+}
+
+// GAP-0668, GAP-0672: a config that names a rule pack a standard user can
+// change (here a file in its rules folder) is refused by the preflight,
+// before anything is stopped, with the account, the file and the icacls fix.
+func TestWindowsEnterpriseStandaloneConfigPreflightRefusesAWritableRulePack(t *testing.T) {
+	var rules string
+	configPath, pack := stubWindowsEnterpriseRulePackPreflight(t, func(dir, label, account string) error {
+		rules = filepath.Join(dir, "rules", "markers.yaml")
+		return &managed.UntrustedPrincipalError{Path: rules, SID: "S-1-5-11"}
+	})
+	err := windowsEnterpriseStandaloneConfigPreflight(configPath)
+	if err == nil || !strings.Contains(err.Error(), "can write to "+rules) ||
+		!strings.Contains(err.Error(), `icacls "`+pack+`" /remove:g *S-1-5-11 /T /C`) ||
+		!strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("preflight = %v, want the writable rules file and the icacls fix", err)
+	}
+}
+
+// GAP-0672: a repair refuses, before it stops anything, an installed config
+// whose rule packs the gateway would not load, so the running gateway keeps
+// its last good policy; a pending transaction is left to its recovery.
+func TestWindowsEnterpriseStandaloneRepairRulePackPreflight(t *testing.T) {
+	stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error { return nil })
+	originalBuild, originalPending := windowsEnterpriseStandaloneRulePackBuild, windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRulePackBuild = originalBuild
+		windowsEnterpriseStandaloneTransactionPending = originalPending
+	})
+	windowsEnterpriseStandaloneRulePackBuild = func(*config.Config) error {
+		return errors.New("digest sha256:9760 does not match guardrail.custom_packs.acme.digest")
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	err := windowsEnterpriseStandaloneRepairRulePackPreflight()
+	if err == nil || !strings.Contains(err.Error(), "keeps its last good policy") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("repair preflight = %v, want a refusal that keeps the running gateway", err)
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return true }
+	if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+		t.Fatalf("repair preflight with a pending transaction = %v, want it left to the recovery", err)
+	}
+}
+
+// GAP-0741: a profile folder the install plan would refuse is refused by
+// the preflight with the folder and the next step; other inspection
+// failures are left to the install.
+func TestWindowsEnterpriseProfilesPreflightRefusal(t *testing.T) {
+	err := windowsEnterpriseProfilesPreflightRefusal(errors.New(`enterprise hooks: reject noncanonical managed runtime baseline: C:\Users\dcw-ch1\.defenseclaw: unexpected DACL`))
+	if err == nil || !strings.Contains(err.Error(), `C:\Users\dcw-ch1\.defenseclaw`) ||
+		!strings.Contains(err.Error(), "uninstall --all --binaries --yes") || !strings.Contains(err.Error(), "Nothing was changed") {
+		t.Fatalf("refusal = %v", err)
+	}
+	if err := windowsEnterpriseProfilesPreflightRefusal(errors.New("enterprise hooks: resolve profile: not found")); err != nil {
+		t.Fatalf("other inspection failure = %v, want it left to the install", err)
+	}
+}

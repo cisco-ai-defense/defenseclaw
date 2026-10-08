@@ -281,13 +281,14 @@ exit $LASTEXITCODE
 | `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: refuse an artifact of any other version (`mdm_version_mismatch`) before anything is installed. Windows: only without `-SetupPath`, where it sets the version the installed CLI's `ensure` records; with `-SetupPath` it is refused (`mdm_invalid_arguments`, `1639`), because the `-Sha256` pin already ties the Setup to one release. |
 | `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configuration#network-proxy)). |
 | `--log FILE` | — | Wrapper log path. |
+| `--staging-dir DIR` | — | The root-only folder the wrapper stages the artifact and the config in. Default `/var/lib/defenseclaw-mdm` on Linux, which the wrapper creates (`root`, `0700`), and `/var/tmp` on macOS. A payload (tarball) source runs its `defenseclaw-gateway` from there, so the folder must be on a filesystem that allows execution; CIS hosts mount `/tmp` and `/var/tmp` `noexec`. It must be a directory owned by root that no other account can write (`mdm_staging_untrusted`). |
 
 Script-only MDMs that cannot pass arguments set the same values in the
 settings block at the top of `defenseclaw-enterprise.sh` (`DC_SOURCE`,
 `DC_SOURCE_URL`, `DC_SOURCE_SHA256`, `DC_TRUST_MODE`, `DC_ALLOWED_TEAM_IDS`,
 `DC_GPG_KEYRING`, `DC_SIGNATURE`, `DC_SIGNATURE_URL`, `DC_PRODUCT_VERSION`,
 `DC_CONFIG_FILE`, `DC_SECRET_NAME`, `DC_SECRET_FILE`, `DC_HTTPS_PROXY`,
-`DC_LOG`). Flags override the settings block. The wrapper refuses any argument
+`DC_LOG`, `DC_STAGING_DIR`). Flags override the settings block. The wrapper refuses any argument
 it does not know, including positional arguments, with exit `2`
 (`mdm_invalid_arguments`). If your MDM appends its own arguments, follow its
 recipe in this section.
@@ -420,6 +421,7 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result document. |
 | `mdm_secret_failed` | `1603` / `1`, `2` or `75` | Storing the key failed. On Windows the deployment applied; on Linux and macOS the key is stored first, so the config was not applied, and the exit code is the one `secret set` returned. |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
+| `mdm_staging_noexec` | — / `1` | Linux: the payload's `defenseclaw-gateway` cannot run from the staging folder because its filesystem is mounted `noexec`; the message names the mount. Pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm as the source. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | `1603` / — | The PowerShell 7 wrapper refused its host. The lifecycle applies the same checks. |
 
 ## Stage a custom macOS rule pack

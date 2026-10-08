@@ -29,6 +29,7 @@ the same Setup and the same config.
 | Windows | Native Windows x64. The lifecycle refuses ARM64, including x64 emulation on ARM64, and refuses to run from a 32-bit process. It does not check the Windows version. The MDM kit's requirement rule uses Windows 10 22H2 or later. |
 | PowerShell 7 | A stable PowerShell 7 x64, installed from Microsoft's MSI. The lifecycle finds it only through `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, requires it under Program Files with a valid Microsoft signature, and ignores `PATH`. Without it, the run stops with `powershell7_required`. Install 7.4 or later: the lifecycle accepts any stable 7.x, but the MDM wrapper requires 7.4. |
 | Language mode | PowerShell FullLanguage mode. Under a WDAC or AppLocker script policy, allow the DefenseClaw signer, or the run stops with `powershell_constrained_language`. |
+| Execution policy | The lifecycle starts its signed scripts with `-ExecutionPolicy Bypass`, which a PowerShell execution policy set by Group Policy (the MachinePolicy or UserPolicy scope) overrides. With `AllSigned` there, add the certificate that signs DefenseClaw to the Trusted Publishers store of the computer, or the run stops with `powershell_execution_policy` and changes nothing; `status` then still reports the recorded deployment. `RemoteSigned` and `Unrestricted` need nothing. |
 | Privileges | An elevated administrator token, or SYSTEM (for example an MDM agent). |
 | Disk space | Free space on the ProgramData volume for about three copies of the Setup payload plus 256 MB to install, upgrade, repair or ensure (one copy plus 256 MB for the other actions). Setup refuses at once, before it stages anything, and names the volume, its free space and the space it needs. |
 | Other profiles | No Secure Client DefenseClaw deployment. The two profiles share service names, so the lifecycle refuses with `profile_conflict`. |
@@ -202,6 +203,7 @@ icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
 icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C | Out-Null
 Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
+icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
 ```
 
 The snippet is safe to run again, for example after you fix a permission:
@@ -239,9 +241,15 @@ For an Intune fleet, deliver a custom pack before the DefenseClaw app using a
 dependent Win32 app, or a pinned HTTPS download with a SHA-256 check; see
 [Intune on Windows](/docs/enterprise/mdm/intune-windows#6-change-the-config-upgrade-and-roll-back).
 
-Setup checks these permissions for the service account before it changes
-anything, and stops with exit code `1639` naming the folder and the
-`icacls` grant that fixes it. Setup checks the config with the
+Setup checks these permissions before it changes anything: the pack folder,
+every file and folder in it (the manifest and the rules folder included) and
+the folders above it must be owned and writable only by Administrators and
+SYSTEM, and readable by the service account. Otherwise it stops with exit
+code `1639`, naming the account, the file or folder it can change and the
+`icacls` commands that fix it. A repair (`/repair`) checks the packs of the
+installed config the same way, digest pins included, before it stops the
+services: when the gateway would not load them, it stops with `1603` and
+changes nothing, and the running gateway keeps its last good policy. Setup checks the config with the
 gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
@@ -297,6 +305,13 @@ permissions with SYSTEM and Administrators and installs into it. A folder
 another account can write is still refused before any change, and the
 message names the account, its access and the `icacls` command that clears
 it.
+
+An agent reads its hooks when it starts, so an agent session a user opened
+before the first install (a Claude Code or Codex window left open, for
+example) runs without DefenseClaw until it is restarted. The `/ensure`
+result, `status` and `verify` name each such user and session with the
+`agent_sessions_restart_required` warning; ask those users to restart their
+agents.
 
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
@@ -412,6 +427,17 @@ every skill, MCP server and plugin install is blocked: `status` warns and
 `verify` fails with `scanner_runtime_unavailable`, and Setup `/repair`
 installs it again.
 
+The lifecycle records the SHA-256 of the `defenseclaw-scanners.exe` it
+admitted (a valid Authenticode signature, or the digest the payload manifest
+pins) in `admission.json` in the scanner runtime folder. Before `status`,
+`verify`, `repair`, `ensure` or a scan runs the executable, it checks the file
+against that record. A copy changed or replaced in place, even by an
+administrator, is not run: the `Scanners:` state is `untrusted`, `verify`
+fails and `status`, `repair` and `ensure` from the installed CLI warn with
+`scanner_runtime_unavailable` (the Intune remediation script reports
+"not repaired"), and every skill, MCP server and plugin install is blocked
+until Setup `/repair` or `/ensure` installs the admitted copy again.
+
 ## Verify the install
 
 Run from an elevated PowerShell 7 session:
@@ -477,7 +503,12 @@ hooks on this computer:
    The Setup form is `/repair ATTESTCLAUDEEFFECTIVEPOLICY=1 JSON=1`.
 
 DefenseClaw records the attestation as you give it; step 3 does not run
-Claude Code. The record is bound to the SHA-256 of the installed Claude Code
+Claude Code. It is a repair, though: like every repair it re-applies the
+deployment, so it stops the four DefenseClaw services and starts them again.
+For about one and a half minutes the agents of every user are refused (fail
+closed, `enterprise_managed_gateway_not_running`), and the run takes several
+minutes more when it prepares the scanner runtime. Plan it like the upgrade
+it follows, in the same maintenance window. The record is bound to the SHA-256 of the installed Claude Code
 policy file and of the hook binary, not to the computer. Every DefenseClaw
 upgrade replaces the hook binary, and a change to the Claude Code hook
 contract the policy is rendered from changes the policy, so either makes the
@@ -670,22 +701,77 @@ per-user install:
   guardian removes the original as that user, after checking that it is in a
   watched folder and matches the copy. A folder that an administrator or a
   SYSTEM job copied into the profile, and so owns, is removed the same way,
-  as long as the user may delete it. For a signed-out user it uses an S4U
-  logon; a Microsoft Entra ID account has none, so the guardian removes the
-  folder when that user next signs in, and `hook-guardian.log` says so
-  (`deferred: ... removes the folder when that user next signs in`, then
-  `removed now that the user is signed in`). Two users with a skill or plugin
-  of the same name each get their own quarantine copy.
+  as long as the user may delete it. A user with a disconnected session
+  counts as signed in. For a signed-out user it uses an S4U logon: MSV1_0 for
+  a local account, Kerberos for an Active Directory account (by its user
+  principal name, through a domain controller). A Microsoft Entra ID account
+  has no S4U logon, and Windows can refuse one, for example when no domain
+  controller answers; the guardian then removes the folder when that user
+  next signs in. `hook-guardian.log` says why (`deferred: ... the owner of
+  <user> is signed out, and ...`, then `removed now that the user is signed
+  in`), and until then `enterprise windows status` and `verify` warn with
+  `asset_removal_deferred`. Two users with a skill or plugin of the same name
+  each get their own quarantine copy.
+- A scan that fails (the scanner exits, or the gateway service cannot read
+  the folder) blocks the asset and disables it at runtime, as a rejected
+  verdict does: a blocked MCP server's tool calls are refused and a blocked
+  skill does not load. A folder moved into a watched folder (`Move-Item` from
+  elsewhere in the profile) keeps the access list of where it came from,
+  which has no entry for the gateway service. The gateway asks the hook
+  guardian for read access, which adds, as the user, the entry the agent
+  folders carry, and scans the folder again.
+- A quarantine that cannot finish, for example because the disk is full,
+  leaves the asset blocked and disabled in place. The copy is staged as
+  `<name>.pending-<id>` beside its quarantine slot, and the stage is removed
+  when the copy fails. The gateway admits such an asset, and one it could not
+  scan, again after 2 minutes, then 4, and so on up to every 30 minutes, until
+  admission finishes. While the folder is still there, `enterprise windows
+  status` and `verify` warn with `asset_not_scanned` or
+  `asset_not_quarantined`, naming the account and the path.
 - With `gateway.watcher.<type>.take_action: false` a rejected asset is only
   recorded (`verdict=rejected (take_action disabled, no gateway action)`) and
   stays usable. When an `ensure` turns `take_action` back on, the first rescan
   admits each such asset again and blocks or quarantines it as for a new
   install. The `watcher-block` row ends with `rejected while take_action was
-  off, enforced once it was turned on`.
+  off, enforced once it was turned on`. Until then `enterprise windows status`
+  and `verify` warn with `asset_rejected_not_enforced` for a skill or plugin
+  still in its folder.
 - With `admission.mcp.scan_on_install: false` a new MCP server is admitted
   without a scan, and the audit row says `reason=scan-disabled`. A server a
-  user adds goes through admission within about 30 seconds, also while a
+  user adds goes through admission, usually within two minutes, also while a
   periodic rescan is running, such as the first one after an upgrade.
+- The MCP scanner does not connect to loopback, private, link-local or
+  multicast addresses. An HTTP or SSE server on `localhost`, `127.0.0.1` or an
+  internal address (`10.x`, `172.16-31.x`, `192.168.x`, or a name that
+  resolves to one) is therefore never scanned: its scan fails and it is
+  blocked like any scanner failure. The `install-scan-error` row says
+  `the MCP scanner does not connect to loopback, private, link-local or
+  multicast addresses ... so the server was not scanned`, and
+  `install-blocked reason=scanner-error` follows. A stdio server (a `command`)
+  is scanned on the computer and is not affected. To admit a local or
+  internal server you trust, pin it in the admin config with its name and
+  URL (an allowed server is not scanned):
+
+  ```yaml title="Admin config"
+  asset_policy:
+    mcp:
+      allowed:
+        - name: notes
+          url: http://127.0.0.1:28561/mcp
+          reason: reviewed internal server
+  ```
+
+  or admit new MCP servers without a scan with
+  `admission.mcp.scan_on_install: false`. There is no setting that lets the
+  scanner connect to these addresses.
+- A stdio server started with `npx` or `uvx` is scanned only when the
+  launcher is installed for all users in a folder that only administrators
+  can change, such as Node.js in `C:\Program Files\nodejs` or uv under
+  `C:\Program Files`. A launcher in a user profile (uv installs `uvx.exe` in
+  `%USERPROFILE%\.local\bin` by default) fails the scan, and the server is
+  blocked (`MCPStdioLaunchError ... untrusted Windows path`). There is no
+  per-user trusted-paths list on a managed computer; install the launcher
+  under Program Files instead.
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the
@@ -693,6 +779,11 @@ per-user install:
   `claude mcp add` (any scope) reaches admission within about a minute.
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
+- Only the skill and plugin folders of the agents in each profile are
+  watched. Project folders (`<project>\.claude\skills`,
+  `<project>\.agents\skills`), inside or outside the profile, get no install
+  admission; the agent hooks still refuse a denied skill name there (see
+  [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
 - The audit rows of these scans name the user whose profile holds the asset:
   the `scan` and `scan-finding` rows carry `user.id` (the SID) and
   `defenseclaw.user.name`, the `scan` row ends with `judge=<model>` when the
@@ -719,6 +810,13 @@ Replace `<account>` with the actual Windows profile directory name, and
 `reviewed-skill` with the installed skill folder name in both fields.
 `source_path_contains` must match the reviewed copy's actual path; omit it
 only when the allow rule should cover every user's copy.
+
+For a Claude Code plugin from a marketplace, use `asset_policy.plugin` with
+the name `claude plugin list` shows, `plugin@marketplace`. A denied rule also
+matches the plugin name alone and the name in its
+`.claude-plugin/plugin.json`, and refuses the plugin at its version folder
+with `install-rejected ... source=admin-deny`; an allowed rule needs
+`plugin@marketplace`.
 
 - A blocked skill whose folder is still in place is released at the next
   periodic rescan (`watch.rescan_interval_min`, 60 minutes by default), or at
@@ -859,7 +957,12 @@ DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
 ```
 
 `/repair` also recovers the transaction; after a failed first install it
-then stops with "run Install", so `/ensure` is the one-step command. Outside
+then stops with "run Install", so `/ensure` is the one-step command. The
+recovery restores the release that ran before the interrupted change, and
+the result, `status`, `verify` and `deployment.json` report that release.
+When the CLI that recovered it is that older release (the installed CLI, or
+the Intune remediation), the result warns `recovered_pending_transaction`:
+the change did not finish, so run the newer Setup `/ensure` again. Outside
 an MDM, a one-time scheduled task that runs as SYSTEM gives the same context
 (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 From a payload folder (see [Run the lifecycle CLI from a payload
@@ -990,7 +1093,9 @@ each user remove their per-user install with
 `defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does
 not adopt a `%USERPROFILE%\.defenseclaw` folder that a per-user install left,
 and refuses that profile until the folder is gone (move it aside to keep its
-data). A folder the account created itself without any per-user product (the
+data). A first install checks every enrolled profile before it changes
+anything and stops in seconds, naming the folder and this command, with
+nothing installed. A folder the account created itself without any per-user product (the
 refused hook of an account that was not enrolled writes one) is not such a
 folder: Setup takes it over. A per-user gateway that still runs holds the gateway API port, and
 Setup names it in its `api_port_held` error. See
@@ -1085,7 +1190,11 @@ what it names as LocalSystem. A purge that did not run as LocalSystem
 removes the machine deployment but none of these folders, so it fails
 (non-zero exit) and names each account: run Setup `/ensure` and then
 `/uninstall PURGE=1`, both as LocalSystem while the accounts have an active
-(connected) session.
+(connected) session. It still removes the
+`HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` marker and the Add/Remove
+Programs entry with the machine deployment, so an Intune registry detection
+rule reports DefenseClaw as not installed and a required assignment
+installs it again.
 
 The agents' shared machine folders stay while they hold anything else,
 because another product can use them. Setup removes its own files from them.

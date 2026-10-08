@@ -208,6 +208,14 @@ installs its plugin through OpenCode's managed config (`/etc/opencode`,
 official server/tool sanitizer, maps the effective enabled MCP server names,
 and rejects sanitizer collisions or prefix ambiguity instead of guessing.
 
+Under application control, OpenCode must be allowed to read the managed plugin,
+`<install root>/share/opencode/defenseclaw.js`. OpenCode skips a plugin it
+cannot read and runs the session without DefenseClaw, which `status` and
+`verify` cannot see. On Linux the deb and rpm ship the plugin, so fapolicyd's
+package-database trust covers it; after a payload (tarball) install, add it to
+a trust file. See
+[Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files).
+
 For local MCP servers, `mcp set` refuses commands outside trusted install
 prefixes unless you explicitly trust the directory or force that one write.
 The managed `defenseclaw.js` registration is connector configuration, not an

@@ -163,7 +163,9 @@ type Result struct {
 
 // ScannerRuntime reports the scanners a standalone Windows deployment runs.
 type ScannerRuntime struct {
-	// State: ready, not_prepared (installed but not unpacked), missing.
+	// State: ready, not_prepared (installed but not unpacked), untrusted
+	// (not the executable the payload trust policy admitted, so not run),
+	// missing.
 	State string `json:"state"`
 	// Versions of the pinned components (skill-scanner, mcp-scanner,
 	// litellm, python, ...).

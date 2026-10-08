@@ -242,7 +242,7 @@ The running gateway applies the new policy without a restart, `watch` and `cisco
 | `defenseclaw.admission` | `verdict`, `reason` |
 | `defenseclaw.guardrail` | `action`, `severity`, `reason`, `scanner_sources` |
 
-You can hand-edit the Rego — the engine is just OPA — but most operators stay in `config.yaml` because the bundled Rego covers the common cases.
+You can hand-edit the Rego — the engine is just OPA — but most operators stay in `config.yaml` because the bundled Rego covers the common cases. An upgrade replaces the shipped `admission.rego` and `guardrail.rego` and saves your edited copy in `~/.defenseclaw/backups/rego-<time>/`, so keep your own rules in a file of another name in `policies/rego` ([Shipped policy files](/docs/get-started/upgrade#shipped-policy-files)).
 
 ### How the engine evaluates
 

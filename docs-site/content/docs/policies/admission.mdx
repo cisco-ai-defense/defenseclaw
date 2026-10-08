@@ -84,6 +84,13 @@ Precedence, first match wins:
 5. The scan result: the action for the worst severity, or the scanner-specific
    action when `scanner_overrides` has one.
 
+The MCP scanner does not connect to a server on a loopback, private,
+link-local or multicast address, so the install scan of such a server fails
+and the verdict is `rejected` (fail-closed). An `allowed` rule with the
+`name` and `url` of the server (step 2) or `scan_on_install: false` for `mcp`
+(step 4) admits one you trust; see
+[Servers on local and internal addresses](/docs/scanning/mcp-scanner#servers-on-local-and-internal-addresses).
+
 Where it runs: the gateway's install watcher checks a skill, plugin or MCP
 server when it appears in a watched directory, and the `defenseclaw` install
 and scan commands run the same check. `gateway.watcher.skill.take_action`
@@ -98,6 +105,8 @@ runs admission again for each asset rejected while it was off and applies the
 actions, as for a new install. The `watcher-block` row ends with `rejected
 while take_action was off, enforced once it was turned on`. This needs the
 periodic rescan (`watch.rescan_enabled`, on by default).
+Until then a managed computer's `status` and `verify` warn with
+`asset_rejected_not_enforced`.
 
 ## The admission block
 
@@ -436,7 +445,7 @@ asset_policy:
   type={{
     "name": {
       type: "string",
-      description: "The asset's name. Matched exactly, ignoring case and Unicode composition: a name with an accented letter matches whether the accent is stored as one character or as a letter plus a combining mark. For a skill, a denied rule also matches the name the skill's SKILL.md declares, so a copy of a denied skill in a folder with another name is denied too; an allowed rule matches the folder name only.",
+      description: "The asset's name. Matched exactly, ignoring case and Unicode composition: a name with an accented letter matches whether the accent is stored as one character or as a letter plus a combining mark. For a skill, a denied rule also matches the name the skill's SKILL.md declares, so a copy of a denied skill in a folder with another name is denied too; an allowed rule matches the folder name only. A Claude Code marketplace plugin, installed under plugins/cache/<marketplace>/<plugin>/<version>, is named plugin@marketplace, as claude plugin list shows it; a denied rule matches that name, the plugin name alone, or the name its .claude-plugin/plugin.json declares, and an allowed rule must use plugin@marketplace.",
     },
     "connector": {
       type: "string",
@@ -509,6 +518,14 @@ working folder. Two things stay out of reach of a hook:
   own skill index before any hook runs;
 - a command that builds the path at run time, for example from a variable, a
   glob, or a `cd` into the skills folder followed by a relative path.
+
+Project skill folders (`<project>/.claude/skills`, `<project>/.agents/skills`)
+are not watched, so install admission never scans what they hold. The hooks
+cover them as they cover every other folder: a denied name is refused at the
+Skill call, the `$name` selection and the folder read, wherever the skill
+lives. With `runtime_detection.enabled: true`, `mode: action` and a
+`default: deny` or an approved registry, the Skill call and `$name` selection
+of any project skill that is not approved are refused too.
 
 Take a denied skill off the device to remove it from that index. Where the
 install watcher runs (per-user installs and managed Windows), a config change

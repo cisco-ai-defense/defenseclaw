@@ -222,6 +222,30 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	return nil
 }
 
+// RemoveStaleQuarantineStages removes the stages an earlier attempt at the
+// destination of plan left: their journal id is another one, and recordID
+// owns the destination now. A copy that failed for lack of space left its
+// stage beside the destination when its own clean-up failed too (GAP-0826).
+func RemoveStaleQuarantineStages(plan AssetQuarantinePlan, recordID string) {
+	if validateQuarantinePlan(plan) != nil || !safePathSegment(recordID) {
+		return
+	}
+	stage := plan.QuarantinePath + ".pending-" + recordID
+	parent := filepath.Dir(plan.QuarantinePath)
+	prefix := filepath.Base(plan.QuarantinePath) + ".pending-"
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(parent, entry.Name())
+		if !strings.HasPrefix(entry.Name(), prefix) || path == stage || !safePathSegment(entry.Name()) {
+			continue
+		}
+		_ = removeAssetPathIfExists(path, plan.QuarantineRoot)
+	}
+}
+
 // ExecuteAssetRestore copies and verifies quarantine content into a staging
 // path, atomically publishes it, re-verifies both copies, then removes the
 // quarantine copy. It also completes interrupted restores idempotently.

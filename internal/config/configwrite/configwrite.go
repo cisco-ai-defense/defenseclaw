@@ -781,6 +781,14 @@ func diffDocuments(before, after []byte) ([]string, error) {
 func diffValues(prefix string, left, right any, out *[]string) {
 	lm, lok := left.(map[string]any)
 	rm, rok := right.(map[string]any)
+	// A block added or removed whole (a first enterprise.enrollment, for
+	// example) is compared with an empty one, so its leaves are named and
+	// a caller that classifies by key sees enterprise.enrollment.exclude_users
+	// and not the block (GAP-0887). An empty block has no leaf to name: it
+	// stays a change of the block itself (guardrail.connectors.cursor: {}).
+	if (lok && len(lm) > 0 && right == nil) || (rok && len(rm) > 0 && left == nil) {
+		lok, rok = true, true
+	}
 	if lok && rok {
 		keys := map[string]struct{}{}
 		for k := range lm {

@@ -162,9 +162,10 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 	case "remove":
 		// The restart below would start the gateway on a config it cannot
-		// compile without this credential.
+		// compile without this credential, or run the judge without its key
+		// (GAP-0674).
 		if raw, err := os.ReadFile(layout.ConfigPath); err == nil {
-			if at := config.ObservabilityV8CredentialReference(layout.ConfigPath, raw, layout.DataDir, opts.name); at != "" {
+			if at := config.InstalledCredentialReference(layout.ConfigPath, raw, layout.DataDir, opts.name); at != "" {
 				return withExitCode(fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at), windowsSecretExitFailure)
 			}
 		}

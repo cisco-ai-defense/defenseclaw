@@ -46,8 +46,9 @@ package is therefore applied by the new version, not checked by the old binary
 against files being replaced. When the package run keeps the last applied
 config because it rejected `config.yaml`, the install output says so.
 
-A `config.yaml` or credential written while a run holds the lock is
-applied by a follow-up transaction of that run (warning `input_changed`).
+A `config.yaml` or credential written while a run holds the lock, also a
+run given `--config`, is applied by a follow-up transaction of that run
+(warning `input_changed`), so the later file is the one in force.
 When the run fails instead, the apply trigger runs `ensure` again once it
 ends; a newer `config.yaml` written during a failed in-place apply is put
 back and applied then, and only the edit the failed run checked is kept as
@@ -117,7 +118,8 @@ sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD
 Run the new release's `defenseclaw-gateway` from the extracted folder. The
 payload must be owned by root and must not be writable by group or others,
 so extract it into a root-only folder, as above, never into a shared one
-such as `/var/tmp`.
+such as `/var/tmp`. The folder must also allow execution: on a CIS host
+`/tmp` and `/var/tmp` are mounted `noexec`.
 
 ### macOS
 
@@ -391,7 +393,17 @@ as described in [Change the config](#change-the-config). See
 
 `repair` re-applies the installed deployment: files, owners and modes,
 service definitions, and machine policy entries. Then it starts and verifies
-the services.
+the services. On Linux and macOS the owners and modes include every file the
+gateway and the hook guardian keep in the gateway data folder, the hook
+guardian folders and next to `config.yaml` (the audit store, the device
+identity key, the hook tokens, the service `.env`), so a `chown -R` or
+`chmod -R` over the deployment is undone without losing the audit history or
+the device identity. `status` and `verify` name the files that differ. A file
+there with a second name (a hard link) is not changed; the error names it.
+Every lifecycle run first takes away the permission bits the private
+folders (gateway data, credentials, hook guardian folders, lifecycle state)
+have beyond their managed mode, before it waits for another run, and a run
+that rolls back does not open them again.
 
 ```bash title="Linux"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair --json

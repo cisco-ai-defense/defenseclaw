@@ -257,3 +257,46 @@ func TestWindowsScannerRuntimeTimeoutStopsWorker(t *testing.T) {
 		t.Fatalf("prepare helper did not launch worker: %v", err)
 	}
 }
+
+// GAP-0311: an installed scanner executable replaced in place (an
+// administrator copied another program over it) is not run by status,
+// verify, or a repair or ensure from the installed CLI: they report it, and
+// only the copy the payload trust policy admitted runs again.
+func TestWindowsScannerRuntimeChangedInPlaceIsNotRun(t *testing.T) {
+	dirSeam, aclSeam := windowsScannerRuntimeDir, windowsScannerRuntimeACLCheck
+	t.Cleanup(func() { windowsScannerRuntimeDir, windowsScannerRuntimeACLCheck = dirSeam, aclSeam })
+	root := t.TempDir()
+	windowsScannerRuntimeDir = func() (string, error) { return root, nil }
+	windowsScannerRuntimeACLCheck = func(string, string) error { return nil }
+	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+	if err := os.WriteFile(target, []byte("admitted runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := windowsEnterpriseFileSHA256(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := managed.WriteScannerRuntimeAdmission(root, admitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("another program"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"verify", "repair"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.0")
+		result.Installed = true
+		applyWindowsStandaloneScannerRuntime(result, &windowsEnterpriseLifecycleOptions{})
+		messages := append(append([]enterprisestatus.Message{}, result.Errors...), result.Warnings...)
+		if result.Scanners == nil || result.Scanners.State != "untrusted" ||
+			!strings.Contains(fmt.Sprint(messages), "scanner_runtime_unavailable") ||
+			strings.Contains(fmt.Sprint(messages), "prepare the scanner runtime") {
+			t.Fatalf("%s ran or accepted a changed runtime: scanners=%+v messages=%+v", action, result.Scanners, messages)
+		}
+	}
+	if err := os.WriteFile(target, []byte("admitted runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := readWindowsScannerRuntime(); got.State != "not_prepared" {
+		t.Fatalf("the admitted runtime state = %q, want it run (not_prepared: this one cannot report versions)", got.State)
+	}
+}

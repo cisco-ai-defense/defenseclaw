@@ -37,7 +37,7 @@
 #       [--gpg-keyring FILE] [--signature FILE | --signature-url URL] (Linux signed)
 #       [--config-file FILE | --config-stdin]
 #       [--secret-name NAME (--secret-file FILE | --secret-stdin)]
-#       [--product-version X.Y.Z] [--https-proxy URL] [--log FILE]
+#       [--product-version X.Y.Z] [--https-proxy URL] [--log FILE] [--staging-dir DIR]
 #
 # Sources: a defenseclaw-enterprise .deb or .rpm (Linux), a .pkg (macOS) or
 # the defenseclaw-enterprise-<version>-<os>-<arch>.tar.gz payload (both).
@@ -67,6 +67,7 @@ DC_SECRET_NAME=""           # e.g. ai-defense-api-key (value only via file or st
 DC_SECRET_FILE=""
 DC_HTTPS_PROXY=""           # proxy for the download only
 DC_LOG=""                   # default: the platform log path below
+DC_STAGING_DIR=""           # root-only folder for the staged copy (default: /var/lib/defenseclaw-mdm on Linux, /var/tmp on macOS)
 
 # Inline administrator config for script-only MDMs: put the YAML between the
 # markers. Never put credentials here - MDM script bodies are not secret
@@ -170,6 +171,41 @@ dc_sweep_stages() {
         esac
         rm -rf "$stale"
     done
+}
+
+# dc_stage_parent: set DC_STAGE_PARENT to the root-only folder this run
+# stages in. CIS hosts mount the shared /tmp and /var/tmp noexec, where the
+# payload's gateway cannot run, so on Linux the default is a root-only folder
+# of its own (GAP-0752); --staging-dir names another one.
+dc_stage_parent() {
+    DC_STAGE_PARENT=$DC_STAGING_DIR
+    if [ -z "$DC_STAGE_PARENT" ]; then
+        if [ "$DC_SCRIPT_OS" = darwin ]; then
+            DC_STAGE_PARENT=/var/tmp
+            return 0
+        fi
+        DC_STAGE_PARENT=/var/lib/defenseclaw-mdm
+        [ -d "$DC_STAGE_PARENT" ] || mkdir -m 0700 "$DC_STAGE_PARENT" 2>/dev/null ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "cannot create the staging folder $DC_STAGE_PARENT"
+    fi
+    case "$DC_STAGE_PARENT" in
+        /*) ;;
+        *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
+    esac
+    if [ ! -d "$DC_STAGE_PARENT" ] || ! dc_trusted_path "$DC_STAGE_PARENT"; then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write"
+    fi
+}
+
+# dc_noexec_mount <path>: print the mount point of path when that mount is
+# noexec (Linux).
+dc_noexec_mount() {
+    [ "$DC_SCRIPT_OS" = linux ] || return 1
+    line=$(findmnt -n -o TARGET,OPTIONS --target "$1" 2>/dev/null) || return 1
+    case ",${line##* }," in
+        *,noexec,*) printf '%s\n' "${line%% *}" ;;
+        *) return 1 ;;
+    esac
 }
 
 dc_stat_uid() {
@@ -333,6 +369,7 @@ dc_parse_args() {
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
             --https-proxy) DC_HTTPS_PROXY=${2:-}; shift 2 ;;
             --log) DC_LOG=${2:-}; shift 2 ;;
+            --staging-dir) DC_STAGING_DIR=${2:-}; shift 2 ;;
             -h | --help) dc_usage; exit 0 ;;
             *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "unknown argument: $1" ;;
         esac
@@ -718,6 +755,16 @@ dc_extract_payload() {
     [ -n "$gateway" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive has no defenseclaw-gateway"
     chown -R 0:0 "$payload"
     chmod -R go-w "$payload"
+    # A staging folder on a noexec mount cannot run the payload's gateway;
+    # the lifecycle step then failed with the shell's "Permission denied"
+    # and mdm_lifecycle_no_result (GAP-0752).
+    set +e
+    "$gateway" --version-json >/dev/null 2>&1
+    probe=$?
+    set -e
+    if [ "$probe" = 126 ] && mount=$(dc_noexec_mount "$DC_STAGE"); then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_noexec "cannot run defenseclaw-gateway from the staging folder $DC_STAGE: $mount is mounted noexec. Pass --staging-dir with a root-only folder on a filesystem that allows execution, or use the deb or rpm package as --source"
+    fi
     DC_CHANNEL_FLAG="--payload=$(dirname "$gateway")"
     DC_PAYLOAD_GATEWAY=$gateway
 }
@@ -776,9 +823,9 @@ dc_main() {
     dc_validate_args
     [ "$(id -u)" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_not_root "run as root (the MDM agent's system context)"
 
-    stage_parent=/var/tmp
-    dc_sweep_stages "$stage_parent"
-    DC_STAGE=$(mktemp -d "$stage_parent/defenseclaw-mdm.XXXXXX")
+    dc_stage_parent
+    dc_sweep_stages "$DC_STAGE_PARENT"
+    DC_STAGE=$(mktemp -d "$DC_STAGE_PARENT/defenseclaw-mdm.XXXXXX")
     trap dc_cleanup EXIT
     trap 'dc_stop_child; exit 1' HUP INT TERM
     chmod 0700 "$DC_STAGE"

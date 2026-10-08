@@ -91,6 +91,20 @@ def test_copied_helpers_are_identical() -> None:
     assert not drifted, f"copy the shared region from packaging/mdm/windows/detect.ps1 into {drifted}"
 
 
+def test_intune_entrypoints_refuse_constrained_language_before_native_helpers() -> None:
+    entrypoints = {
+        MDM / "intune" / "windows" / "Install-DefenseClawIntune.ps1": "1603",
+        MDM / "windows" / "detect.ps1": "1",
+        MDM / "intune" / "windows" / "Remediate-Detect.ps1": "1",
+    }
+    for path, exit_code in entrypoints.items():
+        entry = _text(path).split("# region DefenseClaw MDM shared helpers", 1)[0]
+        guard = "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {"
+        assert guard in entry, path
+        assert entry.index(guard) < entry.index("Set-StrictMode"), path
+        assert f"exit {exit_code}" in entry.split(guard, 1)[1], path
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("os_dir", ["linux", "macos"])
 @pytest.mark.parametrize("name", UNIX_SCRIPTS)
@@ -344,6 +358,42 @@ echo installed-ok
             assert result.returncode == 1, (shell, result.stdout, result.stderr)
             assert "FAIL mdm_version_mismatch" in result.stdout, (shell, result.stdout)
             assert not log.exists(), (shell, "the package manager ran before the version check", log.read_text())
+
+
+# GAP-0752: on a CIS host (/tmp and /var/tmp noexec) the payload's gateway
+# could not run from the wrapper's /var/tmp staging folder, and the result was
+# mdm_lifecycle_no_result with the shell's "Permission denied". The wrapper
+# now stages in a root-only folder of its own and names a noexec mount.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_wrapper_names_a_noexec_staging_mount(tmp_path: Path) -> None:
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in text
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_noexec_mount", "dc_extract_payload"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    findmnt = bin_dir / "findmnt"
+    findmnt.write_text("#!/bin/sh\necho '/var/tmp rw,nosuid,nodev,noexec,relatime'\n", encoding="utf-8")
+    findmnt.chmod(0o755)
+    source = tmp_path / "src"
+    source.mkdir()
+    gateway = source / "defenseclaw-gateway"
+    gateway.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    gateway.chmod(0o644)  # what a noexec mount makes of an executable
+    archive = tmp_path / "payload.tar.gz"
+    subprocess.run(["tar", "-czf", str(archive), "-C", str(source), "defenseclaw-gateway"], check=True)
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    script = f"""
+DC_SCRIPT_OS=linux DC_EXIT_FAILURE=1 DC_STAGE='{stage}' DC_STAGED_SOURCE='{archive}'
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+chown() {{ :; }}
+{functions}
+dc_extract_payload
+echo extracted
+"""
+    result = subprocess.run(["sh", "-c", script], env={"PATH": f"{bin_dir}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "FAIL mdm_staging_noexec" in result.stdout and "/var/tmp is mounted noexec" in result.stdout, result.stdout
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -811,4 +861,3 @@ def test_remediate_fix_does_not_report_a_missing_scanner_runtime_as_healthy() ->
     assert "$_.code -eq 'scanner_runtime_unavailable'" in branch
     assert "$code = 1603" in branch
     assert "$($runtime.message)" in branch
-

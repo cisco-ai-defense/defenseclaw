@@ -245,6 +245,19 @@ def test_enterprise_rpm_owns_its_doc_directory():
     assert "/usr/share/doc/defenseclaw-enterprise" in owned
 
 
+# GAP-0763: fapolicyd refused the OpenCode plugin the lifecycle wrote (no
+# package owned it) to OpenCode, which then ran tool calls without DefenseClaw
+# while status stayed green. The package ships the plugin's exact bytes where
+# the managed OpenCode config names it, so package-database trust covers it.
+def test_enterprise_package_ships_the_managed_opencode_plugin():
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
+    shipped = {c["dst"]: c for c in nfpm["contents"] if "src" in c}
+    plugin = shipped.get("/opt/defenseclaw/share/opencode/defenseclaw.js")
+    assert plugin is not None and plugin["src"] == "internal/enterprisepolicy/opencode_managed_plugin.js"
+    assert plugin.get("file_info", {}).get("mode") == 0o644
+
+
 def test_release_archives_ship_enterprise_packaging_assets():
     config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
     for archive in config["archives"]:
@@ -1234,6 +1247,7 @@ dc_validate_args() {{ :; }}
 id() {{ echo 0; }}
 mktemp() {{ command mktemp -d '{tmp_path}/stage.XXXXXX'; }}
 dc_cleanup() {{ :; }}
+dc_stage_parent() {{ DC_STAGE_PARENT='{tmp_path}'; }}
 dc_sweep_stages() {{ :; }}
 dc_stat_uid() {{ echo 0; }}
 dc_log() {{ :; }}

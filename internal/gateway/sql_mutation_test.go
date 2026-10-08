@@ -5,7 +5,9 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -44,7 +46,7 @@ func TestSQLDestructiveMutationSemanticOwnerAndCEL(t *testing.T) {
 	}
 }
 
-func TestSQLDestructiveMutationAlertsAtPackLevelsAndBlocksAtOperatorBlockAt(t *testing.T) {
+func TestSQLDestructiveMutationAlertsDespiteOperatorBlockAtInEveryProfile(t *testing.T) {
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
@@ -52,35 +54,28 @@ func TestSQLDestructiveMutationAlertsAtPackLevelsAndBlocksAtOperatorBlockAt(t *t
 			installToolCallCorpusProfileConnector(t, connector, profile)
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.BlockAt = "HIGH"
 			cfg.Guardrail.Connector = connector
 			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
-			evaluate := func() codexHookResponse {
-				return (&APIServer{scannerCfg: cfg}).evaluateCodexHook(
-					t.Context(),
-					codexHookRequest{
-						HookEventName: "PreToolUse",
-						ToolName:      "sql_query",
-						CWD:           "/repo",
-						ToolInput: map[string]interface{}{
-							"connection": "postgresql://db.invalid/production",
-							"database":   "production",
-							"query":      "TRUNCATE TABLE scratch.events",
-						},
+			response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(
+				t.Context(),
+				codexHookRequest{
+					HookEventName: "PreToolUse",
+					ToolName:      "sql_query",
+					CWD:           "/repo",
+					ToolInput: map[string]interface{}{
+						"connection": "postgresql://db.invalid/production",
+						"database":   "production",
+						"query":      "TRUNCATE TABLE scratch.events",
 					},
-				)
-			}
-			response := evaluate()
+				},
+			)
 			if response.Action != guardrailActionAlert || response.RawAction != guardrailActionAlert ||
 				response.Severity != "HIGH" || response.WouldBlock ||
-				!findingStringHasRuleID(response.Findings, sqlDestructiveMutationRuleID) {
+				!findingStringHasRuleID(response.Findings, sqlDestructiveMutationRuleID) ||
+				!strings.Contains(response.AdditionalContext, "alert-only; block_at does not turn it into a block") ||
+				!strings.Contains(fmt.Sprint(response.CodexOutput), "alert-only") {
 				t.Fatalf("profile=%s response=%+v", profile, response)
-			}
-			// A block_at the operator set decides the proven finding like any
-			// other finding at that level (GAP-0761).
-			cfg.Guardrail.BlockAt = "HIGH"
-			if response = evaluate(); response.Action != guardrailActionBlock ||
-				response.RawAction != guardrailActionBlock {
-				t.Fatalf("profile=%s block_at HIGH response=%+v", profile, response)
 			}
 		})
 	}

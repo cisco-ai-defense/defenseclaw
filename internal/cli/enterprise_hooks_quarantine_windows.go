@@ -63,6 +63,18 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 				// Load the protected config for each request so watcher roots
 				// adopted after the guardian started apply (GAP-0491).
 				latest, loadErr := enterpriseHookQuarantineCurrentConfig(current)
+				if request.Kind == enforce.QuarantineRequestReadGrant {
+					err := loadErr
+					if err == nil {
+						err = grantEnrolledAssetRead(latest, request, enterprisehooks.GrantGatewayAssetRead)
+					}
+					outcome := "granted the gateway read access"
+					if err != nil {
+						outcome = "read grant refused: " + err.Error()
+					}
+					fmt.Fprintf(errOut, "[hook-guardian] %s %s: %s\n", request.TargetType, request.SourcePath, outcome)
+					return err
+				}
 				err := loadErr
 				if err == nil {
 					err = removeEnrolledQuarantinedSource(latest, request, enterprisehooks.RemoveEnrolledUserAsset)
@@ -111,8 +123,8 @@ func enterpriseHookQuarantineCurrentConfig(startup *config.Config) (*config.Conf
 
 // removeEnrolledQuarantinedSource checks a request against the enrolled
 // users' watched folders and the quarantine store, then removes the source as
-// the user who owns it, with remove. A signed-out user without an S4U logon
-// defers the removal to the next sign-in.
+// the user who owns it, with remove. A signed-out user Windows gives no S4U
+// logon for defers the removal to the next sign-in.
 func removeEnrolledQuarantinedSource(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
 	roots := gateway.EnrolledWatchRoots(current)
 	dirs := make([]string, 0, len(roots))
@@ -127,10 +139,31 @@ func removeEnrolledQuarantinedSource(current *config.Config, request enforce.Qua
 		if strings.EqualFold(filepath.Clean(root.Dir), filepath.Clean(rootDir)) {
 			err := remove(root.SID, root.Home, source)
 			if errors.Is(err, enterprisehooks.ErrEnrolledUserSignedOut) {
-				return fmt.Errorf("%w: the owner of %s is signed out and the account has no S4U logon (a Microsoft Entra ID account); the guardian removes the folder when that user next signs in",
-					enforce.ErrQuarantineRemovalDeferred, filepath.Base(root.Home))
+				return fmt.Errorf("%w: %s", enforce.ErrQuarantineRemovalDeferred,
+					enterprisehooks.SignedOutRemovalReason(root.SID, filepath.Base(root.Home), err))
 			}
 			return err
+		}
+	}
+	return fmt.Errorf("no enrolled user owns %s", rootDir)
+}
+
+// grantEnrolledAssetRead checks a read grant request against the enrolled
+// users' watched folders and has grant give the gateway service read access
+// to the folder as the user who owns that watched folder (GAP-0825).
+func grantEnrolledAssetRead(current *config.Config, request enforce.QuarantineRemovalRequest, grant func(sid, home, path string) error) error {
+	roots := gateway.EnrolledWatchRoots(current)
+	dirs := make([]string, 0, len(roots))
+	for _, root := range roots {
+		dirs = append(dirs, root.Dir)
+	}
+	source, rootDir, err := enforce.VerifyAssetReadGrant(request, dirs)
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if strings.EqualFold(filepath.Clean(root.Dir), filepath.Clean(rootDir)) {
+			return grant(root.SID, root.Home, source)
 		}
 	}
 	return fmt.Errorf("no enrolled user owns %s", rootDir)

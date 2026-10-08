@@ -283,6 +283,25 @@ and after files for every key, explains the conflicts, and covers going back to
 0.8.x. On a managed standalone host the lifecycle migrates the administrator
 config for you; see [Lifecycle](/docs/enterprise/lifecycle).
 
+### Shipped policy files
+
+Every upgrade brings the Rego modules in `~/.defenseclaw/policies/rego`
+(`admission.rego` and `guardrail.rego`) to the release you install, so a
+policy fix reaches an upgraded install too. The previous copies are kept in
+`~/.defenseclaw/backups/rego-<time>/`. A module you edited is replaced as well,
+and the upgrade names it: re-apply your change from the backup, or keep your
+own rules in a file of another name, which upgrades never touch. An unmodified
+copy of a module the release no longer ships, such as the 0.8 `sandbox.rego`,
+moves to the same backup. Unedited guardrail rule packs in
+`~/.defenseclaw/policies/guardrail` are updated the same way; an edited rule
+pack is kept, and the upgrade says so.
+
+`defenseclaw init` writes a missing module and updates an unedited one, and
+keeps an edited one. A `policy_dir` outside `~/.defenseclaw` is left as it is,
+because a rollback does not restore it; the upgrade lists the modules there
+that differ from the release. On a managed host the administrator's lifecycle
+installs the policy.
+
 ## Troubleshooting
 
 | Message | What to do |

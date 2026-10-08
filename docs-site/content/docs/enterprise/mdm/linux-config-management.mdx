@@ -677,8 +677,9 @@ you ask for a downgrade, so to go back a version see
 ## Payload archive instead of the package
 
 Hosts without dpkg or rpm can use the `.tar.gz` payload. Extract it as root
-into a root-only folder and run `ensure` with `--payload` pointing at the
-folder that holds `defenseclaw-gateway`; see [Linux](/docs/enterprise/linux#install).
+into a root-only folder on a filesystem that allows execution (CIS hosts
+mount `/tmp` and `/var/tmp` `noexec`) and run `ensure` with `--payload`
+pointing at the folder that holds `defenseclaw-gateway`; see [Linux](/docs/enterprise/linux#install).
 On such a host, drop `--from-package` from the converge command, so `ensure`
 keeps the payload channel it was installed from. A host installed from the
 package refuses a payload upgrade with `package_owned_binaries`: keep each host

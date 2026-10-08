@@ -157,16 +157,17 @@ func (e *Env) WriteSecret(ctx context.Context, name string, value []byte) error 
 	return e.writeFileAtomic(filepath.Join(e.P(e.Layout.SecretsDir), name), value, mode, owner)
 }
 
-// RemoveSecret deletes one protected credential. It refuses one that an
-// enabled observability destination of the installed config references:
-// the gateway could not start on that config without it.
+// RemoveSecret deletes one protected credential. It refuses one the
+// installed config still names: an enabled observability destination (the
+// gateway could not start on that config without it) or the LLM judge and AI
+// Defense keys (the judge would run without its key, GAP-0674).
 func (e *Env) RemoveSecret(name string) error {
 	e.fillDefaults()
 	if !config.ValidEnterpriseCredentialName(name) {
 		return fmt.Errorf("credential name %q is not valid", name)
 	}
 	if raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes); err == nil {
-		if at := config.ObservabilityV8CredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
+		if at := config.InstalledCredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
 			return fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at)
 		}
 	}

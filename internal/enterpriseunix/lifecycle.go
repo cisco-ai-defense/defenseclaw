@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -152,6 +153,14 @@ type lifecycle struct {
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
+	// configWrittenDuringRun holds a config.yaml another writer put in place
+	// while a transaction of this run planned its own (applyFiles kept it).
+	// A rollback restores the earlier file, so the newer one is put back
+	// after it and applied once the run ends.
+	configWrittenDuringRun []byte
+	// machinePolicyPublished is set once a transaction of this run wrote
+	// vendor machine policy for its config, which a rollback then undoes.
+	machinePolicyPublished bool
 	// machinePolicyErr is the error of the last vendor machine policy
 	// publish: a file DefenseClaw could not write its hooks into.
 	machinePolicyErr error
@@ -236,6 +245,8 @@ func (l *lifecycle) run(ctx context.Context) int {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
+	// Before the lock, which another run can hold for the readiness timeout.
+	env.closePrivateDirs(ctx)
 
 	// A run on a host with no DefenseClaw tree creates the lifecycle folder
 	// (and /opt/cisco/defenseclaw above it) for its lock. A run that commits
@@ -677,15 +688,19 @@ type plan struct {
 	config  *validatedConfig
 	// configFromInstalled is set when config came from the installed file.
 	configFromInstalled bool
-	secrets             []string
-	secretsSHA          string
-	dirs                []desiredDir
-	files               []desiredFile
-	binaries            []desiredFile
-	createdDirs         []string
-	stale               []string
-	systemd             int
-	installedAt         string
+	// configWritable says how an account other than root could write the
+	// installed config.yaml when it could (installedConfigWritable); the
+	// transaction then replaces the file before it changes anything.
+	configWritable string
+	secrets        []string
+	secretsSHA     string
+	dirs           []desiredDir
+	files          []desiredFile
+	binaries       []desiredFile
+	createdDirs    []string
+	stale          []string
+	systemd        int
+	installedAt    string
 	// intended are the machine-policy connectors the config asks for;
 	// machinePolicy is the subset the descriptor records (all of intended
 	// unless a previous transaction with the same config could not place
@@ -696,6 +711,11 @@ type plan struct {
 	// packageUnits are the digests of the unit files the Linux package
 	// placed (package channel), keyed by canonical path.
 	packageUnits map[string]string
+	// installedConfigSHA is the installed config.yaml's digest when the plan
+	// read its inputs ("" when there was none). A different one when the
+	// transaction writes the planned config means another writer replaced
+	// the file during the run.
+	installedConfigSHA string
 }
 
 // buildPlan computes the desired state without mutating the host. account
@@ -760,14 +780,15 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
+	p.installedConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	raw, fromInstalled, err := l.configBytes()
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
-	if fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
-		if err := env.writableInstalledConfig(); err != nil {
-			return nil, &codedError{code: codeConfig, err: err}
-		}
+	writable := env.installedConfigWritable()
+	if writable != "" && fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
+		return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s changed while %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+			env.Layout.ConfigPath, writable, env.lifecycleCommand(ActionEnsure))}
 	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
@@ -817,6 +838,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	p.configFromInstalled = fromInstalled
+	p.configWritable = writable
 	p.config = validated
 
 	p.secrets, p.secretsSHA, err = env.listSecrets()
@@ -893,8 +915,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		for path := range record.Files {
 			if !want[path] {
-				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/")) {
-					continue // the package owns the binaries and units now
+				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/") ||
+					path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
+					continue // the package owns the binaries, units and OpenCode plugin now
 				}
 				p.stale = append(p.stale, path)
 			}
@@ -997,27 +1020,79 @@ func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	return nil, false, err
 }
 
-// writableInstalledConfig refuses an installed config.yaml that is not the
-// applied config while its mode or owner lets an account other than root
-// write it: that account could have written the change. The apply trigger
-// applied a standard user's edit (guardrail mode action to observe) to a
-// config.yaml a bad profile push had left 0666, and status and verify stayed
-// green (GAP-0524). The refused edit is reverted like any rejected one.
-func (e *Env) writableInstalledConfig() error {
-	path := e.P(e.Layout.ConfigPath)
-	_, _, mode, err := statOwnerMode(path)
-	if err != nil {
-		return nil // configBytes read it; the transaction reports a file that went away
+// installedConfigWritable says how an account other than root could write
+// the installed config.yaml: its mode or owner, or a folder that account can
+// write (it could put another file in its place). "" when only root can, or
+// when there is no file. The apply trigger applied an edit by a standard
+// user (guardrail mode action to observe) to a config.yaml a bad profile push
+// had left 0666, and status and verify stayed green (GAP-0524).
+func (e *Env) installedConfigWritable() string {
+	for _, canonical := range []string{e.Layout.ConfigPath, filepath.Dir(e.Layout.ConfigPath)} {
+		path := e.P(canonical)
+		_, _, mode, err := statOwnerMode(path)
+		if err != nil {
+			continue // configBytes reads or defaults the file; the transaction reports one that went away
+		}
+		uid, _, err := e.OwnerOf(path)
+		if err != nil {
+			continue
+		}
+		folder := canonical != e.Layout.ConfigPath
+		writable := mode.Perm()&0o022 != 0 && (!folder || mode&os.ModeSticky == 0)
+		if writable || (uid != 0 && uid != os.Geteuid()) {
+			return fmt.Sprintf("%s was %04o and owned by uid %d", canonical, mode.Perm(), uid)
+		}
 	}
-	uid, _, err := e.OwnerOf(path)
-	if err != nil {
-		return nil
+	return ""
+}
+
+// replaceWritableConfig puts a new file in place of an installed config.yaml
+// another account could write (p.configWritable), before the transaction
+// changes anything. Re-owning the file in place blessed what that account
+// wrote after this run read it, and a descriptor it opened while it could
+// write kept writing the live file: a standard user rewrote config.yaml a
+// moment after the mode was loosened, the run re-owned the file, and its
+// follow-up transaction applied the edit (GAP-0524). The new file holds the
+// applied config, so a later write through such a descriptor goes nowhere.
+// When config.yaml no longer holds the bytes this run read from it, that edit
+// is refused: the applied config is returned for the caller to revert to.
+func (l *lifecycle) replaceWritableConfig(record *Deployment, p *plan) ([]byte, error) {
+	env := l.env
+	if record == nil {
+		return nil, nil // no applied config to put there; an installed one was refused
 	}
-	if mode.Perm()&0o022 == 0 && (uid == 0 || uid == os.Geteuid()) {
-		return nil
+	trusted, err := readBounded(env.committedConfigPath(), maxInputBytes)
+	if err != nil || sha256Bytes(trusted) != record.ConfigSHA256 {
+		trusted = nil
 	}
-	return fmt.Errorf("%s changed while it was %04o and owned by uid %d, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
-		e.Layout.ConfigPath, mode.Perm(), uid, e.lifecycleCommand(ActionEnsure))
+	path := env.P(env.Layout.ConfigPath)
+	current, readErr := readBounded(path, maxInputBytes)
+	if trusted == nil && readErr == nil && sha256Bytes(current) == record.ConfigSHA256 {
+		trusted = current
+	}
+	if trusted == nil {
+		return nil, nil
+	}
+	// A folder another account can write lets it put another file there.
+	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	if p.configFromInstalled && readErr == nil && sha256Bytes(current) != record.ConfigSHA256 {
+		return trusted, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+			env.Layout.ConfigPath, p.configWritable, env.lifecycleCommand(ActionEnsure))}
+	}
+	// A refused edit stays current (status and verify report it) when the
+	// new file replaces the reverted one.
+	kept, keptErr := os.Stat(env.rejectedConfigPath())
+	keep := keptErr == nil && !env.rejectionSuperseded(kept)
+	if err := env.writeFileAtomic(path, trusted, 0o640, fileOwner{UID: 0, GID: p.account.GID}); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	if replaced, err := os.Stat(path); keep && err == nil {
+		_ = os.Chtimes(env.rejectedConfigPath(), replaced.ModTime(), replaced.ModTime())
+	}
+	l.noteChange("replaced %s with a new file holding the applied config: %s, so another account could write it", env.Layout.ConfigPath, p.configWritable)
+	return nil, nil
 }
 
 type codedError struct {
@@ -1063,8 +1138,20 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	committedConfig := l.inPlaceConfigEdit(record)
 	p, err := l.buildPlan(ctx, record, account)
+	if err == nil && p.configWritable != "" {
+		var applied []byte
+		if applied, err = l.replaceWritableConfig(record, p); applied != nil {
+			committedConfig = applied
+		}
+	}
 	if err != nil {
 		code := errorCode(err, codeApply)
+		if committedConfig == nil && code == codeConfig {
+			// An edit written after the check above, while this run planned
+			// (a standard user writing a config.yaml whose mode was just
+			// loosened, GAP-0524), is reverted the same way.
+			committedConfig = l.inPlaceConfigEdit(record)
+		}
 		r.AddError(code, err.Error())
 		if record == nil && account.Created {
 			// Refused before any change: the service account this run
@@ -1201,6 +1288,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if newerConfig != nil {
 			l.restoreNewerConfig(record, newerConfig)
 		}
+		if restored && record != nil && l.machinePolicyPublished {
+			l.restoreMachinePolicy(record)
+		}
+		if restored && record != nil && newerConfig == nil && l.configWrittenDuringRun != nil {
+			l.restoreNewerConfig(record, l.configWrittenDuringRun)
+		} else {
+			l.configWrittenDuringRun = nil
+		}
 		if err != nil {
 			message := err.Error()
 			if refusal := l.configRefusal(ctx); refusal != "" {
@@ -1247,6 +1342,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.settleSecretModes(ctx, account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if err := l.settleStateModes(account); err != nil {
+		return failAndRollback(codeApply, err)
+	}
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(codeApply, err)
@@ -1278,7 +1376,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		l.revokeDeletedAccounts(ctx)
 	}
 	if env.GOOS == "linux" {
-		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
+		// The module labels the hook socket; restorecon then relabels the
+		// socket already in place (GAP-0772).
+		l.ensureSELinuxModule(ctx)
+		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir), env.P(env.Layout.HookSocketDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
 			r.AddWarning("selinux_relabel", err.Error())
 		}
 	}
@@ -1587,7 +1688,15 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 			}
 			continue
 		}
-		if file.KeepContent {
+		// A config.yaml written in place while this run held the lock (a
+		// --config run, say) is newer than the bytes this run planned, so it
+		// stays and a follow-up transaction applies it (input_changed). The
+		// run overwrote it with its own file and nothing warned (GAP-0745).
+		written := file.Kind == "config" && !file.KeepContent && current != p.installedConfigSHA
+		if written {
+			l.configWrittenDuringRun, _ = readBounded(env.P(file.Path), maxInputBytes)
+		}
+		if file.KeepContent || written {
 			// Changed since the plan read it: the newer bytes stay, and the
 			// run applies them in a follow-up transaction. A regular file
 			// still gets the managed mode and owner.
@@ -1969,6 +2078,14 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 	if l.opts.ConfigFile != "" || record == nil {
 		return
 	}
+	// A config.yaml another account could write is replaced by the
+	// transaction instead (replaceWritableConfig). Fixing its mode here, in
+	// place, made it look trusted to the plan, so a write through a
+	// descriptor that account opened while it could write was applied by
+	// the follow-up transaction (GAP-0524).
+	if env.installedConfigWritable() != "" {
+		return
+	}
 	path := env.P(env.Layout.ConfigPath)
 	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
 		return
@@ -2001,8 +2118,9 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		return false, ""
 	}
 	p, err := l.buildPlan(ctx, record, account)
-	if err != nil {
-		// apply reports the same error with rollback semantics.
+	if err != nil || p.configWritable != "" {
+		// apply reports the same error with rollback semantics, or replaces
+		// a config.yaml another account could write.
 		return false, ""
 	}
 	if p.version != record.ProductVersion || p.channel != record.Channel || p.config.SHA != record.ConfigSHA256 || p.secretsSHA != record.SecretsSHA256 || len(p.stale) > 0 {
@@ -2205,13 +2323,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
-	// On Linux the deb/rpm removes its own files. A macOS pkg has no
-	// uninstaller, so the lifecycle removes the binaries and the receipt.
+	// On Linux the deb/rpm removes its own files (the binaries, units and
+	// the managed OpenCode plugin). A macOS pkg has no uninstaller, so the
+	// lifecycle removes the binaries and the receipt.
 	packageManaged := l.packageManaged
 	paths := []string{}
 	if record != nil {
 		for path := range record.Files {
-			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/")) {
+			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/") ||
+				path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
 				continue
 			}
 			paths = append(paths, path)
@@ -2273,6 +2393,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		disableKeptDefinitions()
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	l.removeSELinuxModule(ctx)
 	// Runtime leftovers of the stopped services: the sensor helper's socket
 	// directory and the gateway's plugin cache (its TempDir is /tmp: the
 	// service manager sets no TMPDIR).
@@ -2283,7 +2404,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories.
 	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
-	// The managed OpenCode plugin left with the recorded files above.
+	// The managed OpenCode plugin left with the recorded files above, or
+	// leaves with the deb or rpm that ships it.
 	_ = removeDirIfEmpty(env.P(openCodePluginDir(env.Layout)))
 	_ = removeDirIfEmpty(env.P(filepath.Dir(env.Layout.VendorPolicyDir)))
 	if env.GOOS == "darwin" {
