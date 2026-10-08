@@ -3427,6 +3427,50 @@ function Test-DefenseClawStandaloneVendorDirectory {
     )
 }
 
+# A vendor directory that already existed when standalone Setup first ran
+# (left by an earlier DefenseClaw, or by other Cisco software) kept a DACL
+# without that Users read entry, so every hook of every user failed closed
+# with enterprise_machine_policy_summary_untrusted while status and verify
+# reported ok (GAP-0577). Install, upgrade and repair add the one entry to an
+# existing vendor directory that SYSTEM, Administrators or TrustedInstaller
+# owns; nothing else on it changes, and a directory another principal owns
+# is left to the root-squat checks. The Secure Client profile never takes
+# this path.
+function Grant-DefenseClawStandaloneVendorDirectoryUsersRead {
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $vendor = [IO.Path]::GetDirectoryName(
+        [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).StateRoot
+    )
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $vendor -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or -not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return
+    }
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor
+    $owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
+        return
+    }
+    $read = 0x1200a9
+    foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+        if ([string]$rule.IdentityReference.Value -ceq $script:UsersSID -and
+            $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ([int]$rule.FileSystemRights -band $read) -eq $read) {
+            return
+        }
+    }
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+        [Security.AccessControl.FileSystemRights]$read,
+        [Security.AccessControl.InheritanceFlags]::None,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $vendor -AclObject $acl
+}
+
 # Directories strictly between the required base and a managed root. The base
 # is an OS directory and the root carries its own canonical DACL, so neither is
 # returned.
@@ -25189,6 +25233,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -KeepProtectedAcl:(Test-DefenseClawStandaloneProfile))
         }
         New-DefenseClawLayoutDirectories -Layout $layout
+        if ($Action -in @('Install', 'Upgrade', 'Repair')) {
+            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
+        }
         $pendingRecovery = Recover-DefenseClawPendingTransaction `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `

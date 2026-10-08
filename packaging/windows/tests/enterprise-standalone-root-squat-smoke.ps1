@@ -274,10 +274,27 @@ try {
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
                 $failures.Add('preparing a root changed the DACL of an existing vendor directory')
             }
+            # GAP-0577: install, upgrade and repair then give an existing
+            # administrator-owned vendor directory the same entry, once.
+            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
+            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
+            $usersRules = @(Get-TestUsersRules $vendor)
+            if ($usersRules.Count -ne 1 -or $usersRules[0].IsInherited -or
+                $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+                [int]$usersRules[0].FileSystemRights -ne 0x1200a9) {
+                $failures.Add("an existing vendor directory did not get one this-folder-only Users read entry: $($usersRules.Count)")
+            }
             Reset-TestRoots
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
             try {
                 Initialize-DefenseClawManagedRoot -Path ([IO.Path]::Combine($vendor, 'Cisco Secure Client', 'DefenseClaw-Lifecycle')) -Label 'lifecycle lock directory' -RequiredBase $Root
+            }
+            finally {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            }
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            try {
+                Grant-DefenseClawStandaloneVendorDirectoryUsersRead
             }
             finally {
                 Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
