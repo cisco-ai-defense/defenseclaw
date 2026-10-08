@@ -686,3 +686,14 @@ def test_inventory_long_agent_list_jumps_and_does_not_rescan_users_per_row() -> 
     assert panel.handle_key("pagedown").handled and panel.cursor == 16
     assert panel.handle_key("pageup").handled and panel.cursor == 0
     assert panel.handle_key("G").handled and panel.cursor == total - 1
+
+
+def test_ide_table_fits_wide_unicode_cells() -> None:
+    from defenseclaw.tui.services.inventory_state import _fit_cells
+    from rich.cells import cell_len
+
+    columns = ("User", "IDE", "Plugin", "Version", "Enabled", "AI")
+    row = ("alice", "vim", "漢" * 40, "1", "yes", "yes")
+    fitted, = _fit_cells(columns, (row,), 80, keep=("Enabled", "AI"))
+    assert sum(cell_len(cell) for cell in fitted) <= 80 - 8 - 2 * len(columns)
+    assert fitted[4:] == ("yes", "yes")
