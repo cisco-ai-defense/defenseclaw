@@ -709,6 +709,17 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	return enterpriseACPResult(cmd, enterpriseACPRevokePayload(payload, notFound), err)
 }
 
+// enterpriseACPCheck is the success mark: ASCII when Windows output goes to
+// a file or a pipe, as with the SYSTEM scheduled task an MDM runs, where the
+// check mark came out as the OEM byte 0xFB (GAP-0709). Secure Client keeps
+// the mark of main.
+func enterpriseACPCheck() string {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		return "✓"
+	}
+	return glyph("✓", "OK")
+}
+
 // enterpriseACPRevokePayload marks a revoke that found no enrollment.
 func enterpriseACPRevokePayload(payload map[string]any, notFound string) map[string]any {
 	if notFound != "" {
@@ -760,7 +771,7 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 		return err
 	}
 	if next, ok := payload["next"].(string); ok {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential enrolled\n", Style("✓", "fg=green", "bold"))
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential enrolled\n", Style(enterpriseACPCheck(), "fg=green", "bold"))
 		if replaced, _ := payload["replaced"].([]string); len(replaced) > 0 {
 			fmt.Fprintf(cmd.OutOrStdout(), "    it replaces the %s/%s enrollment in profile %s, whose credential no longer works\n",
 				payload["client"], payload["agent"], strings.Join(replaced, ", "))
@@ -770,7 +781,7 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 	}
 	if lock, ok := payload["contract_lock"].(string); ok {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s guarded %v entry written to %v (contract lock %s)\n",
-			Style("✓", "fg=green", "bold"), payload["agent"], payload["path"], lock)
+			Style(enterpriseACPCheck(), "fg=green", "bold"), payload["agent"], payload["path"], lock)
 		return nil
 	}
 	if notFound, _ := payload["not_found"].(string); notFound != "" {
@@ -781,13 +792,13 @@ func enterpriseACPResult(cmd *cobra.Command, payload map[string]any, err error) 
 		return nil
 	}
 	if revoked, _ := payload["centrally_revoked"].(bool); revoked {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential revoked\n", Style("✓", "fg=green", "bold"))
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential revoked\n", Style(enterpriseACPCheck(), "fg=green", "bold"))
 		if note, _ := payload["note"].(string); note != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", note)
 		}
 		return nil
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential verified\n", Style("✓", "fg=green", "bold"))
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s managed ACP credential verified\n", Style(enterpriseACPCheck(), "fg=green", "bold"))
 	if note, _ := payload["setup_note"].(string); note != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", note)
 	}

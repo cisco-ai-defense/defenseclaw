@@ -370,6 +370,25 @@ func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 	}
 }
 
+// Redirected Windows output carries an ASCII mark, not a check mark the
+// console code page turns into 0xFB (GAP-0709).
+func TestEnterpriseACPResultMarkIsASCIIWhenRedirected(t *testing.T) {
+	previousCfg, previousASCII, previousJSON := cfg, asciiGlyphs, enterpriseACPJSON
+	t.Cleanup(func() { cfg, asciiGlyphs, enterpriseACPJSON = previousCfg, previousASCII, previousJSON })
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	asciiGlyphs, enterpriseACPJSON = func() bool { return true }, false
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&output)
+	if err := enterpriseACPResult(command, map[string]any{"centrally_revoked": true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); !strings.Contains(got, "OK managed ACP credential revoked") || strings.Contains(got, "✓") {
+		t.Fatalf("redirected output = %q", got)
+	}
+}
+
 func TestEnterpriseACPSetupPathQuotesForPowerShell(t *testing.T) {
 	got := enterpriseACPQuotePath(`C:\Program Files\DefenseClaw\bin\gateway.exe`, true)
 	if got != `'C:\Program Files\DefenseClaw\bin\gateway.exe'` {
