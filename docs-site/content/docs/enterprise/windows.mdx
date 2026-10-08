@@ -417,11 +417,14 @@ for these fields:
 | `enrollment.targets` | The number of entries (one per user and connector) in the target manifest. `0` means nobody is protected yet. |
 | `errors` | Empty |
 
-Windows results carry no `policy` object in this release. To read the
-effective policy digest and the config generation of the installed config, run
-`defenseclaw.exe enterprise policy show`: it prints
-`Effective policy sha256:<12 hex>, config generation N` (and `policy` in
-`--json`). See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+The Setup results (`/ensure`, `/install`, `/upgrade`, `/repair`) and the
+`status` and `verify` results carry a `policy` object, as on Linux and
+macOS: `effective_digest` (the effective policy digest of the installed
+config), `config_generation`, `applied` (the gateway reports the same
+digest), `gateway_reported_digest`, and `last_reload_error` when the
+gateway rejected its last reload. `defenseclaw.exe enterprise policy show`
+prints the same as `Effective policy sha256:<12 hex>, config generation N`.
+See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
 
 On Windows, `security_complete` needs at least one of Codex, Claude Code or
 Cursor enabled, and no agent reported as `agent_unprotected` or
