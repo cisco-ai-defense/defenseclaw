@@ -259,14 +259,16 @@ func TestGuardianReadinessNeedsTheCurrentAttestation(t *testing.T) {
 			t.Fatalf("%s: guardian ready=%v errors=%s", tc.name, verify.Readiness.Guardian, got)
 		}
 	}
-	// GAP-0691: right after an apply rewrote targets.yaml, the guardian that
-	// has not reconciled it yet is a wait, not a verify failure.
+	// GAP-0691: right after an apply rewrote targets.yaml, keep the
+	// catch-up guidance but report coverage incomplete until reconciliation.
 	now := h.env.Now()
 	if err := os.Chtimes(h.env.P(h.env.Layout.ManifestPath), now, now); err != nil {
 		t.Fatal(err)
 	}
 	verify = h.run(Options{Action: ActionVerify})
-	if !verify.Readiness.Guardian || !hasWarning(verify, codeGuardianReconcilePending) || len(verify.Errors) != 0 {
+	if verify.Readiness.Guardian || verify.CoverageComplete || verify.SecurityComplete ||
+		!hasWarning(verify, codeGuardianReconcilePending) ||
+		!strings.Contains(messagesOf(verify.Errors, codeVerify), guardianManifestNotReconciled) {
 		t.Fatalf("a just-changed targets.yaml: guardian ready=%v warnings=%+v errors=%+v", verify.Readiness.Guardian, verify.Warnings, verify.Errors)
 	}
 }
