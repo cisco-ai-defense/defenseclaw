@@ -4577,35 +4577,64 @@ function Stop-DefenseClawService {
     # A hung or suspended service process never answers the stop request:
     # Stop-Service failed after the SCM's own timeout, ensure failed 1603 and
     # left the guardian and the enumerator stopped with the transaction
-    # pending (GAP-0946). Standalone gives a stop the SCM's 30-second
-    # budget, then ends the service's own process as the SCM does for a
-    # stuck stop, and continues. Every caller has disabled the service first,
-    # so its failure actions cannot restart it.
+    # pending (GAP-0946). Stop-Service also waits for the request itself,
+    # which Windows holds twice its 30-second transaction timeout while it
+    # ends the unresponsive process on its own, so each hung service cost a
+    # minute and the result never named it (GAP-1038). Standalone sends the
+    # request through a sc.exe child it does not wait on, gives the service
+    # the SCM's 30-second budget, then ends the service's own process and
+    # continues; a process Windows ended because it did not answer the request
+    # is named too. Every caller has disabled the service first, so its
+    # failure actions cannot restart it.
     $budget = [TimeSpan]::FromSeconds($script:ServiceStopTimeoutSeconds)
-    $elapsed = [Diagnostics.Stopwatch]::StartNew()
-    $stopError = $null
+    $processId = Get-DefenseClawServiceProcessId -Name $Name
+    $request = Start-DefenseClawServiceStopRequest -Name $Name
     try {
-        Microsoft.PowerShell.Management\Stop-Service -Name $Name -NoWait -ErrorAction Stop
-    }
-    catch {
-        $stopError = $_
-    }
-    if (Wait-DefenseClawServiceStopped -Service $service -Timeout ($budget - $elapsed.Elapsed)) {
-        return
-    }
-    $running = @($service.DependentServices | Microsoft.PowerShell.Core\Where-Object {
-            $_.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped
-        })
-    if ($running.Count -gt 0) {
-        if ($null -ne $stopError) {
-            throw $stopError
+        if (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget) {
+            # A service that answered has already returned the request; one
+            # whose request is still open after it stopped was ended by
+            # Windows.
+            if ($processId -ne 0 -and -not $request.WaitForExit(3000)) {
+                $script:DefenseClawTerminatedServiceProcesses += "$Name (pid $processId)"
+            }
+            return
         }
-        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds while $($running[0].ServiceName) depends on it"
+        $running = @($service.DependentServices | Microsoft.PowerShell.Core\Where-Object {
+                $_.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped
+            })
+        if ($running.Count -gt 0) {
+            throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds while $($running[0].ServiceName) depends on it"
+        }
+        Stop-DefenseClawUnresponsiveServiceProcess -Name $Name
+        if (-not (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget)) {
+            throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds after its process was ended"
+        }
     }
-    Stop-DefenseClawUnresponsiveServiceProcess -Name $Name
-    if (-not (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget)) {
-        throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds after its process was ended"
+    finally {
+        if (-not $request.HasExited) {
+            try {
+                $request.Kill()
+            }
+            catch {
+            }
+            [void]$request.WaitForExit(5000)
+        }
+        $request.Dispose()
     }
+}
+
+# Sends a stop request for a DefenseClaw service through a sc.exe child and
+# returns that process without waiting for it: the request stays open for as
+# long as an unresponsive service does not answer it.
+function Start-DefenseClawServiceStopRequest {
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-DefenseClawServiceName -Name $Name
+    $info = [Diagnostics.ProcessStartInfo]::new($script:ScExe, "stop $Name")
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    return [Diagnostics.Process]::Start($info)
 }
 
 # How long a standalone stop waits before it ends a service process that
