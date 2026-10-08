@@ -1,12 +1,13 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package connector
 
 import (
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -16,9 +17,6 @@ import (
 // as that, not as a host gateway's token drift; another 401 or 403 points at
 // sandbox doctor, and other failures read as before.
 func TestSandboxHookFailureReasonNamesAPlaceholderRefusal(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell hooks are not used on Windows")
-	}
 	dir := t.TempDir()
 	writeSandboxRendering(t, dir, "claudecode", renderSandboxGolden(t, &ClaudeCodeConnector{}, "2.1.156").Files)
 	hooks := filepath.Join(dir, "claudecode", "usr", "local", "lib", "defenseclaw", "hooks")
