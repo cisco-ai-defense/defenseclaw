@@ -723,7 +723,10 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
         if facts.get("target"):
             row["target"] = facts["target"]
-        for key in ("decision", "route", "rule", "scanner", "location", "sandbox", "path", "moved_to", "description", "next_step"):
+        for key in (
+            "decision", "route", "rule", "scanner", "location",
+            "sandbox", "path", "moved_to", "description", "next_step",
+        ):
             if facts.get(key):
                 row[key] = facts[key]
         if "moved_to" in facts:
