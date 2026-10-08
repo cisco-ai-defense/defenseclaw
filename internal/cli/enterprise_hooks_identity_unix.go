@@ -49,14 +49,7 @@ var enterpriseHookIdentitySpoolState struct {
 	failed      bool
 }
 
-func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return
-	}
-	dir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	if dir == "" {
-		return
-	}
+func enterpriseHookIdentityAccounts(run enterpriseHookReconcileRun, stderr io.Writer) ([]enterprisehooks.IdentitySpoolAccount, []string) {
 	accounts := []enterprisehooks.IdentitySpoolAccount{}
 	keys := []string{}
 	seen := map[int]bool{}
@@ -65,8 +58,17 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			continue
 		}
 		seen[row.UID] = true
-		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: row.UID, User: row.User})
-		keys = append(keys, strconv.Itoa(row.UID)+":"+row.User)
+		user := row.User
+		if user == "" {
+			// A home-only manifest row has a verified UID but no user name.
+			// macOS directory collection needs the name to read that UID's
+			// Open Directory record.
+			if account, err := enterprisehooks.StandaloneResolver().LookupUID(row.UID); err == nil && account.UID == row.UID {
+				user = account.Name
+			}
+		}
+		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: row.UID, User: user})
+		keys = append(keys, strconv.Itoa(row.UID)+":"+user)
 	}
 	// Eligible accounts without rows, and accounts whose home is untrusted,
 	// keep their identity record too: a standard user who makes his home
@@ -86,6 +88,18 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			keys = append(keys, strconv.Itoa(account.UID)+":"+account.User)
 		}
 	}
+	return accounts, keys
+}
+
+func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return
+	}
+	dir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	if dir == "" {
+		return
+	}
+	accounts, keys := enterpriseHookIdentityAccounts(run, stderr)
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")
 	now := time.Now()
