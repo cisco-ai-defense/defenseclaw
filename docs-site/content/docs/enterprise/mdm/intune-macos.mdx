@@ -248,7 +248,11 @@ Run it before the config and pkg steps. In `config.yaml`, set
 
 ## Remove DefenseClaw
 
-First remove the Macs from the install script's assignment. Then assign a root
+First remove the Macs from the install script's assignment. Wait until
+each device has checked in and no longer reports the install script as assigned before assigning uninstall. The Intune agent can run a
+cached recurring install script after unassignment and reinstall the pkg
+after uninstall. Confirm the install script has stopped running on the device
+and that removal stays in effect at the next check-in. Then assign a root
 shell script, set to run once, with `packaging/mdm/macos/uninstall.sh`. It
 stops and removes the LaunchDaemons, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), removes the binaries and
