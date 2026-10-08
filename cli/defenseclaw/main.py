@@ -688,6 +688,15 @@ def _silence_closed_stdout() -> None:
         pass
 
 
+def _cwd_is_gone() -> bool:
+    """Whether this process's working directory was deleted."""
+    try:
+        os.getcwd()
+    except FileNotFoundError:
+        return True
+    return False
+
+
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
@@ -720,6 +729,15 @@ def main() -> None:
             sys.exit(1)
         import errno
 
+        if exc.errno == errno.ENOENT and _cwd_is_gone():
+            # GAP-0264: a shell left in a folder that was deleted made the
+            # first relative path fail in os.path.abspath, with a traceback.
+            click.echo(
+                "Error: the current directory no longer exists. cd to an existing directory "
+                "and run the command again.",
+                err=True,
+            )
+            sys.exit(1)
         if exc.errno != errno.ENOSPC:
             raise
         # GAP-1838: a full disk is an environment problem, not a crash.
