@@ -271,7 +271,7 @@ func TestRunAsUserStepNamesTheUID(t *testing.T) {
 	}
 	gotP, _ := os.ReadFile(passwd)
 	gotG, _ := os.ReadFile(group)
-	if !strings.Contains(string(gotP), "\nsandbox:x:1005:1005:Sandbox:/sandbox:/bin/bash\n") || !strings.HasPrefix(string(gotG), "sandbox:x:1005:\n") {
+	if !strings.HasPrefix(string(gotP), "sandbox:x:1005:1005:Sandbox:/sandbox:/bin/bash\n") || !strings.HasPrefix(string(gotG), "sandbox:x:1005:\n") {
 		t.Fatalf("passwd = %q, group = %q", gotP, gotG)
 	}
 
@@ -294,6 +294,19 @@ func TestRunAsUserStepNamesTheUID(t *testing.T) {
 	gotG, _ = os.ReadFile(group)
 	if string(gotG) != "sandbox:x:20:\nroot:x:0:\ndialout:x:20:\n" {
 		t.Fatalf("group = %q", gotG)
+	}
+
+	// A custom base may already assign the host uid to another account.
+	// The workload must resolve that uid and home to sandbox.
+	if err := os.WriteFile(passwd, []byte("root:x:0:0:root:/root:/bin/bash\nubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\nsandbox:x:998:998:Sandbox:/home/sandbox:/bin/bash\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-c", runAsUserStep(1000, 1000, passwd, group)).CombinedOutput(); err != nil {
+		t.Fatalf("step with existing uid: %v %s", err, out)
+	}
+	gotP, _ = os.ReadFile(passwd)
+	if !strings.HasPrefix(string(gotP), "sandbox:x:1000:1000:Sandbox:/sandbox:/bin/bash\n") {
+		t.Fatalf("passwd = %q", gotP)
 	}
 }
 

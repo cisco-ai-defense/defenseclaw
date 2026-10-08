@@ -52,6 +52,30 @@ class AlertFindingRowsTests(unittest.TestCase):
         else:
             os.environ["COLUMNS"] = self._columns
 
+    def test_alert_identity_does_not_cross_users_with_shared_request_id(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        alert = Event(action="scan-finding", severity="HIGH", connector="claudecode",
+                      structured={"user.id": "alice"}, timestamp=now)
+        bob = Event(action="hook_decision", severity="INFO", connector="claudecode",
+                    structured={"user.id": "bob", "defenseclaw.agent.identity.id": "agt-bob"},
+                    timestamp=now)
+        store.log_event(alert)
+        store.log_event(bob)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id IN (?, ?)",
+                         ("shared-request", alert.id, bob.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([alert.id])[alert.id], {"user": "alice"})
+
+        alice = Event(action="hook_decision", severity="INFO", connector="claudecode",
+                      structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-alice"},
+                      timestamp=now)
+        store.log_event(alice)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?", ("shared-request", alice.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([alert.id])[alert.id],
+                         {"user": "alice", "agent_identity": "agt-alice"})
+
     def _finding(self, request_id: str, hook_details: str, at: datetime) -> str:
         store = self.app.store
         hook = Event(action="connector-hook", target="PreToolUse", severity="INFO",
@@ -170,8 +194,17 @@ class AlertFindingRowsTests(unittest.TestCase):
                 self.app.store.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
         finding_id = self._finding("req-sub", "connector=claudecode result=ok action=block mode=action",
                                    datetime.now(timezone.utc))
+        # The gateway stamps the verified user ID on both rows. A request ID
+        # alone must never authorize borrowing the hook's agent identity.
+        self.app.store.db.execute(
+            """UPDATE audit_events
+               SET structured_json=json_set(structured_json, '$."user.id"', 'alice-id')
+               WHERE id=?""",
+            (finding_id,),
+        )
         decision = Event(action="hook_decision", target="PreToolUse", severity="INFO", connector="claudecode",
-                         structured={"defenseclaw.user.name": "alice", "defenseclaw.agent.depth": 1,
+                         structured={"user.id": "alice-id", "defenseclaw.user.name": "alice",
+                                     "defenseclaw.agent.depth": 1,
                                      "defenseclaw.agent.identity.id": "agt-0123456789abcdef"})
         self.app.store.log_event(decision)
         self.app.store.db.execute("UPDATE audit_events SET request_id='req-sub' WHERE id=?", (decision.id,))

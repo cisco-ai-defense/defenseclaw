@@ -419,19 +419,20 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 
 // runAsUserStep names the run-as uid and gid in the image: the workload
 // runs as the host uid, which the base image's sandbox user does not have,
-// so whoami and every tool that looks up the uid failed. Unless an entry
-// already has the uid, the sandbox user takes it, with HOME at the sandbox
-// home; file owners are numbers and stay as they are. The sandbox group
-// takes the gid and comes first in the group file, so that id names the
+// so whoami and every tool that looks up the uid failed. The sandbox
+// user takes it even if the base image has another account with that uid,
+// and comes first in passwd so name lookups resolve to sandbox. File owners
+// are numbers and stay as they are. The sandbox group takes the gid and comes first in the group file, so that id names the
 // group "sandbox" even where the base image gives the gid to another
 // group: a Mac's primary gid 20 is dialout in a Debian image, and the
 // workload read as a member of the serial-device group.
 func runAsUserStep(uid, gid int, passwd, group string) string {
 	return fmt.Sprintf(`set -eu; `+
-		`grep -q '^[^:]*:[^:]*:%[1]d:' %[3]s || sed -i -E 's#^sandbox:([^:]*):[0-9]+:[0-9]+:([^:]*):[^:]*:#sandbox:\1:%[1]d:%[2]d:\2:%[5]s:#' %[3]s; `+
+		`sed -i -E 's#^sandbox:([^:]*):[0-9]+:[0-9]+:([^:]*):[^:]*:#sandbox:\1:%[1]d:%[2]d:\2:%[5]s:#' %[3]s; `+
 		`grep -q '^sandbox:[^:]*:%[2]d:' %[4]s || { sed -i -E 's#^sandbox:([^:]*):[0-9]+:#sandbox:\1:%[2]d:#' %[4]s; `+
 		`{ grep '^sandbox:' %[4]s || true; grep -v '^sandbox:' %[4]s || true; } > %[4]s.new; cat %[4]s.new > %[4]s; rm -f %[4]s.new; }; `+
-		`grep -q '^[^:]*:[^:]*:%[1]d:' %[3]s || { echo "the base image has no sandbox user in %[3]s to give the run-as uid %[1]d" >&2; exit 1; }`,
+		`grep -q '^sandbox:[^:]*:%[1]d:%[2]d:' %[3]s || { echo "the base image has no sandbox user in %[3]s to give the run-as uid %[1]d" >&2; exit 1; }; `+
+		`{ grep '^sandbox:' %[3]s; grep -v '^sandbox:' %[3]s || true; } > %[3]s.new; cat %[3]s.new > %[3]s; rm -f %[3]s.new`,
 		uid, gid, passwd, group, connector.SandboxHomeDir)
 }
 
