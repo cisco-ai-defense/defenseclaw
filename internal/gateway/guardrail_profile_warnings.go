@@ -24,12 +24,11 @@ import (
 // repeat: things that are not errors but that the profile decision alone
 // does not show.
 func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) []string {
-	var warnings []string
-	warnings = append(warnings, set.unknownConnectorWarnings()...)
-	if subject == nil || !subject.LookupFailed {
-		warnings = append(warnings, set.unknownGroupWarnings(profileGroupCheckWait)...)
-	}
+	warnings := set.assignmentWarnings(subject == nil || !subject.LookupFailed)
 	if note := shortNameUserNote(set, decision, subject); note != "" {
+		warnings = append(warnings, note)
+	}
+	if note := shortNameGroupNote(decision); note != "" {
 		warnings = append(warnings, note)
 	}
 	if note := entraShortNameNote(set, subject, runtime.GOOS); note != "" {
@@ -46,6 +45,25 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	return warnings
 }
 
+// assignmentWarnings is the shared source for explain, list, status and
+// verify. A failed subject lookup may indicate an offline
+// directory, so only that request skips directory group checks; per-user
+// Windows needs no directory check to know group selectors cannot match.
+func (set *guardrailProfileSet) assignmentWarnings(checkGroups bool) []string {
+	return set.assignmentWarningsWithWait(checkGroups, profileGroupCheckWait)
+}
+
+func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wait time.Duration) []string {
+	if set == nil {
+		return nil
+	}
+	warnings := set.unknownConnectorWarnings()
+	if checkGroups || runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
+		warnings = append(warnings, set.unknownGroupWarnings(wait)...)
+	}
+	return warnings
+}
+
 // unknownConnectorWarnings points out profile selectors and overrides that
 // cannot match any built-in connector. Config is a leaf package, so it cannot
 // consult the runtime registry; plugin names remain valid, with a warning
@@ -54,20 +72,10 @@ func (set *guardrailProfileSet) unknownConnectorWarnings() []string {
 	if set == nil || set.base == nil {
 		return nil
 	}
-	known := func(name string) bool {
-		norm := strings.ToLower(strings.TrimSpace(name))
-		switch norm {
-		case "claude-code", "claude_code":
-			norm = "claudecode"
-		case "open-hands", "open_hands":
-			norm = "openhands"
-		}
-		return connector.IsKnownBuiltinConnector(norm) || set.base.Guardrail.HasConnector(norm)
-	}
 	var warnings []string
 	for i, assignment := range set.assignments {
 		for _, name := range assignment.Match.Connectors {
-			if !known(name) {
+			if !set.knownConnector(name) {
 				warnings = append(warnings, fmt.Sprintf("guardrail.profile_assignments[%d].match.connectors: %q is not a built-in or configured connector; check its spelling or plugin", i, name))
 			}
 		}
@@ -85,12 +93,20 @@ func (set *guardrailProfileSet) unknownConnectorWarnings() []string {
 		}
 		slices.Sort(connectors)
 		for _, name := range connectors {
-			if !known(name) {
+			if !set.knownConnector(name) {
 				warnings = append(warnings, fmt.Sprintf("guardrail.profiles[%q].connectors: %q is not a built-in or configured connector; check its spelling or plugin", profileName, name))
 			}
 		}
 	}
 	return warnings
+}
+
+func (set *guardrailProfileSet) knownConnector(name string) bool {
+	if set == nil || set.base == nil {
+		return false
+	}
+	norm := config.NormalizeConnectorName(name)
+	return connector.IsKnownBuiltinConnector(norm) || set.base.Guardrail.HasConnector(norm)
 }
 
 // unnamedGroupsNote says when some of the explained account's groups are
@@ -330,8 +346,8 @@ func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAs
 				quiet = !directoryAnswers(ctx, u.group, u.domain, exists)
 				silent[domainKey] = quiet
 				if quiet {
-					warnings = append(warnings, fmt.Sprintf("could not check the groups of %s: the directory does not answer "+
-						"(unreachable, or SSSD offline with an empty cache), so they are not reported as unknown", u.domain))
+					warnings = append(warnings, fmt.Sprintf("could not confirm group names written for %s by this spelling; "+
+						"check the qualified name with getent group, since the host may use a different domain prefix or the lookup may be unavailable", u.domain))
 				}
 			}
 			if quiet {
@@ -389,6 +405,15 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 			"write %s (or the uid) to select only this account", decision.Assignment, entry, qualified)
 	}
 	return ""
+}
+
+func shortNameGroupNote(decision profileDecision) string {
+	group := strings.TrimSpace(decision.MatchedGroup)
+	if decision.Match != profileMatchGroup || group == "" || strings.ContainsAny(group, `@\`) ||
+		strings.HasPrefix(strings.ToUpper(group), "S-1-") || strings.Trim(group, "0123456789") == "" {
+		return ""
+	}
+	return fmt.Sprintf("assignment %d selects this account by bare group %q, which can also match a same-named group in another domain; use DOMAIN\\name or the group SID to select one domain", decision.Assignment, group)
 }
 
 // entraShortNameNote says when the host names an Entra ID account by its

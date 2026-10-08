@@ -822,7 +822,7 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	// GAP-0255: the gateway's own lookups work (a local account, or at start
 	// before the first failure) but no group of dclab.test is known, Domain
 	// Users included: one note, no group reported as renamed or deleted.
-	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not check the groups of dclab.test") {
+	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 1 || !strings.HasPrefix(got[0], "could not confirm group names written for dclab.test") || strings.Contains(got[0], "SSSD") {
 		t.Fatalf("warnings = %q while the directory does not answer, want one note", got)
 	}
 	profileGroupExists = func(_ context.Context, name string) (bool, error) { return name == "domain users@dclab.test", nil }
@@ -980,6 +980,61 @@ func TestProfileExplainWarnsUnknownConnectorNames(t *testing.T) {
 	if len(warnings) != 2 || !strings.Contains(warnings[0], "profile_assignments[0].match.connectors") ||
 		!strings.Contains(warnings[1], `profiles["strict"].connectors`) {
 		t.Fatalf("unknown connector warnings = %q", warnings)
+	}
+}
+
+func TestProfileExplainFlagsUnknownConnectorAndUnverifiedAgent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, profiles: map[string]config.DerivedGuardrailProfile{}, defaultProfile: "strict"})
+	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
+	for _, check := range []struct {
+		query string
+		code  int
+		want  string
+	}{
+		{"?connector=claudcode", http.StatusBadRequest, "unknown connector"},
+		{"?user=not-a-real-account&connector=codex&agent=agt-0000000000000000", http.StatusOK, "not verified against a host identity record"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve"+check.query, nil)
+		req.RemoteAddr = "127.0.0.1:40000"
+		response := httptest.NewRecorder()
+		api.handleGuardrailProfileResolve(response, req)
+		if response.Code != check.code || !strings.Contains(response.Body.String(), check.want) {
+			t.Fatalf("%s = %d %s", check.query, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
+	previous := profileExplainSubjectLookup
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubject{UserID: "1201", UserName: "alice", Groups: []string{"team"}}, nil
+	}
+	t.Cleanup(func() { profileExplainSubjectLookup = previous })
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, profiles: map[string]config.DerivedGuardrailProfile{},
+		assignments: []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"team"}}}}})
+	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=alice", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	response := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(response, req)
+	if !strings.Contains(response.Body.String(), "previous profile for up to 15 minutes") {
+		t.Fatalf("explain omitted hook cache window: %s", response.Body.String())
+	}
+}
+
+func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
+	note := shortNameGroupNote(profileDecision{Match: profileMatchGroup, MatchedGroup: "dc-ew-twin", Assignment: 1})
+	if !strings.Contains(note, "same-named group in another domain") || !strings.Contains(note, `DOMAIN\name`) {
+		t.Fatalf("bare group warning = %q", note)
+	}
+	if qualified := shortNameGroupNote(profileDecision{Match: profileMatchGroup, MatchedGroup: `DCLAB\dc-ew-twin`, Assignment: 1}); qualified != "" {
+		t.Fatalf("qualified group warning = %q", qualified)
 	}
 }
 
