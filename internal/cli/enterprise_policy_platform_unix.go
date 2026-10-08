@@ -115,7 +115,7 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 	// reads the files as the user; the standalone rules let that check use
 	// NSS too, not only /etc/passwd, which is all a static build's os/user
 	// reads (GAP-0740).
-	configureEnterpriseHooksStandaloneUnix(ctx)
+	configureEnterpriseHooksStandaloneUnix()
 	resolver := unixidentity.Default(ctx)
 	account, err := unixidentity.LookupAccountSpelling(resolver, name, unixidentity.DirectoryFactsFunc(ctx))
 	if err != nil {
