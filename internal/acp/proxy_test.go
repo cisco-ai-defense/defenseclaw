@@ -120,6 +120,41 @@ func TestCopyFramesObserveFailsClosedOnRuntimeModeMismatch(t *testing.T) {
 	}
 }
 
+// chanWriter hands every write to the test.
+type chanWriter chan []byte
+
+func (w chanWriter) Write(p []byte) (int, error) {
+	w <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+// A prompt the agent does not answer gets a notice, once: Hermes waiting for
+// its first-run questions on a terminal left the thread on a spinner with no
+// text (GAP-0870). Any agent frame cancels it.
+func TestSilentAgentPromptGetsAWaitNotice(t *testing.T) {
+	previous := agentSilenceNotice
+	agentSilenceNotice = 20 * time.Millisecond
+	t.Cleanup(func() { agentSilenceNotice = previous })
+	client := make(chanWriter, 4)
+	state := &proxyState{peerProtocolFixes: true}
+	state.armSilenceNotice(ProxyOptions{AgentID: "hermes"}, "s1", client)
+	select {
+	case frame := <-client:
+		if !strings.Contains(string(frame), `"sessionId":"s1"`) || !strings.Contains(string(frame), "run hermes once in a terminal") {
+			t.Fatalf("notice = %s", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no notice for a silent agent")
+	}
+	state.armSilenceNotice(ProxyOptions{AgentID: "hermes"}, "s2", client)
+	state.agentSpoke()
+	select {
+	case frame := <-client:
+		t.Fatalf("a notice after the agent answered: %s", frame)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestCopyFramesActionBuffersOutputUntilPromptResponse(t *testing.T) {
 	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
 	var agentInput, clientOutput bytes.Buffer
