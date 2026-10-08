@@ -831,6 +831,33 @@ class TestSkillScannerEnvFromConfig(unittest.TestCase):
                 self.assertNotIn("ENABLE_LLM_ANALYZER", os.environ)
                 self.assertNotIn("VIRUSTOTAL_API_KEY", os.environ)
             self.assertEqual(os.environ["SKILL_SCANNER_LLM_MODEL"], "other")
+        from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+
+        inherited = {"SKILL_SCANNER_LLM_MODEL": "openai/inherited-model",
+                     "SKILL_SCANNER_LLM_API_KEY": "inherited-key"}
+        with patch.dict(os.environ, inherited):
+            scanner = SkillScannerWrapper(SkillScannerConfig(use_llm=True), secure_client=True)
+            self.assertEqual(scanner._judge()["llm_model"], "openai/inherited-model")
+
+
+class TestScannerEnvEndpointIsolation(unittest.TestCase):
+    def test_inherited_openai_endpoints_do_not_reach_judge(self):
+        from defenseclaw.scanner.settings import scanner_env
+
+        inherited = {
+            "OPENAI_BASE_URL": "https://inherited.example.test",
+            "OPENAI_API_BASE": "https://inherited.example.test",
+        }
+        with patch.dict(os.environ, inherited):
+            with scanner_env({}):
+                self.assertNotIn("OPENAI_BASE_URL", os.environ)
+                self.assertNotIn("OPENAI_API_BASE", os.environ)
+            self.assertEqual(os.environ["OPENAI_BASE_URL"], inherited["OPENAI_BASE_URL"])
+            self.assertEqual(os.environ["OPENAI_API_BASE"], inherited["OPENAI_API_BASE"])
+            with scanner_env({}, secure_client=True):
+                self.assertEqual(os.environ["OPENAI_BASE_URL"], inherited["OPENAI_BASE_URL"])
+                self.assertEqual(os.environ["OPENAI_API_BASE"], inherited["OPENAI_API_BASE"])
 
 
 class TestSkillScannerCommonConfigs(unittest.TestCase):
