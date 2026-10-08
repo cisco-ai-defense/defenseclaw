@@ -196,7 +196,9 @@ rules:
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
-		"contractors": {RulePackDir: packDir, HILT: &config.HILTConfig{Enabled: true, MinSeverity: "medium"}},
+		"contractors": {Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"openclaw": {RulePackDir: packDir},
+		}, HILT: &config.HILTConfig{Enabled: true, MinSeverity: "medium"}},
 	}
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
 		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
