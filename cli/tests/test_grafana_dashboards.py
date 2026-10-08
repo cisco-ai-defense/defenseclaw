@@ -1100,6 +1100,25 @@ def test_merged_loki_tables_name_their_value_columns() -> None:
     assert checked
 
 
+def test_rename_by_regex_steps_use_grafanas_option_names() -> None:
+    # GAP-0057: five tables (kernel policies, the customer-policy hook join,
+    # kernel denials, per-connector traffic and verdicts) set renameByRegex's
+    # pattern as "regexp". Grafana reads "regex", so the step renamed nothing,
+    # the value column kept "Value #<refId>" and organize's rename of the bare
+    # refId matched nothing.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        panels = [*board.get("panels", []), *(child for row in board.get("panels", []) for child in row.get("panels", []))]
+        for panel in panels:
+            for step in panel.get("transformations", []):
+                if step["id"] != "renameByRegex":
+                    continue
+                assert set(step["options"]) == {"regex", "renamePattern"}, (path.name, panel["title"], step["options"])
+                checked += 1
+    assert checked
+
+
 def test_sandboxes_blocked_egress_leaves_out_audit_only_refusals() -> None:
     # GAP-0134: a refused name lookup is audited before the refused
     # connection it precedes, and a harness's own request is expected

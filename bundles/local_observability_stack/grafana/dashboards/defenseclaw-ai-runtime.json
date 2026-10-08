@@ -1929,7 +1929,7 @@
         {
           "id": "renameByRegex",
           "options": {
-            "regexp": "Value #(\\w+)",
+            "regex": "Value #(\\w+)",
             "renamePattern": "$1"
           }
         },
@@ -2485,7 +2485,7 @@
         {
           "id": "renameByRegex",
           "options": {
-            "regexp": "Value #(\\w+)",
+            "regex": "Value #(\\w+)",
             "renamePattern": "$1"
           }
         },
