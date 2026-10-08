@@ -340,7 +340,7 @@ func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
 	if !attestation.BoundTo(ledger) {
 		return "the hook guardian's authorization ledger does not match its last credential attestation; the next guardian reconcile publishes both", true
 	}
-	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(e.P(e.Layout.ManifestPath))
+	manifest, manifestSHA256, err := enterprisehooks.LoadStandaloneManifestWithSHA256(e.P(e.Layout.ManifestPath))
 	if err != nil {
 		return "guardian targets: " + err.Error(), false
 	}
@@ -1058,7 +1058,7 @@ func (l *lifecycle) recoverInterruptedRotation(ctx context.Context, record *Depl
 	var problems []string
 	if err := env.withReconcileLock(ctx, func() error {
 		if intent != nil {
-			_, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(env.P(env.Layout.ManifestPath))
+			_, manifestSHA256, err := enterprisehooks.LoadStandaloneManifestWithSHA256(env.P(env.Layout.ManifestPath))
 			if err == nil {
 				err = env.saveTransaction(*intent, enterprisehooks.CredentialPhaseRollback, manifestSHA256)
 			}
