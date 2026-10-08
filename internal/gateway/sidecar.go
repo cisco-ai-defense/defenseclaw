@@ -877,7 +877,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 
 	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
-		s.currentConfig().Gateway.AutoApprove, WatcherWatchesDirs(s.currentConfig()), s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
+		s.currentConfig().Gateway.AutoApprove, watcherStartupEnabled(s.currentConfig()), s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
 	if err := s.recordSidecarLifecycle(runCtx, audit.ActionSidecarStart); err != nil {
 		return err
 	}
@@ -3136,10 +3136,21 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 // of the last one): the empty name resolves to the OpenClaw default and
 // watching its folders would create ~/.openclaw (GAP-1056). Not on a managed
 // enterprise service either: its home is the service profile, which never
-// holds a user's skills or plugins (GAP-0026). Explicit gateway.watcher dirs
-// apply in both cases.
+// holds a user's skills or plugins (GAP-0026). Secure Client keeps the
+// pre-1.0 connector directories; explicit gateway.watcher dirs apply in all
+// profiles.
 func watcherUsesConnectorDirs(cfg *config.Config) bool {
-	return cfg.HasConnectorConfigured() && !managed.IsManagedEnterprise(cfg.DeploymentMode)
+	return cfg.HasConnectorConfigured() &&
+		(!managed.IsManagedEnterprise(cfg.DeploymentMode) || cfg.SecureClientIntegration())
+}
+
+// watcherStartupEnabled keeps Secure Client's pre-1.0 startup value, which
+// reports the configured switch even when no directories are resolved.
+func watcherStartupEnabled(cfg *config.Config) bool {
+	if cfg.SecureClientIntegration() {
+		return cfg.Gateway.Watcher.Enabled
+	}
+	return WatcherWatchesDirs(cfg)
 }
 
 // WatcherWatchesDirs reports whether the watcher is enabled and may watch a
