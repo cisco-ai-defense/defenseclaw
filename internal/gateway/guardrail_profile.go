@@ -963,7 +963,7 @@ func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *c
 
 // scanAllRulesFor is ScanAllRules with the request's profile rule pack.
 func scanAllRulesFor(ctx context.Context, text, toolName string) []RuleFinding {
-	return scanAllRulesForConnectorFor(ctx, "", text, toolName)
+	return scanAllRulesForConnectorFor(ctx, profileRequestConnector(ctx), text, toolName)
 }
 
 // scanAllRulesForConnectorFor is ScanAllRulesForConnector with the request's
