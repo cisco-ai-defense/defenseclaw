@@ -2970,12 +2970,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.scannerCfg == nil {
+	cfg := a.liveConfig()
+	if cfg == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
 		return
 	}
 
-	ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+	ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()

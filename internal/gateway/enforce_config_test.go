@@ -163,3 +163,23 @@ func TestEnforceRefusedOnManagedStandalone(t *testing.T) {
 	}
 	t.Fatalf("no refused api-enforce-allow audit event in %d events", len(events))
 }
+
+// A URL-only rule is listed under its URL and must be removable by that key.
+func TestEnforceUnblockListedURLRule(t *testing.T) {
+	url := "https://example.invalid/mcp"
+	api, recorded := enforceTestAPI(t, "asset_policy:\n  mcp:\n    denied:\n      - {url: https://example.invalid/mcp, reason: blocked}\n")
+	api.scannerCfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: url, Reason: "blocked"}}
+
+	w := httptest.NewRecorder()
+	api.handleEnforceBlocked(w, httptest.NewRequest(http.MethodGet, "/enforce/blocked", nil))
+	var entries []enforcementEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil || len(entries) != 1 {
+		t.Fatalf("listed rules = %v %s", err, w.Body.String())
+	}
+	code, out := enforceRequest(t, api.handleEnforceBlock, http.MethodDelete,
+		`{"target_type":"mcp","target_name":"`+entries[0].TargetName+`"}`)
+	want := []configwrite.Change{{Path: "asset_policy.mcp.denied", Value: []map[string]any{}}}
+	if code != http.StatusOK || !reflect.DeepEqual(*recorded, want) {
+		t.Fatalf("unblock = %d %v, changes %#v; want %#v", code, out, *recorded, want)
+	}
+}
