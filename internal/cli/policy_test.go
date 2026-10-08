@@ -298,6 +298,37 @@ func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 	})
 }
 
+func TestSecureClientPolicyCommandsLoadLegacyData(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "rego")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	module := `package defenseclaw.admission
+import rego.v1
+verdict := data.guardrail.verdict
+reason := "legacy data"
+file_action := "allow"
+install_action := "allow"
+runtime_action := "allow"
+`
+	if err := os.WriteFile(filepath.Join(dir, "admission.rego"), []byte(module), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data.json"), []byte(`{"guardrail":{"verdict":"allowed"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setPolicyPathTestConfig(t, &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: root})
+	setPolicyPathTestFlags(t)
+	if _, err := capturePolicyPathTestOutput(t, func() error { return policyValidateCmd.RunE(policyValidateCmd, nil) }); err != nil {
+		t.Fatalf("validate legacy bundle: %v", err)
+	}
+	out, err := capturePolicyPathTestOutput(t, func() error { return policyEvaluateCmd.RunE(policyEvaluateCmd, nil) })
+	if err != nil || !strings.Contains(out, `"verdict": "allowed"`) {
+		t.Fatalf("evaluate legacy bundle: output %q, error %v", out, err)
+	}
+}
+
 func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	ownGatewayListener(t)
 	const token = "reload-fixture-value"
