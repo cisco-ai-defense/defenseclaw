@@ -31,8 +31,10 @@ profile applied and why.
   group, user, connector or agent, and check the result with
   `defenseclaw guardrail profile list|show|explain`. See
   [User- and group-based policies](/docs/guardrail/user-and-group-policies).
-- **Agent identity.** Every agent install gets a stable `agt-` ID, every chat
-  a stable `ais-` ID, listed by `defenseclaw agent identities`. See
+- **Agent identity.** Every agent install gets a stable `agt-` ID, listed by
+  `defenseclaw agent identities` (one row per install, user and connector),
+  and every chat and sub-agent a stable `ais-` ID, which its records carry
+  with the lineage and the user's principal. See
   [Agent identity](#agent-identity).
 - **IDE and plugin inventory.** Every extension and plugin in VS Code and its
   forks, JetBrains IDEs, Visual Studio, Zed, Eclipse and Neovim, per user,
