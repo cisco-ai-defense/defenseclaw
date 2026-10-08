@@ -164,6 +164,31 @@ func installMessage(t *testing.T, h *testHost, raw string) string {
 	return r.Errors[0].Message
 }
 
+// GAP-0939, GAP-0940: a destination secret read from an environment
+// variable is refused up front whether or not the variable is set (set, the
+// config was applied and the gateway failed to start into a rollback), and
+// a destination with both fields gets the documented sentence.
+func TestManagedConfigRefusesEnvironmentSecretReferences(t *testing.T) {
+	hec := "observability:\n  destinations:\n    - name: eoi-hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://hec.example.test:8088/services/collector\n      token_env: EO3_REF\n"
+	for _, value := range []string{"", "set"} {
+		t.Setenv("EO3_REF", value)
+		h := newTestHost(t, "linux")
+		got := installMessage(t, h, string(DefaultConfig(h.env.Layout))+hec)
+		if !strings.Contains(got, "(eoi-hec) token_env reads a secret from an environment variable") ||
+			!strings.Contains(got, "never passes one to its services") || !strings.Contains(got, "token_credential") ||
+			!strings.Contains(got, "enterprise secret set") || strings.Contains(got, "keys set") {
+			t.Fatalf("EO3_REF=%q: %s", value, got)
+		}
+	}
+	h := newTestHost(t, "linux")
+	both := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: eo3-http\n      kind: http_jsonl\n" +
+		"      endpoint: https://collector.example.test/ingest\n      bearer_credential: eo3-http-token\n      bearer_env: EO3_REF\n"
+	if got := installMessage(t, h, both); !strings.Contains(got, "(eo3-http) sets both bearer_credential and bearer_env; set either bearer_credential or bearer_env, not both") {
+		t.Fatalf("both fields: %s", got)
+	}
+}
+
 // GAP-0829: a malformed agent identity names the assignment, the value and
 // the form.
 func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {

@@ -150,6 +150,9 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 // installed config.yaml; source, when set, is the file the administrator
 // supplied (--config), and errors name it instead of the installed path.
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
+	if plain, ok := e.managedEnvReferenceProblem(raw, source); ok {
+		return nil, &plainConfigError{msg: plain, err: errManagedEnvReference}
+	}
 	validated, err := e.checkConfig(raw)
 	if err != nil {
 		if plain, ok := e.plainConfigProblem(err, source, raw); ok {
