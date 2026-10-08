@@ -27,7 +27,8 @@
               "tetragon.installed", "tetragon.running", "tetragon.api", "tetragon.socket", "tetragon.version", "tetragon.stream",
               "tetragon.keep_sensors_on_exit", "kernel.bpf_lsm", "tetragon.metrics_loopback", "tetragon.health_loopback",
               "defenseclaw.plane_c", "defenseclaw.agents", "defenseclaw.connectors_action", "defenseclaw.approval",
-              "defenseclaw.burn_in", "defenseclaw.pause", "defenseclaw.overrides", "defenseclaw.orphans", "tetragon.your_policies"
+              "defenseclaw.burn_in", "defenseclaw.pause", "defenseclaw.overrides", "defenseclaw.policies", "defenseclaw.orphans",
+              "tetragon.your_policies"
             ]
           },
           "status": { "enum": ["pass", "fail", "warn", "info", "skip"] },

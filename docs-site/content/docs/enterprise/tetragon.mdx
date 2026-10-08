@@ -597,7 +597,11 @@ user. The guide's pilot uses `40h`. The default stays `168h`; shorten it for a
 pilot, and keep it long for the rings that follow.
 </Callout>
 
-Run the play for the pilot ring, then watch it for a working session:
+Run the play for the pilot ring, then watch it for a working session. From
+`observe` on, `verify` also checks that Tetragon loaded DefenseClaw's own
+policies (`defenseclaw.policies`): a policy Tetragon refused (`load_error`)
+or a pass that did not apply them fails the gate, with the commands that show
+why. Watch it with:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe

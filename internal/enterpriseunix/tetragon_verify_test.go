@@ -73,6 +73,14 @@ func readyInputs(mode string) tetragonInputs {
 	if mode == "enforce" {
 		in.Intent.EnforceConnectors = []string{"claudecode"}
 	}
+	if mode == "observe" || mode == "enforce" {
+		in.State.Policies = []kernelpolicy.PolicyStatus{
+			{Name: "defenseclaw-connect-0a1b2c3d", Family: kernelpolicy.FamilyConnect, ObservedMode: kernelpolicy.LoadedMonitorOnly, State: kernelpolicy.StateEnabled},
+			{Name: "defenseclaw-controls-0a1b2c3e", Family: kernelpolicy.FamilyControls, DesiredMode: kernelpolicy.PolicyMonitor,
+				ObservedMode: kernelpolicy.LoadedMonitor, State: kernelpolicy.StateEnabled},
+			{Name: "defenseclaw-observe-0a1b2c3f", Family: kernelpolicy.FamilyObserve, ObservedMode: kernelpolicy.LoadedMonitorOnly, State: kernelpolicy.StateEnabled},
+		}
+	}
 	return in
 }
 
@@ -184,6 +192,16 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		}, []want{{checkBPFLSM, checkFail, "lockdown,capability,yama,selinux"}}},
 		{"lsm probe not reported", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { in.State.Tetragon.LSM = nil },
 			[]want{{checkBPFLSM, checkWarn, "not reported"}}},
+		// GAP-0045: the gate fails while DefenseClaw's own policies are not in
+		// Tetragon as the mode calls for.
+		{"policy load error", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			in.State.Policies[1].State, in.State.Policies[1].Error = kernelpolicy.StateLoadError, "parseMatchArgs error: argFilter for unknown index"
+			in.State.InSync = false
+		}, []want{{checkPolicies, checkFail, "Tetragon did not load DefenseClaw's defenseclaw-controls-0a1b2c3e"}}},
+		{"pass not applied", "observe", "observe", func(in *tetragonInputs, _ *tetragonProbes) { in.State.InSync = false },
+			[]want{{checkPolicies, checkFail, "did not leave Tetragon with the policies"}}},
+		{"policies not loaded in consume", "consume", "observe", nil, []want{{checkPolicies, checkInfo, "once mode observe runs"}}},
+		{"policies loaded", "observe", "enforce", nil, []want{{checkPolicies, checkPass, "3 policies are loaded"}}},
 		// GAP-0038: consume never reads these facts; no failure, no restart.
 		// GAP-0042: a user with no agent installed has nothing to enforce and
 		// is never counted ready, even with burn_in 0.
@@ -349,6 +367,7 @@ func TestTetragonReadyForEnforceText(t *testing.T) {
         in this release; other users are not affected.
   ✓ Kernel enforcement is not paused
   ✓ No operator override
+  ✓ DefenseClaw's 3 policies are loaded in Tetragon
   ✓ No DefenseClaw policy is left without a sensor helper
   i DefenseClaw never changes your own Tetragon policies; it reads their events
   Approve this build's kernel controls (same value on every host of it):

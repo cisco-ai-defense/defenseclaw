@@ -77,6 +77,7 @@ const (
 	checkBurnIn             = "defenseclaw.burn_in"
 	checkPause              = "defenseclaw.pause"
 	checkOverrides          = "defenseclaw.overrides"
+	checkPolicies           = "defenseclaw.policies"
 	checkOrphans            = "defenseclaw.orphans"
 	checkTetragonYourPolicy = "tetragon.your_policies"
 )
@@ -86,7 +87,7 @@ var tetragonCheckIDs = []string{
 	checkTetragonInstalled, checkTetragonRunning, checkTetragonAPI, checkTetragonSocket, checkTetragonVersion,
 	checkTetragonStream, checkKeepSensorsOnExit, checkBPFLSM, checkMetricsLoopback, checkHealthLoopback,
 	checkPlaneC, checkAgents, checkConnectorsAction, checkApproval, checkBurnIn, checkPause, checkOverrides,
-	checkOrphans, checkTetragonYourPolicy,
+	checkPolicies, checkOrphans, checkTetragonYourPolicy,
 }
 
 // lsmListPath lists the kernel's active security modules.
@@ -303,10 +304,12 @@ func tetragonReadiness(in tetragonInputs, readyFor string, probes tetragonProbes
 		} else {
 			set(checkOverrides, checkPass, "no operator override")
 		}
+		setPoliciesCheck(set, state, intent)
 	} else {
 		skip(checkAgents, "only observe and enforce need it")
 		skip(checkPause, "only observe and enforce need it")
 		skip(checkOverrides, "only observe and enforce need it")
+		skip(checkPolicies, "only observe and enforce need it")
 	}
 	if rank >= modeRank(config.TetragonModeObserve) {
 		rep.Users = readinessUsers(in, now)
@@ -367,6 +370,41 @@ func finishReadiness(rep *TetragonReadiness, checks map[string]TetragonCheck) *T
 
 // setOrphansCheck fails on DefenseClaw policies left without a sensor
 // helper to reconcile them (the same rule as verify's problem).
+// setPoliciesCheck fails while DefenseClaw's own policies are not in
+// Tetragon as the mode calls for: one Tetragon refused to load (load_error),
+// one missing, or a last pass that did not apply them. Without it the
+// readiness gate, and detect.sh --require-tetragon, passed on a host whose
+// controls never loaded (GAP-0045). On a host whose mode loads none
+// (consume, off) there is nothing to check yet.
+func setPoliciesCheck(set func(id, status, message string, fix ...string), state kernelpolicy.State, intent tetragonIntent) {
+	status := adminCommand("enterprise", "linux", "tetragon", "status")
+	if !intent.helperModeLoadsPolicies() {
+		set(checkPolicies, checkInfo, "the sensor helper loads DefenseClaw's policies once mode observe runs; check again then")
+		return
+	}
+	var failed, missing []string
+	for _, policy := range state.Policies {
+		switch policy.State {
+		case kernelpolicy.StateLoadError, kernelpolicy.StateError:
+			failed = append(failed, policy.Name)
+		case "":
+			missing = append(missing, policy.Name)
+		}
+	}
+	switch {
+	case len(failed) > 0:
+		set(checkPolicies, checkFail, "Tetragon did not load DefenseClaw's "+andList(failed)+
+			" (what they hold is neither observed nor denied); see why with:", "sudo journalctl -u tetragon -n 50", status)
+	case len(missing) > 0, state.Tetragon.Reachable && !state.InSync:
+		set(checkPolicies, checkFail, "the sensor helper's last pass did not leave Tetragon with the policies the mode calls for; see why with:",
+			"sudo journalctl -u defenseclaw-sensor-helper -n 50", status)
+	case len(state.Policies) == 0:
+		set(checkPolicies, checkWarn, "the sensor helper has not loaded DefenseClaw's policies yet; check again in a minute")
+	default:
+		set(checkPolicies, checkPass, fmt.Sprintf("DefenseClaw's %d %s loaded in Tetragon", len(state.Policies), plural(len(state.Policies), "policy is", "policies are")))
+	}
+}
+
 func setOrphansCheck(set func(id, status, message string, fix ...string), in tetragonInputs) {
 	for _, finding := range tetragonFindings(in) {
 		if finding.Code == codeKernelPolicyOrphaned {
