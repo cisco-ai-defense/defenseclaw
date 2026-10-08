@@ -541,6 +541,14 @@ def activate_v8_migration(
             _assert_all_environment_dependencies(env, migration.environment_dependencies)
             _assert_all_ambient_environments_compatible(env, migration.environment_edits)
             _inject_fault(fault_injector, "after_activation")
+
+            # Generation publication is part of activation.  If it fails,
+            # restore both live files instead of reporting a failed migration
+            # while leaving its config and promoted credentials in place.
+            stage = "generation_record"
+            from defenseclaw.config_writer import ACTOR_MIGRATION, record_generation
+
+            record_generation(active_config, migration.candidate_sha256, ACTOR_MIGRATION, "config_version 8 activation")
         except BaseException as exc:
             if isinstance(exc, V8ActivationRollbackError):
                 # The atomic publisher retained recovery evidence because it
@@ -578,9 +586,6 @@ def activate_v8_migration(
                 backup_directory=backup_directory,
             ) from None
 
-        from defenseclaw.config_writer import ACTOR_MIGRATION, record_generation
-
-        record_generation(active_config, migration.candidate_sha256, ACTOR_MIGRATION, "config_version 8 activation")
         return V8ActivationResult(
             activated=True,
             already_v8=False,
