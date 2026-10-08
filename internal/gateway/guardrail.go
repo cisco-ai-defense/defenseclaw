@@ -1351,7 +1351,7 @@ func phaseSeverity(v *ScanVerdict) string {
 func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, local, merged, ciscoResult *ScanVerdict) *ScanVerdict {
 	thresholds := g.thresholds(ctx)
 	var prepared *policy.Prepared
-	if gen := currentGeneration(); gen != nil {
+	if gen := requestGeneration(ctx); gen != nil {
 		prepared = gen.OPA
 	}
 	if prepared == nil {

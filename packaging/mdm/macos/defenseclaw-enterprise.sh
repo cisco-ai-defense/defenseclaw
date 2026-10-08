@@ -644,11 +644,13 @@ dc_require_free_space() {
 # result the package's preinstall or postinstall wrote during it and exit 1.
 # The Installer only says "an error occurred while running scripts", while
 # that result names the cause: a refused downgrade with both versions, or a
-# rejected config (GAP-0538).
+# rejected config (GAP-0538). A result not older than the marker is this
+# run's: the file system can stamp both in one clock tick, and a strict
+# "newer" test dropped a preinstall that refused at once.
 dc_package_script_result() {
     result=$DC_PACKAGE_RESULT
-    [ -n "$result" ] && [ -f "$result" ] && [ ! -L "$result" ] || return 0
-    [ -n "$(find "$result" -newer "$1" 2>/dev/null)" ] || return 0
+    [ -n "$result" ] && [ -f "$result" ] && [ ! -L "$result" ] && [ -f "$1" ] || return 0
+    [ -z "$(find "$1" -newer "$result" 2>/dev/null)" ] || return 0
     cp "$result" "$DC_STAGE/package-result.json" 2>/dev/null || return 0
     DC_RESULT="$DC_STAGE/package-result.json"
     dc_emit_result

@@ -356,10 +356,10 @@ func requestProfile(ctx context.Context, g *Generation) *resolvedGuardrailProfil
 }
 
 // requestPolicyConfig is the configuration a request without an API server
-// decides with: the live generation's, or its verified profile's derived
-// configuration. nil before the first generation.
+// decides with: its generation's (requestGeneration), or its verified
+// profile's derived configuration. nil before the first generation.
 func requestPolicyConfig(ctx context.Context) *config.Config {
-	g := currentGeneration()
+	g := requestGeneration(ctx)
 	if g == nil {
 		return nil
 	}
@@ -369,10 +369,10 @@ func requestPolicyConfig(ctx context.Context) *config.Config {
 	return g.Config
 }
 
-// requestThresholds resolves input.thresholds for a request: the live
-// generation, the request's verified profile and its connector.
+// requestThresholds resolves input.thresholds for a request: its generation
+// (requestGeneration), its verified profile and its connector.
 func requestThresholds(ctx context.Context) policy.ThresholdsInput {
-	g := currentGeneration()
+	g := requestGeneration(ctx)
 	profile := ""
 	if resolved := requestProfile(ctx, g); resolved != nil {
 		profile = resolved.decision.Name
