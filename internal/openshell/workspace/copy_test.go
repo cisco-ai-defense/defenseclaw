@@ -593,6 +593,31 @@ func TestCopyGatesSensitiveAndBlocking(t *testing.T) {
 	}
 }
 
+// TestCopyPullFlagsAZeroFilledTail (GAP-0289): a MicroVM the gateway
+// restarted under wrote notes.txt, which came back as its text and a tail
+// of zero bytes, and the pull said nothing. The review flags it (info: it
+// runs no code), not a binary file of zeros.
+func TestCopyPullFlagsAZeroFilledTail(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/notes.txt", "line 1\nline 2\n"+strings.Repeat("\x00", 48))
+	fs.write(remoteRepo+"/zeros.bin", strings.Repeat("\x00", 64))
+	pr := pull(t, e, fs, "c1")
+	var flagged []string
+	for _, f := range pr.Review.Flags {
+		if f.Kind == RiskZeroFilled {
+			flagged = append(flagged, f.Path)
+			if f.Severity != SeverityInfo || !strings.HasPrefix(f.Detail, "ends in 48 zero bytes") {
+				t.Fatalf("flag = %+v", f)
+			}
+		}
+	}
+	if len(flagged) != 1 || flagged[0] != "notes.txt" || pr.Review.Sensitive() {
+		t.Fatalf("zero-filled flags = %v (sensitive %v), want notes.txt only", flagged, pr.Review.Sensitive())
+	}
+}
+
 // TestCopyPullOfAStateAlreadyBroughtBack: a pull of the state the last one
 // took, from the same point, counts as brought back when that one went to a
 // branch or a patch file (a new capture of uncommitted work is another

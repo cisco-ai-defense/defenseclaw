@@ -1126,6 +1126,11 @@ const (
 	ReasonHooksRestored    = "hooks_restored"
 )
 
+// ReasonUnflushedStop is the Reason of the finding event a MicroVM gets
+// when it goes down without DefenseClaw stopping it: its last writes may
+// be lost (no flush).
+const ReasonUnflushedStop = "unflushed_stop"
+
 // ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
 // gets the first time the egress proxy could not complete an allowed
 // connection to a host upstream: an outage, not a policy block.

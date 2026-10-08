@@ -593,7 +593,7 @@ func reviewTreeChanges(ctx context.Context, g gitCmd, changes []TreeChange, scan
 		return b, ok
 	}
 	rep := &ReviewReport{Changes: changes}
-	rep.Flags = classifyChanges(changes, content, sensitive)
+	rep.Flags = append(classifyChanges(changes, content, sensitive), zeroFilledFlags(changes, content)...)
 	rep.Findings = scanChanges(changes, scanners, content)
 	for _, c := range changes {
 		rep.FilesChanged++

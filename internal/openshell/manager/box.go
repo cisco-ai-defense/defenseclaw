@@ -403,6 +403,12 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if previous == "" && b.rec.Phase != "" {
 		previous = audit.SandboxPhase(b.rec.Phase)
 	}
+	// A MicroVM that left the ready phase without DefenseClaw stopping or
+	// deleting it (whose own transitions come first) went down without a
+	// flush: the OpenShell gateway restarted under it, for one (GAP-0289).
+	driver, known := openshell.LookupDriver(b.rec.Driver)
+	unflushed := known && !driver.StopFlushes && trigger == audit.SandboxTriggerWatch && previous == audit.SandboxPhaseReady &&
+		(phase == audit.SandboxPhaseProvisioning || phase == audit.SandboxPhaseStarting || phase == audit.SandboxPhaseStopped || phase == audit.SandboxPhaseError)
 	b.phase = phase
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
@@ -477,6 +483,10 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 			Message: msg,
 		})
 	}
+	if unflushed {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "MEDIUM",
+			Reason: sandboxapi.ReasonUnflushedStop, Message: unflushedStopMessage(rec.Name)})
+	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
 }
@@ -497,6 +507,14 @@ func errorPhaseWayOn(name, mode, reason string) string {
 			"and its copy's work that was not pulled cannot be read any more: `defenseclaw sandbox delete " + name + "`, then run again"
 	}
 	return way
+}
+
+// unflushedStopMessage is the feed's warning about the MicroVM name that
+// went down without DefenseClaw stopping it.
+func unflushedStopMessage(name string) string {
+	return "⚠ " + name + "'s MicroVM went down without DefenseClaw stopping it (the OpenShell gateway restarted, for one), so what it wrote " +
+		"in its last seconds may be missing or end in zero bytes: check those files before you bring the work back (its review flags the ones " +
+		"that end in zero bytes). `defenseclaw sandbox stop` flushes first, and so do DefenseClaw's own gateway restarts"
 }
 
 // errorPhaseReason is why a sandbox is in OpenShell's error phase, in
