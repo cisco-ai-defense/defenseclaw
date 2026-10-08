@@ -402,7 +402,8 @@ def check_items(graph: Graph, platforms: list[str], groups: list[str]) -> list[d
             left = (
                 time.mktime(time.strptime(data["expirationDateTime"][:19], "%Y-%m-%dT%H:%M:%S")) - time.time()
             ) / 86400
-            add(PASS if left > 30 else WARN, "Apple push certificate", f"expires in {int(left)} days")
+            add(FAIL if left <= 0 else PASS if left > 30 else WARN, "Apple push certificate",
+                f"expires in {int(left)} days")
 
     for name in groups:
         found = graph.get_all(f"{V1}/groups?$filter={odata_eq('displayName', name)}&$select=id,displayName")

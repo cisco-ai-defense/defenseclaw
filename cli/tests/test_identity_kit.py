@@ -1300,3 +1300,19 @@ def test_macos_bridge_refuses_unsafe_names_before_touching_the_mac(args: list[st
     result = subprocess.run([bash, str(script), *args], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 2, result
     assert result.stderr.startswith("error: ")
+
+
+def test_intune_expired_apple_push_certificate_fails_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+
+    class Graph:
+        def get_all(self, _path):
+            return []
+
+    monkeypatch.setattr(intune, "try_get", lambda _graph, path: (
+        ({"expirationDateTime": "2020-01-01T00:00:00Z"}, None)
+        if "applePushNotificationCertificate" in path else ({"value": []}, None)
+    ))
+    rows = intune.check_items(Graph(), ["macos"], [])
+    certificate = next(row for row in rows if row["item"] == "Apple push certificate")
+    assert certificate["status"] == intune.FAIL
