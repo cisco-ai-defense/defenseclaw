@@ -260,6 +260,34 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	}
 }
 
+// A child can hook before its parent link is known and the inventory flush can
+// complete before that link arrives. The persisted ledger must retract it.
+func TestAgentIdentityLateChildLinkCorrectsFlushedSession(t *testing.T) {
+	store, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	facts := agentIdentityFacts{ID: "agt-late-child", UserID: "1001", Connector: "codex", MachineHash: "m"}
+	recorder.observe(facts, "a-parent", true)
+	recorder.observe(facts, "b-parent", true)
+	recorder.observe(facts, "z-child", true)
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	recorder.markSubagentSession(facts.ID, "z-child")
+	recorder.markSubagentSession(facts.ID, "z-child")
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{AgentIDs: []string{facts.ID}})
+	if err != nil || len(rows) != 1 || rows[0].SessionsSeen != 2 || rows[0].LastSessionID != "b-parent" {
+		t.Fatalf("late child link left stored rows = %+v, err %v; want two parent chats, last b-parent", rows, err)
+	}
+}
+
 // GAP-0258: a Codex thread without a transcript (transcript_path null, the
 // helper thread a managed install's hooks reach) is not counted as a session;
 // a chat with a transcript is.
