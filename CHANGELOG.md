@@ -94,7 +94,8 @@ stopped`. Nothing is changed; use the install command above.
   the opt-in process tree on, that process and its parents), survives
   daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
   sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
-  detail sum it up; the detail lists the hosts.
+  detail sum it up by the same kinds (`AI: 1 model provider, 1 harness
+  vendor host, 2 shadow AI`); the detail lists the hosts.
 - A sandbox's hook counts (`Hook traffic` and `Hook events` in `sandbox
   status NAME`, the tool calls in the TUI's Sandboxes list) survive daemon
   restarts like its destinations, so the end-of-session summary counts the

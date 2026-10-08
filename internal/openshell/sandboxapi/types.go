@@ -423,12 +423,15 @@ type EgressStats struct {
 	UpstreamFailed int   `json:"upstream_failed,omitempty"`
 	BytesUp        int64 `json:"bytes_up"`
 	BytesDown      int64 `json:"bytes_down"`
-	// ModelAPIs and ShadowAI count the AI destinations of the sandbox's
-	// destinations view (GET /sandboxes/{name}/destinations): its model
-	// provider and its harness's vendor, and the other AI APIs and
-	// inference-shaped hosts it reached or tried to reach.
-	ModelAPIs int `json:"model_apis,omitempty"`
-	ShadowAI  int `json:"shadow_ai,omitempty"`
+	// ModelProviders, HarnessVendor and ShadowAI count the AI destinations
+	// of the sandbox's destinations view (GET /sandboxes/{name}/destinations)
+	// by the kind its KIND column names: its model provider, the AI APIs of
+	// its harness's vendor, and the other AI APIs and inference-shaped hosts
+	// it reached or tried to reach (one count of the first two read "3 model
+	// APIs" next to one model provider, GAP-0319).
+	ModelProviders int `json:"model_providers,omitempty"`
+	HarnessVendor  int `json:"harness_vendor,omitempty"`
+	ShadowAI       int `json:"shadow_ai,omitempty"`
 }
 
 // Destination kinds (DestinationRow.Kind), in the order they are told apart.

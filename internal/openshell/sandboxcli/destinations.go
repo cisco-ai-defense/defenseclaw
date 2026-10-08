@@ -191,13 +191,20 @@ func lastOf(list []string) string {
 	return list[len(list)-1]
 }
 
-// egressAIText is the AI part of a sandbox's Egress status line: "" without
-// AI destinations.
+// egressAIText is the AI part of a sandbox's Egress status line, counted by
+// the kinds `sandbox destinations` names (GAP-0319): "" without AI
+// destinations.
 func egressAIText(sb *sandboxapi.Sandbox) string {
-	if sb.Egress.ModelAPIs == 0 && sb.Egress.ShadowAI == 0 {
+	var parts []string
+	if n := sb.Egress.ModelProviders; n > 0 {
+		parts = append(parts, plural(int64(n), "model provider", "model providers"))
+	}
+	if n := sb.Egress.HarnessVendor; n > 0 {
+		parts = append(parts, plural(int64(n), "harness vendor host", "harness vendor hosts"))
+	}
+	if len(parts) == 0 && sb.Egress.ShadowAI == 0 {
 		return ""
 	}
-	parts := []string{plural(int64(sb.Egress.ModelAPIs), "model API", "model APIs")}
 	if sb.Egress.ShadowAI > 0 {
 		parts = append(parts, fmt.Sprintf("%d shadow AI", sb.Egress.ShadowAI))
 	}

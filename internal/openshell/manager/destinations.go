@@ -945,8 +945,10 @@ func (m *Manager) egressSummary(name, harnessName string, live map[string]egress
 		s.BytesUp += total.BytesUp
 		s.BytesDown += total.BytesDown
 		switch kind, _, _ := r.classify(harnessName); {
-		case kind == sandboxapi.DestinationModelProvider || kind == sandboxapi.DestinationHarnessVendor:
-			s.ModelAPIs++
+		case kind == sandboxapi.DestinationModelProvider:
+			s.ModelProviders++
+		case kind == sandboxapi.DestinationHarnessVendor:
+			s.HarnessVendor++
 		case sandboxapi.ShadowAIKind(kind):
 			s.ShadowAI++
 		}

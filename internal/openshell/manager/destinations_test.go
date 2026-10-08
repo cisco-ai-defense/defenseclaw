@@ -139,7 +139,7 @@ func TestDestinationsAreClassified(t *testing.T) {
 	if feed := e.events("destbox", sandboxapi.ActivityFinding, sandboxapi.ReasonShadowAI); len(feed) != 3 {
 		t.Errorf("shadow AI feed = %+v", feed)
 	}
-	if v := e.get("destbox"); v.Egress.ModelAPIs != 2 || v.Egress.ShadowAI != 2 {
+	if v := e.get("destbox"); v.Egress.ModelProviders != 1 || v.Egress.HarnessVendor != 1 || v.Egress.ShadowAI != 2 {
 		t.Errorf("egress summary = %+v", v.Egress)
 	}
 
@@ -219,7 +219,7 @@ func TestDestinationsTellCredentialEndpointsFromTheModelProvider(t *testing.T) {
 	if rows["api.anthropic.com"].Kind != sandboxapi.DestinationModelProvider || rows["api.stripe.com"].Kind != sandboxapi.DestinationCredential {
 		t.Fatalf("rows = %+v", rows)
 	}
-	if v := e.get("credbox"); v.Egress.ModelAPIs != 1 || v.Egress.ShadowAI != 0 {
+	if v := e.get("credbox"); v.Egress.ModelProviders != 1 || v.Egress.HarnessVendor != 0 || v.Egress.ShadowAI != 0 {
 		t.Fatalf("egress summary = %+v", v.Egress)
 	}
 }

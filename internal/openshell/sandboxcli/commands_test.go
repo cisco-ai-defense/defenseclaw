@@ -82,7 +82,7 @@ func TestListAndStatus(t *testing.T) {
 // AI, and the status Egress line sums the AI destinations up.
 func TestDestinations(t *testing.T) {
 	sb := sampleSandbox("box")
-	sb.Egress.ModelAPIs, sb.Egress.ShadowAI = 1, 1
+	sb.Egress.ModelProviders, sb.Egress.HarnessVendor, sb.Egress.ShadowAI = 1, 2, 1
 	ta := newTestApp(t, "", sb)
 	ta.ok(t, ta.Destinations(bg, "box", OutputText))
 	has(t, ta.output(), "has reached no destination yet")
@@ -119,7 +119,8 @@ func TestDestinations(t *testing.T) {
 		t.Fatalf("destinations json = %s, %v", ta.out.String(), err)
 	}
 	ta.ok(t, ta.fresh().Status(bg, "box", OutputText))
-	has(t, ta.output(), "; AI: 1 model API, 1 shadow AI (`defenseclaw sandbox destinations box`)")
+	// Counted by the kinds sandbox destinations names (GAP-0319).
+	has(t, ta.output(), "; AI: 1 model provider, 2 harness vendor hosts, 1 shadow AI (`defenseclaw sandbox destinations box`)")
 	wantErr(t, ta.fresh().Destinations(bg, "missing", OutputText), "no sandbox missing")
 }
 
