@@ -1468,9 +1468,14 @@ class Store:
         width = 2 + len(self._ALERT_AGENT_KEYS)
         join, hook_cols = "", ", ".join(["NULL"] * width)
         if "request_id" in columns:
+            # Request IDs are client supplied. Borrow hook facts only when
+            # both records identify the same user independently of that ID.
+            f_user = self._safe_json_extract("f.structured_json", '$."user.id"')
+            h_user = self._safe_json_extract("h.structured_json", '$."user.id"')
             join = (
                 "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
-                "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id"
+                "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id "
+                f"AND COALESCE({f_user}, '') <> '' AND {f_user} = {h_user}"
             )
             hook_cols = row_facts("h")
         placeholders = ",".join("?" for _ in ids)
