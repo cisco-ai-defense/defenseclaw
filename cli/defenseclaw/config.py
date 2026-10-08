@@ -6339,12 +6339,24 @@ def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
     return os.path.join(data_dir, "policies")
 
 
-def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
+def load(
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    without_guardrail_profiles: bool = False,
+    parsed_source: dict[str, Any] | None = None,
+) -> Config:
     """Load config from the active config path, applying defaults.
 
     ``data_dir`` scopes transactional reloads (notably upgrades) to the
     installation that is actually being mutated.  ``DEFENSECLAW_CONFIG``
     remains authoritative when set, including for a scoped load.
+
+    ``without_guardrail_profiles`` leaves guardrail.profiles,
+    profile_assignments and default_profile out: a read-only view for a
+    command that reads a key outside them. Building and validating 1,000
+    profiles doubled ``config get`` (GAP-0276). Never save such a view.
+    ``parsed_source`` is config.yaml as the caller already parsed it (the v8
+    source loader), so the file is not parsed again; load may change it.
     """
     data_dir = str(Path(data_dir) if data_dir is not None else default_data_path())
     _load_dotenv_into_os(data_dir)
@@ -6352,7 +6364,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
 
     raw: dict[str, Any] = {}
     try:
-        raw = parse_config_yaml(read_config_text(cfg_file)) or {}
+        raw = parsed_source if parsed_source is not None else parse_config_yaml(read_config_text(cfg_file)) or {}
     except (FileNotFoundError, NotADirectoryError):
         pass
     except OSError as exc:
@@ -6364,6 +6376,8 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
+    if without_guardrail_profiles:
+        raw = _without_guardrail_profiles(raw)
 
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})
@@ -6487,6 +6501,18 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     if is_current_schema(source_config_version):
         cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+_GUARDRAIL_PROFILE_KEYS = ("profiles", "profile_assignments", "default_profile")
+
+
+def _without_guardrail_profiles(raw: dict[str, Any]) -> dict[str, Any]:
+    """raw without the guardrail profile keys (a shallow copy when it has any)."""
+    guardrail = raw.get("guardrail")
+    if not isinstance(guardrail, dict) or not any(key in guardrail for key in _GUARDRAIL_PROFILE_KEYS):
+        return raw
+    trimmed = {key: value for key, value in guardrail.items() if key not in _GUARDRAIL_PROFILE_KEYS}
+    return {**raw, "guardrail": trimmed}
 
 
 def _exact_config_version(value: Any) -> int:

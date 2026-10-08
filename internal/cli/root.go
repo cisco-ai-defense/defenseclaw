@@ -356,10 +356,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	if err != nil {
 		return nil, nil, err
 	}
-	candidate, err := config.LoadRuntimeV8FromBytes(loaded.source, loaded.raw)
-	if err != nil {
-		return nil, nil, err
-	}
+	candidate := loaded.runtime
 	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
 		return nil, nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}

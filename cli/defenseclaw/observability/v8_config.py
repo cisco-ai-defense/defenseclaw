@@ -511,6 +511,16 @@ def load_masked_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = 
     return _masked_copy(_parse_source(data, source_name))
 
 
+def load_masked_v8_with_source(
+    data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml"
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """load_masked_v8 and the parsed source it masked (secrets included), from
+    one parse, for a caller that also builds the configuration (GAP-0276)."""
+
+    document = _parse_source(data, source_name)
+    return _masked_copy(document), document
+
+
 def validate_v8_source(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> dict[str, Any]:
     """Return a detached, validated, display-safe source mapping."""
 

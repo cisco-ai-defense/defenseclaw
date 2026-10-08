@@ -101,9 +101,21 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 				reason = "must be sha256: followed by 64 lowercase hexadecimal characters"
 			case strings.HasSuffix(field, ".block_at"), strings.HasSuffix(field, ".alert_at"):
 				reason = "must be one of CRITICAL, HIGH, MEDIUM, LOW"
+			case strings.HasPrefix(schemaErr.Expected, "an agent identity"):
+				// The assignment, the value and the form (GAP-0829).
+				reason = "must be " + schemaErr.Expected
+				if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
+					reason = fmt.Sprintf("is %q; it must be %s", value, schemaErr.Expected)
+				}
 			default:
 				reason = "does not match the setting's required format"
 			}
+		} else if schemaErr.Keyword == "not" && strings.HasPrefix(schemaErr.Expected, "either ") {
+			// Two fields that exclude each other (GAP-0940).
+			if name, ok := yamlMappingNameAt(raw, schemaErr.Line, schemaErr.Column); ok {
+				field = fmt.Sprintf("%s (destination %q)", field, name)
+			}
+			reason = "sets both; set " + schemaErr.Expected
 		} else if schemaErr.Expected != "" {
 			reason = "must be " + schemaErr.Expected
 		}
@@ -140,6 +152,90 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	return "", false
 }
 
+var errManagedEnvReference = errors.New("an observability destination reads a secret from an environment variable")
+
+// managedEnvReferenceProblem refuses a destination secret read from an
+// environment variable whether or not it is set: the lifecycle writes each
+// service environment itself, so the gateway never sees one. With the
+// variable set in the shell that ran ensure the config passed, was applied,
+// and the gateway failed to start into a rollback; unset, the refusal gave
+// per-user advice (GAP-0939).
+func (e *Env) managedEnvReferenceProblem(raw []byte, source string) (string, bool) {
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) == 0 {
+		return "", false
+	}
+	destinations := yamlMapChild(yamlMapChild(doc.Content[0], "observability"), "destinations")
+	if destinations == nil || destinations.Kind != yaml.SequenceNode {
+		return "", false
+	}
+	var found []string
+	line := 0
+	note := func(field string, node *yaml.Node) {
+		found = append(found, field)
+		if line == 0 {
+			line = node.Line
+		}
+	}
+	for index, destination := range destinations.Content {
+		if destination.Kind != yaml.MappingNode {
+			continue
+		}
+		label := fmt.Sprintf("observability.destinations[%d]", index)
+		if name := yamlMapChild(destination, "name"); name != nil && name.Kind == yaml.ScalarNode && name.Value != "" {
+			label += fmt.Sprintf(" (%s)", name.Value)
+		}
+		for _, pair := range [][2]string{{"token_env", "token_credential"}, {"bearer_env", "bearer_credential"}} {
+			node := yamlMapChild(destination, pair[0])
+			if node == nil || node.Kind != yaml.ScalarNode || strings.TrimSpace(node.Value) == "" {
+				continue
+			}
+			if credential := yamlMapChild(destination, pair[1]); credential != nil && strings.TrimSpace(credential.Value) != "" {
+				// Both fields: the documented sentence, naming the
+				// destination and both fields (GAP-0940).
+				where := source
+				if where == "" {
+					where = e.Layout.ConfigPath
+				}
+				return fmt.Sprintf("%s%s: %s sets both %s and %s; set either %s or %s, not both (on a managed host, %s). The settings reference: %s",
+					where, lineSuffix(node.Line), label, pair[1], pair[0], pair[1], pair[0], pair[1], settingsReferenceURL), true
+			}
+			note(label+" "+pair[0], node)
+		}
+		if headers := yamlMapChild(destination, "headers"); headers != nil && headers.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(headers.Content); i += 2 {
+				if value := headers.Content[i+1]; value.Kind == yaml.MappingNode && yamlMapChild(value, "env") != nil {
+					note(label+" header "+headers.Content[i].Value, value)
+				}
+			}
+		}
+	}
+	if len(found) == 0 {
+		return "", false
+	}
+	where := source
+	if where == "" {
+		where = e.Layout.ConfigPath
+	}
+	return fmt.Sprintf("%s%s: %s reads a secret from an environment variable, and a managed host never passes one to its services, "+
+		"so ensure refuses token_env, bearer_env and {env: NAME} headers. Store the secret with `%s enterprise secret set --name <name> --from-stdin` "+
+		"and reference it by name: token_credential (splunk_hec), bearer_credential (http_jsonl) or {credential: <name>} (a header). The settings reference: %s",
+		where, lineSuffix(line), strings.Join(found, ", "), filepath.Join(e.Layout.BinDir, binGateway), settingsReferenceURL), true
+}
+
+// yamlMapChild is the value of key in mapping node, or nil.
+func yamlMapChild(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
 func lineSuffix(line int) string {
 	if line <= 0 {
 		return ""
@@ -153,6 +249,46 @@ func configField(path string) string {
 		return "the document"
 	}
 	return field
+}
+
+// yamlMappingNameAt returns the name: of the mapping at line:column of raw
+// (a destination), at most 60 bytes.
+func yamlMappingNameAt(raw []byte, line, column int) (string, bool) {
+	if line <= 0 || column <= 0 {
+		return "", false
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return "", false
+	}
+	var name string
+	var walk func(*yaml.Node) bool
+	walk = func(node *yaml.Node) bool {
+		if node == nil {
+			return false
+		}
+		if node.Kind == yaml.MappingNode && node.Line == line && node.Column == column {
+			for index := 0; index+1 < len(node.Content); index += 2 {
+				if key, value := node.Content[index], node.Content[index+1]; key.Value == "name" && value.Kind == yaml.ScalarNode {
+					name = value.Value
+				}
+			}
+			return true
+		}
+		for _, child := range node.Content {
+			if walk(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if !walk(&doc) || name == "" {
+		return "", false
+	}
+	if len(name) > 60 {
+		name = strings.ToValidUTF8(name[:57], "") + "..."
+	}
+	return name, true
 }
 
 // yamlScalarAt returns the scalar at line:column of raw, at most 60 bytes.

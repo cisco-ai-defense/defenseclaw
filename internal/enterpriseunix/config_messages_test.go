@@ -147,3 +147,85 @@ func TestUninstallKeptLineNamesAccounts(t *testing.T) {
 		t.Fatalf("kept line:\n%s", summary)
 	}
 }
+
+// installMessage runs a first install with raw as the config and returns
+// the config_invalid message.
+func installMessage(t *testing.T, h *testHost, raw string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "admin.yaml")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: path})
+	requireError(t, r, codeConfig)
+	if exists(h.env.P(h.env.Layout.ConfigPath)) {
+		t.Fatal("a refused config was installed")
+	}
+	return r.Errors[0].Message
+}
+
+// GAP-0939, GAP-0940: a destination secret read from an environment
+// variable is refused up front whether or not the variable is set (set, the
+// config was applied and the gateway failed to start into a rollback), and
+// a destination with both fields gets the documented sentence.
+func TestManagedConfigRefusesEnvironmentSecretReferences(t *testing.T) {
+	hec := "observability:\n  destinations:\n    - name: eoi-hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://hec.example.test:8088/services/collector\n      token_env: EO3_REF\n"
+	for _, value := range []string{"", "set"} {
+		t.Setenv("EO3_REF", value)
+		h := newTestHost(t, "linux")
+		got := installMessage(t, h, string(DefaultConfig(h.env.Layout))+hec)
+		if !strings.Contains(got, "(eoi-hec) token_env reads a secret from an environment variable") ||
+			!strings.Contains(got, "never passes one to its services") || !strings.Contains(got, "token_credential") ||
+			!strings.Contains(got, "enterprise secret set") || strings.Contains(got, "keys set") {
+			t.Fatalf("EO3_REF=%q: %s", value, got)
+		}
+	}
+	h := newTestHost(t, "linux")
+	both := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: eo3-http\n      kind: http_jsonl\n" +
+		"      endpoint: https://collector.example.test/ingest\n      bearer_credential: eo3-http-token\n      bearer_env: EO3_REF\n"
+	if got := installMessage(t, h, both); !strings.Contains(got, "(eo3-http) sets both bearer_credential and bearer_env; set either bearer_credential or bearer_env, not both") {
+		t.Fatalf("both fields: %s", got)
+	}
+}
+
+// GAP-0829: a malformed agent identity names the assignment, the value and
+// the form.
+func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {
+	h := newTestHost(t, "linux")
+	raw := string(DefaultConfig(h.env.Layout)) + "  profiles:\n    strict:\n      mode: action\n" +
+		"  profile_assignments:\n    - profile: strict\n      match:\n        agents: [agt-49fb88f74f28975]\n"
+	got := installMessage(t, h, raw)
+	if !strings.Contains(got, `guardrail.profile_assignments[0].match.agents[0] is "agt-49fb88f74f28975"`) ||
+		!strings.Contains(got, "agt- followed by 16 lowercase hexadecimal digits") {
+		t.Fatalf("agent identity: %s", got)
+	}
+}
+
+// GAP-0890: a jsonl destination the gateway cannot write is refused before
+// anything changes, naming the destination, the path and the rule.
+func TestManagedConfigRefusesUnsafeJSONLDestinations(t *testing.T) {
+	for path, rule := range map[string]string{
+		"/var/log/defenseclaw/siem":         "is a directory",
+		"/var/log/defenseclaw/link.jsonl":   "is a symbolic link",
+		"/var/log/defenseclaw/open/x.jsonl": "a folder its group or other users can write",
+		"/var/log/siem/x.jsonl":             "outside the folders the gateway service may write",
+	} {
+		h := newTestHost(t, "linux")
+		for _, dir := range []string{"/var/log/defenseclaw/siem", "/var/log/defenseclaw/open"} {
+			if err := os.MkdirAll(h.env.P(dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(h.env.P("/var/log/defenseclaw/open"), 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/etc/hosts", h.env.P("/var/log/defenseclaw/link.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+		raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: rv-jsonl\n      kind: jsonl\n      path: " + path + "\n"
+		if got := installMessage(t, h, raw); !strings.Contains(got, `destination "rv-jsonl" writes `+path) || !strings.Contains(got, rule) {
+			t.Fatalf("%s: %s", path, got)
+		}
+	}
+}

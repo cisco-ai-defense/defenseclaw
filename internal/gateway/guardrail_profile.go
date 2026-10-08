@@ -194,6 +194,9 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 	}
 	sort.Strings(names)
 	tuned := profileConnectorNames(cfg)
+	// Scopes that resolve to the same loaded pack share its compiled rules:
+	// compiling it once per scope key cost a share of every start (GAP-0276).
+	compiledPacks := make(map[*guardrail.RulePack]*compiledRulePackCategories)
 	for _, name := range names {
 		for _, scope := range profileRulePackScopes(derived[name].Config, tuned) {
 			key := scope.key()
@@ -203,7 +206,12 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 			rp, loadErr := loadScopedRulePack(cache, derived[name].Config, scope, "guardrail profile "+name)
 			var compiled *compiledRulePackCategories
 			if loadErr == nil {
-				compiled, loadErr = compileRulePackCategories(rp)
+				if compiled = compiledPacks[rp]; compiled == nil {
+					compiled, loadErr = compileRulePackCategories(rp)
+					if loadErr == nil {
+						compiledPacks[rp] = compiled
+					}
+				}
 			}
 			if loadErr != nil {
 				if strictRules {
@@ -385,8 +393,8 @@ func (a *APIServer) guardrailProfileSet() *guardrailProfileSet {
 }
 
 // initGuardrailProfiles derives the profiles of the start-time config.
-func (a *APIServer) initGuardrailProfiles(cfg *config.Config, cache *guardrail.RulePackCache) {
-	set, err := newGuardrailProfileSet(cfg, cache, false)
+func (a *APIServer) initGuardrailProfiles(cfg *config.Config) {
+	set, err := newGuardrailProfileSet(cfg, nil, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", err)
 		return

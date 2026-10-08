@@ -4,6 +4,7 @@
 package config
 
 import (
+	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
@@ -178,5 +179,43 @@ func TestGuardrailPolicyDigestStable(t *testing.T) {
 	edited.Guardrail.Profiles["watch"] = p
 	if got := digestOf(edited); got == first {
 		t.Errorf("digest unchanged after a profile edit")
+	}
+}
+
+// GAP-0276: every gateway start and reload derives all profiles. With 1,000
+// profiles the configuration was copied once per profile (a JSON round trip
+// each); it is copied once, and each profile owns only the maps it changes.
+func TestDeriveGuardrailProfilesCopiesTheConfigurationOnce(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {Mode: "observe"}}
+	// A section no profile changes, large enough that copying it per
+	// profile shows.
+	cfg.AIDiscovery.SignaturePackDigests = make(map[string]string, 200)
+	for i := range 200 {
+		cfg.AIDiscovery.SignaturePackDigests[fmt.Sprintf("/packs/p%03d.json", i)] = "sha256:00"
+	}
+	cfg.Guardrail.Profiles = make(map[string]GuardrailProfile, 1000)
+	for i := range 1000 {
+		cfg.Guardrail.Profiles[fmt.Sprintf("scale-%04d", i)] = GuardrailProfile{
+			Mode:       "action",
+			Connectors: map[string]PerConnectorGuardrailConfig{"claudecode": {Mode: "observe"}},
+		}
+	}
+	var derived map[string]DerivedGuardrailProfile
+	allocs := testing.AllocsPerRun(1, func() {
+		var err error
+		if derived, err = cfg.DeriveGuardrailProfiles(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(derived) != 1000 || derived["scale-0007"].Config.Guardrail.Mode != "action" ||
+		derived["scale-0007"].Config.Guardrail.Connectors["codex"].Mode != "action" {
+		t.Fatalf("derived profile = %+v", derived["scale-0007"].Config.Guardrail)
+	}
+	if cfg.Guardrail.Connectors["codex"].Mode != "observe" {
+		t.Fatal("deriving a profile changed the base connector override")
+	}
+	if per := allocs / 1000; per > 100 {
+		t.Fatalf("deriving 1,000 profiles made %.0f allocations per profile; copy the configuration once", per)
 	}
 }

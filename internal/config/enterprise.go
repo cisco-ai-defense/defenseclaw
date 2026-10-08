@@ -713,11 +713,11 @@ func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte) (st
 	if _, ok := standaloneUnixLayoutForConfig(configFile); !ok {
 		return "", false
 	}
-	var document yaml.Node
-	if err := yaml.Unmarshal(sourceBytes, &document); err != nil {
+	document, err := sourceYAMLNode(sourceBytes)
+	if err != nil {
 		return "", false
 	}
-	return standaloneLayoutDataDir(configFile, &document)
+	return standaloneLayoutDataDir(configFile, document)
 }
 
 func yamlScalarValue(node *yaml.Node) string {
@@ -736,6 +736,21 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		strings.TrimSpace(e.Trust.Mode) == "" && len(e.Trust.AllowedSigners) == 0 &&
 		strings.TrimSpace(e.Coexistence.PerUserInstall) == "" && e.Coexistence.DisableSelfUpdate == nil &&
 		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == ""
+}
+
+// standaloneInlineSecrets lists the inline secret keys cfg sets.
+func standaloneInlineSecrets(cfg *Config) []string {
+	var inline []string
+	for _, field := range []struct{ key, value string }{
+		{"llm.api_key", cfg.LLM.APIKey},
+		{"cisco_ai_defense.api_key", cfg.CiscoAIDefense.APIKey},
+		{"gateway.token", cfg.Gateway.Token},
+	} {
+		if strings.TrimSpace(field.value) != "" {
+			inline = append(inline, field.key)
+		}
+	}
+	return inline
 }
 
 func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
@@ -787,10 +802,19 @@ func validateEnterpriseConfig(cfg *Config) error {
 	if name := strings.TrimSpace(e.Inspection.LLM.Credential); name != "" && !ValidEnterpriseCredentialName(name) {
 		return fmt.Errorf("config: enterprise.inspection.llm.credential %q must be a protected credential name (lowercase letters, digits and dashes)", name)
 	}
-	// The key never lives in config: the gateway reads it from the named
-	// protected credential and ignores cisco_ai_defense.api_key_env.
-	if strings.TrimSpace(cfg.CiscoAIDefense.APIKey) != "" {
-		return fmt.Errorf("config: managed standalone deployments read the AI Defense key from a protected credential (enterprise.inspection.ai_defense.credential); remove cisco_ai_defense.api_key")
+	// Secrets never live in config: the gateway reads the keys from the
+	// named protected credentials (it ignores cisco_ai_defense.api_key_env)
+	// and the lifecycle provisions the gateway token. Every inline secret is
+	// named, never its value: Windows Setup reported such a config only as
+	// "could not be compiled safely" at $ (GAP-0932).
+	if inline := standaloneInlineSecrets(cfg); len(inline) > 0 {
+		return &V8SemanticError{
+			Path:    "$." + inline[0],
+			Summary: "a managed standalone config holds no secrets; remove " + strings.Join(inline, ", "),
+			Action: "store each key as a protected credential with `enterprise secret set --name <name>` and name it in " +
+				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential " +
+				"(the AI Defense key); the lifecycle provisions the gateway token",
+		}
 	}
 	en := e.Enrollment
 	if err := oneOf("enterprise.enrollment.mode", en.Mode, EnterpriseEnrollmentAuto, EnterpriseEnrollmentManifest); err != nil {

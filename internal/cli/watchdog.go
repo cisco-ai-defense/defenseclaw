@@ -229,7 +229,7 @@ Stop:                   defenseclaw-gateway watchdog stop`,
 var watchdogStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the watchdog as a background daemon",
-	RunE:  runWatchdogStart,
+	RunE:  runWatchdogStartCommand,
 }
 
 var watchdogStopCmd = &cobra.Command{
@@ -262,28 +262,12 @@ func loadWatchdogConfig() (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return config.LoadRuntimeV8FromBytes(loaded.source, loaded.raw)
+	return loaded.runtime, nil
 }
 
 func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	// A background watchdog's watchdog.log lines carry a time (GAP-1578).
 	defer daemon.StampDetachedLog()()
-	cfg, err := loadWatchdogConfig()
-	if err != nil {
-		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
-	}
-
-	interval := time.Duration(cfg.Gateway.Watchdog.Interval) * time.Second
-	if interval < time.Second {
-		interval = 30 * time.Second
-	}
-	debounce := cfg.Gateway.Watchdog.Debounce
-	if debounce < 1 {
-		debounce = 2
-	}
-
-	healthURL := watchdogHealthURL(cfg)
-	requirements := watchdogHealthRequirementsFromConfig(cfg)
 	currentPID := os.Getpid()
 	exe, exeErr := watchdogExecutablePath()
 	if exeErr != nil {
@@ -300,13 +284,6 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	}
 	if watchdogRequiresStrongProcessIdentity() && !watchdogHasStrongProcessIdentity(pidInfo) {
 		return errors.New("watchdog: complete executable and process start identity are required on Windows")
-	}
-
-	var webhooks *gateway.WebhookDispatcher
-	// Include per-connector webhook overrides (D5b) so a global-empty install
-	// that routes a connector to its own webhook still gets a dispatcher.
-	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
-		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
 	}
 
 	// S3.HIGH_BUG ("Stale watchdog PID file can stop an
@@ -332,6 +309,34 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		_ = pidFile.Close()
 		removeWatchdogPIDIfOwned(pidPath, pidInfo)
 	}()
+	// The configuration loads after the PID record is published: the
+	// gateway start that spawned this process waits for that record, and
+	// the load is a full pass over every guardrail profile, which made each
+	// start wait for it too (GAP-0276). The watchdog start command checks the
+	// configuration before it spawns this process.
+	cfg, err := loadWatchdogConfig()
+	if err != nil {
+		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
+	}
+
+	interval := time.Duration(cfg.Gateway.Watchdog.Interval) * time.Second
+	if interval < time.Second {
+		interval = 30 * time.Second
+	}
+	debounce := cfg.Gateway.Watchdog.Debounce
+	if debounce < 1 {
+		debounce = 2
+	}
+
+	healthURL := watchdogHealthURL(cfg)
+	requirements := watchdogHealthRequirementsFromConfig(cfg)
+	var webhooks *gateway.WebhookDispatcher
+	// Include per-connector webhook overrides (D5b) so a global-empty install
+	// that routes a connector to its own webhook still gets a dispatcher.
+	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
+		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
+	}
+
 	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
 		interval, debounce, healthURL)
 
@@ -609,6 +614,17 @@ func assessRequiredConnectors(primary *gateway.ConnectorHealth, connectors *[]ga
 		}
 	}
 	return healthyWatchdogAssessment()
+}
+
+// runWatchdogStartCommand is the watchdog start command: it refuses a configuration
+// the watchdog cannot load before it spawns one, since the spawned watchdog
+// loads it only after it has published its PID record. A gateway start has
+// loaded the configuration already and calls runWatchdogStart.
+func runWatchdogStartCommand(cmd *cobra.Command, args []string) error {
+	if _, err := loadWatchdogConfig(); err != nil {
+		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
+	}
+	return runWatchdogStart(cmd, args)
 }
 
 func runWatchdogStart(_ *cobra.Command, _ []string) error {

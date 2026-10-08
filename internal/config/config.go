@@ -2539,7 +2539,7 @@ func checkManagedConfigTrustBeforeParse(configFile string, raw []byte) error {
 		var declared struct {
 			DeploymentMode string `yaml:"deployment_mode"`
 		}
-		if yaml.Unmarshal(raw, &declared) == nil {
+		if decodeSourceYAML(raw, &declared) == nil {
 			mode = normalizeDeploymentMode(declared.DeploymentMode)
 		}
 	}
@@ -3086,7 +3086,7 @@ func restoreSignaturePackDigests(cfg *Config, raw []byte, configFile string) err
 			SignaturePackDigests map[string]string `yaml:"signature_pack_digests"`
 		} `yaml:"ai_discovery"`
 	}
-	if err := yaml.Unmarshal(raw, &source); err != nil {
+	if err := decodeSourceYAML(raw, &source); err != nil {
 		return fmt.Errorf("config: decode ai_discovery.signature_pack_digests: %w", err)
 	}
 	cfg.AIDiscovery.SignaturePackDigests = source.AIDiscovery.SignaturePackDigests

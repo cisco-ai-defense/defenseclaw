@@ -175,3 +175,17 @@ func TestRulePackNestedCopyHintNamesTheNestedFolder(t *testing.T) {
 		t.Fatalf("a component that is not a nested copy got hint %q", hint)
 	}
 }
+
+// GAP-0932: inline secrets are refused naming every rejected key, never a
+// value, and how to store a secret; before, Windows Setup said only
+// "configuration could not be compiled safely" at $.
+func TestStandaloneGatewayConfigCheckNamesInlineSecrets(t *testing.T) {
+	body := strings.Replace(standaloneGatewayCheckConfig, "  api_port: 18970\n", "  api_port: 18970\n  token: FAKE-MARKER-3\n", 1) +
+		"llm:\n  api_key: FAKE-MARKER-1\ncisco_ai_defense:\n  api_key: FAKE-MARKER-2\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "remove llm.api_key, cisco_ai_defense.api_key, gateway.token") ||
+		!strings.Contains(err.Error(), "enterprise secret set") || strings.Contains(err.Error(), "FAKE-MARKER") ||
+		strings.Contains(err.Error(), "compiled safely") {
+		t.Fatalf("inline secrets = %v", err)
+	}
+}
