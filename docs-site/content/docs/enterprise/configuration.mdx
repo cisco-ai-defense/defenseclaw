@@ -173,13 +173,11 @@ Per-user enrollment also depends on the
 version of the agent being installed for that user.
 
 <Callout type="warn" title="Leave an agent out entirely to leave it unprotected">
-On Linux and macOS, the lifecycle publishes machine policy for Codex,
-Claude Code, Cursor, Copilot and OpenCode when the connector name appears
-anywhere under `guardrail.connectors`, even with `enabled: false`, or under
-`enterprise.machine_policy.connectors`. There, `enabled: false` stops only
-per-user enrollment. Copilot's and OpenCode's machine policy follow the same
-rule on Windows. Windows Codex, Claude Code and Cursor policy is written only
-while the target manifest has an enabled row for that agent. To stop
+On Linux and macOS, `guardrail.connectors.claudecode.enabled: false`
+removes Claude Code machine policy and hooks as well as per-user enrollment;
+Claude Code is then unprotected. Other connector machine-policy ownership is
+controlled by `enterprise.machine_policy.connectors`. On Windows, Codex, Claude
+Code and Cursor policy is written only while the target manifest has an enabled row for that agent. To stop
 publishing machine policy for an agent, remove its name from both maps, or
 set `enterprise.machine_policy.connectors.<name>.ownership: "off"`.
 </Callout>
