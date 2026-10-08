@@ -94,6 +94,12 @@ type managedHookPeerHomeCache struct {
 	// nothing is persisted (per-user gateways, Secure Client).
 	homesFile   string
 	homesLoaded bool
+	// holders is the account (name and home) each uid's cached directory
+	// facts were used for. When another account holds the uid (a removed
+	// account's uid given to a new one), its facts are dropped: the new
+	// person must not get the old holder's groups and profile until the
+	// facts expire (GAP-0720).
+	holders map[int]string
 }
 
 // managedHookPeerHomesFileMax bounds the persisted homes file read at start.
@@ -237,7 +243,23 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	if uid < 0 {
 		return useridentity.DirectoryFacts{}, false
 	}
-	return c.directoryCache().get(strconv.Itoa(uid), block)
+	key := strconv.Itoa(uid)
+	if account, ok := c.account(uid); ok {
+		holder := account.Name + "\x00" + account.Home
+		c.mu.Lock()
+		previous, known := c.holders[uid]
+		if !known && len(c.holders) < managedHookPeerHomesMax || known && previous != holder {
+			if c.holders == nil {
+				c.holders = make(map[int]string)
+			}
+			c.holders[uid] = holder
+		}
+		c.mu.Unlock()
+		if known && previous != holder {
+			c.directoryCache().forget(key)
+		}
+	}
+	return c.directoryCache().get(key, block)
 }
 
 // directoryCache returns the cache of verified directory facts per uid,

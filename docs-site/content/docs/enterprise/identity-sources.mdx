@@ -382,7 +382,11 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   15 minutes and refreshes them in the background (2 minutes for an answer with
   a group that has no name, or an SSSD account still waiting for its UPN on
   standalone enterprise). A Windows user must also sign out and back in, and
-  Himmelblau and SSSD add their own caches.
+  Himmelblau and SSSD add their own caches. On Linux and macOS the facts belong
+  to the account that held the uid when they were read: a new account given
+  the uid of a removed one gets its own facts within 5 minutes (when the
+  gateway next resolves the uid's account), never the old holder's for the
+  full 15.
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
   take seconds. The first request waits up to two seconds, then the default
   profile applies for 15 seconds until the lookup is retried.
