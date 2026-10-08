@@ -86,6 +86,20 @@ class DoctorPolicyStateTests(unittest.TestCase):
                 cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
             self.assertEqual(result.checks[0]["status"], want, (extra, local, result.checks[0]))
 
+    def test_stale_row_names_the_change_the_gateway_did_not_apply(self):
+        # GAP-0362: the row showed only two digests.
+        from defenseclaw.commands import cmd_doctor
+
+        policy = {"effective_digest": "sha256:" + "a" * 64, "generation": 3, "config_generation": 2,
+                  "config_generation_recorded": True}
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": "sha256:" + "b" * 64}), \
+                patch.object(cmd_doctor, "_saved_config_generation", return_value=4):
+            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+        self.assertIn("it has not applied the change saved as config generation 4 (it enforces generation 2)",
+                      result.checks[0]["detail"])
+        self.assertIn("defenseclaw-gateway restart", result.checks[0]["remediation"])
+
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
     def test_only_data_json_is_retired(self):

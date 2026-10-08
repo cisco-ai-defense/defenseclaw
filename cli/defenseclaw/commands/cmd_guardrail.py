@@ -2956,6 +2956,10 @@ _GATEWAY_OUTCOMES = {
         "The change is saved, but the gateway restart failed; run defenseclaw-gateway restart, "
         "then defenseclaw doctor."
     ),
+    "not_applied": (
+        "The running gateway did not apply it and still enforces the previous setting "
+        "(defenseclaw-gateway status says why); restart it to apply this: defenseclaw-gateway restart."
+    ),
     "still_starting": (
         "The change is saved. The gateway is still starting and was kept running, so protection is "
         "not confirmed yet; check it with: defenseclaw-gateway status (restart it only if it does "
@@ -2963,7 +2967,7 @@ _GATEWAY_OUTCOMES = {
     ),
 }
 #: Outcomes that leave the change unconfirmed: the command exits 1.
-_GATEWAY_UNCONFIRMED = frozenset({"restart_failed", "still_starting"})
+_GATEWAY_UNCONFIRMED = frozenset({"restart_failed", "still_starting", "not_applied"})
 
 
 def _resolve_scope_connector(app: AppContext, connector: str) -> tuple[str, str]:
@@ -3080,7 +3084,7 @@ def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: 
     if not _gateway_running(app):
         return "not_running"
     if not needs_restart:
-        return "live"
+        return _live_apply_outcome(app)
     if not restart:
         return "restart_needed"
     import contextlib
@@ -3093,6 +3097,59 @@ def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: 
     if restarted:
         return "restarted"
     return "still_starting" if cmd_setup._take_gateway_left_starting() else "restart_failed"
+
+
+#: How long a saved change waits for the running gateway to report the new
+#: config generation; its watcher lets a write settle for 0.5 s, then builds
+#: the new policy generation.
+_APPLY_CONFIRM_SECONDS = 10.0
+
+
+def _live_apply_outcome(app: AppContext) -> str:
+    """Whether the running gateway applied the config generation just saved.
+
+    ``live`` when its health reports that generation, or when it cannot say
+    (no answer, or no policy in its health); ``restart_needed`` when it applied
+    the change but holds sections it reads only at start; ``not_applied`` when
+    it still enforces an earlier generation: a rejected reload, or a gateway
+    that never reloaded. After a 0.8.x upgrade an older gateway process
+    refused the change while this said it applied it now (GAP-0362).
+    """
+    import time
+
+    from defenseclaw import config_writer
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        want = config_writer.read_generation_state(config_path_for_data_dir(app.cfg.data_dir)).generation
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=2,
+        )
+    except Exception:  # noqa: BLE001 - no recorded generation or no client: it cannot say.
+        return "live"
+    start = time.monotonic()
+    try:
+        while True:
+            try:
+                health = client.health()
+                policy = health.get("policy")
+                applied = int(policy["config_generation"])
+            except Exception:  # noqa: BLE001 - no answer, or a gateway without policy health.
+                return "live"
+            if applied >= want:
+                details = (health.get("config") or {}).get("details") or {}
+                return "restart_needed" if details.get("restart_required") else "live"
+            waited = time.monotonic() - start
+            # A reload error older than this change clears once the new
+            # generation builds, so it counts only after the watcher's turn.
+            if waited >= _APPLY_CONFIRM_SECONDS or (waited >= 2 and policy.get("last_reload_error")):
+                return "not_applied"
+            time.sleep(0.25)
+    finally:
+        client.close()
 
 
 def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None:
@@ -3265,6 +3322,9 @@ def _applied_note(app: AppContext, result: object) -> str:
         return f"Saved{stamp}. The guardrail is off; this takes effect when you run defenseclaw guardrail enable."
     if not _gateway_running(app):
         return f"Saved{stamp}. The gateway isn't running; it loads this when it starts."
+    outcome = _live_apply_outcome(app)
+    if outcome != "live":
+        return f"Saved{stamp}. {_GATEWAY_OUTCOMES[outcome]}"
     return f"Saved{stamp}. The running gateway applies it on its next reload."
 
 
