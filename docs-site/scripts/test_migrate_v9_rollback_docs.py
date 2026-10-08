@@ -12,6 +12,11 @@ class ManualRollbackDocsTest(unittest.TestCase):
         self.assertIn("for module in admission guardrail skill_actions; do", rollback)
         self.assertIn('mv "$module.rego.migrated-v9" "$module.rego"', rollback)
 
+    def test_restores_legacy_provider_overlay(self):
+        rollback = DOC.read_text().split("## Going back to 0.8.x", 1)[1]
+        self.assertIn("custom-providers.json.migrated-v9", rollback)
+        self.assertIn("mv custom-providers.json.migrated-v9 custom-providers.json", rollback)
+
     def test_legacy_windows_setup_rollback_is_documented(self):
         migration = DOC.read_text().split("## Going back to 0.8.x", 1)[1]
         upgrade = (DOC.parents[1] / "get-started/upgrade.mdx").read_text()

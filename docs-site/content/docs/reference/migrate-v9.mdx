@@ -540,13 +540,14 @@ managed host the administrator owns `policy_dir`, so the migration only
 records a note, and the gateway refuses the old module and uses the
 config-driven policy.
 
-### Custom providers (not part of this migration)
+### Custom providers
 
-The migration does not touch `custom-providers.json`. A hand-written file from
-0.8.x keeps working. The next `defenseclaw setup provider add` or `remove`
-moves its entries into `llm_providers.custom` and `llm_providers.ollama_ports`
-in `config.yaml`, and from then on `custom-providers.json` is derived from them
-and never read back. See
+The migration moves entries from a legacy `custom-providers.json` into
+`llm_providers.custom` and `llm_providers.ollama_ports` in `config.yaml`.
+For an overlay inside the data home, it then renames the old file to
+`custom-providers.json.migrated-v9`. An overlay outside the data home stays
+in place so a 0.8.x rollback can still read it. Future provider changes use
+`config.yaml`; any generated overlay is derived from that config. See
 [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
 
 ### Keys that no longer exist
@@ -733,10 +734,22 @@ forward again. To stay on 0.8.x, go back by hand:
 5. Add back any block and allow entries that were moved out of `audit.db`.
    `migration-v9.json` lists them as `audit.db` entries under `moved`; this
    step is why `defenseclaw rollback` is the better way back.
-6. Start the 0.8.x gateway.
+6. If the legacy provider overlay was migrated, restore it in the configured
+   data directory before starting the old gateway:
+
+   ```bash
+   cd ~/.defenseclaw
+   if [ -f custom-providers.json.migrated-v9 ]; then
+     mv custom-providers.json.migrated-v9 custom-providers.json
+   fi
+   ```
+
+   Use your configured `data_dir` instead of `~/.defenseclaw` if it differs.
+   An overlay outside the data home was left in place and needs no rename.
+7. Start the 0.8.x gateway.
 
 After step 2 the file says `config_version: 8` again, the only version 0.8.x
-reads. Complete the policy restoration in steps 3 and 4 before starting it.
+reads. Complete the policy and provider restoration before starting it.
 
 For a managed host, the older release must be given the version 8 admin config
 explicitly; see [Lifecycle](/docs/enterprise/lifecycle).
