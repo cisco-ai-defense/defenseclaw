@@ -6,6 +6,7 @@ package gateway
 import (
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -83,9 +84,14 @@ type identityCache[T any] struct {
 	logf func(format string, args ...any)
 	// maxAge, when set, is the age past which facts are no longer served.
 	maxAge time.Duration
+	// gone, when set, marks a lookup error in which the directory answered
+	// that the account does not exist.
+	gone func(error) bool
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
+	// answeredAt is when a lookup of any key last succeeded.
+	answeredAt time.Time
 }
 
 type identityCacheEntry[T any] struct {
@@ -100,6 +106,8 @@ type identityCacheEntry[T any] struct {
 	lastErr     string
 	// lastFailedAt is when a lookup of the key last failed.
 	lastFailedAt time.Time
+	// gone is set when the last failure said the account does not exist.
+	gone bool
 }
 
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
@@ -263,6 +271,8 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 // its recovery. A key that keeps failing for the same reason logs nothing more.
 func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntry[T], err error, now time.Time) string {
 	if err == nil {
+		c.answeredAt = now
+		entry.gone = false
 		if entry.failedSince.IsZero() {
 			return ""
 		}
@@ -271,6 +281,7 @@ func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntr
 		return fmt.Sprintf("directory lookup for %s works again after %s", key, down)
 	}
 	entry.lastFailedAt = now
+	entry.gone = c.gone != nil && c.gone(err)
 	reason := err.Error()
 	if len(reason) > 300 {
 		reason = reason[:300] + "..."
@@ -319,7 +330,13 @@ type identityCacheHealth struct {
 	// and OldestAge is the age of the oldest of them.
 	Stale     int
 	OldestAge time.Duration
+	// Accounts are the keys (uid or SID) of the failing accounts, sorted, at
+	// most identityHealthMaxAccounts of them.
+	Accounts []string
 }
+
+// identityHealthMaxAccounts bounds identityCacheHealth.Accounts.
+const identityHealthMaxAccounts = 10
 
 // health reports the failing accounts. An idle account whose last failure is
 // older than the TTL is not counted: nothing retries it until it is used.
@@ -331,11 +348,18 @@ func (c *identityCache[T]) health() identityCacheHealth {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
-	for _, entry := range c.entries {
+	for key, entry := range c.entries {
 		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
 			continue
 		}
+		if entry.gone && c.answeredAt.After(entry.lastFailedAt) {
+			// The directory answered for another account after it said this
+			// one does not exist: the account is gone, the directory is not
+			// failing (GAP-0696).
+			continue
+		}
 		h.Failing++
+		h.Accounts = append(h.Accounts, key)
 		if h.Since.IsZero() || entry.failedSince.Before(h.Since) {
 			h.Since, h.LastError = entry.failedSince, entry.lastErr
 		}
@@ -343,6 +367,10 @@ func (c *identityCache[T]) health() identityCacheHealth {
 			h.Stale++
 			h.OldestAge = max(h.OldestAge, age)
 		}
+	}
+	sort.Strings(h.Accounts)
+	if len(h.Accounts) > identityHealthMaxAccounts {
+		h.Accounts = h.Accounts[:identityHealthMaxAccounts]
 	}
 	return h
 }

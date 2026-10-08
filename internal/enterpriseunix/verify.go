@@ -641,9 +641,10 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			AIDefense string `json:"ai_defense"`
 		} `json:"inspection"`
 		Directory *struct {
-			Failing int    `json:"failing"`
-			Since   string `json:"since"`
-			Stale   int    `json:"stale"`
+			Failing  int      `json:"failing"`
+			Since    string   `json:"since"`
+			Stale    int      `json:"stale"`
+			Accounts []string `json:"accounts"`
 		} `json:"directory"`
 	}
 	if json.Unmarshal(body, &health) != nil {
@@ -654,14 +655,35 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		l.result.Inspection.AIDefense = health.Inspection.AIDefense
 	}
 	if d := health.Directory; d != nil && d.Failing > 0 {
-		message := fmt.Sprintf("directory lookups are failing for %d account(s) since %s; accounts without cached facts get the "+
-			"default guardrail profile (default_lookup_failed)", d.Failing, d.Since)
+		which := ""
+		if ids := directoryLookupAccounts(d.Accounts); ids != "" {
+			which = " (" + ids + ")"
+		}
+		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; accounts without cached facts get the "+
+			"default guardrail profile (default_lookup_failed)", d.Failing, which, d.Since)
 		if d.Stale > 0 {
 			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
 		}
-		l.result.AddWarning(codeDirectoryLookups, message+". Check SSSD or the domain controller; `"+
+		check := "Check SSSD or the domain controller"
+		if l.env.GOOS == "darwin" {
+			check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller"
+		}
+		l.result.AddWarning(codeDirectoryLookups, message+". "+check+"; `"+
 			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
 	}
+}
+
+// directoryLookupAccounts names the failing accounts the gateway reported by
+// uid ("uid 1001, uid 1002"); anything that is not a plain uid is dropped.
+func directoryLookupAccounts(ids []string) string {
+	named := []string{}
+	for _, id := range ids {
+		if id == "" || len(id) > 10 || strings.Trim(id, "0123456789") != "" {
+			continue
+		}
+		named = append(named, "uid "+id)
+	}
+	return strings.Join(named, ", ")
 }
 
 // enrollmentCounts summarizes the guardian authorization ledger; detailed

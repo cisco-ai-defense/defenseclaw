@@ -1399,7 +1399,8 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
-			if directory := directoryHealthSummary(directoryCacheHealth()); directory != nil {
+			peer, viaHookSocket := managedHookPeerFromContext(r.Context())
+			if directory := directoryHealthSummary(directoryCacheHealth(), viaHookSocket && peer.UID == 0); directory != nil {
 				body["directory"] = directory
 			}
 			// Non-secret fingerprints of the per-user credential keys that

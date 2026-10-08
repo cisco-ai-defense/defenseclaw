@@ -15,6 +15,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	osuser "os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -176,8 +177,16 @@ func (c *managedHookPeerHomeCache) directoryCache() *identityDirectoryCache {
 		c.directories.incomplete = func(facts useridentity.DirectoryFacts) bool {
 			return hasUnnamedGroup(facts) || awaitingSpoolUPN(facts)
 		}
+		c.directories.gone = peerAccountGone
 	})
 	return c.directories
+}
+
+// peerAccountGone reports a directory lookup error that says the uid has no
+// account: the NSS resolver's not-found, or os/user's unknown uid.
+func peerAccountGone(err error) bool {
+	var unknown osuser.UnknownUserIdError
+	return unixidentity.IsNotFound(err) || errors.As(err, &unknown)
 }
 
 // peerDirectoryCache is the cache the hook path reads directory facts from.
