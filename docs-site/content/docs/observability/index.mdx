@@ -411,9 +411,11 @@ disk space is available. The same sweep removes agent identities (the
 `agt-` ledger behind `defenseclaw agent identities`) that have not been seen
 within the window, so agents and accounts that were removed do not stay listed;
 an agent that runs again is listed again under the same id. `retention_days: 0`
-keeps inventory history and agent identities indefinitely as well. While `ai_discovery.enabled` is `false` nothing
-maintains `inventory.db`; it only holds scan history, so it can be deleted with
-the gateway stopped. `defenseclaw doctor` warns
+keeps inventory history and agent identities indefinitely as well. `inventory.db`
+also holds the agent identity and session ledger. When `ai_discovery.enabled` is
+`false`, hooks can still add identities and sessions, but the retention sweep
+does not run. Deleting the file loses every `agt-` listing and session count.
+`defenseclaw doctor` warns
 (`doctor.state.inventory-storage-size`) when `inventory.db` reaches 1 GiB.
 
 ## Choose an operator view

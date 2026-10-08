@@ -134,6 +134,11 @@ the administrator edits the
 [machine configuration](/docs/enterprise/configuration#where-the-config-lives)
 instead.
 
+Claude Code and Codex email appears only in per-profile inventory when
+`ai_discovery.home_dirs` names the profiles, typically on a managed host.
+A per-user gateway without `home_dirs` does not attach these addresses to its
+AI discovery rows. Cursor hook payloads can report an address independently.
+
 DefenseClaw reads only explicit connector-account evidence:
 
 | Connector | Where the email comes from |
@@ -157,8 +162,9 @@ the default off unless the destination and your privacy policy explicitly allow
 it.
 </Callout>
 
-For Codex and Claude Code, join a hook event to the latest `ai.discovery` row
-with the same trusted `user.id` to obtain the connector email. The address is
+For Codex and Claude Code on a per-profile inventory deployment, join a hook
+event to the latest `ai.discovery` row with the same trusted `user.id` to
+obtain the connector email. The address is
 reported once per discovery cycle rather than copied onto every hook event.
 
 ## Optional principal
