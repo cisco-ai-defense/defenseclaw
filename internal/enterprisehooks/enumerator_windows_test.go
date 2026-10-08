@@ -552,7 +552,8 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 // (SID, Connector) whose per-user profile contains a supported CLI
 // (via the package.json probe added in the previous commit) is
 // emitted with Enabled=true, AgentVersion set to the discovered
-// value, and Deferred=false.
+// value, and Deferred=true so a signed-out owner pends instead of
+// failing install.
 func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
@@ -572,8 +573,8 @@ func TestApplyPreviousRowStateAutoAuthorizesNewRowWithDiscoverableCLI(t *testing
 	if fresh.Enabled == nil || !*fresh.Enabled {
 		t.Fatal("new row Enabled: want pointer-to-true")
 	}
-	if fresh.Deferred {
-		t.Fatal("new row Deferred: want false")
+	if !fresh.Deferred {
+		t.Fatal("new row Deferred: want true")
 	}
 }
 

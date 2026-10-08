@@ -472,7 +472,11 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 //     profile contains a supported per-user install of the
 //     connector's CLI.
 //   - If a version is discoverable: emit the row with
-//     `Enabled: true`, `Deferred: false`, `AgentVersion: <found>`.
+//     `Enabled: true`, `Deferred: true`, `AgentVersion: <found>`.
+//     Deferred lets the guardian leave a signed-out user's row
+//     pending instead of failing the whole install; it only applies
+//     while no WTSActive session exists and the row was never
+//     protected, so signed-in users are still enrolled immediately.
 //     This is the auto-authorize path — parity with macOS
 //     render-targets.sh, which emits enabled rows for any
 //     (user × connector) whose CLI is present.
@@ -517,7 +521,7 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	enabled := true
 	row.AgentVersion = version
 	row.Enabled = &enabled
-	row.Deferred = false
+	row.Deferred = true
 	logfSafely(
 		logf,
 		row.SID,
