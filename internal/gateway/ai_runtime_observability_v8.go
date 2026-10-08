@@ -64,14 +64,14 @@ func newAIRuntimeV8Adapter(emitter sidecarRuntimeEmitter) *aiRuntimeV8Adapter {
 // EmitSnapshot publishes one poll cycle.
 //
 // Export selected planes, including failures, while omitting idle unselected
-// planes. A stopped selected plane must remain visible.
+// planes. Secure Client retains every plane per poll as on origin/main.
 func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot sensor.Snapshot) error {
 	if adapter == nil || adapter.runtime == nil || ctx == nil {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	var firstErr error
 	for _, health := range snapshot.Planes {
-		if !health.Running && !health.Selected {
+		if !ManagedEnterpriseActive() && !health.Running && !health.Selected {
 			continue
 		}
 		if err := adapter.emitPlaneHealth(ctx, snapshot, health); err != nil && firstErr == nil {

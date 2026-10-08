@@ -196,6 +196,24 @@ func TestRuntimeSnapshotExportsStoppedSelectedPlane(t *testing.T) {
     }
 }
 
+func TestSecureClientRuntimeSnapshotExportsEveryPlane(t *testing.T) {
+    old := ManagedEnterpriseActive()
+    SetManagedEnterpriseActive(true)
+    t.Cleanup(func() { SetManagedEnterpriseActive(old) })
+    capture := &endpointInventoryCapture{}
+    snapshot := sensor.Snapshot{Planes: []sensor.PlaneHealth{
+        {Plane: "a", Available: true, Running: true, Mechanism: "process"},
+        {Plane: "b", Available: false, Running: false, Reason: "permission denied"},
+        {Plane: "c", Available: false, Running: false, Reason: "not selected in ai_discovery.runtime.planes"},
+    }}
+    if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
+        t.Fatal(err)
+    }
+    if records := capture.snapshot(); len(records) != len(snapshot.Planes) {
+        t.Fatalf("Secure Client exported %d plane records, want %d", len(records), len(snapshot.Planes))
+    }
+}
+
 func TestRuntimeSnapshotEmitsUnattributedPlaneFinding(t *testing.T) {
 	t.Parallel()
 	capture := &endpointInventoryCapture{}
