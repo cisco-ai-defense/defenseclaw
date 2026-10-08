@@ -125,3 +125,19 @@ func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
 		t.Fatalf("status does not name exactly the older agent session: %q", got)
 	}
 }
+
+// A staged install has no active hooks. Sessions started during staging
+// still need a restart after the first ensure activates the deployment.
+func TestStatusNamesAgentSessionsStartedDuringNoStartStaging(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	offset := time.Duration(0)
+	h.env.Now = func() time.Time { return time.Now().Add(offset) }
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), NoStart: true}))
+	offset = 10 * time.Minute
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	h.runner.ps = "4321 501 00:05:00 claude --resume"
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
+	if !strings.Contains(got, "claude (pid 4321)") {
+		t.Fatalf("status omitted session started during staging: %q", got)
+	}
+}
