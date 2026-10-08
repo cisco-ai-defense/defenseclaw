@@ -1557,8 +1557,18 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			// A plain folder has no branches to put the work on.
 			choices = append(choices, choice{"b", "branch dc/" + after.Name})
 		}
-		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"})
+		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"}, choice{"d", "show diff"})
 		ans, err := a.choose("Bring the changes back?", choices, "a")
+		for err == nil && ans == "d" {
+			// Read the work before choosing, as a mounted project's end
+			// offers (GAP-0207).
+			if diff, derr := a.Workspace.Diff(ctx, a.dataDir(), after.Name); derr != nil {
+				a.warn("diff: " + derr.Error())
+			} else {
+				a.page(diff)
+			}
+			ans, err = a.choose("Bring the changes back?", choices, "a")
+		}
 		switch {
 		case errors.Is(err, errInterrupted):
 			// Ctrl-C: nothing comes back; the changes wait in the sandbox.

@@ -499,9 +499,9 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	ta := newTestApp(t, "", copySandbox("copybox"))
 	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox", Diff: true}))
 	has(t, ta.output(), "starting copybox to read its work", "copybox: 1 file changed (+4 −1)", "  M main.go",
-		"--diff: the changes of a copy come back as a patch; `defenseclaw sandbox pull copybox --patch-out FILE` writes one",
 		"nothing was applied; bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch or --patch-out FILE)", "stopped copybox again")
-	if !slices.Equal(ta.copy.steps, []string{"pull copybox"}) || ta.calls("POST", "copybox/review") != 0 {
+	// --diff shows the pull's diff (GAP-0207).
+	if !slices.Equal(ta.copy.steps, []string{"pull copybox", "diff copybox"}) || ta.calls("POST", "copybox/review") != 0 {
 		t.Fatalf("copy steps %v, daemon reviews %d; want a pull and nothing applied", ta.copy.steps, ta.calls("POST", "copybox/review"))
 	}
 	if r := ta.bodies("POST", "copybox/workspace"); len(r) != 0 {

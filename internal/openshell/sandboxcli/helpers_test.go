@@ -752,6 +752,13 @@ type fakeCopy struct {
 	pulled    []workspace.PullOptions
 	// refreshErr is what Refresh fails with.
 	refreshErr error
+	// diff is what Diff answers.
+	diff string
+}
+
+func (f *fakeCopy) Diff(_ context.Context, _, name string) (string, error) {
+	f.step("diff " + name)
+	return f.diff, nil
 }
 
 func (f *fakeCopy) record(add func()) {

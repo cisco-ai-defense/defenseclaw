@@ -1936,6 +1936,11 @@ func TestCopyReviewShowsFindings(t *testing.T) {
 	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox"}))
 	has(t, ta.output(), "CRITICAL src/aws.txt:1 — clawshield-secrets: AWS access key", "the sandbox wrote what looks like a secret: src/aws.txt",
 		"nothing was applied")
+	// GAP-0207: --diff shows the copy's work, not only how to write a patch.
+	ta.copy.diff = "diff --git a/src/aws.txt b/src/aws.txt\n+dccert-decoy\n"
+	ta.ok(t, ta.fresh().Review(bg, ReviewOptions{Name: "copybox", Diff: true}))
+	has(t, ta.output(), "+dccert-decoy")
+	lacks(t, ta.output(), "come back as a patch")
 }
 
 // Manual R2-43: a copy-mode session that found nothing to bring back lets

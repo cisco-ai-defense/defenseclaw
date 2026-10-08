@@ -246,7 +246,7 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
 ```text
   Pulling myapp-1c2d's work…
 Session ended · 14 tool calls · 2 new sites contacted · 3 files changed (+41 −6)
-Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
   ✓ applied 3 changes to ~/code/myapp
   your previous working tree is kept at refs/defenseclaw/copy/myapp-1c2d/pre-apply; `defenseclaw sandbox undo myapp-1c2d` reverts the apply
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-1c2d   delete: defenseclaw sandbox delete myapp-1c2d
@@ -256,6 +256,7 @@ Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch f
 - `b` puts it on a new branch, `dc/myapp-1c2d`.
 - `p` writes a patch file.
 - `s` leaves it in the sandbox for a later `sandbox pull`.
+- `d` shows the diff, then asks again.
 
 The end of a real session on a Mac, for a sandbox started with
 `--name myapp-claude`, after two blocked sites:

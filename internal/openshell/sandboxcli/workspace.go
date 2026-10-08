@@ -53,6 +53,8 @@ type CopyWorkspace interface {
 	// CheckApply looks, before a pull, at what would stop its apply
 	// (workspace.CheckApply).
 	CheckApply(ctx context.Context, opts workspace.ApplyOptions) (bool, error)
+	// Diff is the last pull as a diff to read (workspace.PullDiff).
+	Diff(ctx context.Context, dataDir, name string) (string, error)
 }
 
 type defaultCopyWorkspace struct{}
@@ -89,6 +91,9 @@ func (defaultCopyWorkspace) PendingWork(ctx context.Context, dataDir, name strin
 }
 func (defaultCopyWorkspace) CheckApply(ctx context.Context, o workspace.ApplyOptions) (bool, error) {
 	return workspace.CheckApply(ctx, o)
+}
+func (defaultCopyWorkspace) Diff(ctx context.Context, dataDir, name string) (string, error) {
+	return workspace.PullDiff(ctx, dataDir, name)
 }
 
 // UndoOptions are the `sandbox undo` flags.
@@ -510,10 +515,17 @@ func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 		return err
 	}
 	if sb, err := api.Get(ctx, o.Name); err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
-		if o.Diff && o.Output != OutputJSON {
-			a.note("--diff: the changes of a copy come back as a patch; `" + CommandName + " pull " + o.Name + " --patch-out FILE` writes one")
+		if err := a.Pull(ctx, PullOptions{Name: o.Name, Output: o.Output, preview: true}); err != nil || !o.Diff || o.Output == OutputJSON {
+			return err
 		}
-		return a.Pull(ctx, PullOptions{Name: o.Name, Output: o.Output, preview: true})
+		// The diff of the work the pull read, to decide on before
+		// applying it (GAP-0207).
+		diff, err := a.Workspace.Diff(ctx, a.dataDir(), o.Name)
+		if err != nil {
+			return workspaceFailure("diff "+o.Name, err, "")
+		}
+		a.page(diff)
+		return nil
 	}
 	rev, err := api.Review(ctx, o.Name, sandboxapi.ReviewRequest{Diff: o.Diff})
 	if err != nil {

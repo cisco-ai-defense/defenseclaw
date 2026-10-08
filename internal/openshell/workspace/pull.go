@@ -778,6 +778,37 @@ func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyO
 	return nil, fmt.Errorf("workspace: unknown apply mode %q", mode)
 }
 
+// maxPullDiffBytes caps the diff PullDiff shows; a larger one is cut, and
+// says how to get all of it (a patch file).
+const maxPullDiffBytes = 4 << 20
+
+// PullDiff is the last pull of a copy-mode sandbox as a diff to read: what
+// `pull --patch-out` would write, without binary data, so a copy's work
+// can be read before it is applied (GAP-0207).
+func PullDiff(ctx context.Context, dataDir, name string) (string, error) {
+	rec, err := LoadCopy(dataDir, name)
+	if err != nil {
+		return "", err
+	}
+	pr, err := LoadPull(dataDir, name)
+	if err != nil {
+		return "", err
+	}
+	if pr.Effective == "" || pr.Empty() {
+		return "", nil
+	}
+	lay, _ := newLayout(dataDir)
+	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit}
+	diff, err := base.output(ctx, "diff", "--no-ext-diff", "--no-textconv", "--no-color", pr.from(), pr.Effective)
+	if err != nil {
+		return "", err
+	}
+	if len(diff) > maxPullDiffBytes {
+		return string(diff[:maxPullDiffBytes]) + "\n… the diff goes on; `pull --patch-out FILE` writes all of it\n", nil
+	}
+	return string(diff), nil
+}
+
 func writePatch(ctx context.Context, base gitCmd, from, to, dest string, force bool) error {
 	diff, err := base.output(ctx, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-color", from, to)
 	if err != nil {

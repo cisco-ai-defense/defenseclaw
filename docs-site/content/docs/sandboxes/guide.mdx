@@ -947,11 +947,13 @@ folder until you bring the work back. At the end of the session you choose
 how:
 
 ```text
-Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip (then Enter)
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip  [d] show diff (then Enter)
 ```
 
-Changes that can run code on your machine, or that hold what looks like a
-secret, are brought back only after a second yes. Nothing is applied
+`d` shows the diff first, then asks again; above the question are the
+review's flags, its findings and a warning when the sandbox wrote what
+looks like a secret. Changes that can run code on your machine, or that
+hold what looks like a secret, are brought back only after a second yes. Nothing is applied
 without a review: a skip, a run with no terminal to ask on (a script, or a
 `--prompt` run in one) and `--yes` leave the changes in the sandbox and say
 how many there are:

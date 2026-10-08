@@ -194,6 +194,20 @@ func TestStageRefusesOversizedFolders(t *testing.T) {
 	}
 }
 
+// GAP-0207: a copy's work could be read only by writing a patch file;
+// PullDiff shows the last pull as the diff the patch would hold.
+func TestPullDiff(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	pull(t, e, fs, "c1")
+	diff, err := PullDiff(bg, e.data, "c1")
+	if err != nil || !strings.Contains(diff, "+++ b/README.md") || !strings.Contains(diff, "+agent version") {
+		t.Fatalf("diff = %q, %v", diff, err)
+	}
+}
+
 // TestCopyReapplyKeepsThePreApplyState: applying the same work again, or a
 // conflicting apply (which falls back to a branch and a patch in the
 // project folder, under fresh names each time, kept when the copy is

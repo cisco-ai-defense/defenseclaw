@@ -1139,8 +1139,9 @@ unified diff too.
 For a copy-mode sandbox (every sandbox on a Mac) `review` previews what
 `sandbox pull` would bring back, the same review and the changed files, and
 applies nothing; a stopped sandbox is started to read its work and stopped
-again. `-o json` then prints the pull's result, as `pull -o json` does, and
-`sandbox pull NAME --patch-out FILE` writes the diff.
+again. The review's flags and findings show, and `--diff` prints the diff
+of that work. `-o json` then prints the pull's result, as `pull -o json`
+does, and `sandbox pull NAME --patch-out FILE` writes the diff to a file.
 
 ```bash
 defenseclaw sandbox review myapp-7f3a
