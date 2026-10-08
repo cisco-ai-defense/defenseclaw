@@ -1361,6 +1361,12 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 				CommandName + " delete " + name + " --keep-snapshot` keeps the undo point, then run again")
 			return nil
 		case !s.started:
+			if now, err := s.api.Get(ctx, name); err == nil && now.Phase != "ready" {
+				// Stopped while the session ended (another terminal, the
+				// TUI): the line read "keeps running → stop" (GAP-0366).
+				a.note("Sandbox " + name + " is " + now.Phase + " now (stopped from outside this session) → resume: " + CommandName + " connect " + name)
+				return nil
+			}
 			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)
 			s.continueHint()
 			return nil

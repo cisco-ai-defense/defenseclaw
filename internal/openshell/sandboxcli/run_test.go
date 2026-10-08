@@ -838,6 +838,30 @@ func TestRunCopyCleansItsStageAfterARolledBackCreate(t *testing.T) {
 	}
 }
 
+// stoppingCopy is a fakeCopy whose pull runs stop first: another terminal
+// stops the sandbox while the session's end reads its work.
+type stoppingCopy struct {
+	*fakeCopy
+	stop func()
+}
+
+func (s *stoppingCopy) Pull(ctx context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	s.stop()
+	return s.fakeCopy.Pull(ctx, o)
+}
+
+// GAP-0366: a sandbox the session found running and another terminal
+// stopped while it ended reads as stopped at the end, not as one that keeps
+// running and needs a stop.
+func TestConnectedSessionEndReadsThePhaseAgain(t *testing.T) {
+	ta := newTestApp(t, "s\n", copySandbox("copybox"))
+	ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
+	ta.Workspace = &stoppingCopy{fakeCopy: ta.copy, stop: func() { ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" }) }}
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "copybox"}))
+	has(t, ta.output(), "Sandbox copybox is stopped now (stopped from outside this session) → resume: defenseclaw sandbox connect copybox")
+	lacks(t, ta.output(), "keeps running")
+}
+
 // Resuming a copy-mode sandbox with --refresh probes outside the workdir
 // (a failed refresh may have left none), then refreshes, then attaches; a
 // plain resume probes the workdir.
