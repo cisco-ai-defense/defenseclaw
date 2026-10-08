@@ -216,18 +216,17 @@ func (b *Burnin) Accrue(uid int, d time.Duration) {
 	}
 }
 
-// ResetUncovered discards clean time when a live session has not yet reached
-// an enabled controls policy. The next policy pass can start a new window.
-func (b *Burnin) ResetUncovered(uid int, now time.Time) bool {
+// TakeBack removes covered time that was credited to uid while one of its
+// sessions may already have run outside the controls policy. The rest of
+// the window stays: a session that waits for the policy pauses the user's
+// burn-in, it does not restart it (GAP-0088).
+func (b *Burnin) TakeBack(uid int, d time.Duration) {
 	rec := b.record(uid)
-	if rec == nil || rec.CoveredSeconds == 0 {
-		return false
+	if rec == nil || d <= 0 || rec.CoveredSeconds == 0 {
+		return
 	}
-	rec.CoveredSeconds = 0
-	rec.WindowStart = now
-	rec.ResetReason = WarnSessionPolicyPending
+	rec.CoveredSeconds = max(0, rec.CoveredSeconds-int64(d/time.Second))
 	b.dirty = true
-	return true
 }
 
 // Covered returns the covered time of uid since its last hit or reset.

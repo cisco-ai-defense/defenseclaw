@@ -1423,7 +1423,7 @@ Known limits of these controls:
   covered burn-in time pauses until every live root is measured. Eight roots
   use two `file_open` hooks on the measured Tetragon 1.7.1 host. More hooks
   loaded but cost more than the budget described below.
-- A new agent session may wait a few seconds for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; if loading fails, the warning remains until the policy is repaired.
+- A new agent session may wait a minute or two for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; the user's earlier covered time stays. If loading fails, the warning remains until the policy is repaired.
 - A control denies below an agent session that Tetragon saw start while the
   controls were loaded. A session that was already running when they loaded
   (enforce turned on, or Tetragon restarted) is monitored until it restarts
@@ -1444,10 +1444,14 @@ Each user has a burn-in: covered agent time that must reach `burn_in` (default
 168 hours) with zero would-block hits. Covered time accrues only while all of
 these hold: the Tetragon stream is connected; no event throttling or
 rate-limit drop happened that minute; the user's policy is enabled; at least
-one anchored agent process of that user is alive; and enforcement is not
-paused. An idle computer accrues nothing. A hit sends the user back to the
-start of a fresh window. The burn-in resets when the control set changes or
-when the user gains a connector.
+one anchored agent process of that user is alive; every live agent session of
+that user is in the enabled policy; and enforcement is not paused. An idle
+computer accrues nothing. A hit sends the user back to the start of a fresh
+window. The burn-in resets when the control set changes or when the user
+gains a connector. Nothing else resets it: a new agent session only pauses
+it until the session is in the policy (`kernel_session_policy_pending`,
+usually a minute or two), and gives back at most the last minute credited
+before the helper saw the session.
 
 A `burn_in` of `0` skips the wait, and status warns `kernel_burn_in_skipped`
 for as long as it applies. Otherwise `burn_in` is 24h to 2160h.

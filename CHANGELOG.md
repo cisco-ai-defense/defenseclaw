@@ -58,7 +58,8 @@ says otherwise. Per-user installs never connect to Tetragon.
     are reported as `kernel_roots_over_limit` and their user's burn-in pauses
     until every live session is measured. A new session may wait a few
     seconds for its process id to reach an enabled controls policy
-    (`kernel_session_policy_pending`) and accrues no burn-in while it waits.
+    (`kernel_session_policy_pending`) and accrues no burn-in while it waits;
+    the user's earlier covered time stays.
     An eligible account counts as enrolled for
     the connectors that reach it through vendor machine policy (Claude Code,
     Codex, Cursor, Copilot CLI and OpenCode) without a `targets.yaml` row, so

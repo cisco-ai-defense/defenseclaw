@@ -54,11 +54,6 @@ func (c *Controller) pass(ctx context.Context, trigger string) {
 	c.rescan()
 	c.tallyMu.Lock()
 	resets := c.burn.Sync(Digest(), c.enrollment, now)
-	for uid := range c.pending {
-		if (len(c.st.Policies) > 0 || len(c.recorded) > 0 || c.restoredBurnin) && c.burn.ResetUncovered(uid, now) {
-			resets[uid] = WarnSessionPolicyPending
-		}
-	}
 	c.tallyMu.Unlock()
 	for uid, reason := range resets {
 		uid := uid

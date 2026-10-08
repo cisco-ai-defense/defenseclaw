@@ -151,8 +151,12 @@ type Controller struct {
 	seenRoots  map[rootKey]bool
 	waiting    map[rootKey]bool
 	warmup     map[int]bool
-	// Restored evidence needs revalidation even if the policy state is absent.
-	restoredBurnin bool
+	// ticks are when each user's latest burn-in ticks were credited, and
+	// scans the times of the last three root scans: a session found waiting
+	// for the controls policy takes back the ticks it may have run in
+	// unmeasured (takeBackTicks). Guarded by tallyMu.
+	ticks map[int][]time.Time
+	scans [3]time.Time
 	// progressAt is when each user's last uid_progress change was emitted.
 	progressAt map[int]time.Time
 	// retireForeign are the policies in DefenseClaw's name pattern that the
@@ -220,14 +224,13 @@ func New(cfg Config) *Controller {
 		seenRoots:  map[rootKey]bool{},
 		waiting:    map[rootKey]bool{},
 		warmup:     map[int]bool{},
+		ticks:      map[int][]time.Time{},
 		progressAt: map[int]time.Time{},
 		nudge:      make(chan struct{}, 1),
 		burn:       LoadBurnin(cfg.Dirs),
 		names:      map[string]known{},
 		totals:     map[string]int64{},
 	}
-	_, burninErr := os.Stat(cfg.Dirs.BurnIn())
-	c.restoredBurnin = burninErr == nil
 	sweepInterruptedWrites(cfg.Dirs.State, cfg.Now(), cfg.Logger)
 	if err := readJSON(cfg.Dirs.StateFile(), &c.st); err != nil && !errors.Is(err, os.ErrNotExist) {
 		cfg.Logger.Warn("kernel policy state unreadable; starting from the live state", "error", err)
@@ -879,6 +882,9 @@ func (c *Controller) rescan() bool {
 	changed := sig != c.rootSig
 	c.rootSig = sig
 	c.alive = alive
+	c.tallyMu.Lock()
+	c.scans = [3]time.Time{c.scans[1], c.scans[2], c.cfg.Now()}
+	c.tallyMu.Unlock()
 	c.refreshPending(true)
 	return changed
 }
@@ -907,6 +913,9 @@ func (c *Controller) refreshPending(publish bool) {
 		// the PID budget is full. A wholly disabled policy pauses accrual
 		// separately; it does not reset the user's prior clean window.
 		if eligible && !covered && (!c.seenRoots[key] || c.enabled[root.UID]) {
+			if !c.waiting[key] {
+				c.takeBackTicks(root.UID)
+			}
 			c.waiting[key] = true
 		}
 		c.seenRoots[key] = true
@@ -933,14 +942,9 @@ func (c *Controller) refreshPending(publish bool) {
 		}
 	}
 	c.pending = pending
+	covered := map[int]int64{}
 	for uid := range pending {
-		// A first pass has no prior policy interval to invalidate. A
-		// restored helper has the previous policy record and does reset.
-		if (len(c.st.Policies) > 0 || len(c.recorded) > 0 || c.restoredBurnin) && c.burn.ResetUncovered(uid, c.cfg.Now()) {
-			id := uid
-			c.change(Change{Event: EventUIDBurnIn, UID: &id, Reason: WarnSessionPolicyPending,
-				NeededSeconds: int64(c.cfg.Intent.BurnIn / time.Second)})
-		}
+		covered[uid] = int64(c.burn.Covered(uid) / time.Second)
 	}
 	c.tallyMu.Unlock()
 	if !publish || !changed {
@@ -964,10 +968,36 @@ func (c *Controller) refreshPending(publish bool) {
 		if pending[c.st.UIDs[i].UID] > 0 {
 			c.st.UIDs[i].State = UIDMonitor
 			c.st.UIDs[i].Reason = WarnSessionPolicyPending
-			c.st.UIDs[i].CoveredSeconds = 0
+			c.st.UIDs[i].CoveredSeconds = covered[c.st.UIDs[i].UID]
 		}
 	}
 	c.persist()
+}
+
+// maxRecentTicks bounds the burn-in ticks remembered per user for
+// takeBackTicks: more than the scans a session can start between.
+const maxRecentTicks = 8
+
+// takeBackTicks removes the covered time credited to uid in the ticks a
+// session just found waiting for the controls policy may have run in
+// unmeasured. A new session started after the second scan before the one
+// that found it (a script-hosted root is told apart only across two scans):
+// on schedule, within three scan intervals. The user's earlier covered
+// time stays (GAP-0088). Callers hold tallyMu.
+func (c *Controller) takeBackTicks(uid int) {
+	since := c.cfg.Now().Add(-3 * c.cfg.Intervals.Scan)
+	if first := c.scans[0]; !first.IsZero() && first.Before(since) {
+		since = first
+	}
+	kept := c.ticks[uid][:0]
+	for _, at := range c.ticks[uid] {
+		if at.After(since) {
+			c.burn.TakeBack(uid, c.cfg.Intervals.Accrue)
+			continue
+		}
+		kept = append(kept, at)
+	}
+	c.ticks[uid] = kept
 }
 
 // accrue adds one tick of covered time to every user whose controls are
@@ -996,6 +1026,10 @@ func (c *Controller) accrue() {
 				continue
 			}
 			c.burn.Accrue(uid, c.cfg.Intervals.Accrue)
+			c.ticks[uid] = append(c.ticks[uid], c.cfg.Now())
+			if n := len(c.ticks[uid]); n > maxRecentTicks {
+				c.ticks[uid] = append([]time.Time(nil), c.ticks[uid][n-maxRecentTicks:]...)
+			}
 		}
 	}
 }
