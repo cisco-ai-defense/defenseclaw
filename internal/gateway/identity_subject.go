@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -401,6 +403,14 @@ func applyIdentityPosture(cfg *config.Config) {
 		spool = enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
 	}
 	setIdentitySpoolDir(spool)
+	// A managed Windows scan takes each profile owner's Claude Code and
+	// Codex address from the owner's identity record, which the SYSTEM
+	// enumerator writes (GAP-1025).
+	if spool != "" && runtime.GOOS == "windows" {
+		inventory.SetOwnerEmailLookup(identitySpoolConnectorEmail)
+	} else {
+		inventory.SetOwnerEmailLookup(nil)
+	}
 	// A managed gateway keeps the last home of each uid across restarts, so
 	// one that starts during a directory outage keeps the agent identities
 	// (GAP-0314). Secure Client persists nothing new.

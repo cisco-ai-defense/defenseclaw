@@ -134,17 +134,27 @@ the administrator edits the
 [machine configuration](/docs/enterprise/configuration#where-the-config-lives)
 instead.
 
-Claude Code and Codex email appears only in per-profile inventory when
-`ai_discovery.home_dirs` names the profiles, typically on a managed host.
-A per-user gateway without `home_dirs` does not attach these addresses to its
-AI discovery rows. Cursor hook payloads can report an address independently.
+On a managed host, Claude Code and Codex email appears on the inventory
+records of each enrolled account, read from that account's own profile. On
+Linux and macOS the hook guardian's per-user scan reads it as the user; on
+Windows the hook enumerator reads it and hands it to the gateway in the
+account's identity record. You do not list the profiles: AI Discovery
+already scans every enrolled profile, and `ai_discovery.home_dirs` only adds
+folders to that list (`status` and `verify` warn about an entry that is not
+an enrolled profile). An address never goes on a record without a user or on
+another account's record. A connector file that cannot be used, because its
+path goes through a link out of the profile (on Windows, any link or
+junction) or the reader may not open it, gives no address and a named `include_user_email` warning in the
+hook guardian's log (Linux, macOS) or the hook enumerator's log (Windows). A
+per-user gateway does not attach these addresses to its AI discovery rows.
+Cursor hook payloads can report an address independently.
 
 DefenseClaw reads only explicit connector-account evidence:
 
 | Connector | Where the email comes from |
 | --- | --- |
-| Claude Code | `oauthAccount.emailAddress` in the profile's `.claude.json`, sent on per-profile `ai.discovery` inventory |
-| Codex | The `email` claim of the ID token in the profile's `.codex/auth.json`, sent on per-profile `ai.discovery` inventory |
+| Claude Code | `oauthAccount.emailAddress` in the profile's `.claude.json`, sent on the owner's `ai_component.observed` inventory records |
+| Codex | The `email` claim of the ID token in the profile's `.codex/auth.json`, sent on the owner's `ai_component.observed` inventory records |
 | Cursor | `user_email` in Cursor's hook payload, sent on hook activity |
 
 The Codex token claim is treated as inventory evidence, not as an authenticated
@@ -162,8 +172,8 @@ the default off unless the destination and your privacy policy explicitly allow
 it.
 </Callout>
 
-For Codex and Claude Code on a per-profile inventory deployment, join a hook
-event to the latest `ai.discovery` row with the same trusted `user.id` to
+For Codex and Claude Code on a managed deployment, join a hook event to the
+latest `ai_component.observed` record with the same trusted `user.id` to
 obtain the connector email. The address is
 reported once per discovery cycle rather than copied onto every hook event.
 

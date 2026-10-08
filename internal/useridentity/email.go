@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,68 @@ func normalizeConnector(connector string) string {
 	}
 }
 
+// ErrEmailFileUnreadable reports a connector account file that exists in a
+// profile but cannot be used: the reader may not open it, or it resolves
+// outside the profile (a link to another account's folder), which would
+// report another person's address as this profile owner's.
+var ErrEmailFileUnreadable = errors.New("connector account file is not readable")
+
+// ProfileEmailForConnector reads the signed-in address of one connector from
+// the account file in the profile home, for a scan that attributes it to the
+// profile's owner. Unlike EmailForConnector it says why a file that is there
+// gave no address: an error wrapping ErrEmailFileUnreadable when the file
+// cannot be read or leaves the profile, and ErrNoEmail when there is no file
+// or no address in it. Environment overrides are never honored.
+func ProfileEmailForConnector(connector, home string) (string, error) {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return "", ErrNoEmail
+	}
+	var path string
+	var parse func([]byte) (string, error)
+	switch normalizeConnector(connector) {
+	case "claudecode":
+		path, parse = filepath.Join(home, ".claude.json"), claudeCodeEmailFromJSON
+	case "codex":
+		path, parse = filepath.Join(home, ".codex", "auth.json"), codexEmailFromJSON
+	default:
+		return "", ErrNoEmail
+	}
+	if err := profileFileInside(home, path); err != nil {
+		return "", err
+	}
+	data, err := readBoundedFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", ErrNoEmail
+	}
+	if err != nil {
+		return "", profileFileError(home, path, err)
+	}
+	// The file was checked before it was opened; a link swapped in between
+	// leaves no address rather than another account's.
+	if err := profileFileInside(home, path); err != nil {
+		return "", err
+	}
+	return parse(data)
+}
+
+// profileFileError names the profile-relative file and why it was refused.
+func profileFileError(home, path string, err error) error {
+	reason := "it is not a regular file within the size limit"
+	if errors.Is(err, os.ErrPermission) {
+		reason = "access is denied"
+	}
+	return profileFileProblem(home, path, reason)
+}
+
+func profileFileProblem(home, path, reason string) error {
+	rel, relErr := filepath.Rel(home, path)
+	if relErr != nil {
+		rel = filepath.Base(path)
+	}
+	return fmt.Errorf("%w: %s: %s", ErrEmailFileUnreadable, filepath.ToSlash(rel), reason)
+}
+
 // claudeCodeEmail reads oauthAccount.emailAddress from Claude Code's local
 // account configuration.
 func claudeCodeEmail(home string) (string, error) {
@@ -109,6 +172,10 @@ func claudeCodeEmail(home string) (string, error) {
 	if err != nil {
 		return "", ErrNoEmail
 	}
+	return claudeCodeEmailFromJSON(data)
+}
+
+func claudeCodeEmailFromJSON(data []byte) (string, error) {
 	var doc struct {
 		OAuthAccount struct {
 			EmailAddress string `json:"emailAddress"`
@@ -149,6 +216,10 @@ func codexEmail(home string) (string, error) {
 	if err != nil {
 		return "", ErrNoEmail
 	}
+	return codexEmailFromJSON(data)
+}
+
+func codexEmailFromJSON(data []byte) (string, error) {
 	var doc struct {
 		Tokens struct {
 			IDToken string `json:"id_token"`
@@ -242,6 +313,13 @@ func emailFromUnverifiedJWT(token string) (string, bool) {
 // and stops at the limit.
 func readBoundedFile(path string) ([]byte, error) {
 	return safefile.ReadRegularFileBounded(path, maxCredentialFileBytes)
+}
+
+// ValidEmail reports whether raw is an address validateEmail accepts as it
+// stands, for a reader of a report another process wrote.
+func ValidEmail(raw string) bool {
+	email, err := validateEmail(raw)
+	return err == nil && email == raw
 }
 
 // validateEmail accepts only a structurally sound, JSON-safe address. It does

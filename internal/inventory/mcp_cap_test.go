@@ -192,6 +192,29 @@ func TestSignalFromMCPConfigPathReadsHermesTopLevelMCPServers(t *testing.T) {
 	}
 }
 
+// GAP-1062: `amp mcp add` writes its servers under amp.mcpServers in
+// ~/.config/amp/settings.json, which the Claude Code reader never looked at.
+func TestSignalFromMCPConfigPathReadsAmpSettingsServers(t *testing.T) {
+	t.Parallel()
+
+	cfgPath := filepath.Join(t.TempDir(), "settings.json")
+	body := `{"amp.mcpServers": {"lma-mcp": {"command": "/usr/bin/echo", "args": ["lma-mcp-marker"]}}}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	signal := (&ContinuousDiscoveryService{}).signalFromMCPConfigPath(AISignature{ID: "amp", SupportedConnector: "amp"}, cfgPath)
+	var names []string
+	for _, ev := range signal.Evidence {
+		if ev.Type == "mcp_server" {
+			names = append(names, ev.Basename)
+		}
+	}
+	if len(names) != 1 || names[0] != "lma-mcp" || signal.Partial {
+		t.Fatalf("mcp_server evidence basenames = %v (partial %v), want [lma-mcp]", names, signal.Partial)
+	}
+}
+
 // GAP-2337: Antigravity leaves a 0-byte mcp_config.json. An empty or
 // whitespace-only config declares no server: it is complete, not a
 // parse error, so the admin view does not list it as an MCP server.

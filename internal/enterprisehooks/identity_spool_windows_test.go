@@ -24,7 +24,7 @@ func TestWindowsIdentitySpoolRecordNamesTheAccount(t *testing.T) {
 	dir := t.TempDir()
 	cache := NewWindowsEnrollmentGroupCache()
 	cache.Users[sid] = nil
-	if err := WriteWindowsIdentitySpool(dir, cache, nil, nil); err != nil {
+	if err := WriteWindowsIdentitySpool(dir, cache, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	record, err := ReadIdentitySpoolRecord(dir, sid, nil)

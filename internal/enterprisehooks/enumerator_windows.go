@@ -132,6 +132,11 @@ type EnumerateOptions struct {
 	// ReportUnprotected receives each agent the standalone enumerator found
 	// installed for an eligible profile but could not enroll.
 	ReportUnprotected func(UnprotectedAgent)
+	// ReportExcluded receives each profile the standalone enrollment
+	// excludes (exclude_users or exclude_groups), with its SID and home, so
+	// the cycle can take the gateway's inventory read access off it
+	// (GAP-1024).
+	ReportExcluded func(ManifestTarget)
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -286,6 +291,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
 			continue
 		}
 		if decision != windowsEnrollmentEnrolled {
