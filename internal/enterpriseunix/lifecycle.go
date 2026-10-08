@@ -1395,7 +1395,6 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			l.noteRepairedTargets(activationStarted)
 		}
 	}
-	l.clearStaleVerifyFailure(ctx)
 	l.describe(ctx, newRecord, false)
 	// The change that leaves the eligible users without a connector says so
 	// at once, as on Windows, not only at the next status (GAP-0266).
@@ -1424,26 +1423,6 @@ func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]b
 			continue
 		}
 		_ = l.env.Services.Stop(ctx, unit)
-	}
-}
-
-// clearStaleVerifyFailure resets a failed daily verify run once a change has
-// been applied and checked: that failure (often a run a package upgrade
-// interrupted) describes the deployment before this change, and it left
-// unit_failed in every status until the timer fired again a day later
-// (GAP-0585).
-func (l *lifecycle) clearStaleVerifyFailure(ctx context.Context) {
-	env := l.env
-	if env.GOOS != "linux" {
-		return
-	}
-	for _, unit := range env.Services.Units() {
-		if unit.Name != unitVerifyService {
-			continue
-		}
-		if status, _ := env.Services.Status(ctx, unit); strings.HasPrefix(status.State, "failed") {
-			_, _ = env.Runner.Run(ctx, "systemctl", "reset-failed", unitVerifyService)
-		}
 	}
 }
 

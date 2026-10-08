@@ -186,8 +186,10 @@ func TestAPackageUpgradeDoesNotLeaveTheDailyVerifyFailed(t *testing.T) {
 	if !h.services.active[unitVerifyService] {
 		t.Fatalf("the upgrade stopped the waiting verify run: %v", h.services.calls)
 	}
-	if !strings.Contains(strings.Join(h.runner.calls, "\n"), "systemctl reset-failed "+unitVerifyService) {
-		t.Fatalf("the verify failure from before the upgrade is kept: %v", h.runner.calls)
+	// The committed change clears the failure (clearSupersededUnitFailures,
+	// GAP-0423).
+	if h.services.failed[unitVerifyService] {
+		t.Fatalf("the verify failure from before the upgrade is kept: %v", h.services.calls)
 	}
 	marker := h.env.P(packageTransactionMarker)
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {

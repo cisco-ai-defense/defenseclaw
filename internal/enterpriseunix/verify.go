@@ -193,7 +193,8 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 // run left on the apply or daily verify oneshot once this run has left the
 // deployment healthy (committed, or found up to date). Left in place, every
 // verify kept warning unit_failed after a refused package upgrade was
-// recovered, until an administrator ran systemctl reset-failed (GAP-0423).
+// recovered, or after a package upgrade interrupted the daily verify, until
+// an administrator ran systemctl reset-failed (GAP-0423, GAP-0585).
 func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
 	env := l.env
 	resetter, ok := env.Services.(failedResetter)
