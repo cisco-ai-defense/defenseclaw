@@ -881,9 +881,10 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
 
 @policy.command()
 @click.argument("name")
+@click.option("--force", is_flag=True, help="On Secure Client, delete an active custom policy and activate default")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
-def delete(app: AppContext, name: str, assume_yes: bool) -> None:
+def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
     """Delete a custom policy, or your edited copy of a built-in.
 
     The policy file is removed for good (no backup is kept). On a terminal
@@ -892,8 +893,9 @@ def delete(app: AppContext, name: str, assume_yes: bool) -> None:
     For a built-in policy (default, strict, permissive) only the user copy
     that ``policy edit`` saved is removed, which restores the built-in.
 
-    A policy is a preset: config.yaml keeps what ``policy activate``
-    applied, so deleting a policy file never changes what is enforced.
+    On Secure Client, an active edited built-in is reactivated from the
+    bundled copy. An active custom policy needs --force and then activates
+    the built-in default. Other profiles keep the applied config preset.
     """
     name = _sanitize_policy_name(name)
 
@@ -922,13 +924,26 @@ def delete(app: AppContext, name: str, assume_yes: bool) -> None:
         click.echo(f"error: policy '{name}' not found in {user_dir}", err=True)
         raise SystemExit(1)
 
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    is_active = secure_client and name == _get_active_policy_name(app)
     if builtin:
         # GAP-1458: drop the user copy that shadowed the built-in.
         _confirm_policy_delete(f"your edited copy of built-in policy '{name}'", path, assume_yes)
         os.remove(real_path)
         ux.ok(f"Removed your edited copy of built-in policy '{name}'; the built-in version is back.")
         _log_policy_action(app, "policy-delete", name, "reverted edited built-in", done="Copy removed")
+        if is_active:
+            _reactivate_after_delete(app, name)
         return
+
+    if is_active and not force:
+        ux.echo(
+            f"error: policy '{name}' is active — refusing to delete. "
+            "Activate another policy first, or pass --force to delete it "
+            "and re-activate 'default'.",
+            err=True,
+        )
+        raise SystemExit(1)
 
     # A named policy is a preset: config.yaml keeps what an activation
     # applied, so deleting the file changes nothing that is enforced.
@@ -936,6 +951,16 @@ def delete(app: AppContext, name: str, assume_yes: bool) -> None:
     os.remove(real_path)
     ux.ok(f"Policy '{name}' deleted.")
     _log_policy_action(app, "policy-delete", name, "", done="Policy deleted")
+    if is_active:
+        ux.warn(f"'{name}' was the active policy — re-activating 'default'.")
+        _reactivate_after_delete(app, "default")
+
+
+def _reactivate_after_delete(app: AppContext, name: str) -> None:
+    """Apply the replacement to Secure Client OPA data and reload the gateway."""
+    before = _restart_only_config(app.cfg)
+    _activate_policy(app, name)
+    _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
 
 
 def _stdin_is_tty() -> bool:

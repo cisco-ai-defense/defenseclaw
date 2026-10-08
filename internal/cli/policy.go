@@ -508,6 +508,19 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 		return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical Rego directory: %w", err)
 	}
 
+	// Secure Client still reads legacy data.json; a canonical data file
+	// selects that layout even when it has no Rego modules.
+	if cfg != nil && cfg.SecureClientIntegration() {
+		nestedData, err := resolveContainedPolicyPath(root, filepath.Join(nestedDir, "data.json"))
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical policy data: %w", err)
+		}
+		dataExists, err := policyDataFileExists(nestedData)
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical policy data: %w", err)
+		}
+		nestedModules = nestedModules || dataExists
+	}
 	paths := resolvedPolicyPaths{rootDir: root, regoDir: nestedDir}
 	if !nestedModules {
 		flatModules, err := policyDirectoryHasRego(root, root)
@@ -674,6 +687,20 @@ func policyDirectoryHasRego(root, dir string) (bool, error) {
 		found = true
 	}
 	return found, nil
+}
+
+func policyDataFileExists(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("policy data is not a regular file")
+	}
+	return true, nil
 }
 
 func policyPathContained(root, candidate string) bool {

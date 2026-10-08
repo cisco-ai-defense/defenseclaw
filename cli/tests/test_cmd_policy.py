@@ -324,6 +324,40 @@ class TestPolicyDelete(PolicyCommandTestBase):
         # A second delete has nothing left to revert.
         self.assertNotEqual(self.invoke(["delete", "strict"]).exit_code, 0)
 
+    def test_secure_client_active_builtin_reactivates_bundled_copy(self):
+        from unittest.mock import patch
+
+        edited = os.path.join(self.app.cfg.policy_dir, "strict.yaml")
+        with open(edited, "w") as f:
+            f.write("name: strict\n")
+        with (
+            patch("defenseclaw.commands.cmd_policy.asset_lists.is_secure_client", return_value=True),
+            patch("defenseclaw.commands.cmd_policy._get_active_policy_name", return_value="strict"),
+            patch("defenseclaw.commands.cmd_policy._reactivate_after_delete") as reactivate,
+        ):
+            result = self.invoke(["delete", "strict", "--yes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(os.path.exists(edited))
+        reactivate.assert_called_once_with(self.app, "strict")
+
+    def test_secure_client_active_custom_requires_force_and_reactivates_default(self):
+        from unittest.mock import patch
+
+        self.invoke(["create", "active-custom"])
+        path = os.path.join(self.app.cfg.policy_dir, "active-custom.yaml")
+        with (
+            patch("defenseclaw.commands.cmd_policy.asset_lists.is_secure_client", return_value=True),
+            patch("defenseclaw.commands.cmd_policy._get_active_policy_name", return_value="active-custom"),
+            patch("defenseclaw.commands.cmd_policy._reactivate_after_delete") as reactivate,
+        ):
+            refused = self.invoke(["delete", "active-custom", "--yes"])
+            self.assertEqual(refused.exit_code, 1, refused.output)
+            self.assertTrue(os.path.isfile(path))
+            forced = self.invoke(["delete", "active-custom", "--force", "--yes"])
+        self.assertEqual(forced.exit_code, 0, forced.output)
+        self.assertFalse(os.path.exists(path))
+        reactivate.assert_called_once_with(self.app, "default")
+
     def test_delete_asks_on_a_terminal_and_accepts_yes(self):
         # GAP-1887: a user-authored policy is removed for good, so confirm first.
         from unittest.mock import patch

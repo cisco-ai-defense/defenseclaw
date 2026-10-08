@@ -453,6 +453,41 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	}
 }
 
+func TestLoadAISignaturesResolvesPackPinSymlink(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"version": 1, "signatures": [{"id": "linked-ai", "name": "Linked", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`
+	target := filepath.Join(dir, "target.json")
+	mustWrite(t, target, body)
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("pack with a resolved-path pin was not loaded")
+	}
+	legacy, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+		SecureClient:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(legacy, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("Secure Client changed its legacy pin lookup")
+	}
+}
+
 // TestLoadAISignaturesPinnedByDigest: a pack pinned in
 // ai_discovery.signature_pack_digests loads only when it matches, and a
 // managed device loads no unpinned pack (a file dropped into a glob).
