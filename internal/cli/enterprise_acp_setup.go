@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
@@ -512,7 +512,7 @@ func readACPClientConfig(path string) (map[string]any, string, error) {
 	return document, acpLeadingJSONCPrefix(raw), nil
 }
 
-func enterpriseACPNormalizeJSONC(raw []byte) []byte { return enterprisepolicy.StripJSONC(raw) }
+func enterpriseACPNormalizeJSONC(raw []byte) []byte { return jsonc.Strip(raw) }
 
 // acpLeadingJSONCPrefix is the whitespace and comments before the first
 // token of a JSONC document.

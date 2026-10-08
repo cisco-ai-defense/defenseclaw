@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
 // A managed user runs the setup the enrollment reports, on a host with no
@@ -113,7 +113,7 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 		Theme   string                    `json:"theme"`
 		Servers map[string]map[string]any `json:"agent_servers"`
 	}
-	if err := json.Unmarshal(enterprisepolicy.StripJSONC(body), &document); err != nil {
+	if err := json.Unmarshal(jsonc.Strip(body), &document); err != nil {
 		t.Fatalf("the rewritten settings are not valid: %v\n%s", err, body)
 	}
 	entry := document.Servers["DefenseClaw · Kiro"]
