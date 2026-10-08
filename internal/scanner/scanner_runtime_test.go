@@ -138,3 +138,27 @@ func TestMCPRuntimeStdioEntry(t *testing.T) {
 		t.Fatalf("stdio entry lost launch fields: %+v", entry)
 	}
 }
+
+// GAP-0711: inherited endpoint overrides, including service-specific ones,
+// cannot change the Bedrock judge destination in either scanner subprocess.
+func TestScannerAWSConfiguredEndpointsIgnored(t *testing.T) {
+	t.Setenv("AWS_ENDPOINT_URL", "https://inherited.example.test")
+	t.Setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "https://inherited.example.test")
+	t.Setenv("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "false")
+	t.Setenv("AWS_PROFILE", "credential-profile")
+	skill := &SkillScanner{Config: config.SkillScannerConfig{UseLLM: true},
+		LLM: config.LLMConfig{Provider: "bedrock", Model: "bedrock/test"}}
+	mcp := &MCPScanner{LLM: config.LLMConfig{Provider: "bedrock", Model: "bedrock/test"}}
+	for name, env := range map[string][]string{"skill": skill.scanEnv(), "mcp": mcp.runtimeEnv()} {
+		vars := map[string]string{}
+		for _, line := range env {
+			key, value, _ := strings.Cut(line, "=")
+			vars[strings.ToUpper(key)] = value
+		}
+		if vars["AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"] != "true" ||
+			vars["AWS_ENDPOINT_URL"] != "" || vars["AWS_ENDPOINT_URL_BEDROCK_RUNTIME"] != "" ||
+			vars["AWS_PROFILE"] != "credential-profile" {
+			t.Fatalf("%s AWS endpoint settings are not pinned", name)
+		}
+	}
+}
