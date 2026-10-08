@@ -1986,15 +1986,33 @@ class TestCheckHookHealth(unittest.TestCase):
             # GAP-1804: arguments of another Python program are its own.
             ("/u/.defenseclaw/.venv/bin/python -m defenseclaw.main plugin list --json --connector hermes", False),
             ("python3 -c import --connector hermes", False),
-            ("/home/u/.hermes/tools/python-3.14/bin/python3 -I -c import os, re, sys import hermes_bootstrap from hermes_cli.main import main", None),
+            ("/home/u/.hermes/tools/python-3.14/bin/python3 -I -c import os, re, sys import hermes_bootstrap from hermes_cli.main import main", True),
             ("python3 -u /u/.local/bin/hermes chat", True),
             ("python3 -Wignore -m hermes_cli", None),
             ("/u/.hermes/hermes-agent/venv/bin/python -m gateway.run", None),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
-            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done):
+            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done), patch(
+                "defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=None
+            ):
                 self.assertIs(cmd_doctor._hermes_host_running(), want, args)
+
+    def test_hermes_multiline_python_launcher_uses_proc_argv(self) -> None:
+        from defenseclaw.commands import cmd_setup
+
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX process table only")
+        python = "/home/u/.hermes/tools/python-3.14.7+20260901-linux-x64/bin/python3"
+        listing = f"4242 {os.getuid()} {python} -I -c import os, re, sys\nimport hermes_bootstrap\n"
+        done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
+        argv = (python, "-I", "-c", "import os, re, sys\nimport hermes_bootstrap\nfrom hermes_cli.main import main")
+        with (
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done),
+            patch("defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=argv) as proc,
+        ):
+            self.assertFalse(cmd_setup._hermes_hosts_idle())
+        proc.assert_called_once_with("4242")
 
     def test_lock_path_without_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
