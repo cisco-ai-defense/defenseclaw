@@ -207,9 +207,11 @@ rules:
 	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
 	inspector := NewGuardrailInspector("local", nil, nil, "")
 	inspector.SetHILTConfig(false, "HIGH")
-	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}}
+	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}, gatewayToken: "owner-token"}
 	subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
-	ctx := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(subject)).Context()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(subject)
+	req.Header.Set("X-DC-Auth", "Bearer owner-token")
+	ctx := proxy.withProxyAgent(req).Context()
 	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "contractors" {
 		t.Fatalf("proxy profile = %q, want contractors", name)
 	}
@@ -243,6 +245,20 @@ func TestProxyTelemetryOmitsUnappliedProfile(t *testing.T) {
 	meta := proxyLLMEventMeta(proxy, request, &ChatRequest{Model: "test-model"}, "test-provider")
 	if name, present := meta.Profile.Name.Get(); present {
 		t.Fatalf("unapplied profile %q appeared in proxy telemetry", name)
+	}
+	// A provider bearer can authenticate a connector without proving the
+	// caller is the gateway owner. The process owner remains ineligible.
+	processOwnerProfileSubject = func() (profileSubject, bool) {
+		return profileSubject{UserID: "owner"}, true
+	}
+	providerRequest := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	providerRequest.Header.Set("Authorization", "Bearer provider-key")
+	providerRequest = proxy.withProxyAgent(providerRequest)
+	if profile := proxyProfileFor(providerRequest.Context()); profile != nil {
+		t.Fatalf("provider-key request inherited owner profile %+v", profile.decision)
+	}
+	if id, _ := agentIdentityFromContext(providerRequest.Context()); id != "" {
+		t.Fatalf("provider-key request inherited owner agent identity %q", id)
 	}
 }
 
