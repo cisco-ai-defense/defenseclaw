@@ -266,7 +266,7 @@ def test_list_packs_json(env):
 
 
 def test_validate_pack_unknown_bare_name_lists_available_packs(env, monkeypatch):
-    app, root, _custom = env
+    app, root, _custom, _writes = env
     monkeypatch.setattr("defenseclaw.config.load", lambda: app.cfg)
     (root / "team2" / "rules").mkdir(parents=True)
     result = _run(app, ["validate-pack", "nosuchpack"])

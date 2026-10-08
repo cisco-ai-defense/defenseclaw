@@ -344,7 +344,7 @@ A call from an `exempt_users` account is visible to a reviewer of
 `audit export` or a SIEM: its `hook_decision` row carries
 `defenseclaw.user.enrollment: exempt`, and the audit store gets an
 `enterprise-exempt-user` row (at most one per account and connector every 10
-minutes). The gateway log has an `enterprise_exempt_user` line for each call.
+minutes). The gateway journal has an `enterprise_exempt_user` line for each call.
 
 With `unenrolled_users: deny`, the enumerator also creates enrollment rows
 for machine-policy agents, so enrolled users keep working. OpenCode counts
