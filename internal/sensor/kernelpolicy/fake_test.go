@@ -41,6 +41,10 @@ type fakeTetragon struct {
 	failAdd      map[string]bool
 	failAll      bool
 	failAfterAdd bool
+	// loadError, when set, makes Tetragon refuse to load the policies of
+	// that family the way 1.7.1 does: the add fails and the policy stays
+	// listed in load_error.
+	loadError Family
 	// onList runs at the start of ListTracingPolicies.
 	onList func()
 	// allowed, when set, makes any other call a test failure.
@@ -111,6 +115,11 @@ func (f *fakeTetragon) AddTracingPolicy(_ context.Context, yaml []byte) error {
 	}
 	if _, dup := f.policies[name]; dup {
 		return fmt.Errorf("tracing policy %s already exists", name)
+	}
+	if family, ok := FamilyOfName(name); ok && f.loadError != "" && family == f.loadError {
+		f.policies[name] = &LoadedPolicy{Name: name, Mode: LoadedUnknown, State: StateLoadError,
+			Error: "policy handler 'tracing' failed loading policy: parseMatchArgs error: argFilter for unknown index"}
+		return errors.New("injected load error")
 	}
 	mode := LoadedEnforce // Tetragon's default when the policy says nothing
 	for _, option := range tp.Spec.Options {

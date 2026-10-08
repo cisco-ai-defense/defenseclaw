@@ -185,6 +185,13 @@ func TestTetragonReadinessChecks(t *testing.T) {
 		{"lsm probe not reported", "observe", "enforce", func(in *tetragonInputs, _ *tetragonProbes) { in.State.Tetragon.LSM = nil },
 			[]want{{checkBPFLSM, checkWarn, "not reported"}}},
 		// GAP-0038: consume never reads these facts; no failure, no restart.
+		// GAP-0042: a user with no agent installed has nothing to enforce and
+		// is never counted ready, even with burn_in 0.
+		{"no agent is not ready", "enforce", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
+			*in = withUsers(*in)
+			in.State.UIDs = append(in.State.UIDs, kernelpolicy.UIDStatus{UID: 1009, User: "dcr-noagent", Connectors: []string{"claudecode"},
+				State: kernelpolicy.UIDInactive, Reason: kernelpolicy.ReasonNoAnchors})
+		}, []want{{checkBurnIn, checkInfo, "1 of 4"}}},
 		{"enforce facts not read in consume", "consume", "enforce", func(in *tetragonInputs, _ *tetragonProbes) {
 			in.State.Tetragon.KeepSensorsOnExit, in.State.Tetragon.LSM = nil, nil
 		}, []want{{checkKeepSensorsOnExit, checkInfo, "once mode observe runs"}, {checkBPFLSM, checkInfo, "once mode observe runs"}}},

@@ -46,6 +46,24 @@ func TestPIDNoteOnlyWhenAScriptSessionIsLeftToMonitor(t *testing.T) {
 	}
 }
 
+// GAP-0042: a ready user is enforcing only while a controls policy is
+// enabled in enforce mode. When Tetragon refuses to load it, the user stays
+// in monitor mode and says why, instead of "enforcing" with nothing denied.
+func TestAUserIsEnforcingOnlyWhileTheControlsPolicyLoads(t *testing.T) {
+	h := newHarness(t, enforceIntent(Digest()), twoNativeTargets)
+	h.procs = []Proc{nativeProc(4001, 1, 100, 1001, aliceClaudeNew)}
+	h.tg.loadError = FamilyControls
+	h.pass()
+	h.burnedIn(1001, 24*time.Hour)
+	h.pass()
+	if alice := uidStatus(h.status(), 1001); alice.State != UIDMonitor || alice.Reason != WarnPolicyLoadError {
+		t.Fatalf("a ready user whose controls policy did not load: %+v", alice)
+	}
+	if !h.has(WarnPolicyLoadError) {
+		t.Fatalf("warnings %v", h.status().Warnings)
+	}
+}
+
 func TestReadyNativeUserBeyondTheBinaryUIDIsScopeLimited(t *testing.T) {
 	h := newHarness(t, enforceIntent(Digest()), twoNativeTargets)
 	h.w.fs.elf(bobClaude)

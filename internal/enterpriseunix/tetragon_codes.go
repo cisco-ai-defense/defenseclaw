@@ -448,4 +448,6 @@ var monitorReasonWords = map[string]string{
 	kernelpolicy.ReasonGuardrailObserve: "connector in observe mode",
 	kernelpolicy.WarnPIDMonitorOnly:     "no native agent binary (a process id never denies)",
 	kernelpolicy.WarnBinaryScopeLimited: "another user's native agent holds the one deny anchor",
+	kernelpolicy.WarnPolicyLoadError:    "the controls policy did not load in Tetragon",
+	kernelpolicy.WarnPolicyNotApplied:   "the controls policy is not in enforce mode yet",
 }

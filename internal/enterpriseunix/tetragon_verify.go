@@ -854,7 +854,14 @@ func enforceCounts(users []TetragonUserReadiness, would bool) string {
 // noDenyAnchor reports a user that finished burn-in but that the enforcing
 // controls cannot deny for: the helper keeps it in monitor and names the
 // limit as its reason.
+// noDenyAnchor reports a user whom enforce cannot deny for in this release:
+// no agent is installed (nothing to anchor), or the agent's only anchor
+// never denies. Such a user is never counted ready (GAP-0042: four users
+// with no agent made "6 of 7 users are ready").
 func noDenyAnchor(state, reason string) bool {
+	if state == kernelpolicy.UIDInactive && reason == kernelpolicy.ReasonNoAnchors {
+		return true
+	}
 	return state == kernelpolicy.UIDMonitor && (reason == kernelpolicy.WarnPIDMonitorOnly || reason == kernelpolicy.WarnBinaryScopeLimited)
 }
 

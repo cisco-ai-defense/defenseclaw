@@ -662,6 +662,7 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 	for _, u := range c.st.UIDs {
 		old[u.UID] = u.State
 	}
+	notEnforcing := c.controlsNotEnforcing()
 	c.tallyMu.Lock()
 	defer c.tallyMu.Unlock()
 	c.st.UIDs = nil
@@ -687,6 +688,13 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 				status.State, status.Reason = UIDMonitor, WarnPIDMonitorOnly
 			}
 		}
+		if status.State == UIDEnforcing && notEnforcing != "" {
+			// The plan enforces this user, but Tetragon holds no controls
+			// policy enabled in enforce mode: it failed to load, or no pass
+			// applied it yet. Nothing is denied, so the user is not called
+			// enforcing (GAP-0042).
+			status.State, status.Reason = UIDMonitor, notEnforcing
+		}
 		status.CoveredSeconds = int64(c.burn.Covered(uid) / time.Second)
 		status.NeededSeconds = int64(c.cfg.Intent.BurnIn / time.Second)
 		status.WouldBlock = c.burn.Hits(uid)
@@ -705,6 +713,26 @@ func (c *Controller) fillUIDs(plan Plan, compiled Compiled) {
 		}
 		c.noteProgress(uid, status, progress)
 	}
+}
+
+// controlsNotEnforcing is why no controls policy denies after this pass:
+// WarnPolicyLoadError when the one this pass wanted failed to load (or is in
+// error), WarnPolicyNotApplied when none is enabled in enforce mode; "" when
+// one is.
+func (c *Controller) controlsNotEnforcing() string {
+	why := WarnPolicyNotApplied
+	for _, policy := range c.st.Policies {
+		if policy.Family != FamilyControls {
+			continue
+		}
+		if policy.State == StateEnabled && policy.ObservedMode.Enforcing() {
+			return ""
+		}
+		if policy.DesiredMode == PolicyEnforce && (policy.State == StateLoadError || policy.State == StateError) {
+			why = WarnPolicyLoadError
+		}
+	}
+	return why
 }
 
 // noteProgress emits a user's burn-in progress (uid_progress) every

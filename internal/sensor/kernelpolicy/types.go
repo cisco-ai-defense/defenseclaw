@@ -213,6 +213,7 @@ const (
 	WarnBinaryScopeLimited  = "kernel_binary_anchor_scope_limited"
 	WarnGuardrailObserve    = "kernel_enforce_guardrail_observe"
 	WarnPolicyLoadError     = "kernel_policy_load_error"
+	WarnPolicyNotApplied    = "kernel_policy_not_applied"
 	WarnLSMUnavailable      = "kernel_lsm_unavailable"
 	WarnPauseInvalid        = "kernel_pause_file_invalid"
 	WarnConfigInvalid       = "tetragon_config_invalid"
