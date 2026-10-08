@@ -315,7 +315,11 @@ func (l *lifecycle) recoverPendingFromVerify(ctx context.Context) string {
 // that only make sense on a settled deployment (ledger freshness, sandbox
 // properties). It returns human-readable problems.
 func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, strict bool) []string {
-	return l.verifyDeployment(ctx, record, strict, false)
+	problems := l.verifyDeployment(ctx, record, strict, false)
+	// Not part of the check after activation: a guardian or gateway writing
+	// its state at that moment is not drift.
+	account := Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}
+	return append(problems, l.env.stateModeProblems(account)...)
 }
 
 // verifyDeployment is verifyInstalled; with inputsChanged the checks of
