@@ -13,9 +13,8 @@ import (
 )
 
 // GAP-0424: the enumerator publishes the Claude Code servers of an enrolled
-// user (user scope, local scope, a project .mcp.json inside the profile)
-// for the gateway, which cannot read ~/.claude.json; a project outside the
-// profile is not read.
+// user (user scope, local scope, and project .mcp.json files) for the
+// gateway, which cannot read ~/.claude.json.
 func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 	home := t.TempDir()
 	outside := t.TempDir()
@@ -53,8 +52,8 @@ func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 	for _, server := range servers {
 		got[server.Name] = server.Project
 	}
-	if len(got) != 3 || got["user-srv"] != "" || got["local-srv"] != inside || got["shared-proj"] != inside {
-		t.Fatalf("published %v, want user-srv, local-srv and shared-proj only", got)
+	if len(got) != 4 || got["user-srv"] != "" || got["local-srv"] != inside || got["shared-proj"] != inside || got["shared-"+filepath.Base(outside)] != outside {
+		t.Fatalf("published %v, want user, local and both project servers", got)
 	}
 }
 

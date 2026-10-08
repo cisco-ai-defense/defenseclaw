@@ -26,11 +26,10 @@ const maxClaudeProjectMCPBytes = 1 << 20
 
 // WriteWindowsClaudeMCPSpool publishes, for every user the manifest enrolls
 // for Claude Code, the MCP servers of that user (ClaudeMCPSpoolDirName). It
-// reads ~/.claude.json, and the .mcp.json of each project inside the
-// profile, without following a link or junction below the profile, so a
-// user cannot point the LocalSystem read anywhere else. A record is rewritten
-// only when its servers change; records of users no longer enrolled or whose
-// state is unreadable are removed.
+// reads ~/.claude.json and the .mcp.json of each project named there,
+// including projects outside the profile, without following reparse points.
+// A record is rewritten only when its servers change; records of users no
+// longer enrolled or whose state is unreadable are removed.
 func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
 		return nil
@@ -97,11 +96,9 @@ func windowsClaudeStateServers(home string) ([]config.MCPServerEntry, error) {
 		return nil, err
 	}
 	return config.ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
-		rel, err := filepath.Rel(home, filepath.Clean(project))
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-			return nil, os.ErrNotExist // only projects inside the profile
-		}
-		return readWindowsProfileFile(home, filepath.Join(rel, ".mcp.json"), maxClaudeProjectMCPBytes)
+		// Claude may open projects on another drive. The bounded stable read
+		// below rejects reparse points along the complete project path.
+		return readWindowsProfileFile(filepath.Clean(project), ".mcp.json", maxClaudeProjectMCPBytes)
 	})
 }
 
