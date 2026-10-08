@@ -22,6 +22,7 @@
 package assetfacts
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -35,7 +36,7 @@ import (
 const Header = "X-DefenseClaw-Asset-Facts"
 
 const (
-	maxHeaderBytes   = 6 << 10
+	maxHeaderBytes   = 128 << 10
 	maxSkills        = 16
 	maxFieldBytes    = 1024
 	maxArgs          = 32
@@ -71,17 +72,20 @@ type MCPServer struct {
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
-// send or the facts do not fit.
+// send. The cap fits every bounded fact set, including escaped arguments;
+// otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
 	if len(facts.Skills) == 0 && facts.MCP == nil {
 		return ""
 	}
-	raw, err := json.Marshal(facts)
-	if err != nil {
+	var raw bytes.Buffer
+	encoder := json.NewEncoder(&raw)
+	encoder.SetEscapeHTML(false)
+	if encoder.Encode(facts) != nil {
 		return ""
 	}
-	value := base64.RawURLEncoding.EncodeToString(raw)
+	value := base64.RawURLEncoding.EncodeToString(bytes.TrimSuffix(raw.Bytes(), []byte{10}))
 	if len(value) > maxHeaderBytes {
 		return ""
 	}
