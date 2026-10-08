@@ -42,7 +42,12 @@ func TestSessionEndedGuardServesTheNextThread(t *testing.T) {
 			setUpAgain <- true
 			return nil, false
 		}
-		command := exec.Command(os.Args[0], "-test.run=TestRelaunchHelperGuard")
+		self, err := os.Executable()
+		if err != nil {
+			t.Error(err)
+			return nil, false
+		}
+		command := exec.Command(self, "-test.run=TestRelaunchHelperGuard")
 		command.Env = append(os.Environ(), "DC_ACP_RELAUNCH_HELPER=1")
 		return command, true
 	}
