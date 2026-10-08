@@ -130,6 +130,30 @@ func TestKernelEventRecordsCarryTheCustomersPolicyEvents(t *testing.T) {
 	}
 }
 
+// TestASyscallKprobeEventBecomesARecord: a customer kprobe on a syscall
+// (`call: sys_openat`, `syscall: true`) reports the architecture's entry
+// symbol, __x64_sys_openat. Its leading underscores once failed the record
+// build, so none of that policy's events reached Loki (GAP-0037).
+func TestASyscallKprobeEventBecomesARecord(t *testing.T) {
+	t.Parallel()
+	adapter, emitter := newKernelTestAdapter(router.AdmissionOrdinary)
+	event := sensor.CustomerKernelEvent{
+		At: time.Date(2026, 10, 8, 2, 35, 0, 0, time.UTC), Policy: "11-file-denied", HookType: "kprobe",
+		Function: "__x64_sys_openat", Action: "post", PolicyMode: "monitor", Outcome: plane.OutcomeObserved,
+		Target: customerTestMarker, Count: 1, PID: 1310, Process: "cat", UID: runtimeIntp(1001), AgentName: "claude",
+	}
+	if err := adapter.EmitSnapshot(t.Context(), sensor.Snapshot{CustomerKernelEvents: []sensor.CustomerKernelEvent{event}}); err != nil {
+		t.Fatalf("EmitSnapshot() error = %v", err)
+	}
+	records := recordsNamed(emitter.records, "ai.runtime.kernel_event")
+	if len(records) != 1 {
+		t.Fatalf("%d kernel_event records, want 1", len(records))
+	}
+	if got := kernelRecordBody(t, records[0])["defenseclaw.ai.runtime.kernel.function"]; got != "__x64_sys_openat" {
+		t.Fatalf("kernel.function = %v", got)
+	}
+}
+
 // TestARecordNeverCarriesAPathOutsideTheTarget: of every kernel_event and
 // kernel block.applied field, only kernel.target names the file; a denial
 // names it relative to the user's home.

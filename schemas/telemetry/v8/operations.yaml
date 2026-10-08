@@ -1483,8 +1483,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: identifier-v1
-    overrides: {max_utf8_bytes: 128}
-    notes: The hooked symbol as Tetragon names it (file_open, security_file_open, tcp_connect)
+    overrides: {max_utf8_bytes: 128, pattern: '^[A-Za-z0-9_][A-Za-z0-9._:/-]*$'}
+    notes: The hooked symbol as Tetragon names it (file_open, security_file_open, tcp_connect, and for a syscall kprobe the architecture's entry symbol such as __x64_sys_openat, so a leading underscore is allowed)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ai.runtime.kernel.action
   type: string
