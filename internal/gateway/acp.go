@@ -122,32 +122,60 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP guard is not enabled"})
 		return
 	}
+	// refuse answers a guard whose editor entry the binding no longer
+	// admits. Outside Secure Client the answer says why and the refusal is
+	// audited: a guard of a profile moved from observe to action used to
+	// keep working unchecked, with nothing in the audit (GAP-0723).
+	refuse := func(message, code string, extra map[string]string) {
+		body := map[string]string{"error": message}
+		if !cfg.SecureClientIntegration() {
+			body["code"] = code
+			for key, value := range extra {
+				body[key] = value
+			}
+			reason := message
+			if extra["profile"] != "" {
+				reason += "; the pair now uses profile " + extra["profile"]
+			}
+			a.recordACPEvaluationV8(acpEvaluationContext(r.Context(), req, agent.ConnectorID), req,
+				acp.Verdict{Action: "block", RawAction: "block", Severity: "MEDIUM", Reason: reason},
+				nil, nil, agent.ConnectorID, req.Profile, time.Since(started))
+		}
+		a.writeJSON(w, http.StatusForbidden, body)
+	}
 	profileName, profile, ok, matched := resolveACPProfileForPair(cfg.ACP, req.ClientID, req.AgentID, req.Profile)
 	if !matched {
 		// Distinguishable on purpose: a stale guard argv and an undefined
 		// profile need different fixes, and "not configured" sent operators
 		// looking for a missing profiles: entry that was present all along.
-		a.writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "ACP profile does not match the configured binding for this client and agent; re-run acp setup",
-		})
+		current := cfg.ACP.ACPProfileForPair(req.ClientID, req.AgentID)
+		if current == "" {
+			current = "default"
+		}
+		refuse("ACP profile does not match the configured binding for this client and agent; re-run acp setup",
+			acp.RefusalProfileChanged, map[string]string{"profile": current, "mode": effectiveACPMode(cfg.ACP, current)})
 		return
 	}
 	if !ok {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP profile is not configured"})
+		refuse("ACP profile is not configured", acp.RefusalBinding, nil)
 		return
 	}
 	if !acpPairIsBound(cfg.ACP, req.ClientID, req.AgentID, profileName) {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP client or agent binding is disabled or pinned to another profile"})
+		refuse("ACP client or agent binding is disabled or pinned to another profile", acp.RefusalBinding, nil)
 		return
 	}
 	if !acpBindingAllowed(profile.AllowedClients, req.ClientID) || !acpBindingAllowed(profile.AllowedAgents, req.AgentID) {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP client or agent is outside the selected profile"})
+		refuse("ACP client or agent is outside the selected profile", acp.RefusalBinding, nil)
 		return
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		credential, ok := acpEnterpriseCredentialFromContext(r.Context())
 		if !ok || credential.ClientID != req.ClientID || credential.AgentID != req.AgentID || credential.Profile != profileName {
-			a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP enterprise credential is outside its enrolled binding"})
+			extra := map[string]string{}
+			if ok {
+				extra["credential_profile"] = credential.Profile
+			}
+			refuse("ACP enterprise credential is outside its enrolled binding", acp.RefusalCredentialBinding, extra)
 			return
 		}
 	}

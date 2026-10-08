@@ -44,6 +44,25 @@ type ProxyOptions struct {
 	Managed bool
 	// SetupCommand writes this editor entry again ("" when unknown).
 	SetupCommand string
+	// SetupCommandFor is SetupCommand for another profile or mode, nil
+	// when unknown.
+	SetupCommandFor func(profile string, mode Mode) string
+}
+
+// setupCommandFor is the command that sets this editor entry up for profile
+// in mode.
+func (o ProxyOptions) setupCommandFor(profile string, mode Mode) string {
+	if o.SetupCommandFor != nil {
+		return o.SetupCommandFor(profile, mode)
+	}
+	command := strings.TrimSuffix(o.SetupCommand, " --activate")
+	if command != "" && profile != o.Profile {
+		command = strings.Replace(command, " --profile "+o.Profile, " --profile "+profile, 1)
+	}
+	if command != "" && mode == ModeAction {
+		command += " --activate"
+	}
+	return command
 }
 
 // Run starts an ACP agent without a shell and mediates every NDJSON frame in
@@ -707,7 +726,7 @@ func logf(w io.Writer, format string, args ...any) {
 // timeout on a busy host) ended the whole agent session (GAP-1834).
 func evaluate(ctx context.Context, opts ProxyOptions, in Evaluation) (Verdict, error) {
 	verdict, err := opts.Evaluator.Evaluate(ctx, in)
-	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || ctx.Err() != nil {
+	if err == nil || opts.Mode != ModeAction || errors.Is(err, ErrModeMismatch) || errors.Is(err, ErrBindingRefused) || ctx.Err() != nil {
 		return verdict, err
 	}
 	if errors.Is(err, ErrGatewayNotReady) {
@@ -764,8 +783,11 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			return nil
 		}
 		if evalErr != nil {
+			if errors.Is(evalErr, ErrBindingRefused) && state.peerProtocolFixes {
+				return endSessionTelling(direction, msg, bindingRefusedError(opts, evalErr), rejectDst)
+			}
 			if errors.Is(evalErr, ErrModeMismatch) && state.peerProtocolFixes {
-				return modeDriftError(opts)
+				return endSessionTelling(direction, msg, modeDriftError(opts), rejectDst)
 			}
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
@@ -801,6 +823,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					Payload: aggregate, Aggregate: true,
 				})
 				if turnErr != nil {
+					if errors.Is(turnErr, ErrBindingRefused) && state.peerProtocolFixes {
+						return bindingRefusedError(opts, turnErr)
+					}
 					if errors.Is(turnErr, ErrModeMismatch) && state.peerProtocolFixes {
 						return modeDriftError(opts)
 					}
@@ -837,9 +862,9 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 // only "Agent failed to run" (GAP-0355): it now names the setup command to
 // run, with --activate when the profile moved to action mode.
 func modeDriftError(opts ProxyOptions) error {
-	now, command := "action", strings.TrimSuffix(opts.SetupCommand, " --activate")+" --activate"
+	now, command := "action", opts.setupCommandFor(opts.Profile, ModeAction)
 	if opts.Mode == ModeAction {
-		now, command = "observe", strings.TrimSuffix(opts.SetupCommand, " --activate")
+		now, command = "observe", opts.setupCommandFor(opts.Profile, ModeObserve)
 	}
 	who := "the ACP mode of profile " + opts.Profile + " changed to " + now
 	if opts.Managed {
@@ -857,6 +882,81 @@ type modeDrift struct{ message string }
 
 func (e *modeDrift) Error() string { return e.message }
 func (e *modeDrift) Unwrap() error { return ErrModeMismatch }
+
+// bindingRefused is ErrBindingRefused in words for the user.
+type bindingRefused struct{ message string }
+
+func (e *bindingRefused) Error() string { return e.message }
+func (e *bindingRefused) Unwrap() error { return ErrBindingRefused }
+
+// bindingRefusedError ends a session whose editor entry the gateway no
+// longer admits, in both modes: observe mode kept running unchecked, and
+// action mode said the gateway did not answer (GAP-0723, GAP-0354).
+func bindingRefusedError(opts ProxyOptions, err error) error {
+	refusal := &BindingRefusedError{Code: RefusalBinding}
+	errors.As(err, &refusal)
+	pair := opts.ClientID + "/" + opts.AgentID
+	command := func(profile string, mode Mode) string {
+		if text := opts.setupCommandFor(profile, mode); text != "" {
+			return "'" + text + "'"
+		}
+		return "the setup command of this editor entry"
+	}
+	const prefix = "DefenseClaw ended this ACP session because "
+	switch {
+	case refusal.Code == RefusalProfileChanged && refusal.Profile != "":
+		mode := Mode(refusal.Mode)
+		if mode == "" {
+			mode = opts.Mode
+		}
+		if opts.Managed {
+			return &bindingRefused{message: fmt.Sprintf("%syour administrator moved %s from ACP profile %s to %s (%s mode). "+
+				"Once they enroll you for %s, run %s", prefix, pair, opts.Profile, refusal.Profile, mode, refusal.Profile, command(refusal.Profile, mode))}
+		}
+		return &bindingRefused{message: fmt.Sprintf("%s%s now uses ACP profile %s (%s mode), not %s; run %s",
+			prefix, pair, refusal.Profile, mode, opts.Profile, command(refusal.Profile, mode))}
+	case refusal.Code == RefusalCredentialBinding && refusal.CredentialProfile != "":
+		return &bindingRefused{message: fmt.Sprintf("%sthe ACP credential of this editor entry is enrolled for profile %s, not %s. "+
+			"Ask your administrator to enroll you for %s, then run %s",
+			prefix, refusal.CredentialProfile, opts.Profile, opts.Profile, command(opts.Profile, opts.Mode))}
+	case opts.Managed:
+		return &bindingRefused{message: fmt.Sprintf("%sthe gateway refused this editor entry for %s (%s). Contact your administrator.",
+			prefix, pair, strings.TrimSuffix(refusal.Message, "; re-run acp setup"))}
+	}
+	return &bindingRefused{message: fmt.Sprintf("%sthe gateway refused this editor entry for %s (%s); run %s",
+		prefix, pair, strings.TrimSuffix(refusal.Message, "; re-run acp setup"), command(opts.Profile, opts.Mode))}
+}
+
+// maxSessionEndNoticeBytes bounds the reason a session-ending notice shows.
+const maxSessionEndNoticeBytes = 2048
+
+// endSessionTelling answers the editor request that ended the session with
+// the reason, so the editor shows it, and returns the reason: an editor
+// shows the agent's stderr only in its log.
+func endSessionTelling(direction Direction, msg Message, reason error, client io.Writer) error {
+	if direction != ClientToAgent || !msg.IsRequest() {
+		return reason
+	}
+	text := reason.Error()
+	if len(text) > maxSessionEndNoticeBytes {
+		text = strings.ToValidUTF8(text[:maxSessionEndNoticeBytes], "") + "..."
+	}
+	if session := promptSessionID(msg); msg.Method == "session/prompt" && session != "" {
+		result, _ := json.Marshal(struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Result  struct {
+				StopReason string `json:"stopReason"`
+			} `json:"result"`
+		}{JSONRPC: "2.0", ID: msg.ID, Result: struct {
+			StopReason string `json:"stopReason"`
+		}{StopReason: "end_turn"}})
+		_, _ = client.Write(append(agentMessageChunk(session, text), append(result, '\n')...))
+		return reason
+	}
+	_, _ = client.Write(append(ErrorResponse(msg.ID, -32001, text), '\n'))
+	return reason
+}
 
 // acpPeerName names the peer that sent a frame travelling in direction.
 func acpPeerName(direction Direction) string {

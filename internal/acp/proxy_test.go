@@ -633,6 +633,36 @@ func TestCopyFramesActionForwardsANullIDErrorResponse(t *testing.T) {
 	}
 }
 
+type profileMovedEvaluator struct{}
+
+func (profileMovedEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict{}, &BindingRefusedError{Code: RefusalProfileChanged, Profile: "act", Mode: "action",
+		Message: "ACP profile does not match the configured binding for this client and agent; re-run acp setup"}
+}
+
+// A profile the administrator moved the pair away from ends the session,
+// in observe mode too, and the editor is told the new profile and the
+// command; it ran unchecked (GAP-0723).
+func TestCopyFramesProfileMovedEndsTheSessionAndSaysWhy(t *testing.T) {
+	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}` + "\n"
+	var forwarded, client bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	err := copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeObserve, ClientID: "zed", AgentID: "hermes", Profile: "obs", Evaluator: profileMovedEvaluator{},
+		Managed: true, Stderr: io.Discard,
+		SetupCommandFor: func(profile string, mode Mode) string { return "setup --profile " + profile + " " + string(mode) },
+	}, state, ClientToAgent, strings.NewReader(prompt), &forwarded, &client)
+	if !errors.Is(err, ErrBindingRefused) || forwarded.Len() != 0 {
+		t.Fatalf("err = %v, forwarded = %q; want the session ended before the prompt reached the agent", err, forwarded.String())
+	}
+	for _, text := range []string{err.Error(), client.String()} {
+		if !strings.Contains(text, "from ACP profile obs to act") || !strings.Contains(text, "setup --profile act action") ||
+			strings.Contains(text, "did not answer") {
+			t.Fatalf("the user is not told what changed and what to run: %s", text)
+		}
+	}
+}
+
 type rejectingEvaluator struct{}
 
 func (rejectingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {

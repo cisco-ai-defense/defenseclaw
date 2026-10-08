@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -68,14 +69,14 @@ func (e *startupError) Unwrap() error { return e.err }
 // gateway's enterprise acp setup for a managed enrollment, whose host has no
 // other DefenseClaw command, or defenseclaw acp setup. managedEntry reports
 // which.
-func setupCommand(clientID, agentID, profile, mode, contractLock string) (command string, managedEntry bool) {
+func setupCommand(clientID, agentID, profile, mode, contractLock string, managedFlags ...string) (command string, managedEntry bool) {
 	activate := ""
 	if mode == string(acp.ModeAction) {
 		activate = " --activate"
 	}
 	if gateway := standaloneManagedGatewayCommand(contractLock); gateway != "" {
-		return fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s%s",
-			gateway, clientID, agentID, profile, activate), true
+		return fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s%s%s",
+			gateway, clientID, agentID, profile, activate, strings.Join(managedFlags, "")), true
 	}
 	setup := fmt.Sprintf("defenseclaw acp setup --client %s --agent %s", clientID, agentID)
 	if profile != "" && profile != "default" {
@@ -84,9 +85,39 @@ func setupCommand(clientID, agentID, profile, mode, contractLock string) (comman
 	return setup + activate, false
 }
 
-func newStartupError(err error, clientID, agentID, profile, mode, contractLock string) error {
+// managedSetupFlags are the enterprise acp setup flags this guard knows from
+// its own argv. The setup refuses to run without --api-port, and a data dir
+// other than <home>/.defenseclaw must be named, so the command the guard
+// printed did not run (GAP-0723).
+func managedSetupFlags(gatewayURL, tokenFile string) string {
+	flags := ""
+	if parsed, err := url.Parse(gatewayURL); err == nil && parsed.Port() != "" {
+		flags += " --api-port " + parsed.Port()
+	}
+	if tokenFile = strings.TrimSpace(tokenFile); tokenFile != "" {
+		dataDir := filepath.Dir(filepath.Dir(filepath.Clean(tokenFile)))
+		home, err := os.UserHomeDir()
+		if err != nil || !sameGuardPath(dataDir, filepath.Join(home, ".defenseclaw")) {
+			if runtime.GOOS == "windows" {
+				flags += " --data-dir '" + strings.ReplaceAll(dataDir, "'", "''") + "'"
+			} else {
+				flags += fmt.Sprintf(" --data-dir %q", dataDir)
+			}
+		}
+	}
+	return flags
+}
+
+func sameGuardPath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func newStartupError(err error, clientID, agentID, profile, mode, contractLock string, managedFlags ...string) error {
 	pair := clientID + "/" + agentID
-	setup, managedEntry := setupCommand(clientID, agentID, profile, mode, contractLock)
+	setup, managedEntry := setupCommand(clientID, agentID, profile, mode, contractLock, managedFlags...)
 	if managedEntry {
 		// A managed host has only the gateway binary, not the Python CLI
 		// the per-user text names (GAP-0270).
@@ -256,8 +287,9 @@ func run(args []string) error {
 		return encoder.Encode(acp.BuiltinCatalog())
 	}
 
+	flagsForSetup := managedSetupFlags(*gateway, *tokenFile)
 	fail := func(err error) error {
-		return newStartupError(err, *clientID, *agentID, *profile, *mode, *contractLock)
+		return newStartupError(err, *clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup)
 	}
 	commandArgs := flags.Args()
 	command := ""
@@ -319,11 +351,15 @@ func run(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	setup, managedEntry := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock)
+	setup, managedEntry := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup)
 	return acp.Run(ctx, acp.ProxyOptions{
 		AgentID: *agentID, ClientID: *clientID, Profile: *profile,
 		Mode: acp.Mode(*mode), Command: command, Args: commandArgs,
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Evaluator: evaluator,
 		Managed: managedEntry, SetupCommand: setup,
+		SetupCommandFor: func(profile string, mode acp.Mode) string {
+			command, _ := setupCommand(*clientID, *agentID, profile, string(mode), *contractLock, flagsForSetup)
+			return command
+		},
 	})
 }

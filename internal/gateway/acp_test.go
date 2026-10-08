@@ -952,6 +952,24 @@ func TestACPManagedCredentialMustMatchThePairsResolvedProfile(t *testing.T) {
 	if code := evaluate("watch"); code != http.StatusForbidden {
 		t.Errorf("credential outside the pair's resolved profile = %d, want 403", code)
 	}
+	// The guard of the old profile is told where the pair went, so it can
+	// end the session with the setup command (GAP-0723). Secure Client keeps
+	// the answer of main.
+	cfg.Enterprise.Profile = "standalone"
+	body, _ := json.Marshal(acp.Evaluation{
+		Profile: "locked", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed",
+		Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt",
+		Payload: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+	request = request.WithContext(withACPEnterpriseCredential(request.Context(), credential))
+	response := httptest.NewRecorder()
+	(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+	var refusal map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &refusal); err != nil || response.Code != http.StatusForbidden ||
+		refusal["code"] != acp.RefusalProfileChanged || refusal["profile"] != "watch" || refusal["mode"] != "action" {
+		t.Errorf("stale guard refusal = %d %s, want 403 naming profile watch", response.Code, response.Body.String())
+	}
 }
 
 // Resolution has to agree with the Python implementation that writes the
