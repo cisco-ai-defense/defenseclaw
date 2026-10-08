@@ -2198,13 +2198,15 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         # Managed installs own their file modes; Secure Client keeps its rows.
         return
     gateway = getattr(cfg, "gateway", None)
+    dotenv = os.path.join(data_dir, ".env")
     targets = (
-        (os.path.join(data_dir, ".env"), False),
+        (dotenv, False),
         (str(getattr(gateway, "device_key_file", "") or os.path.join(data_dir, "device.key")), False),
         (str(getattr(cfg, "audit_db", "") or os.path.join(data_dir, "audit.db")), False),
         (data_dir, True),
     )
     exposed: list[str] = []
+    unverified: list[str] = []
     files: list[str] = []
     for path, is_dir in targets:
         try:
@@ -2215,16 +2217,19 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
             continue
         if os.name == "nt":
             problem = None if is_dir else windows_acl_confidentiality_error(path)
-            if problem and "read" in problem.lower():
-                exposed.append(f"{path} (its Windows ACL lets other accounts read it)")
-                files.append(path)
+            if problem:
+                if _acl_inspection_unavailable(problem):
+                    unverified.append(f"{path} ({problem})")
+                else:
+                    exposed.append(f"{path} (unsafe Windows ACL: {problem})")
+                    files.append(path)
             continue
         mode = stat.S_IMODE(info.st_mode)
         if mode & 0o077:
             exposed.append(f"{path} (mode {mode:04o})")
             if not is_dir:
                 files.append(path)
-    if not exposed:
+    if not exposed and not unverified:
         _emit(
             "pass",
             "Private files",
@@ -2234,13 +2239,14 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         )
         return
     steps = []
-    dotenv = os.path.join(data_dir, ".env")
     if dotenv in files:
         steps.append("defenseclaw doctor --fix --yes (rotates the exposed gateway token and makes .env private)")
+    if unverified:
+        steps.append("inspect the Windows ACLs of " + ", ".join(unverified))
     others = [path for path in files if path != dotenv]
     if os.name == "nt":
         if others:
-            steps.append("remove the other accounts from the permissions of " + ", ".join(others))
+            steps.append("review ownership and remove untrusted permissions on " + ", ".join(others))
     else:
         if others:
             steps.append("chmod 600 " + " ".join(others))
@@ -2249,10 +2255,15 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     _emit(
         "fail" if files else "warn",
         "Private files",
-        "other accounts can read " + ", ".join(exposed),
+        "; ".join(
+            part for part in (
+                "private files are unsafe: " + ", ".join(exposed) if exposed else "",
+                "could not verify private file ACLs: " + ", ".join(unverified) if unverified else "",
+            ) if part
+        ),
         r=r,
         check_id="doctor.state.private-files",
-        reason_code="private-files-exposed",
+        reason_code="private-files-exposed" if exposed else "private-files-unverified",
         remediation="; ".join(steps),
     )
 
@@ -6842,7 +6853,7 @@ _OMNIGENT_ARTIFACT_LIMIT = 2 * 1024 * 1024
 _OMNIGENT_PID_LIMIT = 256
 
 
-def _omnigent_acl_inspection_unavailable(problem: str) -> bool:
+def _acl_inspection_unavailable(problem: str) -> bool:
     """Distinguish unprovable ACL inspection from a proven unsafe grant."""
     return any(
         marker in problem
@@ -6901,7 +6912,7 @@ def _omnigent_custody_read(
             return "unsafe", None, f"{reference} is not a regular non-reparse file"
         custody_status, custody_problem = _pid_record_integrity_error(path, info)
         if custody_status == "denied":
-            if _omnigent_acl_inspection_unavailable(custody_problem):
+            if _acl_inspection_unavailable(custody_problem):
                 return "unavailable", None, f"{reference} custody is unavailable"
             return "unsafe", None, f"{reference} custody is unsafe"
         if custody_status != "ok":
@@ -6910,14 +6921,14 @@ def _omnigent_custody_read(
             private_problem = ""
             if os.name == "nt":
                 private_problem = windows_acl_confidentiality_error(path) or ""
-                if _omnigent_acl_inspection_unavailable(private_problem):
+                if _acl_inspection_unavailable(private_problem):
                     return "unavailable", None, f"{reference} private custody is unavailable"
             else:
                 if stat.S_IMODE(info.st_mode) & 0o077:
                     return "unsafe", None, f"{reference} private custody is unsafe"
                 if sys.platform == "darwin":
                     private_problem = darwin_acl_confidentiality_error(path) or ""
-                    if _omnigent_acl_inspection_unavailable(private_problem):
+                    if _acl_inspection_unavailable(private_problem):
                         return "unavailable", None, f"{reference} private custody is unavailable"
             if private_problem:
                 return "unsafe", None, f"{reference} private custody is unsafe"
