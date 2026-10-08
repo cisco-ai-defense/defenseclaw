@@ -642,7 +642,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	meta.ToolName = codexToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
-	meta = a.applyHookChildThreadLineage(meta)
+	meta = a.applyHookChildThreadLineage(a.claimCodexPendingThread(meta))
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
 	meta = a.beginHookExecution(meta)
 	meta = a.restoreHookSessionLifecycle(ctx, meta)
@@ -690,6 +690,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		a.emitToolInvocationEventV8(ctx, meta, "call", codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), "", nil)
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentRequested, stringFromJSONRaw(codexToolArgs(req)))
+		a.noteCodexThreadCall(meta, codexToolName(req))
 		invocationID := a.rememberHookToolInvocation(meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
 		captureHookToolCall(ctx, meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), invocationID)
 	case "PostToolUse":
