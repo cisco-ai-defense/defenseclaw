@@ -40,7 +40,14 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		var secretError *config.V8SecretReferenceError
 		if !errors.As(err, &secretError) || secretError.Credential {
 			failure := configV8ValidationFailure(err)
-			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, failure.Path, failure.Reason)
+			location := failure.Path
+			// A syntax error is found by its line, not by a path in the
+			// document (GAP-0607).
+			var syntax *config.V8YAMLError
+			if errors.As(err, &syntax) && syntax.Line > 0 {
+				location = fmt.Sprintf("line %d", syntax.Line)
+			}
+			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, location, failure.Reason)
 		}
 		// The rule packs do not depend on the secret, so they are still
 		// checked. Before, a config with an observability token_env
