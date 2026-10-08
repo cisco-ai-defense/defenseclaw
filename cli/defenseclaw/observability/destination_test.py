@@ -630,6 +630,20 @@ def _record_outcome(
     )
 
 
+def untestable_kind(effective: Mapping[str, object], name: str) -> str:
+    """The kind of NAME when it is a local or pull destination, else "".
+
+    Those write on this machine or wait for a reader, so a connectivity test
+    has nothing to reach: the test commands report them as skipped, not as
+    a failure (GAP-0270).
+    """
+    try:
+        kind = str(_find_destination(effective, name).get("kind") or "")
+    except DestinationTestError:
+        return ""
+    return kind if kind in _LOCAL_OR_PULL_KINDS else ""
+
+
 def _find_destination(effective: Mapping[str, object], name: str) -> Mapping[str, object]:
     destinations = effective.get("destinations")
     if not isinstance(destinations, list):

@@ -39,6 +39,7 @@ from defenseclaw.observability.destination_test import (
     DestinationTestError,
     canonical_local_compliance_recorder,
     run_destination_test,
+    untestable_kind,
 )
 
 _BUCKETS = (
@@ -123,6 +124,11 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     except DestinationTestError as exc:
+        if exc.failure_class == "unsupported" and (kind := untestable_kind(inspected.effective or {}, name)):
+            # Nothing to reach: a skip, not a failure (GAP-0270).
+            click.echo(f"result: SKIPPED - {kind} destinations are not connectivity-tested "
+                       "(they write on this machine or wait for a reader)")
+            return
         message = f"destination test failed ({exc.failure_class}): {exc.message}"
         if exc.failure_class in NETWORK_FAILURE_CLASSES:
             message += f"\n{NETWORK_PATH_NOTE}"
