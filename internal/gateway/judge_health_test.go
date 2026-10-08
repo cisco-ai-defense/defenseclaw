@@ -56,16 +56,16 @@ func TestHealthSnapshotShowsFailingJudge(t *testing.T) {
 func TestHealthSnapshotShowsAJudgeThatCouldNotStart(t *testing.T) {
 	h := NewSidecarHealth()
 	t.Cleanup(judgeHealth.reset)
-	t.Setenv("DEFENSECLAW_K4_JUDGE_KEY", "")
+	t.Setenv("JUDGE_HEALTH_TEST_KEY", "")
 	emitJudge(context.Background(), "pii", "m", gatewaylog.DirectionPrompt, 1, 1, "allow",
 		gatewaylog.SeverityInfo, "", "", JudgeEmitOpts{})
 
 	judge, reason := newLLMJudgeWithReason(
 		&config.JudgeConfig{Enabled: true},
-		config.LLMConfig{Provider: "openai", Model: "gpt-judge-x", APIKeyEnv: "DEFENSECLAW_K4_JUDGE_KEY"},
+		config.LLMConfig{Provider: "openai", Model: "gpt-judge-x", APIKeyEnv: "JUDGE_HEALTH_TEST_KEY"},
 		"", nil, nil,
 	)
-	if judge != nil || !strings.Contains(reason, "DEFENSECLAW_K4_JUDGE_KEY") {
+	if judge != nil || !strings.Contains(reason, "JUDGE_HEALTH_TEST_KEY") {
 		t.Fatalf("judge=%v reason=%q, want no judge and a reason naming the key", judge, reason)
 	}
 	judgeHealth.applyJudge(judge, reason)

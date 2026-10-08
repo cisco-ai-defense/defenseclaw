@@ -1701,7 +1701,10 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         self.assertIn('configured rule pack "mine"', rp["detail"])
         self.assertIn("guardrail.custom_packs.mine.digest", rp["detail"])
         self.assertNotIn("rule_pack_dir", rp["detail"])
-        self.assertIn("guardrail use-pack", rp["remediation"])
+        # Re-pin in place, keeping per-connector pack choices (GAP-0332).
+        self.assertEqual(
+            rp["remediation"], "defenseclaw config set guardrail.custom_packs.mine.digest sha256:" + "b" * 64
+        )
 
         cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "b" * 64)}
         r = _DoctorResult()
