@@ -178,6 +178,16 @@ def test_upgrade_config_check_requires_every_v8_value_kept_or_recorded(tmp_path:
 
     kept = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\nadmission:\n  skill:\n    actions: {high: block}\n"
     assert run(kept).returncode == 0, run(kept).stderr
+    moved_changed = run(kept.replace("actions: {high: block}", "actions: {high: allow}"))
+    assert moved_changed.returncode == 1
+    assert "skill_actions.high.install moved to admission.skill.actions.high" in moved_changed.stderr
+    record["moved"].append({"from": "update_check", "to": "update.check", "value": False})
+    (tmp_path / "v8.yaml").write_bytes(before + b"update_check: true\n")
+    record["source_sha256"] = hashlib.sha256((tmp_path / "v8.yaml").read_bytes()).hexdigest()
+    (tmp_path / "record.json").write_text(json.dumps(record), encoding="utf-8")
+    changed_boolean = run(kept + "update: {check: false}\n")
+    assert changed_boolean.returncode == 1
+    assert "update_check moved to update.check" in changed_boolean.stderr
     changed = run(kept.replace("mode: observe", "mode: action"))
     assert changed.returncode == 1
     assert "  - guardrail.mode changed from 'observe' to 'action'" in changed.stderr.splitlines()
