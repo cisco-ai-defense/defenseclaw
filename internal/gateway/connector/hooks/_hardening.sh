@@ -965,6 +965,8 @@ defenseclaw_unreachable_notice_json() {
     text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection.'
   elif defenseclaw_own_gateway_alive; then
     text='DefenseClaw is not checking this session: the gateway is running but did not answer. Run `defenseclaw-gateway restart` to resume protection.'
+  elif defenseclaw_own_config_invalid; then
+    text='DefenseClaw is not checking this session: the gateway could not start because config.yaml does not load. Run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`.'
   else
     text='DefenseClaw is not checking this session: this account'"'"'s gateway is not running. Run `defenseclaw-gateway start` to resume protection.'
   fi
@@ -983,12 +985,30 @@ defenseclaw_unreachable_next_step() {
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
   if [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection'
+  elif defenseclaw_own_gateway_stopped && defenseclaw_own_config_invalid; then
+    printf '%s' 'the gateway could not start because config.yaml does not load; run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`'
   elif defenseclaw_own_gateway_stopped; then
     printf '%s' 'this account'"'"'s gateway is not running; run `defenseclaw-gateway start`'
   elif defenseclaw_own_gateway_alive; then
     # A frozen or hung gateway keeps its listener: the request timed out.
     printf '%s' 'the gateway is running but did not answer; check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`'
   fi
+}
+
+# defenseclaw_own_config_invalid returns 0 when the last hook start of this
+# account's gateway failed because config.yaml does not load and the file has
+# not changed since. A start cannot help then, so the hook names the file
+# instead (GAP-0409). defenseclaw-gateway start writes the marker.
+defenseclaw_own_config_invalid() {
+  local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}" marker="" line="" n=0
+  marker="${data}/gateway.cold-start-failed"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ "$marker" -nt "${data}/config.yaml" ] || return 1
+  while [ "$n" -lt 4 ] && IFS= read -r -n 256 line; do
+    [ "$line" = "config-invalid" ] && return 0
+    n=$((n + 1))
+  done < "$marker"
+  return 1
 }
 
 # defenseclaw_own_gateway_alive returns 0 when this account's per-user

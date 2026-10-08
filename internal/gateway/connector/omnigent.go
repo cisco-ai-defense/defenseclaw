@@ -1042,38 +1042,84 @@ func patchOmnigentConfig(path string) error {
 }
 
 func removeOmnigentConfigEntries(path string) error {
-	cfg, err := readYAMLObject(path)
+	data, err := readHookConfigFile(path)
+	if os.IsNotExist(err) || len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	modules, err := yamlStringList(cfg["policy_modules"])
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("parse YAML %s: %w", path, err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("parse YAML %s: expected a mapping", path)
+	}
+	root := document.Content[0]
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key, value := root.Content[i], root.Content[i+1]
+		switch key.Value {
+		case "policy_modules":
+			if value.Kind != yaml.SequenceNode {
+				if value.Kind == yaml.ScalarNode && value.Value == omnigentPolicyModuleName {
+					root.Content = append(root.Content[:i], root.Content[i+2:]...)
+					i -= 2
+					changed = true
+				}
+				continue
+			}
+			kept := value.Content[:0]
+			removedModule := false
+			for _, module := range value.Content {
+				if module.Kind == yaml.ScalarNode && module.Value == omnigentPolicyModuleName {
+					changed = true
+					removedModule = true
+					continue
+				}
+				kept = append(kept, module)
+			}
+			value.Content = kept
+			if removedModule && len(kept) == 0 {
+				root.Content = append(root.Content[:i], root.Content[i+2:]...)
+				i -= 2
+			}
+		case "policies":
+			if value.Kind != yaml.MappingNode {
+				continue
+			}
+			removedPolicy := false
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				if value.Content[j].Value != omnigentPolicyConfigKey || value.Content[j+1].Kind != yaml.MappingNode {
+					continue
+				}
+				entry := value.Content[j+1]
+				owned := false
+				for k := 0; k+1 < len(entry.Content); k += 2 {
+					owned = owned || (entry.Content[k].Value == "handler" && entry.Content[k+1].Value == omnigentPolicyHandler)
+				}
+				if owned {
+					value.Content = append(value.Content[:j], value.Content[j+2:]...)
+					changed = true
+					removedPolicy = true
+				}
+				break
+			}
+			if removedPolicy && len(value.Content) == 0 {
+				root.Content = append(root.Content[:i], root.Content[i+2:]...)
+				i -= 2
+			}
+		}
+	}
+	if !changed {
+		return nil
+	}
+	updated, err := yaml.Marshal(&document)
 	if err != nil {
 		return err
 	}
-	filtered := modules[:0]
-	for _, module := range modules {
-		if module != omnigentPolicyModuleName {
-			filtered = append(filtered, module)
-		}
-	}
-	if len(filtered) == 0 {
-		delete(cfg, "policy_modules")
-	} else {
-		cfg["policy_modules"] = filtered
-	}
-	if policies, ok := cfg["policies"].(map[string]interface{}); ok {
-		if entry, ok := policies[omnigentPolicyConfigKey].(map[string]interface{}); ok && fmt.Sprint(entry["handler"]) == omnigentPolicyHandler {
-			delete(policies, omnigentPolicyConfigKey)
-		}
-		if len(policies) == 0 {
-			delete(cfg, "policies")
-		}
-	}
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	return atomicWriteFile(path, data, 0o600)
+	return atomicWriteFile(path, updated, 0o600)
 }
 
 func yamlStringList(raw interface{}) ([]string, error) {

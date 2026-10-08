@@ -1099,8 +1099,13 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             StepResult(
                 "Sidecar",
                 "pass" if running else "warn",
-                "running" if running else "not confirmed after start",
-                "defenseclaw-gateway status" if not running else "",
+                # A slow start on a busy machine is not a failure; say what
+                # it means and how to check (GAP-0478).
+                "running"
+                if running
+                else "not answering yet (it may still be starting on a busy machine); "
+                "protection is not active until it does",
+                "check it in a minute with defenseclaw-gateway status" if not running else "",
             )
         )
         runtime_step = _connector_runtime_readiness(cfg, connector) if running else None

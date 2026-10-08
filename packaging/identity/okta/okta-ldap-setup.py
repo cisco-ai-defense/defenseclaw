@@ -236,8 +236,8 @@ def schema_properties(client: Okta, kind: str) -> dict[str, Any]:
 def named_int(value: str) -> tuple[str, int | None]:
     """Parse NAME or NAME=GID."""
     name, sep, number = value.partition("=")
-    if not re.fullmatch(r"[^\s=\"]+", name):
-        raise argparse.ArgumentTypeError(f"not a group name (no spaces or quotes): {value!r}")
+    if not name or name != name.strip() or "=" in name or '"' in name or any(ord(ch) < 32 for ch in name):
+        raise argparse.ArgumentTypeError(f"not a group name: {value!r}")
     if sep and not number.isdigit():
         raise argparse.ArgumentTypeError(f"the id after = must be a number: {value!r}")
     return name, (int(number) if sep else None)
@@ -273,6 +273,16 @@ def cmd_check(client: Okta, args: argparse.Namespace) -> int:
         check_bind_user(client, report, args.bind_login)
     for name, gid in args.group or []:
         check_group(client, report, name, gid)
+    uid_owners: dict[int, str] = {}
+    for user in client.get_all("/api/v1/users?limit=200"):
+        value = user.get("profile", {}).get("uidNumber")
+        if value is None:
+            continue
+        uid = int(value)
+        login = str(user.get("profile", {}).get("login", user.get("id")))
+        if uid in uid_owners and uid_owners[uid] != login:
+            report.problem(f"uidNumber {uid} is shared by {uid_owners[uid]} and {login}")
+        uid_owners[uid] = login
     print("\nAll checks passed." if report.problems == 0 else f"\n{report.problems} problem(s) found.")
     return 1 if report.problems else 0
 
@@ -433,6 +443,21 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
     if not args.user and not args.users_from:
         raise OktaError("name the users: --user LOGIN (repeatable) or --users-from OKTA_GROUP")
 
+    users = collect_users(client, report, args)
+    directory_users = client.get_all("/api/v1/users?limit=200")
+    names: dict[str, str] = {}
+    for other in directory_users:
+        existing = other.get("profile", {}).get("unixUsername")
+        if existing:
+            names.setdefault(existing, other["id"])
+    for user in users:
+        profile = user.get("profile", {})
+        name = profile.get("unixUsername") or unix_name(profile.get("login", ""))
+        if names.setdefault(name, user["id"]) != user["id"]:
+            report.problem(f"account name {name} is taken by another user; choose a unique unixUsername")
+    if report.problems:
+        return report.finish()
+
     print("Groups")
     used_gids = {
         int(g["profile"]["gidNumber"])
@@ -444,20 +469,12 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
         ensure_group(client, report, name, gid, used_gids, args.gid_base)
 
     print("Users")
-    users = collect_users(client, report, args)
     used_uids: set[int] = set()
     if any(u.get("profile", {}).get("uidNumber") is None for u in users):
         for other in client.get_all("/api/v1/users?limit=200"):
             value = other.get("profile", {}).get("uidNumber")
             if value is not None:
                 used_uids.add(int(value))
-    names: dict[str, str] = {}
-    for user in users:
-        profile = user.get("profile", {})
-        name = profile.get("unixUsername") or unix_name(profile.get("login", ""))
-        if names.setdefault(name, user["id"]) != user["id"]:
-            report.problem(f"two users would get the account name {name}; set unixUsername yourself for one of them")
-
     next_uid = args.uid_base
     for user in users:
         profile = user.get("profile", {})
@@ -479,14 +496,54 @@ def cmd_assign_posix(client: Okta, args: argparse.Namespace) -> int:
             update["homeDirectory"] = args.home_template.replace("{name}", name)
         if profile.get("loginShell") is None:
             update["loginShell"] = args.shell
+        if names.get(name) != user["id"]:
+            continue
+        if update and not report.dry_run:
+            # Re-read before writing: another administrator may have taken the proposed uid.
+            current = client.must("GET", f"/api/v1/users/{user['id']}")
+            occupied = {
+                int(other["profile"]["uidNumber"])
+                for other in client.get_all("/api/v1/users?limit=200")
+                if other["id"] != user["id"] and other.get("profile", {}).get("uidNumber") is not None
+            }
+            if "uidNumber" in update and update["uidNumber"] in occupied:
+                report.problem(f"{login}: uidNumber {update['uidNumber']} was taken; rerun the preview")
+                continue
+            if current.get("profile", {}).get("unixUsername") not in (None, name):
+                report.problem(f"{login}: unixUsername changed concurrently; rerun the preview")
+                continue
+            try:
+                client.must("POST", f"/api/v1/users/{user['id']}", {"profile": update})
+            except OktaError as exc:
+                report.problem(f"{login}: POSIX update failed: {exc}")
+                continue
+            saved = client.must("GET", f"/api/v1/users/{user['id']}")
+            if any(saved.get("profile", {}).get(key) != value for key, value in update.items()):
+                report.problem(f"{login}: POSIX values did not match after writing")
+                continue
+            if "uidNumber" in update:
+                duplicate = [
+                    other for other in client.get_all("/api/v1/users?limit=200")
+                    if other["id"] != user["id"]
+                    and other.get("profile", {}).get("uidNumber") == update["uidNumber"]
+                ]
+                if duplicate:
+                    report.problem(
+                        f"{login}: uidNumber {update['uidNumber']} is now shared; serialize assign-posix runs"
+                    )
+                    continue
         if update:
             report.change(f"{login}: " + ", ".join(f"{key}={value}" for key, value in update.items()))
-            if not report.dry_run:
-                client.must("POST", f"/api/v1/users/{user['id']}", {"profile": update})
         else:
             report.ok(f"{login}: POSIX values already set")
-        if primary is not None and not report.dry_run:
-            client.must("PUT", f"/api/v1/groups/{primary['id']}/users/{user['id']}")
+        if primary is not None:
+            members = client.get_all(f"/api/v1/groups/{primary['id']}/users?limit=200")
+            if any(member["id"] == user["id"] for member in members):
+                report.ok(f"{login}: already in {args.primary_group}")
+            else:
+                report.change(f"add {login} to {args.primary_group}")
+                if not report.dry_run:
+                    client.must("PUT", f"/api/v1/groups/{primary['id']}/users/{user['id']}")
         elif primary is None:
             report.note(f"{login}: would be added to {args.primary_group}")
     return report.finish()
@@ -617,6 +674,8 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
         and action.get("access") == "ALLOW"
         and password_only
     )
+    method = (rule.get("actions") or {}).get("appSignOn", {}).get("verificationMethod") or {}
+    same = same and rule.get("status") == "ACTIVE" and method.get("factorMode") == "1FA"
     if same:
         report.ok(f"rule '{name}' already does this: {purpose}")
         return
@@ -741,8 +800,9 @@ def read_credentials() -> tuple[str, str]:
     if not org_url:
         raise OktaError("set OKTA_ORG_URL to the org URL, for example https://example.okta.com")
     parts = urllib.parse.urlsplit(org_url)
-    if parts.scheme != "https" or not parts.hostname or parts.path or parts.query or parts.username:
-        raise OktaError("OKTA_ORG_URL must be https://<org>.okta.com with no path")
+    if (parts.scheme != "https" or not parts.hostname or parts.path or parts.query or parts.username
+            or "-admin." in parts.hostname):
+        raise OktaError("OKTA_ORG_URL must be https://<org>.okta.com (not the -admin URL) with no path")
     token = os.environ.get("OKTA_API_TOKEN", "").strip()
     if not token:
         if not sys.stdin.isatty():

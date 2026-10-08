@@ -29,12 +29,13 @@ func upgradeAuditStoreBeforeStart(cfg *config.Config, out, warn io.Writer) {
 		return
 	}
 	fmt.Fprintf(out, "Upgrading the audit database (one time; a large history can take a few minutes)... ")
-	upgrade := audit.UpgradeDaemonStore
+	opts := auditStoreOptions(cfg)
+	upgrade := func(path string, warn io.Writer) error { return audit.UpgradeDaemonStore(path, warn, opts...) }
 	if cfg.SecureClientIntegration() {
 		// Secure Client keeps the upgrade of main, whose per-migration notes
 		// go to stderr (issue #1092).
 		upgrade = func(path string, warn io.Writer) error {
-			store, err := audit.OpenDaemonStore(path, warn)
+			store, err := audit.OpenDaemonStore(path, warn, opts...)
 			if err != nil {
 				return err
 			}

@@ -65,6 +65,17 @@ their generated hooks stay open even when the effective mode is `closed`. See
 | Internal policy evaluator panic | Allow with `would_block`, warning, and telemetry. | The same fail-open boundary; no authoritative verdict was produced. |
 | Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
 
+Fail mode applies only to a hook the agent can start. A hook script that is
+missing, cannot be read or is not executable (an antivirus quarantine, a
+restored backup with the wrong mode, an account rename or home move that left
+the agent hooks pointing at the old home) makes the shell exit 126 or 127,
+which Claude Code and the other agents treat as a non-blocking hook error: the
+tool call runs unguarded whatever the fail mode. `defenseclaw guardrail
+status`, `defenseclaw status` and `defenseclaw doctor` say that the connector
+is not guarded and name the repair (`defenseclaw doctor --fix` restores the
+script mode; `defenseclaw setup <connector>` or `defenseclaw-gateway restart`
+renders the scripts and re-points the hooks after a home move).
+
 The final row is intentional and important. Hook fail mode governs delivery,
 authentication, parsing, and response availability. It does not fabricate a
 policy denial after an internal evaluator panic. Treat that condition as a

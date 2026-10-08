@@ -136,9 +136,32 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		}
 	}
 	if strict && r.TransactionPending {
-		r.AddError(codeVerify, "a lifecycle transaction is pending; the next mutating run recovers it")
+		r.AddError(codeVerify, "a lifecycle transaction is pending; "+l.recoverPendingFromVerify(ctx))
 	}
 	return 0
+}
+
+// recoverPendingFromVerify starts the apply trigger for a transaction a
+// killed run left pending (an MDM timeout or a power loss during quiesce).
+// verify held the lifecycle lock a moment ago, so no run is applying it, and
+// the services that run stopped stay stopped until a mutating run rolls it
+// back; nothing started one on its own (GAP-0428). The apply trigger runs
+// ensure, which recovers the transaction first. It returns the next step.
+func (l *lifecycle) recoverPendingFromVerify(ctx context.Context) string {
+	env := l.env
+	if env.Geteuid() != 0 {
+		return "the next mutating run recovers it"
+	}
+	var err error
+	if env.GOOS == "darwin" {
+		_, err = env.Runner.Run(ctx, "launchctl", "kickstart", "system/"+labelApply)
+	} else {
+		_, err = env.Runner.Run(ctx, "systemctl", "start", "--no-block", unitApplyService)
+	}
+	if err != nil {
+		return "run `" + env.lifecycleCommand("repair") + "` to roll it back"
+	}
+	return "started the apply trigger, which rolls it back and starts the stopped services again"
 }
 
 // verifyInstalled compares the host with record. strict adds the checks

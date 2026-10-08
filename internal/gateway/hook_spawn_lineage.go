@@ -354,13 +354,17 @@ func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response st
 	if strings.TrimSpace(parent.AgentID) == "" || parent.AgentDepth < 0 || parent.AgentDepth >= 64 {
 		return
 	}
-	now := time.Now().UTC()
 	child := meta
 	child.SessionID = match[1]
-	key := hookChildThreadKey(child)
-
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
+	a.storeHookChildThreadLocked(child, parent, time.Now().UTC())
+}
+
+// storeHookChildThreadLocked records that child's session is one parent
+// started. Caller holds a.llmPromptMu.
+func (a *APIServer) storeHookChildThreadLocked(child, parent llmEventMeta, now time.Time) {
+	key := hookChildThreadKey(child)
 	if a.hookChildThreads == nil {
 		a.hookChildThreads = make(map[string]hookChildThread)
 	}
@@ -379,6 +383,143 @@ func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response st
 	}
 	a.hookChildThreads[key] = hookChildThread{parent: parent, createdAt: now}
 	a.hookChildThreadOrder = append(a.hookChildThreadOrder, key)
+}
+
+// Copilot CLI runs a task sub-agent in a session of its own. Its tool hooks
+// name only that child session; subagentStart arrives in the parent's session
+// before the child's first hook and names only the agent, and subagentStop,
+// after the child's last hook, names the child session as agentId
+// (GAP-0371). A child session's first hook (not a sessionStart, which only a
+// chat sends) is therefore linked to the agent of a pending subagentStart of
+// the same agent identity, when every pending start shares one parent, and
+// subagentStop links the session it names in any case.
+const (
+	copilotSubagentTTL        = 30 * time.Minute
+	copilotSubagentMaxPending = 256
+)
+
+type copilotPendingSubagent struct {
+	identity  string
+	parent    llmEventMeta
+	child     string
+	createdAt time.Time
+}
+
+// applyCopilotSubagentLineage tracks Copilot sub-agent starts and stops and
+// links a child session's hooks to the agent that started it.
+func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[string]any) llmEventMeta {
+	// Secure Client keeps the lineage of main (issue #1092).
+	if a == nil || meta.Source != "copilot" || a.managedAIDOnly() || meta.AgentIdentityID == "" ||
+		strings.TrimSpace(meta.SessionID) == "" {
+		return meta
+	}
+	now := time.Now().UTC()
+	switch meta.LifecycleEvent {
+	case "subagent_start":
+		a.noteCopilotSubagentStart(meta, now)
+		return meta
+	case "subagent_stop":
+		a.noteCopilotSubagentStop(meta, firstString(payload, "agentId", "agent_id"), now)
+		return meta
+	case "session_start":
+		return meta
+	}
+	if linked := a.applyHookChildThreadLineage(meta); linked.ParentLineageResolved || meta.AgentDepth != 0 ||
+		meta.ParentSessionID != "" || meta.LineageProvenance == "reported" {
+		return linked
+	}
+	if _, seen := a.hookSessionStateSnapshot("copilot", meta.SessionID, ""); seen {
+		return meta
+	}
+	a.llmPromptMu.Lock()
+	claimed := -1
+	for i, pending := range a.copilotSubagents {
+		if pending.identity != meta.AgentIdentityID || pending.child != "" ||
+			pending.parent.SessionID == meta.SessionID || now.Sub(pending.createdAt) > copilotSubagentTTL {
+			continue
+		}
+		if claimed >= 0 && (pending.parent.SessionID != a.copilotSubagents[claimed].parent.SessionID ||
+			pending.parent.AgentID != a.copilotSubagents[claimed].parent.AgentID) {
+			claimed = -1 // open starts under two parents: the child's is not known
+			break
+		}
+		if claimed < 0 {
+			claimed = i
+		}
+	}
+	if claimed >= 0 {
+		a.copilotSubagents[claimed].child = meta.SessionID
+		a.storeHookChildThreadLocked(meta, a.copilotSubagents[claimed].parent, now)
+	}
+	a.llmPromptMu.Unlock()
+	if claimed < 0 {
+		return meta
+	}
+	return a.applyHookChildThreadLineage(meta)
+}
+
+func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, now time.Time) {
+	parent, ok := a.hookSessionStateSnapshot("copilot", meta.SessionID,
+		agentNodeID(meta.AgentIdentityID, "copilot", meta.SessionID, "root"))
+	if !ok {
+		if parent, ok = a.hookSessionStateSnapshot("copilot", meta.SessionID, ""); !ok {
+			return
+		}
+	}
+	if strings.TrimSpace(parent.meta.AgentID) == "" || parent.meta.AgentDepth < 0 || parent.meta.AgentDepth >= 64 {
+		return
+	}
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	kept := a.copilotSubagents[:0]
+	for _, pending := range a.copilotSubagents {
+		if now.Sub(pending.createdAt) <= copilotSubagentTTL {
+			kept = append(kept, pending)
+		}
+	}
+	a.copilotSubagents = kept
+	if len(a.copilotSubagents) >= copilotSubagentMaxPending {
+		a.copilotSubagents = a.copilotSubagents[1:]
+	}
+	a.copilotSubagents = append(a.copilotSubagents, copilotPendingSubagent{
+		identity: meta.AgentIdentityID, parent: parent.meta, createdAt: now,
+	})
+}
+
+// noteCopilotSubagentStop ends the pending start the child session belongs
+// to and links that session, which agent identities then does not count as a
+// chat.
+func (a *APIServer) noteCopilotSubagentStop(meta llmEventMeta, child string, now time.Time) {
+	child = strings.TrimSpace(child)
+	a.llmPromptMu.Lock()
+	match := -1
+	for i, pending := range a.copilotSubagents {
+		if pending.identity != meta.AgentIdentityID || pending.parent.SessionID != meta.SessionID {
+			continue
+		}
+		if child != "" && pending.child == child {
+			match = i
+			break
+		}
+		if match < 0 && pending.child == "" {
+			match = i
+		}
+	}
+	var parent llmEventMeta
+	if match >= 0 {
+		parent = a.copilotSubagents[match].parent
+		a.copilotSubagents = append(a.copilotSubagents[:match], a.copilotSubagents[match+1:]...)
+	}
+	linked := match >= 0 && child != "" && child != meta.SessionID
+	if linked {
+		childMeta := meta
+		childMeta.SessionID = child
+		a.storeHookChildThreadLocked(childMeta, parent, now)
+	}
+	a.llmPromptMu.Unlock()
+	if linked {
+		sharedAgentIdentities.markSubagentSession(meta.AgentIdentityID, child)
+	}
 }
 
 // applyHookChildThreadLineage links a hook of a session that a create_thread

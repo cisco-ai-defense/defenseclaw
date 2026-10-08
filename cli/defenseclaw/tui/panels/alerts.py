@@ -1328,6 +1328,10 @@ class AlertsPanelModel:
             if decision := _hook_decision_label(self.store, event.id, event.target):
                 facts = tuple(fact for fact in event.facts if fact[0] != "Decision")
                 event = replace(event, facts=(*facts, ("Decision", decision)))
+        if agent := _alert_agent_facts(self.store, event.id):
+            # Who ran it: user, agent identity, instance, session, depth (GAP-0381).
+            labels = {label for label, _ in agent}
+            event = replace(event, facts=(*(fact for fact in event.facts if fact[0] not in labels), *agent))
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
@@ -1770,6 +1774,16 @@ def _hook_decision_label(store: object | None, event_id: str, hook_target: str =
     except Exception:  # noqa: BLE001 - an older or locked audit DB only loses the decision.
         return ""
     return _hook_decision_from_rows(rows, hook_target)
+
+
+def _alert_agent_facts(store: object | None, event_id: str) -> tuple[tuple[str, str], ...]:
+    """The CLI's agent facts of an alert, for the detail pane (GAP-0381)."""
+    try:
+        from defenseclaw.commands.cmd_alerts import alert_agent_facts  # noqa: PLC0415
+
+        return tuple(alert_agent_facts(store, [event_id]).get(event_id, ()))
+    except Exception:  # noqa: BLE001 - detail enrichment must not hide the selected row.
+        return ()
 
 
 def _finding_display_title(rule_id: str, title: str) -> str:

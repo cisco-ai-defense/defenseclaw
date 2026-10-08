@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -237,6 +239,9 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	recorder.observe(facts, "sess-b", true)
 	recorder.observe(facts, "sess-a", false)
 	recorder.observe(facts, "sess-c", true)
+	// The previous chat hooks once more after the new one started, as Codex's
+	// does after /new: the last session stays the newest (GAP-0395).
+	recorder.observe(facts, "sess-b", false)
 	if err := recorder.flush(ctx, store); err != nil {
 		t.Fatal(err)
 	}
@@ -369,6 +374,59 @@ func TestAgentIdentitiesRoutePages(t *testing.T) {
 	}
 	if code, _, _, _ = get("?limit=0"); code != http.StatusBadRequest {
 		t.Fatalf("limit=0 answered %d, want 400", code)
+	}
+}
+
+// GAP-0380: a config root the agent claims is shown to an admin; control and
+// bidi formatting characters in it are replaced, as ESC already was.
+func TestClaimedInstallHintReplacesDisplayControls(t *testing.T) {
+	hint := claimedInstallHint(map[string]interface{}{"config_dir": "/home/m/cfg-x\x1b[31mRED-\u202eend\u2066\u200f\u0085"})
+	if hint != "/home/m/cfg-x [31mRED- end" {
+		t.Fatalf("hint = %q, want controls and bidi characters replaced", hint)
+	}
+}
+
+// GAP-0393: when inventory.db cannot be written, agent identities run from
+// memory. The route says persisted false with the reason, and /health carries
+// it for status and doctor.
+func TestAgentIdentityLedgerWriteFailureIsReported(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a file mode the test user cannot write through")
+	}
+	agentIdentityTestSetup(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "inventory.db")
+	store, err := inventory.NewInventoryStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755); _ = os.Chmod(path, 0o644) })
+	prev := sharedAgentIdentities
+	sharedAgentIdentities = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	token := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore { return nil },
+		func() string { return dir }, func() int { return 1 })
+	t.Cleanup(func() { sharedAgentIdentities.clearStoreSource(token); sharedAgentIdentities = prev })
+	sharedAgentIdentities.observe(agentIdentityFacts{ID: "agt-0000000000000393", UserID: "4393", Connector: "claudecode", MachineHash: "m"}, "s-1", true)
+
+	rec := httptest.NewRecorder()
+	(&APIServer{}).handleAgentIdentities(rec, httptest.NewRequest(http.MethodGet, "/api/v1/agents/identities", nil))
+	var body struct {
+		Persisted    bool   `json:"persisted"`
+		PersistError string `json:"persist_error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != http.StatusOK || body.Persisted ||
+		body.PersistError == "" {
+		t.Fatalf("route = %d %s, want persisted false with the reason", rec.Code, rec.Body.String())
+	}
+	if ledger := agentIdentityLedgerHealth(); ledger == nil || ledger["persisted"] != false || ledger["error"] == "" {
+		t.Fatalf("/health agent_identities = %v, want the write failure", ledger)
 	}
 }
 

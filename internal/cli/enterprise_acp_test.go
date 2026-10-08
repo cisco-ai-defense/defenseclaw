@@ -124,7 +124,24 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if _, err := os.Stat(tokenPath); err != nil {
 		t.Fatal(err)
 	}
-	run(runEnterpriseACPVerify)
+	// verify tells a published token from a completed setup, and list
+	// names who is enrolled and how far they got (GAP-0400).
+	if verified := run(runEnterpriseACPVerify); verified["setup_done"] != false {
+		t.Fatalf("verify did not report that setup has not run: %v", verified)
+	}
+	restoreDescribe := enterpriseACPDescribePrincipal
+	t.Cleanup(func() { enterpriseACPDescribePrincipal = restoreDescribe })
+	enterpriseACPDescribePrincipal = func(string) (enterpriseACPAccount, error) {
+		return enterpriseACPAccount{exists: true, name: "alice", home: userHome, uid: -1, gid: -1}, nil
+	}
+	listed, _ := run(runEnterpriseACPList)["enrollments"].([]any)
+	if len(listed) != 1 {
+		t.Fatalf("list = %v, want the one enrollment", listed)
+	}
+	if row, _ := listed[0].(map[string]any); row["user"] != "alice" || row["client"] != "zed" || row["agent"] != "kiro" ||
+		row["token_copy"] != "present" || row["setup"] != "not run" {
+		t.Fatalf("list row = %v, want alice zed/kiro with the token copy present and setup not run", row)
+	}
 
 	enrollment, err := resolveEnterpriseACPEnrollment(true)
 	if err != nil {
@@ -169,6 +186,18 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
 		t.Fatalf("user token survived revoke: %v", err)
 	}
+	// verify and revoke of an enrollment that does not exist say so, not a
+	// record path in an lstat error or "revoked" (GAP-0355).
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&output)
+	if err := runEnterpriseACPVerify(command, nil); err == nil || !strings.Contains(output.String(), "no ACP enrollment for") ||
+		strings.Contains(output.String(), "lstat") {
+		t.Fatalf("verify of a missing enrollment: err=%v output=%s", err, output.String())
+	}
+	if again := run(runEnterpriseACPRevoke); again["found"] != false || again["centrally_revoked"] != false {
+		t.Fatalf("revoke of a missing enrollment reported a revocation: %v", again)
+	}
 }
 
 // The Windows refusals named hook mutation and gave no next step; they now
@@ -212,6 +241,23 @@ func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 	enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = "zed", "kiro", "locked"
 	if _, err := resolveEnterpriseACPEnrollment(true); err == nil {
 		t.Fatal("implicit empty allowlist was accepted for enterprise enrollment")
+	}
+	// A per-pair binding authorizes its pair as the gateway evaluates it,
+	// and a refusal names the pin that disagrees (GAP-0357).
+	cfg.Enterprise.Profile = "standalone"
+	cfg.ACP.Clients = map[string]config.ACPBinding{"zed": {Enabled: true}}
+	cfg.ACP.Agents = map[string]config.ACPBinding{"kiro": {Enabled: true}, "hermes": {Enabled: true, Profile: "watch"}}
+	cfg.ACP.Bindings = map[string]config.ACPBinding{"zed/kiro": {Enabled: true, Profile: "locked"}}
+	cfg.ACP.Profiles = map[string]config.ACPProfile{
+		"locked": {AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"}},
+		"watch":  {AllowedClients: []string{"zed"}, AllowedAgents: []string{"hermes"}},
+	}
+	if _, err := resolveEnterpriseACPEnrollment(true); err != nil && strings.Contains(err.Error(), "does not authorize") {
+		t.Fatalf("the binding for zed/kiro was not honoured: %v", err)
+	}
+	enterpriseACPAgent, enterpriseACPProfile = "hermes", "watch"
+	if _, err := resolveEnterpriseACPEnrollment(true); err == nil || !strings.Contains(err.Error(), `acp.clients.zed.profile is ""`) {
+		t.Fatalf("the refusal does not name the pin that disagrees: %v", err)
 	}
 }
 

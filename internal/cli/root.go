@@ -168,12 +168,12 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	if cmd != nil && !cmd.HasParent() {
 		// The daemon owns the store: it moves a corrupt one aside and starts
 		// on a new one instead of failing.
-		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr)
+		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr, auditStoreOptions(cfg)...)
 		if err != nil {
 			return fmt.Errorf("failed to open audit store: %w", err)
 		}
 	} else {
-		auditStore, err = openCommandAuditStore(cfg.AuditDB)
+		auditStore, err = openCommandAuditStore(cfg.AuditDB, auditStoreOptions(cfg)...)
 		if err != nil {
 			if cmd == nil || cmd.Annotations[auditOptionalAnnotation] != "true" {
 				return err
@@ -196,14 +196,23 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	return nil
 }
 
+// auditStoreOptions are the options every opener of cfg's audit.db passes:
+// on a Secure Client host the store keeps main's schema (GAP-0246).
+func auditStoreOptions(cfg *config.Config) []audit.StoreOption {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		return []audit.StoreOption{audit.WithSecureClientSchema()}
+	}
+	return nil
+}
+
 // auditOptionalAnnotation marks a subcommand that writes no audit events, so
 // an audit store that does not open is a warning instead of an error.
 const auditOptionalAnnotation = "defenseclaw.audit-optional"
 
 // openCommandAuditStore opens and initializes the audit store for a CLI
 // subcommand (the daemon uses audit.OpenDaemonStore instead).
-func openCommandAuditStore(path string) (*audit.Store, error) {
-	store, err := audit.NewStore(path)
+func openCommandAuditStore(path string, opts ...audit.StoreOption) (*audit.Store, error) {
+	store, err := audit.NewStore(path, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit store: %w", err)
 	}

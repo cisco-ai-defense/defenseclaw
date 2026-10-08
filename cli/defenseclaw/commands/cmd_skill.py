@@ -1499,6 +1499,7 @@ def _print_skill_list_table(
 ) -> None:
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
     from defenseclaw.commands import list_scope_title
 
@@ -1574,12 +1575,12 @@ def _print_skill_list_table(
         status_display = ux.table_cell_text(status_display)
         table.add_row(
             f"[{status_style}]{status_display}[/{status_style}]" if status_style else status_display,
-            display_name,
-            desc,
-            source,
+            Text(str(display_name)),
+            Text(str(desc)),
+            Text(str(source)),
             f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
             f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
-            actions_str,
+            Text(str(actions_str)),
         )
 
     console.print(table)

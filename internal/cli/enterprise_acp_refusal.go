@@ -56,5 +56,8 @@ func enterpriseACPRefusal(err error) error {
 	if cfg != nil && cfg.SecureClientIntegration() {
 		return err
 	}
-	return enterpriseACPTargetError(err)
+	if err = enterpriseACPTargetError(err); err == nil {
+		return nil
+	}
+	return enterpriseACPPlainError(err, "")
 }

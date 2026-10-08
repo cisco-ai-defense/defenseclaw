@@ -300,6 +300,39 @@ func TestInterruptedTransactionIsRecovered(t *testing.T) {
 	}
 }
 
+// GAP-0428: an ensure killed in quiesce left the services stopped, the
+// verify job unloaded and the transaction pending, and nothing recovered it.
+// quiesce leaves the verify timer alone, and a verify that finds the
+// transaction pending (and the lock free) starts the apply trigger.
+func TestVerifyStartsTheApplyTriggerForAnInterruptedTransaction(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	l := &lifecycle{env: h.env, result: &enterprisestatus.Result{}}
+	h.services.active[labelVerify] = true
+	l.quiesce(context.Background(), darwinUnits, nil)
+	if !h.services.active[labelVerify] {
+		t.Fatal("quiesce stopped the verify job")
+	}
+	gateway := filepath.Join(h.env.Layout.BinDir, binGateway)
+	snap, err := h.env.takeSnapshot("killed", []string{gateway}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.env.savePending(&Pending{Action: ActionEnsure, SnapshotDir: snap.Dir, Phase: "quiesce"}); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionVerify})
+	if got := messagesOf(r.Errors, codeVerify); !strings.Contains(got, "started the apply trigger") {
+		t.Fatalf("verify errors = %s, want the recovery started", got)
+	}
+	h.runner.mu.Lock()
+	calls := strings.Join(h.runner.calls, "\n")
+	h.runner.mu.Unlock()
+	if !strings.Contains(calls, "launchctl kickstart system/"+labelApply) {
+		t.Fatalf("runner calls = %s, want the apply job kicked", calls)
+	}
+}
+
 func TestInstallRefusals(t *testing.T) {
 	h := newTestHost(t, "linux")
 	payload := h.payload("1.0.0")

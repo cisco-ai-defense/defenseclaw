@@ -52,8 +52,6 @@ def test_first_run_defaults_match_go_panel_argv() -> None:
         "--scanner-mode",
         "local",
         "--no-judge",
-        "--fail-mode",
-        "open",
         "--no-start-gateway",
         "--verify",
     )
@@ -86,8 +84,6 @@ def test_first_run_cycles_choices_and_bools() -> None:
         "--scanner-mode",
         "local",
         "--with-judge",
-        "--fail-mode",
-        "open",
         "--start-gateway",
         "--no-verify",
     )
@@ -155,14 +151,20 @@ def test_connector_preview_badge_uses_stable_kind_not_label(monkeypatch) -> None
     assert supported.display_value == "hermes"
 
 
-def test_first_run_fail_mode_cycles_to_closed() -> None:
+def test_first_run_action_profile_defaults_fail_mode_closed() -> None:
+    # GAP-0353: the first-run default matches quickstart and the
+    # non-interactive init (closed); open is an explicit choice.
     panel = FirstRunPanelModel()
+    panel.cursor = 1
+    panel.handle_key("right")
+    args = panel.args()
+    assert args[args.index("--profile") + 1] == "action"
+    assert args[args.index("--fail-mode") + 1] == "closed"
+
     panel.cursor = 4
     panel.handle_key("right")
     args = panel.args()
-
-    fail_idx = args.index("--fail-mode")
-    assert args[fail_idx + 1] == "closed"
+    assert args[args.index("--fail-mode") + 1] == "open"
 
 
 def test_first_run_ctrl_r_returns_data_only_command_intent() -> None:

@@ -222,20 +222,10 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 		}
 		return EnqueueResult{Disposition: EnqueueDropped, Reason: reason}
 	}
-	admitted, halfOpen := dispatcher.admitCircuit(dispatcher.nowUTC())
-	if !admitted {
-		dispatcher.queueMu.Unlock()
-		dispatcher.lifecycleMu.Unlock()
-		dispatcher.counters.rejected.Add(1)
-		return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonCircuitOpen}
-	}
 	dispatcher.pending = append(dispatcher.pending, payload)
 	dispatcher.chargedItems++
 	dispatcher.chargedBytes += payload.Size()
 	dispatcher.counters.accepted.Add(1)
-	if halfOpen {
-		dispatcher.setOperationalHealth(HealthDegraded, HealthReasonCircuitHalfOpen)
-	}
 	dispatcher.queueMu.Unlock()
 	dispatcher.lifecycleMu.Unlock()
 	dispatcher.signalWorker()
@@ -415,6 +405,13 @@ func (dispatcher *Dispatcher) DeliveryHealthSnapshot() HealthSnapshot {
 	lastSuccess := dispatcher.lastSuccess
 	lastFailure := dispatcher.lastFailure
 	dispatcher.healthMu.Unlock()
+	if state != HealthStopped && circuitState == CircuitOpen && !dispatcher.nowUTC().Before(circuitOpenUntil) {
+		// The cooldown expired, but no producer has supplied a recovery batch.
+		// Surface the pending half-open state rather than a stale failed check.
+		circuitState = CircuitHalfOpen
+		state = HealthDegraded
+		reason = HealthReasonCircuitHalfOpen
+	}
 	items, bytes, inFlightItems, inFlightBytes := dispatcher.QueueUsage()
 	return HealthSnapshot{
 		Destination:         dispatcher.config.Destination,
@@ -469,28 +466,6 @@ const (
 	circuitDeliveryBlocked
 	circuitDeliveryProbe
 )
-
-// admitCircuit runs while Enqueue owns the lifecycle and queue locks. This
-// makes the first post-cooldown record the sole half-open probe without
-// reserving a slot that can subsequently fail the queue-capacity check.
-func (dispatcher *Dispatcher) admitCircuit(now time.Time) (admitted, halfOpen bool) {
-	dispatcher.healthMu.Lock()
-	defer dispatcher.healthMu.Unlock()
-	switch dispatcher.circuitState {
-	case CircuitClosed:
-		return true, false
-	case CircuitOpen:
-		if now.Before(dispatcher.circuitOpenUntil) {
-			return false, false
-		}
-		dispatcher.circuitState = CircuitHalfOpen
-		return true, true
-	case CircuitHalfOpen:
-		return false, false
-	default:
-		return false, false
-	}
-}
 
 func (dispatcher *Dispatcher) circuitMode(now time.Time) (circuitDeliveryMode, bool) {
 	dispatcher.healthMu.Lock()
@@ -569,10 +544,9 @@ func (dispatcher *Dispatcher) run() {
 			dispatcher.setOperationalHealth(HealthDegraded, HealthReasonCircuitHalfOpen)
 		}
 		if mode == circuitDeliveryBlocked {
-			payloads := dispatcher.takeCircuitRejectedBatch()
-			if len(payloads) > 0 {
-				dispatcher.counters.rejected.Add(uint64(len(payloads)))
-				dispatcher.release(payloads)
+			if !dispatcher.waitCircuitCooldown() {
+				dispatcher.abandonPending()
+				return
 			}
 			continue
 		}
@@ -657,32 +631,27 @@ func (dispatcher *Dispatcher) flushPending() bool {
 	return dispatcher.completed.Load() < dispatcher.flushTarget.Load()
 }
 
-// takeCircuitRejectedBatch removes already-accepted work without consulting
-// the adapter's estimator. Open-circuit suppression therefore cannot block on
-// destination code and does not increment the failed-operation counter.
-func (dispatcher *Dispatcher) takeCircuitRejectedBatch() []Payload {
-	dispatcher.queueMu.Lock()
-	defer dispatcher.queueMu.Unlock()
-	limit := len(dispatcher.pending)
-	if limit > dispatcher.config.MaxBatchItems {
-		limit = dispatcher.config.MaxBatchItems
+// waitCircuitCooldown keeps accepted work charged and queued until the route
+// may probe again. New records can fill the bounded queue; capacity drops are
+// counted while mandatory local persistence continues.
+func (dispatcher *Dispatcher) waitCircuitCooldown() bool {
+	dispatcher.healthMu.Lock()
+	until := dispatcher.circuitOpenUntil
+	dispatcher.healthMu.Unlock()
+	delay := until.Sub(dispatcher.nowUTC())
+	if delay <= 0 {
+		return true
 	}
-	if limit == 0 {
-		return nil
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-dispatcher.rootContext.Done():
+		return false
+	case <-dispatcher.wake:
+		return true
+	case <-timer.C:
+		return true
 	}
-	payloads := append([]Payload(nil), dispatcher.pending[:limit]...)
-	remaining := copy(dispatcher.pending, dispatcher.pending[limit:])
-	clear(dispatcher.pending[remaining:])
-	dispatcher.pending = dispatcher.pending[:remaining]
-	if remaining == 0 {
-		dispatcher.pending = nil
-	}
-	dispatcher.inFlightItems = len(payloads)
-	dispatcher.inFlightBytes = 0
-	for _, payload := range payloads {
-		dispatcher.inFlightBytes += payload.Size()
-	}
-	return payloads
 }
 
 func (dispatcher *Dispatcher) takeBatch() (
@@ -809,7 +778,7 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			now := dispatcher.nowUTC()
 			dispatcher.recordFailure(now, failureCode)
 			if attempt == maxAttempts {
-				dispatcher.counters.rejected.Add(uint64(len(payloads)))
+				dispatcher.counters.dropped.Add(uint64(len(payloads)))
 				reason := HealthReasonDeliveryFailed
 				if dispatcher.recordCircuitFailure(FailureClassTransient, now) {
 					reason = HealthReasonCircuitOpen
@@ -965,8 +934,9 @@ func boundedBackoff(policy RetryPolicy, attempt int) time.Duration {
 	if policy.Jitter != nil {
 		delay = safeJitter(policy.Jitter, delay, attempt)
 	} else if delay > 0 {
-		// Full jitter avoids synchronized retry waves and is still bounded.
-		delay = time.Duration(rand.Float64() * float64(delay))
+		// Keep at least half the exponential delay. Full jitter could retry a
+		// busy collector immediately and amplify an outage.
+		delay = delay/2 + time.Duration(rand.Float64()*float64(delay-delay/2))
 	}
 	if delay < 0 {
 		return 0

@@ -1163,17 +1163,19 @@ swap_in() {
         info "Migrating config and data"
         local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
-        DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
+        DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" </dev/null || return 1
         # The previous version's agent discovery is absent or stale. Refresh
         # it (bounded --version probes, no telemetry) before the gateway
         # starts, so the gateway records each agent's version in the hook
         # contract lock and doctor can check compatibility. Best effort.
         info "Refreshing agent discovery"
-        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
+        # stdin from /dev/null: a vendor --version probe that reads the
+        # terminal stopped a background (&) upgrade here (GAP-0376).
+        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel </dev/null >/dev/null 2>&1 || true
         # The new defenseclaw-acp has a new digest: re-pin it in configured
         # editor entries, which would otherwise fail closed. Best effort.
         if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
-            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
+            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" </dev/null || true
         fi
     fi
 }
@@ -1272,9 +1274,9 @@ start_gateway() {
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
     if [[ -n "${delegate}" ]]; then
-        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start </dev/null || rc=$?
     else
-        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start </dev/null || rc=$?
     fi
     if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
         # Launched, not yet ready: it is up only once the loop below says so.
@@ -1588,14 +1590,19 @@ pick_connector() {
         printf "    ${BOLD}%2d)${NC} %s\n" "${index}" "${name}"
         index=$((index + 1))
     done
-    printf "  Choice [default 1=codex]: " >&2
-    choice=$(read_tty_line) || choice=""
-    choice="${choice:-1}"
-    index=1
-    CONNECTOR=codex
-    for name in ${CONNECTOR_CHOICES}; do
-        [[ "${index}" == "${choice}" ]] && CONNECTOR="${name}"
-        index=$((index + 1))
+    while true; do
+        printf "  Choice [default 1=codex]: " >&2
+        choice=$(read_tty_line) || choice=""
+        choice="${choice:-1}"
+        index=1
+        for name in ${CONNECTOR_CHOICES}; do
+            if [[ "${choice}" == "${index}" || "${choice}" == "${name}" ]]; then
+                CONNECTOR="${name}"
+                break 2
+            fi
+            index=$((index + 1))
+        done
+        warn "Choose a listed number or connector name."
     done
     ok "Connector: ${CONNECTOR}"
 }
@@ -1619,7 +1626,7 @@ first_install_extras() {
                 # installed; the summary names it as the step after OpenClaw.
                 OPENCLAW_NEXT="defenseclaw ${args[*]}"
             else
-                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
+                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" </dev/null || rc=$?
             fi
             if [[ ${rc} -ne 0 ]]; then
                 # The install stays; the summary names the failure and the re-run.

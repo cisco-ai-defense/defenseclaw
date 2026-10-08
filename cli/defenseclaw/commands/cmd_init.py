@@ -1457,9 +1457,10 @@ def _prompt_action_policy(
     enforces, so we ask them a single time after the action subset is known
     rather than per connector. Pre-supplied flags skip the matching prompt."""
     # Hook fail-mode: surface the choice so first-run operators don't have to
-    # discover `defenseclaw guardrail fail-mode` later. Default is "open"
-    # because silently bricking the agent on a transient delivery or response
-    # error is worse than leaking a single tool call.
+    # discover `defenseclaw guardrail fail-mode` later. Default is "closed",
+    # the same posture quickstart and the non-interactive init give an action
+    # connector: an action connector whose hooks fail open lets every blocked
+    # call run while the gateway is down.
     if fail_mode is None:
         terminal_checkbox.restore_line_prompt_mode()
         ux.section("Hook fail-mode (delivery and response failures)")
@@ -1472,7 +1473,7 @@ def _prompt_action_policy(
         fail_mode = click.prompt(
             "  " + ux.bold("Fail mode"),
             type=click.Choice(["open", "closed"], case_sensitive=False),
-            default="open",
+            default="closed",
             show_choices=True,
         )
     # Human-In-the-Loop (HITL) only fires in action mode, so it is only asked

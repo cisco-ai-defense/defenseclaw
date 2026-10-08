@@ -148,6 +148,27 @@ func TestUserScanBoundsOddIDEFolderNames(t *testing.T) {
 	}
 }
 
+// GAP-0396: the guardian's per-user scan runs as the home's owner, but a
+// link that owner planted toward another readable home must not put the
+// other account's plugins in this account's managed inventory.
+func TestUserScanFollowsNoLinkOutOfTheHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-user scans run on Linux and macOS")
+	}
+	withoutMachineIDEs(t)
+	home, other := t.TempDir(), t.TempDir()
+	writeVSCodeExtensions(t, home, "github.copilot")
+	writeVSCodeExtensions(t, other, "secretco.internal-ai-assistant")
+	if err := os.Symlink(filepath.Join(other, ".vscode"), filepath.Join(home, ".cursor")); err != nil {
+		t.Fatal(err)
+	}
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), UserScanOptions{}, nil)
+	ide := report.IDEInventory
+	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].PluginID != "github.copilot" {
+		t.Fatalf("IDE inventory = %+v, want only the home's own plugin", ide)
+	}
+}
+
 // An editor-extension row stored by 0.8.x or 1.0.0 (keyed on the extension
 // id) is the predecessor of the signal the IDE inventory keys on the
 // installation: the first scan after an upgrade keeps its first-seen time
@@ -186,6 +207,30 @@ func TestIDEAIIndexFlagsPreRenameDevinPlugins(t *testing.T) {
 		if sig, ok := idx.match(family, id); !ok || sig.ID != legacyconnector.Replacement {
 			t.Fatalf("%s %s matched %+v, %t", family, id, sig, ok)
 		}
+	}
+}
+
+func TestMarketplaceAIExtensionsIncludeDescribedAndKnownProducts(t *testing.T) {
+	index := newIDEAIIndex(nil)
+	for _, id := range []string{
+		"augment.vscode-augment", "kilocode.kilo-code", "rjmacarthy.twinny",
+		"genieai.chatgpt-vscode", "gitlab.gitlab-workflow",
+		"google.gemini-cli-vscode-ide-companion", "sst-dev.opencode",
+		"visualstudioexptteam.vscodeintellicode",
+	} {
+		if _, ok := index.matchPlugin(ideplugins.FamilyVSCode, ideplugins.Plugin{ID: id}); !ok {
+			t.Fatalf("%s was not flagged AI", id)
+		}
+	}
+	if _, ok := index.matchPlugin(ideplugins.FamilyVSCode, ideplugins.Plugin{
+		ID: "newvendor.assistant", Description: "AI coding assistant for editors",
+	}); !ok {
+		t.Fatal("description-based AI coding rule missed a new extension")
+	}
+	if _, ok := index.matchPlugin(ideplugins.FamilyVSCode, ideplugins.Plugin{
+		ID: "plain.theme", Description: "A colorful theme",
+	}); ok {
+		t.Fatal("ordinary extension was flagged AI")
 	}
 }
 

@@ -77,5 +77,8 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	}
 	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
 		t.Fatal("changed client configuration was accepted")
+	} else if !strings.Contains(err.Error(), "editor settings file") || strings.Contains(err.Error(), "executable") {
+		// The settings file is not an executable (GAP-0391).
+		t.Fatalf("changed client configuration error = %v", err)
 	}
 }

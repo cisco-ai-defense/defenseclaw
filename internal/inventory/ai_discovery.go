@@ -603,6 +603,10 @@ type ContinuousDiscoveryService struct {
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   AIDiscoveryObservabilityV8
 
+	// userHomeScan marks the guardian's per-user scan (ScanUserHome): it runs
+	// as the home's owner, but its report lands in the managed inventory,
+	// so the IDE scan follows no link out of the home (GAP-0396).
+	userHomeScan bool
 	// processOwners, when set, limits the process detector to processes of
 	// these owners (the account name or uid of a per-user scan).
 	processOwners map[string]bool

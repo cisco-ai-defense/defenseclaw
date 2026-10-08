@@ -243,6 +243,25 @@ def _is_audit_export(ctx: click.Context) -> bool:
     return index + 1 < len(argv) and argv[index + 1] in {"export", "findings"}
 
 
+def _audit_logs_can_read_with_ide_scope_typo(ctx: click.Context, result: object) -> bool:
+    """A malformed inventory scope cannot change a read-only log tail."""
+    if ctx.invoked_subcommand != "audit":
+        return False
+    argv = sys.argv[1:]
+    try:
+        child = argv[argv.index("audit") + 1]
+    except (ValueError, IndexError):
+        return False
+    errors = getattr(result, "errors", [])
+    return (
+        child == "logs"
+        and not getattr(result, "timed_out", False)
+        and not getattr(result, "parse_error", "")
+        and len(errors) == 1
+        and "ai_discovery.ide_inventory" in errors[0]
+    )
+
+
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
     """Emit a stable installer-facing version record before config loading."""
     if not value or ctx.resilient_parsing:
@@ -327,14 +346,14 @@ def cli(ctx: click.Context) -> None:
                 audit_first_run_refusal(ctx.command, sys.argv[1:])
             raise SystemExit(exc.exit_code) from exc
 
-    if invoked == "doctor" and cfg_mod.config_is_empty():
+    if invoked == "doctor" and (damage := cfg_mod.config_damage_message()):
         # An empty config.yaml loads as built-in defaults; judging the install
         # against them printed wrong FAIL rows. Stop at the config rows, as for
         # a malformed file (GAP-1633).
         from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
 
         app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(
-            cfg_mod.ConfigVersionError(cfg_mod.empty_config_message())
+            cfg_mod.ConfigVersionError(damage)
         )
         app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
         return
@@ -358,7 +377,8 @@ def cli(ctx: click.Context) -> None:
             # GAP-0288: the file is there and refused; `init` would not fix it.
             ux.echo(
                 f"Failed to load config: {exc}. Fix it in {cfg_mod.config_path()}; "
-                "'defenseclaw config validate' shows the line.",
+                "'defenseclaw config validate' shows the line. If the gateway is running, "
+                "it keeps its last good config.",
                 err=True,
             )
         else:
@@ -398,7 +418,13 @@ def cli(ctx: click.Context) -> None:
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
-        if not result.ok:
+        if _audit_logs_can_read_with_ide_scope_typo(ctx, result):
+            ux.echo(
+                "Config warning: ai_discovery.ide_inventory is invalid; log output is still available. "
+                "Run 'defenseclaw config validate' to repair the scope.",
+                err=True,
+            )
+        elif not result.ok:
             timed_out = getattr(result, "timed_out", False)
             # GAP-1788: status is read-only and config.yaml loaded, so it
             # still shows the gateway and connectors, flags the problem, and
@@ -440,7 +466,9 @@ def cli(ctx: click.Context) -> None:
         app.store = Store(_cli_audit_db(app.cfg))
         app.store.init()
     except Exception as exc:
-        ux.echo(f"Failed to open audit store: {exc}", err=True)
+        from defenseclaw.audit_capacity import audit_open_failure_notice
+
+        ux.echo(audit_open_failure_notice(app.cfg.audit_db, exc), err=True)
         raise SystemExit(1)
 
     if source_is_v8 and not getattr(app, "config_problems", None):
@@ -746,6 +774,14 @@ def main() -> None:
         click.echo(f"Error: config.yaml was not changed: {plain_error(exc)}", err=True)
         sys.exit(1)
     except OSError as exc:
+        from defenseclaw.config import ConfigSaveError
+
+        if isinstance(exc, ConfigSaveError):
+            click.echo(
+                f"Error: cannot write {exc.path}: {exc.strerror}; the previous config.yaml is unchanged.",
+                err=True,
+            )
+            sys.exit(1)
         if _output_pipe_closed(exc):
             _silence_closed_stdout()
             sys.exit(1)

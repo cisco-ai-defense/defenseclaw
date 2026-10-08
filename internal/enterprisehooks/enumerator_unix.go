@@ -60,6 +60,10 @@ type UnixEnumeratorState struct {
 	// local account; for a directory account it counts only when the
 	// directory is shown to be answering.
 	Sources map[string]string `json:"sources,omitempty"`
+	// ACPMisses and ACPSources are the same for the uid principals of
+	// managed ACP enrollments, keyed by principal (uid:N).
+	ACPMisses  map[string]int    `json:"acp_misses,omitempty"`
+	ACPSources map[string]string `json:"acp_sources,omitempty"`
 }
 
 const (
@@ -172,6 +176,10 @@ type UnixEnumerationReport struct {
 	// machine-policy connectors (no manifest rows). The guardian runs the
 	// per-user foreign-hook cleanup for them.
 	EligibleAccounts []UnixEligibleAccount `json:"-"`
+	// DirectoryAnswered is set when a directory account resolved in this
+	// cycle, which makes another directory account's "no such user"
+	// definitive.
+	DirectoryAnswered bool `json:"-"`
 }
 
 // UnixEligibleAccount is one enrolled-or-eligible account in the
@@ -420,6 +428,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			directoryAnswered = true
 		}
 	}
+	report.DirectoryAnswered = directoryAnswered
 	definitiveMiss := func(user string) bool {
 		return sources.definitiveMiss(user, directoryAnswered)
 	}
@@ -871,6 +880,9 @@ type UnixRevokeGoneReport struct {
 	// Kept explains, per account, why the rows of an account that did not
 	// resolve stay.
 	Kept []string `json:"kept,omitempty"`
+	// DirectoryAnswered is UnixEnumerationReport.DirectoryAnswered for
+	// this pass.
+	DirectoryAnswered bool `json:"-"`
 }
 
 // RevokeGoneUnixTargets returns the published manifest without the rows of
@@ -943,6 +955,7 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 			report.Kept = append(report.Kept, fmt.Sprintf("%s: the account lookup failed, so its targets stay: %s", user, reason))
 		}
 	}
+	report.DirectoryAnswered = directoryAnswered
 	gone := map[string]struct{}{}
 	for _, user := range users {
 		if _, ok := missing[user]; !ok {
@@ -1542,6 +1555,22 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 				state.Sources = map[string]string{}
 			}
 			state.Sources[user] = source
+		}
+	}
+	for principal, count := range parsed.ACPMisses {
+		if count > 0 && count < 1000 {
+			if state.ACPMisses == nil {
+				state.ACPMisses = map[string]int{}
+			}
+			state.ACPMisses[principal] = count
+		}
+	}
+	for principal, source := range parsed.ACPSources {
+		if principal != "" && (source == unixSourceFiles || source == unixSourceDirectory) {
+			if state.ACPSources == nil {
+				state.ACPSources = map[string]string{}
+			}
+			state.ACPSources[principal] = source
 		}
 	}
 	return state

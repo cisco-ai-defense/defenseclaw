@@ -30,9 +30,9 @@ const DestinationDispatchComponentName = "destination-dispatch"
 
 const (
 	defaultDestinationAttemptTimeout = 10 * time.Second
-	defaultDestinationMaxAttempts    = 3
-	defaultDestinationInitialBackoff = 100 * time.Millisecond
-	defaultDestinationMaxBackoff     = 5 * time.Second
+	defaultDestinationMaxAttempts    = 24
+	defaultDestinationInitialBackoff = 2 * time.Second
+	defaultDestinationMaxBackoff     = 30 * time.Second
 	defaultDestinationHealthInterval = time.Second
 	maxDestinationBatchBytes         = 64 * 1024 * 1024
 )

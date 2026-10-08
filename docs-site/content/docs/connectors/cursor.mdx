@@ -107,7 +107,7 @@ report success after displacing an already configured Cursor registration.
 defenseclaw setup cursor
 ```
 
-Confirms once, wires observe-mode hooks against `~/.cursor/hooks.json`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and observe mode does not block. Pass `--yes` to skip the confirmation in CI.
+Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. It wires hooks against `~/.cursor/hooks.json` and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. Observe mode does not block. For scripted setup, pass `--yes --mode observe` (or `--mode action`).
 
 </Tab>
 

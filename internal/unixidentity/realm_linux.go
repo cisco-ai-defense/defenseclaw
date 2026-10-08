@@ -182,10 +182,17 @@ func netBIOSName(formats []string) string {
 	return ""
 }
 
-// realmFor only associates a joined realm with an account when its qualified
-// name identifies that realm and realmd names the account's NSS backend.
-// A bare SSSD name may belong to any of several domains, including LDAP.
-func realmFor(domain, source string, realms []Realm) (Realm, bool) {
+// realmFor picks the joined realm whose client (sssd or winbind) serves the
+// account. A DNS domain names its realm, or the nearest parent realm (an
+// Active Directory child domain). A winbind NetBIOS domain names the realm
+// of that NetBIOS name, and an unqualified winbind name the only winbind
+// realm. An SSSD name without a DNS domain is ambiguous: SSSD serves AD,
+// IPA and plain LDAP domains side by side, and with
+// use_fully_qualified_names = False it names the accounts of each without
+// their domain. Its realm is the one SSSD itself confirms (inDomain: SSSD
+// resolves the name in that realm's domain to this account), and none when
+// SSSD confirms none, or more than one.
+func realmFor(domain, source string, realms []Realm, inDomain func(string) bool) (Realm, bool) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	client := "sssd"
 	if source == useridentity.SourceWinbind {
@@ -208,6 +215,16 @@ func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 			if domain == "" && len(candidates) == 1 {
 				return candidates[0], true
 			}
+			return Realm{}, false
+		}
+		var confirmed []Realm
+		for _, realm := range candidates {
+			if inDomain != nil && realm.Domain != "" && inDomain(realm.Domain) {
+				confirmed = append(confirmed, realm)
+			}
+		}
+		if len(confirmed) == 1 {
+			return confirmed[0], true
 		}
 		return Realm{}, false
 	}
@@ -224,12 +241,12 @@ func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 }
 
 // applyRealm adds the facts of the realm that serves an SSSD or winbind
-// account: its DNS domain when a winbind name carries none or only a
-// NetBIOS domain (CORP\alice), as Windows reports the same account; the Kerberos
+// account: its DNS domain when the name carries none or only a NetBIOS
+// domain (CORP\alice), as Windows reports the same account; the Kerberos
 // realm; the directory type of an Active Directory or IPA realm; and the
 // sAMAccountName@REALM principal, in the UPN form, when there is none yet.
-func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm) {
-	realm, ok := realmFor(facts.Domain, facts.Source, realms)
+func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms []Realm, inDomain func(string) bool) {
+	realm, ok := realmFor(facts.Domain, facts.Source, realms, inDomain)
 	if !ok {
 		return
 	}

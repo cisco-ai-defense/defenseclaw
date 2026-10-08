@@ -63,16 +63,18 @@ func newAIRuntimeV8Adapter(emitter sidecarRuntimeEmitter) *aiRuntimeV8Adapter {
 
 // EmitSnapshot publishes one poll cycle.
 //
-// Plane health is emitted for every plane on every cycle, including planes
-// that are down. Emitting only healthy planes would make a dead subscription
-// indistinguishable from a clean host, and absence is the hardest thing to
-// alert on.
+// Export plane health only for running planes. The local sensor snapshot still
+// reports stopped and unselected planes; exporting idle states each poll
+// overwhelms optional destinations without adding a state transition.
 func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot sensor.Snapshot) error {
 	if adapter == nil || adapter.runtime == nil || ctx == nil {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	var firstErr error
 	for _, health := range snapshot.Planes {
+		if !health.Running {
+			continue
+		}
 		if err := adapter.emitPlaneHealth(ctx, snapshot, health); err != nil && firstErr == nil {
 			firstErr = err
 		}

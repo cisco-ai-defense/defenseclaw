@@ -185,6 +185,55 @@ func (c ACPConfig) ACPProfileForPair(client, agent string) string {
 	return strings.TrimSpace(c.DefaultProfile)
 }
 
+// ACPPairBindingRefusals says why a pair is not bound under profile: both
+// halves must be enabled; a per-pair binding, when present, must be enabled
+// and name profile (or none); without one, the client and agent pins must
+// both name profile. It is empty when the pair is bound. The gateway
+// evaluates by this rule and managed enrollment refuses by it, naming each
+// pin that disagrees (GAP-0357).
+func (c ACPConfig) ACPPairBindingRefusals(client, agent, profile string) []string {
+	var refusals []string
+	clientBinding, clientOK := c.Clients[client]
+	agentBinding, agentOK := c.Agents[agent]
+	switch {
+	case !clientOK:
+		refusals = append(refusals, fmt.Sprintf("acp.clients.%s is not configured", client))
+	case !clientBinding.Enabled:
+		refusals = append(refusals, fmt.Sprintf("acp.clients.%s is disabled", client))
+	}
+	switch {
+	case !agentOK:
+		refusals = append(refusals, fmt.Sprintf("acp.agents.%s is not configured", agent))
+	case !agentBinding.Enabled:
+		refusals = append(refusals, fmt.Sprintf("acp.agents.%s is disabled", agent))
+	}
+	if len(refusals) > 0 {
+		return refusals
+	}
+	key := ACPBindingKey(client, agent)
+	if pair, ok := c.ACPBindingFor(client, agent); ok {
+		if !pair.Enabled {
+			return []string{fmt.Sprintf("acp.bindings.%s is disabled", key)}
+		}
+		if named := strings.TrimSpace(pair.Profile); named != "" && named != profile {
+			return []string{fmt.Sprintf("acp.bindings.%s names profile %q", key, named)}
+		}
+		return nil
+	}
+	for _, pin := range []struct{ field, value string }{
+		{"acp.clients." + client + ".profile", clientBinding.Profile},
+		{"acp.agents." + agent + ".profile", agentBinding.Profile},
+	} {
+		if pin.value != profile {
+			refusals = append(refusals, fmt.Sprintf("%s is %q", pin.field, pin.value))
+		}
+	}
+	if len(refusals) > 0 {
+		refusals = append(refusals, fmt.Sprintf("set both to %q, or add acp.bindings.%s with profile %q", profile, key, profile))
+	}
+	return refusals
+}
+
 type ACPBinding struct {
 	Enabled bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`

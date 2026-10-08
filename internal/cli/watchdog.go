@@ -360,6 +360,9 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr, "[watchdog] warn: gateway token unavailable; recovery telemetry will not be recorded")
 	}
 
+	if watchdogGatewayStarter == nil {
+		watchdogGatewayStarter = startCrashedGatewayFromWatchdog
+	}
 	watchdogLoopRunner(ctx, healthURL, interval, debounce, requirements, webhooks, recoveryRecorder)
 	if webhooks != nil {
 		webhooks.Close()
@@ -453,6 +456,15 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
 					current = stateDown
 					saveWatchdogState(dataDir, current)
+				}
+				if downCount >= debounce && watchdogGatewayStarter != nil {
+					// A crashed per-user gateway is started again (GAP-0386);
+					// the start keeps its own backoff after a failure.
+					if started, err := watchdogGatewayStarter(dataDir); started && err != nil {
+						fmt.Fprintf(os.Stderr, "[watchdog] the gateway is not running and could not be started: %v\n", err)
+					} else if started {
+						fmt.Fprintln(os.Stderr, "[watchdog] the gateway was not running; started it again")
+					}
 				}
 			}
 		}
@@ -653,8 +665,10 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	}
 	_ = logFile.Close()
 	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogSpawnReadyTimeout, watchdogStartInterval); err != nil {
-		if watchdogStillStarting(pidPath) {
-			Warn(fmt.Sprintf("Watchdog is still starting (PID %d holds its ownership lock and has not published its PID yet)", cmd.pid))
+		// On a busy machine the child may not even have taken its lock yet;
+		// a live child is slow, not failed (GAP-0478).
+		if watchdogStillStarting(pidPath) || watchdogChildRunning(cmd.pid) {
+			Warn(fmt.Sprintf("Watchdog is still starting (PID %d); on a busy machine this can take a minute", cmd.pid))
 			Subhead("Check it in a minute with: defenseclaw-gateway watchdog status")
 			return nil
 		}
@@ -667,6 +681,19 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	fmt.Printf("Watchdog %s (PID %d)\n", Style("started", "fg=green", "bold"), cmd.pid)
 	fmt.Printf("  %s %s\n", Style("Log file:", "fg=bright_black", "bold"), logPath)
 	return nil
+}
+
+// watchdogChildRunning reports whether the watchdog process just spawned is
+// still alive.
+func watchdogChildRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return watchdogProcessAlive(pid, proc)
 }
 
 // watchdogStillStarting reports a watchdog that took its ownership lock but

@@ -473,6 +473,7 @@ def status(app: AppContext, as_json: bool) -> None:
             )
         _print_policy(health)
         _print_audit_log_health(cfg, health)
+        _print_agent_identity_ledger(health)
         _print_agents(cfg, health=health)
         _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
@@ -1237,6 +1238,16 @@ def _print_audit_log_health(cfg, health: dict | None) -> None:
             value += "; run 'defenseclaw doctor'"
     if value:
         _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
+
+
+def _print_agent_identity_ledger(health: dict | None) -> None:
+    """Warn when the gateway cannot save agent identities (GAP-0393)."""
+    from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
+
+    value = agent_identity_ledger_failure(health)
+    if value:
+        value = value[0].upper() + value[1:] + "; run 'defenseclaw doctor'"
+        _status_row("Agent identities", ux._style(value, fg="yellow"))
 
 
 def _gateway_audit_write_failure(health: dict | None) -> str:

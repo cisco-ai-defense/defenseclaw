@@ -59,23 +59,23 @@ func isSQLiteCorrupt(err error) bool {
 // block/allow list over, so the daemon starts instead of failing. The move is
 // refused while another process still has the database open. Only the daemon,
 // the store's long-lived owner, calls this; other commands keep failing.
-func OpenDaemonStore(dbPath string, warn io.Writer) (*Store, error) {
-	return openDaemonStore(dbPath, warn, nil)
+func OpenDaemonStore(dbPath string, warn io.Writer, opts ...StoreOption) (*Store, error) {
+	return openDaemonStore(dbPath, warn, nil, opts...)
 }
 
 // UpgradeDaemonStore applies the pending migrations the way OpenDaemonStore
 // does, then closes the store. The per-migration notes go nowhere: the
 // launcher prints one progress line of its own around the call (GAP-0153).
-func UpgradeDaemonStore(dbPath string, warn io.Writer) error {
-	store, err := openDaemonStore(dbPath, warn, io.Discard)
+func UpgradeDaemonStore(dbPath string, warn io.Writer, opts ...StoreOption) error {
+	store, err := openDaemonStore(dbPath, warn, io.Discard, opts...)
 	if err != nil {
 		return err
 	}
 	return store.Close()
 }
 
-func openDaemonStore(dbPath string, warn, progress io.Writer) (*Store, error) {
-	store, err := openCheckedStore(dbPath, warn, progress)
+func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOption) (*Store, error) {
+	store, err := openCheckedStore(dbPath, warn, progress, opts...)
 	if err == nil || !isSQLiteCorrupt(err) {
 		return store, err
 	}
@@ -83,7 +83,7 @@ func openDaemonStore(dbPath string, warn, progress io.Writer) (*Store, error) {
 	if moveErr != nil {
 		return nil, fmt.Errorf("%w (the corrupt store was not moved aside: %v)", err, moveErr)
 	}
-	store, freshErr := NewStore(dbPath)
+	store, freshErr := NewStore(dbPath, opts...)
 	if freshErr == nil {
 		store.progress = progress
 		if freshErr = store.Init(); freshErr != nil {
@@ -137,8 +137,8 @@ func readCarryOverNote(moved string) (carryOverNote, bool) {
 	return note, true
 }
 
-func openCheckedStore(dbPath string, warn, progress io.Writer) (*Store, error) {
-	store, err := NewStore(dbPath)
+func openCheckedStore(dbPath string, warn, progress io.Writer, opts ...StoreOption) (*Store, error) {
+	store, err := NewStore(dbPath, opts...)
 	if err != nil {
 		return nil, err
 	}

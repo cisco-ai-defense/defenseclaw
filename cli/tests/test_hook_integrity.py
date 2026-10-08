@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.commands.cmd_doctor import _check_hook_runtime_integrity, _DoctorResult
-from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems
+from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, unrunnable_hook_problem
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
@@ -209,3 +209,37 @@ def test_fix_drops_a_stale_openclaw_lock_entry(tmp_path, monkeypatch):
     assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "pass"
     assert set(json.loads(lock_path.read_text())["connectors"]) == {"codex"} and restarts == [1]
     assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "skip"
+
+
+def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch):
+    # GAP-0542 / GAP-0543: after a rename the lock (and the agent hooks) name
+    # the old home; doctor and status say DefenseClaw is not guarding.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    new_home = tmp_path / "new"
+    new_home.mkdir()
+    cfg, script = _install(new_home)
+    lock_path = new_home / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text())
+    old_script = str(tmp_path / "old" / "hooks" / script.name)
+    lock["connectors"]["codex"]["locations"]["hook_script_paths"] = [old_script]
+    lock_path.write_text(json.dumps(lock))
+
+    problem = unrunnable_hook_problem(cfg, "codex")
+    assert f"set up in {tmp_path / 'old'}" in problem
+    assert "not guarding" in problem
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode 000 files")
+def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeypatch):
+    # GAP-0403: chmod 000 makes every hook a non-blocking error, so the
+    # connector is not guarded whatever its fail mode.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    script.chmod(0)
+    try:
+        problem = unrunnable_hook_problem(cfg, "codex")
+        problems = hook_runtime_problems(cfg, "codex")
+    finally:
+        script.chmod(0o700)
+    assert "cannot be read" in problem
+    assert "changed since setup" not in " ".join(problems)

@@ -49,8 +49,8 @@ non-zero exit code when something is wrong.
 ## Quick start
 
 Prepare the tenant and read a group's SID. Use an app registration with the application
-permissions `Group.ReadWrite.All` and `User.ReadWrite.All` (`Group.Read.All` and
-`User.Read.All` to only read), admin-consented:
+permissions `Group.ReadWrite.All` and `User.ReadWrite.All` (`Organization.Read.All` and `Policy.Read.All` for `check`;
+`Group.Read.All` and `User.Read.All` for `sids`), admin-consented:
 
 ```sh
 export AZURE_TENANT_ID=...; export AZURE_CLIENT_ID=...
@@ -64,7 +64,12 @@ python3 entra_setup.py sids --group defenseclaw-ml-team
 python3 entra_setup.py sid-from-object-id <object id>           # offline
 ```
 
-Entra-joined Windows (elevated PowerShell):
+Entra-joined Windows (elevated PowerShell): unblock downloaded scripts with
+`Unblock-File .\Get-DefenseClawEntraIdentity.ps1` and
+`Unblock-File .\Add-EntraGroupToLocalGroup.ps1`, or use
+`powershell.exe -ExecutionPolicy Bypass -File .\Get-DefenseClawEntraIdentity.ps1`.
+An unattended Internet-zone script can wait at a security prompt. For Intune
+platform scripts, which receive no arguments, use an Account protection policy.
 
 ```powershell
 .\Get-DefenseClawEntraIdentity.ps1 -GroupSid S-1-12-1-...        # as the user; again as SYSTEM for the identity store
@@ -155,3 +160,12 @@ Lint: `ruff` (line length 120), `shellcheck` and PSScriptAnalyzer (including the
 - macOS Platform SSO gives no Entra groups; a local group has to carry the membership.
 - On Windows, `guardrail profile explain --user` takes a SID, `AzureAD\Name`, the bare name or the UPN.
 - `entra_setup.py` uses the commercial Microsoft cloud (`graph.microsoft.com`).
+
+`setup-himmelblau.sh configure` replaces its managed config and reports the
+unmanaged setting names it will remove. It keeps a timestamped backup on each
+run; review that backup before discarding site-specific settings.
+
+To remove Himmelblau from a host, see the guide's **Remove Himmelblau** section:
+purge all five packages (including `himmelblau-apparmor`), remove its apt
+repository and key, its configuration and state, and the Entra device object.
+Keep user homes until their owners have copied needed data.

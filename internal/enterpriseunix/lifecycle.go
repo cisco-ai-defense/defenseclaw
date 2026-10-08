@@ -1233,12 +1233,15 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 // quiesce stops the services in reverse activation order. Sockets stay up
 // so hooks queue during the change; they are restarted in activation only
-// when their definition changed. The units in keep stay as they are.
+// when their definition changed. The units in keep stay as they are. The
+// verify timer stays too: its run waits for the lifecycle lock, and it is
+// what notices (and recovers) a transaction a killed run left pending, which
+// otherwise left verify unloaded with the services stopped (GAP-0428).
 func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]bool) {
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	for _, unit := range ordered {
-		if unit.Kind == "socket" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
+		if unit.Kind == "socket" || unit.Kind == "timer" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
 			continue
 		}
 		_ = l.env.Services.Stop(ctx, unit)

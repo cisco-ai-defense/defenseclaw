@@ -161,6 +161,7 @@ type Install struct {
 type Plugin struct {
 	ID            string
 	DisplayName   string
+	Description   string
 	Publisher     string
 	Version       string
 	Enabled       string
@@ -202,14 +203,13 @@ func ScanMachine(goos string, limits Limits) []Install {
 }
 
 type scanner struct {
-	goos    string
-	limits  Limits
-	layout  layout
-	files   int
-	bytes   int64
-	plugins int
-	full    bool
-	out     []Install
+	goos   string
+	limits Limits
+	layout layout
+	files  int
+	bytes  int64
+	full   bool
+	out    []Install
 }
 
 func newScanner(goos string, limits Limits) *scanner {
@@ -233,10 +233,8 @@ func (s *scanner) result() []Install {
 
 // add records an installation, keeping plugins within MaxPlugins.
 func (s *scanner) add(inst Install) {
-	room := s.limits.MaxPlugins - s.plugins
-	if room < 0 {
-		room = 0
-	}
+	// Bound each installation independently so an earlier IDE cannot hide a later one.
+	room := s.limits.MaxPlugins
 	if len(inst.Plugins) > room {
 		inst.Plugins = inst.Plugins[:room]
 		inst.Partial = true
@@ -246,7 +244,6 @@ func (s *scanner) add(inst Install) {
 		// A budget ran out while this installation was read.
 		inst.Partial = true
 	}
-	s.plugins += len(inst.Plugins)
 	s.out = append(s.out, inst)
 }
 

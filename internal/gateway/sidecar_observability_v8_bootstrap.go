@@ -449,6 +449,23 @@ func (owner *sidecarOwnedObservabilityV8Runtime) Emit(
 	return owner.runtime.Emit(ctx, metadata, builder)
 }
 
+// EmitAtomicBatch persists a group of related records with one commit
+// (observabilityruntime.Runtime.EmitAtomicBatch).
+func (owner *sidecarOwnedObservabilityV8Runtime) EmitAtomicBatch(
+	ctx context.Context,
+	items []observabilityruntime.LogBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	if owner == nil || owner.runtime == nil {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.EmitAtomicBatch(ctx, items)
+}
+
 // LatestLifecycleProjection reads the newest verified lifecycle record of a
 // hook agent through the active generation. The API server restores a hook
 // session's lineage from it after a restart; without it on the runtime the

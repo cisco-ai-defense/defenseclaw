@@ -12,13 +12,30 @@
 # (GAP-0268). Hold the apply trigger until the postinstall has applied the
 # package, and let an apply run that already started finish first.
 #
-# This script never fails the package transaction.
+# It fails the package transaction only for an administrator config this
+# package cannot read (below); nothing else stops it.
 
 set -u
 case "${1:-}" in
     install | upgrade | [1-9]*) ;;
     *) exit 0 ;;
 esac
+
+# The highest config_version this package reads (MaxSupportedConfigVersion;
+# a test keeps the two equal). A package older than the administrator
+# config used to replace every file and then fail its ensure on the config,
+# which left the new binaries next to the old deployment and services, with
+# verify reporting them modified until a manual downgrade (GAP-0392). Refuse
+# before any file is replaced instead.
+max_config_version=9
+config=/etc/defenseclaw/config.yaml
+if [ -f "$config" ]; then
+    found=$(sed -n "s/^config_version:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$config" 2>/dev/null | head -n 1)
+    if [ -n "$found" ] && [ "$found" -gt "$max_config_version" ] 2>/dev/null; then
+        echo "defenseclaw-enterprise: $config has config_version $found, and this package reads up to $max_config_version: it was written for a newer DefenseClaw. Nothing was changed. Install a DefenseClaw release that reads it, or push a config with config_version: $max_config_version first." >&2
+        exit 1
+    fi
+fi
 
 state=/var/lib/defenseclaw-enterprise
 apply_path=defenseclaw-enterprise-apply.path

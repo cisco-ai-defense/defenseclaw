@@ -42,7 +42,9 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 		return &fakeRun{errs: map[string]error{}, results: map[string]commandResult{
 			"passwd 1001": {stdout: []byte(account)},
 			owns:          {stdout: []byte(account)},
-			initgroups:    {stdout: []byte("alice@corp.example.com 1001 5001 5002\n")},
+			// SSSD resolves the qualified name to the account (GAP-0568).
+			"-s sss passwd alice@corp.example.com": {stdout: []byte(account)},
+			initgroups:                             {stdout: []byte("alice@corp.example.com 1001 5001 5002\n")},
 			// getent exits 2 with the groups it found when one id has none.
 			groups: {exitCode: getentExitNotFound, stdout: []byte("alice@corp.example.com:*:1001:\nml-team@corp.example.com:*:5001:\n")},
 		}}

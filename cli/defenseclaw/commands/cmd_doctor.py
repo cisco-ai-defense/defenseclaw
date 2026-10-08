@@ -2103,6 +2103,9 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
                 "and if it keeps failing, run 'defenseclaw-gateway restart'"
             )
+        elif reason == "target-outside-data-dir":
+            detail = f"observability.local.path ({db_path}) must be inside {cfg.data_dir}"
+            remediation = "move observability.local.path into the DefenseClaw data directory"
         else:
             detail = f"private custody validation failed ({reason})"
             remediation = "restore the audit database from a trusted backup"
@@ -6987,6 +6990,8 @@ def _hermes_python_argv_verdict(args, name) -> bool | None:
     if name(script) in _HERMES_HOST_EXECUTABLES:
         return True  # a script launcher: python .../bin/hermes
     lowered = script.replace("\\", "/").lower()
+    if name(script).startswith("hermes_bootstrap") and "/.hermes/tools/" in lowered:
+        return True
     return None if "/hermes_cli/" in lowered or "/hermes-agent/" in lowered else False
 
 
@@ -7459,6 +7464,23 @@ def _omnigent_runtime_readiness(cfg, *, config_path: str | None = None) -> tuple
     return _omnigent_live_config_evidence(config_path)
 
 
+def _omnigent_tmux_requirement() -> str:
+    """Report the managed terminal prerequisite without inspecting user sessions."""
+    if os.name == "nt":
+        return ""
+    binary = shutil.which("tmux")
+    if not binary:
+        return "; managed terminals require tmux 3.3 or newer (tmux is missing)"
+    try:
+        result = subprocess.run([binary, "-V"], capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "; managed terminals require tmux 3.3 or newer (version unavailable)"
+    match = re.search(r"tmux (\d+)\.(\d+)", result.stdout)
+    if not match or tuple(map(int, match.groups())) < (3, 3):
+        return "; managed terminals require tmux 3.3 or newer (RHEL 9 ships 3.2a)"
+    return ""
+
+
 def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
     """Verify managed artifacts and bind them to the live server config."""
     locations, lock_detail = _omnigent_lock_locations(cfg)
@@ -7548,12 +7570,13 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
             _emit("fail", "OmniGent policy", drift, r=r)
             return
     live_status, live_detail = _omnigent_runtime_readiness(cfg, config_path=config_path)
+    tmux_requirement = _omnigent_tmux_requirement()
     # The module and .pth shim were verified above, so the row names only the
     # live-server state and what to do about it.
     _emit(
-        "warn" if live_status == "bound" else live_status,
+        "warn" if live_status == "bound" or tmux_requirement else live_status,
         "OmniGent policy",
-        f"native-degraded; {live_detail}",
+        f"native-degraded; {live_detail}{tmux_requirement}",
         r=r,
         remediation=(
             "start or restart the OmniGent server so it loads the DefenseClaw policy, then rerun "
@@ -8386,6 +8409,31 @@ def _model_call_missed_the_proxy(info: dict) -> str:
         f"OpenClaw completed a model call at {called_at:%H:%M:%S}Z that did not go through the guardrail "
         f"proxy (last proxied call: {proxied})"
     )
+
+
+def agent_identity_ledger_failure(health: dict | None) -> str:
+    """The gateway's report that agent identities are not saved, in plain words, or "" (GAP-0393)."""
+    ledger = health.get("agent_identities") if isinstance(health, dict) else None
+    if not isinstance(ledger, dict) or ledger.get("persisted") is not False:
+        return ""
+    reason = str(ledger.get("error") or "").strip()[:200]
+    detail = "not saved to inventory.db" + (f" ({reason})" if reason else "")
+    return detail + ": session counts and first-seen times reset at the next gateway restart"
+
+
+def _check_agent_identity_ledger(health: dict | None, r: _DoctorResult) -> None:
+    detail = agent_identity_ledger_failure(health)
+    if detail:
+        _emit(
+            "warn",
+            "Agent identity ledger",
+            detail,
+            r=r,
+            remediation=(
+                "make inventory.db in the data directory writable and free disk space; "
+                "the gateway saves the identities it holds on its next write, without a restart"
+            ),
+        )
 
 
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -9815,6 +9863,20 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         _emit("fail", "Observability plan", str(exc), r=r)
         return
     except OSError as exc:
+        # A full volume prevents temporary effective-plan snapshots.
+        import errno
+
+        if exc.errno == errno.ENOSPC or "No usable temporary directory" in str(exc):
+            try:
+                full = os.statvfs(cfg.data_dir).f_bavail == 0
+            except (OSError, AttributeError):
+                full = exc.errno == errno.ENOSPC
+            if full:
+                _emit(
+                    "skip", "Observability plan",
+                    "skipped because the disk is full; free space and rerun defenseclaw doctor", r=r,
+                )
+                return
         # A config or snapshot the account cannot read or protect is a
         # finding, not a crash of the whole report.
         _emit("fail", "Observability plan", f"cannot inspect the configuration: {exc}", r=r)
@@ -10294,6 +10356,11 @@ def _check_observability_v8_status(
             if live.display_reason:
                 detail += f"/{live.display_reason}"
             detail += f"; queue={live.queue_label}; last={live.activity_label}; circuit={live.circuit_label}"
+            if destination.kind == "splunk_hec" and live.last_error_class in {"http_rejected", "hec_ack_rejected"}:
+                detail += (
+                    "; HEC rejected an event: check that the index exists and the token can write to it; "
+                    f"run defenseclaw observability destination test {shlex.quote(destination.name)} --write-probe"
+                )
             if live_state == "unavailable" and destination.kind != "sqlite":
                 tag = "warn"
             elif live_state in {"degraded", "initializing", "draining"}:
@@ -10302,7 +10369,7 @@ def _check_observability_v8_status(
                 tag = "fail"
             if live.circuit_state == "half_open":
                 tag = "warn"
-                detail += "; one bounded recovery probe is in progress"
+                detail += "; awaiting or running one bounded recovery probe"
             local_stack_stopped = _local_observability_stack_stopped(destination, live, tag)
             if local_stack_stopped:
                 # Nothing to repair: the bundled stack is not running, and
@@ -10316,7 +10383,7 @@ def _check_observability_v8_status(
                     "unsafe_endpoint",
                 }:
                     tag = "fail"
-                elif tag == "pass":
+                else:
                     tag = "warn"
                 destination_arg = shlex.quote(destination.name)
                 detail += (
@@ -10971,6 +11038,7 @@ def doctor(
     sidecar_health = _check_sidecar(cfg, r)
     if sidecar_health is not None:
         _check_guardrail_profile(cfg, r)
+        _check_agent_identity_ledger(sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
