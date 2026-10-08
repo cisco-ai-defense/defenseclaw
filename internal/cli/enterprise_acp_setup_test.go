@@ -5,11 +5,13 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -111,10 +113,33 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	validate("kiro", kiroBinary, result.contractLock)
 
 	hermesBinary := enroll("hermes")
-	hermes, err := setup("hermes", hermesBinary)
-	if err != nil {
+	type setupOutcome struct {
+		result enterpriseACPUserSetupResult
+		err    error
+	}
+	done := make(chan setupOutcome, 1)
+	if err := withACPUserSetupLock(settings, func() error {
+		started := make(chan struct{})
+		go func() {
+			close(started)
+			result, setupErr := setup("hermes", hermesBinary)
+			done <- setupOutcome{result, setupErr}
+		}()
+		<-started
+		select {
+		case outcome := <-done:
+			return fmt.Errorf("concurrent setup finished before the editor transaction was released: %v", outcome.err)
+		case <-time.After(250 * time.Millisecond):
+			return nil
+		}
+	}); err != nil {
 		t.Fatal(err)
 	}
+	outcome := <-done
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	hermes := outcome.result
 	validate("hermes", hermesBinary, hermes.contractLock)
 	validate("kiro", kiroBinary, result.contractLock)
 }
