@@ -2001,16 +2001,19 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     )
 
 
-def _audit_folder_custody_text(reason: str, db_path: str, data_dir: str) -> tuple[str, str]:
-    """Detail and fix for an audit database whose folders failed the private-custody check.
+def _folder_custody_text(
+    reason: str, path: str, data_dir: str, what: str = "the audit database", itself: str = "the database"
+) -> tuple[str, str]:
+    """Detail and fix for a file (``what``) whose folders failed the private-custody check.
 
-    Restoring the database from a backup does not help there: the folders
-    are what need fixing, and the database was not touched (GAP-0300).
+    Restoring the file from a backup does not help there: the folders are
+    what need fixing, and the file was not touched (GAP-0300 for the audit
+    database, GAP-0344 for the device key).
     """
     from defenseclaw.doctor_recovery import RecoveryRefusedError, _controlled_directory_paths
 
     try:
-        chain = _controlled_directory_paths(data_dir, os.path.dirname(db_path))
+        chain = _controlled_directory_paths(data_dir, os.path.dirname(path))
     except RecoveryRefusedError:
         chain = (data_dir,)
     if reason == "directory-chain-is-writable-by-others":
@@ -2021,17 +2024,17 @@ def _audit_folder_custody_text(reason: str, db_path: str, data_dir: str) -> tupl
                     writable.append(folder)
         folders = writable or [data_dir]
         return (
-            f"{', '.join(folders)} can be written by other accounts, so the audit database in it is not trusted; "
-            f"the database itself is untouched ({reason})",
+            f"{', '.join(folders)} can be written by other accounts, so {what} in it is not trusted; "
+            f"{itself} itself is untouched ({reason})",
             "chmod go-w " + " ".join(shlex.quote(folder) for folder in folders),
         )
     if reason == "directory-owner-mismatch":
         return (
-            f"a folder of {data_dir} on the way to the audit database belongs to another account ({reason})",
+            f"a folder of {data_dir} on the way to {what} belongs to another account ({reason})",
             f"make {data_dir} and the folders in it yours (chown), then run 'defenseclaw doctor' again",
         )
     return (
-        f"the folders that hold the audit database failed the private custody check ({reason})",
+        f"the folders that hold {what} failed the private custody check ({reason})",
         f"keep {data_dir} a private folder of your own (chmod 700 {shlex.quote(data_dir)}), "
         "then run 'defenseclaw doctor' again",
     )
@@ -2088,7 +2091,7 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         elif reason.startswith("directory-"):
             # The folders that hold it failed the check, not the database
             # (GAP-0300).
-            detail, remediation = _audit_folder_custody_text(reason, db_path, str(getattr(cfg, "data_dir", "") or ""))
+            detail, remediation = _folder_custody_text(reason, db_path, str(getattr(cfg, "data_dir", "") or ""))
         else:
             detail = f"private custody validation failed ({reason})"
             remediation = "restore the audit database from a trusted backup"
@@ -2324,14 +2327,26 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
             remediation=("defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"),
         )
         return
+    detail = f"device key recovery is unsafe: {health.reason_code}"
+    remediation = "stop the gateway and restore the identity from a trusted backup; Doctor will not overwrite it"
+    if str(health.reason_code or "").startswith("directory-"):
+        # The folders that hold the key failed the check, not the key: a
+        # restore from backup would not help (GAP-0344, as GAP-0300).
+        detail, remediation = _folder_custody_text(
+            str(health.reason_code),
+            target,
+            str(getattr(cfg, "data_dir", "") or ""),
+            what="the device key",
+            itself="the key",
+        )
     _emit(
         "fail",
         "Device identity",
-        f"device key recovery is unsafe: {health.reason_code}",
+        detail,
         r=r,
         check_id="doctor.identity.device-key",
         reason_code=health.reason_code,
-        remediation="stop the gateway and restore the identity from a trusted backup; Doctor will not overwrite it",
+        remediation=remediation,
     )
 
 
