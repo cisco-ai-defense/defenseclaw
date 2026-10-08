@@ -340,6 +340,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if note := otherGatewayBinaryNote(d.RecordedExecutable()); note != "" {
 			fmt.Println(note)
 		}
+		if note := movedCLILauncherNote(); note != "" {
+			Warn(note)
+		}
 		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
 			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
@@ -455,6 +458,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	}
 	// The name records the move to the second; allow for that rounding.
 	printMovedCorruptAuditStores(cfg, startAttemptedAt.Add(-time.Second))
+	if note := movedCLILauncherNote(); note != "" {
+		Warn(note)
+	}
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -2880,4 +2886,63 @@ func otherGatewayBinaryNote(running string) string {
 		return ""
 	}
 	return fmt.Sprintf("It runs %s, not this binary (%s). To switch: 'defenseclaw-gateway stop', then start again.", running, self)
+}
+
+// movedCLILauncherNote says when the defenseclaw command next to this gateway
+// binary no longer runs. install.sh links ~/.local/bin/defenseclaw into
+// ~/.defenseclaw/.venv by absolute path and the venv entry point names its
+// interpreter the same way, so after an account rename or a home move the
+// user only saw "command not found" while this binary, a plain copy, still
+// ran and said nothing (GAP-0732).
+func movedCLILauncherNote() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return movedCLILauncherNoteIn(filepath.Dir(self))
+}
+
+func movedCLILauncherNoteIn(binDir string) string {
+	link := filepath.Join(binDir, "defenseclaw")
+	target, err := os.Readlink(link)
+	if err != nil {
+		return ""
+	}
+	missing := ""
+	if _, err := os.Stat(link); errors.Is(err, os.ErrNotExist) {
+		missing = target
+	} else if interpreter := scriptInterpreter(link); interpreter != "" {
+		if _, err := os.Stat(interpreter); errors.Is(err, os.ErrNotExist) {
+			missing = interpreter
+		}
+	}
+	if missing == "" {
+		return ""
+	}
+	return fmt.Sprintf("The defenseclaw command (%s) does not run: it needs %s, which no longer exists "+
+		"(was this account renamed or its home moved?). Rerun the DefenseClaw installer to repair it.", link, missing)
+}
+
+// scriptInterpreter returns the absolute interpreter a script names on its
+// #! line, or "".
+func scriptInterpreter(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := f.Read(head)
+	line, _, _ := strings.Cut(string(head[:n]), "\n")
+	if !strings.HasPrefix(line, "#!") {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimPrefix(line, "#!"))
+	if len(fields) == 0 || !filepath.IsAbs(fields[0]) {
+		return ""
+	}
+	return fields[0]
 }
