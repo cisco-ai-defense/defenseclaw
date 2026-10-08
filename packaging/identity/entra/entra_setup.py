@@ -381,10 +381,15 @@ def _load_plan(path: str) -> dict:
     users = plan.get("users", [])
     if not isinstance(groups, list) or not isinstance(users, list):
         raise SystemExit("error: 'groups' and 'users' must be lists")
+    seen_groups: set[str] = set()
     for group in groups:
         if not isinstance(group, dict) or not isinstance(group.get("name"), str) or not group["name"]:
             raise SystemExit("error: every entry of 'groups' needs a 'name'")
         _nickname(group["name"])
+        key = group["name"].casefold()
+        if key in seen_groups:
+            raise SystemExit(f"error: duplicate group name {group['name']!r} in the plan")
+        seen_groups.add(key)
     seen_users: dict[str, dict] = {}
     unique_users: list[dict] = []
     for user in users:
@@ -654,9 +659,12 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
             if name not in planned_groups and find_group(graph, name) is None:
                 raise SystemExit(f"error: user {spec['name']} names missing group {name!r}")
 
+    # Resolve every planned group before the first tenant write. A later
+    # non-security or ambiguous name must not leave earlier groups created.
+    existing_groups = {spec["name"]: find_group(graph, spec["name"]) for spec in plan.get("groups", [])}
     for spec in plan.get("groups", []):
         name = spec["name"]
-        group = find_group(graph, name)
+        group = existing_groups[name]
         if group is not None:
             print(f"{tag}group {name}: exists")
         elif not apply:
