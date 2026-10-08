@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
 )
 
 // validateStandaloneGatewayConfig proves the gateway service can load
@@ -58,6 +59,13 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		}
 	} else {
 		runtime = loaded.runtime
+		// A jsonl destination the gateway service cannot write stopped the
+		// services, failed the readiness wait and rolled back (GAP-0908).
+		var unsafe *config.V8SemanticError
+		if err := checkJSONLDestinationPaths(loaded.compiled,
+			strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))); errors.As(err, &unsafe) {
+			return fmt.Errorf("the gateway cannot use %s: %s; %s", configPath, unsafe.Summary, unsafe.Action)
+		}
 	}
 	if runtime == nil || !runtime.Guardrail.Enabled {
 		return nil
@@ -87,6 +95,29 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			}
 		}
 		return fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %v%s", configPath, err, hint)
+	}
+	return nil
+}
+
+// checkJSONLDestinationPaths refuses the first enabled jsonl destination
+// whose path local.JSONLPathProblem rejects, naming the destination, the
+// path and the rule (config validate, Windows Setup). allowedWriters may
+// also write its folder (Windows).
+func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, allowedWriters ...string) error {
+	if compiled == nil || compiled.Plan == nil {
+		return nil
+	}
+	for _, destination := range compiled.Plan.Destinations() {
+		if destination.Kind != config.ObservabilityV8DestinationJSONL || !destination.Enabled || destination.Generated {
+			continue
+		}
+		if problem := local.JSONLPathProblem(destination.Transport.Path, allowedWriters...); problem != "" {
+			return &config.V8SemanticError{
+				Path:    "$.observability.destinations",
+				Summary: fmt.Sprintf("destination %q writes %s, which %s", destination.Name, destination.Transport.Path, problem),
+				Action:  "point it at a regular file in a folder only its owner (an administrator or the gateway account) can write",
+			}
+		}
 	}
 	return nil
 }

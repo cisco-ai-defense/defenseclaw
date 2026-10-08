@@ -83,6 +83,11 @@ var configV8ValidateCmd = &cobra.Command{
 			// candidate references must load, as the gateway's reload needs.
 			err = config.CheckCandidateAssets(loaded.runtime)
 		}
+		if err == nil {
+			// Every jsonl destination must be a file the gateway may write
+			// (GAP-0890).
+			err = checkJSONLDestinationPaths(loaded.compiled)
+		}
 		if err != nil {
 			failure := configV8ValidationFailure(err)
 			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(failure); encodeErr != nil {

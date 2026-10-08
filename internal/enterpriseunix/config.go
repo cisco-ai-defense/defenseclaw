@@ -26,6 +26,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -270,6 +271,9 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	if err := e.checkRulePackDirs(cfg); err != nil {
 		return nil, err
 	}
+	if err := e.checkJSONLDestinations(compiled.Plan); err != nil {
+		return nil, err
+	}
 	v := &validatedConfig{
 		Raw:                    append([]byte(nil), raw...),
 		SHA:                    sha256Bytes(raw),
@@ -306,6 +310,37 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	sort.Strings(v.HomeRoots)
 	sort.Strings(v.AgentPrefixes)
 	return v, nil
+}
+
+// checkJSONLDestinations refuses, before anything changes, a jsonl
+// destination the gateway cannot write: on Linux a path outside the
+// folders its sandbox may write, and a path that is a directory, a link or
+// a device, or in a folder other accounts can write. The gateway refused
+// them only at start, with runtime_unavailable, and ensure rolled back
+// (GAP-0890).
+func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
+	if plan == nil {
+		return nil
+	}
+	for _, destination := range plan.Destinations() {
+		if destination.Kind != config.ObservabilityV8DestinationJSONL || !destination.Enabled || destination.Generated {
+			continue
+		}
+		path := filepath.Clean(destination.Transport.Path)
+		if e.GOOS == "linux" && !pathWithin(path, e.Layout.DataDir) && !pathWithin(path, e.Layout.LogDir) {
+			return fmt.Errorf("observability destination %q writes %s, outside the folders the gateway service may write (%s and %s); use a path in one of them",
+				destination.Name, path, e.Layout.DataDir, e.Layout.LogDir)
+		}
+		if problem := local.JSONLPathProblem(e.P(path)); problem != "" {
+			return fmt.Errorf("observability destination %q writes %s, which %s; a jsonl destination writes a regular file in a folder only root and the gateway account can write",
+				destination.Name, path, problem)
+		}
+	}
+	return nil
+}
+
+func pathWithin(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, strings.TrimRight(dir, "/")+"/")
 }
 
 // checkRulePackDirs refuses rule packs the gateway cannot load or could

@@ -201,3 +201,31 @@ func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {
 		t.Fatalf("agent identity: %s", got)
 	}
 }
+
+// GAP-0890: a jsonl destination the gateway cannot write is refused before
+// anything changes, naming the destination, the path and the rule.
+func TestManagedConfigRefusesUnsafeJSONLDestinations(t *testing.T) {
+	for path, rule := range map[string]string{
+		"/var/log/defenseclaw/siem":         "is a directory",
+		"/var/log/defenseclaw/link.jsonl":   "is a symbolic link",
+		"/var/log/defenseclaw/open/x.jsonl": "a folder its group or other users can write",
+		"/var/log/siem/x.jsonl":             "outside the folders the gateway service may write",
+	} {
+		h := newTestHost(t, "linux")
+		for _, dir := range []string{"/var/log/defenseclaw/siem", "/var/log/defenseclaw/open"} {
+			if err := os.MkdirAll(h.env.P(dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(h.env.P("/var/log/defenseclaw/open"), 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/etc/hosts", h.env.P("/var/log/defenseclaw/link.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+		raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: rv-jsonl\n      kind: jsonl\n      path: " + path + "\n"
+		if got := installMessage(t, h, raw); !strings.Contains(got, `destination "rv-jsonl" writes `+path) || !strings.Contains(got, rule) {
+			t.Fatalf("%s: %s", path, got)
+		}
+	}
+}

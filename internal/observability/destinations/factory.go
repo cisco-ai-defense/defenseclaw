@@ -228,6 +228,17 @@ func (factory *Factory) PrepareDestination(
 			Compress: rotation.Compress,
 		})
 		if err != nil {
+			if !nilInterface(factory.stderr) {
+				// The destination, the path and the rule: start failed with
+				// only runtime_unavailable (GAP-0890).
+				reason := local.JSONLPathProblem(destination.Transport.Path)
+				if reason == "" {
+					reason = "cannot be prepared: its folder cannot be created, or is not a folder the gateway trusts"
+				}
+				_, _ = fmt.Fprintf(factory.stderr,
+					"defenseclaw: observability destination %q: %s %s; fix the path or remove the destination\n",
+					destination.Name, destination.Transport.Path, reason)
+			}
 			return nil, cleanup, newError(ErrorAdapterPrepare)
 		}
 		if adapter.OpenDeferred() && !nilInterface(factory.stderr) {
