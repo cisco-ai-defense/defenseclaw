@@ -264,8 +264,9 @@ What follows when the identity is missing:
   request after that still uses the old facts while the refresh runs. A user
   added to a group gets the group's profile after all three. `guardrail profile
   explain` asks the operating system directly, so it already shows the new
-  profile; its `cache:` line and a warning give the age of the facts requests
-  still use. On a bound Mac, flush Open Directory membership with
+  profile. The per-user CLI's `cache:` line and warning give the age of the
+  facts requests still use; managed `profile-explain` does not print that age.
+  On a bound Mac, flush Open Directory membership with
   `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
   gateway or wait for its 15-minute refresh. On Windows the
   groups are those of the sign-in token, so the user must also sign out and
