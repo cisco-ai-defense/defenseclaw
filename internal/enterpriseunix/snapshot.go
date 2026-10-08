@@ -81,7 +81,19 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 			return nil, fmt.Errorf("snapshot %s: not a regular file", canonical)
 		default:
 			blob := strconv.Itoa(index)
-			store, err := e.preserve(dir, path, blob)
+			var store string
+			if e.applyTriggerWatches(canonical) {
+				// A hard link changes the link count of the live file, which
+				// the apply trigger reads as a change (IN_ATTRIB for systemd
+				// PathChanged, NOTE_LINK for launchd WatchPaths): its ensure
+				// queued behind this run and held the lock for seconds after
+				// it, so a verify or status run right after an ensure --config
+				// failed lifecycle_busy (GAP-0354). These administrator inputs
+				// are small, so they are copied.
+				err = copyPreserved(path, filepath.Join(dir, "files", blob))
+			} else {
+				store, err = e.preserve(dir, path, blob)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("snapshot %s: %w", canonical, err)
 			}
@@ -111,6 +123,13 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 		return nil, err
 	}
 	return snap, nil
+}
+
+// applyTriggerWatches reports a file the apply trigger watches:
+// config.yaml and the files directly in the secrets and policies folders.
+func (e *Env) applyTriggerWatches(canonical string) bool {
+	parent := filepath.Dir(canonical)
+	return canonical == e.Layout.ConfigPath || parent == e.Layout.SecretsDir || parent == e.Layout.PolicyDir
 }
 
 func (e *Env) loadSnapshot(dir string) (*snapshot, error) {
@@ -147,7 +166,8 @@ func (e *Env) sideStoreDir(root, id string) string {
 // free space, and a full disk is the usual reason a transaction fails. A
 // file on another filesystem than the lifecycle state is linked into a
 // store below a managed root on its own filesystem; a byte copy into the
-// snapshot directory is the last resort.
+// snapshot directory is the last resort. The files the apply trigger
+// watches are always copied (applyTriggerWatches).
 func (e *Env) preserve(snapDir, path, blob string) (string, error) {
 	err := os.Link(path, filepath.Join(snapDir, "files", blob))
 	if err == nil {

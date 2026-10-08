@@ -15,6 +15,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -502,5 +503,39 @@ func TestLifecycleBusyStatusShowsTheInstalledVersion(t *testing.T) {
 		if !strings.Contains(long, "waits up to 5s") || !strings.Contains(long, "exits 75") {
 			t.Fatalf("%s --help: %q", action, long)
 		}
+	}
+}
+
+// GAP-0334: secret set --from-file read a key file that group or others can
+// write, which Windows and the MDM wrapper refuse.
+func TestSecretSetRefusesAKeyFileOthersCanWrite(t *testing.T) {
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	root := t.TempDir()
+	previous := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }}, nil
+	}
+	t.Cleanup(func() { newUnixLifecycleEnv = previous })
+	key := filepath.Join(t.TempDir(), "ai-defense-api-key")
+	if err := os.WriteFile(key, []byte("value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newEnterpriseSecretCommand("set", "")
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	opts := enterpriseSecretOptions{name: "ai-defense-api-key", fromFile: key}
+	err = runEnterpriseSecret(cmd, "set", &opts)
+	if err == nil || !strings.Contains(err.Error(), "writable by group or other") || commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+		t.Fatalf("a world-writable key file was not refused: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("the refused key file reached the lifecycle: %q", out.String())
 	}
 }

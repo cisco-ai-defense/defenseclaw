@@ -71,3 +71,28 @@ func TestWatcherCategoryQuarantineOutsideFlatSlot(t *testing.T) {
 		t.Fatalf("coll/inner slot: %v", err)
 	}
 }
+
+// GAP-0413: two users had a skill with one folder name. Both mapped to the
+// slot skills/<connector>/<name>, so the second was refused ("quarantine
+// path already belongs to a different asset") and stayed active in its
+// folder. Each gets a slot, and both sources are removed.
+func TestWatcherQuarantinesTwoSkillsWithOneName(t *testing.T) {
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	other := filepath.Join(filepath.Dir(skillDir), "second-user-skills")
+	w := New(cfg, []string{skillDir, other}, nil, store, logger, nil, nil)
+	for index, root := range []string{skillDir, other} {
+		path := filepath.Join(root, "dup")
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# dup "+root+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w.quarantineAsset(context.Background(), InstallEvent{
+			Type: InstallSkill, Name: "dup", Path: path, Connector: "claudecode", Timestamp: time.Now().UTC(),
+		})
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("skill %d with the shared name stays active: %v", index+1, err)
+		}
+	}
+}

@@ -246,5 +246,8 @@ for recipes.
 | Another lifecycle run holds the lock | `75` | Not applicable |
 | The gateway restart failed after the key was stored | Not applicable | `1603` |
 
-On Windows a `--from-file` path that non-administrators can write is also
-refused with `1639`.
+A `--from-file` path that another account could change is also refused
+before anything is stored: on Linux and macOS a symlink, a file that group or
+others can write or that another account owns, or a file in a folder another
+account can write (exit `2`); on Windows a path that non-administrators can
+write (exit `1639`).

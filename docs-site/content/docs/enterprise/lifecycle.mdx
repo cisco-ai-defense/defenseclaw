@@ -506,7 +506,8 @@ to keep the machine state for a reinstall instead.
 
 - **Linux packages.** Removing the package runs the lifecycle `uninstall`
   first, without purge, which removes the machine state and the
-  `defenseclaw` account. `apt purge` also deletes what a failed uninstall
+  `defenseclaw` account, also when the package install itself failed and
+  rolled back (then the rejected `config.yaml` goes too). `apt purge` also deletes what a failed uninstall
   left of `/etc/defenseclaw`, `/var/lib/defenseclaw`,
   `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`,
   and `/var/log/defenseclaw`. Each user keeps `~/.defenseclaw` and the
@@ -571,9 +572,14 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge
 & 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /uninstall JSON=1 PURGE=1
 ```
 
-After an uninstall, ask users to restart running agents. An agent that loaded
-the hook command before the uninstall may report a hook launch failure until
-it restarts.
+After an uninstall, and again after a reinstall (including an MDM remove and
+re-add), ask users to restart running agents. An agent reads its hooks when it
+starts: one that loaded the hook command before the uninstall may report a
+hook launch failure, and one left running through the uninstall and the
+reinstall keeps running without DefenseClaw until it restarts. On Linux and
+macOS, the `ensure` result, `status` and `verify` name each user whose agent
+sessions started before the deployment was activated, with the
+`agent_sessions_restart_required` warning.
 
 ## Decommission checklist
 

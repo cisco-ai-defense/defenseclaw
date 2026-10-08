@@ -72,6 +72,22 @@ func (e *Env) listSecrets() ([]string, string, error) {
 	return names, sha256Bytes(digest.Bytes()), nil
 }
 
+// TrustedSecretSource refuses a --from-file credential that another account
+// could have changed: a symlink, a file that group or others can write or
+// that another account owns, or one in a folder another account can write.
+// The Windows CLI and the MDM wrapper refuse such a file; the Unix CLI read
+// it (GAP-0334).
+func TrustedSecretSource(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("--from-file %s does not exist", path)
+	}
+	return trustedInputFile(abs, "--from-file")
+}
+
 // ReadSecretValue reads a credential from r, stripping one trailing line
 // ending so `echo key |` works.
 func ReadSecretValue(r io.Reader) ([]byte, error) {

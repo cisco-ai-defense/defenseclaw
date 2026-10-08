@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -58,6 +59,10 @@ type CreateQuarantineRecordInput struct {
 	OwnershipJSON  string
 	Connectors     []string
 }
+
+// ErrQuarantinePathTaken is CreateQuarantineRecord refusing a quarantine path
+// that a different asset (another source path or content) already holds.
+var ErrQuarantinePathTaken = errors.New("audit: quarantine path already belongs to a different asset")
 
 // CreateQuarantineRecord atomically records physical identity and connector
 // ownership. Re-registering the same quarantine path is idempotent, but it
@@ -108,9 +113,7 @@ func (s *Store) CreateQuarantineRecord(
 		}
 	} else {
 		if !sameQuarantineIdentity(record, normalized) {
-			return QuarantineRecord{}, fmt.Errorf(
-				"audit: quarantine path already belongs to a different asset",
-			)
+			return QuarantineRecord{}, ErrQuarantinePathTaken
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE quarantine_records

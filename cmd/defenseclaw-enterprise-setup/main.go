@@ -49,6 +49,11 @@ const (
 	standalonePayloadTrustName = "payload-trust.json"
 )
 
+// standaloneSetupArtifactName is the file name the standalone Setup ships
+// under; its usage and errors name it, not the Secure Client Setup
+// (GAP-0353).
+const standaloneSetupArtifactName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+
 // enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
 var enterpriseSetupPayloadLoader = loadEmbeddedEnterprisePayload
 
@@ -220,13 +225,17 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 		writeEnterpriseSetupUsageForFlavor(stdout, standalone)
 		return 0
 	}
+	name := enterpriseSetupArtifactName
+	if standalone {
+		name = standaloneSetupArtifactName
+	}
 	if err != nil {
-		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
+		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
 		return enterpriseSetupArgumentFailureCode()
 	}
 	exitCode, err := executeEnterpriseSetup(context.Background(), opts, stdout, stderr)
 	if err != nil {
-		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
+		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
 		var invalid enterpriseSetupInvalidArguments
 		if errors.As(err, &invalid) {
 			return enterpriseInvalidArgsExitCode
@@ -320,6 +329,9 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		return opts, false, err
 	}
 	if flags.NArg() != 0 {
+		if standalone {
+			return opts, false, fmt.Errorf("unexpected argument %q; run %s /? for the actions and the NAME=value properties", flags.Arg(0), standaloneSetupArtifactName)
+		}
 		return opts, false, fmt.Errorf("unexpected positional argument %q", flags.Arg(0))
 	}
 	opts.Action = strings.ToLower(strings.TrimSpace(opts.Action))
@@ -493,6 +505,10 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 				normalized = append(normalized, fmt.Sprintf("--%s=%t", canonical, enabled))
 				continue
 			}
+			if standalone {
+				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (CONFIG=, MANIFEST=, JSON=1, NOSTART=1, PURGE=1, TIMEOUTSECONDS=, ALLOWEDSIGNERS=, ATTESTCLAUDEEFFECTIVEPOLICY=1)",
+					trimmed[:separator], standaloneSetupArtifactName)
+			}
 		}
 		normalized = append(normalized, argument)
 	}
@@ -604,7 +620,14 @@ func splitStandaloneLifecycleJSON(output []byte) (document, diagnostics []byte) 
 	return output, nil
 }
 
+// writeEnterpriseSetupFailure reports err as the Secure Client Setup does;
+// the Secure Client golden gate pins this output.
 func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupOptions, err error) {
+	writeEnterpriseSetupFailureAs(stdout, stderr, enterpriseSetupArtifactName, opts, err)
+}
+
+// writeEnterpriseSetupFailureAs reports err under the Setup file name.
+func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts enterpriseSetupOptions, err error) {
 	if err == nil {
 		return
 	}
@@ -619,7 +642,7 @@ func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupO
 		_ = json.NewEncoder(stdout).Encode(report)
 		return
 	}
-	fmt.Fprintf(stderr, "%s: %v\n", enterpriseSetupArtifactName, err)
+	fmt.Fprintf(stderr, "%s: %v\n", name, err)
 }
 
 // writeEnterpriseSetupUsage prints the Secure Client Setup usage.
@@ -628,6 +651,10 @@ func writeEnterpriseSetupUsage(output io.Writer) {
 }
 
 func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
+	if standalone {
+		writeStandaloneSetupUsage(output)
+		return
+	}
 	actions := enterpriseSetupActions(standalone)
 	sort.Strings(actions)
 	fmt.Fprintf(output, "%s --action <%s> [options]\n", enterpriseSetupArtifactName, strings.Join(actions, "|"))
@@ -636,4 +663,24 @@ func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
 		fmt.Fprintln(output, "Ensure (standalone Setup) converges the host: install, upgrade, repair, or no-op.")
 	}
 	fmt.Fprintln(output, "Production paths and service names are fixed by the enterprise lifecycle.")
+}
+
+// writeStandaloneSetupUsage prints the standalone Setup usage in the form
+// windows.mdx documents: /action switches and NAME=value properties. It
+// printed the Secure Client Setup name and --action flags (GAP-0353).
+func writeStandaloneSetupUsage(output io.Writer) {
+	fmt.Fprintf(output, "%s /ensure [NAME=value ...]\n", standaloneSetupArtifactName)
+	fmt.Fprintln(output, "  /ensure converges the computer: install, upgrade, repair, or nothing to do.")
+	fmt.Fprintln(output, "  Other actions: /install /upgrade /repair /reconcile /status /verify /uninstall")
+	fmt.Fprintln(output, "Properties (case-insensitive, dashes ignored):")
+	fmt.Fprintln(output, "  CONFIG=<path>                  administrator config; required for the first install")
+	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
+	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
+	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")
+	fmt.Fprintln(output, "  PURGE=1                        with /uninstall: also remove the DefenseClaw files of each enrolled account")
+	fmt.Fprintln(output, "  TIMEOUTSECONDS=<n>             lifecycle timeout, 60 to 7200 seconds (default 1800)")
+	fmt.Fprintln(output, "  ALLOWEDSIGNERS=<sha256>,...    accept only these Authenticode signer certificates")
+	fmt.Fprintln(output, "  ATTESTCLAUDEEFFECTIVEPOLICY=1  with /repair: record that Claude Code runs the managed hooks")
+	fmt.Fprintf(output, "Example: %s /ensure CONFIG=C:\\ProgramData\\DefenseClaw-Staging\\config.yaml JSON=1\n", standaloneSetupArtifactName)
+	fmt.Fprintln(output, "Exit codes: 0 success, 1603 failure, 1618 busy, 1639 invalid arguments.")
 }

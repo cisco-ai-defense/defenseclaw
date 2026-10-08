@@ -13,10 +13,12 @@
 package enterpriseunix
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // GAP-1474: a per-user gateway started before the deployment keeps running
@@ -93,5 +95,33 @@ func TestStatusMatchesMacOSGatewaysByExecutablePath(t *testing.T) {
 		if strings.Contains(message, pid) {
 			t.Fatalf("status names pid %s, which is not a per-user gateway: %+v", pid, got.Warnings)
 		}
+	}
+}
+
+// A Claude Code session left open through uninstall --keep-state and a
+// reinstall ran without hooks while status, verify and the ensure result
+// reported a healthy deployment: an agent reads its hooks when it starts
+// (GAP-0411). Sessions older than the activation are named.
+func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	record, err := h.env.loadDeployment()
+	if err != nil || record == nil {
+		t.Fatalf("no deployment: %v", err)
+	}
+	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, "/proc/stat", fmt.Sprintf("cpu 0 0 0 0\nbtime %d\n", activated.Add(-time.Hour).Unix()))
+	agent := func(pid string, ticks int64) {
+		writeHostFile(t, h, "/proc/"+pid+"/cmdline", "claude\x00--resume\x00")
+		writeHostFile(t, h, "/proc/"+pid+"/stat", fmt.Sprintf("%s (claude) S 1 %s %s%d 0 0", pid, pid, strings.Repeat("0 ", 16), ticks))
+	}
+	agent("4321", 100)          // started an hour before the activation
+	agent("4322", 3600*100+600) // started after it
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
+	if !strings.Contains(got, "claude (pid 4321)") || strings.Contains(got, "4322") {
+		t.Fatalf("status does not name exactly the older agent session: %q", got)
 	}
 }
