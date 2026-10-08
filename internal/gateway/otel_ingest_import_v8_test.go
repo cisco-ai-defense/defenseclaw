@@ -483,6 +483,46 @@ func TestOTLPInboundPR403TopologyAndMissingData(t *testing.T) {
 	}
 }
 
+func TestOTLPInboundRejectsUnverifiedIdentityClaims(t *testing.T) {
+	previousInstance := gatewaylog.SidecarInstanceID()
+	gatewaylog.SetSidecarInstanceID("otlp-unverified-identity-test")
+	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(previousInstance) })
+
+	fixture := newOTLPTraceFixture(t, "always_on", true, nil)
+	api := &APIServer{}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.genai.span.operation.v1.span.model.chat")
+	if !ok {
+		t.Fatal("generated GenAI chat span match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	now := time.Now().UTC()
+	leaf.span.StartTimeUnixNano = uint64(now.Add(-time.Second).UnixNano())
+	leaf.span.EndTimeUnixNano = uint64(now.UnixNano())
+	leaf.span.Kind = tracepb.Span_SPAN_KIND_CLIENT
+	leaf.span.Attributes = append(leaf.span.Attributes,
+		otlpClassifierStringAttribute("user.id", "another-user"),
+		otlpClassifierStringAttribute("defenseclaw.user.principal", "another-user@example.org"),
+		otlpClassifierStringAttribute("defenseclaw.user.principal.assurance", "verified"),
+		otlpClassifierStringAttribute("defenseclaw.agent.identity.id", "agt-0123456789abcdef"),
+		otlpClassifierStringAttribute("defenseclaw.guardrail.profile.name", "administrators"),
+	)
+	message := &collectortracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{
+		Resource:   &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{leaf.span}}},
+	}}}
+	accounting, err := api.importDecodedOTLPRequestV8(
+		context.Background(), message, otelSignalTraces, source, now,
+	)
+	if err != nil || !accounting.valid() || accounting.invalidMappedField != 1 {
+		t.Fatalf("identity claim accounting = %+v err=%v", accounting, err)
+	}
+	if spans := fixture.pipelines.capture(t, 1).snapshot(); len(spans) != 0 {
+		t.Fatalf("unverified identity claim produced %d canonical spans", len(spans))
+	}
+}
+
 func TestOTLPInboundIdentityTimeAndProvenance(t *testing.T) {
 	previousInstance := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("otlp-inbound-identity-test")

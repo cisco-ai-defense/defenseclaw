@@ -105,6 +105,15 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		if disposition, terminal := inboundTerminalDisposition(classifier, leaf, classification); terminal {
 			return addPrimary(leaf, disposition)
 		}
+		// A connector token authenticates the source, not the reported user,
+		// agent identity, or policy profile. Reject these claims before any
+		// canonical record or correlation state can treat them as local facts.
+		// Native exact records have a separate local provenance contract.
+		// Secure Client retains the pre-1.0 import behavior (issue #1092).
+		if !a.managedAIDOnly() && classification.match.Shape() != observability.InboundShapeNativeExact &&
+			unverifiedOTLPIdentityClaimV8(leaf.attributes()) {
+			return addPrimary(leaf, otlpInboundInvalidMappedField)
+		}
 		correlated, correlationErr := a.correlateNativeOTLPLeafV8(
 			ctx, leaf, classification.match, authenticatedSource, receipt,
 		)
@@ -265,6 +274,38 @@ func primaryDispositionForInboundLeaf(result otlpInboundLeafResult) otlpInboundP
 		return otlpInboundCollectionDisabled
 	}
 	return otlpInboundInvalidRecord
+}
+
+// unverifiedOTLPIdentityClaimV8 checks only the sender's leaf attributes.
+// These values have no binding to the authenticated OTLP source. A local
+// identity/profile resolver may add them later, after it has verified the
+// caller and agent; accepting a sender value here would forge that result.
+func unverifiedOTLPIdentityClaimV8(index otlpTypedAttributeIndex) bool {
+	for _, key := range []string{
+		"user.id",
+		"defenseclaw.user.id_kind",
+		"defenseclaw.user.name",
+		"defenseclaw.user.email",
+		"defenseclaw.user.principal",
+		"defenseclaw.user.domain",
+		"defenseclaw.user.directory",
+		"defenseclaw.user.tenant_id",
+		"defenseclaw.user.identity.source",
+		"defenseclaw.user.principal.assurance",
+		"defenseclaw.session.kind",
+		"defenseclaw.session.kerberos_principal",
+		"defenseclaw.agent.identity.id",
+		"defenseclaw.agent.instance_id",
+		"defenseclaw.guardrail.profile.name",
+		"defenseclaw.guardrail.profile.digest",
+		"defenseclaw.guardrail.profile.match",
+		"defenseclaw.guardrail.profile.matched_group",
+	} {
+		if _, state := index.lookup(key); state != otlpTypedAttributeAbsent {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *APIServer) importClassifiedOTLPLeafV8(
