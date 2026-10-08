@@ -572,7 +572,7 @@ is ready for `observe`.
     { type: 'cmd', text: 'sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for consume', pauseMs: 700 },
     { type: 'out', text: 'Tetragon readiness for consume', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon is installed (/var/run/tetragon/tetragon-info.json)', pauseMs: 40 },
-    { type: 'ok', text: '  ✓ Tetragon is running (pid 380213)', pauseMs: 40 },
+    { type: 'ok', text: '  ✓ Tetragon is running (pid 547909)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ API: unix socket /var/run/tetragon/tetragon.sock', pauseMs: 40 },
     { type: 'ok', text: '  ✓ The info file, socket and their directories pass the helper\'s trust check', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon v1.7.1 is supported for consume', pauseMs: 40 },
@@ -588,17 +588,17 @@ is ready for `observe`.
     { type: 'spacer', pauseMs: 150 },
     { type: 'cmd', text: 'sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status', pauseMs: 700 },
     { type: 'out', text: 'Tetragon (managed Linux)', pauseMs: 40 },
-    { type: 'out', text: '  Tetragon:        v1.7.1, pid 380213, reachable', pauseMs: 40 },
+    { type: 'out', text: '  Tetragon:        v1.7.1, pid 547909, reachable', pauseMs: 40 },
     { type: 'out', text: '  API socket:      trusted (root-owned unix socket) at unix:///var/run/tetragon/tetragon.sock', pauseMs: 40 },
-    { type: 'out', text: '  Sensor helper:   running, state updated 2026-10-08T10:54:26Z', pauseMs: 40 },
+    { type: 'out', text: '  Sensor helper:   running, state updated 2026-10-08T19:36:38Z', pauseMs: 40 },
     { type: 'out', text: '  Mode:            consume, burn-in 168h', pauseMs: 40 },
     { type: 'out', text: '  Kernel controls: not loaded (mode consume)', pauseMs: 40 },
     { type: 'out', text: '  Your Tetragon policies (DefenseClaw reads their events and never changes them):', pauseMs: 40 },
     { type: 'out', text: '    NAME                    MODE          STATE    EVENTS  FORWARDED  BLOCKED  LAST', pauseMs: 40 },
     { type: 'out', text: '    dc-tg2-dns-getaddrinfo  monitor_only  enabled  0       0          0        -', pauseMs: 40 },
-    { type: 'out', text: '    dc-tg2-file-denied      monitor_only  enabled  0       0          0        -', pauseMs: 40 },
-    { type: 'out', text: '    dc-tg2-file-sensitive   monitor_only  enabled  269     264        0        2026-10-08T10:54:23Z', pauseMs: 40 },
-    { type: 'out', text: '    dc-tg2-net-connect      monitor_only  enabled  124     111        0        2026-10-08T10:54:01Z', pauseMs: 40 },
+    { type: 'out', text: '    dc-tg2-file-denied      monitor_only  enabled  1       1          0        2026-10-08T18:37:28Z', pauseMs: 40 },
+    { type: 'out', text: '    dc-tg2-file-sensitive   monitor_only  enabled  171     171        0        2026-10-08T19:33:17Z', pauseMs: 40 },
+    { type: 'out', text: '    dc-tg2-net-connect      monitor_only  enabled  54      48         0        2026-10-08T19:34:01Z', pauseMs: 40 },
     { type: 'out', text: 'Next: this host is ready for observe. Check with:', pauseMs: 40 },
     { type: 'out', text: '  sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for observe', pauseMs: 40 },
     { type: 'spacer', pauseMs: 40 },
@@ -659,7 +659,7 @@ To forward nothing and keep only the counts, set `customer_events: off`.
 The tiles split what your policies saw: the last tile counts every process,
 the first only the events below an AI agent. The table keeps one row per
 policy, agent, action, outcome and hook join (`exact`, `temporal` or `none`).
-A real run over about two hours on the lab computer.
+A real run over about half an hour on the lab computer.
 
 ## Step 3: Observe on a pilot ring
 
@@ -720,7 +720,11 @@ What to read in `status`:
 - **Users with no agent.** A user with no command-line agent installed has no
   control at all. `verify` names them.
 
-![tetragon status in observe with burn_in 40h: Tetragon version and socket, the three DefenseClaw policies in monitor mode, a Users table with one user reset by a hit and two in burn-in, the would-block and blocked hits with the key path and the binary, your four Tetragon policies with their event counts, one warning about the one-user-per-computer limit, and the Next line](/images/tetragon/terminal-tetragon-status.png)
+![tetragon status in observe with burn_in 40h: Tetragon version and socket, the three DefenseClaw policies in monitor mode, a Users table with two users reset by a hit and one in burn-in, the would-block and blocked hits with the path and the binary, your four Tetragon policies with their event counts, and the Next line](/images/tetragon/terminal-tetragon-status.png)
+
+The lab computer ran `enforce` earlier in the round, so the hit list also holds
+hits that were blocked then. On a pilot ring that has only run `observe`, every
+hit reads would block.
 
 ## Step 4: Approve and enforce, ring by ring
 
@@ -795,19 +799,19 @@ private key or an in-place write of a shell profile or user autostart entry
 returns `Operation not permitted`; see
 [When a control blocks something](#when-a-control-blocks-something).
 
-![tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table with one user reset by a hit on the SSH key and two still measuring, and the enterprise.tetragon block to approve with mode enforce and the enforce_ack digest](/images/tetragon/terminal-tetragon-verify-enforce.png)
+![tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table with two users reset by a hit (each hit with its control, path and binary) and one still measuring, and the enterprise.tetragon block to approve with mode enforce and the enforce_ack digest](/images/tetragon/terminal-tetragon-verify-enforce.png)
 
 <TerminalAnimation
   cwd="~"
   speed={1.5}
   height={520}
-  ariaLabel="Animated terminal replay of tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table where one user was reset by a hit and two are still measuring, and the block to approve."
-  caption="Recorded on the same lab computer after a working session. `dcr-std1` read the SSH key decoy 15 times, so its window restarted; the other two users have not run an agent yet. Nothing is ready yet; the output still prints the block to approve for when a user finishes."
+  ariaLabel="Animated terminal replay of tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table where two users were reset by a hit and one is still measuring, and the block to approve."
+  caption="Recorded on the same lab computer after a working session. `dcr-std1` and `dcr-std2` each opened the SSH key decoy and wrote `~/.bashrc` where a control would have denied it, so their windows restarted; `dcr-std3` has not run an agent yet. Nothing is ready yet; the output still prints the block to approve for when a user finishes."
   frames={[
     { type: 'cmd', text: 'sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce', pauseMs: 700 },
     { type: 'out', text: 'Tetragon readiness for enforce (this host runs observe)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon is installed (/var/run/tetragon/tetragon-info.json)', pauseMs: 40 },
-    { type: 'ok', text: '  ✓ Tetragon is running (pid 380213)', pauseMs: 40 },
+    { type: 'ok', text: '  ✓ Tetragon is running (pid 471686)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ API: unix socket /var/run/tetragon/tetragon.sock', pauseMs: 40 },
     { type: 'ok', text: '  ✓ The info file, socket and their directories pass the helper\'s trust check', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon v1.7.1 is supported for enforce', pauseMs: 40 },
@@ -817,19 +821,31 @@ returns `Operation not permitted`; see
     { type: 'ok', text: '  ✓ Tetragon\'s metrics endpoint listens on loopback (127.0.0.1:2112)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon\'s health endpoint listens on loopback (127.0.0.1:6789)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ AI Discovery Plane C is on and the gateway records it', pauseMs: 40 },
-    { type: 'ok', text: '  ✓ 1 enrolled user has an agent (dcr-std1); none seen yet for dcr-std2,', pauseMs: 40 },
+    { type: 'ok', text: '  ✓ 2 enrolled users have an agent (dcr-std1, dcr-std2); none seen yet for', pauseMs: 40 },
     { type: 'out', text: '    dcr-std3', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Every enrolled command-line connector is in action mode (claudecode, codex)', pauseMs: 40 },
     { type: 'out', text: '  i This build\'s kernel controls are not approved yet; approve them (below)', pauseMs: 40 },
     { type: 'out', text: '  i 0 of 3 enrolled users finished burn-in on this host', pauseMs: 40 },
     { type: 'out', text: '  Burn-in (40h of agent use, no would-block hit, per user on this host):', pauseMs: 40 },
     { type: 'out', text: '    USER             PROGRESS              ETA       HITS', pauseMs: 40 },
-    { type: 'out', text: '    dcr-std1 (1001)     0.0h/40h   reset   -         15', pauseMs: 40 },
-    { type: 'out', text: '      ssh_private_key_read: ~/.ssh/id_ed25519 by /bin/wc', pauseMs: 40 },
-    { type: 'out', text: '        last 2026-10-08T08:36:51Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
+    { type: 'out', text: '    dcr-std1 (1001)     0.1h/40h   reset   -         4', pauseMs: 40 },
+    { type: 'out', text: '      persistence_write: ~/.bashrc by /bin/bash', pauseMs: 40 },
+    { type: 'out', text: '        last 2026-10-08T18:06:29Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
     { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
     { type: 'out', text: '        in this release; other users are not affected.', pauseMs: 40 },
-    { type: 'out', text: '    dcr-std2 (1002)     0.0h/40h     0%    measuring 0', pauseMs: 40 },
+    { type: 'out', text: '      ssh_private_key_read: ~/.ssh/id_ed25519 by /bin/wc', pauseMs: 40 },
+    { type: 'out', text: '        last 2026-10-08T18:06:19Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
+    { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
+    { type: 'out', text: '        in this release; other users are not affected.', pauseMs: 40 },
+    { type: 'out', text: '    dcr-std2 (1002)     0.5h/40h   reset   -         2', pauseMs: 40 },
+    { type: 'out', text: '      persistence_write: ~/.bashrc by /bin/bash', pauseMs: 40 },
+    { type: 'out', text: '        last 2026-10-08T17:32:33Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
+    { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
+    { type: 'out', text: '        in this release; other users are not affected.', pauseMs: 40 },
+    { type: 'out', text: '      ssh_private_key_read: ~/.ssh/id_ed25519 by /bin/wc', pauseMs: 40 },
+    { type: 'out', text: '        last 2026-10-08T17:32:25Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
+    { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
+    { type: 'out', text: '        in this release; other users are not affected.', pauseMs: 40 },
     { type: 'out', text: '    dcr-std3 (1006)     0.0h/40h     0%    measuring 0', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Kernel enforcement is not paused', pauseMs: 40 },
     { type: 'ok', text: '  ✓ No operator override', pauseMs: 40 },
@@ -849,6 +865,20 @@ returns `Operation not permitted`; see
     { type: 'spacer', pauseMs: 40 },
   ]}
 />
+
+Once a ring enforces, `status` shows each user's state. This lab ring set
+`burn_in: 0` so the controls could deny without the wait (`status` warns
+`kernel_burn_in_skipped` for it); a real ring keeps a measured burn-in. Of the
+three users, `dcr-std1` is enforcing, `dcr-std2` stays in monitor mode because
+another user's native agent holds the one deny anchor, and `dcr-std3` has no
+agent installed. The hits show what was blocked and what would have been:
+
+![tetragon status in enforce: the kernel controls digest approved, four DefenseClaw policies with controls in enforce mode and controls-burnin in monitor mode, a Users table where dcr-std1 is enforcing, dcr-std2 is monitor only because another user's native agent holds the one deny anchor and dcr-std3 has no agent installed, the blocked and would-block hits with their paths and binaries, your four Tetragon policies, and three warnings: kernel_burn_in_skipped, kernel_binary_anchor_scope_limited and kernel_pid_anchor_monitor_only](/images/tetragon/terminal-tetragon-status-enforce.png)
+
+When more than one user is ready, `verify --ready-for enforce` ends with the
+user who holds the deny anchor and how to move it:
+
+![tetragon verify --ready-for enforce on the computer that enforces: every check passes, the burn-in table for burn_in 0 with the hits of two users, and the closing line that one of three users is enforced, two stay in monitor without a deny anchor, dcr-std1 (uid 1001) holds the deny anchor as the lowest uid with a native agent install, and enrollment.exclude_users moves it](/images/tetragon/terminal-tetragon-verify-enforce-holder.png)
 
 ## Check the fleet
 
@@ -1089,7 +1119,7 @@ tell them the path and the time.
 In Claude Code the model reads the note, so its answer names the control. A
 tool call that read the SSH key decoy under `enforce`:
 
-![Claude Code after a Bash tool call that ran wc on the SSH key decoy under enforce: the tool saw Operation not permitted, exit code 1, and the answer says the system's DefenseClaw policy blocks the read and that the kernel-level control PATH-SSH-KEY prevents the operation](/images/tetragon/terminal-claude-kernel-notice.png)
+![Claude Code after a Bash tool call that ran wc on the SSH key decoy under enforce: the command failed with Operation not permitted, and the answer says DefenseClaw's kernel control policy blocked wc from reading the SSH private key under PATH-SSH-KEY and not to retry it](/images/tetragon/terminal-claude-kernel-notice.png)
 
 A block by one of your own policies reaches the model as a note from the tool
 result, and the model passes the instruction on:
@@ -1116,7 +1146,7 @@ result, and the model passes the instruction on:
    connector to `observe` or the ring to `mode: observe`. There is no per-user
    exemption in this release.
 
-![Grafana Blocked Events and Analysis, row Kernel denials (Linux): 13 kernel denials, 1 block by an administrator's Tetragon policy, and a table of denials by connector, control kernel.ssh_private_key_read, process, user and count](/images/tetragon/grafana-blocked-events-kernel.png)
+![Grafana Blocked Events and Analysis, row Kernel denials (Linux): 4 kernel denials, 1 block by an administrator's Tetragon policy, and a table of denials by connector, control, process, user and count: three reads of the SSH key by wc and one write of a shell profile by bash](/images/tetragon/grafana-blocked-events-kernel.png)
 
 ## Pause, roll back and the kill switch
 
@@ -1289,7 +1319,7 @@ reports in its load-error or error state is the problem
 | An agent got `Operation not permitted` | One of the two kernel controls, or one of your own enforcing policies, denied an open | Follow [the help-desk runbook](#when-a-control-blocks-something) |
 | `status` says Tetragon is not reachable in `consume` | Plane C is off, the helper cannot reach the socket, or Tetragon is stopped | `tetragon verify --ready-for consume` names the failing check and prints the command that fixes it |
 | No would-block hit appears for a Claude Code, Codex, Cursor or Copilot CLI user | The CLI is not installed in the user's home or an administrator prefix; the user is not an eligible account of `enterprise.enrollment`; a disabled `targets.yaml` row for that user and connector; or the connector is in observe mode | `status` lists the users with no agent and the observed-but-not-enforced sessions with the reason, and marks the connectors enrolled through machine policy with `*`. Set `enterprise.enrollment.agent_prefixes` for a CLI under an administrator prefix |
-| Burn-in does not advance | Time accrues only while an anchored agent of that user is running and the stream is connected, and a hit resets the window | Read the user's row in `status` and the estimate in `verify --ready-for enforce` |
+| Burn-in does not advance | Time accrues only while an anchored agent of that user is running, every live session of that user is in the controls policy, and the stream is connected. A new session waits a minute or two (`kernel_session_policy_pending`), more than eight live sessions pause it (`kernel_roots_over_limit`), a pause stops it, and a hit resets the window | Read the user's row and reason in `status` and the estimate in `verify --ready-for enforce`; end the extra sessions, or wait |
 | "Events lost" reads unknown | Tetragon's metrics listener is not on loopback, or Tetragon is 1.6.x | Set `metrics-server` to `127.0.0.1:2112` in [Harden Tetragon](#harden-tetragon) |
 | The ack went stale after an upgrade | The release changed a control, so the digest changed | Push the list form of `enforce_ack` with the old and the new digest |
 | Tetragon restarted and my own policies are gone | A restart drops policies added with `tetra` | Put the policies you keep in `/etc/tetragon/tetragon.tp.d` |
@@ -1442,8 +1472,9 @@ Known limits of these controls:
   `kernel_session_policy_pending`: they do not wait for a load, they do not
   fit); their user's covered burn-in time pauses until every live root is
   measured. Eight roots
-  use two `file_open` hooks on the measured Tetragon 1.7.1 host. More hooks
-  loaded but cost more than the budget described below.
+  use two `file_open` hooks on the measured Tetragon 1.7.1 host. More roots
+  would load more hooks, and every extra hook adds to the cost of each open on
+  the computer ([Cost on the host](#cost-on-the-host)).
 - A new agent session may wait a minute or two for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; the user's earlier covered time stays. If loading fails, the warning remains until the policy is repaired.
 - A control denies below an agent session that Tetragon saw start while the
   controls were loaded. A session that was already running when they loaded
@@ -1546,6 +1577,7 @@ widen it.
 | --- | --- |
 | Tetragon stops | No kernel enforcement (fail open). Plane C falls back to `cn_proc` and `fanotify` in the same stream; status warns `tetragon_unavailable`. `enterprise linux verify` still passes; `tetragon verify` fails its Tetragon checks (running, socket, the helper reads Tetragon's events), so a ring gate on it stops until Tetragon is back |
 | Tetragon restarts | The policies it held are gone. The helper loads them again within a pass (about a minute), honoring the pause and any operator override. Agent sessions that were running are then monitored, not denied, until they restart (`kernel_sessions_predate_controls`) |
+| The computer reboots | Tetragon and the sensor helper start by themselves, the helper after Tetragon. The policies Tetragon held are gone, so the helper loads them again at its first pass (about a minute), honoring a pause set with `--for` (an `--until-reboot` pause ends with the reboot). The burn-in progress is kept; the helper saves it every 30 seconds. Every agent session is new, and one that starts before the policies load is monitored until it restarts (`kernel_sessions_predate_controls`) |
 | The helper stops | Loaded policies keep running with the scope they had. Start the helper again, or run the cleanup above. When it is back, the gateway re-attaches to its event stream within seconds |
 | Events are lost | Enforcement is unaffected. Coverage is reported as partial, and burn-in time stops |
 | A policy does not load | It stays in or returns to monitor mode and status reports `kernel_reconcile_failed`. `verify` fails with `kernel_policy_load_error:<name>` when Tetragon reports a DefenseClaw policy in its load-error or error state, in `observe` or `enforce`. A policy missing after a pass is only the warning `kernel_policy_not_applied` |

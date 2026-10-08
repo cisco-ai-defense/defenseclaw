@@ -335,7 +335,7 @@ The commands are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sand
 With the feed installed and the process tree on, `sandbox ps --tree` says
 where its records come from and how many it holds:
 
-![defenseclaw sandbox ps with --tree on a Claude Code sandbox: the sandbox's init process, a login shell, the DefenseClaw supervisor and Claude Code, then the line source: kernel (Tetragon, through the sandbox kernel feed) with 349 execs and exits recorded and 303 of them with their pid in the sandbox](/images/segmentation/terminal-sandbox-ps-tree-kernel.png)
+![defenseclaw sandbox ps with --tree on a Claude Code sandbox: the sandbox's init process, a login shell, the DefenseClaw supervisor and Claude Code, then the line source: kernel (Tetragon, through the sandbox kernel feed) with 112 execs and exits recorded so far and 103 of them with their pid in the sandbox](/images/segmentation/terminal-sandbox-ps-tree-kernel.png)
 
 And `kernel-feed status` shows that the feed answers and its Tetragon stream is
 connected:
@@ -353,6 +353,7 @@ connected:
 | Audit records | Every process of the tree is one `sandbox.process_tree` start record and one exit record, at most 10 a second per sandbox (a burst of 200). Past that the tree still holds every process, but its records are not sent: the gateway log says once a minute how many, and `sandbox ps` warns with the count (`records_not_sent` in `--json`). A build or a test run in a sandbox passes 10 a second easily |
 | Files | `/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper` (the root copy), `/etc/systemd/system/defenseclaw-sandbox-feed.service`, the socket `/run/defenseclaw-sandbox-feed/feed.sock` (`root:docker 0660`); its log is `journalctl -u defenseclaw-sandbox-feed` |
 | Versions | The feed's protocol is versioned. Your gateway reads its own protocol and the previous one; otherwise it uses the 5-second sample and `sandbox ps`, `kernel-feed status`, `defenseclaw doctor` (**Sandbox kernel feed**) and the gateway log print the `sudo ... sandbox kernel-feed install` command. `defenseclaw upgrade` prints it too when the feed runs another release |
+| After a reboot | The feed starts by itself, after Tetragon and Docker, and reads Tetragon within seconds. Your DefenseClaw gateway does not start with the computer ([Startup behavior](/docs/get-started/install#startup-behavior)): until the next hook call or `defenseclaw-gateway start` starts it, `sandbox list` says so, a sandboxed agent's hook calls are refused with a message that names the stopped gateway, and `sandbox ps` has no `source: kernel`. Once the gateway runs, `source: kernel` returns |
 | Uninstall | `defenseclaw uninstall` leaves the root service in place and prints `sudo <gateway> sandbox kernel-feed uninstall`. After `--binaries`, use `sudo /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper --sandbox-feed --uninstall` |
 
 | Reason | Means |
@@ -371,6 +372,12 @@ warns and uses the 5-second sample, and `defenseclaw doctor` warns on the
 **Sandbox kernel feed** row. Ask the administrator to check Tetragon
 (`sudo systemctl status tetragon`). The feed reconnects by itself when
 Tetragon is back.
+
+```text
+$ defenseclaw doctor | grep -A1 "Sandbox kernel feed"
+  [WARN] Sandbox kernel feed  -  build 1.0.45, protocol 1; its Tetragon stream is unavailable (tetragon_unavailable)
+      -> Next step: ask the administrator to check Tetragon ('sudo systemctl status tetragon'); the feed reconnects by itself, and sandbox process trees use the 5-second sample until then
+```
 
 ## One OpenShell gateway per machine
 

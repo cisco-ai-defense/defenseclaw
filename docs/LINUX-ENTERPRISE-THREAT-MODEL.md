@@ -395,8 +395,8 @@ access. Status shows presence, modification time and a digest prefix only.
     finished burn-in and have a native agent install, while the other users
     stay in monitor
     (`kernel_binary_anchor_scope_limited`).
-16. The arguments of Codex's notify program carry the turn's content
-    (GAP-0045). The helper withholds them from its stream, but any other
+16. The arguments of Codex's notify program carry the turn's content. The
+    helper withholds them from its stream, but any other
     process accounting on the computer (Tetragon's own export file, which is
     root `0600` and the customer's, or `auditd`) records them.
 17. The events of the customer's own Tetragon policies carry a target (a file

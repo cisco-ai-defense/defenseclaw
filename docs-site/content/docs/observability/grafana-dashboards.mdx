@@ -88,9 +88,10 @@ counts:
 
 The Kernel controls row counts what the two controls denied and what they
 would have denied in monitor mode, and shows each user's burn-in. This run
-went from observe to enforce on the same computer:
+went from observe to enforce and back on the same computer, so the table of
+policies also lists the ones removed along the way:
 
-![Grafana AI Discovery Runtime Planes, row Kernel controls (Linux): tiles for hosts with enforcing controls (1), kernel denials (5), would-blocks in monitor mode (8), agent activity with no hook decision, paused hosts and operator overrides, and reconcile failures and orphans (0); charts of kernel denials by control and connector and of would-blocks by control; a table of DefenseClaw kernel policies with the change, family, host, mode, policy and state; and a table of burn-in progress per user with the host, uid, covered and needed hours and progress](/images/tetragon/grafana-kernel-controls-linux.png)
+![Grafana AI Discovery Runtime Planes, row Kernel controls (Linux): tiles for hosts with enforcing controls (1), kernel denials (5), would-blocks in monitor mode (5), agent activity with no hook decision (58), paused hosts and operator overrides (0), and reconcile failures and orphans (0); charts of kernel denials by control and connector and of would-blocks by control; a table of DefenseClaw kernel policies with the change (loaded or removed), family, host, mode, policy and state; and a table of burn-in progress per user with the host, uid, covered and needed hours and progress](/images/tetragon/grafana-kernel-controls-linux.png)
 
 The row for your own policies separates what they saw from what reached an AI
 agent:
@@ -100,7 +101,7 @@ agent:
 **Blocked Events & Analysis** shows the kernel denials by control, connector,
 user and process:
 
-![Grafana Blocked Events and Analysis, row Kernel denials (Linux): 13 kernel denials, 1 block by an administrator's Tetragon policy, and a table of denials by connector, control, process, user and count](/images/tetragon/grafana-blocked-events-kernel.png)
+![Grafana Blocked Events and Analysis, row Kernel denials (Linux): 4 kernel denials, 1 block by an administrator's Tetragon policy, and a table of denials by connector, control, process, user and count](/images/tetragon/grafana-blocked-events-kernel.png)
 
 ## Filter by user
 

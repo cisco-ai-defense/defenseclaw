@@ -56,8 +56,8 @@ says otherwise. Per-user installs never connect to Tetragon.
     sessions are anchored in one monitor controls policy, because every extra
     `file_open` hook runs for every open on the computer: further sessions
     are reported as `kernel_roots_over_limit` and their user's burn-in pauses
-    until every live session is measured. A new session may wait a few
-    seconds for its process id to reach an enabled controls policy
+    until every live session is measured. A new session may wait a minute
+    or two for its process id to reach an enabled controls policy
     (`kernel_session_policy_pending`) and accrues no burn-in while it waits;
     the user's earlier covered time stays.
     An eligible account counts as enrolled for
