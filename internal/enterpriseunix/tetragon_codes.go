@@ -350,8 +350,8 @@ var tetragonCodes = map[string]tetragonCodeText{
 			" (it did not restart into this build)" + next
 	}},
 	kernelpolicy.WarnRootsOverLimit: {Message: func(f tetragonFacts) string {
-		return defaultStr(f.Detail, "some") + fmt.Sprintf(" live agent processes are over the %d-pid anchor limit", kernelpolicy.MaxPIDs) +
-			" (they are observed, not enforced); nothing to do, the count is reported"
+		return defaultStr(f.Detail, "some") + fmt.Sprintf(" live agent sessions are over the %d-session limit of the monitor controls", kernelpolicy.MaxPIDs) +
+			" (the controls do not count their opens, and their users' burn-in pauses until fewer sessions run); nothing to do, the count is reported"
 	}},
 	kernelpolicy.WarnSessionPolicyPending: {Message: func(f tetragonFacts) string {
 		return defaultStr(f.Detail, "some") + " agent session(s) are waiting for an enabled controls policy that includes their process ids" +
