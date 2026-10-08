@@ -210,6 +210,12 @@ rest also reach per-user installs.
   container (0755 folders, 0644 files, 0755 scripts; `env/.env` stays
   private), and the bridge stops as soon as the container keeps restarting,
   with its last log lines.
+- **`defenseclaw setup splunk --disable --logs` stops the local Splunk
+  container.** It ran the bridge's `down` without the env file the bridge
+  requires, ignored the failure and said the container stopped; it now passes
+  the file, checks the container is gone, and otherwise says why and how to
+  stop it. A setup re-run no longer takes DefenseClaw's own running Splunk
+  for a foreign holder of ports 8000 and 8088.
 - **Security: hooks keep the gateway token and the hook payload off process
   command lines and out of child environments.** The Claude Code,
   Antigravity, Copilot, Cursor, Devin, Hermes, Kiro and OpenHands shell

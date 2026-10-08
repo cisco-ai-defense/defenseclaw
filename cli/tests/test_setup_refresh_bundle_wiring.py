@@ -31,6 +31,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -604,6 +605,62 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         mock_refresh.assert_called_once_with("/data")
 
 
+class TestStopSplunkBridgeReallyStops(unittest.TestCase):
+    """GAP-0346: `setup splunk --disable --logs` ran `bridge down` without the
+    env file the bridge requires, ignored its failure and said the container
+    stopped; the next setup then took that running stack for a foreign
+    holder of ports 8000 and 8088."""
+
+    @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=False)
+    @patch(
+        "defenseclaw.commands.cmd_setup._resolve_bridge_bin", return_value="/data/splunk-bridge/bin/splunk-claw-bridge"
+    )
+    @patch("defenseclaw.commands.cmd_setup.is_compose_project_running")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_down_gets_the_env_file_and_a_failure_is_said(
+        self, run: MagicMock, running: MagicMock, *_mocks: MagicMock
+    ) -> None:
+        from defenseclaw.commands.cmd_setup import _stop_bridge
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            env_file = os.path.join(data_dir, "splunk-bridge", "env", ".env")
+            os.makedirs(os.path.dirname(env_file))
+            with open(env_file, "w", encoding="utf-8") as handle:
+                handle.write("SPLUNK_PASSWORD=dccert-decoy\n")
+            running.side_effect = [True, False]
+            run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                _stop_bridge(data_dir)
+            self.assertEqual(run.call_args.args[0][1:], ["down", "--env-file", env_file])
+            self.assertIn("Local Splunk container stopped", output.getvalue())
+
+            running.side_effect = [True, True]
+            run.return_value = subprocess.CompletedProcess([], 1, "", "error: environment file not found\n")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                _stop_bridge(data_dir)
+            self.assertIn(
+                "Could not stop the local Splunk container: error: environment file not found", output.getvalue()
+            )
+            self.assertNotIn("container stopped", output.getvalue())
+
+    @patch("defenseclaw.commands.cmd_setup.shutil.which", return_value="/usr/bin/docker")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", ""))
+    @patch("defenseclaw.commands.cmd_setup._port_in_use", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup.is_compose_project_running")
+    def test_ports_held_by_its_own_stack_pass_the_preflight(self, running: MagicMock, *_mocks: MagicMock) -> None:
+        from defenseclaw.commands.cmd_setup import _preflight_docker
+
+        running.return_value = True
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(_preflight_docker(), (True, ""))
+        running.return_value = False
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(_preflight_docker(), (False, "port_8000_in_use"))
+
+
 class TestStopSplunkBridgeEnvironment(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True)
@@ -728,10 +785,12 @@ class TestStopSplunkBridgeEnvironment(unittest.TestCase):
         "defenseclaw.commands.cmd_setup._resolve_bridge_bin",
         return_value="/fake/bin/splunk-claw-bridge",
     )
+    @patch("defenseclaw.commands.cmd_setup.is_compose_project_running", side_effect=[True, False])
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     def test_disable_down_does_not_inherit_gateway_tokens(
         self,
         mock_run: MagicMock,
+        _running: MagicMock,
         _resolve: MagicMock,
         _native_windows: MagicMock,
         _supported: MagicMock,

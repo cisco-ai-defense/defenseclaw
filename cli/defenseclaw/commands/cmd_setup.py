@@ -18201,8 +18201,16 @@ def _preflight_docker() -> tuple[bool, str]:
         return False, "docker_daemon_not_running"
     click.echo("    Docker daemon running... ok")
 
+    own_stack: bool | None = None
     for port, label in [(8000, "Splunk Web"), (8088, "HEC")]:
         if _port_in_use(port):
+            if own_stack is None:
+                own_stack = is_compose_project_running(SPLUNK_COMPOSE_PROJECT, environment=_splunk_bridge_child_env())
+            if own_stack:
+                # DefenseClaw's own local Splunk holds it, which setup
+                # restarts (GAP-0346: a stack whose setup was interrupted).
+                click.echo(f"    Port {port} ({label})... used by DefenseClaw's local Splunk, which setup restarts")
+                continue
             click.echo(f"    Port {port} ({label})... IN USE")
             click.echo(f"    Free port {port} or stop the existing Splunk instance.")
             return False, f"port_{port}_in_use"
@@ -18442,17 +18450,33 @@ def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
         return
+    if not is_compose_project_running(SPLUNK_COMPOSE_PROJECT, environment=child_env):
+        click.echo("    Local Splunk container was not running")
+        return
+    # The bridge refuses to run without its env file, which `up` was given
+    # too: without it `down` failed while this said "stopped" (GAP-0346).
+    down_args = [bridge, "down"]
+    env_file = os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL)
+    if os.path.isfile(env_file):
+        down_args.extend(["--env-file", env_file])
     try:
-        subprocess.run(
-            [bridge, "down"],
+        result = subprocess.run(
+            down_args,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=120,
+            check=False,
             env=child_env,
         )
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        failure, stopped = (lines[-1] if lines else f"exit {result.returncode}"), result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        failure, stopped = str(exc), False
+    if stopped and not is_compose_project_running(SPLUNK_COMPOSE_PROJECT, environment=child_env):
         click.echo("    Local Splunk container stopped")
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        click.echo("    Could not stop local Splunk container (may not be running)")
+        return
+    click.echo(f"    Could not stop the local Splunk container: {failure}")
+    click.echo(f"    Stop it with: docker compose -p {SPLUNK_COMPOSE_PROJECT} down")
 
 
 # ---------------------------------------------------------------------------
