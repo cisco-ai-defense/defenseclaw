@@ -196,3 +196,19 @@ func TestMCPServerAddedDuringFirstCycleIsAdmittedAtOnce(t *testing.T) {
 		t.Fatalf("admitted %v, want added once and slow only baselined", admitted)
 	}
 }
+
+// GAP-0623: a command server from a project .mcp.json was scanned by name
+// from the gateway folder, where the CLI cannot find it, and every scan
+// failed closed. It is scanned from its project, for its connector.
+func TestProjectMCPServerIsScannedFromItsProject(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	project := t.TempDir()
+	server := config.MCPServerEntry{Name: "timesrv", Command: "uvx", Args: []string{"mcp-server-time"}, Connector: "claudecode", Project: project, SourceScope: "project"}
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: "claudecode"}
+	ms, ok := w.scannerFor(evt).(*scanner.MCPScanner)
+	if !ok || ms.Project != project || ms.Connector != "claudecode" {
+		t.Fatalf("scanner %+v, want the scan run in %s for claudecode", ms, project)
+	}
+}
