@@ -1144,8 +1144,8 @@ def test_multi_connector_rows_noop_for_single_connector() -> None:
 
 
 def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
-    # N3 state-layer surface: scanner overrides live only in the active policy
-    # YAML / data.json today. The default config has none, so the summary is ""
+    # N3 state-layer surface: scanner overrides come from config.yaml.
+    # The default config has none, so the summary is ""
     # and the Overview renders nothing until the adapter populates the field.
     assert format_scanner_overrides_summary(()) == ""
     assert OverviewPanelModel(None, version="test").scanner_overrides_summary() == ""

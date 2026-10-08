@@ -2137,36 +2137,49 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
 def admission_action_overrides(
     config: object | None,
 ) -> tuple[tuple[str, str, str, str], ...]:
-    """The per-type admission actions config.yaml sets that differ from the
-    built-in policy (N3).
+    """Effective explicit admission actions that differ from built-in policy.
 
-    ``admission.<skill|mcp|plugin>.actions`` refine the inherited
-    ``admission.defaults`` for one asset type; an action equal to the built-in
-    one (for example after ``policy activate default``) is not an override and
-    is left out. Output: ``(type, severity, surface, action)`` tuples for
-    :func:`format_scanner_overrides_summary`.
-    Malformed entries are skipped so a bad value degrades to a partial list,
-    never a raise.
+    Per-type actions win over scanner-derived skill actions, which win over
+    admission.defaults.actions. Only effective differences are shown to the
+    Overview and status views.
     """
 
     admission = getattr(config, "admission", None)
     if admission is None:
         return ()
     try:
-        from defenseclaw.enforce.admission import _builtin_admission, _compile_action
+        from defenseclaw.enforce.admission import (  # noqa: PLC0415
+            _builtin_admission,
+            _compile_action_map,
+            _derived_scanner_gate,
+        )
     except Exception:  # noqa: BLE001 - the override summary is purely informational.
         return ()
+    defaults = _compile_action_map(getattr(getattr(admission, "defaults", None), "actions", None))
     flat: list[tuple[str, str, str, str]] = []
     for target_type in ("skill", "mcp", "plugin"):
-        actions = getattr(getattr(admission, target_type, None), "actions", None) or {}
+        own = _compile_action_map(getattr(getattr(admission, target_type, None), "actions", None))
+        derived = {}
+        if target_type == "skill":
+            scanner = getattr(getattr(config, "scanners", None), "skill_scanner", None)
+            derived = _derived_scanner_gate(
+                getattr(scanner, "fail_on_severity", ""), getattr(scanner, "review_queue_min", "")
+            )
         builtin = _builtin_admission(target_type).actions
-        for severity, raw in actions.items():
-            compiled = _compile_action(raw)
-            if compiled is None or compiled == builtin.get(str(severity).upper()):
+        for severity in dict.fromkeys((*own, *defaults)):
+            if severity in own:
+                compiled = own[severity]
+            elif severity in derived:
                 continue
-            action = compiled[0]
+            else:
+                compiled = defaults[severity]
+            if compiled == builtin.get(severity):
+                continue
+            action, allowed = compiled
             for surface in ("install", "file", "runtime"):
-                flat.append((target_type, str(severity).upper(), surface, str(getattr(action, surface))))
+                flat.append((target_type, severity, surface, str(getattr(action, surface))))
+            if allowed:
+                flat.append((target_type, severity, "verdict", "allow"))
     return tuple(flat)
 
 
