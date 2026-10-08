@@ -69,9 +69,17 @@ func newUserScopedTestServer(t *testing.T, standalone bool, ledger *userScopedTe
 			return now
 		},
 	}
-	restoreName := userScopedIdentityName
+	restoreName, restoreForName := userScopedIdentityName, userScopedIdentityForName
 	userScopedIdentityName = func(identity string) string { return names[identity] }
-	t.Cleanup(func() { userScopedIdentityName = restoreName })
+	userScopedIdentityForName = func(name string) (string, bool) {
+		for identity, held := range names {
+			if strings.EqualFold(held, name) {
+				return identity, true
+			}
+		}
+		return "", false
+	}
+	t.Cleanup(func() { userScopedIdentityName, userScopedIdentityForName = restoreName, restoreForName })
 
 	observed := &userScopedObservation{}
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -283,6 +291,15 @@ func TestUserScopedCredentialBindsWindowsSID(t *testing.T) {
 		observed.userID != sid || observed.idKind != useridentity.KindWindowsSID || observed.userName != "Alice" {
 		t.Fatalf("SID-bound credential: status %d %+v", code, *observed)
 	}
+	// GAP-0907, GAP-0702: after Rename-LocalUser the hook still sends the
+	// name its user signed in with, which no account has now; the SID
+	// matches, so it is served and the records carry the current name.
+	headers[llmEventUserNameHeader] = "old-alice"
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, headers); code != http.StatusOK ||
+		observed.userID != sid || observed.userName != "Alice" {
+		t.Fatalf("renamed account: status %d %+v", code, *observed)
+	}
+	headers[llmEventUserNameHeader] = "alice"
 	headers[llmEventUserIDHeader] = "S-1-5-21-1111-2222-3333-1002"
 	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, headers); code != http.StatusForbidden || observed.called {
 		t.Fatalf("SID naming another user: status %d called=%v", code, observed.called)

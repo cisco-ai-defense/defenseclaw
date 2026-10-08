@@ -12,11 +12,27 @@
 
 package gateway
 
-import "github.com/defenseclaw/defenseclaw/internal/useridentity"
+import (
+	"os/user"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+)
 
 // userScopedIdentityName names the account a per-user credential is bound
 // to: the SID's account on Windows.
 var userScopedIdentityName = useridentity.NameForID
+
+// userScopedIdentityForName is the identity (SID) of the account an
+// account name names now, or false when none has it.
+var userScopedIdentityForName = func(name string) (string, bool) {
+	account, err := user.Lookup(strings.TrimSpace(name))
+	if err != nil || account == nil {
+		return "", false
+	}
+	return connector.CanonicalUserScopedIdentity(account.Uid)
+}
 
 // userScopedIdentityHome is the profile directory of the account a per-user
 // credential is bound to (the SID's ProfileList entry on Windows), or "".

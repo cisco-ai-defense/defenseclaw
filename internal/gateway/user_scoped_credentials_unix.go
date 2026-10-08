@@ -13,8 +13,13 @@
 package gateway
 
 import (
+	"context"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -29,6 +34,18 @@ var userScopedIdentityName = func(identity string) string {
 		return ""
 	}
 	return managedHookPeerName(uid)
+}
+
+// userScopedIdentityForName is the uid of the account an account name names
+// now through the platform account database, or false when none has it.
+var userScopedIdentityForName = func(name string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	account, err := unixidentity.Default(ctx).LookupUser(strings.TrimSpace(name))
+	if err != nil {
+		return "", false
+	}
+	return connector.CanonicalUserScopedIdentity(strconv.Itoa(account.UID))
 }
 
 // userScopedIdentityHome is the home of the account a per-user credential is
