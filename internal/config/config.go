@@ -2712,6 +2712,7 @@ func loadConfigSourceChecked(
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
 	foldV8ScannerKeys(&cfg)
+	cleanCustomPackPaths(&cfg)
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
 		return nil, err
 	}
