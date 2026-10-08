@@ -1261,6 +1261,13 @@ port arrives as an ask for you to approve. Once approved, the session's
 first connection shows in `defenseclaw sandbox activity` as
 `✓ host.openshell.internal:5432 (port 5432 on this machine)`.
 
+The ports DefenseClaw refuses are your account's: its API, hook ingress and
+egress proxy, and the OpenShell gateway. On a machine several accounts use,
+another account's DefenseClaw listens on ports your account cannot see as
+DefenseClaw's (its configuration is private to it), so `--host-port` accepts
+them like any other port, and the ask is what stands between them and the
+sandbox. Approve only a port whose service you know.
+
 ### Other run flags
 
 | Flag | Effect |
