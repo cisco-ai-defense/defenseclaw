@@ -461,7 +461,10 @@ Secrets and upgrades restart it on their own. On every OS, `ensure`
 applies a config change that only touches keys the gateway reloads in place
 (most of them) in the running gateway, without a restart, and waits until the
 gateway reports the new policy: the policy generation on `/health` and on
-decisions goes up by one. On Windows the change is applied the same way when
+decisions goes up by one. On Linux and macOS a file that differs only in
+bytes (comments, line endings, a BOM, quoting) is applied the same way: the
+config generation goes up, the effective policy digest stays, and the gateway
+keeps running. On Windows the change is applied the same way when
 the installed release is current and the supplied config differs from the
 installed one only in such keys: `ensure` replaces `config.yaml` with its
 access control kept, waits up to 30 seconds for the gateway to report the new

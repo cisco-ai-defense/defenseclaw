@@ -77,8 +77,11 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	if err != nil || sha256Bytes(previous) != record.ConfigSHA256 {
 		return false
 	}
+	// A file that differs only in bytes (a comment, CRLF, a BOM, quoting)
+	// changes no key: it is applied hot like any reloadable change, so the
+	// gateway is not restarted for a policy that stays the same (GAP-0545).
 	changed, err := configwrite.ChangedPaths(previous, p.config.Raw)
-	if err != nil || len(changed) == 0 || len(configwrite.ManagedRestartRequired(changed)) > 0 {
+	if err != nil || len(configwrite.ManagedRestartRequired(changed)) > 0 {
 		return false
 	}
 	gateway, ok := gatewayUnitOf(env.Services.Units())
