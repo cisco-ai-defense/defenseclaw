@@ -87,8 +87,14 @@ DESKTOP_ONLY_FILES = frozenset(
         "cmd/defenseclaw-setup/retired_install_state.go",
         "internal/legacyconnector/legacyconnector.go",
         "internal/legacyconnector/legacyconnector_test.go",
+        # IDE inventory: legacy Desktop folders are reported as Devin Desktop,
+        # and the page names the old product so admins can find it (GAP-0418).
+        "docs-site/content/docs/ai-discovery.mdx",
     }
 )
+# Third-party VS Code extension ids the IDE inventory flags as AI extensions
+# (GAP-0343). They name a vendor extension, not a DefenseClaw connector.
+THIRD_PARTY_EXTENSION_IDS = ("google." + _GEMINI + "-" + _CLI + "-vscode-ide-companion",)
 # Files that may name either retired connector.
 UNRESTRICTED_FILES = frozenset({"CHANGELOG.md", "docs/ENTERPRISE-TEST-PLAN.md"})
 UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"
@@ -144,6 +150,8 @@ def _violations(relative: str, text: str) -> list[str]:
     """Return the retired names ``text`` may not contain at path ``relative``."""
     if relative.startswith(EXCLUDED_PREFIXES) or relative in UNRESTRICTED_FILES:
         return []
+    for extension_id in THIRD_PARTY_EXTENSION_IDS:
+        text = text.replace(extension_id, "")
     if relative in DESKTOP_ONLY_FILES:
         hits = _hits(text, GEMINI_RE) + _hits(text, GEMINI_LIST_RE)
     else:
