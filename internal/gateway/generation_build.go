@@ -136,7 +136,10 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	for key, digest := range assetDigestComponents(cfg) {
 		g.Components[key] = digest
 	}
-	g.Providers = buildGenerationProviders(cfg)
+	g.Providers, err = buildGenerationProviders(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("generation: providers: %w", err)
+	}
 	g.Components["providers"] = g.Providers.digest()
 	for key, pack := range g.RulePacks {
 		g.Components["rule_pack:"+key] = "sha256:" + pack.Summary().Digest
