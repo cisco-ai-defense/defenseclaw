@@ -277,7 +277,15 @@ sudo dnf install realmd sssd sssd-tools sssd-dbus sssd-kcm adcli samba-common-to
 
 ```bash title="Ubuntu 24.04"
 sudo apt-get install realmd sssd-ad sssd-tools sssd-dbus sssd-kcm libnss-sss libpam-sss adcli krb5-user
+sudo pam-auth-update --enable mkhomedir
+sudo hostnamectl set-hostname host.corp.example.com
+sudo grep -qxF 'includedir /etc/krb5.conf.d/' /etc/krb5.conf || sudo sed -i '1i includedir /etc/krb5.conf.d/' /etc/krb5.conf
 ```
+
+On Ubuntu, `krb5-user` asks for the default Kerberos realm during package
+installation; enter `CORP.EXAMPLE.COM`. Set the host's FQDN before `realm join`
+so its keytab contains `host/host.corp.example.com`. Enabling `mkhomedir`
+creates an AD user's home at first sign-in.
 
 ```bash
 sudo realm discover corp.example.com
@@ -285,9 +293,16 @@ sudo realm join --membership-software=adcli --client-software=sssd -U administra
 sudo realm permit alice@corp.example.com
 ```
 
-On Ubuntu, `/etc/krb5.conf` must contain `includedir /etc/krb5.conf.d/`. That
-loads SSSD's `localauth` plugin; without it a GSSAPI sign-in maps the ticket to
-`alice` instead of `alice@corp.example.com` and SSH denies the login.
+On Ubuntu, the `includedir` line loads SSSD's `localauth` plugin; without it a
+GSSAPI sign-in maps the ticket to `alice` instead of
+`alice@corp.example.com` and SSH denies the login. Also enable GSSAPI in
+OpenSSH before testing the sign-in:
+
+```bash title="Ubuntu 24.04"
+printf 'GSSAPIAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/50-gssapi.conf
+sudo sshd -t
+sudo systemctl reload ssh
+```
 
 </Step>
 
@@ -301,11 +316,15 @@ root hook guardian (standalone enterprise). Enable the attribute in
 
 ```ini
 [sssd]
-services = nss, pam, ifp
+services = ifp
 
 [ifp]
 user_attributes = +userPrincipalName
 ```
+
+On Ubuntu 24.04, the NSS and PAM responders are socket activated. Listing
+them in `services` as well makes their sockets fail; list only `ifp` here.
+On RHEL 9, use `services = nss, pam, ifp`.
 
 If InfoPipe returns no `userPrincipalName`, also add
 `ldap_user_extra_attrs = userPrincipalName` to the `[domain/...]`
@@ -321,13 +340,16 @@ examples in these docs assume.
 ```bash
 sudo sss_cache -E
 sudo systemctl restart sssd
+systemctl is-system-running
 getent passwd alice@corp.example.com
 id alice@corp.example.com
 realm list
 dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe org.freedesktop.sssd.infopipe.GetUserAttr string:alice@corp.example.com array:string:userPrincipalName
 ```
 
-`getent` and `id` must show the user and the groups. `realm list` must show
+On Ubuntu, `systemctl is-system-running` should say `running`; if it says
+`degraded`, inspect `systemctl --failed` before continuing. `getent` and `id`
+must show the user and the groups. `realm list` must show
 the domain with `server-software: active-directory`: the directory type comes
 from it, on per-user installs too. The `dbus-send` call must return the UPN. Note the group spelling `id -Gn` prints (`ml-team@corp.example.com`):
 it is the name a `groups` assignment uses.
@@ -355,15 +377,27 @@ defenseclaw audit export --since 10m \
   | jq -c 'select(.action=="hook_decision") | .structured
       | {user: ."defenseclaw.user.name", domain: ."defenseclaw.user.domain",
          directory: ."defenseclaw.user.directory", source: ."defenseclaw.user.identity.source",
+         principal: ."defenseclaw.user.principal",
+         kerberos_principal: ."defenseclaw.session.kerberos_principal",
          assurance: ."defenseclaw.user.principal.assurance", session: ."defenseclaw.session.kind",
          agent: ."defenseclaw.agent.identity.id"}' | sort -u
 ```
 
-A per-user install shows `domain` `corp.example.com`, `source` `sssd`,
-`assurance` `verified` and `session` `ssh`, with no `directory`. The
-standalone enterprise profile adds `directory` `active_directory` and
-`source` `sssd_infopipe`. The principal and the Kerberos principal appear
-only after you turn on `ai_discovery.include_user_principal`. See
+On a managed Linux host, export through the installed gateway as root and
+inspect the output file:
+
+```bash
+audit_file=$(mktemp)
+sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 10m -o "$audit_file" --force
+jq -c 'select(.action=="hook_decision") | .structured' "$audit_file"
+rm "$audit_file"
+```
+
+A per-user install shows `domain` `corp.example.com`, `directory`
+`active_directory`, `source` `sssd`, `assurance` `verified` and `session`
+`ssh`. The standalone enterprise profile reports `source` `sssd_infopipe`.
+The projected `principal` and `kerberos_principal` values are null until you
+turn on `ai_discovery.include_user_principal`. See
 [Turn off the principal or the IDE inventory](#turn-off-the-principal-or-the-ide-inventory).
 
 </Step>
@@ -508,7 +542,7 @@ none of these facts.
 | `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
 | A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice@corp.example.com --json` and compare `subject.groups` with your spelling. If the group was renamed or deleted in the directory, `explain`, `profile list`, `status` and `doctor` warn `group "..." is not known to this host`, and so does the gateway log at start and reload. Use the SID to avoid name ambiguity. On Windows, a user added to the group must sign out and back in first. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
-| A user's new group has no effect, or `explain` shows it and the audit rows do not yet | Three layers sit between the directory and a decision. SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. The gateway keeps the user's directory facts for 15 minutes from the user's first request. And the first request after those 15 minutes still uses the old facts while one background lookup replaces them. `guardrail profile explain` asks the operating system directly, so it shows the profile requests get after the next refresh; its `cache:` line gives the age of the facts requests use now, with a warning when they give another profile. Restart the gateway to drop its cache and use the new group at once. |
+| A user's new group has no effect, or `explain` shows it and the audit rows do not yet | Three layers sit between the directory and a decision. SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. The gateway keeps the user's directory facts for 15 minutes from the user's first request. The first request after those 15 minutes still uses the old facts while one background lookup replaces them. `guardrail profile explain` asks the operating system directly, so it shows the profile requests get after the next refresh. The per-user CLI's `cache:` line gives the age of the facts requests use now; managed `enterprise linux profile-explain` does not print that age. Restart the gateway to drop its cache and use the new group at once. |
 | A new session ID after a restart | Expected only for a new chat. A resumed chat keeps its `ais-` ID and the agent ID (`agt-`) stays the same; if the agent ID changed, the connector's config root moved. |
 | `profile explain --user alice` answers `default_lookup_failed` | With SSSD fully qualified names the short name `alice` is not an account on the host. Pass the name `getent passwd` shows (`alice@corp.example.com`, in any case, so the upper-case realm form Kerberos reports works too) or the uid. |
 | `profile explain` says the gateway did not answer within 35 s (status and doctor: "running but did not answer in time"; on a managed host `enterprise linux profile-explain` says the gateway "took the connection but did not answer within 35 s") | The gateway is running and still resolving the user, which a cold SSSD or a slow domain controller causes (an account in several hundred groups can need about 20 seconds the first time). Time `getent initgroups alice@corp.example.com` on the host, then ask again: the answer is quick once SSSD has the groups. Only `Could not ask the gateway ... Start it with` (on a managed host, `did not answer; check the deployment with`) means the gateway is not running. |

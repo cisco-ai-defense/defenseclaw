@@ -93,7 +93,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --group) [ "$#" -ge 2 ] || die "--group needs a value" 2; group=$2; shift 2 ;;
     --user)
-      [ "$#" -ge 2 ] && [ -n "$2" ] || die "--user needs an account name (leave it out for the user at the console)" 2
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        die "--user needs an account name (leave it out for the user at the console)" 2
+      fi
       account=$2; shift 2 ;;
     --allow-system-group) allow_system=1; shift ;;
     --apply) apply=1; shift ;;
