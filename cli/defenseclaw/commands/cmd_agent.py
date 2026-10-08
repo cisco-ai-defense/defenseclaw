@@ -3740,9 +3740,9 @@ def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
     from defenseclaw import config_writer
     from defenseclaw.commands.cmd_status import _enterprise_profile
     from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config import load as load_config
 
     cfg = _require_loaded_config(app)
-    configured = list(getattr(cfg.ai_discovery, "signature_packs", []) or [])
     secure_client = _enterprise_profile(cfg) == "secure_client"
     if secure_client:
         # Match the v8 command: install into the directory without a config
@@ -3765,29 +3765,34 @@ def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
         config_writer.refuse_when_managed(config_path)
         with config_writer.hold_lock(config_path):
             config_writer.refuse_when_managed(config_path)
-            dest = ai_signatures.signature_pack_destination(pack_path, cfg.data_dir)
+            # The command may have loaded config before another install committed.
+            # Read it again under the writer lock before checking and editing packs.
+            current_cfg = load_config(data_dir=cfg.data_dir) if Path(config_path).is_file() else cfg
+            configured = list(current_cfg.ai_discovery.signature_packs or [])
+            dest = ai_signatures.signature_pack_destination(pack_path, current_cfg.data_dir)
             previous = dest.read_bytes() if dest.exists() else None
             previous_mode = dest.stat().st_mode & 0o777 if previous is not None else None
             dest = ai_signatures.install_signature_pack(
-                pack_path, data_dir=cfg.data_dir, signature_packs=configured, replace=replace
+                pack_path, data_dir=current_cfg.data_dir, signature_packs=configured, replace=replace
             )
-            original_pins = dict(getattr(cfg.ai_discovery, "signature_pack_digests", None) or {})
+            original_pins = dict(current_cfg.ai_discovery.signature_pack_digests or {})
             try:
                 if str(dest) not in configured:
-                    cfg.ai_discovery.signature_packs = [*configured, str(dest)]
+                    current_cfg.ai_discovery.signature_packs = [*configured, str(dest)]
                 pins = dict(original_pins)
                 if str(dest) in pins:
                     pins[str(dest)] = "sha256:" + hashlib.sha256(dest.read_bytes()).hexdigest()
-                    cfg.ai_discovery.signature_pack_digests = pins
+                    current_cfg.ai_discovery.signature_pack_digests = pins
                 if str(dest) not in configured or str(dest) in pins:
-                    cfg.save()
+                    current_cfg.save()
+                app.cfg = current_cfg
             except Exception:
                 if previous is None:
                     dest.unlink()
                 else:
                     ai_signatures.restore_signature_pack(dest, previous, previous_mode)
-                cfg.ai_discovery.signature_packs = configured
-                cfg.ai_discovery.signature_pack_digests = original_pins
+                current_cfg.ai_discovery.signature_packs = configured
+                current_cfg.ai_discovery.signature_pack_digests = original_pins
                 raise
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc

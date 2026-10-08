@@ -386,6 +386,44 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         payload = json.loads(listed.output)
         self.assertIn("custom-cli-ai", {sig["id"] for sig in payload})
 
+    def test_signature_install_merges_a_pack_added_after_config_load(self):
+        from defenseclaw.config import load
+
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.data_dir = str(Path(tmp_dir) / "signature-race")
+        Path(app.cfg.data_dir).mkdir()
+        app.cfg.save()
+        stale_cfg = load(data_dir=app.cfg.data_dir)
+        packs = []
+        for name in ("first", "second"):
+            pack = Path(tmp_dir) / f"{name}.json"
+            pack.write_text(json.dumps({
+                "version": 1, "id": name,
+                "signatures": [{
+                    "id": f"{name}-ai", "name": name, "vendor": "Example",
+                    "category": "ai_cli",
+                }],
+            }), encoding="utf-8")
+            packs.append(pack)
+
+        try:
+            first = self.runner.invoke(
+                agent, ["signatures", "install", str(packs[0])], obj=app, catch_exceptions=False
+            )
+            self.assertEqual(first.exit_code, 0, first.output)
+            app.cfg = stale_cfg
+            second = self.runner.invoke(
+                agent, ["signatures", "install", str(packs[1])], obj=app, catch_exceptions=False
+            )
+            self.assertEqual(second.exit_code, 0, second.output)
+            saved = load(data_dir=app.cfg.data_dir)
+            self.assertEqual(
+                {Path(path).name for path in saved.ai_discovery.signature_packs},
+                {"first.json", "second.json"},
+            )
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
     def test_managed_signature_replace_refuses_before_overwrite(self):
         app, tmp_dir, db_path = make_app_context()
         app.cfg.data_dir = str(Path(tmp_dir) / "managed")
