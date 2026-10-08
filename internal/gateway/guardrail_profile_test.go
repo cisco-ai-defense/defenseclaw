@@ -1135,7 +1135,7 @@ func TestProfileExplainFlagsUnknownConnectorAndUnverifiedAgent(t *testing.T) {
 		code  int
 		want  string
 	}{
-		{"?connector=claudcode", http.StatusBadRequest, "unknown connector"},
+		{"?connector=claudcode", http.StatusBadRequest, "valid connectors: amp, antigravity, claudecode, codex"},
 		{"?user=not-a-real-account&connector=codex&agent=agt-0000000000000000", http.StatusOK, "not verified against a host identity record"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve"+check.query, nil)

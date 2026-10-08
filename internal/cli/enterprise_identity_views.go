@@ -167,7 +167,25 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			runtimeCommand = cmd
+			if view.use == "agent-identities" && query.Get("user") != "" {
+				var resolved struct {
+					LookupError string `json:"lookup_error"`
+					Subject     struct {
+						UserID string `json:"user_id"`
+					} `json:"subject"`
+				}
+				_, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(query.Get("user")), &resolved)
+				if err != nil {
+					return withExitCode(err, enterprisestatus.UnixExitFailure)
+				}
+				if resolved.Subject.UserID == "" && resolved.LookupError != "" {
+					return invalidLifecycleArguments(fmt.Errorf("%s", resolved.LookupError))
+				}
+			}
 			if err := writeEnterpriseIdentityView(cmd.OutOrStdout(), path); err != nil {
+				if commandExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+					return err
+				}
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			return nil

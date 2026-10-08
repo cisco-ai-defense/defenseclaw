@@ -242,6 +242,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 		var hb *openshell.HomebrewInstallError
 		switch {
+		case errors.Is(err, openshell.ErrBrewNeedsTerminal):
+			a.bad("Gateway service: " + openshell.ErrBrewNeedsTerminal.Error())
+			a.note("→ run this command again from a normal terminal (Terminal.app, or an ssh login), not tmux")
+			return &Silent{Err: err}
 		case errors.As(err, &hb) && hb.FormulaInstalled:
 			// The script got past the install and failed after it, in
 			// starting the gateway or registering it with the CLI: the
