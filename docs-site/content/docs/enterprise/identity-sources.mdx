@@ -79,8 +79,8 @@ how it authenticated the request, and the install decides which way that is.
 | Install | How the caller is authenticated | The user the gateway takes |
 | --- | --- | --- |
 | Per-user, any OS | The gateway, hook or ACP token the request presents. The tokens are in the user's own files, and the gateway runs as that account | The account the gateway runs as |
-| Standalone enterprise, Linux and macOS | The kernel's peer credentials on the hook socket. On loopback TCP, a per-user credential, or for ACP the user's enterprise ACP credential, accepted only from a process of the uid it is bound to (the kernel names the owner of the TCP socket) | The peer's uid, or the uid the credential is bound to |
-| Standalone enterprise, Windows | A per-user credential on loopback TCP (`127.0.0.1:18970`), or for ACP the user's enterprise ACP credential. Windows gives the gateway no kernel check of a TCP caller | The SID the credential is bound to |
+| Standalone enterprise, Linux and macOS | The kernel's peer credentials on the hook socket. On loopback TCP, a per-user credential accepted only from a process of the uid it is bound to (the kernel names the owner of the TCP socket) | The peer's uid, or the uid the credential is bound to |
+| Standalone enterprise, Windows | A per-user credential on loopback TCP (`127.0.0.1:18970`). Windows gives the gateway no kernel check of a TCP caller | The SID the credential is bound to |
 | Sandbox of a per-user install | The sandbox binding's credential, which only that sandbox holds | The host user recorded on the binding |
 
 A **per-user credential** is an HMAC-SHA256 of the connector and the uid or
@@ -89,25 +89,6 @@ enrolled user's credentials into that user's own hook files, and the gateway
 derives the same values for every user in its authorization ledger. The
 gateway reads the identity the presented credential is bound to, and refuses
 with `403` a request whose identity headers name anyone else.
-
-An **enterprise ACP credential** is the bearer that
-`defenseclaw-gateway enterprise acp enroll` issues for one user, editor, agent
-and ACP profile (see [managed enterprise enrollment](/docs/acp-guard#managed-enterprise-enrollment)).
-The gateway keeps the record in its protected data directory, and only the
-bearer copy is in that user's private ACP runtime. An ACP evaluation that
-presents it is bound to the uid (Linux and macOS) or SID (Windows) the
-enrollment named, and gets that user's directory facts and guardrail profile,
-as the user's hooks do. On Linux and macOS the gateway also asks the kernel
-which account owns the guard's loopback TCP socket and refuses the request
-(`401`, audit reason `acp_caller_account_mismatch`) when it is not the
-enrolled uid, so a copy of the bearer in another account's home does not
-work. Windows tells the gateway the process of a TCP connection but not its
-account, so there the bearer alone identifies the user; revoke and enroll
-again when a copy may have leaked. Enrollment refuses the other platform's kind:
-`--sid` on Linux and macOS, `--uid` and `--gid` on Windows. The
-guard sends no identity headers, and the gateway ignores any that a request
-carries. An enrollment that names only a home directory, with no uid or SID,
-binds no user, so its evaluations have no verified user.
 
 On Windows that makes the SID **bound to a credential, not verified by the
 kernel**. Another standard user cannot present the credential, because it is
@@ -129,7 +110,7 @@ install does, never falls back to its own account.
 
 | What the OS knows | Where DefenseClaw reads it | Assurance |
 | --- | --- | --- |
-| Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user or enterprise ACP credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
+| Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
 | Account name and the backend that owns it | NSS through `getent passwd`; each service on the `passwd` line of `nsswitch.conf` is asked for the uid in turn (`sss`, `winbind`, `ldap`, `himmelblau`, `aad`). An account no directory service knows is `local`, and so is an account `/etc/passwd` holds under its name and uid, which the SSSD files provider (the implicit files domain on RHEL 8) also answers for | Verified |
 | Domain | For SSSD, the joined domain that holds the account by its SID ([When Linux attributes a principal](#when-linux-attributes-a-principal)). For winbind, the domain its name reports (`CORP\alice`), in lower case: a NetBIOS domain is reported by the DNS name of its realm (realmd gives the NetBIOS name in the login format `CORP\%U`), as Windows reports it; the NetBIOS domain of a trusted domain is reported as is. An `nss_ldap` (nslcd) account has none: nslcd names an account by its uid attribute, which may be an e-mail address (the Okta login) | Verified |
 | Groups | `initgroups` plus a group lookup through NSS. An SSSD account keeps only the groups inside the domain of its SID, its local groups and its primary group ([When Linux attributes a principal](#when-linux-attributes-a-principal)) | Verified |
@@ -236,7 +217,7 @@ LDAP account of that name.
 
 | What the OS knows | Where DefenseClaw reads it | Assurance |
 | --- | --- | --- |
-| Which user made the request | Standalone enterprise: the SID a per-user or enterprise ACP credential is bound to, presented over loopback TCP (the kernel does not verify it). Per-user install: the account the gateway runs as | Verified |
+| Which user made the request | Standalone enterprise: the SID a per-user credential is bound to, presented over loopback TCP (the kernel does not verify it). Per-user install: the account the gateway runs as | Verified |
 | Account name and domain | `LookupAccountSid`. The domain is reported in lower case | Verified |
 | AD UPN | `TranslateNameW`. An account's first lookup waits up to 1.5 seconds for it when a users or groups assignment exists, and otherwise resolves it in the background. A successful translation is cached for 5 minutes, below the 15-minute directory refresh interval, so a UPN rename is checked on the next refresh. A failed lookup (no domain controller reachable) is retried after 2 minutes; the last good answer is kept during the outage | Verified |
 | Entra UPN, provider and tenant | `HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>` and the `CloudDomainJoin\JoinInfo` join state, for Entra-joined and hybrid-joined computers | Verified |
@@ -255,7 +236,7 @@ cache expires. `profile-explain` can show the new profile before live hooks use 
 
 | What the OS knows | Where DefenseClaw reads it | Assurance |
 | --- | --- | --- |
-| Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user or enterprise ACP credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
+| Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
 | Account name and groups | Open Directory, through the account database. Every install reports directory `local` and source `macos_opendirectory` | Verified |
 | Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
 | AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
