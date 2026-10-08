@@ -283,14 +283,10 @@ Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded 
 | `defenseclaw acp adopt [--client X] [--activate] [--yes]` | Adopt the agents `detect` found. |
 | `defenseclaw acp catalog` | Show the pinned ACP schema and built-in client/agent inventory. |
 | `defenseclaw acp setup --client zed\|jetbrains --agent <name> [--activate]` | Install or reconfigure a managed guarded entry. Defaults to observe mode. |
-| `defenseclaw acp setup --managed ... --runtime-data-dir <dir> --token-file <path>` | Install only user-side editor/lock files for a centrally authorized enterprise enrollment, on a computer that has this CLI. A managed computer uses `defenseclaw-gateway enterprise acp setup`. |
 | `defenseclaw acp status` | Show the ACP posture and configured bindings (`--json` for the machine-readable document). |
 | `defenseclaw acp remove --client <client> --agent <agent>` | Remove only the DefenseClaw-owned entry. |
 | `defenseclaw acp verify [--client X] [--agent Y]` | Fail when a managed editor entry or the guarded executable's digest has drifted. With no `--client`/`--agent`, every configured binding is checked. |
 | `defenseclaw acp refresh [--from-sha256 <digest>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). A changed agent binary or editor entry still needs `acp setup`. |
-| `defenseclaw-gateway enterprise acp enroll\|verify\|revoke ...` | Manage the protected per-principal/client/agent/profile credential and its private user copy. `verify` also says whether the user has run setup. |
-| `defenseclaw-gateway enterprise acp list [--json]` | List every managed ACP enrollment: user, editor and agent, profile, when it was enrolled, whether the user's token copy is present and whether the user has run setup. Accounts that no longer exist are marked. Standalone managed hosts only. |
-| `defenseclaw-gateway enterprise acp setup --client X --agent Y --profile P [--activate] --api-port N` | Run by the enrolled user on a standalone managed computer, with the command `enroll` reports: write the guarded editor entry and the contract lock. Reads no central configuration. Secure Client has no `setup`; its `enroll` reports `defenseclaw acp setup --managed`. |
 
 ## Guardrail
 
@@ -893,12 +889,9 @@ and the ledger directory from the service environment
 or `verify` yourself, use the same values as the guardian's unit or plist,
 and pass `--manifest` on macOS (`/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml`).
 
-### ACP credentials (`enterprise acp`)
+### ACP
 
-`defenseclaw-gateway enterprise acp enroll|verify|revoke` manages the
-protected ACP credential for one user, client, agent, and profile, and
-`enterprise acp list` shows every enrollment. See
-[ACP guard](/docs/acp-guard).
+ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
 
 ## Discoverability
 
