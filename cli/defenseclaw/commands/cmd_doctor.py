@@ -1303,10 +1303,18 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
         )
 
 
+def _doctor_secure_client(cfg) -> bool:
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    return _enterprise_profile(cfg) == "secure_client"
+
+
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError, inspect_v8_config
 
+    secure_client = _doctor_secure_client(cfg)
+    check_id = "doctor.config.canonical-v8" if secure_client else "doctor.config.validation"
     cfg_path = str(config_path_for_data_dir(cfg.data_dir))
     if not os.path.isfile(cfg_path):
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
@@ -1320,7 +1328,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             "Config validation",
             f"{exc}; re-run defenseclaw doctor",
             r=r,
-            check_id="doctor.config.validation",
+            check_id=check_id,
             reason_code="canonical-validation-timeout",
         )
         return
@@ -1350,7 +1358,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             # (GAP-1499), not the wire record.
             detail,
             r=r,
-            check_id="doctor.config.validation",
+            check_id=check_id,
             reason_code="canonical-validation-failed",
             remediation=remediation,
         )
@@ -1359,9 +1367,13 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         _emit(
             "fail",
             "Config validation",
-            "the configuration validator returned no validity decision",
+            (
+                "canonical v8 validator returned no validity decision"
+                if secure_client
+                else "the configuration validator returned no validity decision"
+            ),
             r=r,
-            check_id="doctor.config.validation",
+            check_id=check_id,
             reason_code="canonical-validation-unavailable",
             remediation="defenseclaw config validate",
         )
@@ -1369,9 +1381,9 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     _emit(
         "pass",
         "Config file",
-        f"{cfg_path}; canonical schema valid",
+        f"{cfg_path}; canonical schema {'v8 ' if secure_client else ''}valid",
         r=r,
-        check_id="doctor.config.validation",
+        check_id=check_id,
     )
 
 
@@ -1386,7 +1398,8 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
     from defenseclaw.config_writer import machine_managed_standalone
     from defenseclaw.upgrade_shim import managed_lifecycle_command
 
-    managed = machine_managed_standalone()
+    secure_client = _doctor_secure_client(cfg)
+    managed = machine_managed_standalone() and not secure_client
     cfg_path = str(config_path_for_data_dir(getattr(cfg, "data_dir", None)))
     r.set_section("configuration")
     if not json_out:
@@ -1407,7 +1420,7 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
             "Config file",
             f"{cfg_path} not found; DefenseClaw is not initialized, so no other check can run",
             r=r,
-            check_id="doctor.config.validation",
+            check_id="doctor.config.canonical-v8" if secure_client else "doctor.config.validation",
             reason_code="not-initialized",
             remediation="defenseclaw init",
         )
@@ -9501,6 +9514,8 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     (a stale gateway). WARN when config.yaml changed outside the DefenseClaw
     writer (config.generation.json did not record its bytes).
     """
+    if _doctor_secure_client(cfg):
+        return
     label = "Policy"
     if not isinstance(live_health, dict):
         _emit_policy_without_gateway(cfg, r, label, "the gateway is not running")
@@ -9660,6 +9675,8 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     """Retired policy inputs and the config_version 9 migration record."""
     from defenseclaw.config import CONFIG_VERSION_V9, config_path_for_data_dir
 
+    if _doctor_secure_client(cfg):
+        return
     data_dir = getattr(cfg, "data_dir", "") or ""
     if getattr(cfg, "_source_config_version", 0) >= CONFIG_VERSION_V9:
         policy_dir = getattr(cfg, "policy_dir", "") or ""
