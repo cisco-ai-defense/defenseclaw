@@ -112,6 +112,12 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	} {
 		observed, digestErr := fileSHA256(item.path)
 		if digestErr != nil || !strings.EqualFold(observed, item.expected) {
+			if item.label == "client configuration" && !secureClientHost() {
+				// The lock pins the whole settings file, and "executable
+				// digest" sent users looking for a changed binary (GAP-0391).
+				return fmt.Errorf("the editor settings file %s changed after setup (the contract lock pins its digest, "+
+					"so any edit needs setup again)", clientConfigPath)
+			}
 			return fmt.Errorf("ACP %s executable digest does not match the runtime contract", item.label)
 		}
 	}
@@ -128,6 +134,10 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	}
 	return nil
 }
+
+// SecureClientHost reports a Secure Client install, whose guard keeps the
+// behaviour of main (issue #1092).
+func SecureClientHost() bool { return secureClientHost() }
 
 func samePath(left, right string) bool {
 	if runtime.GOOS == "windows" {

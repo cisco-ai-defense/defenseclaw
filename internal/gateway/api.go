@@ -1157,6 +1157,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		BaseContext: func(_ net.Listener) context.Context {
 			return baseCtx
 		},
+		ConnContext: acpPeerConnContext,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During
@@ -3600,7 +3601,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
-				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
+				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}

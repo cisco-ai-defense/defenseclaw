@@ -104,6 +104,17 @@ func TestCopyFramesObserveFailsClosedOnRuntimeModeMismatch(t *testing.T) {
 	if !errors.Is(err, ErrModeMismatch) || forwarded.Len() != 0 {
 		t.Fatalf("mode mismatch did not fail closed: err=%v forwarded=%q", err, forwarded.String())
 	}
+	// The user is told what changed and which command to run, not "re-run
+	// managed setup" (GAP-0355).
+	state.peerProtocolFixes = true
+	err = copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeObserve, Profile: "p", Evaluator: modeMismatchEvaluator{}, Stderr: &stderr, Managed: true,
+		SetupCommand: "/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp setup --client zed --agent kiro --profile p",
+	}, state, ClientToAgent, bytes.NewBufferString(frame), &forwarded, &rejected)
+	if !errors.Is(err, ErrModeMismatch) || !strings.Contains(err.Error(), "changed the ACP mode of profile p to action") ||
+		!strings.Contains(err.Error(), "enterprise acp setup --client zed --agent kiro --profile p --activate") {
+		t.Fatalf("mode drift message = %v", err)
+	}
 }
 
 func TestCopyFramesActionBuffersOutputUntilPromptResponse(t *testing.T) {
@@ -602,5 +613,53 @@ func TestCopyFramesActionGatewayNotReadyRetriesAfterAPauseAndNamesTheCause(t *te
 	}
 	if text, _ := blockedTurn(t, rejected.Bytes(), "3"); text != gatewayNotReadyReason || strings.Contains(text, "did not answer") {
 		t.Fatalf("refused turn = %q", text)
+	}
+}
+
+// An error response with a null id is valid JSON-RPC 2.0: an editor answers
+// an agent notification it could not parse that way. Action mode forwards it
+// and the session goes on (GAP-0351).
+func TestCopyFramesActionForwardsANullIDErrorResponse(t *testing.T) {
+	nullID := `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"Method not found"}}`
+	input := bytes.NewBufferString(nullID + "\n" + `{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"prompt":[]}}` + "\n")
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: AllowEvaluator{}}, state, ClientToAgent, input, &forwarded, &rejected)
+	if err != nil {
+		t.Fatalf("a null-id error response ended the session: %v", err)
+	}
+	if !strings.Contains(forwarded.String(), nullID) || !strings.Contains(forwarded.String(), `"id":8`) {
+		t.Fatalf("frames were not forwarded: %s", forwarded.String())
+	}
+}
+
+type rejectingEvaluator struct{}
+
+func (rejectingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict{}, ErrCredentialRejected
+}
+
+// A revoked credential says so and points a managed user at the
+// administrator, not at a gateway that "did not answer" and a command the
+// host lacks; observe mode tells the user once that nothing is checked
+// (GAP-0354).
+func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
+	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}`
+	for _, mode := range []Mode{ModeAction, ModeObserve} {
+		var forwarded, client bytes.Buffer
+		state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+		opts := ProxyOptions{Mode: mode, Evaluator: rejectingEvaluator{}, Managed: true, Stderr: io.Discard}
+		input := strings.NewReader(prompt + "\n" + strings.Replace(prompt, `"id":3`, `"id":4`, 1) + "\n")
+		if err := copyFrames(context.Background(), opts, state, ClientToAgent, input, &forwarded, &client); err != nil {
+			t.Fatal(err)
+		}
+		text := client.String()
+		if !strings.Contains(text, "revoked") || !strings.Contains(text, "administrator") ||
+			strings.Contains(text, "defenseclaw status") || strings.Contains(text, "did not answer") {
+			t.Fatalf("%s mode: the editor was not told the credential was refused: %s", mode, text)
+		}
+		if mode == ModeObserve && (strings.Count(text, "not checking this session") != 1 || strings.Count(forwarded.String(), "session/prompt") != 2) {
+			t.Fatalf("observe mode: want one notice and both prompts forwarded: client=%s agent=%s", text, forwarded.String())
+		}
 	}
 }

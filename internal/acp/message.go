@@ -26,7 +26,25 @@ type Message struct {
 	Raw     json.RawMessage `json:"-"`
 }
 
-func ParseMessage(frame []byte) (Message, error) {
+func ParseMessage(frame []byte) (Message, error) { return parseMessage(frame, false) }
+
+// ParseMessageAllowingNullIDErrors is ParseMessage that also accepts the
+// error response JSON-RPC 2.0 sends with a null id when the id of the request
+// could not be determined (section 5.1), such as an editor's answer to an
+// agent notification it could not parse. ParseMessage refuses it, which in
+// action mode ended the whole session (GAP-0351). Secure Client keeps
+// ParseMessage (issue #1092).
+func ParseMessageAllowingNullIDErrors(frame []byte) (Message, error) {
+	return parseMessage(frame, true)
+}
+
+// IsNullIDError reports an error response with a null id: it answers no
+// pending request.
+func (m Message) IsNullIDError() bool {
+	return m.Method == "" && bytes.Equal(bytes.TrimSpace(m.ID), []byte("null")) && len(m.Error) > 0 && len(m.Result) == 0
+}
+
+func parseMessage(frame []byte, allowNullIDError bool) (Message, error) {
 	frame = bytes.TrimSpace(frame)
 	if len(frame) == 0 || len(frame) > MaxFrameBytes {
 		return Message{}, fmt.Errorf("%w: frame size %d", ErrInvalidMessage, len(frame))
@@ -69,7 +87,7 @@ func ParseMessage(frame []byte) (Message, error) {
 		if hasResult || hasError {
 			return Message{}, fmt.Errorf("%w: request cannot contain result or error", ErrInvalidMessage)
 		}
-	} else if !hasID || hasResult == hasError {
+	} else if (!hasID && !(allowNullIDError && msg.IsNullIDError())) || hasResult == hasError {
 		return Message{}, fmt.Errorf("%w: response must contain exactly one of result or error", ErrInvalidMessage)
 	}
 	msg.Raw = append([]byte(nil), frame...)

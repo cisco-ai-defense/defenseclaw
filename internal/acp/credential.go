@@ -16,8 +16,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -304,6 +306,55 @@ func EnterpriseCredentialsReady(dataDir string) bool {
 		}
 	}
 	return true
+}
+
+// EnterpriseEnrollment describes one managed ACP enrollment record without its
+// bearer.
+type EnterpriseEnrollment struct {
+	Principal string    `json:"principal"`
+	ClientID  string    `json:"client"`
+	AgentID   string    `json:"agent"`
+	Profile   string    `json:"profile"`
+	Created   time.Time `json:"created"`
+}
+
+// ListEnterpriseEnrollments reads every enrollment record, in principal,
+// client, agent and profile order. invalid names the records that do not
+// load (a revocation tombstone, a damaged or foreign file).
+func ListEnterpriseEnrollments(dataDir string) (enrollments []EnterpriseEnrollment, invalid []string, err error) {
+	dir := enterpriseCredentialDir(dataDir)
+	if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err := validateEnterpriseCredentialDirectory(dir); err != nil {
+		return nil, nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !credentialRecordNameRE.MatchString(entry.Name()) {
+			invalid = append(invalid, entry.Name())
+			continue
+		}
+		credential, loadErr := loadEnterpriseCredentialFile(filepath.Join(dir, entry.Name()))
+		info, infoErr := entry.Info()
+		if loadErr != nil || infoErr != nil {
+			invalid = append(invalid, entry.Name())
+			continue
+		}
+		enrollments = append(enrollments, EnterpriseEnrollment{
+			Principal: credential.Principal, ClientID: credential.ClientID, AgentID: credential.AgentID,
+			Profile: credential.Profile, Created: info.ModTime().UTC(),
+		})
+	}
+	sort.Slice(enrollments, func(i, j int) bool {
+		left, right := enrollments[i], enrollments[j]
+		return strings.Join([]string{left.Principal, left.ClientID, left.AgentID, left.Profile}, "\x00") <
+			strings.Join([]string{right.Principal, right.ClientID, right.AgentID, right.Profile}, "\x00")
+	})
+	return enrollments, invalid, nil
 }
 
 // RemoveEnterpriseCredential revokes the service-side credential immediately.

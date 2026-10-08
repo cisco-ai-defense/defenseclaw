@@ -27,6 +27,27 @@ var ErrModeMismatch = errors.New("ACP runtime mode does not match central policy
 // acp setup that just turned the guard on (GAP-2135).
 var ErrGatewayNotReady = errors.New("ACP gateway is not ready to evaluate")
 
+// ErrCredentialRejected is a gateway that refused the guard's ACP credential
+// (HTTP 401 with no authenticated answer): it was revoked, replaced or never
+// issued. It keeps the text the guard always logged.
+var ErrCredentialRejected = errors.New("ACP gateway challenge authentication failed")
+
+// ErrACPDisabled is an authenticated HTTP 503 that says the ACP guard is
+// turned off in the configuration. It is also ErrGatewayNotReady, as it was.
+var ErrACPDisabled = errors.New("ACP guard is not enabled")
+
+// acpDisabledError is ErrACPDisabled with the text and ErrGatewayNotReady
+// identity the guard reported before it told the two apart.
+type acpDisabledError struct{ status int }
+
+func (e acpDisabledError) Error() string {
+	return fmt.Sprintf("%v: ACP evaluator returned HTTP %d", ErrGatewayNotReady, e.status)
+}
+
+func (e acpDisabledError) Is(target error) bool {
+	return target == ErrGatewayNotReady || target == ErrACPDisabled
+}
+
 type Evaluation struct {
 	Profile   string          `json:"profile"`
 	Mode      Mode            `json:"mode"`
@@ -165,6 +186,12 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 		return Verdict{}, ErrModeMismatch
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		var refusal struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(payload, &refusal) == nil && refusal.Error == ErrACPDisabled.Error() {
+			return Verdict{}, acpDisabledError{status: resp.StatusCode}
+		}
 		return Verdict{}, fmt.Errorf("%w: ACP evaluator returned HTTP %d", ErrGatewayNotReady, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -211,6 +238,10 @@ func (e *HTTPEvaluator) authenticateGateway(ctx context.Context, keyID string) (
 		return "", "", errors.New("ACP gateway challenge response is too large")
 	}
 	if !VerifyHTTPResponseMAC(e.token, keyID, challengeNonce, resp.StatusCode, payload, resp.Header.Get(AuthResponseMACHeader)) {
+		if resp.StatusCode == http.StatusUnauthorized && resp.Header.Get(AuthResponseMACHeader) == "" {
+			// The gateway answers a credential it does not hold unsigned.
+			return "", "", ErrCredentialRejected
+		}
 		return "", "", errors.New("ACP gateway challenge authentication failed")
 	}
 	if resp.StatusCode != http.StatusOK {

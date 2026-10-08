@@ -100,7 +100,13 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		msg, err := acp.ParseMessage(req.Payload)
+		// A guard forwards a null-id error response (GAP-0351); Secure
+		// Client keeps the parser of main.
+		parse := acp.ParseMessageAllowingNullIDErrors
+		if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+			parse = acp.ParseMessage
+		}
+		msg, err := parse(req.Payload)
 		if err != nil || msg.Method != req.Method || acp.Classify(msg, req.Direction) != req.Surface {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP envelope metadata does not match payload"})
 			return
@@ -564,18 +570,7 @@ func resolveACPProfileForPair(
 // at all, so disabling a client or an agent continues to disable every pair
 // that uses it.
 func acpPairIsBound(cfg config.ACPConfig, client, agent, profileName string) bool {
-	clientBinding, clientOK := cfg.Clients[client]
-	agentBinding, agentOK := cfg.Agents[agent]
-	if !clientOK || !clientBinding.Enabled || !agentOK || !agentBinding.Enabled {
-		return false
-	}
-	if pair, ok := cfg.ACPBindingFor(client, agent); ok {
-		if !pair.Enabled {
-			return false
-		}
-		return strings.TrimSpace(pair.Profile) == "" || strings.TrimSpace(pair.Profile) == profileName
-	}
-	return clientBinding.Profile == profileName && agentBinding.Profile == profileName
+	return len(cfg.ACPPairBindingRefusals(client, agent, profileName)) == 0
 }
 
 func effectiveACPMode(cfg config.ACPConfig, profileName string) string {

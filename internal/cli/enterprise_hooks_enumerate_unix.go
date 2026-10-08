@@ -123,6 +123,10 @@ type enterpriseHooksRevokeGoneReport struct {
 	Changed  bool   `json:"changed"`
 	Idle     bool   `json:"idle,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// ACPRevoked lists the managed ACP enrollments of deleted accounts this
+	// pass revoked, as "uid:N client/agent/profile".
+	ACPRevoked []string `json:"acp_revoked,omitempty"`
+	ACPKept    []string `json:"acp_kept,omitempty"`
 }
 
 // enterpriseHooksRevokeGoneRootCheck is replaceable in unprivileged tests.
@@ -155,15 +159,17 @@ func runEnterpriseHooksRevokeGone(ctx context.Context, stdout, stderr io.Writer,
 		return errors.New("enterprise hooks revoke-gone: the managed config is not the standalone profile")
 	}
 	report := enterpriseHooksRevokeGoneReport{Manifest: manifestPath}
+	statePath := enterpriseHookEnumeratorStatePath(manifestPath)
+	state := enterprisehooks.LoadUnixEnumeratorState(statePath)
+	resolver := unixidentity.NewCachingResolver(enterpriseHooksEnumerateResolver(ctx))
+	directoryAnswered := false
 	if strings.EqualFold(strings.TrimSpace(current.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
 		report.Idle = true
 		report.Reason = "enterprise.enrollment.mode is manifest; the administrator publishes targets"
 	} else {
-		statePath := enterpriseHookEnumeratorStatePath(manifestPath)
-		state := enterprisehooks.LoadUnixEnumeratorState(statePath)
 		manifest, result, err := enterprisehooks.RevokeGoneUnixTargets(ctx, enterprisehooks.UnixRevokeGoneOptions{
 			ExistingManifestPath: manifestPath,
-			Resolver:             unixidentity.NewCachingResolver(enterpriseHooksEnumerateResolver(ctx)),
+			Resolver:             resolver,
 			LocalAccounts: func() (map[string]int, error) {
 				return enterpriseHooksEnumerateLocalAccounts(ctx)
 			},
@@ -177,13 +183,19 @@ func runEnterpriseHooksRevokeGone(ctx context.Context, stdout, stderr io.Writer,
 			return err
 		}
 		report.UnixRevokeGoneReport = result
+		directoryAnswered = result.DirectoryAnswered
 		if len(result.Revoked) > 0 {
 			if report.Changed, err = enterpriseHooksEnumerateManifestWriter(manifestPath, manifest); err != nil {
 				return err
 			}
-			if err := enterprisehooks.SaveUnixEnumeratorState(statePath, state); err != nil {
-				fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
-			}
+		}
+	}
+	// The managed ACP enrollments of deleted accounts go in the same pass,
+	// whatever the hook enrollment mode (GAP-0367).
+	report.ACPRevoked, report.ACPKept = revokeGoneEnterpriseACPEnrollments(ctx, current, resolver, directoryAnswered, true, state, stderr)
+	if len(report.Revoked) > 0 || len(report.ACPRevoked) > 0 {
+		if err := enterprisehooks.SaveUnixEnumeratorState(statePath, state); err != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
 		}
 	}
 	if opts.jsonOut {
@@ -200,6 +212,12 @@ func runEnterpriseHooksRevokeGone(ctx context.Context, stdout, stderr io.Writer,
 	for _, kept := range report.Kept {
 		fmt.Fprintf(stdout, "kept %s\n", kept)
 	}
+	if len(report.ACPRevoked) > 0 {
+		fmt.Fprintf(stdout, "revoked the ACP enrollments of accounts that no longer exist: %s\n", strings.Join(report.ACPRevoked, ", "))
+	}
+	for _, kept := range report.ACPKept {
+		fmt.Fprintf(stdout, "kept %s\n", kept)
+	}
 	return nil
 }
 
@@ -209,6 +227,9 @@ type enterpriseHooksEnumerateReport struct {
 	Changed  bool   `json:"changed"`
 	Idle     bool   `json:"idle,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// ACPRevoked lists the managed ACP enrollments of deleted accounts this
+	// cycle revoked (GAP-0367).
+	ACPRevoked []string `json:"acp_revoked,omitempty"`
 }
 
 func runEnterpriseHooksEnumerate(ctx context.Context, stdout, stderr io.Writer, opts enterpriseHooksEnumerateOptions) error {
@@ -282,6 +303,13 @@ func runEnterpriseHooksEnumerateCycle(
 	if strings.EqualFold(strings.TrimSpace(current.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
 		report.Idle = true
 		report.Reason = "enterprise.enrollment.mode is manifest; the administrator publishes targets"
+		if !opts.dryRun {
+			resolver := unixidentity.NewCachingResolver(enterpriseHooksEnumerateResolver(ctx))
+			report.ACPRevoked, _ = revokeGoneEnterpriseACPEnrollments(ctx, current, resolver, false, false, state, stderr)
+			if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(manifestPath), state); err != nil {
+				fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
+			}
+		}
 		return report, nil
 	}
 	machinePolicy, err := enterpriseHooksEnumerateMachinePolicyConnectors(opts.descriptor)
@@ -330,6 +358,7 @@ func runEnterpriseHooksEnumerateCycle(
 	if err != nil {
 		return report, err
 	}
+	report.ACPRevoked, _ = revokeGoneEnterpriseACPEnrollments(ctx, current, resolver, cycle.DirectoryAnswered, false, state, stderr)
 	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(manifestPath), state); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not persist enumerator state: %v\n", err)
 	}
