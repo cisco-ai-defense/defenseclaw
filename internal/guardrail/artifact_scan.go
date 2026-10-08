@@ -140,38 +140,41 @@ func isPathWriteExpression(expression string) bool {
 // ScanArtifact applies the pack's file rules to the text files under path (a
 // directory or one file): one finding per rule and file, at the line of the
 // first match, located as "relative/path:line". Binary, oversized and
-// non-UTF-8 files, symbolic links and vendored directories are skipped, and at
-// most artifactMaxFiles files are read.
-func (rp *RulePack) ScanArtifact(ctx context.Context, path string) []scanner.Finding {
+// non-UTF-8 files, symbolic links and vendored directories are skipped. A
+// traversal error or a file count beyond artifactMaxFiles fails the scan.
+func (rp *RulePack) ScanArtifact(ctx context.Context, path string) ([]scanner.Finding, error) {
 	if rp == nil {
-		return nil
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	rules := rp.artifactRules()
+	if len(rules) == 0 {
+		return nil, nil
+	}
 	info, err := os.Stat(path)
-	if len(rules) == 0 || err != nil {
-		return nil
+	if err != nil {
+		return nil, err
 	}
 	var findings []scanner.Finding
 	if info.Mode().IsRegular() {
 		if text, ok := readArtifactText(path); ok {
 			findings = scanArtifactText(rules, text, filepath.Base(path))
 		}
-		return findings
+		return findings, nil
 	}
 	if !info.IsDir() {
-		return nil
+		return nil, fmt.Errorf("artifact %s is not a regular file or directory", path)
 	}
 	read := 0
-	_ = filepath.WalkDir(path, func(current string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(path, func(current string, entry fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		switch {
 		case walkErr != nil:
-			if entry != nil && entry.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
+			return walkErr
 		case entry.IsDir():
 			if _, skip := artifactSkipDirs[entry.Name()]; skip && current != path {
 				return fs.SkipDir
@@ -179,12 +182,13 @@ func (rp *RulePack) ScanArtifact(ctx context.Context, path string) []scanner.Fin
 			return nil
 		case !entry.Type().IsRegular():
 			return nil
-		case read >= artifactMaxFiles:
-			return fs.SkipAll
 		}
 		text, ok := readArtifactText(current)
 		if !ok {
 			return nil
+		}
+		if read >= artifactMaxFiles {
+			return fmt.Errorf("artifact scan exceeds %d readable files", artifactMaxFiles)
 		}
 		read++
 		rel, relErr := filepath.Rel(path, current)
@@ -194,7 +198,7 @@ func (rp *RulePack) ScanArtifact(ctx context.Context, path string) []scanner.Fin
 		findings = append(findings, scanArtifactText(rules, text, rel)...)
 		return nil
 	})
-	return findings
+	return findings, err
 }
 
 func scanArtifactText(rules []artifactRule, text, location string) []scanner.Finding {
@@ -268,7 +272,11 @@ func (o *artifactOverlay) Scan(ctx context.Context, target string) (*scanner.Sca
 	for _, finding := range result.Findings {
 		seen[[2]string{finding.ID, finding.Location}] = struct{}{}
 	}
-	for _, finding := range o.pack.ScanArtifact(ctx, target) {
+	overlayFindings, err := o.pack.ScanArtifact(ctx, target)
+	if err != nil {
+		return nil, fmt.Errorf("artifact rule-pack scan: %w", err)
+	}
+	for _, finding := range overlayFindings {
 		if _, duplicate := seen[[2]string{finding.ID, finding.Location}]; duplicate {
 			continue
 		}

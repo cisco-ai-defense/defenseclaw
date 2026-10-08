@@ -7,9 +7,12 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -106,5 +109,58 @@ func TestClearRuntimeDirRetriesThenMovesAside(t *testing.T) {
 	pruneOtherRuntimes(root, "keep")
 	if left, _ := filepath.Glob(filepath.Join(root, ".stale-*")); len(left) != 0 {
 		t.Fatalf("prune left the moved-aside folder: %v", left)
+	}
+}
+
+// The embedded Windows plugin entry point must carry configured rule-pack
+// findings into the JSON consumed by the Go scanner.
+func TestPluginRuntimeAppliesRulePackOverlay(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	const stubs = `import sys,types
+for name in ("defenseclaw", "defenseclaw.config", "defenseclaw.scanner",
+             "defenseclaw.scanner.plugin_scanner", "defenseclaw.scanner.plugin_scanner.types",
+             "defenseclaw.scanner.plugin_scanner.self_identity", "defenseclaw.scanner.rulepack"):
+    sys.modules[name]=types.ModuleType(name)
+class Options:
+    include_self=False
+    trusted_self_paths=()
+class Result:
+    def to_dict(self):
+        return {"scanner":"plugin-scanner","target":"/plugin","timestamp":"2026-01-01T00:00:00Z","findings":[]}
+class Finding:
+    id="PACK-MARKER"
+    location="plugin.py:1"
+    line_number=1
+    def to_dict(self):
+        return {"id":self.id,"location":self.location,"severity":"HIGH","title":"Marker","scanner":"rule-pack","tags":[],"line_number":self.line_number}
+sys.modules["defenseclaw.scanner.plugin_scanner"].scan_plugin=lambda target,options: Result()
+sys.modules["defenseclaw.scanner.plugin_scanner.types"].PluginScanOptions=Options
+sys.modules["defenseclaw.scanner.plugin_scanner.self_identity"].is_first_party_self_target=lambda target,**kw: False
+sys.modules["defenseclaw.config"].load=lambda: object()
+sys.modules["defenseclaw.scanner.rulepack"].overlay_findings=lambda cfg,connector=None,**kw: [Finding()] if connector=="codex" else []
+`
+	cmd := exec.Command(python, "-c", stubs+"\n"+pluginScanScript, "/plugin", "--connector", "codex")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("plugin runtime script: %v: %s", err, output)
+	}
+	var result struct {
+		Findings []struct {
+			ID      string   `json:"id"`
+			Scanner string   `json:"scanner"`
+			Line    int      `json:"line"`
+			Tags    []string `json:"tags"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("plugin runtime output: %v: %s", err, output)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].ID != "PACK-MARKER" ||
+		result.Findings[0].Scanner != "plugin-scanner" || result.Findings[0].Line != 1 ||
+		!slices.Contains(result.Findings[0].Tags, "analyzer:rule-pack") {
+		t.Fatalf("rule-pack finding missing: %s", output)
 	}
 }

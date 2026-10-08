@@ -38,6 +38,7 @@ import (
 const ScanRecordedByCallerEnv = "DEFENSECLAW_SCAN_RECORDED_BY_CALLER"
 
 type PluginScanner struct {
+	Connector   string
 	BinaryPath  string
 	Policy      string
 	Profile     string
@@ -70,6 +71,9 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 		args = []string{target}
 	case scannerRuntimeName, scannerRuntimeName + ".exe":
 		args = []string{"plugin-scan", target}
+		if s.Connector != "" {
+			args = append(args, "--connector", s.Connector)
+		}
 	default:
 		args = []string{"plugin", "scan", "--json", target}
 	}
