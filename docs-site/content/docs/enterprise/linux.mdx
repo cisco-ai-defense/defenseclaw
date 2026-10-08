@@ -70,7 +70,11 @@ lists each directive and the version it needs.
 
 The gateway runs as the `defenseclaw` system account. The lifecycle creates
 it with `systemd-sysusers`, or `useradd` as a fallback, and reuses an
-existing account.
+existing account that cannot sign in. An existing `defenseclaw` account with
+a login shell (anything other than `nologin` or `false`) is refused, and
+`status` and `verify` report one: whoever signs in as it could stop the
+gateway. Remove it with `userdel defenseclaw`, or give it the shell
+`/usr/sbin/nologin`, and run `ensure` again.
 
 The units:
 

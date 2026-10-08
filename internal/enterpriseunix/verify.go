@@ -187,6 +187,8 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		add("service account %s is missing", record.ServiceUser)
 	case account.UID != record.ServiceUID || account.GID != record.ServiceGID:
 		add("service account %s is %d:%d, deployment recorded %d:%d", record.ServiceUser, account.UID, account.GID, record.ServiceUID, record.ServiceGID)
+	case account.LoginShell != "":
+		add("%v", loginAccountError(account, env.lifecycleCommand("ensure")))
 	}
 
 	packageDrift, packageDriftChecked := "", false
