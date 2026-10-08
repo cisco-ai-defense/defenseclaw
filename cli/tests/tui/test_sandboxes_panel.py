@@ -1483,10 +1483,37 @@ async def test_pull_shows_applies_or_branches_through_the_command_line(fetch, mo
         await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
         await app._sandbox_pull("fix-tests")  # noqa: SLF001
     assert calls.calls == []
-    assert [action.action_id for action in menus[0].actions] == ["review", "apply", "branch", "cancel"]
+    assert [action.action_id for action in menus[0].actions] == ["review", "apply", "branch", "branch_name", "cancel"]
     assert "a copy of /home/dev/code/tests" in menus[0].subtitle
     argv = ["/opt/dc/defenseclaw-gateway", "sandbox", "pull", "fix-tests", *(flags or [])]
     assert ran == ([] if flags is None else [(argv, os.getcwd())])
+
+
+@pytest.mark.asyncio
+async def test_pull_puts_the_work_on_a_branch_the_user_names(fetch, monkeypatch) -> None:
+    # GAP-0266: the TUI fixed the branch to dc/<sandbox>; --branch-name took any.
+    from defenseclaw.tui.services.sandbox_state import branch_name_problem
+
+    fetch.sandboxes = [RUNNING, COPY]
+    app = DefenseClawTUI(config=_config())
+    ran = _fake_terminal(monkeypatch, app)
+    monkeypatch.setattr(app, "_sandbox_call", _Calls())
+    screens: list[Any] = []
+    answers = _screen_answers("branch_name", " dc/un-tui ", "branch_name", None)
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return await answers(screen)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_pull("fix-tests")  # noqa: SLF001
+        await app._sandbox_pull("fix-tests")  # noqa: SLF001 - the name editor cancelled
+    assert screens[1]._value == "dc/fix-tests"  # noqa: SLF001
+    assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "pull", "fix-tests", "--branch-name", "dc/un-tui"], os.getcwd())]
+    assert branch_name_problem("  ") and branch_name_problem("--force") and branch_name_problem("a b")
+    assert branch_name_problem("dc/un-tui") is None
 
 
 @pytest.mark.asyncio

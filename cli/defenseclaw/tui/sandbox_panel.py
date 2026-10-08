@@ -46,6 +46,7 @@ from textual import events
 from defenseclaw.gateway import SandboxAPIError
 from defenseclaw.platform_support import openshell_sandboxes_supported
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
 from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunch,
@@ -59,6 +60,7 @@ from defenseclaw.tui.services.sandbox_state import (
     VIEW_TITLES,
     SandboxesPanelModel,
     SandboxPanelAction,
+    branch_name_problem,
     fit,
     harness_command,
     review_pairs,
@@ -976,6 +978,12 @@ class SandboxPanelMixin:
                         f"Put it on branch dc/{name}",
                         f"Your working tree stays as it is: defenseclaw sandbox pull {name} --branch",
                     ),
+                    # The command line takes any name (GAP-0266).
+                    MenuAction(
+                        "branch_name",
+                        "Put it on a branch you name",
+                        f"Asks for the name: defenseclaw sandbox pull {name} --branch-name BRANCH",
+                    ),
                     MenuAction("cancel", "Cancel"),
                 ),
                 # The menu shows the subtitle as plain text: the path needs no escaping.
@@ -984,6 +992,20 @@ class SandboxPanelMixin:
                 show_descriptions=True,
             )
         )
+        if choice == "branch_name":
+            branch = await self.push_screen_wait(  # type: ignore[attr-defined]
+                FieldEditorScreen(
+                    f"Branch for {name}'s work",
+                    value=f"dc/{name}",
+                    hint="A new branch in the project's repository; your working tree stays as it is.",
+                    validator=branch_name_problem,
+                )
+            )
+            if not branch:
+                self._set_status("Pull cancelled; nothing changed.")  # type: ignore[attr-defined]
+                return
+            self._run_sandbox_cli("pull", name, "--branch-name", branch.strip())
+            return
         flags = {"review": (), "apply": ("--apply",), "branch": ("--branch",)}.get(choice or "")
         if flags is None:
             self._set_status("Pull cancelled; nothing changed.")  # type: ignore[attr-defined]

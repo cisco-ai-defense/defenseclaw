@@ -79,6 +79,16 @@ ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
 
 # A project's repository sandbox policy (packs.RepoPolicyPath).
 REPO_POLICY_PATH = ".defenseclaw/sandbox.yaml"
+
+
+def branch_name_problem(value: str) -> str | None:
+    """Why the TUI's Pull cannot use a branch name, or None; git judges the rest (GAP-0266)."""
+    name = value.strip()
+    if not name:
+        return "Type a branch name."
+    if name.startswith("-") or any(ch.isspace() for ch in name):
+        return "A branch name has no spaces and does not start with -."
+    return None
 # The next step after an openshell.admin.allow_unblock refusal.
 ADMIN_UNBLOCK_NEXT = "ask your DefenseClaw administrator (openshell.admin.allow_unblock is off)"
 # A saved unblock (openshell.egress.unblocked) the organization's policy ignores.
