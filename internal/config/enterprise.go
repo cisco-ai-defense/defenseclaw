@@ -713,11 +713,11 @@ func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte) (st
 	if _, ok := standaloneUnixLayoutForConfig(configFile); !ok {
 		return "", false
 	}
-	var document yaml.Node
-	if err := yaml.Unmarshal(sourceBytes, &document); err != nil {
+	document, err := sourceYAMLNode(sourceBytes)
+	if err != nil {
 		return "", false
 	}
-	return standaloneLayoutDataDir(configFile, &document)
+	return standaloneLayoutDataDir(configFile, document)
 }
 
 func yamlScalarValue(node *yaml.Node) string {

@@ -113,8 +113,11 @@ def test_config_show_has_every_section_and_get_reads_one_key(tmp_path: Path) -> 
     ):
         fast = CliRunner().invoke(cmd_config.config_cmd, ["get", "asset_policy.enabled"])
     assert fast.exit_code == 0 and fast.output == "true\n", fast.output
-    # ... and the configuration is loaded once, not once per helper.
+    # ... and the configuration is loaded once, not once per helper, without
+    # building every guardrail profile for a key outside them.
     assert load.call_count == 1
+    assert load.call_args.kwargs["without_guardrail_profiles"] is True
+    assert load.call_args.kwargs["parsed_source"] is not None
 
 
 def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

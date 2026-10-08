@@ -191,7 +191,7 @@ func TestGuardrailWaitsForAPIProfilePublication(t *testing.T) {
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
 	cfg.Guardrail.DefaultProfile = "strict"
-	api := newAPIServer(nil, "127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
 	s.setAPIServer(api)
 	if err := <-done; err != nil {
 		t.Fatal(err)

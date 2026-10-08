@@ -139,6 +139,54 @@ var v8YAMLParseCache struct {
 	doc    *V8YAMLDocument
 }
 
+// sourceYAMLCache holds the plain YAML parse of the last configuration source
+// a key reader decoded. One load reads config_version, deployment_mode,
+// enterprise.profile and ai_discovery.signature_pack_digests through separate
+// helpers, and each parsed the whole file again for its key: with 1,000
+// guardrail profiles those parses were a fifth of every config load, paid by
+// gateway start, the watchdog and each CLI command (GAP-0276). The node is
+// shared: read it, never change it.
+var sourceYAMLCache struct {
+	sync.Mutex
+	sum  [sha256.Size]byte
+	node *yaml.Node
+	err  error
+}
+
+// decodeSourceYAML is yaml.Unmarshal(raw, out) through sourceYAMLCache.
+func decodeSourceYAML(raw []byte, out any) error {
+	node, err := sourceYAMLNode(raw)
+	if err != nil {
+		return err
+	}
+	return node.Decode(out)
+}
+
+// sourceYAMLNode is the yaml.Unmarshal parse of raw into a document node,
+// kept for the next reader of the same bytes. The result is read-only.
+func sourceYAMLNode(raw []byte) (*yaml.Node, error) {
+	if len(raw) > v8YAMLParseCacheMaxBytes {
+		var node yaml.Node
+		err := yaml.Unmarshal(raw, &node)
+		return &node, err
+	}
+	sum := sha256.Sum256(raw)
+	cache := &sourceYAMLCache
+	cache.Lock()
+	if cache.node != nil && cache.sum == sum {
+		node, err := cache.node, cache.err
+		cache.Unlock()
+		return node, err
+	}
+	cache.Unlock()
+	var node yaml.Node
+	err := yaml.Unmarshal(raw, &node)
+	cache.Lock()
+	cache.sum, cache.node, cache.err = sum, &node, err
+	cache.Unlock()
+	return &node, err
+}
+
 // ParseV8YAML performs source-safety, exact-version, and targeted legacy-key
 // checks. It does not apply defaults, migrations, environment overrides, schema
 // validation, or observability compilation. The result is shared between

@@ -276,7 +276,7 @@ func NeedsMigrationV9(raw []byte) bool {
 	var doc struct {
 		ConfigVersion int `yaml:"config_version"`
 	}
-	return yaml.Unmarshal(raw, &doc) == nil && doc.ConfigVersion == ObservabilityV8ConfigVersion
+	return decodeSourceYAML(raw, &doc) == nil && doc.ConfigVersion == ObservabilityV8ConfigVersion
 }
 
 // MigrateV8InMemory is the gateway's read-only load of a config_version 8

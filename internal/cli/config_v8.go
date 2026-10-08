@@ -376,6 +376,12 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 // (skill_actions and the like) are not in the current schema, so the strict
 // parse of the raw file would refuse the very file the migration exists to
 // fix. A failed migration refuses the file.
+//
+// migrate also marks the load of a process that runs the file (the gateway
+// and the watchdog): loaded.runtime is then the strict runtime decode
+// (managed trust, provenance) the caller runs, instead of an inspection decode
+// the caller would decode again. Each decode is a full pass over every
+// guardrail profile (GAP-0276).
 func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate bool) (*loadedConfigV8File, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -426,7 +432,11 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
-	runtimeCandidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	loadRuntime := config.LoadRuntimeV8InspectionCandidateFromBytes
+	if migrate {
+		loadRuntime = config.LoadRuntimeV8FromBytes
+	}
+	runtimeCandidate, err := loadRuntime(absPath, raw)
 	if err != nil {
 		return nil, err
 	}

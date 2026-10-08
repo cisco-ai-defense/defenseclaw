@@ -88,7 +88,7 @@ func TestACPEvaluateResolvesTheGuardrailProfileForItsConnector(t *testing.T) {
 	previous := liveGuardrailProfiles.Load()
 	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
 	api.scannerCfg = cfg
-	api.initGuardrailProfiles(cfg, nil)
+	api.initGuardrailProfiles(cfg)
 	payload := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"terminal/create","params":{"sessionId":"s","command":"false","args":[]}}`)
 	body, err := json.Marshal(acp.Evaluation{Profile: "default", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed", Direction: acp.AgentToClient, Surface: acp.SurfaceTerminal, Method: "terminal/create", Payload: payload})
 	if err != nil {
@@ -454,7 +454,7 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 	}
 	cfg.Guardrail.DefaultProfile = "watch"
 	api := &APIServer{scannerCfg: cfg}
-	api.initGuardrailProfiles(cfg, nil)
+	api.initGuardrailProfiles(cfg)
 
 	type seen struct {
 		subject  VerifiedSubject

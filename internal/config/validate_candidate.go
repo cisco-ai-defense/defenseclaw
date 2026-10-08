@@ -110,11 +110,11 @@ func ValidateCandidate(configFile string, raw []byte) error {
 // can not turn a managed document back into a local one. Unparseable bytes
 // report false; the validator rejects them anyway.
 func StandaloneManagedSource(raw []byte) bool {
-	var document yaml.Node
-	if err := yaml.Unmarshal(raw, &document); err != nil {
+	document, err := sourceYAMLNode(raw)
+	if err != nil {
 		return standaloneManagedDocument(runtime.GOOS, &yaml.Node{Kind: yaml.MappingNode})
 	}
-	root := v8DocumentRoot(&document)
+	root := v8DocumentRoot(document)
 	if root == nil || root.Kind != yaml.MappingNode {
 		root = &yaml.Node{Kind: yaml.MappingNode}
 	}
