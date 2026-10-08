@@ -671,7 +671,7 @@ which combination to recommend.
 | `scanners.skill_scanner.use_llm` | `true` | The LLM analyzer. |
 | `scanners.skill_scanner.use_behavioral`, `enable_meta`, `use_trigger` | `false` | The behavioral, meta and trigger analyzers. |
 | `scanners.skill_scanner.lenient` | `true` | Tolerate malformed skills instead of failing them. |
-| `scanners.skill_scanner.llm_consensus_runs` | `0` | Run the LLM analysis this many times and combine the results; `0` turns it off (up to 1000). |
+| `scanners.skill_scanner.llm_consensus_runs` | `0` | Run the LLM analysis this many times and combine the results (up to 1000). `0` leaves the SDK default of one run in place; `use_llm: false` disables LLM analysis. |
 | `scanners.skill_scanner.judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses the scanner's own `llm:` block, which then needs `llm.model`. An unset value with a populated `llm:` block counts as `override`. |
 | `scanners.skill_scanner.fail_on_severity` | `HIGH` | The blocking gate DefenseClaw applies to the scanner's findings (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`). It is never passed to the scanner itself. Skill admission actions derive from it. |
 | `scanners.skill_scanner.review_queue_min` | `MEDIUM` | The review (warn) band starts here. It must not be above `fail_on_severity`. |
