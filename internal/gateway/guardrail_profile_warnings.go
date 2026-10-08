@@ -32,7 +32,7 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
-	if note := entraShortNameNote(set, subject); note != "" {
+	if note := entraShortNameNote(set, subject, runtime.GOOS); note != "" {
 		warnings = append(warnings, note)
 	}
 	if note := unnamedGroupsNote(subject); note != "" {
@@ -395,8 +395,8 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 // short name and reports no UPN for it (Himmelblau's default
 // cn_name_mapping = true) while an assignment lists users by UPN: no such
 // entry can select an account of this host (GAP-0328).
-func entraShortNameNote(set *guardrailProfileSet, subject *profileSubject) string {
-	if set == nil || subject == nil || subject.LookupFailed || subject.Directory != useridentity.DirectoryEntraID ||
+func entraShortNameNote(set *guardrailProfileSet, subject *profileSubject, goos string) string {
+	if goos == "windows" || set == nil || subject == nil || subject.LookupFailed || subject.Directory != useridentity.DirectoryEntraID ||
 		subject.UPN != "" || strings.Contains(subject.UserName, "@") {
 		return ""
 	}

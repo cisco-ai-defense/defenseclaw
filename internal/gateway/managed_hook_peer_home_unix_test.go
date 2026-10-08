@@ -236,11 +236,14 @@ func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
 		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"carol@contoso.example"}}},
 	}}
 	shortEntra := profileSubject{UserID: "1608906301", UserName: "carol", Directory: useridentity.DirectoryEntraID}
-	if note := entraShortNameNote(byUPN, &shortEntra); !strings.Contains(note, "cn_name_mapping = false") {
+	if note := entraShortNameNote(byUPN, &shortEntra, "linux"); !strings.Contains(note, "cn_name_mapping = false") {
 		t.Errorf("Entra short-name note = %q, want the cn_name_mapping hint", note)
 	}
+	if note := entraShortNameNote(byUPN, &shortEntra, "windows"); note != "" {
+		t.Errorf("Windows Entra account got a Linux Himmelblau hint %q", note)
+	}
 	shortEntra.UserName, shortEntra.UPN = "carol@contoso.example", "carol@contoso.example"
-	if note := entraShortNameNote(byUPN, &shortEntra); note != "" {
+	if note := entraShortNameNote(byUPN, &shortEntra, "linux"); note != "" {
 		t.Errorf("an account named by its UPN got the note %q", note)
 	}
 }
