@@ -515,6 +515,7 @@ func TestPaymentCardEveryLengthSeparatorAndLuhnExclusion(t *testing.T) {
 		assertDetectorAbsent(t, "pii.payment_card", negative)
 	}
 	assertDetectorExact(t, "pii.payment_card", `note\n4242424242424242`, "4242424242424242")
+	assertDetectorExact(t, "pii.payment_card", "Card: 4111111111111111USD", "4111111111111111")
 	for _, value := range []string{
 		strings.Repeat("1", 16), "4242 4242-4242 4242", "14242424242424242",
 		// GAP-0255: generated ids stay whole.

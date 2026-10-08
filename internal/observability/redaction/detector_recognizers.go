@@ -1305,12 +1305,13 @@ func digitBoundary(input string, start, end int) bool {
 }
 
 // paymentCardBoundary keeps generated ids whole (GAP-0255): a card number is
-// never glued to a letter or digit, and a digit run inside an 8-4-4-4-12 UUID
-// (evaluation_id, request_id, occurrence ids) is part of the id. A letter
-// that ends an escape (the n of a JSON-escaped line break) is a boundary.
+// never glued to a preceding letter or adjacent digit, and a digit run
+// inside an 8-4-4-4-12 UUID (evaluation_id, request_id, occurrence ids) is
+// part of the id. A trailing currency code is allowed. A letter that ends
+// an escape (the n of a JSON-escaped line break) is a boundary.
 func paymentCardBoundary(input string, start, end int) bool {
 	gluedBefore := start > 0 && isASCIIAlphaNum(input[start-1]) && !(start > 1 && input[start-2] == '\\')
-	if gluedBefore || end < len(input) && isASCIIAlphaNum(input[end]) {
+	if gluedBefore || end < len(input) && isASCIIDigit(input[end]) {
 		return false
 	}
 	left, right := start, end
