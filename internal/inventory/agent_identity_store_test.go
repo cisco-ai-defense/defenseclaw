@@ -60,8 +60,17 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 		!got.FirstSeen.Equal(t0.Add(-time.Minute)) || !got.LastSeen.Equal(t0.Add(2*time.Hour)) {
 		t.Fatalf("merged row = %+v", got)
 	}
-	if removed, err := st.PruneAgentIdentitySessions(ctx, t0.Add(90*time.Minute)); err != nil || removed != 2 {
-		t.Fatalf("session prune removed %d, err %v; want the 2 counted before the cutoff", removed, err)
+	if removed, err := st.PruneAgentIdentitySessions(ctx); err != nil || removed != 0 {
+		t.Fatalf("session prune removed %d, err %v; active identity must keep its session ids", removed, err)
+	}
+	// The first chat stays active beyond retention and resumes after a restart.
+	resumed := alice
+	resumed.LastSeen = t0.Add(3 * time.Hour)
+	if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{resumed}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "alice"}); err != nil || len(rows) != 1 || rows[0].SessionsSeen != 3 {
+		t.Fatalf("resumed chat counted again: rows = %+v, err %v", rows, err)
 	}
 	for _, qualified := range []string{"alice@DCLAB.TEST", `DCLAB\alice`} {
 		if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: qualified}); err != nil || len(rows) != 1 || rows[0].UserID != "1001" {
@@ -76,7 +85,14 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{Connector: "codex"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
 		t.Fatalf("connector filter rows = %+v, err %v", rows, err)
 	}
+	if _, err := st.PruneAgentIdentities(ctx, t0.Add(4*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := st.PruneAgentIdentitySessions(ctx); err != nil || removed != 3 {
+		t.Fatalf("orphan session prune removed %d, err %v; want 3", removed, err)
+	}
 }
+
 // A resumed older chat is already counted and cannot replace the last new chat.
 func TestAgentIdentityResumedOlderSessionKeepsLastSession(t *testing.T) {
 	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))

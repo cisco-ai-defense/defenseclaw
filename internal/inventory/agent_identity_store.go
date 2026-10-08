@@ -203,10 +203,10 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 	})
 }
 
-// PruneAgentIdentitySessions deletes the session ids first counted before
-// cutoff and returns how many. They only remember which sessions were
-// counted, so a session older than the window that resumes is counted again.
-func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff time.Time) (int64, error) {
+// PruneAgentIdentitySessions deletes deduplication rows whose identities
+// were pruned. Active identities retain every counted session ID so a
+// long-running chat cannot increase its cumulative count after retention.
+func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("inventory store: not open")
 	}
@@ -218,7 +218,9 @@ func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff 
 		if err := ensureAgentIdentitiesTable(ctx, tx); err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions WHERE first_seen < ?`, formatAgentIdentityTime(cutoff))
+		result, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions
+			WHERE NOT EXISTS (SELECT 1 FROM agent_identities
+				WHERE agent_identities.agent_id = agent_identity_sessions.agent_id)`)
 		if err != nil {
 			return err
 		}
