@@ -143,3 +143,22 @@ func TestADUPNCacheDoesNotReuseAccountNameAcrossSIDs(t *testing.T) {
 		t.Fatalf("new SID UPN = %q after %d translations", got, calls)
 	}
 }
+
+func TestWindowsGroupNamesLookupHonorsBudget(t *testing.T) {
+	blocked := make(chan struct{})
+	defer close(blocked)
+	sids := []string{"S-1-5-21-1-2-3-1105", "S-1-5-21-1-2-3-1106"}
+	start := time.Now()
+	got := windowsGroupNamesWithLookup(sids, 2, 20*time.Millisecond, func(string) (string, string, bool) {
+		<-blocked
+		return "group", "CORP", true
+	})
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("group lookup took %s after its budget", elapsed)
+	}
+	for i, sid := range sids {
+		if got[i] != sid {
+			t.Fatalf("group %d = %q; want SID %q after timeout", i, got[i], sid)
+		}
+	}
+}
