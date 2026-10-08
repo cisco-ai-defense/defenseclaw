@@ -400,17 +400,180 @@ def _nickname(name: str) -> str:
     return nickname[:64]
 
 
+# A private password file on Windows: its owner is the current user, LocalSystem or
+# BUILTIN\Administrators, and its DACL grants access to no one else. This is the
+# same rule the DefenseClaw CLI applies to its own private files. OWNER RIGHTS
+# (S-1-3-4) stands for that already-checked owner.
+_WINDOWS_PRIVATE_SIDS = ("S-1-5-18", "S-1-5-32-544", "S-1-3-4")
+_WINDOWS_ACE_RE = re.compile(r"\(([A-Z]*);([A-Z]*);[^;()]*;[^;()]*;[^;()]*;([^;()]+)\)")
+
+
+class _WindowsSecurity:
+    """The few Win32 security calls the password-file check needs (Windows only)."""
+
+    _OWNER, _DACL, _PROTECTED_DACL, _SE_FILE_OBJECT = 0x1, 0x4, 0x80000000, 1
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self.ctypes, self.wintypes = ctypes, wintypes
+        self.advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        ptr = ctypes.POINTER(ctypes.c_void_p)
+        self.kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel.LocalFree.argtypes = [ctypes.c_void_p]
+        self.kernel.LocalFree.restype = ctypes.c_void_p
+        self.advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        self.advapi.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+        ]
+        self.advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        self.advapi.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ptr]
+        self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, ptr, ctypes.c_void_p
+        ]
+        self.advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.LPWSTR), ctypes.c_void_p
+        ]
+        self.advapi.GetSecurityDescriptorDacl.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), ptr, ctypes.POINTER(wintypes.BOOL)
+        ]
+        self.advapi.GetSecurityInfo.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ptr, ptr, ptr, ptr, ptr]
+        self.advapi.GetSecurityInfo.restype = wintypes.DWORD
+        self.advapi.SetNamedSecurityInfoW.argtypes = [
+            wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        self.advapi.SetNamedSecurityInfoW.restype = wintypes.DWORD
+
+    def _fail(self, call: str, code: int | None = None) -> None:
+        code = self.ctypes.get_last_error() if code is None else code
+        raise SystemExit(f"error: cannot check the password file permissions: {call} failed (Windows error {code})")
+
+    def _sid_text(self, sid) -> str:
+        text = self.wintypes.LPWSTR()
+        if not self.advapi.ConvertSidToStringSidW(sid, self.ctypes.byref(text)):
+            self._fail("ConvertSidToStringSidW")
+        try:
+            return text.value
+        finally:
+            self.kernel.LocalFree(text)
+
+    def canonical_sid(self, token: str) -> str:
+        """Turn an SDDL account token (an alias such as SY or BA, or S-1-...) into S-1-... form."""
+        sid = self.ctypes.c_void_p()
+        if not self.advapi.ConvertStringSidToSidW(token, self.ctypes.byref(sid)):
+            self._fail("ConvertStringSidToSidW")
+        try:
+            return self._sid_text(sid)
+        finally:
+            self.kernel.LocalFree(sid)
+
+    def current_user_sid(self) -> str:
+        token = self.wintypes.HANDLE()
+        if not self.advapi.OpenProcessToken(self.kernel.GetCurrentProcess(), 0x0008, self.ctypes.byref(token)):
+            self._fail("OpenProcessToken")
+        try:
+            size = self.wintypes.DWORD()
+            self.advapi.GetTokenInformation(token, 1, None, 0, self.ctypes.byref(size))
+            buffer = self.ctypes.create_string_buffer(size.value)
+            if not size.value or not self.advapi.GetTokenInformation(token, 1, buffer, size, self.ctypes.byref(size)):
+                self._fail("GetTokenInformation")
+            return self._sid_text(self.ctypes.c_void_p.from_buffer(buffer).value)
+        finally:
+            self.kernel.CloseHandle(token)
+
+    def make_private(self, path: str, user_sid: str) -> None:
+        """Give *path* a protected DACL: full control for the user, LocalSystem and Administrators only."""
+        descriptor = self.ctypes.c_void_p()
+        sddl = f"D:P(A;;FA;;;{user_sid})(A;;FA;;;SY)(A;;FA;;;BA)"
+        if not self.advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, 1, self.ctypes.byref(descriptor), None
+        ):
+            self._fail("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+        try:
+            present, defaulted = self.wintypes.BOOL(), self.wintypes.BOOL()
+            dacl = self.ctypes.c_void_p()
+            if not self.advapi.GetSecurityDescriptorDacl(
+                descriptor, self.ctypes.byref(present), self.ctypes.byref(dacl), self.ctypes.byref(defaulted)
+            ):
+                self._fail("GetSecurityDescriptorDacl")
+            status = self.advapi.SetNamedSecurityInfoW(
+                path, self._SE_FILE_OBJECT, self._DACL | self._PROTECTED_DACL, None, None, dacl, None
+            )
+            if status:
+                self._fail("SetNamedSecurityInfoW", status)
+        finally:
+            self.kernel.LocalFree(descriptor)
+
+    def owner_and_dacl(self, file_descriptor: int) -> str:
+        """Return the owner and DACL of an open file as SDDL text."""
+        import msvcrt
+
+        owner, dacl, descriptor = self.ctypes.c_void_p(), self.ctypes.c_void_p(), self.ctypes.c_void_p()
+        status = self.advapi.GetSecurityInfo(
+            msvcrt.get_osfhandle(file_descriptor), self._SE_FILE_OBJECT, self._OWNER | self._DACL,
+            self.ctypes.byref(owner), None, self.ctypes.byref(dacl), None, self.ctypes.byref(descriptor),
+        )
+        if status:
+            self._fail("GetSecurityInfo", status)
+        try:
+            text = self.wintypes.LPWSTR()
+            if not self.advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor, 1, self._OWNER | self._DACL, self.ctypes.byref(text), None
+            ):
+                self._fail("ConvertSecurityDescriptorToStringSecurityDescriptorW")
+            try:
+                return text.value
+            finally:
+                self.kernel.LocalFree(text)
+        finally:
+            self.kernel.LocalFree(descriptor)
+
+
+def _windows_sddl_is_private(sddl: str, allowed: set[str], canonical) -> bool:
+    """True when the owner is allowed and every allow ACE that applies to the file names an allowed SID."""
+    match = re.fullmatch(r"O:([^():]+)D:([A-Z]*)((?:\([^()]*\))*)", sddl)
+    if not match or canonical(match.group(1)) not in allowed:
+        return False
+    aces = match.group(3)
+    parsed = _WINDOWS_ACE_RE.findall(aces)
+    if len(parsed) != aces.count("("):
+        return False
+    for ace_type, flags, account in parsed:
+        if ace_type in ("D", "OD", "XD") or "IO" in re.findall("..", flags):
+            continue
+        if canonical(account) not in allowed:
+            return False
+    return True
+
+
+def _windows_password_file_is_private(path: str, descriptor: int, created: bool) -> bool:
+    security = _WindowsSecurity()
+    user = security.current_user_sid()
+    if created:
+        security.make_private(path, user)
+    allowed = {user, *_WINDOWS_PRIVATE_SIDS}
+    return _windows_sddl_is_private(security.owner_and_dacl(descriptor), allowed, security.canonical_sid)
+
+
 def _open_password_file(path: str) -> int:
     """Open the password file for appending, only as a private regular file owned by this process."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    created = False
     try:
-        descriptor = os.open(path, flags, 0o600)
+        try:
+            descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            descriptor = os.open(path, flags)
     except OSError as exc:
         raise SystemExit(f"error: cannot open password file securely: {exc.strerror}") from None
     try:
         info = os.fstat(descriptor)
-        owner_ok = not hasattr(os, "geteuid") or info.st_uid == os.geteuid()
-        if not stat.S_ISREG(info.st_mode) or not owner_ok or info.st_nlink != 1 or info.st_mode & 0o077:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise SystemExit("error: password file must be a private regular file owned by the current user")
         if not hasattr(os, "O_NOFOLLOW"):
             path_info = os.lstat(path)
@@ -418,6 +581,14 @@ def _open_password_file(path: str) -> int:
                 info.st_dev, info.st_ino
             ):
                 raise SystemExit("error: password file must not be a symlink")
+        # Windows has no POSIX owner or mode bits (fstat reports 0o666 for every
+        # writable file), so the owner and DACL decide there.
+        if os.name == "nt":
+            private = _windows_password_file_is_private(path, descriptor, created)
+        else:
+            private = info.st_uid == os.geteuid() and not info.st_mode & 0o077
+        if not private:
+            raise SystemExit("error: password file must be a private regular file owned by the current user")
     except BaseException:
         os.close(descriptor)
         raise
