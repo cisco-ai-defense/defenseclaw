@@ -174,7 +174,7 @@ func (s *Sidecar) recordExporterHealthMetricsV8(
 				previous := s.destinationLossMetricCounters[key]
 				previous.dropped = recordDestinationLossMetric(
 					ctx, observedAt, health.Generation, runtime, destination.Name, signal,
-					"retry_exhausted", previous.dropped, source.Counters.Dropped,
+					"dropped", previous.dropped, source.Counters.Dropped,
 				)
 				previous.rejected = recordDestinationLossMetric(
 					ctx, observedAt, health.Generation, runtime, destination.Name, signal,

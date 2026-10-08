@@ -275,7 +275,8 @@ window are not automatically replayed. The local SQLite event history retains
 them; export that history separately if backfill matters. Doctor shows dropped
 and rejected counts per destination. The `defenseclaw.queue.drops` delta
 metric reports those record losses per `destination.<name>.<signal>` queue,
-with `retry_exhausted` or `rejected` as the reason.
+with `dropped` or `rejected` as the reason. `dropped` includes queue overflow,
+retry exhaustion, and records abandoned during shutdown.
 
 Gateway health and `defenseclaw doctor` expose the circuit state, consecutive
 failures, bounded failure class, and open deadline. Transient-open and

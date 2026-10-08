@@ -190,7 +190,7 @@ func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *te
 	if len(drops) != 4 {
 		t.Fatalf("destination loss observations=%d want=4", len(drops))
 	}
-	wantLoss := map[string][]int64{"retry_exhausted": {4, 3}, "rejected": {1, 2}}
+	wantLoss := map[string][]int64{"dropped": {4, 3}, "rejected": {1, 2}}
 	for _, drop := range drops {
 		attrs := drop.Attributes()
 		if attrs["defenseclaw.metric.queue"] != "destination.capture.metrics" {
