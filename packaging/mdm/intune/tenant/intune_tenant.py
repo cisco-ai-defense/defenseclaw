@@ -663,7 +663,7 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if included and assignment.get("intent") == args.intent:
         print(f"app {args.app} is already assigned to {args.group} as {args.intent}")
         return 0
-    action = "update the existing assignment" if assignment else "assign"
+    action = "delete the existing assignment and create a new one" if assignment else "assign"
     if not args.apply:
         print(f"[plan] would {action} app {args.app} for group {args.group} with intent {args.intent}")
         print("Nothing was changed. Run again with --apply to make this change.")
@@ -678,7 +678,20 @@ def cmd_assign_app(graph: Graph, args: argparse.Namespace) -> int:
     if assignment:
         if "settings" in assignment:
             body["settings"] = assignment["settings"]
-        graph.request("PATCH", f"{collection}/{assignment['id']}", body)
+        # Graph refuses a PATCH of an assignment intent, target or settings, so
+        # an intent change deletes and recreates it. When the create fails, the
+        # old assignment is put back so the app is never left unassigned
+        # (GAP-1014).
+        graph.request("DELETE", f"{collection}/{assignment['id']}")
+        try:
+            graph.request("POST", collection, body)
+        except (GraphError, SystemExit):
+            restore = {key: assignment[key] for key in ("intent", "target", "settings") if assignment.get(key)}
+            restore["@odata.type"] = "#microsoft.graph.mobileAppAssignment"
+            graph.request("POST", collection, restore)
+            print(f"app {args.app}: the new assignment failed; the previous {assignment.get('intent')} "
+                  f"assignment for group {args.group} was restored", file=sys.stderr)
+            raise
     else:
         graph.request("POST", collection, body)
     print(f"app {args.app}: {action} completed for group {args.group} as {args.intent}")

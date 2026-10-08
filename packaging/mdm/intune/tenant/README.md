@@ -53,7 +53,7 @@ Run `python3 intune_tenant.py COMMAND --help` for the options. Python 3.9 or lat
 | `devices` | no | Managed devices with compliance, management state and last sync. Filters: `--os`, `--group`, `--noncompliant` |
 | `status` | no | Install state per device of an app, run state per device of a Remediations package |
 | `groups` | with `--apply` | Create static security groups; add an Entra device to a group by name |
-| `assign-app` | with `--apply` | Add an app assignment; changing its intent updates the existing assignment, which the preview names |
+| `assign-app` | with `--apply` | Add an app assignment; changing its intent deletes the old assignment and creates the new one (Graph cannot change it in place), which the preview names; a failed create restores the old one |
 | `remove-assignment` | with `--apply` | Remove an included group assignment before an uninstall rollout; exclusions are preserved |
 | `remediation` | with `--apply` | Create or update a Remediations package from `../windows/Remediate-*.ps1` (run as SYSTEM) and assign it on a daily schedule |
 | `macos-script` | with `--apply` | Create or update a macOS shell script from a file (run as root) and assign it |

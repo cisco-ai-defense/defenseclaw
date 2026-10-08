@@ -1084,10 +1084,11 @@ func (a *APIServer) joinCodexNotifyLineage(meta llmEventMeta) llmEventMeta {
 			return meta
 		}
 	}
-	// Never join the retained hook state of another user (GAP-1017). With
-	// no user on either side (a per-user gateway without account facts) the
-	// session lineage still joins; identity facts need a named user below.
-	if meta.UserID != snapshot.UserID {
+	// Hook state retained for a named user joins only a notify from that
+	// same user, never another or an unnamed one (GAP-1017). State kept
+	// without account facts still joins its session; identity facts below
+	// always need the same named user.
+	if snapshot.UserID != "" && meta.UserID != snapshot.UserID {
 		return meta
 	}
 	if !exact {
