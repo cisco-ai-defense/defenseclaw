@@ -772,6 +772,18 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Findings:         findingStrs,
 			DetailedFindings: append(ruleFindings, cgFindings...),
 		}
+		detectionOnly := len(ruleFindings) > 0 && len(cgFindings) == 0
+		for _, finding := range ruleFindings {
+			if finding.enforcement != findingEnforcementDetectionOnly {
+				detectionOnly = false
+				break
+			}
+		}
+		if detectionOnly {
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				verdict.Reason = "detection-only: tool-call patterns alone cannot block; " + verdict.Reason
+			}
+		}
 
 		// AID lane: also forward to Cisco AI Defense when the operator has
 		// configured a key. Strictest verdict wins via mergeWithAIDVerdict.

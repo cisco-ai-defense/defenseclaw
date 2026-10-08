@@ -64,13 +64,19 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
       - id: ACME-INTERNAL-DUMP
         tool_call_only: true
         pattern: (?i)\bpg_dump\b.{0,200}\bacme-prod\b
+        expression: f.commands.exists(c, c.argv_complete && c.program == 'pg_dump' && 'acme-prod' in c.argv)
         title: "Dump of the acme-prod database"
         severity: HIGH
         confidence: 0.9
         tags: [acme, database]
     ```
 
-    The [CEL rule guide](/docs/policies/cel/authoring) has the full rule shape, including `expression` for structured tool-call rules.
+    A pattern-only rule can block matching prompts and content, but a tool-call
+    pattern match is detection-only: it alerts and never blocks, regardless of
+    `block_at`. For a tool-call block, use an `expression` over complete action
+    facts as above. `tool_call_only` limits where the pattern runs; it does not
+    make the pattern enforceable. The [CEL rule guide](/docs/policies/cel/authoring)
+    explains the available facts and proof requirements.
   </Step>
   <Step>
     **Validate it.** The gateway's own loader checks the whole directory offline and prints the digest:

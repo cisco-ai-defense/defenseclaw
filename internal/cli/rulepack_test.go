@@ -61,6 +61,32 @@ func TestRulePackValidateWireProtocol(t *testing.T) {
 	}
 }
 
+func TestRulePackValidateWarnsWhenToolCallPatternCannotBlock(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(directory, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const rule = "version: 1\ncategory: acme\nrules:\n  - id: ACME-TEST\n    tool_call_only: true\n    pattern: 'marker'\n    title: Marker\n    severity: HIGH\n    confidence: 0.9\n    tags: [test]\n"
+	if err := os.WriteFile(filepath.Join(directory, "rules", "acme.yaml"), []byte(rule), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput := rulePackValidateCmd.OutOrStdout()
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+	})
+	rulePackValidateDir, rulePackValidateJSON = directory, false
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "warning: 1 enabled tool_call_only rules have no expression") {
+		t.Fatalf("missing detection-only warning: %s", output)
+	}
+}
+
 func TestRulePackValidateFailureIsStructuredAndValueSafe(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(directory, "rules"), 0o755); err != nil {

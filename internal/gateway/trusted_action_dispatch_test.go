@@ -2864,6 +2864,29 @@ func TestDetectionOnlyFindingCannotDriveBlock(t *testing.T) {
 	}
 }
 
+func TestPatternOnlyToolCallExplainsAllowedFinding(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	generation, err := compileRulePackGeneration([]ruleCategory{{
+		Name: "acme",
+		Rules: []PatternRule{{
+			ID: "ACME-MARKER", Pattern: regexp.MustCompile("acme-marker"),
+			ToolCallOnly: true, Title: "Marker", Severity: "HIGH", Confidence: 1,
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishConnectorRulePackOverrides("codex", generation)
+	api := testAPIServerWithConfig(t, "action")
+	verdict := api.inspectToolPolicyCtx(t.Context(), &ToolInspectRequest{
+		Connector: "codex", Tool: "custom_tool", Args: json.RawMessage(`{"text":"acme-marker"}`),
+	})
+	if verdict.Action != guardrailActionAllow || !strings.Contains(verdict.Reason,
+		"detection-only: tool-call patterns alone cannot block") {
+		t.Fatalf("pattern-only verdict = %+v", verdict)
+	}
+}
+
 func TestRuleGenerationSnapshotIsImmutable(t *testing.T) {
 	ruleCategoriesMu.Lock()
 	savedCategories := connectorRuleCategories
