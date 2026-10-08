@@ -118,6 +118,43 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	return record, nil
 }
 
+// errSSSDNotActive keeps InfoPipe unasked while sssd.service is not active.
+var errSSSDNotActive = errors.New("sssd.service is not active yet, so SSSD InfoPipe is not asked until it is")
+
+// infoPipeGate refuses an InfoPipe call while systemd reports sssd.service
+// in any state but active. The call D-Bus-activates sssd-ifp; while sssd was
+// still starting (a directory late at boot) each guardian pass timed out an
+// activation, and when sssd came up the queued activations hit the start
+// limit, left sssd-ifp.service failed and the host degraded (GAP-0583). A
+// host where systemd does not answer (known false) keeps asking InfoPipe.
+func infoPipeGate(active, known bool) error {
+	if known && !active {
+		return errSSSDNotActive
+	}
+	return nil
+}
+
+// sssdServiceState reports whether systemd has sssd.service active, without
+// starting anything; known is false when systemd does not answer on the bus.
+func sssdServiceState(ctx context.Context, conn *dbus.Conn) (active, known bool) {
+	var unit dbus.ObjectPath
+	systemd := conn.Object("org.freedesktop.systemd1", "/org/freedesktop/systemd1")
+	if err := systemd.CallWithContext(ctx, "org.freedesktop.systemd1.Manager.GetUnit", dbus.FlagNoAutoStart, "sssd.service").Store(&unit); err != nil {
+		var dbusErr dbus.Error
+		if errors.As(err, &dbusErr) && dbusErr.Name == "org.freedesktop.systemd1.NoSuchUnit" {
+			return false, true // not loaded: not running
+		}
+		return false, false
+	}
+	var state dbus.Variant
+	if err := conn.Object("org.freedesktop.systemd1", unit).CallWithContext(ctx, dbusPropertiesGet, dbus.FlagNoAutoStart,
+		"org.freedesktop.systemd1.Unit", "ActiveState").Store(&state); err != nil {
+		return false, false
+	}
+	value, _ := state.Value().(string)
+	return value == "active", true
+}
+
 // infoPipeHeld is what InfoPipe reports for the user that holds a uid: the
 // name, id provider ("ldap", "ad", "ipa", ...) and Kerberos realm of its
 // SSSD domain, and its userPrincipalName when the [ifp] user_attributes
@@ -136,6 +173,9 @@ func infoPipeAccount(ctx context.Context, uid int) (infoPipeHeld, error) {
 		return infoPipeHeld{}, err
 	}
 	defer conn.Close()
+	if err := infoPipeGate(sssdServiceState(ctx, conn)); err != nil {
+		return infoPipeHeld{}, err
+	}
 	var user dbus.ObjectPath
 	if err := conn.Object(infoPipeService, infoPipeUsers).CallWithContext(ctx, infoPipeFindByID, 0, uint32(uid)).Store(&user); err != nil {
 		return infoPipeHeld{}, err
