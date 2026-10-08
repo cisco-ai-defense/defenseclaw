@@ -91,8 +91,11 @@ func TestEnterpriseCredentialsReadyPastAThousandEnrollments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if !EnterpriseCredentialsReady(dataDir) {
+	if !EnterpriseCredentialsReady(dataDir, false) {
 		t.Fatal("an inventory of 1,025 valid enrollments is not ready")
+	}
+	if EnterpriseCredentialsReady(dataDir, true) {
+		t.Fatal("Secure Client accepted more than 1,024 enrollments")
 	}
 }
 
@@ -115,7 +118,7 @@ func TestRevokedEnterpriseCredentialNamesItsEnrollment(t *testing.T) {
 	if !ok || revoked.Principal != "sid:S-1-5-21-1-2-3-1001" || revoked.AgentID != "hermes" {
 		t.Fatalf("revoked = %+v, %v", revoked, ok)
 	}
-	if EnterpriseCredentialsReady(dataDir) {
+	if EnterpriseCredentialsReady(dataDir, false) {
 		t.Fatal("an inventory with no enrollment reported ready")
 	}
 }
@@ -137,7 +140,7 @@ func TestEnterpriseCredentialRevocationTombstoneFailsInventoryClosed(t *testing.
 	if _, ok := MatchEnterpriseCredential(dataDir, credential.Token); ok {
 		t.Fatal("credential matched while revocation tombstone was present")
 	}
-	if EnterpriseCredentialsReady(dataDir) {
+	if EnterpriseCredentialsReady(dataDir, false) {
 		t.Fatal("credential inventory reported ready while revocation tombstone was present")
 	}
 }

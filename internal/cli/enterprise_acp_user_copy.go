@@ -79,6 +79,18 @@ func cleanEnterpriseACPUserCopies(
 	deleted func(sid string) bool,
 	stderr io.Writer,
 ) {
+	// Enrollment can publish a new copy after the list is read. Hold its
+	// transaction lock through removal and the list update (GAP-0982).
+	var unlock func()
+	if err := withEnterpriseACPServiceOwner(dataDir, func() error {
+		var lockErr error
+		unlock, lockErr = acp.AcquireEnterpriseCredentialEnrollmentLock(dataDir)
+		return lockErr
+	}); err != nil {
+		fmt.Fprintf(stderr, "[acp-enrollments] warn: could not lock ACP user copy cleanup: %v\n", err)
+		return
+	}
+	defer unlock()
 	pending, err := acp.EnterpriseUserCopyCleanups(dataDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "[acp-enrollments] warn: could not read the ACP user copies waiting for removal: %v\n", err)

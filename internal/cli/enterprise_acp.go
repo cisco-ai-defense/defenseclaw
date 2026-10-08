@@ -667,6 +667,21 @@ func runEnterpriseACPRevoke(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
 	}
+	// Keep service revocation and user-copy cleanup in the same enrollment
+	// transaction so a concurrent enroll cannot publish a token between them.
+	// Secure Client retains the main branch sequence.
+	if !cfg.SecureClientIntegration() {
+		var unlock func()
+		err := withEnterpriseACPServiceOwner(cfg.DataDir, func() error {
+			var lockErr error
+			unlock, lockErr = acp.AcquireEnterpriseCredentialEnrollmentLock(cfg.DataDir)
+			return lockErr
+		})
+		if err != nil {
+			return enterpriseACPResult(cmd, nil, err)
+		}
+		defer unlock()
+	}
 	// Revoke centrally first. From this point a copied or cached bearer has no
 	// authority even if user-side cleanup is interrupted.
 	found := true
