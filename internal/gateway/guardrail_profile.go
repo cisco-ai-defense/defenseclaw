@@ -950,12 +950,16 @@ func anyEqualFold(have []string, want string) bool {
 }
 
 // decisionConfig returns the configuration a decision for ctx reads: the
-// derived configuration of the request's profile, or a.scannerCfg.
+// derived configuration of the request's profile, or the live base snapshot.
 func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 	if a == nil {
 		return nil
 	}
-	return a.decisionConfigFrom(ctx, a.scannerCfg)
+	// Secure Client keeps the pre-profile startup policy path.
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
+	}
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot())
 }
 
 // decisionConfigFrom is decisionConfig for a caller that already holds a

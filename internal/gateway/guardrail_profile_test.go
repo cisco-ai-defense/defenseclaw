@@ -59,6 +59,34 @@ rules:
 	}
 }
 
+// Removing the last profile must leave unmatched hooks on the live base mode.
+func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
+	stubProfileSources(t)
+	startup := &config.Config{}
+	startup.Guardrail.Mode = "observe"
+	startup.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	startup.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, startup)
+	live := startup
+	api.SetConfigRuntime(nil, func() *config.Config { return live })
+	ctx := api.withGuardrailProfileDecision(t.Context(), "opencode")
+	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "observe" {
+		t.Fatalf("startup unmatched hook mode = %q", got)
+	}
+	reloaded := *startup
+	reloaded.Guardrail = startup.Guardrail
+	reloaded.Guardrail.Mode = "action"
+	reloaded.Guardrail.Profiles = nil
+	reloaded.Guardrail.ProfileAssignments = nil
+	live = &reloaded
+	api.setGuardrailProfiles(nil)
+	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "action" {
+		t.Fatalf("reloaded unmatched hook mode = %q, want action", got)
+	}
+}
+
 // A reload during a request must attribute records to the profile enforced
 // by decisions after the reload.
 func TestGuardrailProfileTelemetryFollowsReloadedSet(t *testing.T) {
