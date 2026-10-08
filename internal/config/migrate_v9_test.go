@@ -993,6 +993,32 @@ func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T)
 	}
 }
 
+// A missing audit.db is optional, but a path that cannot be accessed must
+// stop the persisted migration before it drops operator policy.
+func TestMigrateV9RefusesAuditDBAccessError(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(configPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, AuditDBPath: filepath.Join(parent, "audit.db"),
+	})
+	if err == nil {
+		t.Fatal("migration committed without reading the configured audit.db")
+	}
+	if got, readErr := os.ReadFile(configPath); readErr != nil || string(got) != string(source) {
+		t.Fatalf("config after failed migration = %q, %v", got, readErr)
+	}
+}
+
 // TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon: a damaged audit.db
 // is repaired by the daemon's store open, so the in-memory migration notes it
 // and goes on; a persisted migration, which would lose the rows for good,

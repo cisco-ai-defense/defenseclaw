@@ -2557,7 +2557,15 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 		return nil
 	}
 	if _, err := os.Stat(path); err != nil {
-		return nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if m.in.Managed {
+			m.note("%s: could not access %s (%v); the admin config is the policy",
+				LocalEnforcementEntriesIgnored, path, err)
+			return nil
+		}
+		return fmt.Errorf("config: access operator rows in %s: %w", path, err)
 	}
 	// A Secure Client gateway keeps reading operator rows from the table
 	// (PolicyEngine.legacyOperatorRows), so they stay there untouched.
