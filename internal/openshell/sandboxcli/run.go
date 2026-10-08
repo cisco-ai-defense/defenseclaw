@@ -1610,7 +1610,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		}
 	}
 	for _, w := range sb.Warnings {
-		if !b.shown[warningKey(w)] {
+		// The project's own warnings came with the Project lines above
+		// (GAP-0247).
+		if !b.shown[warningKey(w)] && (sb.Workspace == nil || sb.WorkdirMode == config.OpenShellWorkdirCopy || !slices.Contains(sb.Workspace.Warnings, w)) {
 			a.warn(w)
 		}
 	}
