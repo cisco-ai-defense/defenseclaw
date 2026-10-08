@@ -124,6 +124,8 @@ def test_systemd_enumerator_can_publish_refused_surfaces():
     lines = _unit("defenseclaw-hook-enumerator.service")
     assert "ProtectSystem=strict" in lines
     assert "/var/lib/defenseclaw-hook-guardian" in _unit_values(lines, "ReadWritePaths")
+    # It revokes the ACP enrollments of deleted accounts (GAP-0697).
+    assert "-/var/lib/defenseclaw/acp" in _unit_values(lines, "ReadWritePaths")
     assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in lines
     # The file is chowned root:defenseclaw so the gateway can read it; without
     # CAP_CHOWN the chown fails and every hook call is refused 503 (GAP-1760).

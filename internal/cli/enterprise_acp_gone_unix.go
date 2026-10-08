@@ -100,7 +100,11 @@ func revokeGoneEnterpriseACPEnrollments(
 			return acp.RemoveEnterpriseCredential(current.DataDir, enrollment.Principal, enrollment.ClientID, enrollment.AgentID, enrollment.Profile)
 		}); err != nil {
 			failed[enrollment.Principal] = true
-			kept = append(kept, fmt.Sprintf("%s: the account no longer exists, but its ACP enrollment could not be revoked: %v", pair, err))
+			line := fmt.Sprintf("%s: the account no longer exists, but its ACP enrollment could not be revoked: %v", pair, err)
+			// The timer cycle drops kept; a failed revoke left no line at all
+			// (GAP-0697).
+			fmt.Fprintf(stderr, "[acp-enrollments] warn: %s\n", line)
+			kept = append(kept, line)
 			continue
 		}
 		fmt.Fprintf(stderr, "[acp-enrollments] %s: the account no longer exists; revoked its ACP enrollment\n", pair)
