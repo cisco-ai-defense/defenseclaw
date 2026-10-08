@@ -34,7 +34,10 @@ import stat
 from pathlib import Path
 from typing import Any
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
+    import tomli as tomllib
 
 _LOCK_LIMIT = 4 * 1024 * 1024
 

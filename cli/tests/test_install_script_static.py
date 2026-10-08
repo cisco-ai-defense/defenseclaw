@@ -1031,7 +1031,7 @@ def test_a_failed_python_build_removes_the_uv_it_installed_and_names_the_kept_ca
     assert "nothing was changed" not in proc.stdout
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root writes any folder")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes any folder")
 def test_an_unwritable_install_folder_is_refused_before_anything_changes(tmp_path: Path) -> None:
     # GAP-0381, GAP-0420: a read-only ~/.local(/bin) failed the swap after the
     # gateway stopped, or a first install only said uv could not be installed,
