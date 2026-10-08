@@ -829,7 +829,7 @@ def build_parser() -> argparse.ArgumentParser:
     macos.add_argument("--file", required=True, metavar="FILE", help="the script, with its settings block filled in")
     macos.add_argument("--group", metavar="NAME", help="assign it to this group")
     macos.add_argument(
-        "--frequency", default="PT1H", metavar="ISO8601", help="how often it runs; PT0S runs once (default PT1H)"
+        "--frequency", default="P1D", metavar="ISO8601", help="how often it runs; PT0S runs once (default P1D)"
     )
     macos.add_argument("--retries", type=int, default=3, help="retries after a failure (default 3)")
     _mutating(macos)

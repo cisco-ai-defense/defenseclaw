@@ -550,3 +550,11 @@ def test_intune_groups_reject_dynamic_group() -> None:
     args = intune.build_parser().parse_args(["groups", "--name", "team", "--apply"])
     with pytest.raises(SystemExit, match="static security group"):
         intune.cmd_groups(Graph(), args)
+
+
+def test_intune_macos_script_defaults_to_daily_frequency() -> None:
+    intune = _load(INTUNE)
+    args = intune.build_parser().parse_args([
+        "macos-script", "--name", "script", "--file", "script.sh",
+    ])
+    assert args.frequency == "P1D"
