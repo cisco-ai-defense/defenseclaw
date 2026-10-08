@@ -903,7 +903,10 @@ func (c *Controller) refreshPending(publish bool) {
 				c.st.Overrides[FamilyControls].Kind != OverrideDeleted &&
 				c.st.Overrides[FamilyBurnin].Kind != OverrideDeleted
 		}
-		if !c.seenRoots[key] && eligible && !covered {
+		// A policy replacement can displace a previously covered root when
+		// the PID budget is full. A wholly disabled policy pauses accrual
+		// separately; it does not reset the user's prior clean window.
+		if eligible && !covered && (!c.seenRoots[key] || c.enabled[root.UID]) {
 			c.waiting[key] = true
 		}
 		c.seenRoots[key] = true

@@ -119,8 +119,11 @@ const (
 	DefaultPauseFor = 4 * time.Hour
 	MaxPauseFor     = 7 * 24 * time.Hour
 
-	// MaxPIDs is how many pids one matchPIDs selector carries (pids_limit.out).
+	// MaxPIDs is the total number of live roots a controls policy anchors.
 	MaxPIDs = 64
+	// Tetragon's process filter evaluates at most four matchPIDs values even
+	// when it accepts a longer list. Split the total budget across selectors.
+	maxPIDsPerSelector = 4
 	// MaxSelectors is Tetragon's per-hook selector budget (selector_limit.out).
 	MaxSelectors = 5
 	// maxValues bounds any one value list, so a very large enrollment is

@@ -74,23 +74,18 @@ func TestGoldenTwoUsersMixedInstalls(t *testing.T) {
 	if fmt.Sprint(p.UIDs) != "[1001 1002]" || fmt.Sprint(p.PIDs) != "[4001 4002 5001]" {
 		t.Fatalf("uids %v pids %v", p.UIDs, p.PIDs)
 	}
-	// The binaries anchor holds the native ELFs only: both installed Claude
-	// versions, and never the shared interpreter of a script-hosted agent.
-	for _, want := range []string{aliceClaudeOld, aliceClaudeNew} {
-		if !hasBinary(p, want) {
-			t.Errorf("binaries anchor lacks %s: %v", want, p.Binaries)
-		}
-	}
-	if hasBinary(p, "/usr/bin/node") || len(p.Binaries) != 2 {
-		t.Errorf("binaries anchor = %v; an interpreter must never be an anchor", p.Binaries)
+	// Live monitor sessions use disjoint PID selectors. A binary selector
+	// beside them could report the same descendant open a second time.
+	if len(p.Binaries) != 0 {
+		t.Errorf("monitor binaries anchor overlaps live pid anchors: %v", p.Binaries)
 	}
 	hooks := selectorsOf(t, p)
 	if len(hooks) != 2 {
 		t.Fatalf("hooks = %d, want the exact-name hook and the directory hook", len(hooks))
 	}
-	// hook 0: NoPost exemption, ssh (binaries, pids), persistence files (binaries, pids).
-	if len(hooks[0]) != 5 || len(hooks[1]) != 2 {
-		t.Fatalf("selector counts %d/%d, want 5/2", len(hooks[0]), len(hooks[1]))
+	// hook 0: NoPost exemption, ssh and persistence PID selectors.
+	if len(hooks[0]) != 3 || len(hooks[1]) != 1 {
+		t.Fatalf("selector counts %d/%d, want 3/1", len(hooks[0]), len(hooks[1]))
 	}
 	if hooks[0][0].MatchActions[0].Action != "NoPost" {
 		t.Fatalf("the ssh exemption must come first: %+v", hooks[0][0])
@@ -150,15 +145,26 @@ func TestSixtyFiveRootsAnchorSixtyFour(t *testing.T) {
 	if !anyContains(c.Notes, WarnRootsOverLimit) {
 		t.Fatalf("notes = %v", c.Notes)
 	}
-	// The pid anchor sits in both hooks; every selector stays within budget.
+	// Tetragon evaluates only four values in a matchPIDs selector. Every
+	// anchored root must appear in a selector it will actually evaluate.
+	seen := map[int]int{}
 	for _, hook := range selectorsOf(t, p) {
 		for _, sel := range hook {
 			for _, pids := range sel.MatchPIDs {
-				if len(pids.Values) > MaxPIDs {
+				if len(pids.Values) > 4 {
 					t.Fatalf("%d pids in one selector", len(pids.Values))
+				}
+				for _, pid := range pids.Values {
+					seen[pid]++
 				}
 			}
 		}
+	}
+	if seen[7004] == 0 || seen[7063] == 0 {
+		t.Fatalf("later roots are absent from effective pid selectors: %v", seen)
+	}
+	if hooks := len(p.tp.Spec.LsmHooks); hooks > 12 {
+		t.Fatalf("%d LSM hook instances for 64 roots, want at most 12", hooks)
 	}
 }
 
@@ -365,8 +371,8 @@ func TestHostileLinksDropOnlyTheirOwnPath(t *testing.T) {
 			t.Fatalf("notes = %v, want the three hostile links reported", c.Notes)
 		}
 	}
-	if got := len(selectorsOf(t, p)[0]); got != 5 {
-		t.Fatalf("%d selectors in hook 0, want all five", got)
+	if got := len(selectorsOf(t, p)[0]); got != 3 {
+		t.Fatalf("%d selectors in hook 0, want exemption and both PID controls", got)
 	}
 }
 

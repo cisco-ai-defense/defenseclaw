@@ -229,7 +229,7 @@ spec:
 apiVersion: cilium.io/v1alpha1
 kind: TracingPolicy
 metadata:
-  name: defenseclaw-controls-dc621239
+  name: defenseclaw-controls-30f58aee
 spec:
   options:
     - name: policy-mode
@@ -268,37 +268,6 @@ spec:
                 - /home/bob/.ssh/id_rsa
           matchActions:
             - action: NoPost
-        - matchBinaries:
-            - operator: In
-              values:
-                - /home/alice/.local/share/claude/versions/2.1.100
-                - /home/alice/.local/share/claude/versions/2.1.101
-              followChildren: true
-          matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - args: [0]
-              operator: Equal
-              values:
-                - /home/alice/.ssh/id_dsa
-                - /home/alice/.ssh/id_ecdsa
-                - /home/alice/.ssh/id_ed25519
-                - /home/alice/.ssh/id_rsa
-                - /home/bob/.ssh/id_dsa
-                - /home/bob/.ssh/id_ecdsa
-                - /home/bob/.ssh/id_ed25519
-                - /home/bob/.ssh/id_rsa
-            - args: [2]
-              operator: Equal
-              values:
-                - "1001"
-          matchActions:
-            - action: Override
-              argError: -1
-            - action: Post
         - matchPIDs:
             - operator: In
               followForks: true
@@ -329,41 +298,6 @@ spec:
               values:
                 - "1001"
                 - "1002"
-          matchActions:
-            - action: Override
-              argError: -1
-            - action: Post
-        - matchBinaries:
-            - operator: In
-              values:
-                - /home/alice/.local/share/claude/versions/2.1.100
-                - /home/alice/.local/share/claude/versions/2.1.101
-              followChildren: true
-          matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - args: [0]
-              operator: Equal
-              values:
-                - /home/alice/.bash_profile
-                - /home/alice/.bashrc
-                - /home/alice/.profile
-                - /home/alice/.zshrc
-                - /home/bob/.bash_profile
-                - /home/bob/.bashrc
-                - /home/bob/.profile
-                - /home/bob/.zshrc
-            - args: [1]
-              operator: Mask
-              values:
-                - "2"
-            - args: [2]
-              operator: Equal
-              values:
-                - "1001"
           matchActions:
             - action: Override
               argError: -1
@@ -419,37 +353,6 @@ spec:
           resolve: f_cred.uid.val
           label: opener_uid
       selectors:
-        - matchBinaries:
-            - operator: In
-              values:
-                - /home/alice/.local/share/claude/versions/2.1.100
-                - /home/alice/.local/share/claude/versions/2.1.101
-              followChildren: true
-          matchNamespaces:
-            - namespace: Pid
-              operator: In
-              values:
-                - host_ns
-          matchArgs:
-            - args: [0]
-              operator: Prefix
-              values:
-                - /home/alice/.config/autostart/
-                - /home/alice/.config/systemd/user/
-                - /home/bob/.config/autostart/
-                - /home/bob/.config/systemd/user/
-            - args: [1]
-              operator: Mask
-              values:
-                - "2"
-            - args: [2]
-              operator: Equal
-              values:
-                - "1001"
-          matchActions:
-            - action: Override
-              argError: -1
-            - action: Post
         - matchPIDs:
             - operator: In
               followForks: true

@@ -23,11 +23,28 @@ func validControls(t *testing.T) (tracingPolicy, LintOptions, *world) {
 	roots := w.roots(nativeProc(4001, 1, 100, 1001, aliceClaudeNew), codexProc(5001, 1, 120, 1002))
 	c := w.compile(Input{Controls: &Scope{Mode: PolicyMonitor, UIDs: []int{1001, 1002}}, Roots: roots.Roots})
 	p := policyOf(t, c, FamilyControls)
+	withoutRoots := w.compile(Input{Controls: &Scope{Mode: PolicyMonitor, UIDs: []int{1001, 1002}}})
+	bin := policyOf(t, withoutRoots, FamilyControls)
+	// Exercise lint against both anchor kinds in one synthetic policy. The
+	// compiler keeps them separate in monitor mode to avoid duplicate hits.
+	tp := cloneTP(t, p.tp)
+	binTP := cloneTP(t, bin.tp)
+	tp.Spec.LsmHooks[0].Selectors = []tpSelector{
+		tp.Spec.LsmHooks[0].Selectors[0],
+		binTP.Spec.LsmHooks[0].Selectors[1],
+		tp.Spec.LsmHooks[0].Selectors[1],
+		binTP.Spec.LsmHooks[0].Selectors[2],
+		tp.Spec.LsmHooks[0].Selectors[2],
+	}
+	tp.Spec.LsmHooks[1].Selectors = []tpSelector{
+		binTP.Spec.LsmHooks[1].Selectors[0],
+		tp.Spec.LsmHooks[1].Selectors[0],
+	}
 	opts := LintOptions{Homes: []string{"/home/alice", "/home/bob"}, FS: w.fs}
-	if v := Lint(p.YAML, opts); len(v) != 0 {
+	if v := lintTP(t, tp, opts); len(v) != 0 {
 		t.Fatalf("the compiler's own output fails lint: %v", v)
 	}
-	return cloneTP(t, p.tp), opts, w
+	return tp, opts, w
 }
 
 func cloneTP(t *testing.T, tp tracingPolicy) tracingPolicy {

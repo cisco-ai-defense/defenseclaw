@@ -95,3 +95,23 @@ func TestRestoredCleanTimeWaitsForFirstLoadedPolicy(t *testing.T) {
 		t.Fatalf("restored clean time survived the uncovered first session: %v", got)
 	}
 }
+
+func TestDisplacedRootStaysPendingBeyondPIDBudget(t *testing.T) {
+	h := newHarness(t, observeIntent(), baseTargets)
+	for i := 0; i < MaxPIDs; i++ {
+		h.procs = append(h.procs, codexProc(7000+i, 1, uint64(100+i), 1001))
+	}
+	h.pass()
+	h.burnedIn(1001, 24*time.Hour)
+	// A previously missed older root enters the scan and takes a place in
+	// the bounded policy. The displaced live root must now stop clean time.
+	h.procs = append(h.procs, codexProc(8000, 1, 50, 1001))
+	h.pass()
+	if s := userState(h, 1001); s.Reason != WarnSessionPolicyPending {
+		t.Fatalf("uncovered existing root did not pause burn-in: %+v", s)
+	}
+	h.accrueTick()
+	if got := h.covered(1001); got != 0 {
+		t.Fatalf("user accrued %v with an uncovered root", got)
+	}
+}

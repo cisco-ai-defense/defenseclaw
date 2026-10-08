@@ -220,8 +220,8 @@ func lintSelectors(h int, args []tpArg, selectors []tpSelector, lsm, enforcing b
 			if len(pids.Values) == 0 {
 				add(1, h, s, "matchPIDs has no value")
 			}
-			if len(pids.Values) > MaxPIDs {
-				add(7, h, s, "matchPIDs has %d values (limit %d)", len(pids.Values), MaxPIDs)
+			if len(pids.Values) > maxPIDsPerSelector {
+				add(7, h, s, "matchPIDs has %d values (effective limit %d)", len(pids.Values), maxPIDsPerSelector)
 			}
 			for _, pid := range pids.Values {
 				if pid <= 1 {

@@ -67,20 +67,27 @@ func TestControlsLoadWithMoreThanFourUsers(t *testing.T) {
 			t.Fatalf("%s: uids %v pids %v, want all seven", name, p.UIDs, p.PIDs)
 		}
 		pidSelectors := 0
+		seenPIDs := map[int]bool{}
 		for _, hook := range p.tp.Spec.LsmHooks {
 			for _, sel := range hook.Selectors {
 				if len(sel.MatchPIDs) == 0 {
 					continue
 				}
 				pidSelectors++
+				if len(sel.MatchPIDs[0].Values) > maxPIDsPerSelector {
+					t.Fatalf("%s: %d values in one pid selector", name, len(sel.MatchPIDs[0].Values))
+				}
+				for _, pid := range sel.MatchPIDs[0].Values {
+					seenPIDs[pid] = true
+				}
 				uid := sel.MatchArgs[len(sel.MatchArgs)-1]
 				if uid.position() != 2 || uid.Operator != "InMap" || len(uid.Values) != 7 {
 					t.Fatalf("%s: pid anchor uid filter = %+v, want InMap of all seven uids", name, uid)
 				}
 			}
 		}
-		if pidSelectors != 3 {
-			t.Fatalf("%s: %d pid selectors, want ssh keys, persistence files and persistence directories", name, pidSelectors)
+		if pidSelectors != 6 || len(seenPIDs) != 7 {
+			t.Fatalf("%s: %d pid selectors covering %d roots, want six selectors covering all seven", name, pidSelectors, len(seenPIDs))
 		}
 		// No policy of the set carries a numeric list Tetragon would refuse.
 		for _, policy := range c.Policies {

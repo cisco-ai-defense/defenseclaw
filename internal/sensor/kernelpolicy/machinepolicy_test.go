@@ -128,7 +128,7 @@ func TestMachinePolicyRowsOnlyWhereTheManifestIsSilent(t *testing.T) {
 
 // The golden case of the fix: on the default managed config an eligible
 // account with a native Claude Code install and a live session is anchored
-// by both the binaries and the pid, and the observe policy covers its home.
+// by its pid in monitor mode, and the observe policy covers its home.
 func TestAnEligibleAccountAloneAnchorsItsNativeClaude(t *testing.T) {
 	w := newWorld(t, "")
 	w.enroll = w.enroll.WithMachinePolicy([]EligibleAccount{{User: "alice", UID: 1001, Home: "/home/alice"}}, []string{"claudecode"})
@@ -142,7 +142,7 @@ func TestAnEligibleAccountAloneAnchorsItsNativeClaude(t *testing.T) {
 	}
 	c := w.compile(Input{Observe: true, Connect: true, Controls: &Scope{Mode: PolicyMonitor, UIDs: w.enroll.UIDs()}, Roots: roots.Roots})
 	p := policyOf(t, c, FamilyControls)
-	if fmt.Sprint(p.UIDs) != "[1001]" || fmt.Sprint(p.PIDs) != "[4001]" || !hasBinary(p, aliceClaudeOld) || !hasBinary(p, aliceClaudeNew) {
+	if fmt.Sprint(p.UIDs) != "[1001]" || fmt.Sprint(p.PIDs) != "[4001]" || len(p.Binaries) != 0 {
 		t.Fatalf("uids %v pids %v binaries %v", p.UIDs, p.PIDs, p.Binaries)
 	}
 	if observe := policyOf(t, c, FamilyObserve); !strings.Contains(string(observe.YAML), "/home/alice/") {
