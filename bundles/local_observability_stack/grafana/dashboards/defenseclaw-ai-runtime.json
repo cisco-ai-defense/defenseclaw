@@ -707,13 +707,6 @@
       ],
       "transformations": [
         {
-          "id": "renameByRegex",
-          "options": {
-            "regexp": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
-        {
           "id": "merge"
         },
         {
@@ -726,9 +719,9 @@
               "host_name": "Host",
               "backend": "Backend",
               "mechanism": "Mechanism",
-              "CYCLES": "Cycles",
-              "LOST": "Events lost",
-              "CONTAINER": "Container events"
+              "Value #CYCLES": "Cycles",
+              "Value #LOST": "Events lost",
+              "Value #CONTAINER": "Container events"
             }
           }
         }
@@ -1148,13 +1141,6 @@
       ],
       "transformations": [
         {
-          "id": "renameByRegex",
-          "options": {
-            "regexp": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
-        {
           "id": "merge"
         },
         {
@@ -1171,9 +1157,9 @@
               "approval": "Approval",
               "paused": "Paused",
               "digest": "Controls digest",
-              "ENROLLED": "Enrolled users",
-              "ENFORCED": "Enforcing",
-              "BURNIN": "In burn-in"
+              "Value #ENROLLED": "Enrolled users",
+              "Value #ENFORCED": "Enforcing",
+              "Value #BURNIN": "In burn-in"
             }
           }
         }
@@ -2039,13 +2025,6 @@
       ],
       "transformations": [
         {
-          "id": "renameByRegex",
-          "options": {
-            "regexp": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
-        {
           "id": "merge"
         },
         {
@@ -2055,9 +2034,9 @@
             "alias": "Progress",
             "replaceFields": false,
             "binary": {
-              "left": "COVERED",
+              "left": "Value #COVERED",
               "operator": "/",
-              "right": "NEEDED"
+              "right": "Value #NEEDED"
             }
           }
         },
@@ -2070,8 +2049,8 @@
             "renameByName": {
               "host_name": "Host",
               "user": "User (uid)",
-              "COVERED": "Covered hours",
-              "NEEDED": "Needed hours",
+              "Value #COVERED": "Covered hours",
+              "Value #NEEDED": "Needed hours",
               "Progress": "Progress"
             }
           }
