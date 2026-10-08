@@ -286,10 +286,12 @@ allowed, the same files come from `defenseclaw acp setup --managed`, which the
 **ACP Guard → Enroll managed enterprise ACP** panel of the TUI runs; a
 standalone managed computer refuses that CLI.
 
-The contract lock pins the digest of the whole editor settings file, so any
-edit to it, even of an unrelated key, stops every guarded entry of that file
-with "the editor settings file ... changed after setup" until the user runs the
-setup command again. If a user deletes their token copy, `verify` says it is
+The contract lock of a managed entry pins the guarded entry itself, not the
+whole editor settings file, so the editor rewriting that file (Zed does on a
+theme, font or settings-UI change) keeps the entry working. An edit of the
+guarded entry stops it with "the DefenseClaw · Kiro entry in the editor
+settings file ... changed after setup" until the user runs the setup command
+again, which the guard's error names. If a user deletes their token copy, `verify` says it is
 missing and nothing restores it: run `enterprise acp enroll` again with the
 same selectors, which publishes the same credential again.
 
