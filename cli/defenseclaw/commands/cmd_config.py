@@ -438,7 +438,7 @@ def _strip_generator_header(rendered: str) -> str:
 @config_cmd.command("reference")
 @click.argument(
     "section",
-    type=click.Choice(["observability"], case_sensitive=False),
+    type=click.Choice(["observability", "ai_discovery"], case_sensitive=False),
     required=False,
     default="observability",
 )
@@ -459,16 +459,17 @@ def _strip_generator_header(rendered: str) -> str:
 def config_reference(section: str, fmt: str, output: Path | None) -> None:
     """Print the configuration reference for this version.
 
-    The yaml and markdown formats cover SECTION, and observability is the
-    only section they have. --format json-schema prints the schema of every
-    section (guardrail, gateway, scanners and the rest) with each field's
-    allowed values.
+    The yaml and markdown formats cover SECTION. --format json-schema prints
+    the schema of every section with each field's allowed values.
     """
 
     try:
-        rendered = (
-            config_v8_schema() if fmt.lower() == "json-schema" else config_v8_reference(fmt, section=section.lower())
-        )
+        if fmt.lower() == "json-schema":
+            rendered = config_v8_schema()
+        elif section.lower() == "ai_discovery":
+            rendered = _ai_discovery_reference(fmt.lower(), config_v8_schema())
+        else:
+            rendered = config_v8_reference(fmt, section=section.lower())
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     if fmt.lower() == "yaml":
@@ -482,6 +483,28 @@ def config_reference(section: str, fmt: str, output: Path | None) -> None:
             stream.write(rendered)
     except OSError as exc:
         raise click.ClickException(f"cannot write reference output: {exc}") from exc
+
+
+def _ai_discovery_reference(fmt: str, raw_schema: str) -> str:
+    """Render discovery fields from the gateway's canonical embedded schema."""
+    schema = json.loads(raw_schema)
+    fields = schema["$defs"]["aiDiscovery"]["properties"]
+    if fmt == "markdown":
+        lines = ["# ai_discovery", "", "| Field | Type | Default | Description |", "| --- | --- | --- | --- |"]
+        for name, field in fields.items():
+            kind = field.get("type", "object" if "$ref" in field else "any")
+            default = json.dumps(field["default"]) if "default" in field else "—"
+            description = str(field.get("description", "")).replace("|", "\\|").replace("\n", " ")
+            lines.append(f"| `ai_discovery.{name}` | {kind} | `{default}` | {description} |")
+        return "\n".join(lines) + "\n"
+    lines = ["# ai_discovery fields from the canonical gateway schema", "ai_discovery:"]
+    for name, field in fields.items():
+        if "default" in field:
+            value = yaml.safe_dump(field["default"], default_flow_style=True).strip().removesuffix("...").strip()
+            lines.append(f"  {name}: {value}")
+        else:
+            lines.append(f"  # {name}: {field.get('type', 'object')} (see --format json-schema)")
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
