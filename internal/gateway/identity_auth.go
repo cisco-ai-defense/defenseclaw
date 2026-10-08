@@ -59,7 +59,11 @@ func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, u
 	if subject.IDKind == useridentity.KindPOSIXUID {
 		if claimed, ok := claimedSessionFromContext(ctx); ok {
 			uid, _ := strconv.Atoi(userID)
-			if verified, ok := verifyPeerSession(uid, userName, claimed.Session); ok {
+			pid := 0
+			if peer, ok := managedHookRequestPeer(ctx); ok && peer.UID == uid {
+				pid = peer.PID
+			}
+			if verified, ok := verifyPeerSession(uid, pid, userName, claimed.Session); ok {
 				session = verified
 				ctx = withVerifiedSession(ctx, verified)
 			}
@@ -124,8 +128,9 @@ func attachProcessOwner(ctx context.Context, emitter sidecarRuntimeEmitter) cont
 // carries changed facts (a group added or removed in the directory).
 var identityObservedState = struct {
 	sync.Mutex
-	last map[string]identityObservedMark
-}{last: map[string]identityObservedMark{}}
+	last    map[string]identityObservedMark
+	pending map[string]bool
+}{last: map[string]identityObservedMark{}, pending: map[string]bool{}}
 
 type identityObservedMark struct {
 	at          time.Time
@@ -134,18 +139,32 @@ type identityObservedMark struct {
 
 const identityObservedMaxUsers = 4096
 
-func identityObservedDue(userID string, facts useridentity.DirectoryFacts, now time.Time) bool {
+func identityObservedBegin(userID string, facts useridentity.DirectoryFacts, now time.Time) (func(bool), bool) {
 	fingerprint := identityFactsFingerprint(facts)
 	identityObservedState.Lock()
 	defer identityObservedState.Unlock()
+	if identityObservedState.pending == nil {
+		identityObservedState.pending = map[string]bool{}
+	}
+	if identityObservedState.pending[userID] {
+		return nil, false
+	}
 	if last, ok := identityObservedState.last[userID]; ok && last.fingerprint == fingerprint && now.Sub(last.at) < identityDirectoryTTL {
-		return false
+		return nil, false
 	}
-	if len(identityObservedState.last) >= identityObservedMaxUsers {
-		identityObservedState.last = map[string]identityObservedMark{}
-	}
-	identityObservedState.last[userID] = identityObservedMark{at: now, fingerprint: fingerprint}
-	return true
+	identityObservedState.pending[userID] = true
+	return func(success bool) {
+		identityObservedState.Lock()
+		defer identityObservedState.Unlock()
+		delete(identityObservedState.pending, userID)
+		if !success {
+			return
+		}
+		if len(identityObservedState.last) >= identityObservedMaxUsers {
+			identityObservedState.last = map[string]identityObservedMark{}
+		}
+		identityObservedState.last[userID] = identityObservedMark{at: now, fingerprint: fingerprint}
+	}, true
 }
 
 // identityFactsFingerprint digests the directory facts an identity.observed
@@ -176,9 +195,12 @@ func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject
 	if resolved := subject.Directory.ResolvedAt; !resolved.IsZero() && time.Since(resolved) >= identityDirectoryTTL {
 		return
 	}
-	if !identityObservedDue(subject.UserID, subject.Directory, time.Now()) {
+	finish, due := identityObservedBegin(subject.UserID, subject.Directory, time.Now())
+	if !due {
 		return
 	}
+	success := false
+	defer func() { finish(success) }()
 	// identity.observed belongs to the gateway activity producer's
 	// compliance.activity set; no producer is registered under "identity",
 	// so classifying under that key failed and nothing was ever emitted.
@@ -203,7 +225,7 @@ func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject
 	if groups > 65535 {
 		groups = 65535
 	}
-	_, _ = emitter.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+	_, emitErr := emitter.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
 		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
@@ -243,6 +265,7 @@ func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject
 			DefenseClawSessionKind:            attrs.SessionKind,
 		})
 	})
+	success = emitErr == nil
 }
 
 // identityGroupCount counts an account's groups. Windows facts list each

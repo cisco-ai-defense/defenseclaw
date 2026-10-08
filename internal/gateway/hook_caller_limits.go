@@ -86,6 +86,7 @@ type hookCallerLimiter struct {
 	// total is the number of admitted requests that have not finished, for
 	// all callers; lastOverloadLog paces the log line of a full gateway.
 	total           int
+	telemetryTotal  int
 	lastOverloadLog time.Time
 	// Test overrides; zero values select the defaults above.
 	now                                            func() time.Time
@@ -154,11 +155,10 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 			}
 		}
 	}
-	// Telemetry batches are not hooks: a refused hook denies the tool call
-	// while an exporter retries, so they stay out of the gateway-wide bound
-	// (they keep their own per-caller budget).
-	counted := !strings.HasSuffix(caller, hookCallerTelemetryBudget)
-	if counted && l.total >= l.globalLimit() {
+	telemetry := strings.HasSuffix(caller, hookCallerTelemetryBudget)
+	// Keep half the host capacity available to hooks even when exporters
+	// from many accounts all retry together.
+	if l.total >= l.globalLimit() || (telemetry && l.telemetryTotal >= max(1, l.globalLimit()/2)) {
 		logNow = now.Sub(l.lastOverloadLog) >= hookCallerLogInterval
 		if logNow {
 			l.lastOverloadLog = now
@@ -166,11 +166,9 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		return nil, nil, managedHookReasonOverloaded, logNow
 	}
 	rps, burst, inFlight, running := l.limits()
-	if counted {
-		// Keep capacity for at least three other callers even when one
-		// caller fills every request it may hold while queued.
-		inFlight = min(inFlight, max(1, l.globalLimit()/4))
-	}
+	// Keep capacity for at least three other callers even when one
+	// caller fills every request it may hold while queued.
+	inFlight = min(inFlight, max(1, l.globalLimit()/4))
 	budget := l.callers[caller]
 	if budget == nil {
 		budget = &hookCallerBudget{limiter: rate.NewLimiter(rate.Limit(rps), burst), running: make(chan struct{}, running)}
@@ -185,16 +183,18 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		return nil, nil, managedHookReasonRateLimited, logNow
 	}
 	budget.inFlight++
-	if counted {
-		l.total++
+	l.total++
+	if telemetry {
+		l.telemetryTotal++
 	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			l.mu.Lock()
 			budget.inFlight--
-			if counted {
-				l.total--
+			l.total--
+			if telemetry {
+				l.telemetryTotal--
 			}
 			budget.lastSeen = l.clock()
 			l.mu.Unlock()

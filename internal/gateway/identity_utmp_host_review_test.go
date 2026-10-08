@@ -24,7 +24,7 @@ func TestUtmpHostWithoutAddressDoesNotVerifySSH(t *testing.T) {
 	old := utmpSessionPath
 	utmpSessionPath = path
 	t.Cleanup(func() { utmpSessionPath = old })
-	if verified, ok := verifyPeerSession(1001, "alice", useridentity.SessionFacts{TTY: "pts/1"}); ok {
+	if verified, ok := verifyPeerSession(1001, 0, "alice", useridentity.SessionFacts{TTY: "pts/1"}); ok {
 		t.Fatalf("host-only utmp reached verified session context: %+v", verified)
 	}
 }
