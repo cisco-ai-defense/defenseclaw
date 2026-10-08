@@ -2647,7 +2647,7 @@ threading.Event().wait()
     )
     $requiredContractConnectors = @(
         'amp', 'antigravity', 'claudecode', 'codex', 'copilot',
-        'cursor', 'devin', 'hermes', 'omnigent', 'opencode'
+        'cursor', 'devin', 'hermes', 'opencode'
     )
     $excludedContractConnectors = @(
         'openhands', 'openclaw', 'zeptoclaw'
@@ -2657,19 +2657,12 @@ threading.Event().wait()
     } else {
         @()
     }
-    $omniGentJob = [regex]::Match(
-        $nativeWorkflowText,
-        '(?ms)^  omnigent-native-degraded:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
-    ).Value
     $actualContractConnectors = @($genericContractConnectors)
-    if (-not [string]::IsNullOrWhiteSpace($omniGentJob)) {
-        $actualContractConnectors += 'omnigent'
-    }
     Assert-True (
         $actualContractConnectors.Count -eq $requiredContractConnectors.Count -and
         ($actualContractConnectors | Sort-Object) -join ',' -ceq
             ($requiredContractConnectors | Sort-Object) -join ','
-    ) 'required Windows contract coverage is exactly the ten deterministic packaged connector lanes'
+    ) 'required Windows contract coverage is exactly the nine deterministic packaged connector lanes'
     Assert-True (@($excludedContractConnectors | Where-Object {
         $actualContractConnectors -ccontains $_
     }).Count -eq 0) 'packaged coverage excludes deprecated or unsupported connectors'
@@ -2693,8 +2686,7 @@ threading.Event().wait()
         $nativeWorkflowText,
         '(?ms)^  windows-native-required:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
     ).Value
-    Assert-True ($requiredFanInJob -match '(?m)^\s{6}- connector-contract\s*$' -and
-        $requiredFanInJob -match '(?m)^\s{6}- omnigent-native-degraded\s*$') `
+    Assert-True ($requiredFanInJob -match '(?m)^\s{6}- connector-contract\s*$') `
         'required Windows aggregate depends on every deterministic packaged connector contract'
     $invokeHookFunction = [regex]::Match(
         $harnessText,
@@ -2713,7 +2705,7 @@ threading.Event().wait()
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
-    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract', 'omnigent-native-degraded')) {
+    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract')) {
         Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
         $requiredJob = [regex]::Match(
             $nativeWorkflowText,
@@ -2722,23 +2714,19 @@ threading.Event().wait()
         Assert-True ($requiredJob -notmatch 'continue-on-error') "required Windows job $job is not advisory"
     }
     Assert-True ($nativeWorkflowText -match '(?s)windows-native-required:.*?if: \$\{\{ always\(\) \}\}.*?result -ne ''success''') 'aggregate fails skipped or failed dependencies'
-    Assert-True ($omniGentJob -notmatch '(?m)^\s{4}if:' -and
-        $omniGentJob -notmatch '(?m)^\s{4}continue-on-error:') `
-        'OmniGent native-degraded contract is unconditional and non-advisory'
     Assert-True ($nativeWorkflowText -notmatch 'shell:\s*bash') 'dedicated Windows workflow never selects Bash'
     Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 6) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
         '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
-        "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist",
-        '-Leaf omnigent -DiagnosticsLeaf windows-native-diagnostics-omnigent -ArtifactLeaf windows-native-dist'
+        "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist"
     )) {
         Assert-True ($nativeWorkflowText.Contains($leafContract)) `
             "native Windows workflow preserves isolated path contract: $leafContract"
@@ -3106,21 +3094,6 @@ threading.Event().wait()
         $connectorContractJob -notmatch 'retried' -and
         $connectorContractJob -match 'Upload diagnostics on failure\r?\n        if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}') `
         'every connector contract runs once; a telemetry failure fails the job instead of being retried'
-    Assert-True ($omniGentJob -match '(?s)invoke-windows-setup-standard-user-ci\.ps1.*?-Mode omnigent-native-degraded.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
-        $standardUserCIText -match "'omnigent-native-degraded'" -and
-        $standardUserCIText -match 'test-omnigent-windows-native\.ps1' -and
-        $standardUserCIText -match 'SpecialFolder\]::LocalApplicationData' -and
-        $standardUserCIText -match 'Join-Path \$localAppData ''DefenseClaw-CI\\uv-input''' -and
-        $standardUserCIText -match 'Join-Path \$localAppData ''DefenseClaw-CI\\omnigent-native-degraded''' -and
-        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$state \$identity\.User' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$state \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$uvRoot \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match 'Assert-DisposableChildAcl \$uvRoot \$identity\.User' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$omnigentState \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match 'Assert-DisposableChildAcl \$omnigentState \$identity\.User' -and
-        $standardUserCIText -match 'standard-user OmniGent uv copy does not match its authenticated input' -and
-        $standardUserCIText -match '(?s)-StateRoot \$omnigentState -ArtifactRoot \$artifacts.*?-UvPath \$uvPath') `
-        'hosted OmniGent packaged lifecycle runs as a disposable real standard user'
     Assert-True ($nativeWorkflowText -notmatch '-Operation acceptance\b' -and
         $nativeHarnessText -notmatch "'acceptance' \{ Invoke-Acceptance \}" -and
         $nativeWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
