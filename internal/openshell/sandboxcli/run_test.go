@@ -813,6 +813,31 @@ func TestRunCopyCleansItsStageWhenTheCreateFails(t *testing.T) {
 	}
 }
 
+// GAP-0360: a create the daemon rolls back (a Ctrl-C cut it off) reads as
+// creating for a moment: the stage is removed once the sandbox is gone,
+// not left as leftover data.
+func TestRunCopyCleansItsStageAfterARolledBackCreate(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.refuseCreate = func(req sandboxapi.CreateRequest) *sandboxapi.Error {
+		sb := sampleSandbox(req.Name)
+		sb.Phase = "creating"
+		ta.daemon.sandboxes[req.Name] = &sb // the fake holds its lock here
+		return &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: create sandbox " + req.Name + " failed", Detail: "context canceled"}
+	}
+	ta.Sleep = func(_ context.Context, d time.Duration) error {
+		if d == discardInterval {
+			ta.daemon.mu.Lock()
+			delete(ta.daemon.sandboxes, "copybox")
+			ta.daemon.mu.Unlock()
+		}
+		return nil
+	}
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}), "create sandbox copybox failed")
+	if !slices.Equal(ta.copy.steps, []string{"stage copybox", "discard copybox"}) {
+		t.Fatalf("copy steps = %v", ta.copy.steps)
+	}
+}
+
 // Resuming a copy-mode sandbox with --refresh probes outside the workdir
 // (a failed refresh may have left none), then refreshes, then attaches; a
 // plain resume probes the workdir.

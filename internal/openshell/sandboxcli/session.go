@@ -1160,13 +1160,7 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 // A sandbox being deleted (from another terminal or the TUI) is passing
 // too: once it is gone, settledPhase returns the not-found error.
 func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (*sandboxapi.Sandbox, error) {
-	passing := func(phase string) bool {
-		switch phase {
-		case "unknown", "provisioning", "starting", "creating", "deleting":
-			return true
-		}
-		return false
-	}
+	passing := passingPhase
 	if !passing(after.Phase) {
 		// A harness that failed while its sandbox still reads ready may
 		// have lost the sandbox a moment ago (a Docker restart stops its
@@ -1210,6 +1204,16 @@ func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (
 	}
 	s.lost = after.Phase == "ready" && s.harnessCode != 0 && s.before != nil && s.before.Phase == "ready"
 	return after, nil
+}
+
+// passingPhase reports a phase a sandbox passes through: being created,
+// started or deleted, or unknown while the OpenShell gateway restarts.
+func passingPhase(phase string) bool {
+	switch phase {
+	case "unknown", "provisioning", "starting", "creating", "deleting":
+		return true
+	}
+	return false
 }
 
 // waitPhase reads the sandbox every settlePhaseInterval, for at most
