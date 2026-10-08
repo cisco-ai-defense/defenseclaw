@@ -345,6 +345,18 @@ def _key_view(app: AppContext, parts: list) -> dict:
     return _show_data(app, source=_is_destination_key(parts), effective=False, provenance=False)
 
 
+def _written_config() -> dict | None:
+    """config.yaml as written ({} before it exists), or None when it cannot
+    be read or does not parse."""
+    cfg_path = str(config_module.config_path())
+    if not os.path.isfile(cfg_path):
+        return {}
+    try:
+        return dict(load_validate_v8(Path(cfg_path).read_bytes(), source_name=cfg_path).masked)
+    except (OSError, V8ConfigError, RuntimeError):
+        return None
+
+
 def _destination_not_set(key: str, parts: list, written: dict) -> str:
     listed = _lookup(written, parts[:2])[1]
     count = len(listed) if isinstance(listed, list) else 0
@@ -737,8 +749,13 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         raise click.UsageError(str(exc)) from exc
     for _key, parts in parsed:
         _refuse_config_version(parts)
-    # Validate every path before the writer runs so a valid path cannot hide a typo.
+    # Validate every path before the writer runs so a valid path cannot hide a
+    # typo. A key config.yaml lists is valid without the resolved view, and a
+    # file that does not parse is left to the writer, which names the line.
+    written = _written_config()
     for key, parts in parsed:
+        if written is None or _lookup(written, parts)[0]:
+            continue
         view = _key_view(app, parts)
         if not _admission_layer_key(parts) and not _lookup(view, parts)[0] and not _unlisted_entry_key(parts):
             if _is_destination_key(parts):
