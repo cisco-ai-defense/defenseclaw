@@ -168,9 +168,9 @@ type InstallWatcher struct {
 	pending map[string]time.Time // path → first-seen, for debounce
 
 	// pluginWaiting holds plugin-root folders that had nothing to admit yet
-	// (empty or category folders) and are watched for what lands in them;
-	// addWatch adds such a watch. Both are used on the Run goroutine only
-	// (GAP-2449).
+	// (empty or category folders, GAP-2449) and skill folders without a file
+	// yet (GAP-0900); they are watched for what lands in them,
+	// and addWatch adds such a watch. Both are used on the Run goroutine only.
 	pluginWaiting map[string]struct{}
 	addWatch      func(dir string)
 
@@ -823,6 +823,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 	for _, dir := range w.skillDirs {
 		if watchOnce(dir, "skill") {
+			w.watchIncompleteSkillFolders(dir)
 			// Claude Code syncs account skills two levels down
 			// (skills/synced/<account>/<skill>); watch those folders too so
 			// a newly synced skill is scanned on arrival (GAP-1409).
@@ -1104,7 +1105,66 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		}
 		return []InstallEvent{fallback}
 	}
+	if fallback.Type == InstallSkill && w.isDirectChildDir(path) {
+		if skillFolderIncomplete(path) {
+			w.waitForPluginFolder(path)
+			return []InstallEvent{}
+		}
+		delete(w.pluginWaiting, filepath.Clean(path))
+	}
 	return []InstallEvent{fallback}
+}
+
+// skillFolderIncomplete reports whether a folder in a skill root has no file
+// at its top yet (it is empty or holds only folders), so there is nothing an
+// agent loads as a skill. A folder just made with mkdir, about to be filled
+// in, used to be admitted at once, refused by the scanner ("No SKILL.md and no
+// .md files found") and quarantined fail-closed while the user was creating it
+// (GAP-0900); the watcher waits on it instead and admits it once a file lands.
+// A link, or a folder that cannot be read, is not incomplete: it is admitted
+// and fails closed as before (GAP-0394).
+func skillFolderIncomplete(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+// watchIncompleteSkillFolders waits on the skill folders in root that have no
+// file yet when the watcher starts, so a SKILL.md written into one
+// later reaches admission (live-created ones are waited on by
+// pendingInstallEvents). Hermes roots hold category folders and keep their own
+// discovery.
+func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
+	if discover, _ := hermesSkillsDiscover(root); discover != nil {
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || isBundledSkillWatchPath(path) {
+			continue
+		}
+		if _, synced := w.claudeSyncedDepth(path); synced {
+			continue
+		}
+		if skillFolderIncomplete(path) {
+			w.waitForPluginFolder(path)
+		}
+	}
 }
 
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {

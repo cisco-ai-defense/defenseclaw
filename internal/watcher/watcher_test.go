@@ -347,6 +347,9 @@ func TestWatcher_DetectsNewDirectory(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(skillDir, "new-skill"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(skillDir, "new-skill", "SKILL.md"), []byte("# new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.After(5 * time.Second)
 	for {
@@ -1314,6 +1317,9 @@ func TestBulkDropIsAdmittedInParallelAndShownPending(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		path := filepath.Join(skillDir, fmt.Sprintf("bulk-%d", i))
 		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# bulk\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		w.queuePending(path)

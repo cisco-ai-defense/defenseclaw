@@ -428,6 +428,9 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				isClaudeSkillsPlugin(path) {
 				continue
 			}
+			if skillFolderIncomplete(path) {
+				continue // not a skill yet; the live watcher admits it once it is (GAP-0900)
+			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallSkill,
 				Name:      e.Name(),

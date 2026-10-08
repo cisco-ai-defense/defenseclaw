@@ -205,3 +205,42 @@ func TestHermesNotesOnlyFolderIsACategory(t *testing.T) {
 		t.Fatalf("events = %v, want notes2/vb14n", got)
 	}
 }
+
+// GAP-0900: a skill folder with no file yet (just made with mkdir)
+// is not admitted, so it is not scanned and quarantined while the user is
+// creating it; it is waited on and admitted once its SKILL.md lands.
+func TestIncompleteSkillFolderWaitsForAFile(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	atStart, live := filepath.Join(skillDir, "at-start"), filepath.Join(skillDir, "new-skill")
+	for _, dir := range []string{atStart, filepath.Join(live, "scripts")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.watchIncompleteSkillFolders(skillDir)
+	if _, ok := w.pluginWaiting[atStart]; !ok {
+		t.Fatalf("existing empty skill folder is not waited on: %v", w.pluginWaiting)
+	}
+	if events := w.pendingInstallEvents(live); len(events) != 0 {
+		t.Fatalf("incomplete skill folder events = %v, want none", events)
+	}
+	for _, evt := range w.enumerateTargets() {
+		if evt.Type == InstallSkill {
+			t.Fatalf("rescan enumerates incomplete skill folder %s", evt.Path)
+		}
+	}
+	skillMD := filepath.Join(live, "SKILL.md")
+	if err := os.WriteFile(skillMD, []byte("---\nname: new-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if queued, ok := w.waitingPluginEvent(skillMD); !ok || queued != live {
+		t.Fatalf("SKILL.md in waiting skill folder = %q, %v; want %q", queued, ok, live)
+	}
+	if events := w.pendingInstallEvents(live); len(events) != 1 || events[0].Type != InstallSkill || events[0].Path != live {
+		t.Fatalf("completed skill folder events = %v, want one skill", events)
+	}
+	if _, ok := w.pluginWaiting[live]; ok {
+		t.Fatal("admitted skill folder is still waited on")
+	}
+}
