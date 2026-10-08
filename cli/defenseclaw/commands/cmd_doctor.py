@@ -2042,6 +2042,13 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "one and keeps the block/allow lists; or stop the gateway and restore "
                 f"{db_path} from a trusted backup"
             )
+            try:
+                free = shutil.disk_usage(os.path.dirname(db_path)).free
+            except OSError:
+                free = -1
+            if free == 0:
+                detail = f"the disk holding {db_path} is full (0 MiB free)"
+                remediation = "free space on that disk, then rerun 'defenseclaw doctor'"
         elif reason == "audit-db-changed-during-inspection":
             detail = f"read-only integrity check failed ({reason})"
             remediation = (

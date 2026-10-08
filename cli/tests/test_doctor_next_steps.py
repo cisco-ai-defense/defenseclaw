@@ -321,6 +321,21 @@ def test_header_corrupt_audit_db_names_gateway_restart(tmp_path) -> None:
     assert "defenseclaw-gateway restart" in r.checks[-1]["remediation"]
 
 
+def test_full_disk_audit_db_names_space_cause(tmp_path) -> None:
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="audit-db-integrity-unavailable")
+    cfg = mock.MagicMock(audit_db=str(tmp_path / "audit.db"), data_dir=str(tmp_path))
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health),
+        mock.patch("defenseclaw.commands.cmd_doctor.shutil.disk_usage", return_value=mock.MagicMock(free=0)),
+    ):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    assert "disk holding" in r.checks[-1]["detail"]
+    assert "free space" in r.checks[-1]["remediation"]
+
+
 def _bedrock_judge_cfg(tmp_path, auth_mode: str):
     from defenseclaw.config import (
         BedrockKeyConfig,
