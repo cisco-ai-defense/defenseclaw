@@ -486,6 +486,31 @@ func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
 // GAP-0562: with JSON=1 the standalone Setup reports a refusal of its own in
 // the lifecycle's schema-2 shape (code, message, exit_code 1639), so an MDM
 // reads one shape whoever refused; the Secure Client Setup keeps schema 1.
+func TestStandaloneSetupNormalizationFailurePreservesJSON(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=1"}, &stdout, &stderr)
+	var result struct {
+		SchemaVersion int    `json:"schema_version"`
+		Action        string `json:"action"`
+		ExitCode      int    `json:"exit_code"`
+		Errors        []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != enterpriseInvalidArgsExitCode ||
+		result.SchemaVersion != 2 || result.Action != "ensure" || result.ExitCode != code ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q parse=%v", code, stdout.String(), stderr.String(), err)
+	}
+}
+
 func TestStandaloneSetupFailureUsesTheLifecycleResultShape(t *testing.T) {
 	opts := enterpriseSetupOptions{Action: "ensure", JSON: true}
 	refusal := enterpriseSetupInvalidArguments{errors.New("the config C:\\stage\\config.yaml is not protected")}
