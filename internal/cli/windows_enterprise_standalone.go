@@ -265,8 +265,15 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	hookRuntimeRepaired := ""
+	if action == "repair" && windowsEnterpriseIsElevated() {
+		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
+	if hookRuntimeRepaired != "" {
+		result.Changes = append(result.Changes, hookRuntimeRepaired)
+	}
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
@@ -758,6 +765,9 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseEnrolledConnectors(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
 		applyWindowsEnterpriseAccountFolders(result)
+		if result.Action == "status" || result.Action == "verify" {
+			applyWindowsEnterpriseHookRuntimeAccess(result)
+		}
 	}
 	applyWindowsEnterpriseGatewayStartFailure(result, report)
 	applyWindowsEnterpriseAPIPortHolders(result, report)
@@ -2108,7 +2118,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
-		if verifyReport.OK {
+		if _, drifted := windowsEnterpriseHookRuntimeDrift(); verifyReport.OK && drifted == "" {
 			applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
 			result.Noop = true
 			result.NoopReason = plan.Reason
@@ -2156,6 +2166,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			clearWindowsEnterpriseSources(&actionOpts)
 		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
+		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
+			result.Changes = append(result.Changes, repaired)
+		}
 	}
 	var cleanupManifest func()
 	if plan.Action == "install" && strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
