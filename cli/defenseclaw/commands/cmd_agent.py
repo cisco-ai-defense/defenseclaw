@@ -4526,6 +4526,18 @@ def _tag_sandbox_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _ai_usage_counts(signals: list[dict[str, Any]]) -> dict[str, int]:
+    """The summary counts of these signals, counted as the sidecar counts the
+    whole machine: active is every signal that is not gone."""
+    states = [_canonical_ai_usage_state(sig.get("state", "")) for sig in signals]
+    return {
+        "active_signals": sum(state != "gone" for state in states),
+        "new_signals": states.count("new"),
+        "changed_signals": states.count("changed"),
+        "gone_signals": states.count("gone"),
+    }
+
+
 def _render_ai_usage_table(
     payload: dict[str, Any],
     *,
@@ -4553,6 +4565,23 @@ def _render_ai_usage_table(
         )
     )
     summary = payload.get("summary", {}) or {}
+    if sandboxes or categories or products or components:
+        # The header counts what the filters select, not the whole machine
+        # (GAP-0269: --sandbox showed active=32 above that sandbox's 6).
+        summary = {
+            **summary,
+            **_ai_usage_counts(
+                _filter_ai_usage_signals(
+                    raw_signals,
+                    states=(),
+                    categories=categories,
+                    products=products,
+                    show_gone=True,
+                    components=components,
+                    sandboxes=sandboxes,
+                )
+            ),
+        }
     enabled = payload.get("enabled", True)
 
     try:
@@ -4560,7 +4589,7 @@ def _render_ai_usage_table(
         from rich.table import Table
     except Exception:
         return _render_ai_usage_plain(
-            payload,
+            {**payload, "summary": summary},
             signals=filtered,
             detail=detail,
             by_detector=by_detector,

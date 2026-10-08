@@ -562,6 +562,19 @@ class AiUsageRendererTests(unittest.TestCase):
         self.assertIn("myapp-7f3a", out)
         self.assertNotIn("Cursor", out)
 
+    def test_sandbox_filter_counts_that_sandbox_in_the_header(self):
+        # GAP-0269: the header counted the whole machine above one sandbox's rows.
+        from defenseclaw.commands import cmd_agent
+
+        payload = _wide_payload()
+        payload["summary"] = {"active_signals": 32, "new_signals": 4, "changed_signals": 2, "gone_signals": 1}
+        found = _ai_signal(state="new", category="skill", product="Claude Code", vendor="Anthropic", detector="skill")
+        found.update({"sandbox_name": "myapp-7f3a", "source": "sandbox"})
+        payload["signals"].append(found)
+        out = cmd_agent._render_ai_usage_table(payload, sandboxes=("myapp-7f3a",))
+        self.assertIn("active=1 new=1 changed=0 gone=0", out)
+        self.assertIn("active=32 new=4", cmd_agent._render_ai_usage_table(payload))
+
     def test_category_filter_is_exact_and_case_insensitive(self):
         from defenseclaw.commands import cmd_agent
 

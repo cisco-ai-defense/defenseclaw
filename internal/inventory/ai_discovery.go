@@ -2028,13 +2028,34 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.MCPPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if pathExists(path) {
-					out = append(out, s.signalFromMCPConfigPath(sig, path))
+				if !pathExists(path) {
+					continue
+				}
+				// A config read in full that declares no server is no MCP
+				// server (GAP-2337): Claude Code writes ~/.claude.json
+				// whether or not it has one, so every Claude Code home, and
+				// every Claude Code sandbox, listed an MCP server (GAP-0269).
+				if signal := s.signalFromMCPConfigPath(sig, path); declaresMCPServer(signal) {
+					out = append(out, signal)
 				}
 			}
 		}
 	}
 	return out
+}
+
+// declaresMCPServer reports an MCP config signal that names a server, or
+// one whose config could not be read in full (Partial), which may.
+func declaresMCPServer(signal AISignal) bool {
+	if signal.Partial {
+		return true
+	}
+	for _, ev := range signal.Evidence {
+		if ev.Type == "mcp_server" {
+			return true
+		}
+	}
+	return false
 }
 
 // signalFromMCPConfigPath builds a SignalMCPServer signal for an MCP
