@@ -223,7 +223,8 @@ func TestMapperSummarizesTheSupervisorAndDropsOthers(t *testing.T) {
 
 // DefenseClaw's collector, exec'd into the sandbox, is marked with its
 // children and the images its pid runs next; a workload process with the
-// same command is not (it is in the container's init tree).
+// same command is not (it is in the container's init tree, and not a child of
+// the container's pid 1).
 func TestMapperMarksTheCollector(t *testing.T) {
 	collectorArgs := "-i PATH=/usr/bin:/bin HOME=/sandbox LC_ALL=C /bin/bash -p -c \"export LC_ALL=C mode=$1\" defenseclaw-collect ps 1"
 	timeout := proc{pid: 8000, ktime: 1e9, docker: workload, binary: "/usr/bin/timeout", args: "10 /usr/bin/env " + collectorArgs, injected: true}
@@ -247,6 +248,47 @@ func TestMapperMarksTheCollector(t *testing.T) {
 	}
 	if f := one(t, m.Map(ctx, execOf(exec))).Frame; f.Collector || !f.Injected {
 		t.Fatalf("another injected process = %+v", f)
+	}
+}
+
+// OpenShell's exec starts the collector as a child of the container's pid 1
+// (its supervisor), inside a shell and under timeout(1), in the init tree
+// (GAP-0024). It is marked with its own programs; a program the collector
+// never runs stays in the tree, and the same command line started by the
+// workload is not taken.
+func TestMapperMarksTheCollectorOpenShellStarts(t *testing.T) {
+	script := `"export LC_ALL=C mode=$1 max=$2" defenseclaw-collect ps 4096 64`
+	envArgs := "-i PATH=/usr/bin:/bin HOME=/sandbox LC_ALL=C /bin/bash -p -c " + script
+	init := proc{pid: 7000, ktime: 1e8, docker: workload, binary: "/usr/local/bin/openshell-sandbox"}
+	shell := proc{pid: 7100, ktime: 1e9, docker: workload, binary: "/bin/bash", parent: &init,
+		args: `-c "timeout -k 5 10 /usr/bin/env -i 'PATH=/usr/bin:/bin' 'HOME=/sandbox' 'LC_ALL=C' /bin/bash -p -c ` + script + `"`}
+	timeout := proc{pid: 7100, ktime: 1e9 + 500, docker: workload, binary: "/usr/bin/timeout", args: "-k 5 10 /usr/bin/env " + envArgs, parent: &shell}
+	env := proc{pid: 7101, ktime: 2e9, docker: workload, binary: "/usr/bin/env", args: envArgs, parent: &timeout}
+	bash := proc{pid: 7101, ktime: 2e9 + 500, docker: workload, binary: "/bin/bash", args: "-p -c " + script, parent: &env}
+	find := proc{pid: 7102, ktime: 3e9, docker: workload, binary: "/usr/bin/find", args: "/proc -mindepth 2", parent: &bash}
+	tr := proc{pid: 7103, ktime: 3e9 + 50, docker: workload, binary: "/usr/bin/tr", args: `\n\0 \001\n`, parent: &bash}
+	curl := proc{pid: 7104, ktime: 3e9 + 100, docker: workload, binary: "/usr/bin/curl", args: "https://example.invalid", parent: &bash}
+	agent := proc{pid: 7200, ktime: 4e9, docker: workload, binary: "/usr/local/bin/claude", parent: &init}
+	mimic := proc{pid: 7201, ktime: 5e9, docker: workload, binary: shell.binary, args: shell.args, parent: &agent}
+	m := NewMapper(MapperConfig{Containers: testContainers(), Proc: fakeProc{
+		7000: {ns: 1}, 7100: {ns: 50}, 7101: {ns: 51}, 7102: {ns: 52}, 7103: {ns: 53}, 7104: {ns: 54}, 7200: {ns: 60}, 7201: {ns: 61},
+	}})
+	ctx := context.Background()
+	for _, p := range []proc{shell, timeout, env, bash, find, tr} {
+		if f := one(t, m.Map(ctx, execOf(p))).Frame; !f.Collector || f.Injected {
+			t.Fatalf("%s %s is not marked as the collector: %+v", p.binary, p.args, f)
+		}
+	}
+	if f := one(t, m.Map(ctx, exitOf(find, 0, ""))).Frame; !f.Collector {
+		t.Fatalf("the collector's exit is not marked: %+v", f)
+	}
+	if f := one(t, m.Map(ctx, execOf(curl))).Frame; f.Collector {
+		t.Fatalf("a program the collector never runs was left out of the tree: %+v", f)
+	}
+	for _, p := range []proc{agent, mimic} {
+		if f := one(t, m.Map(ctx, execOf(p))).Frame; f.Collector {
+			t.Fatalf("a workload process was taken for the collector: %+v", f)
+		}
 	}
 }
 

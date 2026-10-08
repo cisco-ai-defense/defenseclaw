@@ -205,7 +205,6 @@ func (m *Mapper) exec(ctx context.Context, response *pb.GetEventsResponse, exec 
 		m.count(func(s *MapperStats) { s.Runtime++ })
 		return nil
 	}
-	frame.Collector = m.collector(process, frame)
 
 	if pid, ok := m.capture(hostPID, process.GetExecId()); ok {
 		frame.PID = pid
@@ -222,6 +221,7 @@ func (m *Mapper) exec(ctx context.Context, response *pb.GetEventsResponse, exec 
 			m.pinned.put(frame.ParentExecID, pid)
 		}
 	}
+	frame.Collector = m.collector(process, frame)
 	m.images.put(hostPID, execID)
 	m.count(func(s *MapperStats) {
 		s.Execs++
@@ -233,21 +233,45 @@ func (m *Mapper) exec(ctx context.Context, response *pb.GetEventsResponse, exec 
 }
 
 // collector reports whether an exec is DefenseClaw's collector or one of its
-// processes: an injected process with the collector's command, a child of
-// one, or a later image of one's pid.
+// processes: a process with the collector's command, a child of one, or a
+// later image of one's pid.
+//
+// A collector injected into the container (docker exec) is DefenseClaw's
+// alone: the workload cannot start a process outside the container's init
+// tree, so everything below it is the collector's. OpenShell's exec starts
+// the collector below the container's init (as a child of its pid 1), where
+// the workload could start the same command line, so such a collector is
+// bounded (GAP-0024): only a child of the container's pid 1 is taken, and
+// below it only the collector's own programs (sandboxfeed.CollectorProgram)
+// are left out; any other program stays in the tree.
 func (m *Mapper) collector(process *pb.Process, frame sandboxfeed.Frame) bool {
-	if !frame.Injected {
+	previous, _ := m.images.get(frame.HostPID)
+	for _, id := range []string{frame.ParentExecID, previous} {
+		if id == "" {
+			continue
+		}
+		if bounded, ok := m.collectors.get(id); ok {
+			if bounded && !sandboxfeed.CollectorProgram(process.GetBinary()) {
+				return false
+			}
+			m.markCollector(frame.ExecID, bounded)
+			return true
+		}
+	}
+	if !frame.Injected && frame.PPID != 1 {
 		return false
 	}
-	previous, _ := m.images.get(frame.HostPID)
-	if (frame.ParentExecID != "" && m.collectors.has(frame.ParentExecID)) || (previous != "" && m.collectors.has(previous)) ||
-		sandboxfeed.IsCollectorCommand(append([]string{process.GetBinary()}, strings.Fields(process.GetArguments())...)) {
-		if frame.ExecID != "" {
-			m.collectors.put(frame.ExecID, true)
-		}
-		return true
+	if !sandboxfeed.IsCollectorCommand(append([]string{process.GetBinary()}, strings.Fields(process.GetArguments())...)) {
+		return false
 	}
-	return false
+	m.markCollector(frame.ExecID, !frame.Injected)
+	return true
+}
+
+func (m *Mapper) markCollector(execID string, bounded bool) {
+	if execID != "" {
+		m.collectors.put(execID, bounded)
+	}
 }
 
 // runtimeInit reports the container runtime's init process of an exec into a

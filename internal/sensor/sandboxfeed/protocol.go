@@ -46,6 +46,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"time"
 )
@@ -303,18 +304,52 @@ const CollectorName = "defenseclaw-collect"
 // IsCollectorCommand reports whether argv (the program first) is
 // DefenseClaw's collector as the gateway runs it in a sandbox: `/usr/bin/env
 // -i PATH=/usr/bin:/bin HOME=... LC_ALL=C /bin/bash -p -c SCRIPT
-// defenseclaw-collect ...`, possibly under a wrapper such as timeout(1)
-// whose own arguments come first. The feed marks such a process, when it was
-// injected into the container (never one the workload started), and its
-// children, so the gateway can leave its own sampling out of the tree. An
-// argument list cut short keeps its start, so the shape is matched there.
+// defenseclaw-collect ...`, possibly under timeout(1) and its options, and
+// possibly inside the shell OpenShell's exec runs a command with
+// (`/bin/bash -c "timeout -k 5 10 /usr/bin/env -i 'PATH=/usr/bin:/bin' ..."`,
+// whose quotes a text command line keeps). Nothing else may come before the
+// env. The feed marks such a process and its children, so the gateway can
+// leave its own sampling out of the tree. An argument list cut short keeps
+// its start, so the shape is matched there.
 func IsCollectorCommand(argv []string) bool {
-	for i := 0; i < len(argv) && i <= 3; i++ {
-		rest := argv[i:]
-		if len(rest) >= 8 && rest[0] == "/usr/bin/env" && rest[1] == "-i" && rest[2] == "PATH=/usr/bin:/bin" &&
-			strings.HasPrefix(rest[3], "HOME=") && rest[4] == "LC_ALL=C" && rest[5] == "/bin/bash" && rest[6] == "-p" && rest[7] == "-c" {
-			return true
+	words := make([]string, len(argv))
+	for i, word := range argv {
+		words[i] = strings.Trim(word, `"'`)
+	}
+	if len(words) >= 2 && isCollectorShell(words[0]) && words[1] == "-c" {
+		words = words[2:]
+	}
+	if len(words) > 0 && path.Base(words[0]) == "timeout" {
+		words = words[1:]
+		for len(words) > 0 && strings.HasPrefix(words[0], "-") {
+			option := words[0]
+			words = words[1:]
+			if (option == "-k" || option == "-s" || option == "--kill-after" || option == "--signal") && len(words) > 0 {
+				words = words[1:]
+			}
 		}
+		if len(words) == 0 {
+			return false
+		}
+		words = words[1:] // the duration
+	}
+	return len(words) >= 8 && words[0] == "/usr/bin/env" && words[1] == "-i" && words[2] == "PATH=/usr/bin:/bin" &&
+		strings.HasPrefix(words[3], "HOME=") && words[4] == "LC_ALL=C" && words[5] == "/bin/bash" && words[6] == "-p" && words[7] == "-c"
+}
+
+func isCollectorShell(program string) bool {
+	return program == "/bin/bash" || program == "/usr/bin/bash" || program == "/bin/sh" || program == "/usr/bin/sh"
+}
+
+// CollectorProgram reports whether a program is one the collector runs: the
+// shells and wrappers it starts under and the tools its script calls. A
+// collector the workload could have started itself (OpenShell's exec starts
+// it below the container's init, like the workload) hides only these: any
+// other program below it stays in the tree.
+func CollectorProgram(binary string) bool {
+	switch path.Base(binary) {
+	case "bash", "sh", "timeout", "env", "find", "tr", "head", "tail", "base64", "readlink":
+		return true
 	}
 	return false
 }

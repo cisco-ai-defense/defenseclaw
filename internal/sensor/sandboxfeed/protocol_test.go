@@ -81,9 +81,14 @@ func TestIsCollectorCommand(t *testing.T) {
 		"under timeout":       {append([]string{"/usr/bin/timeout", "10"}, collector...), true},
 		"under a long option": {append([]string{"/usr/bin/timeout", "--kill-after=5", "10"}, collector...), true},
 		"too deep":            {append([]string{"a", "b", "c", "d"}, collector...), false},
-		"a workload shell":    {[]string{"/bin/bash", "-c", "env -i PATH=/usr/bin:/bin " + CollectorName}, false},
-		"another PATH":        {append([]string{"/usr/bin/env", "-i", "PATH=/tmp/bin"}, collector[3:]...), false},
-		"empty":               {nil, false},
+		// OpenShell's exec, as Tetragon's text command line splits it (GAP-0024).
+		"openshell exec shell":         {strings.Fields(`/bin/bash -c "timeout -k 5 10 /usr/bin/env -i 'PATH=/usr/bin:/bin' 'HOME=/sandbox' 'LC_ALL=C' /bin/bash -p -c "export LC_ALL=C" defenseclaw-collect ps`), true},
+		"timeout with -k":              {append([]string{"/usr/bin/timeout", "-k", "5", "10"}, collector...), true},
+		"a shell that runs more first": {strings.Fields(`/bin/bash -c "echo hi; timeout -k 5 10 /usr/bin/env -i 'PATH=/usr/bin:/bin' 'HOME=/sandbox' 'LC_ALL=C' /bin/bash -p -c x"`), false},
+		"timeout and no duration":      {[]string{"/usr/bin/timeout", "-k", "5"}, false},
+		"a workload shell":             {[]string{"/bin/bash", "-c", "env -i PATH=/usr/bin:/bin " + CollectorName}, false},
+		"another PATH":                 {append([]string{"/usr/bin/env", "-i", "PATH=/tmp/bin"}, collector[3:]...), false},
+		"empty":                        {nil, false},
 	} {
 		if got := IsCollectorCommand(c.argv); got != c.want {
 			t.Errorf("%s: IsCollectorCommand = %v, want %v", name, got, c.want)
