@@ -451,7 +451,12 @@ restart fails closed.
 | macOS | `sudo launchctl kickstart -k system/com.cisco.defenseclaw.gateway` | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --json` |
 | Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
 
-Restart the gateway after you edit a rule pack or policy file in place.
+A running standalone gateway detects edits to a rule pack or policy file. If
+the pack is pinned, an in-place edit fails its digest check and the gateway
+keeps the previous policy generation. Stage the edited pack in a new folder,
+validate and pin its new digest, then apply it with `ensure --config`. A
+restart alone cannot apply a mismatched pack and may leave the gateway unable
+to start.
 Secrets and upgrades restart it on their own. On every OS, `ensure`
 applies a config change that only touches keys the gateway reloads in place
 (most of them) in the running gateway, without a restart, and waits until the
