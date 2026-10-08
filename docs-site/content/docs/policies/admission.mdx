@@ -413,7 +413,7 @@ asset_policy:
   type={{
     "name": {
       type: "string",
-      description: "The asset's name. Matched exactly, ignoring case.",
+      description: "The asset's name. Matched exactly, ignoring case and Unicode composition: a name with an accented letter matches whether the accent is stored as one character or as a letter plus a combining mark.",
     },
     "connector": {
       type: "string",

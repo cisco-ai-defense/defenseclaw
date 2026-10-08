@@ -138,6 +138,11 @@ type AssetPolicyInput struct {
 	Args           []string
 	Transport      string
 	RuntimeSurface string
+
+	// unicodeNames compares names after Unicode NFC normalisation
+	// (NormalizeAssetName, GAP-0432). EvaluateAssetPolicy and
+	// AssetListDecision set it outside Secure Client.
+	unicodeNames bool
 }
 
 type AssetPolicyDecision struct {
@@ -206,6 +211,7 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	if c == nil {
 		return out
 	}
+	in.unicodeNames = !c.SecureClientIntegration()
 	// The explicit operator lists apply in every mode, as the audit.db
 	// actions rows they replace did (config_version 9).
 	switch verdict, rule := c.AssetListDecision(in); verdict {
@@ -483,7 +489,7 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	hasConstraint := false
 	if rule.Name != "" {
 		hasConstraint = true
-		if !strings.EqualFold(strings.TrimSpace(rule.Name), strings.TrimSpace(in.Name)) {
+		if !sameRuleName(rule.Name, in.Name, in.unicodeNames) {
 			return false
 		}
 	}

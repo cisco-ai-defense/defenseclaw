@@ -87,6 +87,19 @@ func TestAssetPolicyListsMatchConnectorAliases(t *testing.T) {
 	}
 }
 
+// GAP-0432: a rule in the composed (NFC) spelling of a name matches the
+// decomposed (NFD) spelling of the same visible name, and the reverse.
+func TestAssetListDecisionMatchesNamesAfterNFC(t *testing.T) {
+	const composed, decomposed = "epa-caf\u00e9", "epa-cafe\u0301"
+	for _, tc := range []struct{ rule, name string }{{composed, decomposed}, {decomposed, composed}} {
+		cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+		cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: tc.rule}}
+		if verdict, _ := cfg.AssetListDecision(AssetPolicyInput{TargetType: "skill", Name: tc.name}); verdict != AssetListDeny {
+			t.Fatalf("rule %+q, name %+q: verdict %q, want deny", tc.rule, tc.name, verdict)
+		}
+	}
+}
+
 func TestEvaluateAssetPolicyAllowOverridesDefaultDeny(t *testing.T) {
 	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
 	cfg.AssetPolicy.Enabled = true

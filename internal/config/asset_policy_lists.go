@@ -35,6 +35,7 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 	if c == nil {
 		return "", AssetPolicyRule{}
 	}
+	in.unicodeNames = !c.SecureClientIntegration()
 	var p AssetTypePolicy
 	switch normalizeAssetToken(in.TargetType) {
 	case "mcp":
