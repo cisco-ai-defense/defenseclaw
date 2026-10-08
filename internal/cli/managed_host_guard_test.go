@@ -116,6 +116,12 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
 		t.Fatalf("setup rotate-token on a managed Windows computer: %v", err)
 	}
+	// GAP-0779: the MCP scanner named trusted-paths as a remedy, and the
+	// refusal spoke of rotating credentials.
+	root.SetArgs([]string{"setup", "trusted-paths", "add", `C:\Program Files\nodejs`})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "Program Files") || strings.Contains(err.Error(), "Rotating") {
+		t.Fatalf("setup trusted-paths on a managed Windows computer: %v", err)
+	}
 	root.SetArgs([]string{"setup", "kiro"})
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
 		!strings.Contains(err.Error(), "guardrail.connectors.kiro") {

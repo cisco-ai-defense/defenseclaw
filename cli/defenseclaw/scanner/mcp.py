@@ -678,15 +678,57 @@ def _resolve_trusted_windows_launcher(
 
     from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
 
-    if not _is_trusted_binary_path(canonical):
-        # GAP-0385: name the file and the way to trust its folder.
+    if not _is_trusted_binary_path(canonical) and not _admin_only_program_files_launcher(canonical):
+        # GAP-0385: name the file and the way to trust its folder. GAP-0779:
+        # trusted-paths is a per-user command, refused on a managed computer.
         folder = ntpath.dirname(canonical)
         raise MCPStdioLaunchError(
             f"local MCP launcher {launcher!r} resolved to an untrusted Windows path "
-            f"or failed owner/DACL validation: {canonical}. If only administrators can "
-            f"change that folder, trust it with: defenseclaw setup trusted-paths add \"{folder}\""
+            f"or failed owner/DACL validation: {canonical}. A scan starts a launcher only from "
+            f"a folder that only administrators can change: install it for all users under "
+            f"Program Files (on a managed computer, the administrator does this), or, on a "
+            f"per-user install where only administrators can change that folder, trust it with: "
+            f"defenseclaw setup trusted-paths add \"{folder}\""
         )
     return canonical
+
+
+# FOLDERID_ProgramFiles and FOLDERID_ProgramFilesX86.
+_WINDOWS_PROGRAM_FILES_FOLDER_IDS = (
+    "905e63b6-c1bf-494e-b29c-65b732d3d21a",
+    "7c5a40ef-a0fb-4bfc-874a-c0f2e0b9fa8e",
+)
+
+
+def _windows_program_files_roots() -> tuple[str, ...]:
+    """Program Files folders, from the Known Folder API, not the environment."""
+    from defenseclaw.inventory import agent_discovery
+
+    roots: list[str] = []
+    for folder_id in _WINDOWS_PROGRAM_FILES_FOLDER_IDS:
+        root = agent_discovery._windows_current_user_known_folder(folder_id)
+        if root and root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
+def _admin_only_program_files_launcher(canonical: str) -> bool:
+    """Whether a launcher is installed for all users under Program Files.
+
+    The scanner runtime of a managed Windows computer runs with an allowlisted
+    environment that has no ProgramFiles variable and no per-user trusted
+    paths, so npx.cmd in C:\\Program Files\\nodejs matched no trusted prefix
+    and every npx or uvx server failed closed (GAP-0779). Only administrators
+    can change Program Files; the owner and DACL of the file and of every
+    folder up to it are still checked.
+    """
+    from defenseclaw.inventory import agent_discovery
+
+    return any(
+        agent_discovery._path_is_within(canonical, root)
+        and agent_discovery._windows_acl_chain_is_safe(canonical, root)
+        for root in _windows_program_files_roots()
+    )
 
 
 def _trusted_windows_command_processor(env: dict[str, str]) -> str:

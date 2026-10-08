@@ -411,8 +411,13 @@ allowlisted stdio launcher (allowed: npx, uvx)". For such a server:
   definition only.
 
 On Windows the launcher must sit in a trusted folder (the Node.js installer folder and
-uv's default `%USERPROFILE%\.local\bin` are trusted by default). The error names the file it found;
-`defenseclaw setup trusted-paths add "<folder>"` trusts an admin-owned folder.
+uv's default `%USERPROFILE%\.local\bin` are trusted by default). A launcher installed for all users under Program Files is trusted when
+only administrators can change it and its folders. The error names the file it found;
+`defenseclaw setup trusted-paths add "<folder>"` trusts an admin-owned folder on a per-user install.
+On a managed Windows computer there is no per-user trusted-paths list and `setup` is refused:
+the scanner runs in the gateway service and trusts launchers under Program Files only (for example
+Node.js in `C:\Program Files\nodejs`), so an administrator installs Node.js or uv there for all users.
+A `uvx.exe` in a user profile is never trusted there, because the user can replace it.
 When the server exits before it answers, its last stderr lines are printed.
 
 ## How the settings reach the scanner

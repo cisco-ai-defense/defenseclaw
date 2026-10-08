@@ -160,6 +160,28 @@ def test_untrusted_launcher_path_is_rejected(
         mcp._resolve_trusted_windows_launcher("npx", ".cmd", {"PATH": os.fspath(Path(npx).parent)})
 
 
+def test_program_files_launcher_is_trusted_without_a_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-0779: the managed scanner runtime has no ProgramFiles variable, so npx.cmd
+    in C:\\Program Files\\nodejs matched no trusted prefix. A launcher under Program
+    Files whose folders only administrators can change is trusted; one whose folder
+    others can change is not."""
+    program_files = tmp_path / "Program Files"
+    npx = _touch(program_files / "nodejs" / "npx.cmd")
+    _which_map(monkeypatch, {"npx": npx, "npx.cmd": npx})
+    _trusted(monkeypatch, set())
+    monkeypatch.setattr(mcp, "_windows_program_files_roots", lambda: (os.fspath(program_files),))
+    monkeypatch.setattr(agent_discovery, "_windows_acl_chain_is_safe", lambda _path, _root: True)
+    env = {"PATH": os.fspath(Path(npx).parent)}
+    assert mcp._resolve_trusted_windows_launcher("npx", ".cmd", env) == os.path.realpath(npx)
+
+    monkeypatch.setattr(agent_discovery, "_windows_acl_chain_is_safe", lambda _path, _root: False)
+    with pytest.raises(mcp.MCPStdioLaunchError, match="for all users under Program Files"):
+        mcp._resolve_trusted_windows_launcher("npx", ".cmd", env)
+
+
 def test_failed_start_prints_the_server_stderr_tail(capsys: pytest.CaptureFixture[str]) -> None:
     # GAP-0385: a server that exits at once (a folder that does not exist)
     # showed only "exited before completing"; its stderr was withheld.

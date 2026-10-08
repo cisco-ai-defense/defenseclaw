@@ -701,6 +701,14 @@ per-user install:
   or admit new MCP servers without a scan with
   `admission.mcp.scan_on_install: false`. There is no setting that lets the
   scanner connect to these addresses.
+- A stdio server started with `npx` or `uvx` is scanned only when the
+  launcher is installed for all users in a folder that only administrators
+  can change, such as Node.js in `C:\Program Files\nodejs` or uv under
+  `C:\Program Files`. A launcher in a user profile (uv installs `uvx.exe` in
+  `%USERPROFILE%\.local\bin` by default) fails the scan, and the server is
+  blocked (`MCPStdioLaunchError ... untrusted Windows path`). There is no
+  per-user trusted-paths list on a managed computer; install the launcher
+  under Program Files instead.
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the
