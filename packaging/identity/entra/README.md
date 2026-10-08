@@ -65,6 +65,12 @@ python3 entra_setup.py sids --group defenseclaw-ml-team
 python3 entra_setup.py sid-from-object-id <object id>           # offline
 ```
 
+The helper saves and syncs a generated password before asking Graph to create its
+user. If Graph rejects a create, the private password file can contain a password
+that was not applied. Check the account and use only the entry from a confirmed
+creation; a later successful apply may append a newer entry for the same user.
+
+
 Entra-joined Windows (elevated PowerShell): unblock downloaded scripts with
 `Unblock-File .\Get-DefenseClawEntraIdentity.ps1` and
 `Unblock-File .\Add-EntraGroupToLocalGroup.ps1`, or use

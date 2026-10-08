@@ -76,6 +76,7 @@ func (err *Error) Code() ErrorCode {
 // EventHistoryHealthReporter when they need that degraded state bridged into
 // mandatory health telemetry.
 type Options struct {
+	SecureClient               bool
 	Store                      *audit.Store
 	Engine                     *redaction.Engine
 	Signer                     audit.ProjectionIntegritySigner
@@ -224,9 +225,10 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	}
 	destinationObserver := newSafeDeliveryObserver(options.DestinationObserver)
 	dispatchFactory := &destinationDispatchFactory{
-		adapters:  options.DestinationAdapterFactory,
-		resources: options.TelemetryProviderFactory,
-		observer:  destinationObserver,
+		adapters:     options.DestinationAdapterFactory,
+		resources:    options.TelemetryProviderFactory,
+		observer:     destinationObserver,
+		secureClient: options.SecureClient,
 	}
 	factories := []runtimegraph.ComponentFactory{
 		&retentionPolicyFactory{controller: options.RetentionController},

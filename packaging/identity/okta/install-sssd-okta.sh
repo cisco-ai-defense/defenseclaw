@@ -78,8 +78,9 @@ Options:
   --render-only FILE        Write the rendered config to FILE (mode 0600),
                             check it, and change nothing else. Works on any Linux.
   --dry-run                 Show what would change, change nothing
-  --force                   Replace an sssd.conf this script did not write, and
-                            let authselect replace a modified profile
+  --force                   Replace an sssd.conf this script did not write or
+                            one with other SSSD domains; also let authselect
+                            replace a modified profile
   -h, --help                Show this help
 
 Exit codes: 0 done or nothing to do, 1 a step failed, 2 bad arguments,
@@ -380,6 +381,34 @@ install_conf() {
     fi
     if ! grep -q "$MARKER" "$CONF" && ((FORCE == 0)); then
       fail 3 "$CONF was not written by this script (it has no '$MARKER' line). Nothing was changed. Rerun with --force to replace it; the old file is kept as a backup."
+    fi
+    # The marker identifies the kit, but an administrator may have joined
+    # another SSSD domain since the first run. Never drop that domain implicitly.
+    local other_domains
+    other_domains=$(python3 - "$CONF" "$DOMAIN" <<'PYCONF'
+import re
+import sys
+
+wanted = sys.argv[2]
+domains = set()
+section = ""
+with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+    for raw in handle:
+        line = raw.split("#", 1)[0].split(";", 1)[0].strip()
+        heading = re.fullmatch(r"\[([^]]+)\]", line)
+        if heading:
+            section = heading.group(1).strip()
+            if section.startswith("domain/"):
+                domains.add(section[7:])
+        elif section == "sssd":
+            setting = re.match(r"domains\s*=\s*(.*)", line, re.IGNORECASE)
+            if setting:
+                domains.update(name.strip() for name in setting.group(1).split(",") if name.strip())
+print(", ".join(sorted(domains - {wanted})))
+PYCONF
+)
+    if [[ -n $other_domains ]] && ((FORCE == 0)); then
+      fail 3 "$CONF also configures SSSD domain(s) $other_domains. No changes were made. Merge the new Okta settings into the existing file manually, or use --force to replace all domains."
     fi
     if ((DRY_RUN)); then
       log "  would replace $CONF; changes (password hidden):"

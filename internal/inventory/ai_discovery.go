@@ -499,6 +499,8 @@ type AIDiscoveryReportObserver func(context.Context, AIDiscoveryReport)
 type aiStoredSignal struct {
 	AISignal
 	RawPaths                           []string     `json:"raw_paths,omitempty"`
+	PrivacyScopeKnown                  bool         `json:"privacy_scope_known,omitempty"`
+	PrivacyScopeHashes                 []string     `json:"privacy_scope_hashes,omitempty"`
 	StoredEvidenceHash                 string       `json:"evidence_hash,omitempty"`
 	StoredEvidence                     []AIEvidence `json:"evidence,omitempty"`
 	StoredModelAPISourceHash           string       `json:"model_api_source_hash,omitempty"`
@@ -628,7 +630,9 @@ type ContinuousDiscoveryService struct {
 	ideBaseline   map[string]IDEPlugin
 	ideRecordedAt time.Time
 	// scanMu guards the per-scan privacy skip observation.
-	tccSkipped bool
+	tccSkipped           bool
+	tccSkippedPaths      map[string]bool
+	privacyEvidencePaths map[string][]string
 }
 
 type scanResponse struct {
@@ -1118,6 +1122,8 @@ func (s *ContinuousDiscoveryService) runScanSingleFlight(
 func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
 	start := time.Now()
 	s.tccSkipped = false
+	s.tccSkippedPaths = make(map[string]bool)
+	s.privacyEvidencePaths = make(map[string][]string)
 	scanID := newScanID()
 	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
 		ScanID: scanID, Source: source, PrivacyMode: s.opts.Mode, StartedAt: start,
@@ -1679,6 +1685,8 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		emittedFps[sig.Fingerprint] = true
 		current[sig.Fingerprint] = aiStoredSignal{
 			AISignal: sig, RawPaths: rawPathsForSignal(sig, s.opts.StoreRawLocalPaths),
+			PrivacyScopeKnown:        !s.opts.SecureClient && s.privacyScopeKnown(sig),
+			PrivacyScopeHashes:       s.privacyScopesForSignal(sig),
 			StoredModelAPISourceHash: sig.ModelAPISourceHash,
 		}
 	}
@@ -1725,8 +1733,8 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			if _, ok := current[fp]; ok || replaced[fp] {
 				continue
 			}
-			if stats.TCCSkipped && (old.Detector == "package_manifest" || old.Detector == "model_file") {
-				// A protected subtree was skipped. Its absence is not proof of removal.
+			if stats.TCCSkipped && (old.Detector == "package_manifest" || old.Detector == "model_file") && (s.opts.SecureClient || s.privacySkipAffects(old)) {
+				// This signal may belong to a skipped subtree; absence is not proof of removal.
 				if old.Detector == "model_file" {
 					if fileCarryRemaining > 0 {
 						carry.persist(fp, old, &fileCarryRemaining)
@@ -3143,6 +3151,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 			// to one signal per (component, project) instead of
 			// per file. See projectRootForManifest for the
 			// cache-segment walk-up rules.
+			s.notePrivacyEvidencePath(path)
 			entry := pkgManifestEntry{
 				path:      path,
 				basename:  filepath.Base(path),

@@ -283,6 +283,34 @@ func TestCodexTranscriptlessThreadIsNotASession(t *testing.T) {
 	}
 }
 
+// A final flush must survive AI Discovery closing its store first.
+func TestAgentIdentityFinalFlushAfterDiscoveryStoreCloses(t *testing.T) {
+	agentIdentityTestSetup(t)
+	dir := t.TempDir()
+	store, err := inventory.NewInventoryStore(filepath.Join(dir, "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	token := recorder.setStoreSource(func() *inventory.InventoryStore { return store }, func() string { return dir }, func() int { return 7 })
+	recorder.observe(agentIdentityFacts{ID: "agt-final-flush", UserID: "1001", Connector: "codex", MachineHash: "m"}, "s-1", true)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder.runFlusher(ctx, time.Hour, token)
+	reopened, err := inventory.NewInventoryStore(filepath.Join(dir, "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	rows, _, err := reopened.ListAgentIdentities(context.Background(), inventory.AgentIdentityFilter{})
+	if err != nil || len(rows) != 1 || rows[0].AgentID != "agt-final-flush" {
+		t.Fatalf("final flush rows = %+v, err %v", rows, err)
+	}
+}
+
 // GAP-0289: with AI discovery off the recorder's own inventory.db is pruned
 // by last seen like discovery's history, so the ledger does not grow
 // without bound.

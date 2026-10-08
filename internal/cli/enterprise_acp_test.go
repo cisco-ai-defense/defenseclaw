@@ -27,7 +27,7 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	}
 	serviceData := t.TempDir()
 	userHome := t.TempDir()
-	userData := filepath.Join(userHome, ".defenseclaw")
+	userData := filepath.Join(userHome, "custom-acp-data")
 	previousCfg := cfg
 	previous := struct {
 		client, agent, profile, user, home, sid, data string
@@ -141,6 +141,13 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	if row, _ := listed[0].(map[string]any); row["user"] != "alice" || row["client"] != "zed" || row["agent"] != "kiro" ||
 		row["token_copy"] != "present" || row["setup"] != "not run" {
 		t.Fatalf("list row = %v, want alice zed/kiro with the token copy present and setup not run", row)
+	}
+	if err := os.WriteFile(acpContractLockPath(userData, "zed", "kiro"), []byte("contract"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listed, _ = run(runEnterpriseACPList)["enrollments"].([]any)
+	if row, _ := listed[0].(map[string]any); row["token_copy"] != "present" || row["setup"] != "done" {
+		t.Fatalf("list row = %v, want the custom directory token and setup lock", row)
 	}
 
 	enrollment, err := resolveEnterpriseACPEnrollment(true)

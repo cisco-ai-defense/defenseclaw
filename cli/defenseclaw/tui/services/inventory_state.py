@@ -17,6 +17,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from rich.cells import cell_len, set_cell_size
+
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.overview_state import friendly_connector_name
 
@@ -1743,17 +1745,18 @@ def _fit_cells(
     The widest other column loses a character at a time (never below its
     header or 6), and a clipped cell ends in "…".
     """
-    widths = [max([len(name), *(len(row[i]) for row in rows)]) for i, name in enumerate(columns)]
+    widths = [max([cell_len(name), *(cell_len(row[i]) for row in rows)]) for i, name in enumerate(columns)]
     # Panel margins, the scrollbar and one space of padding each side of a cell.
     budget = width - 8 - 2 * len(columns)
     shrinkable = [i for i, name in enumerate(columns) if name not in keep]
     while shrinkable and sum(widths) > budget:
         i = max(shrinkable, key=lambda j: widths[j])
-        if widths[i] <= max(6, len(columns[i])):
+        if widths[i] <= max(6, cell_len(columns[i])):
             break
         widths[i] -= 1
     return tuple(
-        tuple(cell if len(cell) <= widths[i] else cell[: widths[i] - 1] + "…" for i, cell in enumerate(row))
+        tuple(cell if cell_len(cell) <= widths[i] else set_cell_size(cell, widths[i] - 1) + "…"
+              for i, cell in enumerate(row))
         for row in rows
     )
 

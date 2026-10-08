@@ -185,8 +185,9 @@ func netBIOSName(formats []string) string {
 
 // realmFor picks the joined realm whose client (sssd or winbind) serves the
 // account. A DNS domain names its realm, or the nearest parent realm (an
-// Active Directory child domain). A winbind NetBIOS domain names the realm
-// of that NetBIOS name, and an unqualified winbind name the only winbind
+// Active Directory child domain for winbind. SSSD parent domains require
+// a separate SID check before they can be attributed. A winbind NetBIOS
+// domain names the realm of that name, and an unqualified name the only winbind
 // realm. An SSSD domain without a DNS name names no realm: which SSSD domain
 // holds an account comes from its SID (applySSSDDomain).
 func realmFor(domain, source string, realms []Realm) (Realm, bool) {
@@ -221,7 +222,7 @@ func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 		if domain == realm.Domain {
 			return realm, true
 		}
-		if strings.HasSuffix(domain, "."+realm.Domain) && len(realm.Domain) > len(best.Domain) {
+		if client == "winbind" && strings.HasSuffix(domain, "."+realm.Domain) && len(realm.Domain) > len(best.Domain) {
 			best, found = realm, true
 		}
 	}
@@ -268,7 +269,7 @@ func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms [
 // ApplyHeldSSSDDomain gives an SSSD account without a realm the joined
 // realm of the SSSD domain that a lookup by its uid places it in: InfoPipe
 // Users.FindByID, which only root may call. The domain names its realm by
-// its DNS name or a parent's, or by its Kerberos realm (kerberosRealm). It is
+// its exact DNS name, or by its Kerberos realm (kerberosRealm). It is
 // how the guardian attributes an account that has no SID, such as one of an
 // IPA domain without an AD trust; the gateway has no such lookup. A name
 // that carries another domain (an e-mail style name) gets nothing.

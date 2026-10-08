@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -418,4 +419,73 @@ func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 			t.Errorf("the linked folder is granted: %s", g.Path)
 		}
 	}
+}
+
+func TestZedDirectoryCapMarksPartial(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".local", "share", "zed", "extensions", "installed")
+	for i := 0; i <= zedMaxExtensions; i++ {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("extension-%04d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, inst := range Scan(home, "linux", Limits{}) {
+		if inst.Family == FamilyZed {
+			if len(inst.Plugins) != zedMaxExtensions || !inst.Partial {
+				t.Fatalf("Zed directory cap: plugins=%d partial=%v", len(inst.Plugins), inst.Partial)
+			}
+			return
+		}
+	}
+	t.Fatal("Zed installation missing")
+}
+
+func TestVSCodeDisabledStateReadsLiveWAL(t *testing.T) {
+	home := t.TempDir()
+	ext := filepath.Join(home, ".vscode", "extensions")
+	writeFile(t, filepath.Join(ext, "extensions.json"), `[{"identifier":{"id":"example.extension"},"version":"1.0"}]`)
+	path := filepath.Join(home, ".config", "Code", "User", "globalStorage", "state.vscdb")
+	writeStateDB(t, path, "[]")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA wal_autocheckpoint=0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE ItemTable SET value=? WHERE key=?`, `[{"id":"example.extension"}]`, "extensionsIdentifiers/disabled"); err != nil {
+		t.Fatal(err)
+	}
+	plugins := byID(Scan(home, "linux", Limits{}), FamilyVSCode, "vscode", "")
+	p := plugins["example.extension|user"]
+	if p.Enabled != EnabledOff || p.EnabledSource != SourceStateDB {
+		t.Fatalf("live disabled state: %+v", p)
+	}
+}
+
+func TestUnreadableVSCodeExtensionsKeepInstallationPartial(t *testing.T) {
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("requires Unix directory permissions")
+	}
+	home := t.TempDir()
+	ext := filepath.Join(home, ".vscode", "extensions")
+	writeFile(t, filepath.Join(ext, "example.plugin-1.0", "package.json"), `{"name":"plugin","publisher":"example"}`)
+	if err := os.Chmod(ext, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ext, 0o755) })
+	installs := Scan(home, runtime.GOOS, Limits{})
+	for _, inst := range installs {
+		if inst.Family == FamilyVSCode && inst.Product == "vscode" && inst.Root == ext {
+			if !inst.Partial {
+				t.Fatal("unreadable extension directory reported as complete")
+			}
+			return
+		}
+	}
+	t.Fatal("visible installation was omitted")
 }

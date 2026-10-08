@@ -1441,8 +1441,10 @@ func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
 // rows; the guardian still writes identity records and per-user scans for
 // every eligible account the enumerator published (GAP-0021).
 func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
-	previous := enterpriseHookLoadEligibleAccounts
-	t.Cleanup(func() { enterpriseHookLoadEligibleAccounts = previous })
+	previous, previousConfig := enterpriseHookLoadEligibleAccounts, cfg
+	t.Cleanup(func() { enterpriseHookLoadEligibleAccounts, cfg = previous, previousConfig })
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
 	enterpriseHookLoadEligibleAccounts = func(path string) ([]enterprisehooks.UnixEligibleAccount, error) {
 		if path != enterprisehooks.UnixEligibleAccountsPath("/etc/defenseclaw/hooks/manifest.json") {
 			t.Errorf("eligible accounts read from %q", path)
@@ -1458,6 +1460,14 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 	})
 	if len(rows) != 2 || rows[0].Connector != "opencode" || rows[1].UID != 94401104 || rows[1].User != "bob@corp.example" || rows[1].UserHome != "/home/bob@corp.example" {
 		t.Fatalf("rows = %+v, want the manifest row and one row for the eligible account without one", rows)
+	}
+	cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
+	rows = enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+		Manifest: "/etc/defenseclaw/hooks/manifest.json",
+		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
+	})
+	if len(rows) != 1 || rows[0].UID != 1001 {
+		t.Fatalf("manifest mode scanned stale eligible accounts: %+v", rows)
 	}
 }
 

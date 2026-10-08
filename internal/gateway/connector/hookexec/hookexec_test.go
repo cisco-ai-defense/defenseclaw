@@ -2678,3 +2678,21 @@ func TestSecureClientHookSendsNoSessionFacts(t *testing.T) {
 		t.Fatal("per-user hook in an SSH session sent no session facts")
 	}
 }
+
+// GAP-0756: Secure Client handles the first 429 as the pre-1.0 hook did.
+func TestSecureClientHookDoesNotRetry429(t *testing.T) {
+	rt := &stubRT{onRequest: func(s *stubRT, _ *http.Request) (*http.Response, error) {
+		status, body := http.StatusTooManyRequests, `{"error":"rate_limited"}`
+		if s.requests > 1 {
+			status, body = http.StatusOK, `{"action":"allow"}`
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	}}
+	result := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.SecureClient = true
+	})
+	if rt.requests != 1 || result.code != blockExit {
+		t.Fatalf("Secure Client: %d requests, code %d, stdout %q, stderr %q", rt.requests, result.code, result.stdout, result.stderr)
+	}
+}
