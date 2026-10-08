@@ -1095,3 +1095,37 @@ class TestPolicyEngineToolConnectorScope(_StoreTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_secure_client_partial_actions_keep_builtin_medium_warning(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "secure_client")
+    rego = tmp_path / "rego"
+    rego.mkdir()
+    (rego / "data.json").write_text(json.dumps({"actions": {"CRITICAL": {
+        "install": "block", "file": "quarantine", "runtime": "block",
+    }}}), encoding="utf-8")
+    cfg = SimpleNamespace(deployment_mode="managed_enterprise", policy_dir=str(tmp_path))
+    policy = compile_admission(cfg, "skill")
+    action, _ = effective_action_for(policy, severity="MEDIUM")
+    assert action.install == "none"
+    assert action.runtime == "enable"
+
+
+def test_secure_client_observe_denied_skill_keeps_would_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "secure_client")
+    cfg = _FakeConfig()
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.policy_dir = str(tmp_path)
+    cfg.asset_policy.enabled = True
+    cfg.asset_policy.mode = "observe"
+    cfg.asset_policy.skill.denied = [SimpleNamespace(name="denied", connector="", reason="operator")]
+    store, db_path = make_temp_store()
+    try:
+        decision = evaluate_admission(PolicyEngine(store, cfg), target_type="skill", name="denied")
+        assert decision.verdict == "scan"
+        assert decision.observed_source == "asset-policy-deny-observe"
+    finally:
+        store.close()
+        os.unlink(db_path)

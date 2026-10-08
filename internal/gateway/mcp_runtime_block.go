@@ -65,7 +65,7 @@ func mcpServerRuntimeBlock(pe *enforce.PolicyEngine, toolName, connector, explic
 // mcpServerDenied reports an operator block (asset_policy.mcp.denied) or a
 // scan-verdict runtime disable (journal) of server for connector.
 func mcpServerDenied(pe *enforce.PolicyEngine, server, connector string) (bool, error) {
-	blocked, err := pe.IsBlockedForConnector("mcp", server, connector)
+	blocked, err := pe.IsMCPBlockedForConnector(server, connector)
 	if err != nil || blocked {
 		return blocked, err
 	}

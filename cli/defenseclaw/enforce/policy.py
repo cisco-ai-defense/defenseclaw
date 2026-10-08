@@ -186,11 +186,11 @@ class PolicyEngine:
     def _drop_operator_entries(self, target_type: str, name: str, connector: str, op: str) -> None:
         if self._legacy_rows():
             return
-        decisions = ("block",) if op == asset_lists.OP_UNBLOCK else ("block", "allow")
-        if any(asset_lists.has_entry(self.cfg, self.store, target_type, name, connector, d) for d in decisions):
-            asset_lists.write_operator_decision(
-                self.cfg, op=op, target_type=target_type, name=name, connector=connector,
-            )
+        # The writer reloads the lists under its lock; the caller snapshot may
+        # predate a concurrent block or allow.
+        asset_lists.write_operator_decision(
+            self.cfg, op=op, target_type=target_type, name=name, connector=connector,
+        )
 
     # Tool rules (asset_policy.tool) are presented as ActionEntry rows keyed
     # "@<connector>/<tool>" (scoped) or "<tool>" (unscoped), the shape the

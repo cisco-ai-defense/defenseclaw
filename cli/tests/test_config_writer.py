@@ -663,3 +663,19 @@ def test_alternate_config_uses_active_data_dir_for_derived_providers(tmp_path, m
     overlay = json.loads((active / "custom-providers.json").read_text(encoding="utf-8"))
     assert overlay["providers"][0]["name"] == "custom-gateway"
     assert not (alternate / "custom-providers.json").exists()
+
+
+def test_operator_unblock_loaded_before_concurrent_block(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+    from defenseclaw.enforce.policy import PolicyEngine
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    _config(tmp_path)
+    stale = config_module.load(data_dir=str(tmp_path))
+    writer = config_module.load(data_dir=str(tmp_path))
+    PolicyEngine(None, writer).block("skill", "late", "operator")
+    PolicyEngine(None, stale).unblock("skill", "late")
+
+    persisted = config_module.load(data_dir=str(tmp_path))
+    assert not persisted.asset_policy.skill.denied

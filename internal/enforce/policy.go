@@ -87,6 +87,61 @@ func (e *PolicyEngine) IsBlockedForConnector(targetType, name, connector string)
 	return verdict == config.AssetListDeny, nil
 }
 
+// IsMCPBlockedForConnector checks the server name and its configured endpoint.
+// A CLI block by URL is stored under that URL, while a tool hook supplies the
+// server name. Resolve the endpoint for the active connector before deciding.
+func (e *PolicyEngine) IsMCPBlockedForConnector(server, connector string) (bool, error) {
+	if e.legacyOperatorRows() {
+		return e.IsBlockedForConnector("mcp", server, connector)
+	}
+	cfg := e.config()
+	if cfg == nil {
+		return false, nil
+	}
+	in := config.AssetPolicyInput{TargetType: "mcp", Name: server, Connector: connector}
+	// Most calls have name-only rules. Avoid reading connector registries
+	// unless some rule needs an endpoint to match.
+	needsEndpoint := false
+	for _, rules := range [][]config.AssetPolicyRule{cfg.AssetPolicy.MCP.Denied, cfg.AssetPolicy.MCP.Allowed} {
+		for _, rule := range rules {
+			if rule.URL != "" || strings.HasPrefix(rule.Name, "https://") || strings.HasPrefix(rule.Name, "http://") {
+				needsEndpoint = true
+				break
+			}
+		}
+	}
+	if !needsEndpoint {
+		verdict, _ := cfg.AssetListDecision(in)
+		return verdict == config.AssetListDeny, nil
+	}
+	entry, ok := cfg.LookupMCPServerForConnector(connector, "", server)
+	if ok {
+		in.URL = strings.TrimSpace(entry.URL)
+		in.Command, in.Args, in.Transport = entry.Command, entry.Args, entry.Transport
+	}
+	nameVerdict, nameRule := cfg.AssetListDecision(in)
+	if in.URL == "" {
+		return nameVerdict == config.AssetListDeny, nil
+	}
+	in.Name = in.URL // CLI URL entries from 0.8.x are stored as rule names.
+	urlVerdict, urlRule := cfg.AssetListDecision(in)
+	if urlVerdict == "" {
+		return nameVerdict == config.AssetListDeny, nil
+	}
+	if nameVerdict == "" {
+		return urlVerdict == config.AssetListDeny, nil
+	}
+	nameScoped := strings.TrimSpace(nameRule.Connector) != ""
+	urlScoped := strings.TrimSpace(urlRule.Connector) != ""
+	if nameScoped != urlScoped {
+		if urlScoped {
+			return urlVerdict == config.AssetListDeny, nil
+		}
+		return nameVerdict == config.AssetListDeny, nil
+	}
+	return nameVerdict == config.AssetListDeny || urlVerdict == config.AssetListDeny, nil
+}
+
 // IsAllowedForConnector reports whether asset_policy.<targetType>.allowed
 // allows name for connector. Callers check IsBlockedForConnector first.
 func (e *PolicyEngine) IsAllowedForConnector(targetType, name, connector string) (bool, error) {
