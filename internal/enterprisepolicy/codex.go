@@ -112,26 +112,17 @@ var (
 )
 
 // stripCodexOwned removes DefenseClaw's regions and marked lines, leaving
-// exactly the administrator's text.
+// exactly the administrator's text: DefenseClaw adds no separator lines
+// around its blocks (GAP-0903).
 func stripCodexOwned(raw []byte) []byte {
 	lines := strings.SplitAfter(string(raw), "\n")
 	var out strings.Builder
 	skipping := ""
-	skipBlank := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if skipBlank {
-			skipBlank = false
-			if trimmed == "" {
-				continue
-			}
-		}
 		switch {
 		case skipping != "":
 			if trimmed == skipping {
-				// DefenseClaw separates its head block from administrator
-				// content with one blank line; drop it with the block.
-				skipBlank = skipping == codexHeadEnd
 				skipping = ""
 			}
 			continue
@@ -146,9 +137,22 @@ func stripCodexOwned(raw []byte) []byte {
 		}
 		out.WriteString(line)
 	}
-	text := out.String()
-	// Drop the separator newline DefenseClaw added before its tail block.
-	return []byte(strings.TrimRight(text, "\n") + trailingNewline(text))
+	return []byte(out.String())
+}
+
+// codexAdminText is the administrator text DefenseClaw merges into: the
+// recorded preimage while the file is exactly what DefenseClaw last wrote
+// (an earlier build separated its blocks with blank lines, which are not the
+// administrator's), else the file with DefenseClaw's lines removed.
+func codexAdminText(opts Options, path string, current []byte, exists bool) []byte {
+	if !exists {
+		return nil
+	}
+	if record, err := loadRecord(opts, codexConnector); err == nil && record != nil &&
+		record.Path == path && sha256Hex(current) == record.PostimageSHA256 {
+		return stripCodexOwned(record.Preimage)
+	}
+	return stripCodexOwned(current)
 }
 
 // codexHasOwned reports whether raw carries a DefenseClaw region or marked
@@ -170,13 +174,6 @@ func codexStrip(current []byte) ([]byte, bool, error) {
 		return current, false, nil
 	}
 	return stripCodexOwned(current), true, nil
-}
-
-func trailingNewline(text string) string {
-	if strings.TrimSpace(text) == "" {
-		return ""
-	}
-	return "\n"
 }
 
 // codexAdminLayout describes where administrator tables live.
@@ -312,9 +309,6 @@ func renderCodex(opts Options, admin []byte, policy config.ResolvedConnectorPoli
 			out.WriteString(line + "\n")
 		}
 		out.WriteString(codexHeadEnd + "\n")
-		if len(lines) > 0 {
-			out.WriteString("\n")
-		}
 	}
 	for i, line := range lines {
 		out.WriteString(line)
@@ -326,9 +320,6 @@ func renderCodex(opts Options, admin []byte, policy config.ResolvedConnectorPoli
 		}
 	}
 	if len(tail) > 0 {
-		if out.Len() > 0 {
-			out.WriteString("\n")
-		}
 		out.WriteString(codexTailBegin + "\n")
 		for _, line := range tail {
 			out.WriteString(line + "\n")
@@ -561,7 +552,7 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 		state.finish()
 		return state, nil
 	}
-	admin := stripCodexOwned(current)
+	admin := codexAdminText(opts, path, current, exists)
 	rendered, conflicts, err := renderCodex(opts, admin, policy)
 	if err != nil {
 		return state, codexParseError(path, current, err)
@@ -675,8 +666,8 @@ func (codexTarget) Export(opts Options, format string) ([]byte, error) {
 	// would be invalid).
 	var admin []byte
 	if path, err := CodexRequirementsPath(opts); err == nil {
-		if current, exists, readErr := readPolicyFile(opts, path); readErr == nil && exists {
-			admin = stripCodexOwned(current)
+		if current, exists, readErr := readPolicyFile(opts, path); readErr == nil {
+			admin = codexAdminText(opts, path, current, exists)
 		}
 	}
 	rendered, conflicts, err := renderCodex(opts, admin, opts.PolicyFor(codexConnector))

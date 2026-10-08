@@ -132,6 +132,24 @@ func TestCodexReconcilePreservesAdministratorBytes(t *testing.T) {
 	if got := string(stripCodexOwned([]byte(merged))); got != adminCodexRequirements {
 		t.Fatalf("stripping DefenseClaw content must return the exact administrator bytes:\n--- got\n%s\n--- want\n%s", got, adminCodexRequirements)
 	}
+	// Only DefenseClaw's own lines are added: no blank separators around
+	// its blocks (GAP-0903).
+	var others []string
+	inBlock := false
+	for _, line := range strings.SplitAfter(merged, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == codexHeadBegin || trimmed == codexTailBegin:
+			inBlock = true
+		case trimmed == codexHeadEnd || trimmed == codexTailEnd:
+			inBlock = false
+		case !inBlock && !strings.HasSuffix(trimmed, codexOwnedMark):
+			others = append(others, line)
+		}
+	}
+	if got := strings.Join(others, ""); got != adminCodexRequirements {
+		t.Fatalf("DefenseClaw added lines outside its blocks:\n--- got\n%s\n--- want\n%s", got, adminCodexRequirements)
+	}
 	if !strings.Contains(merged, "hooks = true "+codexOwnedMark) || !strings.Contains(merged, "managed_dir = \"/opt/defenseclaw/bin\" "+codexOwnedMark) {
 		t.Fatalf("owned lines not inserted into administrator tables:\n%s", merged)
 	}
