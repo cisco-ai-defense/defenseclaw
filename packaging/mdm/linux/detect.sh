@@ -160,6 +160,10 @@ dc_report() { # <detected 0|1> <value> <reason>
         jamf) printf '<result>%s</result>\n' "$value"; exit 0 ;;
     esac
     if [ "$detected" = 1 ]; then
+    if [ "$value" = busy ]; then
+        printf 'defenseclaw detect: lifecycle is busy; retry later\n' >&2
+        exit 75
+    fi
         printf 'DefenseClaw Enterprise %s\n' "$value"
         exit 0
     fi
@@ -203,7 +207,12 @@ if [ -n "$DC_MIN_VERSION" ] && ! dc_version_ge "$version" "$DC_MIN_VERSION"; the
     dc_report 0 outdated "installed version $version is older than $DC_MIN_VERSION"
 fi
 if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
-    verify=$("$gateway" enterprise "$group" verify --json 2>/dev/null </dev/null || true)
+    if verify=$("$gateway" enterprise "$group" verify --json 2>/dev/null </dev/null); then
+        verify_status=0
+    else
+        verify_status=$?
+    fi
+    [ "$verify_status" != 75 ] && [ "$(printf '%s' "$verify" | grep -c '"code": "lifecycle_busy"' || true)" = 0 ] || dc_report 0 busy "lifecycle is busy"
     dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
 fi
 dc_report 1 "$version" ""

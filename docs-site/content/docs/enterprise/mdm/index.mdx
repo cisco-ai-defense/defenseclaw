@@ -457,6 +457,11 @@ uninstall removes the policy folder; re-stage the pack before a reinstall.
 
 ## Detection
 
+Run Unix `detect.sh` as root. A standard user gets `unknown` in value/Jamf
+format. `--min-version` requires a dotted release such as `1.0.0`; a bad
+value exits `2`. With `--require-healthy`, lifecycle lock contention reports
+`busy` (exit `75` in exit format), so retry after the apply finishes.
+
 MDMs ask two different questions. Answer each with the mechanism that fits.
 
 1. **Inventory: is the version I assigned installed?** Install rules,
