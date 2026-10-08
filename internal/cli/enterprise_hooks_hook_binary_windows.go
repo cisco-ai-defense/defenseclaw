@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -48,8 +49,47 @@ func init() {
 		previous(ctx, stderr, run)
 		if enterprisehooks.WindowsStandaloneProcess() {
 			keepWindowsStandaloneHookBinary(stderr)
+			removeWindowsStandaloneReplacementCopies(stderr)
 		}
 	}
+}
+
+// windowsReplacementCopyPattern is the copy an upgrade keeps of a binary a
+// running program still used: <binary>.backup.<32 hex>.
+var windowsReplacementCopyPattern = regexp.MustCompile(`^(?i:defenseclaw[a-z0-9-]*\.exe)\.backup\.[0-9a-f]{32}$`)
+
+// removeWindowsStandaloneReplacementCopies removes, as soon as no program
+// runs it any more, the copy an upgrade kept of a binary an editor's ACP
+// thread still ran. Only an upgrade or uninstall used to remove it, so a
+// no-op ensure and a guardian restart left it in bin (GAP-0934, GAP-0937).
+func removeWindowsStandaloneReplacementCopies(stderr io.Writer) {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
+		return
+	}
+	for _, removed := range removeWindowsReplacementCopies(filepath.Join(roots.InstallRoot, "bin")) {
+		fmt.Fprintf(stderr, "[hook-guardian] removed %s, which no program runs any more\n", removed)
+	}
+}
+
+// removeWindowsReplacementCopies deletes each replacement copy in dir that
+// no program holds open and returns the ones it removed.
+func removeWindowsReplacementCopies(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var removed []string
+	for _, entry := range entries {
+		if !windowsReplacementCopyPattern.MatchString(entry.Name()) || !entry.Type().IsRegular() {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if err := os.Remove(path); err == nil {
+			removed = append(removed, path)
+		}
+	}
+	return removed
 }
 
 // keepWindowsStandaloneHookBinary keeps the guardian's copy of the recorded

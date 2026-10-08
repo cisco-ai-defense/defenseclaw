@@ -147,6 +147,16 @@ var (
 // diagnostic (Enter-DefenseClawLifecycleLock).
 const windowsEnterpriseLifecycleBusyMarker = "holds the protected file lock"
 
+// windowsEnterpriseRemoveReplacementCopies removes the unused replacement
+// copies in the production bin folder; replaceable in tests.
+var windowsEnterpriseRemoveReplacementCopies = func() []string {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		return nil
+	}
+	return removeWindowsReplacementCopies(filepath.Join(roots.InstallRoot, "bin"))
+}
+
 func init() {
 	windowsEnterpriseRunningAsLocalSystem = func() bool {
 		user, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -2120,6 +2130,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		if _, drifted := windowsEnterpriseHookRuntimeDrift(); verifyReport.OK && drifted == "" {
 			applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
+			if windowsEnterpriseIsElevated() {
+				// A copy an earlier upgrade kept of a binary an editor still
+				// ran goes once nothing runs it (GAP-0934).
+				for _, removed := range windowsEnterpriseRemoveReplacementCopies() {
+					result.Changes = append(result.Changes, "removed "+removed+", which no program runs any more")
+				}
+			}
 			result.Noop = true
 			result.NoopReason = plan.Reason
 			applyWindowsEnterprisePolicy(ctx, result)

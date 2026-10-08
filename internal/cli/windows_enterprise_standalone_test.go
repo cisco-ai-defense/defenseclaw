@@ -794,8 +794,13 @@ func (stub *ensureStub) install(t *testing.T) {
 		windowsEnterprisePolicyDigest = originalPolicy
 	})
 	originalHookRuntime := windowsEnterpriseHookRuntimeDir
-	t.Cleanup(func() { windowsEnterpriseHookRuntimeDir = originalHookRuntime })
+	originalCopies := windowsEnterpriseRemoveReplacementCopies
+	t.Cleanup(func() {
+		windowsEnterpriseHookRuntimeDir = originalHookRuntime
+		windowsEnterpriseRemoveReplacementCopies = originalCopies
+	})
 	windowsEnterpriseHookRuntimeDir = func() (string, error) { return "", nil }
+	windowsEnterpriseRemoveReplacementCopies = func() []string { return nil }
 	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, nil }
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
 	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }

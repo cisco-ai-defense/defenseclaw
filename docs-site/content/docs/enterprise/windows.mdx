@@ -1113,8 +1113,10 @@ DefenseClaw agents under `agent_servers` in Zed's `settings.json` and
 An upgrade replaces each binary in place. When an editor still runs the
 previous `defenseclaw-acp.exe` (an open ACP thread), Windows keeps that copy
 as `defenseclaw-acp.exe.backup.<32 hex>` beside the new one until the thread
-ends: the upgrade succeeds, the next lifecycle run removes the copy, and
-Windows deletes it at the next restart. Uninstall removes such copies too;
+ends: the upgrade succeeds, and once no program runs the copy the hook
+guardian removes it within its next cycle (about a minute), as does the next
+lifecycle run, a no-op Setup `/ensure` included; failing that, Windows
+deletes it at the next restart. Uninstall removes such copies too;
 if a program still runs one, the uninstall stops before changing anything
 and names it: close that editor thread, or restart, and run it again. The
 same holds for the installed binaries themselves: while an editor's ACP
