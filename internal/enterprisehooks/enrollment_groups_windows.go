@@ -185,6 +185,44 @@ func canonicalWindowsGroupSIDs(values []string) []string {
 	return out
 }
 
+// RefreshWindowsManifestIdentityGroups keeps group facts for administrator
+// enrolled users without changing their targets manifest. The cache is
+// filtered to the current manifest before it is published to the gateway.
+func RefreshWindowsManifestIdentityGroups(manifest Manifest, cache *WindowsEnrollmentGroupCache) (*WindowsEnrollmentGroupCache, error) {
+	if cache == nil {
+		cache = NewWindowsEnrollmentGroupCache()
+	}
+	allowed := map[string]bool{}
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() {
+			if sid := canonicalManifestTargetSID(target.SID); sid != "" {
+				allowed[sid] = true
+			}
+		}
+	}
+	fresh := NewWindowsEnrollmentGroupCache()
+	fresh.SignedIn = map[string]bool{}
+	for sid := range allowed {
+		fresh.Users[sid] = []string{}
+	}
+	for sid, groups := range cache.Users {
+		if canon := canonicalManifestTargetSID(sid); allowed[canon] {
+			fresh.Users[canon] = canonicalWindowsGroupSIDs(groups)
+		}
+	}
+	sessions, err := windowsActiveSessionGroups()
+	if err != nil {
+		return fresh, err
+	}
+	for sid, groups := range sessions {
+		if canon := canonicalManifestTargetSID(sid); allowed[canon] {
+			fresh.Users[canon] = canonicalWindowsGroupSIDs(groups)
+			fresh.SignedIn[canon] = true
+		}
+	}
+	return fresh, nil
+}
+
 // windowsGroupMembership is one user's membership of one configured group.
 type windowsGroupMembership int
 

@@ -271,6 +271,38 @@ func TestIdentitySpoolRecordRequiresCurrentAccountName(t *testing.T) {
 	}
 }
 
+// TestIdentitySpoolRejectsFutureRecord pins clock rollback handling: a record
+// dated after the gateway's clock cannot keep old group assignments alive.
+func TestIdentitySpoolRejectsFutureRecord(t *testing.T) {
+	dir := t.TempDir()
+	key := "15002"
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+		Key: key, User: "alice", UpdatedAt: now.Add(time.Hour),
+		Facts: useridentity.DirectoryFacts{Groups: []string{"old-group"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, key+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldValidate := validateManagedGuardianAuthorization
+	previousDir := currentIdentitySpoolDir()
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	setIdentitySpoolDir(dir)
+	t.Cleanup(func() {
+		validateManagedGuardianAuthorization = oldValidate
+		setIdentitySpoolDir(previousDir)
+	})
+	if _, ok := readIdentitySpoolFacts(key, now); ok {
+		t.Fatal("future-dated spool record was trusted")
+	}
+	if _, ok := readIdentitySpoolFacts(key, now.Add(time.Hour)); !ok {
+		t.Fatal("current spool record was rejected")
+	}
+}
+
 // TestSpoolRecordInAnotherSSSDDomainClearsOwnRealm pins the managed half of
 // GAP-0605: when the guardian's InfoPipe lookup by uid holds the account in
 // another SSSD domain than the realm the gateway's own facts give it, the

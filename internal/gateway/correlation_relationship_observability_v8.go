@@ -55,10 +55,17 @@ func (a *APIServer) contextWithSessionAgentV8(ctx context.Context, connector str
 	if envelope.AgentID != "" || envelope.SessionID == "" {
 		return ctx
 	}
-	if meta, found := a.hookLifecycleSnapshot(connector, envelope.SessionID, ""); found && meta.AgentID != "" {
-		envelope.AgentID = meta.AgentID
-	} else {
-		envelope.AgentID = agentNodeID(nativeSessionAgentScopeV8(ctx, connector, envelope.SessionID), connector, envelope.SessionID, "root")
+	scope := nativeSessionAgentScopeV8(ctx, connector, envelope.SessionID)
+	// Session IDs are supplied by agents and may overlap across users. Select
+	// only a hook snapshot owned by the authenticated caller's agent identity.
+	if scope != "" {
+		identity := llmEventMeta{AgentIdentityID: scope}
+		if snapshot, found := a.hookSessionStateSnapshotMatching(connector, envelope.SessionID, "", &identity); found && snapshot.meta.AgentID != "" {
+			envelope.AgentID = snapshot.meta.AgentID
+		}
+	}
+	if envelope.AgentID == "" {
+		envelope.AgentID = agentNodeID(scope, connector, envelope.SessionID, "root")
 	}
 	return audit.ContextWithEnvelope(ctx, envelope)
 }

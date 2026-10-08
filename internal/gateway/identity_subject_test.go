@@ -395,7 +395,7 @@ func TestProxyAndACPBindProcessOwnerOverClaimedUser(t *testing.T) {
 		t.Fatalf("ACP user.id = %q, want the gateway owner %q", got, owner)
 	}
 
-	proxyUser := func(p *GuardrailProxy, dcAuth string) (user string) {
+	proxyUser := func(p *GuardrailProxy, dcAuth string) (user, forwarded string) {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		req.RemoteAddr = "127.0.0.1:40000"
 		req.Header.Set("X-User-Id", "4242")
@@ -406,17 +406,18 @@ func TestProxyAndACPBindProcessOwnerOverClaimedUser(t *testing.T) {
 		forged(dropProxyUserClaims(correlate(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 			if authenticated, ok := p.authenticateRequest(r); ok {
 				user = AgentIdentityFromContext(authenticated.Context()).UserID
+				forwarded = authenticated.Header.Get("X-User-Id")
 			}
 		})))).ServeHTTP(httptest.NewRecorder(), req)
-		return user
+		return user, forwarded
 	}
-	if got := proxyUser(&GuardrailProxy{gatewayToken: "gateway-token"}, "gateway-token"); got != owner {
-		t.Fatalf("proxy user.id = %q, want the gateway owner %q", got, owner)
+	if got, forwarded := proxyUser(&GuardrailProxy{gatewayToken: "gateway-token"}, "gateway-token"); got != owner || forwarded != "4242" {
+		t.Fatalf("proxy user.id = %q, forwarded X-User-Id = %q; want owner %q and original header", got, forwarded, owner)
 	}
 	// A request admitted without an owner credential proves nothing about
 	// who sent it: it keeps neither the claim nor a verified owner.
-	if got := proxyUser(&GuardrailProxy{skipAuthForTest: true}, ""); got != "" {
-		t.Fatalf("credential-less proxy user.id = %q, want none", got)
+	if got, forwarded := proxyUser(&GuardrailProxy{skipAuthForTest: true}, ""); got != "" || forwarded != "4242" {
+		t.Fatalf("credential-less proxy user.id = %q, forwarded X-User-Id = %q; want no user and original header", got, forwarded)
 	}
 }
 

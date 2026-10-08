@@ -1947,6 +1947,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(
 	if (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
 		return modelFileAggregate{}, false, nil
 	}
+	s.notePrivacyEvidencePath(path)
 	artifactKey := filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		artifactKey = filepath.Clean(resolved)
@@ -2005,6 +2006,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(
 }
 
 func (s *ContinuousDiscoveryService) ollamaBlobCacheAggregate(path string, root modelScanRoot) (modelFileAggregate, bool) {
+	s.notePrivacyEvidencePath(path)
 	fh, err := os.Open(path)
 	if err != nil {
 		return modelFileAggregate{}, false

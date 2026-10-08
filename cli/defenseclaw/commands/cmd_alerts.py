@@ -720,7 +720,10 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         alert_list = app.store.list_alerts(limit)
     hook_details = _hook_details_for(app.store, alert_list)
     targets = _alert_targets_for(app.store, alert_list)
-    agents = alert_agent_facts(app.store, [e.id for e in alert_list])
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    agents = ({} if _enterprise_profile(app.cfg) == "secure_client"
+              else alert_agent_facts(app.store, [e.id for e in alert_list]))
     json_keys = {"User": "user", "Agent": "agent_identity_id", "Instance": "agent_instance_id",
                  "Session": "session_id", "Depth": "agent_depth"}
     rows = []
@@ -846,7 +849,10 @@ def _alerts_default(
             human = _humanize_details(e.details)
             if human:
                 click.echo(f"  {label('Details')} {human}")
-        agent = alert_agent_facts(app.store, [e.id]).get(e.id, [])
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        agent = ([] if _enterprise_profile(app.cfg) == "secure_client"
+                 else alert_agent_facts(app.store, [e.id]).get(e.id, []))
         for name, value in agent:
             click.echo(f"  {label(name)} {value}")
         agent_user = next((value for name, value in agent if name == "User"), "")

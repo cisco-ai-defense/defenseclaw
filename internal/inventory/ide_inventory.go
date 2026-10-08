@@ -703,11 +703,13 @@ func idePluginError(p IDEPlugin, installs map[string]bool) error {
 // a home costs that row, never the user's whole report.
 func boundUserScanIDE(inv *IDEInventory) {
 	installs := map[string]bool{}
+	installRows := map[string]int{}
 	kept := inv.Installations[:0]
 	for _, inst := range inv.Installations {
 		if len(kept) < maxIDEInstallationsPerUser && ideInstallationError(inst) == nil {
 			kept = append(kept, inst)
 			installs[inst.InstallID] = true
+			installRows[inst.InstallID] = len(kept) - 1
 		} else {
 			inv.Partial = true
 		}
@@ -719,6 +721,11 @@ func boundUserScanIDE(inv *IDEInventory) {
 			plugins = append(plugins, p)
 		} else {
 			inv.Partial = true
+			// The cap may hide a plugin in a later installation. Mark
+			// that installation incomplete so lifecycle keeps its baseline.
+			if i, ok := installRows[p.InstallID]; ok {
+				inv.Installations[i].Partial = true
+			}
 		}
 	}
 	inv.Plugins = plugins

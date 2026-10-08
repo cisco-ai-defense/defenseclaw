@@ -234,7 +234,8 @@ def build_claw_aibom(
     }
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
-    _stamp_local_user(out)
+    if not _secure_client_inventory(cfg):
+        _stamp_local_user(out)
     out["summary"] = _build_summary(out)
     _mark_collected_categories(out, cats)
     return out
@@ -309,6 +310,12 @@ def local_user_identity() -> tuple[str, str]:
     return "", ""
 
 
+def _secure_client_inventory(cfg: Config) -> bool:
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    return _enterprise_profile(cfg) == "secure_client"
+
+
 def _stamp_local_user(out: dict[str, Any]) -> None:
     """Tie connector plugins and MCP servers to the account that owns them.
 
@@ -349,7 +356,7 @@ def attach_ide_plugins(inv: dict[str, Any], payload: dict[str, Any] | None, note
         "disabled": sum(1 for p in plugins if p.get("enabled") == "disabled"),
         "users": len(users),
         "scope": str((payload or {}).get("scope") or ""),
-        "partial": bool((payload or {}).get("partial")) or any(
+        "partial": bool((payload or {}).get("partial") or (payload or {}).get("next_cursor")) or any(
             inst.get("partial") for inst in (payload or {}).get("installations") or []
         ),
     }
@@ -4858,7 +4865,8 @@ def _build_aibom_from_filesystem(
         out["profile_scope"] = "default-single-profile"
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
-    _stamp_local_user(out)
+    if not _secure_client_inventory(cfg):
+        _stamp_local_user(out)
     out["summary"] = _build_summary(out)
     _mark_collected_categories(out, cats)
     return out

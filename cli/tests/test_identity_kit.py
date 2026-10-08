@@ -222,6 +222,86 @@ def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) 
     assert writes == []
 
 
+def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","groups":[{"name":"new-team"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, path):
+            return ([{"verifiedDomains": [{"name": "example.test"}]}]
+                    if "/organization?" in path else [])
+
+        def wait_for_named_object(self, _path):
+            raise AssertionError("missing group must be created without polling")
+
+        def request(self, method, path, _body):
+            calls.append((method, path))
+            return {"id": "group-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "group-id", "displayName": "new-team"}
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    assert entra.cmd_apply(Graph(), args) == 0
+    assert calls == [("POST", "/v1.0/groups")]
+
+
+def test_entra_apply_records_password_before_user_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","users":[{"name":"alice"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, _path):
+            return [{"verifiedDomains": [{"name": "example.test"}]}]
+
+        def get(self, _path):
+            raise entra.GraphError(404, "NotFound", "missing")
+
+        def request(self, method, path, _body):
+            calls.append((method, path))
+            return {"id": "user-id"}
+
+        def get_after_create(self, _path):
+            return {"id": "user-id"}
+
+    def failed_sync(_descriptor):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(entra.os, "fsync", failed_sync)
+    args = entra.build_parser().parse_args(
+        ["apply", "--config", str(plan), "--apply", "--password-file", str(tmp_path / "passwords")]
+    )
+    with pytest.raises(OSError, match="disk full"):
+        entra.cmd_apply(Graph(), args)
+    assert calls == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
+def test_himmelblau_check_fails_for_missing_account(tmp_path: Path) -> None:
+    source = (ENTRA.parent / "setup-himmelblau.sh").read_text(encoding="ascii")
+    config = tmp_path / "himmelblau.conf"
+    config.write_text("[global]\ndomain = example.test\ncn_name_mapping = false\n", encoding="ascii")
+    nsswitch = tmp_path / "nsswitch.conf"
+    nsswitch.write_text("passwd: files himmelblau\ngroup: files himmelblau\n", encoding="ascii")
+    script = tmp_path / "setup-himmelblau.sh"
+    script.write_text(source.replace("CONF=/etc/himmelblau/himmelblau.conf", f"CONF={config}")
+                      .replace("/etc/nsswitch.conf", str(nsswitch)), encoding="ascii")
+    systemctl = tmp_path / "systemctl"
+    systemctl.write_text("#!/bin/sh\necho active\n", encoding="ascii")
+    systemctl.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(script), "check", "--user", "dc-no-such-user-91402"],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+    )
+    assert result.returncode == 1, result.stdout
+
+
 def test_intune_groups_adds_to_group_just_created(monkeypatch: pytest.MonkeyPatch) -> None:
     intune = _load(INTUNE)
     graph = intune.Graph("token")

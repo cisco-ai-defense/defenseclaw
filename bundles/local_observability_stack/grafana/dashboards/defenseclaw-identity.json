@@ -226,7 +226,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_user_principal_assurance=\"verified\" [$__range])) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_user_principal_assurance=~\"verified|claimed\" [$__range]))",
+          "expr": "(sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_user_principal_assurance=\"verified\" [$__range])) or vector(0)) / sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"hook_decision|tool[.]invocation[.].*\" | connector=~\"$connector\" | body_defenseclaw_user_principal_assurance=~\"verified|claimed\" [$__range]))",
           "datasource": {
             "type": "loki",
             "uid": "defenseclaw-loki"

@@ -285,13 +285,13 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
 	reaper, err := audit.NewRetentionReaper(
-		s.store, s.judgeBodyStore, int64(snapshot.Local.RetentionDays), audit.RetentionOptions{},
+		s.store, s.judgeBodyStore, int64(snapshot.Local.RetentionDays), audit.RetentionOptions{SecureClient: s.currentConfig().SecureClientIntegration()},
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
 	retention, err := observabilityruntime.NewRetentionController(
-		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}},
+		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration()},
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
@@ -300,6 +300,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		s.observeObservabilityV8Delivery(transition)
 	})
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
+		SecureClient:  s.currentConfig().SecureClientIntegration(),
 		ConsoleStream: destinations.ConsoleStderr,
 		Stdout:        os.Stdout, Stderr: os.Stderr,
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
@@ -341,7 +342,8 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		ctx,
 		runtimegraph.ConfigFromPlan(compiled.Plan, retainJudgeBodies),
 		observabilityruntime.Options{
-			Store: s.store, Engine: engine, Signer: signer,
+			SecureClient: s.currentConfig().SecureClientIntegration(),
+			Store:        s.store, Engine: engine, Signer: signer,
 			RecordBuilder: failureBuilder, Reporter: reporter,
 			EventHistoryHealthReporter: sidecarV8EventHistoryObserver{s: s},
 			RetentionController:        retention,

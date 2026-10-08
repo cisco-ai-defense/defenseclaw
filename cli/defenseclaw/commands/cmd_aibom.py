@@ -142,8 +142,11 @@ def scan(
 
     # IDE extensions and plugins belong to the user, not to one connector:
     # fetch them once from the gateway and attach them to the first BOM.
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(app.cfg) == "secure_client"
     ide: tuple[dict | None, str] | None = None
-    if cats is None or "ide_plugins" in cats:
+    if not secure_client and (cats is None or "ide_plugins" in cats):
         ide = _fetch_ide_plugins(app)
 
     invs: list[dict] = []

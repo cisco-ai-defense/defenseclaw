@@ -9,6 +9,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -96,6 +98,70 @@ func TestEnterpriseWindowsEnumerateIdlesInManifestMode(t *testing.T) {
 	))
 	if calls != 2 {
 		t.Fatalf("auto mode must enumerate and publish (%d calls)", calls)
+	}
+}
+
+func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testing.T) {
+	const alice = "S-1-5-21-111-222-333-1001"
+	const bob = "S-1-5-21-111-222-333-1002"
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{Mode: config.EnterpriseEnrollmentManifest})
+	cfg.DataDir = t.TempDir()
+	manifestPath := filepath.Join(t.TempDir(), "targets.yaml")
+	home := t.TempDir()
+	data := fmt.Sprintf("version: 1\ntargets:\n  - sid: %s\n    user_home: %s\n    connector: codex\n    agent_version: 0.200.0\n", alice, home)
+	if err := os.WriteFile(manifestPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousLoader := enterpriseWindowsEnumerateGroupCacheLoader
+	previousCacheWriter := enterpriseWindowsEnumerateGroupCacheWriter
+	previousRefresher := enterpriseWindowsManifestGroupCacheRefresher
+	previousSpoolWriter := enterpriseWindowsIdentitySpoolWriter
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsEnumerateGroupCacheLoader = previousLoader
+		enterpriseWindowsEnumerateGroupCacheWriter = previousCacheWriter
+		enterpriseWindowsManifestGroupCacheRefresher = previousRefresher
+		enterpriseWindowsIdentitySpoolWriter = previousSpoolWriter
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		t.Fatal("manifest mode walked user profiles")
+		return enterprisehooks.Manifest{}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
+		t.Fatal("manifest mode rewrote administrator targets")
+		return false, nil
+	}
+	enterpriseWindowsEnumerateGroupCacheLoader = func(string) (*enterprisehooks.WindowsEnrollmentGroupCache, error) {
+		cache := enterprisehooks.NewWindowsEnrollmentGroupCache()
+		cache.Users[bob] = []string{"S-1-5-32-545"}
+		return cache, nil
+	}
+	refreshed := false
+	enterpriseWindowsManifestGroupCacheRefresher = func(manifest enterprisehooks.Manifest, cache *enterprisehooks.WindowsEnrollmentGroupCache) (*enterprisehooks.WindowsEnrollmentGroupCache, error) {
+		if len(manifest.Targets) != 1 || manifest.Targets[0].SID != alice || len(cache.Users[bob]) != 1 {
+			t.Fatalf("manifest/cache = %+v / %+v", manifest, cache)
+		}
+		refreshed = true
+		cache.Users = map[string][]string{alice: {"S-1-5-32-544"}}
+		return cache, nil
+	}
+	enterpriseWindowsEnumerateGroupCacheWriter = func(string, *enterprisehooks.WindowsEnrollmentGroupCache) (bool, error) { return true, nil }
+	var published *enterprisehooks.WindowsEnrollmentGroupCache
+	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ func(string) error, _ func(string, ...any)) error {
+		published = cache
+		return nil
+	}
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if !refreshed || published == nil || len(published.Users) != 1 || len(published.Users[alice]) != 1 {
+		t.Fatalf("manifest identity facts were not published: refreshed=%t cache=%+v", refreshed, published)
 	}
 }
 

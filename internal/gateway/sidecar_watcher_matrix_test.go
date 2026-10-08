@@ -620,8 +620,20 @@ func TestWatcherUsesConnectorDirsSkipsManagedServiceHome(t *testing.T) {
 		t.Fatal("a configured per-user gateway must watch its connector folders")
 	}
 	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "standalone"
 	if watcherUsesConnectorDirs(cfg) {
 		t.Fatal("a managed enterprise service must not watch its own profile's connector folders")
+	}
+	cfg.Enterprise.Profile = "secure_client"
+	cfg.Gateway.Watcher.Enabled = true
+	cfg.Gateway.Watcher.Skill.Enabled = true
+	cfg.Gateway.Watcher.Plugin.Enabled = true
+	if !watcherUsesConnectorDirs(cfg) || !WatcherWatchesDirs(cfg) {
+		t.Fatal("Secure Client must retain enabled connector watcher folders and startup status")
+	}
+	cfg.Guardrail.Connector = ""
+	if !watcherStartupEnabled(cfg) {
+		t.Fatal("Secure Client startup must report the enabled watcher switch")
 	}
 }
 
