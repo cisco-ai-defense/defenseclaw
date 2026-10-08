@@ -648,6 +648,35 @@ func failsAtStart(output, state string) func(*testApp) {
 // R2-66, R2-78, L3): late denials count, a harness that failed early is not
 // blamed on the hooks, the continue hint follows a conversation only, and
 // the agent's names cannot drive the terminal.
+// lateContainerStop is a session in the running sandbox "box" whose
+// harness fails as Docker stops its container: from then on the sandbox
+// runs no command, and OpenShell reports its error phase at the at-th look
+// of settledPhase (never, for 0).
+func lateContainerStop(at int32) func(*testApp) {
+	return func(ta *testApp) {
+		box := sampleSandbox("box")
+		box.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: time.Now()}
+		ta.daemon.add(box)
+		ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{FilesChanged: 1, Insertions: 2}}
+		ta.term.code, ta.IO.TTY = 1, true
+		var gone atomic.Bool
+		ta.term.during = func() { gone.Store(true) }
+		ta.stream.answer = func(argv []string) (int, string) {
+			if gone.Load() && slices.Equal(sandboxCommand(argv), []string{"true"}) {
+				return 255, "Error: the sandbox is not reachable"
+			}
+			return 0, ""
+		}
+		var looks atomic.Int32
+		ta.Sleep = func(_ context.Context, d time.Duration) error {
+			if d == settlePhaseInterval && looks.Add(1) == at {
+				ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) { sb.Phase = "error" })
+			}
+			return nil
+		}
+	}
+}
+
 func TestSessionSummary(t *testing.T) {
 	claude := RunOptions{Harness: "claude"}
 	elsewhere := func(undone bool) func(*testApp) {
@@ -796,6 +825,17 @@ func TestSessionSummary(t *testing.T) {
 		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code",
 			"is in OpenShell's error state → `defenseclaw sandbox delete " + sbName + " --keep-snapshot`"},
 			not: []string{"keeps running", "was stopped from outside this session"}},
+		// GAP-0333, GAP-0337: Docker restarted under a session that connected
+		// to a running sandbox, and OpenShell read it ready for longer than
+		// the first look while it ran no command: the end waits for the
+		// phase, and one that never comes says the sandbox does not answer.
+		{name: "the container stopped and OpenShell said so late", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
+			setup: lateContainerStop(4), want: []string{"box's container stopped under the session (Docker restarted, or its workload failed), which ended Claude Code"},
+			not: []string{"keeps running", "is still running"}},
+		{name: "a container that does not answer", input: "y\n", exit: 1, do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "box"}) },
+			setup: lateContainerStop(0), want: []string{"box does not answer, though OpenShell still reads it as running",
+				"the undo point stays, since box does not answer", "Sandbox box does not answer → `defenseclaw sandbox status box` shows its state"},
+			not: []string{"keeps running", "is still running"}},
 		// GAP-0077: the OpenShell gateway restarted under the session (an
 		// upgrade), which closed the harness's exec relay: the sandbox read
 		// as unknown for a moment, then ready, and the session said it was

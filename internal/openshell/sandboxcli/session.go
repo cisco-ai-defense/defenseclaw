@@ -92,6 +92,11 @@ type session struct {
 	// OpenShell gateway restarted under it, for one) while the sandbox
 	// went on running: it is left running for a reattach.
 	lost bool
+	// unanswered is set when the sandbox ran no command at the end of a
+	// session whose harness failed, though OpenShell still read it ready
+	// after settlePhaseWait (settledPhase): its container may be gone (a
+	// Docker restart), so nothing may say it keeps running (GAP-0333).
+	unanswered bool
 	// placeholder is set when OpenShell refused a request of the session's
 	// conversation that carried a credential placeholder
 	// (sandboxapi.PlaceholderRefusal): the conversation cannot go on, so the
@@ -967,6 +972,9 @@ func (s *session) end(ctx context.Context) error {
 				after = sb
 			}
 		}
+	case s.unanswered:
+		a.warn(s.sb.Name + " does not answer, though OpenShell still reads it as running: its container may have stopped under the session " +
+			"(a Docker restart, for one), which OpenShell reports once Docker is back (`" + CommandName + " status " + s.sb.Name + "` shows it)")
 	case !s.liveRun:
 		a.note(s.sb.Name + " is still running (it was running when you connected); changes it makes after this point are not in this review")
 	}
@@ -1074,6 +1082,10 @@ func (s *session) end(ctx context.Context) error {
 			// The warning said the undo point stays.
 			a.ok("kept: the changes stay in the folder")
 		}
+	case accepted && reviewed && s.unanswered:
+		a.ok("kept: the changes stay in the folder")
+		a.note("the undo point stays, since " + s.sb.Name + " does not answer: `" + CommandName + " undo " + s.sb.Name +
+			"` still reverts this session's changes")
 	case accepted && reviewed && stopFailed:
 		// Not running, but not stopped either (OpenShell's error state after
 		// a Docker restart): "keeps running" was false there (GAP-0333).
@@ -1178,12 +1190,34 @@ func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (
 				break
 			}
 		}
+		if after.Phase == "ready" && !s.answers(ctx) {
+			// Still read ready, but it runs no command: its container is
+			// gone, and OpenShell says so once Docker is back, which can take
+			// longer than the look above (GAP-0333, GAP-0337).
+			after, err := s.waitPhase(ctx, after, func(phase string) bool { return phase == "ready" || passing(phase) })
+			if err == nil && after.Phase == "ready" {
+				s.unanswered = true
+			}
+			return after, err
+		}
 		if !passing(after.Phase) {
 			return after, nil
 		}
 	}
+	after, err := s.waitPhase(ctx, after, passing)
+	if err != nil {
+		return nil, err
+	}
+	s.lost = after.Phase == "ready" && s.harnessCode != 0 && s.before != nil && s.before.Phase == "ready"
+	return after, nil
+}
+
+// waitPhase reads the sandbox every settlePhaseInterval, for at most
+// settlePhaseWait, while wait holds for its phase, and returns it as it then
+// is; the not-found error once it is gone.
+func (s *session) waitPhase(ctx context.Context, after *sandboxapi.Sandbox, wait func(string) bool) (*sandboxapi.Sandbox, error) {
 	for range int(settlePhaseWait / settlePhaseInterval) {
-		if s.app.Sleep(ctx, settlePhaseInterval) != nil {
+		if !wait(after.Phase) || s.app.Sleep(ctx, settlePhaseInterval) != nil {
 			break
 		}
 		next, err := s.api.Get(ctx, s.sb.Name)
@@ -1194,13 +1228,25 @@ func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (
 			break
 		}
 		after = next
-		if !passing(after.Phase) {
-			break
-		}
 	}
-	s.lost = after.Phase == "ready" && s.harnessCode != 0 && s.before != nil && s.before.Phase == "ready"
 	return after, nil
 }
+
+// answers reports whether the sandbox runs a trivial command now (one try,
+// within answerTimeout); a command that cannot be prepared counts as an
+// answer, which leaves the phase as OpenShell reports it.
+func (s *session) answers(ctx context.Context) bool {
+	inv, err := s.cli.Exec(s.sb.Name, []string{"true"}, openshell.CLIExecOptions{Timeout: answerTimeout})
+	if err != nil {
+		return true
+	}
+	var out bytes.Buffer
+	code, err := s.app.Streamer.Stream(ctx, inv, &out, &out)
+	return err == nil && code == 0
+}
+
+// answerTimeout bounds answers.
+const answerTimeout = 10 * time.Second
 
 // settlePhaseWait and settlePhaseInterval pace settledPhase.
 const (
@@ -1305,6 +1351,10 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		case s.lost:
 			a.note("Sandbox " + name + " keeps running → reattach: " + CommandName + " connect " + name + "   stop: " + CommandName + " stop " + name)
+			return nil
+		case s.unanswered:
+			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name + "` shows its state; in OpenShell's error state (after a Docker restart) `" +
+				CommandName + " delete " + name + " --keep-snapshot` keeps the undo point, then run again")
 			return nil
 		case !s.started:
 			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)
