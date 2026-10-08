@@ -97,7 +97,8 @@ func notifyPrefix(args []string) ([]string, bool) {
 }
 
 // CommandArgs is CommandLine's pass without the join: one output word per
-// argument, with the same rules. A caller that needs the words (the hook
+// argument (the words of a placeholder cut apart are one), with the same
+// rules. A caller that needs the words (the hook
 // join's command hash) uses it; a placeholder can contain spaces, so a joined
 // line cannot be split back into words.
 //
@@ -110,7 +111,15 @@ func notifyPrefix(args []string) ([]string, bool) {
 // anchored at the start of a word, so without this `"--token=..."` would pass
 // unredacted. An argument of several words (the script of sh -c '...' or
 // eval '...', a header value) has its words redacted the same way.
+//
+// It is idempotent: the words of a redaction placeholder a split on white
+// space cut apart ("<redacted", "len=9", "sha=...>") are one word again, left
+// as they are, and the quotes inside one (prefix="d") never open or close a
+// quoted value. The sandbox feed redacts a command line and the gateway runs
+// the rules again; without this the second pass took a placeholder's first
+// word for the secret and multiplied the rest (GAP-0052).
 func CommandArgs(args []string) []string {
+	args = mergePlaceholders(args)
 	out := make([]string, 0, len(args))
 	mysql := len(args) > 0 && mysqlClient(strings.Trim(args[0], `'"`))
 	// afterKey: the hidden value follows a key word (a header name), so an
@@ -122,6 +131,10 @@ func CommandArgs(args []string) []string {
 	var keyQuote, hideQuote byte
 	for _, word := range args {
 		opening, a, closing := splitEdgeQuotes(word)
+		// A placeholder's own quotes (prefix="d") are not the command
+		// line's, and its spaces do not make a script of the word.
+		bare, redacted := withoutPlaceholders(a)
+		word = opening + bare + closing
 		if hideQuote != 0 {
 			// A text source split one quoted secret value on spaces.
 			out = append(out, opening+ForSinkEntity(a)+closing)
@@ -142,8 +155,10 @@ func CommandArgs(args []string) []string {
 		case hideNext:
 			a, hideNext, afterKey = ForSinkEntity(a), false, false
 			sensitive = true
-		case strings.ContainsAny(a, " \t\r\n"):
+		case strings.ContainsAny(bare, " \t\r\n"):
 			a = redactWords(a)
+		case redacted:
+			// Already redacted: a placeholder, or a key and its placeholder.
 		case cmdlineSecretKey.MatchString(a):
 			hideNext, afterKey, keyQuote = true, true, unclosedQuote(word)
 		case user && !strings.HasPrefix(a, "-") && strings.Contains(a, ":"):
@@ -183,6 +198,94 @@ func CommandArgs(args []string) []string {
 			return sub[1] + ForSinkEntity(sub[2]) + "@"
 		})
 		out = append(out, opening+a+closing)
+	}
+	return out
+}
+
+// maxPlaceholderWords bounds how many words one placeholder spans
+// ("<redacted len=23 prefix="d" sha=5f84a2a8>" is four).
+const maxPlaceholderWords = 6
+
+// placeholderStart opens every redaction placeholder.
+const placeholderStart = "<redacted"
+
+// placeholderEnd is the end of the redaction placeholder that starts at
+// s[i], or -1 when none does.
+func placeholderEnd(s string, i int) int {
+	for k := i; k < len(s) && k-i < 96; k++ {
+		if s[k] == '>' && isPlaceholder(s[i:k+1]) {
+			return k + 1
+		}
+	}
+	return -1
+}
+
+// openPlaceholder is where a placeholder starts in word that does not end in
+// it, or -1.
+func openPlaceholder(word string) int {
+	for from := 0; ; {
+		i := strings.Index(word[from:], placeholderStart)
+		if i < 0 {
+			return -1
+		}
+		i += from
+		end := placeholderEnd(word, i)
+		if end < 0 {
+			return i
+		}
+		from = end
+	}
+}
+
+// withoutPlaceholders is s with every redaction placeholder taken out, and
+// whether it held one.
+func withoutPlaceholders(s string) (string, bool) {
+	if !strings.Contains(s, placeholderStart) {
+		return s, false
+	}
+	var b strings.Builder
+	found := false
+	for {
+		i := strings.Index(s, placeholderStart)
+		if i < 0 {
+			break
+		}
+		end := placeholderEnd(s, i)
+		if end < 0 {
+			b.WriteString(s[:i+len(placeholderStart)])
+			s = s[i+len(placeholderStart):]
+			continue
+		}
+		b.WriteString(s[:i])
+		s, found = s[end:], true
+	}
+	b.WriteString(s)
+	return b.String(), found
+}
+
+// mergePlaceholders joins the words of each redaction placeholder that a
+// split on white space cut apart back into one word, with what the word it
+// starts in holds before it ("--password=<redacted", "len=9", "sha=...>").
+func mergePlaceholders(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		at := openPlaceholder(args[i])
+		if at < 0 {
+			out = append(out, args[i])
+			continue
+		}
+		merged := false
+		for j := i + 1; j < len(args) && j < i+maxPlaceholderWords; j++ {
+			group := strings.Join(args[i:j+1], " ")
+			if placeholderEnd(group, at) > 0 {
+				out = append(out, group)
+				i, merged = j, true
+				break
+			}
+		}
+		if !merged {
+			out = append(out, args[i])
+		}
 	}
 	return out
 }
