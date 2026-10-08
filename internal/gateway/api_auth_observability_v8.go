@@ -244,7 +244,7 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 			DefenseClawAdminTargetRef:             facts.targetRef(),
 			UserID:                                proxyV8OptionalID(facts.Caller.ID),
 			DefenseClawUserIDKind:                 v8UserIDKind(facts.Caller.IDKind),
-			DefenseClawUserName:                   proxyV8OptionalID(facts.Caller.Name),
+			DefenseClawUserName:                   observability.OptionalUserName(facts.Caller.Name),
 			ConditionAdminPrincipalKnown:          principal.IsPresent(),
 			MandatoryProtectedBoundaryAuthFailure: true,
 		})

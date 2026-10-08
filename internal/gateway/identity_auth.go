@@ -255,7 +255,7 @@ func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject
 			UserID:                            subject.UserID,
 			DefenseClawUserPrincipalAssurance: string(useridentity.AssuranceVerified),
 			DefenseClawUserIDKind:             v8UserIDKind(subject.IDKind),
-			DefenseClawUserName:               hookV8OptionalIdentifier(subject.UserName),
+			DefenseClawUserName:               observability.OptionalUserName(subject.UserName),
 			DefenseClawUserPrincipal:          attrs.Principal,
 			DefenseClawUserDomain:             attrs.Domain,
 			DefenseClawUserDirectory:          attrs.Directory,

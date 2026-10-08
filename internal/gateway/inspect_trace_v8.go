@@ -192,7 +192,7 @@ func (a *APIServer) guardrailApplyTraceV8Input(
 	caller := auditCallerIdentity(ctx)
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	input.DefenseClawUserName = observability.OptionalUserName(caller.Name)
 	// A session id comes from the caller and can collide across users. Resolve
 	// the connector install for the verified caller instead of joining a
 	// session-only registry entry that another account registered.

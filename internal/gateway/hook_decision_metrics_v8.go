@@ -136,7 +136,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawRunID:                    hookV8OptionalIdentifier(meta.RunID),
 			UserID:                              hookV8OptionalIdentifier(meta.UserID),
 			DefenseClawUserIDKind:               v8UserIDKind(meta.UserIDKind),
-			DefenseClawUserName:                 hookV8OptionalIdentifier(meta.UserName),
+			DefenseClawUserName:                 observability.OptionalUserName(meta.UserName),
 			DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 			DefenseClawAgentIdentityID:          agentIdentityV8FromContext(ctx),
 			DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),

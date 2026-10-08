@@ -433,7 +433,8 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 	}
 
 	meta := richHookToolV8Meta()
-	meta.UserID, meta.UserIDKind, meta.UserName = "1002", "posix_uid", "bob"
+	// A non-ASCII account name reaches every destination (GAP-0587).
+	meta.UserID, meta.UserIDKind, meta.UserName = "1002", "posix_uid", "dcad-eo\u00e9"
 	arguments := `{"command":"curl http://169.254.169.254/latest/meta-data/"}`
 	ctx := withHookToolCallCapture(t.Context(), &hookToolCallCapture{})
 	invocationID := api.rememberHookToolInvocation(meta, "shell", arguments)
@@ -467,7 +468,7 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 		attributes := hookModelV8ProtoAttributes(tool)
 		for key, want := range map[string]string{
 			"defenseclaw.guardrail.action": "block", "defenseclaw.guardrail.rule_id": "C2-METADATA-AWS",
-			"defenseclaw.guardrail.severity": "CRITICAL", "user.id": "1002", "defenseclaw.user.name": "bob",
+			"defenseclaw.guardrail.severity": "CRITICAL", "user.id": "1002", "defenseclaw.user.name": "dcad-eo\u00e9",
 		} {
 			if attributes[key] != want {
 				t.Errorf("%s: tool attribute %s=%q want %q", name, key, attributes[key], want)
@@ -520,7 +521,7 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 			fields[item.Key] = item.Value.GetStringValue()
 		}
 		if fields["defenseclaw.guardrail.rule_id"] != "C2-METADATA-AWS" || fields["defenseclaw.guardrail.severity"] != "CRITICAL" ||
-			fields["defenseclaw.connector.source"] != "codex" || fields["defenseclaw.user.name"] != "bob" ||
+			fields["defenseclaw.connector.source"] != "codex" || fields["defenseclaw.user.name"] != "dcad-eo\u00e9" ||
 			!strings.Contains(fields["defenseclaw.guardrail.reason"], "C2-METADATA-AWS") {
 			t.Errorf("%s: block event fields=%v", name, fields)
 		}

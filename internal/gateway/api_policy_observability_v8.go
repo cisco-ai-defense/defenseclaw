@@ -261,7 +261,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 		if !ManagedEnterpriseActive() {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+			input.DefenseClawUserName = observability.OptionalUserName(caller.Name)
 		}
 		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
@@ -334,7 +334,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 		if !ManagedEnterpriseActive() {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-			input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+			input.DefenseClawUserName = observability.OptionalUserName(caller.Name)
 		}
 		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationFailed(input)
@@ -492,7 +492,7 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 	if !ManagedEnterpriseActive() {
 		input.UserID = hookV8OptionalIdentifier(caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-		input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+		input.DefenseClawUserName = observability.OptionalUserName(caller.Name)
 	}
 	caller.Identity.applyTo(&input)
 	return input
