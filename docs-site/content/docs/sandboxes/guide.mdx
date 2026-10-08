@@ -351,6 +351,14 @@ The agent finds these tools in it:
 - Node.js 22 with `npm`
 - `git`, the GitHub CLI (`gh`), `curl`, `jq` and `ssh`
 
+`make` on the agent's `PATH` is `/usr/local/bin/make`, a DefenseClaw
+wrapper around the image's GNU make: OpenShell's seccomp filter refuses a
+call that make makes for every recipe it starts (a `setresuid` that
+changes nothing), so without the wrapper every recipe fails with
+`make: <command>: Operation not permitted`. The wrapper preloads a small
+library that leaves that call out, for make and every make it starts, so
+`make test` and node-gyp builds (`npm rebuild --build-from-source`) run.
+
 There is no Go, Rust or Java toolchain, and the agent has no root, so it
 can't `apt-get install` one. It can install what `pip`, `uv` and `npm`
 fetch into the project or its home. For another system tool, build a base
