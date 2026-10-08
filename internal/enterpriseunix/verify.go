@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
@@ -669,6 +670,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
 	l.describeDeletedEnrolledAccounts()
+	l.describeIdentityRecords()
 	if record != nil {
 		l.describePerUserGateways(ctx)
 	}
@@ -771,6 +773,33 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
 		}
 	}
+}
+
+// codeIdentityRecordsStale warns that the guardian identity records look
+// older than the guardian keeps them by the wall clock (GAP-0921).
+const codeIdentityRecordsStale = "identity_records_stale"
+
+// identityRecordsFreshFor is how old the newest guardian identity record may
+// look: the guardian rewrites them every 15 minutes, and within about a
+// minute after a clock step.
+const identityRecordsFreshFor = 30 * time.Minute
+
+// describeIdentityRecords warns while the guardian identity records look
+// stale or are dated in the future: the gateway then ignores those over an
+// hour old, and the accounts a profile assignment selects by UPN get the
+// default profile.
+func (l *lifecycle) describeIdentityRecords() {
+	env := l.env
+	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
+	newest, stale := enterprisehooks.IdentitySpoolStale(dir, env.Now(), identityRecordsFreshFor)
+	if !stale {
+		return
+	}
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's identity records were last written at %s by "+
+		"this host's clock (the clock was stepped, or the guardian has not refreshed them); records over an hour old are "+
+		"ignored, and accounts a guardrail profile assignment selects by UPN then get the default profile. The guardian "+
+		"rewrites them within about a minute of a clock step; if this persists, restart the hook guardian",
+		newest.UTC().Format(time.RFC3339)))
 }
 
 // codeProfileAssignment warns that a guardrail profile assignment selects

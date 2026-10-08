@@ -224,7 +224,12 @@ decides the domain of an SSSD account from its uid, not from its name:
   enterprise drops a realm that InfoPipe places in another domain. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing from
   `services` in `sssd.conf`) the principal of a confirmed account is
   `account@realm`. Standalone enterprise keeps the facts of an SSSD account
-  that has no UPN for 2 minutes, then asks again.
+  that has no UPN for 2 minutes, then asks again. The gateway trusts a
+  guardian record for an hour by the wall clock; the guardian rewrites the
+  records every 15 minutes, and within about a minute after the clock is
+  stepped (an NTP correction, a resume from suspend). While the newest record
+  looks older than 30 minutes or is dated in the future, `status` and `verify`
+  warn `identity_records_stale`.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with
