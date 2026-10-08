@@ -150,6 +150,20 @@ func TestRepoPolicyRefusesLoosening(t *testing.T) {
 
 // The repository policy is untrusted input: strict, bounded, no links, no
 // includes, and nothing it says reaches the terminal unescaped.
+// GAP-0245: yaml.v3 names a parser error's line one short (an unclosed
+// '[' on line 5 read "line 4"); the error names the line a reader counts.
+func TestRepoPolicyNamesTheSyntaxErrorLine(t *testing.T) {
+	for doc, want := range map[string]string{
+		"version: 1\nnetwork:\n  mode: deny\negress:\n  block: [a.example.com\n": "line 5: did not find expected ',' or ']'",
+		"version: 1\nnetwork:\nworkspace: {masks: [x]\n":                         "line 3: did not find expected ',' or '}'",
+	} {
+		_, err := ParseRepoPolicy([]byte(doc), "repo")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want %q", doc, err, want)
+		}
+	}
+}
+
 func TestRepoPolicyHostileInput(t *testing.T) {
 	for _, tc := range []struct{ name, doc, code string }{
 		{"no version", "network: {mode: deny}\n", "missing_field"},
