@@ -20,6 +20,14 @@ class IdentityGuideExamplesTest(unittest.TestCase):
         self.assertIn("/usr/bin/klist --json", text)
         self.assertNotIn("`klist` is never run", text)
 
+    def test_managed_macos_profile_command_uses_installed_binary(self):
+        text = (DOCS / "identity-entra-id.mdx").read_text()
+        self.assertIn(
+            "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway "
+            "enterprise macos profile-explain",
+            text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
