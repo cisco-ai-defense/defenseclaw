@@ -534,7 +534,7 @@ func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
 		Summary: inventory.AIDiscoverySummary{ScanID: "scan-ide", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok"},
 		IDEInventory: &inventory.IDEInventory{
 			Plugins: []inventory.IDEPlugin{
-				{PluginID: "anthropic.claude-code", Product: "vscode", Version: "2.0.1", Enabled: "enabled", IsAI: true, UserID: "1001", UserName: "alice", PathHash: "sha256:" + strings.Repeat("a", 64), State: inventory.AIStateNew},
+				{PluginID: "anthropic.claude-code", Product: "vscode", Version: "2.0.1", Enabled: "enabled", IsAI: true, UserID: "1001", UserName: "alice@realm", PathHash: "sha256:" + strings.Repeat("a", 64), State: inventory.AIStateNew},
 				{PluginID: "ms-python.python", Product: "vscode", Enabled: "disabled", State: inventory.AIStateSeen},
 			},
 			Removed: []inventory.IDEPlugin{{PluginID: "com.github.copilot", Product: "pycharm", Enabled: "enabled", IsAI: true, State: inventory.AIStateGone}},
@@ -559,6 +559,11 @@ func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
 	}
 	var unicodeIDFound bool
 	for _, row := range readStoredContinuousDiscoveryV8(t, fixture.path) {
+		if row.eventName == "ide.plugin.discovered" && row.body["defenseclaw.ide.plugin.id"] == "anthropic.claude-code" {
+			if got := row.body["defenseclaw.user.name"]; got != "alice@realm" {
+				t.Errorf("qualified plugin account name = %v, want alice@realm", got)
+			}
+		}
 		if row.eventName == "ide.plugin.discovered" && row.body["defenseclaw.ide.plugin.id"] == "outil-équipe" {
 			unicodeIDFound = true
 		}

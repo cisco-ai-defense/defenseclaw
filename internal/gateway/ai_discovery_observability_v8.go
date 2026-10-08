@@ -412,6 +412,7 @@ var (
 	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
 	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+	ideV8UserNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
 )
 
 func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observability.Optional[string] {
@@ -481,7 +482,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawAIDiscoveryScanID: aiDiscoveryV8Optional(summary.ScanID),
 			UserID:                       ideV8Optional(plugin.UserID, ideV8UserPattern, 256),
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
-			DefenseClawUserName:          ideV8Optional(plugin.UserName, ideV8UserPattern, 256),
+			DefenseClawUserName:          ideV8Optional(plugin.UserName, ideV8UserNamePattern, 256),
 		}
 		inventoryIdentity(plugin.UserID).applyTo(&base)
 		switch plugin.State {
