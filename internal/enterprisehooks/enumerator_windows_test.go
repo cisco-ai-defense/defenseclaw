@@ -972,3 +972,24 @@ func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *t
 		}
 	})
 }
+
+// GAP-0430: a deleted local account (LookupAccountSid says ERROR_NONE_MAPPED)
+// is revoked even when its profile folder remains; a domain account whose
+// lookup fails, or a lookup that timed out, is not judged deleted.
+func TestWindowsDeletedLocalAccountNeedsANoneMappedLocalSID(t *testing.T) {
+	previous := windowsMachineAccountDomainSID
+	t.Cleanup(func() { windowsMachineAccountDomainSID = previous })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	local := testMachineDomainSID + "-1182"
+	noneMapped := func(string) (string, string, error) { return "", "", windows.ERROR_NONE_MAPPED }
+	timedOut := func(string) (string, string, error) { return "", "", errors.New("account name lookup timed out") }
+	if !windowsDeletedLocalAccount(local, noneMapped) {
+		t.Fatal("a deleted local account was not judged deleted")
+	}
+	if windowsDeletedLocalAccount(local, timedOut) {
+		t.Fatal("a timed-out lookup was judged a deleted account")
+	}
+	if windowsDeletedLocalAccount("S-1-5-21-111-222-333-1104", noneMapped) {
+		t.Fatal("a domain account was judged deleted")
+	}
+}

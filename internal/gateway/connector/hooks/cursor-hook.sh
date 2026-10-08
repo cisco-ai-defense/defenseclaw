@@ -200,7 +200,7 @@ fail_unreachable() {
   defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    emit_cursor_deny "DefenseClaw hook failed closed"
+    emit_cursor_deny "{{if .Managed}}DefenseClaw hook failed closed{{else}}DefenseClaw gateway unreachable; run defenseclaw-gateway start{{end}}"
     exit 2
   fi
   emit_cursor_allow

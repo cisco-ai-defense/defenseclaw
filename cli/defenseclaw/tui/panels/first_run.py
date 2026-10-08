@@ -117,12 +117,12 @@ class FirstRunPanelModel:
             ),
         )
         args.append("--with-judge" if self.value("LLM Judge") == "true" else "--no-judge")
-        # Hook fail mode is always passed; CLI default mirrors ours.
-        if fail_mode := self.value("Hook Fail Mode"):
-            args.extend(("--fail-mode", fail_mode))
-        # HITL only makes sense in action profile; skip the flags
-        # entirely in observe so CLI preserves any existing setting.
+        # Fail mode and HITL only apply to the action profile; skip the
+        # flags in observe so an observe connector keeps failing open and
+        # the CLI preserves any existing setting.
         if self.value("Profile") == "action":
+            if fail_mode := self.value("Hook Fail Mode"):
+                args.extend(("--fail-mode", fail_mode))
             hitl_on = self.value("HITL") == "true"
             args.append("--human-approval" if hitl_on else "--no-human-approval")
             if hitl_on and (severity := self.value("HITL Min Severity")):
@@ -202,9 +202,9 @@ def default_first_run_fields() -> tuple[FirstRunField, ...]:
         FirstRunField(
             "Hook Fail Mode",
             "choice",
-            "open",
+            "closed",
             FAIL_MODE_CHOICES,
-            "If a check can't finish: open = allow and log, closed = block where supported.",
+            "Action profile only. If a check can't finish: closed = block where supported, open = allow and log.",
         ),
         FirstRunField(
             "HITL",

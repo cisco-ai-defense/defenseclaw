@@ -90,9 +90,8 @@ const (
 
 // PlaneHealth is one plane's current state.
 //
-// It is emitted on every tick including zero. If it were emitted only while
-// healthy, a subscription that died would leave no trace at all, and absence
-// is the hardest thing to alert on.
+// The local sensor snapshot includes every plane on every tick, including
+// stopped and unselected planes. Optional telemetry exports running planes.
 type PlaneHealth struct {
 	Plane     platform.Plane
 	Available bool

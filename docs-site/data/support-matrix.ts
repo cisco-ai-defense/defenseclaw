@@ -287,6 +287,8 @@ const connectorSources: ConnectorSource[] = [
     minVersion: '0.7.0',
     versionNote: 'Contract covers 0.7.0 up to 0.14.0.',
     notes: {
+      linux: 'Managed terminal harnesses require tmux 3.3 or newer; RHEL 9 ships 3.2a.',
+      macos: 'Managed terminal harnesses require tmux 3.3 or newer.',
       windows: 'Degraded mode: server and SDK policy path only, without terminal wrappers or sandbox parity.',
     },
     route: PER_USER_NO_WINDOWS,

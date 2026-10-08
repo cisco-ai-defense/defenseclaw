@@ -121,7 +121,20 @@ def scan(
     else:
         connectors = [None]
     if not connectors:
-        # Nothing to inventory: say so instead of printing nothing (GAP-2073).
+        if cats == {"ide_plugins"} and not connector_flag:
+            from defenseclaw.inventory.claw_inventory import attach_ide_plugins, format_ide_plugins_human
+
+            payload, note = _fetch_ide_plugins(app)
+            if payload is None or note:
+                raise click.ClickException(f"IDE plugins: {note or 'not collected'}")
+            inv: dict[str, object] = {"summary": {}, "ide_plugins": []}
+            attach_ide_plugins(inv, payload)
+            if as_json:
+                click.echo(json.dumps(inv, indent=2, sort_keys=True))
+            else:
+                format_ide_plugins_human(inv)
+            return
+        # Connector categories need a configured connector.
         from defenseclaw.commands import echo_no_connector
 
         echo_no_connector()

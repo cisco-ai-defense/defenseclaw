@@ -33,6 +33,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw import legacy_connector
 from defenseclaw.config import (
     FULL_RUNTIME_PLANES,
     USER_RUNTIME_PLANES,
@@ -347,6 +348,9 @@ _IDE_REMOTE_LABELS = {"ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"}
 def ide_plugin_ide_label(item: Mapping[str, Any]) -> str:
     """IDE cell: the product, plus where it runs for a remote install."""
     product = str(item.get("ide_product") or item.get("ide_family") or "-")
+    version = str(item.get("ide_version") or "")
+    if version:
+        product = f"{product} {version}"
     kind = str(item.get("remote_kind") or "")
     if kind:
         return f"{product} ({_IDE_REMOTE_LABELS.get(kind, 'remote')})"
@@ -359,7 +363,7 @@ def ide_plugin_enabled_label(value: object) -> str:
     return _IDE_PLUGIN_ENABLED_LABELS.get(text, text)
 
 
-def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
+def ide_plugin_rows(plugins: list[Any], versions: Mapping[str, str] | None = None) -> list[list[str]]:
     """User | IDE | Plugin | Version | Enabled | AI cells, sorted for reading."""
     rows: list[list[str]] = []
     for item in plugins:
@@ -371,7 +375,7 @@ def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
             plugin = f"{plugin} ({name})" if plugin else name
         rows.append([
             str(item.get("user") or item.get("user_id") or "-"),
-            ide_plugin_ide_label(item),
+            ide_plugin_ide_label({**item, "ide_version": (versions or {}).get(str(item.get("install_id") or ""), "")}),
             plugin or "-",
             str(item.get("version") or "-"),
             ide_plugin_enabled_label(item.get("enabled")),
@@ -418,7 +422,11 @@ def ide_plugins(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.ai_usage_ide_plugins_all(user=user.strip(), ide=ide.strip().lower(), ai_only=ai_only)
+        payload = client.ai_usage_ide_plugins_all(
+            user=user.strip(),
+            ide="devin-desktop" if ide.strip().lower() == legacy_connector.RETIRED_DESKTOP_ID else ide.strip().lower(),
+            ai_only=ai_only,
+        )
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -447,7 +455,9 @@ def ide_plugins(
         )
         return
     plugins = payload.get("plugins") or []
-    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [])
+    versions = {str(inst.get("install_id") or ""): str(inst.get("version") or "")
+                for inst in payload.get("installations") or [] if isinstance(inst, Mapping)}
+    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [], versions)
     if not rows:
         filtered = bool(user or ide or ai_only)
         click.echo("No IDE plugins match these filters." if filtered else "No IDE plugins found yet.")
@@ -462,6 +472,8 @@ def ide_plugins(
         )
     if payload.get("scope") == "ai_only":
         summary += " (the inventory keeps AI plugins only)"
+    if payload.get("partial") or any(i.get("partial") for i in payload.get("installations") or []):
+        summary += " — partial installation; scan limits were reached"
     click.echo(summary)
 
 
@@ -1215,6 +1227,10 @@ def discovery() -> None:
     ),
 )
 @click.option(
+    "--ide-inventory", type=click.Choice(("all", "ai_only", "off")), default=None,
+    help="IDE plugin inventory scope (all, ai_only or off).",
+)
+@click.option(
     "--enable-host-plane/--no-enable-host-plane",
     default=None,
     help=(
@@ -1251,6 +1267,7 @@ def discovery_enable(
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     enable_host_plane: bool | None,
+    ide_inventory: str | None,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1284,6 +1301,7 @@ def discovery_enable(
         lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
+        ide_inventory=ide_inventory,
     )
 
     from defenseclaw import ux
@@ -2106,11 +2124,13 @@ def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
 
     stream = StringIO()
     console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    from rich.text import Text
+
     table = Table()
     for header in headers:
         table.add_column(header)
     for row in rows:
-        table.add_row(*row)
+        table.add_row(*(Text("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(cell))) for cell in row))
     console.print(table)
     return stream.getvalue()
 
@@ -3227,6 +3247,7 @@ def _build_discovery_overrides(
     lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
+    ide_inventory: str | None = None,
 ) -> dict[str, Any]:
     """Collect non-None overrides into a stable, ordered mapping.
 
@@ -3270,6 +3291,8 @@ def _build_discovery_overrides(
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
         overrides["store_raw_local_paths"] = bool(store_raw_local_paths)
+    if ide_inventory is not None:
+        overrides["ide_inventory"] = ide_inventory
     return overrides
 
 
@@ -3994,6 +4017,11 @@ def _format_missing_token_error(app: AppContext) -> str:
     the wording (presence of remediation hints) without bringing the
     whole click.ClickException raise path into the assertion.
     """
+    from defenseclaw import config as config_module
+
+    if not config_module.config_path().is_file():
+        return "DefenseClaw is not initialized — run defenseclaw init first."
+
     configured_env = ""
     cfg = getattr(app, "cfg", None)
     gw = getattr(cfg, "gateway", None) if cfg is not None else None
@@ -5800,6 +5828,17 @@ def identities(
     and gateway restarts. Each session of an agent has its own ais- id.
     Every identity is listed, most recently seen first.
     """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS
+
+    if connector_name:
+        raw_connector, connector_name = connector_name, normalize_connector(connector_name)
+        if connector_name not in KNOWN_CONNECTORS:
+            raise click.BadParameter(
+                f"unknown connector {raw_connector!r}; valid names: {', '.join(KNOWN_CONNECTORS)}",
+                param_hint="--connector",
+            )
+    if limit is not None and limit > 1000:
+        raise click.BadParameter("limit too large (maximum 1000)", param_hint="--limit")
     client = _usage_client(
         app,
         gateway_host=gateway_host,
@@ -5807,9 +5846,7 @@ def identities(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.agent_identities_all(
-            user=user, connector=normalize_connector(connector_name) if connector_name else None, limit=limit or 0
-        )
+        payload = client.agent_identities_all(user=user, connector=connector_name or None, limit=limit or 0)
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -5825,17 +5862,41 @@ def identities(
     if next_cursor:
         hint = "" if limit else " Narrow the list with --user or --connector."
         click.echo(f"Showing the {len(rows)} most recently seen of {total} agent identities.{hint}", err=True)
+    persisted = payload.get("persisted")
+    persist_error = str(payload.get("persist_error") or "").strip()
     if as_json:
-        click.echo(json.dumps(
-            {"enabled": bool(payload.get("enabled", False)), "identities": rows,
-             "total": total, "next_cursor": next_cursor},
-            indent=2, sort_keys=True))
+        out: dict[str, Any] = {"enabled": bool(payload.get("enabled", False)), "identities": rows,
+                               "total": total, "next_cursor": next_cursor}
+        if isinstance(persisted, bool):
+            out["persisted"] = persisted
+        if persist_error:
+            out["persist_error"] = persist_error
+        click.echo(json.dumps(out, indent=2, sort_keys=True))
         return
+    if persisted is False and payload.get("enabled") is not False:
+        # GAP-0393: the list is the gateway's memory only.
+        reason = f" ({persist_error})" if persist_error else ""
+        click.echo(
+            f"Warning: agent identities are not being saved to inventory.db{reason}; session counts and "
+            "first-seen times reset at the next gateway restart. Run 'defenseclaw doctor'.",
+            err=True,
+        )
     if payload.get("enabled") is False:
         click.echo("Agent identities are not recorded on this deployment.")
         return
     if not rows:
-        click.echo("No agent identities seen yet. They appear after an agent's first hook, LLM proxy or ACP request.")
+        if user or connector_name:
+            existing = client.agent_identities(limit=1).get("total", 0)
+            label = f"--user {user}" if user else f"--connector {connector_name}"
+            click.echo(
+                f"No agent identity matches {label} "
+                f"({existing} identities exist; run without a filter to list them)."
+            )
+        else:
+            click.echo(
+                "No agent identities seen yet. They appear after an agent's first hook, "
+                "LLM proxy or ACP request."
+            )
         return
     click.echo(_render_agent_identities(rows))
 
@@ -5857,9 +5918,16 @@ def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
             _format_relative_time(str(row.get("last_seen", "") or "")),
             root,
         ))
-    widths = [max(len(line[i]) for line in table) for i in range(len(headers) - 1)]
+    from rich.cells import cell_len
+
+    table = [
+        tuple("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in cell) for cell in line)
+        for line in table
+    ]
+    widths = [max(cell_len(line[i]) for line in table) for i in range(len(headers) - 1)]
     lines = [
-        "  ".join(cell.ljust(width) for cell, width in zip(line[:-1], widths)) + "  " + line[-1]
+        "  ".join(cell + " " * (width - cell_len(cell)) for cell, width in zip(line[:-1], widths))
+        + "  " + line[-1]
         for line in table
     ]
     return "\n".join(line.rstrip() for line in lines)

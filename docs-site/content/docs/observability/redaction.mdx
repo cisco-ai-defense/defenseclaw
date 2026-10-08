@@ -212,8 +212,10 @@ the agent and session ids stay in every profile, so records still join. On the
 Secure Client profile every profile keeps all five, as before 1.0.
 
 `ai_discovery.include_user_principal` and `ai_discovery.include_user_email` decide
-whether the gateway attaches the principals and the email at all, for every
-destination at once; the client address and the tenant ID have no switch. To send
+whether the gateway attaches the principals and available email at all, for every
+destination at once. Email is available from per-profile inventory when
+`ai_discovery.home_dirs` is configured, or from Cursor hook payloads.
+The client address and the tenant ID have no switch. To send
 a principal to a trusted local Loki but not to Galileo or another SaaS destination,
 turn the option on and give the destinations that must not receive it the
 `strict` profile (or a custom profile that extends it). See

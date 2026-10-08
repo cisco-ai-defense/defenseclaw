@@ -432,10 +432,15 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 		}
 		return ""
 	}
+	// The kernel names the account of the loopback caller; the guard here is
+	// the test process, so the test says which account it runs as.
+	restorePeer, peer := acpLoopbackPeerUID, 4301
+	acpLoopbackPeerUID = func(*http.Request) (int, error) { return peer, nil }
 	t.Cleanup(func() {
 		setIdentityFactsEnabled(false)
 		setManagedServiceHosted(priorHosted)
 		userScopedIdentityName = restoreName
+		acpLoopbackPeerUID = restorePeer
 		liveGuardrailProfiles.Store(nil)
 	})
 	dataDir := t.TempDir()
@@ -499,6 +504,21 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 	if bound.profile.Name != "acp-user" || bound.profile.Match != profileMatchUser {
 		t.Fatalf("enrolled uid: profile = %+v, want acp-user by user", bound.profile)
 	}
+	// Another account presenting a copy of the bearer is refused, not
+	// recorded as the token owner with the owner's profile (GAP-0348).
+	peer = 4302
+	copied, err := acp.EnsureEnterpriseCredential(dataDir, "uid:4301", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	copiedEvaluator, err := acp.NewHTTPEvaluator(server.URL, copied.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copiedEvaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err == nil {
+		t.Fatal("a bearer presented by another account was accepted")
+	}
+	peer = 4301
 	unbound := evaluate("home:" + strings.Repeat("ab", 32))
 	if unbound.verified || unbound.caller != "" || unbound.agent != "" || unbound.profile.Match != profileMatchDefaultUnverified {
 		t.Fatalf("home: credential: verified=%v caller=%q agent user=%q profile=%+v, want unverified and no claimed user",

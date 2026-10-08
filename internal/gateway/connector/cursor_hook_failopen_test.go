@@ -165,6 +165,14 @@ func TestCursorHook_FailClosedOnUnreachableEmitsDeny(t *testing.T) {
 		t.Fatalf("expected exit 2 (fail-closed), got %v; stderr=%s", err, stderr)
 	}
 	assertDenyEnvelope(t, stdout)
+	if !strings.Contains(stdout, "run defenseclaw-gateway start") {
+		t.Fatalf("deny did not give the operator a gateway recovery command: %s", stdout)
+	}
+	prompt, _, promptErr := runCursorHookWithInput(t, "127.0.0.1:1", "closed", true,
+		`{"hook_event_name":"beforeSubmitPrompt"}`)
+	if promptErr == nil || !strings.Contains(prompt, "run defenseclaw-gateway start") {
+		t.Fatalf("prompt deny did not give the operator a gateway recovery command: %s (%v)", prompt, promptErr)
+	}
 }
 
 func TestCursorHook_DisabledMarkerEmitsAllow(t *testing.T) {

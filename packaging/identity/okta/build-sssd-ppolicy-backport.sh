@@ -14,7 +14,8 @@
 #
 # It is pinned to sssd-2.9.8-4.el9_8.1. backport-ppolicy.py matches exact text
 # and stops with the first text it does not find on any other source package.
-# It only builds: it installs nothing. The packages it builds are a local fork
+# It installs build tools and dependencies with sudo dnf, then builds SSSD.
+# It does not install the rebuilt SSSD packages. They are a local fork
 # of a Red Hat package: Red Hat does not support them, and you own the rebuild
 # for every later SSSD security update. The commands to install them are
 # printed at the end.
@@ -34,7 +35,8 @@ usage() {
   cat << USAGE
 Usage: $SELF [--workdir DIR] [--nvr NAME-VERSION-RELEASE] [--dry-run]
 
-Build $NVR with the ldap_use_ppolicy backport. Builds only; installs nothing.
+Build $NVR with the ldap_use_ppolicy backport. Installs build tools and
+dependencies with sudo dnf; does not install the rebuilt SSSD packages.
 
   --workdir DIR   Build folder (default \$HOME/sssd-ppolicy-build)
   --nvr NVR       Source package to rebuild (default $NVR). Only that

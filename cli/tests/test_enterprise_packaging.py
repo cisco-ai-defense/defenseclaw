@@ -815,6 +815,32 @@ def test_linux_preinstall_holds_the_apply_trigger_until_the_postinstall(tmp_path
     assert f"config.yaml was not applied: {rejected['message']}" in post.stderr
 
 
+# GAP-0392: a package older than the administrator config replaced every
+# file and then failed its ensure, leaving new binaries next to the old
+# deployment. The preinstall refuses it before anything changes, and its
+# limit is the gateway MaxSupportedConfigVersion.
+def test_linux_preinstall_refuses_a_config_newer_than_the_package(tmp_path: Path) -> None:
+    script = (LINUX / "preinstall.sh").read_text(encoding="utf-8")
+    limit = re.search(r"^max_config_version=(\d+)$", script, re.M)
+    go_limit = re.search(
+        r"const MaxSupportedConfigVersion = (\d+)",
+        (ROOT / "internal" / "config" / "observability_v8_types.go").read_text(encoding="utf-8"),
+    )
+    assert limit and go_limit and limit.group(1) == go_limit.group(1)
+    host = _Host(tmp_path, apply_path_active=True)
+    config = tmp_path / "config.yaml"
+    config.write_text(f"config_version: {int(limit.group(1)) + 1}\nguardrail: {{}}\n", encoding="utf-8")
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "config=/etc/defenseclaw/config.yaml": f"config={config}",
+    }
+    result = host.run(_rooted(script, rooting), "2")
+    assert result.returncode == 1
+    assert "Nothing was changed" in result.stderr
+    assert host.calls() == []
+
+
 # Preremove ran uninstall with the 5 s default and exited 0
 # on busy (75), so dpkg/rpm deleted the binaries and units while machine
 # policy, per-user hooks and the running gateway still named them.

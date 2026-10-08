@@ -268,6 +268,16 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
 			continue
 		}
+		if standalone && windowsDeletedLocalAccount(profile.SID, lookupAccount) {
+			// A deleted local account whose profile folder could not be
+			// removed (a hive another process still holds) kept its rows: the
+			// guardian could never repair them, status failed and every
+			// later Setup /ensure stopped at the activation evidence. No one
+			// can sign in as it, so its rows are revoked now (GAP-0430).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account no longer exists; its rows are revoked although its profile folder remains")
+			continue
+		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
 		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
 			if groupDecision, groupReason := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
@@ -679,6 +689,18 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 			return "", "", errors.New("account name lookup timed out")
 		}
 	}
+}
+
+// windowsDeletedLocalAccount reports a local account SID that no longer
+// names an account. A domain or Entra account lookup also fails while its
+// directory is unreachable, so only local accounts are judged, and only by
+// ERROR_NONE_MAPPED (a timeout or a spent budget is not proof).
+func windowsDeletedLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	_, _, err := lookup(sid)
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
 }
 
 // windowsProfileEnrollmentDecision applies enterprise.enrollment to one

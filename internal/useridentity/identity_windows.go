@@ -159,6 +159,7 @@ func accountNameForSID(sid string) string {
 	if idx := strings.LastIndexAny(name, `\/`); idx >= 0 && idx+1 < len(name) {
 		name = name[idx+1:]
 	}
+	name, _ = SplitLSAAccount(name)
 	return name
 }
 

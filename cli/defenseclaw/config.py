@@ -166,6 +166,15 @@ class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
 
+class ConfigSaveError(OSError):
+    """An atomic config.yaml save failed before replacing the prior file."""
+
+    def __init__(self, path: str, cause: OSError) -> None:
+        super().__init__(cause.errno, cause.strerror or str(cause), path)
+        self.path = path
+
+
+
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
 # gateway's MaxSupportedConfigVersion.
@@ -264,6 +273,43 @@ def empty_config_message(path: str | None = None) -> str:
     )
 
 
+def config_is_incomplete(path: str | None = None) -> bool:
+    """Whether config.yaml stops mid-document (a crash or a full disk while it was written).
+
+    DefenseClaw always ends the file with a newline. A non-empty file without
+    one is cut short; callers ask only once it has no valid config_version, so
+    it is not an older install to import either (GAP-0482).
+    """
+
+    cfg_file = path or str(config_path())
+    try:
+        with open(cfg_file, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                return False
+            stream.seek(-1, os.SEEK_END)
+            return stream.read(1) != b"\n"
+    except OSError:
+        return False
+
+
+def config_damage_message(path: str | None = None) -> str:
+    """The repair text for an empty or cut-short config.yaml, or "" for any other file."""
+
+    if config_is_empty(path):
+        return empty_config_message(path)
+    if not config_is_incomplete(path):
+        return ""
+    cfg_file = path or str(config_path())
+    home = os.path.dirname(cfg_file) or "."
+    return (
+        f"{cfg_file} is incomplete: it stops in the middle of the file (as after a crash or a full disk). "
+        "It is not an older configuration, and nothing was changed. Restore your copy of config.yaml"
+        f"{_previous_config_hint(home)}, "
+        "or remove the file and run defenseclaw init."
+    )
+
+
 def _newest_config_backup(home: str) -> tuple[str, float] | None:
     """The newest nonempty backups/config.yaml.* copy DefenseClaw wrote (GAP-2206)."""
 
@@ -342,8 +388,8 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
             "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
         )
     if version != CURRENT_CONFIG_VERSION:
-        if version == 0 and config_is_empty(path):
-            raise ConfigVersionError(empty_config_message(path))
+        if version == 0 and (damage := config_damage_message(path)):
+            raise ConfigVersionError(damage)
         raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
 
@@ -3517,8 +3563,15 @@ class Config:
         refuses to reload.
         """
         path = str(config_path_for_data_dir(self.data_dir))
-        with locked_config_yaml(path):
-            self._save_locked(path)
+        try:
+            with locked_config_yaml(path):
+                self._save_locked(path)
+        except OSError as exc:
+            if exc.errno is None:
+                # A refusal (a managed_enterprise change without admin
+                # rights), not a failed write: keep its own error.
+                raise
+            raise ConfigSaveError(path, exc) from exc
 
     def save_verified(self, verify: Callable[[str], None]) -> None:
         """Persist, verify the exact written generation, and roll back on failure.

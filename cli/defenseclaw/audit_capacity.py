@@ -58,6 +58,23 @@ def audit_disk_full_notice(db_path: str) -> str:
     )
 
 
+def audit_open_failure_notice(db_path: str, exc: BaseException) -> str:
+    directory = os.path.dirname(os.path.abspath(db_path)) or os.curdir
+    cause = str(exc)
+    if "unable to open database file" in cause.lower() or isinstance(exc, OSError):
+        try:
+            free_bytes = shutil.disk_usage(directory).free
+        except OSError:
+            free_bytes = None
+        if free_bytes is not None and free_bytes < 256 * 1024 * 1024:
+            return (
+                f"the disk holding {directory} has too little usable space "
+                f"({free_bytes // (1024 * 1024)} MiB reported free); free space, "
+                "then retry opening the audit store"
+            )
+    return f"cannot open audit store {db_path}: {cause}"
+
+
 # Plain words for the gateway's event_history_last_sqlite_class tokens.
 AUDIT_WRITE_FAILURE_CAUSES = {
     "full": "the disk holding the audit database is full",

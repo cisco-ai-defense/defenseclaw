@@ -79,7 +79,7 @@ how it authenticated the request, and the install decides which way that is.
 | Install | How the caller is authenticated | The user the gateway takes |
 | --- | --- | --- |
 | Per-user, any OS | The gateway, hook or ACP token the request presents. The tokens are in the user's own files, and the gateway runs as that account | The account the gateway runs as |
-| Standalone enterprise, Linux and macOS | The kernel's peer credentials on the hook socket. On loopback TCP, a per-user credential, or for ACP the user's enterprise ACP credential | The peer's uid, or the uid the credential is bound to |
+| Standalone enterprise, Linux and macOS | The kernel's peer credentials on the hook socket. On loopback TCP, a per-user credential, or for ACP the user's enterprise ACP credential, accepted only from a process of the uid it is bound to (the kernel names the owner of the TCP socket) | The peer's uid, or the uid the credential is bound to |
 | Standalone enterprise, Windows | A per-user credential on loopback TCP (`127.0.0.1:18970`), or for ACP the user's enterprise ACP credential. Windows gives the gateway no kernel check of a TCP caller | The SID the credential is bound to |
 | Sandbox of a per-user install | The sandbox binding's credential, which only that sandbox holds | The host user recorded on the binding |
 
@@ -97,7 +97,13 @@ The gateway keeps the record in its protected data directory, and only the
 bearer copy is in that user's private ACP runtime. An ACP evaluation that
 presents it is bound to the uid (Linux and macOS) or SID (Windows) the
 enrollment named, and gets that user's directory facts and guardrail profile,
-as the user's hooks do. Enrollment refuses the other platform's kind:
+as the user's hooks do. On Linux and macOS the gateway also asks the kernel
+which account owns the guard's loopback TCP socket and refuses the request
+(`401`, audit reason `acp_caller_account_mismatch`) when it is not the
+enrolled uid, so a copy of the bearer in another account's home does not
+work. Windows tells the gateway the process of a TCP connection but not its
+account, so there the bearer alone identifies the user; revoke and enroll
+again when a copy may have leaked. Enrollment refuses the other platform's kind:
 `--sid` on Linux and macOS, `--uid` and `--gid` on Windows. The
 guard sends no identity headers, and the gateway ignores any that a request
 carries. An enrollment that names only a home directory, with no uid or SID,

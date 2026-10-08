@@ -75,4 +75,77 @@ def test_identities_forwards_filters_and_renders_rows(stub_client: _StubClient) 
     # GAP-0152: every page is listed, each identity once.
     as_json = CliRunner().invoke(cli, ["agent", "identities", "--json"])
     assert as_json.exit_code == 0, as_json.output
-    assert json.loads(as_json.output) == {"enabled": True, "identities": [_ROW, _ROW2], "total": 2, "next_cursor": ""}
+    assert json.loads(as_json.output) == {
+        "enabled": True, "persisted": True, "identities": [_ROW, _ROW2], "total": 2, "next_cursor": "",
+    }
+
+
+def test_identities_not_saved_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0393: a ledger the gateway cannot save keeps the API's flag in --json
+    # and warns in the table, status and doctor.
+    from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
+
+    class _Unsaved(_StubClient):
+        def agent_identities(self, **_: Any) -> dict[str, Any]:
+            return {"enabled": True, "persisted": False, "persist_error": "attempt to write a readonly database",
+                    "identities": [_ROW], "total": 1, "next_cursor": ""}
+
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: _Unsaved())
+    as_json = CliRunner().invoke(cli, ["agent", "identities", "--json"])
+    assert json.loads(as_json.output)["persisted"] is False
+    table = CliRunner().invoke(cli, ["agent", "identities"])
+    assert "not being saved" in table.output
+    health = {"agent_identities": {"persisted": False, "error": "attempt to write a readonly database"}}
+    assert "readonly database" in agent_identity_ledger_failure(health)
+    assert agent_identity_ledger_failure({"telemetry": {"state": "running"}}) == ""
+
+
+def test_identity_filters_name_empty_results_and_reject_invalid_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class EmptyClient:
+        def agent_identities_all(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"enabled": True, "identities": [], "total": 0}
+
+        def agent_identities(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"total": 2621}
+
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: EmptyClient())
+    runner = CliRunner()
+    empty = runner.invoke(cli, ["agent", "identities", "--user", "nosuchuser"])
+    assert empty.exit_code == 0, empty.output
+    assert "No agent identity matches --user nosuchuser (2621 identities exist" in empty.output
+    unknown = runner.invoke(cli, ["agent", "identities", "--connector", "bogus"])
+    assert unknown.exit_code != 0 and "valid names" in unknown.output
+    huge = runner.invoke(cli, ["agent", "identities", "--limit", "99999999999999999999"])
+    assert huge.exit_code != 0 and "limit too large" in huge.output
+
+
+def test_identity_table_uses_cell_width_and_removes_control_characters() -> None:
+    row = {**_ROW, "user_name": "李雷	name"}
+    rendered = cmd_agent._render_agent_identities([row])
+    assert "	" not in rendered
+    heading, value = rendered.splitlines()
+    from rich.cells import cell_len
+
+    assert cell_len(heading[:heading.index("Connector")]) == cell_len(value[:value.index("claudecode")])
+
+
+def test_ide_inventory_scope_option_and_read_only_log_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    import click
+    from defenseclaw.main import _audit_logs_can_read_with_ide_scope_typo
+
+    assert cmd_agent._build_discovery_overrides(ide_inventory="ai_only")["ide_inventory"] == "ai_only"
+    help_text = CliRunner().invoke(cli, ["agent", "discovery", "enable", "--help"])
+    assert help_text.exit_code == 0 and "--ide-inventory" in help_text.output
+
+    ctx = click.Context(cli)
+    ctx.invoked_subcommand = "audit"
+    monkeypatch.setattr(sys, "argv", ["defenseclaw", "audit", "logs"])
+    assert _audit_logs_can_read_with_ide_scope_typo(
+        ctx, SimpleNamespace(errors=["ai_discovery.ide_inventory: invalid enum"], timed_out=False, parse_error="")
+    )
+    assert not _audit_logs_can_read_with_ide_scope_typo(
+        ctx, SimpleNamespace(errors=["guardrail.block_at: invalid"], timed_out=False, parse_error="")
+    )

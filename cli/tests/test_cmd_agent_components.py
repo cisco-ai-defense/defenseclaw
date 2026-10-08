@@ -43,6 +43,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import legacy_connector
 from defenseclaw.commands import cmd_agent
 from defenseclaw.context import AppContext
 
@@ -940,6 +941,17 @@ if __name__ == "__main__":
 
 
 class IDEPluginsTests(unittest.TestCase):
+    def test_untrusted_names_render_literally_and_ide_version_distinguishes_rows(self):
+        from defenseclaw.commands import cmd_agent
+
+        table = cmd_agent._render_runtime_table(["Plugin"], [["[/] close tag"]])
+        self.assertIn("[/] close tag", table)
+        rows = cmd_agent.ide_plugin_rows(
+            [{"ide_product": "intellij-idea-ce", "install_id": "i1", "plugin_id": "com.tabnine"}],
+            {"i1": "2025.2"},
+        )
+        self.assertEqual(rows[0][1], "intellij-idea-ce 2025.2")
+
     def test_lists_every_page_with_filters_and_scope_messages(self):
         from defenseclaw.gateway import OrchestratorClient
 
@@ -982,6 +994,11 @@ class IDEPluginsTests(unittest.TestCase):
             self.assertIn("org.rust.lang (Rust)", result.output)
             self.assertLess(result.output.index("alice"), result.output.index("bob"))
             self.assertIn("2 plugin(s) shown; 2 in total, 1 AI, 1 disabled, 2 user(s)", result.output)
+
+            calls.clear()
+            alias = runner.invoke(cmd_agent.agent, ["ide-plugins", "--ide", legacy_connector.RETIRED_DESKTOP_ID], obj=_make_ctx())
+            self.assertEqual(alias.exit_code, 0, msg=alias.output)
+            self.assertEqual(calls[0]["ide"], "devin-desktop")
 
             pages[""] = {"enabled": True, "scope": "off", "plugins": []}
             result = runner.invoke(cmd_agent.agent, ["ide-plugins"], obj=_make_ctx())

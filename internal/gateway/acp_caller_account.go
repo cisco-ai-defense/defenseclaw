@@ -1,0 +1,146 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"os/user"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/peercred"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+)
+
+// acpLoopbackPeerUID names the account of the process on the client end of
+// a loopback TCP request, from the kernel connection table; replaceable in
+// tests. A connection is looked up once: the guard sends every evaluation of
+// a session over the same connection, one per streamed frame.
+var acpLoopbackPeerUID = func(r *http.Request) (int, error) {
+	if peer, ok := r.Context().Value(acpConnPeerKey{}).(*acpConnPeer); ok {
+		return peer.lookup()
+	}
+	local, _ := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+	remote, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	if local == nil || err != nil {
+		return -1, errors.New("the request carries no TCP addresses")
+	}
+	return peercred.LoopbackTCPPeerUID(local, remote)
+}
+
+// acpConnPeerKey carries the peer account lookup of one TCP connection.
+type acpConnPeerKey struct{}
+
+// acpConnPeer is the account on the client end of one accepted TCP
+// connection, read from the kernel on first use. A failed lookup is not
+// kept, so the next request asks again.
+type acpConnPeer struct {
+	mu            sync.Mutex
+	local, remote *net.TCPAddr
+	uid           int
+	known         bool
+}
+
+func (p *acpConnPeer) lookup() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.known {
+		return p.uid, nil
+	}
+	uid, err := peercred.LoopbackTCPPeerUID(p.local, p.remote)
+	if err != nil {
+		return -1, err
+	}
+	p.uid, p.known = uid, true
+	return uid, nil
+}
+
+// acpPeerConnContext gives each accepted TCP connection its peer account
+// lookup. It reads nothing until an ACP request needs it.
+func acpPeerConnContext(ctx context.Context, conn net.Conn) context.Context {
+	local, _ := conn.LocalAddr().(*net.TCPAddr)
+	remote, _ := conn.RemoteAddr().(*net.TCPAddr)
+	if local == nil || remote == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, acpConnPeerKey{}, &acpConnPeer{local: local, remote: remote})
+}
+
+// The refusal reasons of a managed ACP request whose caller is another
+// account than its credential's, or could not be told.
+const (
+	acpCallerAccountMismatchReason   = "acp_caller_account_mismatch"
+	acpCallerAccountUnverifiedReason = "acp_caller_account_unverified"
+)
+
+// acpCallerAccountChecked reports whether this gateway checks the OS account
+// of an ACP caller: a standalone managed gateway on Linux or macOS, whose
+// kernel names the owner of a loopback TCP socket. Windows tells a service
+// only the process of a TCP connection, and Secure Client keeps the bearer
+// check of main (issue #1092).
+func (a *APIServer) acpCallerAccountChecked() bool {
+	return runtime.GOOS != "windows" && a != nil && a.scannerCfg != nil &&
+		managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) && !a.scannerCfg.SecureClientIntegration()
+}
+
+// acpCallerAccountRefusal is the authentication failure reason for a
+// managed ACP request whose loopback caller is not the account its
+// enrollment credential was issued to, or "" when the account matches or
+// is not checked. A copied bearer used to run another user's guarded
+// session recorded as the verified token owner, with the owner's guardrail
+// profile (GAP-0348).
+func (a *APIServer) acpCallerAccountRefusal(r *http.Request) string {
+	if !a.acpCallerAccountChecked() {
+		return ""
+	}
+	credential, enrolled := acpEnterpriseCredentialFromContext(r.Context())
+	kind, value, _ := strings.Cut(credential.Principal, ":")
+	if !enrolled || kind != "uid" {
+		// A home: principal names no account and binds none.
+		return ""
+	}
+	want, err := strconv.Atoi(value)
+	if err != nil {
+		return acpCallerAccountUnverifiedReason
+	}
+	got, err := acpLoopbackPeerUID(r)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] ACP caller account unavailable: %v\n", err)
+		return acpCallerAccountUnverifiedReason
+	}
+	if got != want {
+		return acpCallerAccountMismatchReason
+	}
+	return ""
+}
+
+// withACPCallerAccount names the kernel-verified account of a refused ACP
+// caller on the authentication failure row, which named no one, so an
+// administrator could not tell who was presenting a revoked or copied
+// credential (GAP-0354).
+func (a *APIServer) withACPCallerAccount(ctx context.Context, r *http.Request) context.Context {
+	if !a.acpCallerAccountChecked() || !identityFactsEnabled.Load() {
+		return ctx
+	}
+	uid, err := acpLoopbackPeerUID(r)
+	if err != nil || uid < 0 {
+		return ctx
+	}
+	id := strconv.Itoa(uid)
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, id)
+	identity := AgentIdentityFromContext(ctx)
+	identity.UserID, identity.UserIDKind, identity.UserName = id, useridentity.KindPOSIXUID, ""
+	if account, lookupErr := user.LookupId(id); lookupErr == nil {
+		identity.UserName = sanitizeLLMEventUser(account.Username)
+	}
+	return ContextWithAgentIdentity(ctx, identity)
+}

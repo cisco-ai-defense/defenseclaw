@@ -115,7 +115,7 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 
 | Key | Matches | Spell it as |
 | --- | --- | --- |
-| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: the group name `id -Gn` prints. Entra groups reach Linux only through Himmelblau or Entra Domain Services, and never reach macOS through Platform SSO ([Entra groups per platform](/docs/enterprise/identity-entra-id#pick-your-setup)). |
+| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: use the exact group name from `dscl` or `dseditgroup`; `id -Gn` splits names containing spaces. For macOS and Windows domain groups in YAML, use single quotes such as `'CORP\ML-Team'` or double the backslash inside double quotes (`"CORP\\ML-Team"`). Obtain Windows names containing spaces from the Windows group tools. Entra groups reach Linux only through Himmelblau or Entra Domain Services, and never reach macOS through Platform SSO ([Entra groups per platform](/docs/enterprise/identity-entra-id#pick-your-setup)). |
 | `users` | The verified user | A uid or SID, the account name, `DOMAIN\user` (`CORP\alice`, the form winbind and Windows report), or the principal or UPN (`alice@CORP.EXAMPLE.COM`). |
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
@@ -213,8 +213,11 @@ enforce (see
 [sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents)).
 **Identity headers, hook payloads and claimed
 facts never reach the matcher.** A user who forges a header, sets
-`KRB5CCNAME`, edits a local file or overrides a config directory cannot move
-to a weaker profile.
+`KRB5CCNAME` or alters a hook payload cannot change verified identity. On a
+standalone enterprise install, the user cannot edit the machine-owned profile
+or move to a weaker one. On a per-user install, the user owns the configuration
+file and can change their own profile; enforce profiles with machine-owned
+configuration when users must not weaken them.
 
 What follows when the identity is missing:
 
@@ -245,7 +248,9 @@ What follows when the identity is missing:
   added to a group gets the group's profile after all three. `guardrail profile
   explain` asks the operating system directly, so it already shows the new
   profile; its `cache:` line and a warning give the age of the facts requests
-  still use. Restart the gateway to drop its cache at once. On Windows the
+  still use. On a bound Mac, flush Open Directory membership with
+  `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
+  gateway or wait for its 15-minute refresh. On Windows the
   groups are those of the sign-in token, so the user must also sign out and
   back in. While the directory does not answer, the gateway keeps using a
   user's last facts, for at most an hour (four times the cache lifetime). After

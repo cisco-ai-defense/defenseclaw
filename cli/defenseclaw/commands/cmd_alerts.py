@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 
@@ -472,6 +473,38 @@ def _hook_details_for(store, alert_list: list) -> dict[str, list[str]]:
     return result if isinstance(result, dict) else {}
 
 
+# Control and bidi formatting characters an agent can put in the text it
+# reports (a session id), so the detail cannot render other than it reads.
+_DISPLAY_UNSAFE = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+
+
+def alert_agent_facts(store, alert_ids: list[str]) -> dict[str, list[tuple[str, str]]]:
+    """Labelled facts of who an alert is about: user, agent identity,
+    instance, session and sub-agent depth (GAP-0381)."""
+    lookup = getattr(store, "agent_facts_for_alerts", None)
+    ids = [alert_id for alert_id in alert_ids if alert_id and not alert_id.startswith("gw:")]
+    if lookup is None or not ids:
+        return {}
+    try:
+        found = lookup(ids)
+    except Exception:  # an older or locked audit DB only loses these facts
+        return {}
+    out: dict[str, list[tuple[str, str]]] = {}
+    for alert_id, facts in (found or {}).items():
+        rows = [
+            (label, _DISPLAY_UNSAFE.sub(" ", str(facts[key])).strip()[:200])
+            for key, label in (("user", "User"), ("agent_identity", "Agent"), ("agent_instance", "Instance"),
+                               ("session", "Session"))
+            if facts.get(key)
+        ]
+        depth = str(facts.get("depth") or "")
+        if depth.isdigit():
+            rows.append(("Depth", f"{depth} (sub-agent)" if int(depth) > 0 else "0 (main agent)"))
+        if rows:
+            out[alert_id] = rows
+    return out
+
+
 def _connector_needle(connector: str | None) -> str:
     """The --connector value as a stored connector name: ``claude-code`` (the
     name 'defenseclaw setup claude-code' takes) matches ``claudecode`` (GAP-2130)."""
@@ -530,7 +563,7 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     term_width = console.size.width
     # A wide terminal shows the whole hook event (UserPromptSubmit,
     # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
-    w_target = _W_TARGET if term_width < 100 else 18
+    w_target = _W_TARGET if term_width < 100 else 20
     w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 
     scope = f" — connector={connector}" if (connector or "").strip() else ""
@@ -565,7 +598,8 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(copilot_hook_target(e.target or "", _event_connector(e)), w_target)
+        hook_target = copilot_hook_target(e.target or "", _event_connector(e))
+        target = _trunc_path(_short_hook_target(hook_target, _event_connector(e)), w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         facts = _finding_facts(e, hook_details, targets)
@@ -700,6 +734,9 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         alert_list = app.store.list_alerts(limit)
     hook_details = _hook_details_for(app.store, alert_list)
     targets = _alert_targets_for(app.store, alert_list)
+    agents = alert_agent_facts(app.store, [e.id for e in alert_list])
+    json_keys = {"User": "user", "Agent": "agent_identity_id", "Instance": "agent_instance_id",
+                 "Session": "session_id", "Depth": "agent_depth"}
     rows = []
     for e in alert_list:
         row = {
@@ -722,6 +759,8 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
                 row[key] = facts[key]
         if "moved_to" in facts:
             row.setdefault("decision", "quarantined")
+        for label, value in agents.get(e.id, []):
+            row[json_keys[label]] = int(value.split(" ", 1)[0]) if label == "Depth" else value
         rows.append(row)
     click.echo(json.dumps(rows, indent=2, sort_keys=True))
 
@@ -822,6 +861,11 @@ def _alerts_default(
             human = _humanize_details(e.details)
             if human:
                 click.echo(f"  {label('Details')} {human}")
+        agent = alert_agent_facts(app.store, [e.id]).get(e.id, [])
+        for name, value in agent:
+            click.echo(f"  {label(name)} {value}")
+        agent_user = next((value for name, value in agent if name == "User"), "")
+        agent_connector = (facts or {}).get("connector") or _event_connector(e)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         if e.action == "scan" and scanner_name and e.target:
@@ -841,6 +885,8 @@ def _alerts_default(
                     loc = f"  {f['location']}" if f["location"] else ""
                     click.echo(f" {f['title']}{loc}")
         hint = _alert_next_step(e)
+        if not hint and agent_user and agent_connector:
+            hint = f"defenseclaw agent identities --user {shlex.quote(agent_user)} --connector {agent_connector}"
         if hint:
             click.echo(f"  {ux._style('Next:', fg='bright_black', bold=True)}      {hint}")
         if e.id:
