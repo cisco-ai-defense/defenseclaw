@@ -130,10 +130,14 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 	if err := schema.Validate(document.Plain); err != nil {
 		var validation *jsonschema.ValidationError
 		if !errors.As(err, &validation) {
+			summary := "configuration does not satisfy the canonical v8 schema"
+			if v8SchemaDocumentVersion(document) >= 9 {
+				summary = "configuration does not satisfy the config_version 9 schema"
+			}
 			return &V8SchemaError{
 				Source:  source,
 				Path:    "$",
-				Summary: "configuration does not satisfy the canonical v8 schema",
+				Summary: summary,
 				Version: v8SchemaDocumentVersion(document),
 				Action:  "correct the configuration and retry",
 			}
@@ -156,6 +160,13 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 		}
 		node := v8SchemaYAMLNode(document.Document, leaf.InstanceLocation, unknown)
 		expected, suggestion := v8SchemaExpectation(leaf, unknown)
+		if v8SchemaDocumentVersion(document) >= 9 && expected == "the canonical v8 field contract" {
+			expected = "a valid value for this setting"
+		}
+		action := "inspect the canonical v8 schema or generated reference and correct this field"
+		if v8SchemaDocumentVersion(document) >= 9 {
+			action = "inspect the config_version 9 settings reference and correct this field"
+		}
 		result := &V8SchemaError{
 			Source:        source,
 			Path:          path,
@@ -164,7 +175,7 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			Expected:      expected,
 			Suggestion:    suggestion,
 			Summary:       "configuration violates the " + keyword + " constraint",
-			Action:        "inspect the canonical v8 schema or generated reference and correct this field",
+			Action:        action,
 			Version:       v8SchemaDocumentVersion(document),
 		}
 		if key := v8SchemaUnknownKeyNode(document.Document, leaf.InstanceLocation, unknown); key != nil {
