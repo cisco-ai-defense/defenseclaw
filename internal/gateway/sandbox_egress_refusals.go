@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
@@ -146,6 +147,14 @@ func (a *APIServer) addSandboxEgressRefusals(
 		return resp
 	}
 	refusals := st.egressRefusals(binding)
+	if len(refusals) == 0 && sandboxDirectRefusalResult(rawBody) {
+		// OpenShell's record of the refusal may still be on its way.
+		deadline := time.Now().Add(sandboxDirectRefusalWait)
+		for len(refusals) == 0 && ctx.Err() == nil && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			refusals = st.egressRefusals(binding)
+		}
+	}
 	if len(refusals) == 0 {
 		return resp
 	}
@@ -157,6 +166,29 @@ func (a *APIServer) addSandboxEgressRefusals(
 	resp.AdditionalContext = notice
 	resp.HookOutput = sandboxHookOutput(ctx, profile, req, rawBody, payload, nil, resp)
 	return resp
+}
+
+// sandboxDirectRefusalWait bounds how long the post-tool hook of a call
+// whose result names a connection error to this machine's sandbox address
+// waits for OpenShell's record of the refusal, which its event stream can
+// deliver after the hook: a test that failed in 9 ms got no note of the ask
+// it raised (the note came with the next turn), and the agent took the
+// pending ask for the user's refusal (GAP-0325). A variable for tests.
+var sandboxDirectRefusalWait = 1500 * time.Millisecond
+
+// sandboxDirectRefusalErrors are the words of a connection a sandbox's
+// network policy refused, or a closed port, as tools print them.
+var sandboxDirectRefusalErrors = []string{"eacces", "econnrefused", "connection refused", "permission denied", "failed to connect"}
+
+// sandboxDirectRefusalResult reports a hook payload that names a refused
+// connection to the host alias or its synthetic sandbox address, the
+// direct connections OpenShell refuses (a --host-port ask among them).
+func sandboxDirectRefusalResult(rawBody []byte) bool {
+	body := strings.ToLower(string(rawBody))
+	if !strings.Contains(body, "host.openshell.internal") && !strings.Contains(body, "198.18.") {
+		return false
+	}
+	return slices.ContainsFunc(sandboxDirectRefusalErrors, func(e string) bool { return strings.Contains(body, e) })
 }
 
 // sandboxEgressRefusalNotice is the agent's note of refused destinations.

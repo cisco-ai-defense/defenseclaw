@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -201,6 +202,33 @@ func TestSandboxPostToolHookTellsTheAgentOfEgressRefusals(t *testing.T) {
 // the agent was told.
 // GAP-0216: an SSH refusal's note gives the agent the HTTPS way, and does
 // not tell it to leave the destination alone.
+// GAP-0325: OpenShell's record of a refused direct connection can come
+// after the post-tool hook of the call it failed. A result that names a
+// connection error to this machine's sandbox address waits briefly for it,
+// so the agent hears that the ask waits for the user, not nothing.
+func TestSandboxPostToolHookWaitsForADirectRefusal(t *testing.T) {
+	var once sync.Once
+	ready := time.Now().Add(200 * time.Millisecond)
+	ask := SandboxEgressRefusal{Host: "host.openshell.internal", Port: 8765, Category: manager.NoteAsked, Note: manager.NoteAsked}
+	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
+		c.EgressRefusals = func(sandboxauth.Binding) []SandboxEgressRefusal {
+			var out []SandboxEgressRefusal
+			if time.Now().After(ready) {
+				once.Do(func() { out = []SandboxEgressRefusal{ask} })
+			}
+			return out
+		}
+	})
+	body := `{"hook_event_name":"PostToolUse","session_id":"s-claude","tool_name":"Bash","tool_input":{"command":"npx vitest run"},` +
+		`"tool_response":{"stdout":"","stderr":"Error: connect EACCES 198.18.0.2:8765 - Local (0.0.0.0:0)"},"tool_use_id":"t-claude","cwd":"/work/app"}`
+	resp := f.hook(t, "/api/v1/claude-code/hook", f.claudeTok, body)
+	out, _ := resp["claude_code_output"].(map[string]interface{})
+	specific, _ := out["hookSpecificOutput"].(map[string]interface{})
+	if s, _ := specific["additionalContext"].(string); !strings.Contains(s, "waits for the user") {
+		t.Fatalf("answer = %v", resp)
+	}
+}
+
 func TestSandboxEgressRefusalNoticeOfSSH(t *testing.T) {
 	got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{{Host: "github.com", Port: 22, Category: "ssh", Note: manager.NoteSSH,
 		What: "SSH, which does not leave a sandbox", Remedy: "use HTTPS instead: a git remote https://github.com/OWNER/REPO.git"}})
