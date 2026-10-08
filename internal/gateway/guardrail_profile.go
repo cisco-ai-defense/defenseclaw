@@ -1033,6 +1033,9 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 // agent. It applies only to a request with a verified user-scoped identity;
 // without one (nil) the proxy keeps its own settings.
 func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
+	if ctx != nil && ctx.Value(unverifiedProxyCallerKey{}) == true {
+		return nil
+	}
 	set := liveGuardrailProfiles.Load()
 	if set == nil {
 		return nil

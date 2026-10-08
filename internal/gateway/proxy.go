@@ -520,8 +520,15 @@ func (p *GuardrailProxy) servedConnector() string {
 // user, recorded for `defenseclaw agent identities`. It then resolves the
 // request's guardrail profile with that connector and agent, so connectors
 // and agents assignments decide proxy traffic as explain says they do.
+type unverifiedProxyCallerKey struct{}
+
 func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 	ctx := r.Context()
+	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) {
+		// A provider key admits model traffic but says nothing about who sent it.
+		// Keep the proxy's base guardrail and leave the owner's agent unclaimed.
+		return r.WithContext(context.WithValue(ctx, unverifiedProxyCallerKey{}, true))
+	}
 	connectorName := p.servedConnector()
 	if identity := AgentIdentityFromContext(ctx); identity.IdentityID == "" {
 		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
