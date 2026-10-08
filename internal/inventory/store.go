@@ -554,6 +554,27 @@ var inventoryMigrations = []invMigration{
 			return nil
 		},
 	},
+	{
+		description: "v6: track the last sighting of each agent identity session",
+		apply: func(ex invDBExecer) error {
+			// v5 stores may have this table (created on first upsert) or may
+			// not. Create the old shape first so the ALTER works in either case.
+			for _, q := range []string{
+				`CREATE TABLE IF NOT EXISTS agent_identity_sessions (
+					agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL,
+					PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`,
+				`ALTER TABLE agent_identity_sessions ADD COLUMN last_seen TEXT NOT NULL DEFAULT ''`,
+				`UPDATE agent_identity_sessions SET last_seen = first_seen`,
+				`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_last_seen
+					ON agent_identity_sessions(last_seen)`,
+			} {
+				if _, err := ex.Exec(q); err != nil {
+					return fmt.Errorf("ai inventory: v6 migration: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 type invMigration struct {

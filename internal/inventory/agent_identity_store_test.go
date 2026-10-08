@@ -60,7 +60,7 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 		!got.FirstSeen.Equal(t0.Add(-time.Minute)) || !got.LastSeen.Equal(t0.Add(2*time.Hour)) {
 		t.Fatalf("merged row = %+v", got)
 	}
-	if removed, err := st.PruneAgentIdentitySessions(ctx); err != nil || removed != 0 {
+	if removed, err := st.PruneAgentIdentitySessions(ctx, time.Time{}); err != nil || removed != 0 {
 		t.Fatalf("session prune removed %d, err %v; active identity must keep its session ids", removed, err)
 	}
 	// The first chat stays active beyond retention and resumes after a restart.
@@ -88,7 +88,7 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 	if _, err := st.PruneAgentIdentities(ctx, t0.Add(4*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := st.PruneAgentIdentitySessions(ctx); err != nil || removed != 3 {
+	if removed, err := st.PruneAgentIdentitySessions(ctx, time.Time{}); err != nil || removed != 3 {
 		t.Fatalf("orphan session prune removed %d, err %v; want 3", removed, err)
 	}
 }
@@ -114,5 +114,65 @@ func TestAgentIdentityResumedOlderSessionKeepsLastSession(t *testing.T) {
 	rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{})
 	if err != nil || len(rows) != 1 || rows[0].SessionsSeen != 2 || rows[0].LastSessionID != "s-new" {
 		t.Fatalf("rows = %+v, err %v; want 2 sessions, last s-new", rows, err)
+	}
+}
+
+// Active identities keep only sessions seen inside the retention window.
+func TestAgentIdentitySessionRetentionForActiveAgent(t *testing.T) {
+	st, err := NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-40 * 24 * time.Hour)
+	rec := AgentIdentityRecord{
+		AgentID: "agt-active", UserID: "1001", Connector: "codex", MachineHash: "m",
+		FirstSeen: old, LastSeen: old, SessionsSeen: 1,
+	}
+	for _, id := range []string{"expired", "ongoing"} {
+		rec.SessionIDs, rec.LastSessionID = []string{id}, id
+		if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{rec}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A resumed session must refresh its retention clock without changing
+	// the cumulative distinct-session count.
+	rec.LastSeen = now.Add(-time.Hour)
+	rec.SessionIDs, rec.LastSessionID = []string{"ongoing"}, "ongoing"
+	if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{rec}); err != nil {
+		t.Fatal(err)
+	}
+	pruneAgentLedger(ctx, st, now.Add(-30*24*time.Hour), 30, &inventoryHistorySweeper{}, now, "test")
+	rows, err := st.db.QueryContext(ctx, `SELECT session_id FROM agent_identity_sessions WHERE agent_id = ?`, rec.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var sessions []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		sessions = append(sessions, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0] != "ongoing" {
+		t.Fatalf("retained session ids = %v, want only ongoing", sessions)
+	}
+	agents, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{AgentIDs: []string{rec.AgentID}})
+	if err != nil || len(agents) != 1 || agents[0].SessionsSeen != 2 {
+		t.Fatalf("active agent after prune = %+v, err %v; want cumulative count 2", agents, err)
+	}
+	if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{rec}); err != nil {
+		t.Fatal(err)
+	}
+	agents, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{AgentIDs: []string{rec.AgentID}})
+	if err != nil || len(agents) != 1 || agents[0].SessionsSeen != 2 {
+		t.Fatalf("resumed session counted twice: %+v, err %v", agents, err)
 	}
 }
