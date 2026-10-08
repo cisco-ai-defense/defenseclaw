@@ -90,6 +90,7 @@ readonly DC_MACOS_PACKAGE_ID=com.cisco.defenseclaw.enterprise
 DC_CONFIG_STDIN=0
 DC_SECRET_STDIN=0
 DC_STAGE=""
+DC_CHILD=""
 DC_RESULT=""
 DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
@@ -139,6 +140,33 @@ dc_cleanup() {
     if [ -n "$DC_STAGE" ] && [ -d "$DC_STAGE" ]; then
         rm -rf "$DC_STAGE"
     fi
+}
+
+# dc_stop_child: an interrupted run stops the lifecycle command it waits for,
+# so the command does not finish (or store a credential) after the run was
+# reported failed.
+dc_stop_child() {
+    [ -z "$DC_CHILD" ] || kill "$DC_CHILD" 2>/dev/null || true
+}
+
+# dc_sweep_stages <parent>: remove the staging folders of earlier runs that
+# were killed before their cleanup ran: root-owned, and either their run is
+# gone (the pid it recorded no longer runs) or, without a pid, a day old.
+dc_sweep_stages() {
+    for stale in "$1"/defenseclaw-mdm.*; do
+        [ -d "$stale" ] && [ ! -L "$stale" ] || continue
+        [ "$(dc_stat_uid "$stale")" = 0 ] || continue
+        owner=$(head -c 32 "$stale/pid" 2>/dev/null || true)
+        case "$owner" in
+            "" | *[!0-9]*)
+                [ -n "$(find "$stale" -maxdepth 0 -mmin +1440 2>/dev/null)" ] || continue
+                ;;
+            *)
+                ! kill -0 "$owner" 2>/dev/null || continue
+                ;;
+        esac
+        rm -rf "$stale"
+    done
 }
 
 dc_stat_uid() {
@@ -625,11 +653,13 @@ dc_main() {
     [ "$(id -u)" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_not_root "run as root (the MDM agent's system context)"
 
     stage_parent=/var/tmp
+    dc_sweep_stages "$stage_parent"
     DC_STAGE=$(mktemp -d "$stage_parent/defenseclaw-mdm.XXXXXX")
     trap dc_cleanup EXIT
-    trap 'exit 1' HUP INT TERM
+    trap 'dc_stop_child; exit 1' HUP INT TERM
     chmod 0700 "$DC_STAGE"
     [ "$(dc_stat_uid "$DC_STAGE")" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging directory is not root-owned"
+    printf '%s\n' "$$" >"$DC_STAGE/pid"
     dc_log "start action=$DC_ACTION"
 
     if [ "$DC_ACTION" != ensure ]; then
@@ -655,15 +685,24 @@ dc_main() {
             config=$inline
         fi
     fi
-    secret=""
+    # The credential stays in memory and reaches the lifecycle through a
+    # pipe: a staged copy outlived a run killed before its cleanup.
+    secret_data=""
     if [ -n "$DC_SECRET_NAME" ]; then
-        secret="$DC_STAGE/secret"
         if [ "$DC_SECRET_STDIN" = 1 ]; then
-            dc_read_bounded "$secret" "$DC_MAX_SECRET_BYTES" "secret"
+            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))")
         else
-            dc_stage_file "$DC_SECRET_FILE" "$secret" "$DC_MAX_SECRET_BYTES" "secret" trusted
+            case "$DC_SECRET_FILE" in /*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret must be an absolute path" ;; esac
+            if [ ! -f "$DC_SECRET_FILE" ] || [ -L "$DC_SECRET_FILE" ]; then
+                dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret is not a regular file: $DC_SECRET_FILE"
+            fi
+            dc_trusted_path "$DC_SECRET_FILE" ||
+                dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE"
+            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))" <"$DC_SECRET_FILE")
         fi
-        [ -s "$secret" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
+        [ "$(printf '%s' "$secret_data" | wc -c | tr -d ' ')" -le "$DC_MAX_SECRET_BYTES" ] ||
+            dc_fail_result "$DC_EXIT_INVALID" mdm_input_too_large "secret exceeds $DC_MAX_SECRET_BYTES bytes"
+        [ -n "$secret_data" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
     fi
 
     DC_CHANNEL_FLAG=""
@@ -688,12 +727,16 @@ dc_main() {
     # the install gives the gateway access. Both steps wait for an apply
     # that the package's postinstall or the change itself started (the
     # apply path unit) instead of failing busy.
-    if [ -n "$secret" ]; then
+    if [ -n "$DC_SECRET_NAME" ]; then
         set +e
-        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json <"$secret" >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err"
+        printf '%s' "$secret_data" |
+            "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err" &
+        DC_CHILD=$!
+        wait "$DC_CHILD"
         secret_status=$?
+        DC_CHILD=""
         set -e
-        rm -f "$secret"
+        secret_data=""
         if [ "$secret_status" != 0 ]; then
             detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
             case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac

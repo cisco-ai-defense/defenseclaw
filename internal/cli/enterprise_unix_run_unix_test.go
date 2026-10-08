@@ -539,3 +539,14 @@ func TestSecretSetRefusesAKeyFileOthersCanWrite(t *testing.T) {
 		t.Fatalf("the refused key file reached the lifecycle: %q", out.String())
 	}
 }
+
+// GAP-0632: a `secret set` whose caller was killed while it waited for the
+// lifecycle lock does not store the credential later.
+func TestSecretSetStandsDownWhenItsCallerIsGone(t *testing.T) {
+	if err := secretCallerGone(4242, 4242); err != nil {
+		t.Fatalf("the caller is still there: %v", err)
+	}
+	if err := secretCallerGone(4242, 1); err == nil || !strings.Contains(err.Error(), "credential was not stored") {
+		t.Fatalf("an orphaned secret set stored the credential: %v", err)
+	}
+}
