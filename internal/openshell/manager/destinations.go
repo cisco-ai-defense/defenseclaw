@@ -519,10 +519,12 @@ func (r *destRow) classify(harnessName string) (kind, provider, vendor string) {
 			provider, vendor = catalogProviderName(hit), hit.Vendor
 		}
 		return sandboxapi.DestinationCredential, provider, vendor
-	case harnessFetchHost(harnessName, r.Host, 0):
-		// The harness's own background request (OpenCode's model
-		// catalog), which an open pack lets through: its vendor's, no
-		// shadow AI.
+	case (hit != nil || catalog.InferenceShaped(r.Host)) && harnessFetchHost(harnessName, r.Host, 0):
+		// The harness's own background request to an AI host (OpenCode's
+		// model catalog), which an open pack lets through: its vendor's, no
+		// shadow AI. A fetch host that is no AI host (Codex's startup tip
+		// from raw.githubusercontent.com, which the agent's tools reach
+		// too) is what it is, not an AI API (GAP-0319).
 		if spec, ok := harness.Get(harnessName); ok {
 			provider = spec.DisplayName
 		}

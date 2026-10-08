@@ -475,3 +475,13 @@ func TestHermesModelMetadataIsItsOwn(t *testing.T) {
 		t.Fatalf("claudecode: %s, want unknown AI", kind)
 	}
 }
+
+// Codex fetches its startup tip from raw.githubusercontent.com, which is a
+// code host, not its vendor's AI API: in a Codex sandbox it reads as source
+// hosting and the Egress line counts no AI for it (GAP-0319).
+func TestAHarnessFetchFromACodeHostIsNoAIAPI(t *testing.T) {
+	r := &destRow{Host: "raw.githubusercontent.com", Connections: 1}
+	if kind, provider, _ := r.classify("codex"); kind != string(egress.CategorySourceHosting) || provider != "" {
+		t.Fatalf("codex: %s %q, want source hosting", kind, provider)
+	}
+}
