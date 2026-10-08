@@ -96,6 +96,8 @@ class PolicyEngine:
         args: list[str] | None = None, transport: str = "",
     ) -> bool:
         if self._legacy_rows():
+            if target_type == "tool":
+                return self._legacy_tool_install_is(name, connector, "block")
             return self._journal_install_is(target_type, name, connector, "block")
         if target_type == "tool":
             return self._operator_decision(target_type, name, connector) == asset_lists.LIST_DENY
@@ -107,6 +109,8 @@ class PolicyEngine:
 
     def is_allowed_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
         if self._legacy_rows():
+            if target_type == "tool":
+                return self._legacy_tool_install_is(name, connector, "allow")
             return self._journal_install_is(target_type, name, connector, "allow")
         return self._operator_decision(target_type, name, connector) == asset_lists.LIST_ALLOW
 
@@ -193,9 +197,21 @@ class PolicyEngine:
     # tool commands render.
 
     def block_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        if self._legacy_rows():
+            if self.store:
+                target = f"@{connector}/{tool_name}" if connector else tool_name
+                self.store.set_action_field("tool", target, "install", "block", reason)
+            return
         self.block_for_connector("tool", tool_name, connector, reason)
 
     def allow_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        if self._legacy_rows():
+            if self.store:
+                target = f"@{connector}/{tool_name}" if connector else tool_name
+                self.store.set_action_field("tool", target, "install", "allow", reason)
+                self.store.clear_action_field("tool", target, "file")
+                self.store.clear_action_field("tool", target, "runtime")
+            return
         self.allow_for_connector("tool", tool_name, connector, reason)
 
     def unblock_tool_for_connector(self, tool_name: str, connector: str = "") -> None:
@@ -230,6 +246,15 @@ class PolicyEngine:
         """Journal a scan verdict's install block (never operator policy)."""
         if self.store:
             self.store.set_action_field(target_type, name, "install", "block", reason, connector)
+
+    def _legacy_tool_install_is(self, name: str, connector: str, want: str) -> bool:
+        if not self.store:
+            return False
+        if connector:
+            scoped = self.store.get_action("tool", f"@{connector}/{name}")
+            if scoped is not None and scoped.actions.install:
+                return scoped.actions.install == want
+        return self.store.has_action("tool", name, "install", want)
 
     def _journal_install_is(self, target_type: str, name: str, connector: str, want: str) -> bool:
         if not self.store:
