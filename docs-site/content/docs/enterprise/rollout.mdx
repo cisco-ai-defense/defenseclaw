@@ -97,7 +97,7 @@ How each agent is protected depends on the agent and the OS:
 | Codex, Claude Code, Cursor, GitHub Copilot, OpenCode | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Applies to every user of the computer. OpenCode uses DefenseClaw's managed OpenCode plugin |
 | Devin, Antigravity, Hermes, Amp | [Per-user](/docs/enterprise/concepts#per-user-connector) | The guardian writes and repairs each enrolled user's config |
 | OpenHands, OmniGent | Per-user, on Linux and macOS only | Refused on Windows |
-| Kiro | Per-user | The guardian writes each user's global `~/.kiro/hooks` file. The [ACP guard](/docs/acp-guard) stays available for editors that start Kiro over ACP |
+| Kiro | Per-user | The guardian writes each user's global `~/.kiro/hooks` file |
 
 Machine-policy agents give the strongest protection: users cannot edit the
 vendor's policy files, and where DefenseClaw sets the vendor's
