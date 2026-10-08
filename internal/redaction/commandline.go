@@ -34,22 +34,22 @@ import (
 //     (curl -u, --user, --proxy-user, -U), and cmdlineUserArg one with it
 //     attached;
 //   - cmdlineURLPassword is the password of a URL's userinfo
-//     (scheme://user:password@host);
+//     (scheme://user:password@host); a redaction placeholder in the user or
+//     the password counts as one character, so its spaces do not hide the
+//     password next to it;
 //   - cmdlineSecretKey is a word that names a secret and ends where its
 //     value, the next word, starts (a header: "Authorization: Bearer ...",
 //     "X-Api-Key: ..."), and cmdlineAuthScheme the scheme word an
-//     Authorization value starts with;
-//   - cmdlineWord is one word of an argument that holds several (a script).
+//     Authorization value starts with.
 var (
 	cmdlineSecretArg   = regexp.MustCompile(`(?i)^(-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
 	cmdlineSecretFlag  = regexp.MustCompile(`(?i)^-{1,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*$`)
 	cmdlineLongToken   = regexp.MustCompile(`^[A-Za-z0-9_\-+/=.]{32,}$`)
 	cmdlineUserFlag    = regexp.MustCompile(`^(?:-u|-U|--user|--proxy-user)$`)
 	cmdlineUserArg     = regexp.MustCompile(`^(-u|-U|--user=|--proxy-user=)([^:]*:)(.+)$`)
-	cmdlineURLPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://[^/@:\s]*:)([^/@\s]+)@`)
+	cmdlineURLPassword = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://(?:<redacted[^<>]{0,90}>|[^/@:\s])*:)((?:<redacted[^<>]{0,90}>|[^/@\s])+)@`)
 	cmdlineSecretKey   = regexp.MustCompile(`(?i)^[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:]$`)
 	cmdlineAuthScheme  = regexp.MustCompile(`(?i)^(?:bearer|basic|token|digest|negotiate)$`)
-	cmdlineWord        = regexp.MustCompile(`\S+`)
 )
 
 // WithheldArgv replaces the arguments of a Codex notify program, which
@@ -113,13 +113,21 @@ func notifyPrefix(args []string) ([]string, bool) {
 // eval '...', a header value) has its words redacted the same way.
 //
 // It is idempotent: the words of a redaction placeholder a split on white
-// space cut apart ("<redacted", "len=9", "sha=...>") are one word again, left
-// as they are, and the quotes inside one (prefix="d") never open or close a
-// quoted value. The sandbox feed redacts a command line and the gateway runs
-// the rules again; without this the second pass took a placeholder's first
-// word for the secret and multiplied the rest (GAP-0052).
+// space cut apart ("<redacted", "len=9", "sha=...>") are one word again, the
+// quotes inside one (prefix="d") never open or close a quoted value, and a
+// value that is only a placeholder stays as it is (ForSinkEntity keeps its
+// own placeholder). The sandbox feed redacts a command line and the gateway
+// runs the rules again; without this the second pass took a placeholder's
+// first word for the secret and multiplied the rest (GAP-0052). Text next to
+// a placeholder in the same word goes through the rules like any other, so
+// placeholder-shaped text cannot carry a secret past them (GAP-0062).
 func CommandArgs(args []string) []string {
-	args = mergePlaceholders(args)
+	return commandArgs(mergePlaceholders(args))
+}
+
+// commandArgs is CommandArgs on words whose placeholders are whole. It
+// returns exactly one word per word it is given.
+func commandArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	mysql := len(args) > 0 && mysqlClient(strings.Trim(args[0], `'"`))
 	// afterKey: the hidden value follows a key word (a header name), so an
@@ -133,7 +141,7 @@ func CommandArgs(args []string) []string {
 		opening, a, closing := splitEdgeQuotes(word)
 		// A placeholder's own quotes (prefix="d") are not the command
 		// line's, and its spaces do not make a script of the word.
-		bare, redacted := withoutPlaceholders(a)
+		bare := withoutPlaceholders(a)
 		word = opening + bare + closing
 		if hideQuote != 0 {
 			// A text source split one quoted secret value on spaces.
@@ -157,8 +165,6 @@ func CommandArgs(args []string) []string {
 			sensitive = true
 		case strings.ContainsAny(bare, " \t\r\n"):
 			a = redactWords(a)
-		case redacted:
-			// Already redacted: a placeholder, or a key and its placeholder.
 		case cmdlineSecretKey.MatchString(a):
 			hideNext, afterKey, keyQuote = true, true, unclosedQuote(word)
 		case user && !strings.HasPrefix(a, "-") && strings.Contains(a, ":"):
@@ -180,7 +186,9 @@ func CommandArgs(args []string) []string {
 		case mysql && len(a) > 2 && strings.HasPrefix(a, "-p"):
 			a = "-p" + ForSinkEntity(a[2:])
 			sensitive = true
-		case cmdlineLongToken.MatchString(a) && strings.ContainsAny(a, "0123456789") && strings.IndexFunc(a, isASCIILetter) >= 0 && !strings.Contains(a, "/"):
+		case cmdlineLongToken.MatchString(bare) && strings.ContainsAny(bare, "0123456789") && strings.IndexFunc(bare, isASCIILetter) >= 0 && !strings.Contains(bare, "/"):
+			// The shape is checked without the placeholders in the word,
+			// whose spaces and brackets are not the token's.
 			a = ForSinkEntity(a)
 		}
 		if sensitive {
@@ -237,14 +245,12 @@ func openPlaceholder(word string) int {
 	}
 }
 
-// withoutPlaceholders is s with every redaction placeholder taken out, and
-// whether it held one.
-func withoutPlaceholders(s string) (string, bool) {
+// withoutPlaceholders is s with every redaction placeholder taken out.
+func withoutPlaceholders(s string) string {
 	if !strings.Contains(s, placeholderStart) {
-		return s, false
+		return s
 	}
 	var b strings.Builder
-	found := false
 	for {
 		i := strings.Index(s, placeholderStart)
 		if i < 0 {
@@ -257,10 +263,10 @@ func withoutPlaceholders(s string) (string, bool) {
 			continue
 		}
 		b.WriteString(s[:i])
-		s, found = s[end:], true
+		s = s[end:]
 	}
 	b.WriteString(s)
-	return b.String(), found
+	return b.String()
 }
 
 // mergePlaceholders joins the words of each redaction placeholder that a
@@ -326,14 +332,16 @@ func quoteCloses(word string, quote byte) bool {
 }
 
 // redactWords redacts the words of an argument that holds several, keeping
-// the white space between them.
+// the white space between them. A placeholder is part of the word it is in,
+// so each word comes back as one (GAP-0064: split on every space, the words
+// of a placeholder were merged again and fewer came back than went in).
 func redactWords(s string) string {
-	at := cmdlineWord.FindAllStringIndex(s, -1)
+	at := wordSpans(s)
 	words := make([]string, len(at))
 	for i, r := range at {
 		words[i] = s[r[0]:r[1]]
 	}
-	red := CommandArgs(words)
+	red := commandArgs(words)
 	var b strings.Builder
 	last := 0
 	for i, r := range at {
@@ -343,6 +351,41 @@ func redactWords(s string) string {
 	}
 	b.WriteString(s[last:])
 	return b.String()
+}
+
+// wordSpans are the start and end of each word of s: a run of characters
+// other than white space, in which a redaction placeholder, spaces and all,
+// counts as one character.
+func wordSpans(s string) [][2]int {
+	var spans [][2]int
+	start := -1
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], placeholderStart) {
+			if end := placeholderEnd(s, i); end > 0 {
+				if start < 0 {
+					start = i
+				}
+				i = end
+				continue
+			}
+		}
+		switch s[i] {
+		case ' ', '\t', '\n', '\f', '\r':
+			if start >= 0 {
+				spans = append(spans, [2]int{start, i})
+				start = -1
+			}
+		default:
+			if start < 0 {
+				start = i
+			}
+		}
+		i++
+	}
+	if start >= 0 {
+		spans = append(spans, [2]int{start, len(s)})
+	}
+	return spans
 }
 
 // splitEdgeQuotes splits the shell quotes, their backslash escapes (a script
