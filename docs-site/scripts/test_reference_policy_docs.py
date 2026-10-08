@@ -38,5 +38,16 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("`defenseclaw skill scan` without `--remote`", row)
 
 
+    def test_effective_config_is_file_resolution_not_live_gateway(self):
+        text = (DOCS / "cli.mdx").read_text()
+        row = next(line for line in text.splitlines()
+                   if line.startswith("| `defenseclaw config get KEY"))
+        section = text.split("`--effective` resolves", 1)[1].split("### Managed devices", 1)[0]
+        self.assertIn("current `config.yaml`", row)
+        self.assertIn("does not query the running gateway", section)
+        self.assertIn("rejected reload", section)
+        self.assertIn("`defenseclaw status`", section)
+
+
 if __name__ == "__main__":
     unittest.main()

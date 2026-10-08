@@ -933,7 +933,7 @@ model and [Configuration](/docs/reference/configuration) for every key.
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw config get KEY [--effective] [--format yaml\|json]` | Print one value or a whole section (secrets masked). A key `config.yaml` leaves out prints its default and says so on stderr. With `--effective`, guardrail levels (`guardrail.block_at`, `guardrail.connectors.C.alert_at`) and `admission[.<type>]` print the value the gateway enforces and its source on stderr: `config:<key>`, `pack-default:<pack>`, `derived:scanners.skill_scanner` or `builtin` (the shipped admission defaults). An `admission` key `config.yaml` leaves out prints that enforced value without the flag too. Exit `1` when the key has no value and no default, `2` for an unknown section. |
+| `defenseclaw config get KEY [--effective] [--format yaml\|json]` | Print one value or a whole section (secrets masked). A key `config.yaml` leaves out prints its default and says so on stderr. With `--effective`, guardrail levels (`guardrail.block_at`, `guardrail.connectors.C.alert_at`) and `admission[.<type>]` resolve the value from the current `config.yaml` and print its source on stderr: `config:<key>`, `pack-default:<pack>`, `derived:scanners.skill_scanner` or `builtin` (the shipped admission defaults). An `admission` key `config.yaml` leaves out prints that resolved value without the flag too. Exit `1` when the key has no value and no default, `2` for an unknown section. |
 | `defenseclaw config set KEY VALUE [--json] [--expect-sha256 S]` | Change one value through the config writer. `KEY` is a dotted path with `[i]` list indexes; `VALUE` is a YAML scalar, or any JSON value with `--json`. See [`config set` and `config unset`](#config-set-and-config-unset). |
 | `defenseclaw config unset KEY [--expect-sha256 S]` | Remove a key, so its default applies again. |
 | `defenseclaw config show [--section NAME] [--source] [--format yaml\|json]` | Print the whole configuration, or one top-level section, with the defaults that apply to the keys `config.yaml` leaves out. `--source` prints `config.yaml` as written, unresolved. `--effective` (with optional `--provenance`) prints only the observability section, resolved the way the gateway runs it. |
@@ -976,8 +976,9 @@ To read one item of a list, put its number in the path: `config get
 asset_policy.skill.denied.0.name`. `config get` also takes the spelling
 `config set` and `config unset` use, `asset_policy.skill.denied[0].name`.
 
-`--effective` answers "what does the gateway enforce, and why". The value goes
-to standard output and the source to standard error:
+`--effective` resolves the current `config.yaml` using gateway policy rules and
+shows where the value comes from. It does not query the running gateway. The
+value goes to standard output and the source to standard error:
 
 ```bash
 defenseclaw config get guardrail.block_at --effective
@@ -989,7 +990,10 @@ CRITICAL
 ```
 
 After `defenseclaw config set guardrail.block_at HIGH` the same command prints
-`HIGH` and `(source: config:guardrail.block_at)`.
+`HIGH` and `(source: config:guardrail.block_at)`. If a hand edit causes a
+rejected reload, this command can show the new file value while the gateway
+continues to enforce its previous generation. Check `defenseclaw status` or
+`defenseclaw doctor` to see whether the latest configuration was applied.
 
 ### `config set` and `config unset`
 
