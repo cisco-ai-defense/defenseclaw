@@ -33,6 +33,10 @@ stopped`. Nothing is changed; use the install command above.
 
 ### Breaking changes
 
+- Under the derived admission gate, LOW and INFO skill findings now allow. The
+  skill scanner defaults to `quiet` when a judge is configured; findings that
+  need human review use the `warn` path and appear in the review queue.
+
 - The retired top-level `otel:` configuration moves to `observability.destinations` in config_version 9.
 - `install.sh` and `install.ps1` install, upgrade, repair and roll back the
   same way on every platform. Each run keeps the replaced install in
