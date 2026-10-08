@@ -1321,22 +1321,37 @@ swap_app() {
 }
 
 restore_snapshot() {
-    local failed binary link name kept=true restored=true free_mb
-    # Only the latest failed install is kept: with a large audit database
-    # each copy holds gigabytes, and an earlier one is not used again.
-    for failed in "${DEFENSECLAW_HOME}"/.failed-*; do
-        if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}" || true; fi
-    done
-    failed="${DEFENSECLAW_HOME}/.failed-$(date +%Y%m%dT%H%M%S)"
-    # Putting the snapshot back only renames; keeping the failed install needs
-    # a new folder. On a full disk that mkdir failed and, under set -e, ended
-    # the restore before it began: no CLI, no gateway, no word (GAP-0375).
-    # Then the failed install is deleted instead, which also frees space.
-    mkdir -p "${failed}/data" 2>/dev/null || { kept=false; rm -rf "${failed}" 2>/dev/null || true; }
-    if [[ -d "${VENV}" ]]; then
-        { [[ "${kept}" == true ]] && mv "${VENV}" "${failed}/venv"; } || rm -rf "${VENV}" || restored=false
+    local failed="" binary link name dest kept=true restored=true moved free_mb
+    # A restore that stops part-way (a full disk) keeps the snapshot, and the
+    # next run finishes it from what this one recorded there: FAILED_DIR names
+    # the folder that keeps the failed install, VENV_BACK and DATA_ASIDE mark
+    # the steps that are done. Running a done step again set the data it had
+    # put back aside as the failed install and put nothing back, so
+    # config.yaml, .env and the policies were left only in .failed-<time> and
+    # the upgrade started from no configuration (GAP-0624).
+    [[ -f "${SNAP}/FAILED_DIR" ]] && failed="$(cat "${SNAP}/FAILED_DIR" 2>/dev/null || true)"
+    if [[ -z "${failed}" || ! -d "${failed}/data" ]]; then
+        # Only the latest failed install is kept: with a large audit database
+        # each copy holds gigabytes, and an earlier one is not used again.
+        for failed in "${DEFENSECLAW_HOME}"/.failed-*; do
+            if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}" || true; fi
+        done
+        failed="${DEFENSECLAW_HOME}/.failed-$(date +%Y%m%dT%H%M%S)"
+        # Putting the snapshot back only renames; keeping the failed install needs
+        # a new folder. On a full disk that mkdir failed and, under set -e, ended
+        # the restore before it began: no CLI, no gateway, no word (GAP-0375).
+        # Then the failed install is deleted instead, which also frees space.
+        mkdir -p "${failed}/data" 2>/dev/null || { kept=false; rm -rf "${failed}" 2>/dev/null || true; }
+        [[ "${kept}" != true ]] || printf '%s\n' "${failed}" > "${SNAP}/FAILED_DIR" 2>/dev/null || true
     fi
-    if [[ -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}" || restored=false; fi
+    if [[ ! -f "${SNAP}/VENV_BACK" ]]; then
+        moved=true
+        if [[ -d "${VENV}" ]]; then
+            { [[ "${kept}" == true ]] && mv "${VENV}" "${failed}/venv"; } || rm -rf "${VENV}" || moved=false
+        fi
+        if [[ "${moved}" == true && -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}" || moved=false; fi
+        if [[ "${moved}" == true ]]; then : > "${SNAP}/VENV_BACK" 2>/dev/null || true; else restored=false; fi
+    fi
     for binary in ${MANAGED_BINARIES}; do
         if [[ -f "${SNAP}/bin/${binary}" ]]; then
             { cp -p "${SNAP}/bin/${binary}" "${BIN_DIR}/.${binary}.old" && mv -f "${BIN_DIR}/.${binary}.old" "${BIN_DIR}/${binary}"; } \
@@ -1351,13 +1366,29 @@ restore_snapshot() {
     done
     rm -rf "${INSTALLER_DIR}" || restored=false
     if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || restored=false; fi
-    while IFS= read -r name; do
-        { [[ "${kept}" == true ]] && mv "${DEFENSECLAW_HOME}/${name}" "${failed}/data/" 2>/dev/null; } \
-            || rm -rf "${DEFENSECLAW_HOME:?}/${name}" || restored=false
-    done < <(data_entries)
-    for name in "${SNAP}/data"/* "${SNAP}/data"/.[!.]* "${SNAP}/data"/..?*; do
-        if [[ -e "${name}" || -L "${name}" ]]; then mv "${name}" "${DEFENSECLAW_HOME}/" || restored=false; fi
-    done
+    if [[ ! -f "${SNAP}/DATA_ASIDE" ]]; then
+        moved=true
+        while IFS= read -r name; do
+            { [[ "${kept}" == true ]] && mv "${DEFENSECLAW_HOME}/${name}" "${failed}/data/" 2>/dev/null; } \
+                || rm -rf "${DEFENSECLAW_HOME:?}/${name}" || moved=false
+        done < <(data_entries)
+        if [[ "${moved}" == true ]]; then : > "${SNAP}/DATA_ASIDE" 2>/dev/null || true; else restored=false; fi
+    fi
+    # The saved data goes back only over a data folder the failed install has
+    # left; a name made since an interrupted restore goes aside first.
+    if [[ -f "${SNAP}/DATA_ASIDE" ]]; then
+        for name in "${SNAP}/data"/* "${SNAP}/data"/.[!.]* "${SNAP}/data"/..?*; do
+            [[ -e "${name}" || -L "${name}" ]] || continue
+            dest="${DEFENSECLAW_HOME}/${name##*/}"
+            if [[ -e "${dest}" || -L "${dest}" ]]; then
+                { [[ "${kept}" == true ]] && mv "${dest}" "${failed}/data/${name##*/}.after-restore"; } \
+                    || rm -rf "${dest}" || { restored=false; continue; }
+            fi
+            mv "${name}" "${DEFENSECLAW_HOME}/" || restored=false
+        done
+    else
+        restored=false
+    fi
     if [[ -n "${APP_PATH}" && -d "${SNAP}/DefenseClawMac.app" ]]; then
         { rm -rf "${APP_PATH}" && mv "${SNAP}/DefenseClawMac.app" "${APP_PATH}"; } || restored=false
     fi

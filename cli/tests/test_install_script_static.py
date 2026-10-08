@@ -1166,6 +1166,49 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only bin folder")
+def test_a_restore_that_stopped_part_way_keeps_the_restored_data(tmp_path: Path) -> None:
+    # GAP-0624: a restore that failed on a full disk kept its snapshot; the
+    # next run set the data it had put back aside as the failed install and
+    # put nothing back, so config.yaml was left only in .failed-<time>.
+    dc_home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = dc_home / "previous.new"
+    for root in (dc_home, snap / "data"):
+        (root / "policies").mkdir(parents=True)
+        (root / "config.yaml").write_text("config_version: 7\n", encoding="utf-8")
+        (root / "policies" / "custom.rego").write_text("package custom\n", encoding="utf-8")
+    (snap / "bin").mkdir()
+    (snap / "bin" / "defenseclaw-gateway").write_text("0.8.4\n", encoding="utf-8")
+    (snap / "venv").mkdir()
+    (snap / "COMPLETE").touch()
+    (dc_home / ".venv").mkdir()
+    bin_dir.mkdir()
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { :; }\nwarn() { :; }\nerr() { echo "err: $*"; }\nrestart_old() { :; }\n'
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + f'DEFENSECLAW_HOME="{dc_home}" SNAP="{snap}" VENV="{dc_home}/.venv" BIN_DIR="{bin_dir}"\n'
+        + f'INSTALLER_DIR="{dc_home}/installer" APP_PATH="" VERSION=1.0.0 PREV_VERSION=0.8.4\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + "restore_snapshot\n",
+        encoding="utf-8",
+    )
+    bin_dir.chmod(0o555)
+    try:
+        first = _run([str(script)], tmp_path)
+    finally:
+        bin_dir.chmod(0o755)
+    assert "back completely" in first.stdout and snap.is_dir(), first
+
+    _run([str(script)], tmp_path)
+
+    assert not snap.exists()
+    assert (dc_home / "config.yaml").read_text(encoding="utf-8") == "config_version: 7\n"
+    assert (dc_home / "policies" / "custom.rego").is_file()
+    assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "0.8.4\n"
+
+
 def test_the_cli_says_an_install_is_running_during_the_swap(tmp_path: Path) -> None:
     # GAP-0391: while the swap moved the venv, a second `defenseclaw rollback`
     # (or any command after a killed run) failed with "command not found".
