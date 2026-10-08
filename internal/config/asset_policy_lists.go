@@ -16,7 +16,10 @@
 
 package config
 
-import "strings"
+import (
+	"runtime"
+	"strings"
+)
 
 // Explicit list verdicts returned by AssetListDecision and ToolListDecision.
 const (
@@ -58,11 +61,30 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 				if list.verdict == AssetListAllow && !allowPinMatches(rule.SourcePathContains, in.SourcePath) {
 					continue
 				}
+				if list.verdict == AssetListAllow && normalizeAssetToken(in.TargetType) == "mcp" &&
+					rule.Command != "" && !mcpAllowCommandMatches(rule, in) {
+					continue
+				}
 				return list.verdict, rule
 			}
 		}
 	}
 	return "", AssetPolicyRule{}
+}
+
+// mcpAllowCommandMatches binds an operator allow to the reviewed launcher and
+// complete argument list. Denied rules retain their broad basename/prefix scope.
+func mcpAllowCommandMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
+	if strings.TrimSpace(rule.Command) != strings.TrimSpace(in.Command) ||
+		len(rule.ArgsPrefix) != len(in.Args) {
+		return false
+	}
+	for i, want := range rule.ArgsPrefix {
+		if strings.TrimSpace(want) != strings.TrimSpace(in.Args[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // ToolListDecision matches asset_policy.tool.denied and .allowed for a tool
@@ -115,7 +137,41 @@ func allowPinMatches(pins []string, path string) bool {
 		return true
 	}
 	for _, pin := range pins {
-		if PathHasComponents(path, pin) {
+		if (runtime.GOOS == "windows" && PathHasComponents(path, pin)) ||
+			(runtime.GOOS != "windows" && pathHasComponentsExact(path, pin)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathHasComponentsExact preserves case for allow pins on case-sensitive hosts.
+func pathHasComponentsExact(path, marker string) bool {
+	parts := strings.Split(strings.ReplaceAll(path, "\\", "/"), "/")
+	pins := strings.Split(strings.ReplaceAll(marker, "\\", "/"), "/")
+	pathParts, pinParts := make([]string, 0, len(parts)), make([]string, 0, len(pins))
+	for _, part := range parts {
+		if part != "" {
+			pathParts = append(pathParts, part)
+		}
+	}
+	for _, part := range pins {
+		if part != "" {
+			pinParts = append(pinParts, part)
+		}
+	}
+	if len(pinParts) == 0 {
+		return false
+	}
+	for i := 0; i+len(pinParts) <= len(pathParts); i++ {
+		matched := true
+		for j := range pinParts {
+			if pathParts[i+j] != pinParts[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
 			return true
 		}
 	}
