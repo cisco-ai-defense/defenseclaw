@@ -1092,6 +1092,35 @@ func TestSecureClientDecidesWithTheStartTimeConfig(t *testing.T) {
 	}
 }
 
+// TestProfileExplainReportsTheLiveMode pins GAP-0895: after guardrail.mode
+// was hot-applied from observe to action, profile-explain still printed the
+// start-time mode while the hooks enforced the new one.
+func TestProfileExplainReportsTheLiveMode(t *testing.T) {
+	t.Cleanup(func() { liveGuardrailProfiles.Store(nil) })
+	liveGuardrailProfiles.Store(nil)
+	start := &config.Config{}
+	start.Guardrail.Mode = "observe"
+	live := &config.Config{}
+	live.Guardrail.Mode = "action"
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, start)
+	api.SetGenerationSource(func() *Generation { return &Generation{Config: live} })
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?connector=codex", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var out struct {
+		Effective struct {
+			Mode string `json:"mode"`
+		} `json:"effective"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body.String())
+	}
+	if out.Effective.Mode != hookModeForConfig(live, "codex") || out.Effective.Mode != "action" {
+		t.Fatalf("effective mode = %q, want the live action mode: %s", out.Effective.Mode, rec.Body.String())
+	}
+}
+
 // TestProfileExplainShowsTheSubjectWithoutProfiles pins GAP-0280: the
 // documented identity check (`profile explain --user U --json | jq .subject`)
 // printed null on an install with no guardrail profiles, because the handler

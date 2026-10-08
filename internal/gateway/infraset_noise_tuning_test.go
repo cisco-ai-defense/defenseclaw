@@ -208,3 +208,49 @@ func TestNetcatListenerUsesExposureTaxonomy(t *testing.T) {
 	}
 	t.Fatal("CMD-NETCAT-LISTEN missing")
 }
+
+// TestHomeSpelledAuthorizedKeysWriteBlocks pins GAP-0892/0894/0896 on the
+// default pack. A lone `echo k >> ~/.ssh/authorized_keys` lost its blocking
+// finding because the tilde rewrite gave the path fact its "~" spelling back
+// but not the redirect target, so the owner no longer tied the redirect to
+// the path; every spelling and writer must block alike, and reads stay quiet.
+func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
+	const connector = "home-spelled-authorized-keys"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	tests := []struct {
+		command, rule string
+		enforced      bool
+	}{
+		{`echo k >> ~/.ssh/authorized_keys`, "persistence.ssh_authorized_keys_command", true},
+		{`echo "ssh-ed25519 AAAAfixture m@t" >> ~/.ssh/authorized_keys`, "persistence.ssh_authorized_keys_command", true},
+		{`echo k >> "$HOME/.ssh/authorized_keys"`, "persistence.ssh_authorized_keys_command", true},
+		{`echo k >> /home/alice/.ssh/authorized_keys`, "persistence.ssh_authorized_keys_command", true},
+		{`echo k >> ~/".ssh/authorized_keys"`, "persistence.ssh_authorized_keys_command", true},
+		{`mkdir -p ~/.ssh && echo k >> ~/.ssh/authorized_keys`, "persistence.ssh_authorized_keys_command", true},
+		{`echo k > ~/.ssh/authorized_keys`, "persistence.ssh_authorized_keys_command", true},
+		{`echo k | tee -a ~/.ssh/authorized_keys`, "persistence.ssh_authorized_keys_command", true},
+		{`cat ~/.ssh/authorized_keys`, "", false},
+		{`grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", false},
+		{`echo k >> ~/notes.txt`, "", false},
+	}
+	for _, test := range tests {
+		input := actionfacts.Input{
+			Tool: "bash", Command: test.command, CWD: "/repo",
+			ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX,
+		}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, LegacyText: test.command, Connector: connector,
+			EnforcementCapable: true,
+		})
+		if test.rule == "" {
+			if len(findings) != 0 {
+				t.Errorf("%q: unexpected findings %v", test.command, findingIDs(findings))
+			}
+			continue
+		}
+		if len(findings) != 1 || findings[0].RuleID != test.rule ||
+			findings[0].contributesToEnforcement() != test.enforced {
+			t.Errorf("%q: findings %v, want only %s enforced=%t", test.command, findingIDs(findings), test.rule, test.enforced)
+		}
+	}
+}

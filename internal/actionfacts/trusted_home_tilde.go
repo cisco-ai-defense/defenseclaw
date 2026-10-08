@@ -105,10 +105,27 @@ func firstLiteral(word *syntax.Word) (*syntax.Lit, bool) {
 // respellTrustedPOSIXHomeTilde gives the path facts of rewritten operands
 // back their "~" spelling (Value and Normalized), as a partial parse of the
 // original text records them, while Resolved keeps the ActiveHome path, so
-// rules that match a home path by its spelling keep matching it.
+// rules that match a home path by its spelling keep matching it. A static
+// redirect target of those commands gets the same spelling, so it still
+// names its path fact: the owners that tie a redirect to the path it writes
+// compare the two values, and without it a lone `echo k >> ~/.ssh/
+// authorized_keys` lost its finding while the absolute and chained forms
+// kept theirs (GAP-0892, GAP-0894, GAP-0896).
 func respellTrustedPOSIXHomeTilde(facts *Facts, commandIDs map[int64]struct{}, tildeOperands map[string]string) {
 	if facts == nil || len(tildeOperands) == 0 {
 		return
+	}
+	for index := range facts.Commands {
+		command := &facts.Commands[index]
+		if _, ok := commandIDs[command.ID]; !ok || command.Dialect != DialectPOSIX {
+			continue
+		}
+		for redirectIndex := range command.Redirects {
+			redirect := &command.Redirects[redirectIndex]
+			if spelling, ok := tildeOperands[redirect.Target]; ok && !redirect.Expands {
+				redirect.Target = spelling
+			}
+		}
 	}
 	for index := range facts.Paths {
 		path := &facts.Paths[index]
