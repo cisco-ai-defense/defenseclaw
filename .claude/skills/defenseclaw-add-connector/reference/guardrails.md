@@ -10,7 +10,7 @@ This layer turns a connector's hook, plugin, proxy or ACP payload into a guardra
 | 1b | `api.go` `connectorHookHandlerByName` and the legacy route list | Fallback route list used when there is no registry. It is duplicated, so keep it in sync. |
 | 2 | `unified_hook_dispatch.go` `handleUnifiedConnectorHook`, `hookProfileForConnector` | Gets the profile from the registry through `HookProfileProvider`. Uses the contract ID from the lock, or `ResolveHookContract(name, agentVersion)`. |
 | 3 | `agent_hook.go` `handleAgentHook` | Enforces the body limit (413) and JSON decode (400). Checks trusted event headers: `X-DefenseClaw-Antigravity-Event`, `X-DefenseClaw-Copilot-Event`, and Codex `X-DefenseClaw-Hook-Event`/`-Contract` (409 on mismatch). A registered event outside `profile.SupportedEvents` gives 400. Also handles the Kiro surface (`kiroHookSurfaceFromHeaders`), correlation, `withAuthenticatedToolResource`, tool-chain capture and the judge session reset. |
-| 4 | `agent_hook.go` `normalizeAgentHookRequestWithCorrelationEvent`, `normalizeAgentHookRequestWithRawProfileEvent` | Generic field extraction (§3), then `ContentEnvelopeKey`, then `profile.Decode`, then `profile.DecodeToolArgs`. Decode may **not** set identity. |
+| 4 | `agent_hook.go` `normalizeAgentHookRequestWithCorrelationEvent`, `normalizeAgentHookRequestWithRawProfileEvent` | Generic field extraction (§3), then `ContentEnvelope`, then `profile.Decode`, then `profile.DecodeToolArgs`. Decode may **not** set identity. |
 | 5 | `hook_profile_runtime.go` `hookProfileRuntimes` | Only `codex` and `claudecode` have typed evaluators. Every other connector goes to `evaluateAgentHook`. Add an entry only for a bespoke evaluator. |
 | 6 | `agent_hook.go` `evaluateAgentHook` | Routes by event class (prompt, result, structured tool call). Builds `trustedActionRequest`. Merges asset policy, maps the verdict, renders the response. |
 | 7 | `inspect.go` `inspectTrustedToolPolicyCtx` | Order: managed AID-only short-circuit, MCP-server runtime block, static block/allow (`@connector/tool` first), `dispatchTrustedAction`, CodeGuard on write tools, the AID lane, the judge lane. |
@@ -43,7 +43,7 @@ This layer turns a connector's hook, plugin, proxy or ACP payload into a guardra
   - `runtimeAssetCanEnforce` (`asset_policy_runtime.go`).
 
 What to register:
-1. **Contract.** `Events`, `Capabilities` (BlockEvents, AskEvents), `ResponseFieldName`, `ContentEnvelopeKey` and `ToolCallLifecycle` in `builtinHookContracts` (core.md §3).
+1. **Contract.** `Events`, `Capabilities` (BlockEvents, AskEvents), `ResponseFieldName`, `ContentEnvelope` and `ToolCallLifecycle` in `builtinHookContracts` (core.md §3).
 2. **Lifecycle routing.** If the lifecycle `Version != 0` and the pre-tool event does not route **exactly** as structured-action, the generic fallback is off and the call is **never inspected** (`structuredToolEvent` in `evaluateAgentHook`). That is how the OpenHands PascalCase bug happened. A connector with no lifecycle (Kiro) uses the canonical `isGenericToolInspectionEvent` fallback.
 3. **Classifier switches.** If the pre-tool, prompt, result, turn-start or session-boundary names are new spellings, add them to the classifier switches in `agent_hook.go`. `runtimeAssetCanEnforce` reuses `isGenericToolInspectionEvent`, so a missing name also turns MCP and skill asset blocks into would-block.
 4. **Missing event name.** If stdin lacks the event name, bind it at Setup and forward it in a trusted header (Antigravity, Copilot), or map it in Decode (`openHandsStdinEventNames`).
@@ -63,7 +63,7 @@ Overrides:
 - **`Decode`** may set the event, CWD, tool name, args, content, direction and payload.
 - **`ToolArgsAuthoritative=true`** makes an empty result count as `ToolArgsProjectionUncertain` (the parser-uncertainty metric) instead of using the generic guess.
 - **`DecodeToolArgs(raw)`** has final authority over args. Antigravity's `antigravityToolArgsFromRawPayload` rejects duplicate keys and alias collisions.
-- **`ContentEnvelopeKey`** opens exactly one declared sub-object. There is no recursive scan. No contract declares one today, not even Hermes `extra`; `TestContentEnvelopeKeyDeclarations` pins that.
+- **`ContentEnvelope`** opens exactly one declared sub-object and reads exactly the one field it declares for the event. There is no recursive scan and no shared key list. Only Hermes declares one: its payload puts the prompt, tool result and model response under `extra` (GAP-0898; a contract that called the payload flat left every Hermes prompt unscanned). `TestContentEnvelopeDeclarations` pins that.
 
 Examples:
 - `openHandsProfileDecode` / `openHandsTerminalCommandArgs` (`connector/hook_only.go`)

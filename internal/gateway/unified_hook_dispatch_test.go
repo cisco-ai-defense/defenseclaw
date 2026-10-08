@@ -93,8 +93,8 @@ func TestHookProfileForConnector(t *testing.T) {
 	}{
 		{"codex", "codex", "codex", true, true, true},
 		{"claudecode", "claudecode", "claudecode", true, true, true},
-		// hermes has no Decode: its `extra` content is recovered by the
-		// generic decoder's ContentEnvelopeKey fallback.
+		// hermes has no Decode: the generic decoder reads its `extra`
+		// content from the ContentEnvelope its hook contract declares.
 		{"hermes", "hermes", "hermes", false, true, true},
 		{"cursor", "cursor", "cursor", true, true, true},
 		{"devin", "devin", "devin", true, true, true},
