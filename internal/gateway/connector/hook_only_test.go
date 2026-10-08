@@ -1626,6 +1626,9 @@ func TestHermesHookRepairReconcilesExactOwnedStateAndIsByteIdempotent(t *testing
 // DefenseClaw command; Setup used to refuse the repair and leave Hermes
 // unguarded. A command that only names the connector stays refused.
 func TestHermesHookRepairReplacesEditedHookPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher, not hermes-hook.sh")
+	}
 	root := testenv.PrivateTempDir(t)
 	path := filepath.Join(root, "config.yaml")
 	hookScript := filepath.Join(root, ".defenseclaw", "hooks", "hermes-hook.sh")
