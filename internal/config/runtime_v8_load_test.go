@@ -304,7 +304,7 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 				MaxSupportedConfigVersion+1, newerConfigAction),
 		},
 	} {
-		err := checkRuntimeConfigVersion(test.version)
+		err := checkRuntimeConfigVersion(test.version, false)
 		if test.want == "" {
 			if err != nil {
 				t.Fatalf("config_version %d rejected: %v", test.version, err)

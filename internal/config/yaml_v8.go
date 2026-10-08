@@ -352,6 +352,11 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 		return nil
 	case version >= 0 && version < v8YAMLConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUpgrade, "$.config_version", value,
+	if version == ConfigVersionV9 && v9SecureClientDocument(root) {
+		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
+			"Secure Client supports config_version 8 only",
+			"use a Secure Client config_version 8 source")
+	}
 			fmt.Sprintf("config_version %d is older than %d", version, v8YAMLConfigVersion),
 			"run `defenseclaw migrate`")
 	case version > MaxSupportedConfigVersion:

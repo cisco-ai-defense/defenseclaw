@@ -367,3 +367,19 @@ func TestParseV8YAMLSharesTheParseOfOneSource(t *testing.T) {
 		t.Fatal("malformed bytes were accepted from the cache")
 	}
 }
+
+func TestSecureClientV9SourceRejected(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\nadmission: {skill: {actions: {high: block}}}\n")
+	err := requireV8YAMLError(t, raw, V8YAMLErrorVersionUnsupported)
+	if err.Path != "$.config_version" {
+		t.Fatalf("error path = %q, want $.config_version", err.Path)
+	}
+	if err := checkRuntimeConfigVersion(9, true); err == nil {
+		t.Fatal("runtime version check accepted Secure Client v9")
+	}
+	if _, err := LoadRuntimeV8FromBytes("config.yaml", raw); err == nil {
+		t.Fatal("runtime loader accepted Secure Client v9 source")
+	}
+}
