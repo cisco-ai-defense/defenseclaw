@@ -3555,6 +3555,97 @@ function Revoke-DefenseClawStateAncestorTraverse {
         -ErrorAction Stop
 }
 
+# What a standard user's hook needs on the standalone vendor directory to
+# check it as an ancestor of the machine policy summary: read-permissions,
+# read-attributes and traverse (and synchronize), on that directory alone.
+# It cannot list the directory or read anything below it (GAP-0578).
+$script:VendorDirectoryUsersRights = [Security.AccessControl.FileSystemRights](0x1200a0)
+
+# Whether every standard user can check the vendor directory: an allow entry
+# for Users, Authenticated Users, Interactive or Everyone grants the rights,
+# and no deny entry for them takes any away.
+function Test-DefenseClawStandaloneVendorUsersRead {
+    param([Parameter(Mandatory)][string]$Path)
+    $required = [int64]$script:VendorDirectoryUsersRights
+    $everyUser = @($script:UsersSID, $script:AuthenticatedUsersSID, 'S-1-5-4', 'S-1-1-0')
+    $granted = [int64]0
+    $rules = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path).GetAccessRules(
+        $true, $true, [Security.Principal.SecurityIdentifier])
+    foreach ($rule in $rules) {
+        if (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0 -or
+            $everyUser -notcontains [string]$rule.IdentityReference.Value) {
+            continue
+        }
+        $rights = [int64]$rule.FileSystemRights -band 0xffffffffL
+        if (($rights -band 0xb0000000L) -ne 0) {
+            # GENERIC_ALL, GENERIC_READ or GENERIC_EXECUTE cover all three.
+            $rights = $rights -bor $required
+        }
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny) {
+            if (($rights -band $required) -ne 0) {
+                return $false
+            }
+            continue
+        }
+        $granted = $granted -bor $rights
+    }
+    return (($granted -band $required) -eq $required)
+}
+
+# A vendor directory that already existed (another Cisco product created it
+# with SYSTEM and Administrators only) left every enrolled user's hook
+# failing closed with enterprise_machine_policy_summary_untrusted while
+# Setup, verify and repair reported success (GAP-0578). Install and repair
+# add one entry for Users with exactly these rights, on that directory alone
+# and not inherited; owner and every other entry are preserved. Nothing is
+# added when users can already check the directory.
+function Grant-DefenseClawStandaloneVendorUsersRead {
+    param([Parameter(Mandatory)][string]$Path)
+    if (Test-DefenseClawStandaloneVendorUsersRead -Path $Path) {
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $Path
+    Assert-DefenseClawTrustedAncestor -Path $Path
+    $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    [void]$security.AddAccessRule(
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+            $script:VendorDirectoryUsersRights,
+            [Security.AccessControl.InheritanceFlags]::None,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+}
+
+# Gives back the entry Grant-DefenseClawStandaloneVendorUsersRead added (the
+# exact rights, not inherited), when the gateway gives back its own.
+function Revoke-DefenseClawStandaloneVendorUsersRead {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path -PathType Container)) {
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $Path
+    Assert-DefenseClawTrustedAncestor -Path $Path
+    $security = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    $ours = @($security.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]$_.IdentityReference.Value -ceq $script:UsersSID -and
+                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                $_.InheritanceFlags -eq [Security.AccessControl.InheritanceFlags]::None -and
+                $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and
+                ([int64]$_.FileSystemRights -band 0xffffffffL) -eq [int64]$script:VendorDirectoryUsersRights
+            })
+    if ($ours.Count -eq 0) {
+        return
+    }
+    foreach ($rule in $ours) {
+        [void]$security.RemoveAccessRuleSpecific($rule)
+    }
+    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $security -ErrorAction Stop
+}
+
 function Initialize-DefenseClawManagedRoot {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -6009,6 +6100,9 @@ function Set-DefenseClawManagedAcls {
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID
+        if (Test-DefenseClawStandaloneVendorDirectory -Path $ancestor) {
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $ancestor
+        }
     }
     if (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.ManagedIPCDirectory `
@@ -10045,6 +10139,9 @@ function Restore-DefenseClawTransaction {
             Revoke-DefenseClawStateAncestorTraverse `
                 -Path $ancestor `
                 -GatewayServiceSID $rolledBackGatewaySID
+            if (Test-DefenseClawStandaloneVendorDirectory -Path $ancestor) {
+                Revoke-DefenseClawStandaloneVendorUsersRead -Path $ancestor
+            }
         }
     }
     Remove-DefenseClawTransactionCreatedSharedDirectories `
@@ -17681,6 +17778,14 @@ function Assert-DefenseClawEnterpriseDeployment {
         Assert-DefenseClawStateAncestorTraverse `
             -Path $ancestor `
             -GatewayServiceSID $gatewaySID
+        if ((Test-DefenseClawStandaloneVendorDirectory -Path $ancestor) -and
+            -not (Test-DefenseClawStandaloneVendorUsersRead -Path $ancestor)) {
+            throw (
+                "standard users cannot read the permissions of $ancestor, so every enrolled user's hook fails closed " +
+                '(enterprise_machine_policy_summary_untrusted). Run Setup /repair, which grants BUILTIN\Users ' +
+                "read-permissions and traverse on that folder alone, or run icacls `"$ancestor`" /grant *S-1-5-32-545:(S,RC,RA,X)"
+            )
+        }
     }
     Assert-DefenseClawPathAcl `
         -Path $Layout.ManagedIPCDirectory `
@@ -21771,6 +21876,9 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         Revoke-DefenseClawStateAncestorTraverse `
             -Path $ancestor `
             -GatewayServiceSID $cleanupGatewaySID
+        if (Test-DefenseClawStandaloneVendorDirectory -Path $ancestor) {
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $ancestor
+        }
     }
     if ($Purge) {
         [void](Publish-DefenseClawStatePurgeIntent `

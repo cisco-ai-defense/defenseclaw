@@ -287,6 +287,30 @@ try {
             }
             Reset-TestRoots
 
+            # GAP-0578: an existing vendor directory standard users cannot
+            # read (another Cisco product's SYSTEM and Administrators DACL)
+            # gets one this-folder Users entry from install and repair, which
+            # verify requires; uninstall gives back exactly that entry.
+            [void][IO.Directory]::CreateDirectory($vendor)
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $vendor -AclObject $vendorSecurity
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            if (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) {
+                $failures.Add('a SYSTEM and Administrators only vendor directory reads as checkable by users')
+            }
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            $usersRules = @(Get-TestUsersRules $vendor)
+            if ($usersRules.Count -ne 1 -or [int]$usersRules[0].FileSystemRights -ne 0x1200a0 -or
+                $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+                -not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
+                $failures.Add('install did not give an existing vendor directory exactly one this-folder Users read entry')
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
+                $failures.Add('uninstall did not give the vendor directory its DACL back')
+            }
+            Reset-TestRoots
+
             # Actions other than Install name the squatted root with a stable code.
             New-TestDirectory $vendor 'BU'
             try {
