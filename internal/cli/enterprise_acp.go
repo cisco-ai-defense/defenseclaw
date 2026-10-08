@@ -437,6 +437,11 @@ func runEnterpriseACPEnroll(cmd *cobra.Command, _ []string) error {
 		tokenPath, publishErr = acp.PublishEnterpriseUserToken(
 			enrollment.dataDir, enrollment.client, enrollment.agent, credential.Token,
 		)
+		if publishErr == nil && !secureClient {
+			// Best effort: without the note setup only skips the check for a
+			// replaced enrollment (GAP-0733).
+			_ = writeEnterpriseACPUserEnrollment(tokenPath, enrollment.profile, enterpriseACPProfileMode(enrollment.profile))
+		}
 		return publishErr
 	})
 	if err != nil {
@@ -549,6 +554,20 @@ func enterpriseACPQuotePath(path string, windows bool) string {
 	return fmt.Sprintf("%q", path)
 }
 
+// enterpriseACPProfileMode is the mode of profile in the central policy, as
+// the gateway resolves it.
+func enterpriseACPProfileMode(profile string) string {
+	if settings, ok := cfg.ACP.Profiles[profile]; ok {
+		if mode := strings.TrimSpace(settings.Mode); mode == string(acp.ModeObserve) || mode == string(acp.ModeAction) {
+			return mode
+		}
+	}
+	if strings.TrimSpace(cfg.ACP.Mode) == string(acp.ModeAction) {
+		return string(acp.ModeAction)
+	}
+	return string(acp.ModeObserve)
+}
+
 // enterpriseACPSetupCommand is the user-side command an enrollment reports:
 // this executable's own setup subcommand, because a managed host has no other
 // DefenseClaw command to run (GAP-0254). Secure Client has no setup
@@ -560,14 +579,7 @@ func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath str
 		guard = filepath.Join(filepath.Dir(path), "defenseclaw-acp"+filepath.Ext(path))
 	}
 	activate := ""
-	mode := strings.TrimSpace(cfg.ACP.Mode)
-	if mode == "" {
-		mode = "observe"
-	}
-	if profile, ok := cfg.ACP.Profiles[enrollment.profile]; ok && strings.TrimSpace(profile.Mode) != "" {
-		mode = strings.TrimSpace(profile.Mode)
-	}
-	if mode == "action" {
+	if enterpriseACPProfileMode(enrollment.profile) == string(acp.ModeAction) {
 		activate = " --activate"
 	}
 	if cfg.SecureClientIntegration() {

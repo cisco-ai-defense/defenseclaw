@@ -348,6 +348,12 @@ func TestEnterpriseACPEnrollReplacesTheOtherProfile(t *testing.T) {
 	if err != nil || len(enrollments) != 1 || enrollments[0].Profile != "act" {
 		t.Fatalf("enrollments = %+v, err = %v; want only the act enrollment", enrollments, err)
 	}
+	// Setup learns of the replacement from the note beside the copy
+	// (GAP-0733).
+	tokenPath, _ := acp.EnterpriseUserTokenPath(filepath.Join(userHome, ".defenseclaw"), "zed", "hermes")
+	if note, ok := readEnterpriseACPUserEnrollment(tokenPath); !ok || note.Profile != "act" || note.Mode != "action" {
+		t.Fatalf("enrollment note = %+v, %v; want profile act in action mode", note, ok)
+	}
 }
 
 // The Windows refusals named hook mutation and gave no next step; they now

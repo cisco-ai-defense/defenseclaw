@@ -82,6 +82,9 @@ type enterpriseACPUserSetup struct {
 	guard                  string
 	agentBinary            string
 	gatewayURL             string
+	// rerun is this setup command for another profile and mode, nil when
+	// unknown.
+	rerun func(profile string, mode acp.Mode) string
 }
 
 // enterpriseACPGuardCustody checks that the guard a managed lock pins is the
@@ -129,15 +132,38 @@ func runEnterpriseACPSetup(cmd *cobra.Command, _ []string) error {
 	if enterpriseACPActivate {
 		mode = acp.ModeAction
 	}
+	client := strings.ToLower(strings.TrimSpace(enterpriseACPClient))
+	agent := strings.ToLower(strings.TrimSpace(enterpriseACPAgent))
+	agentBinary := strings.TrimSpace(enterpriseACPAgentBinary)
+	windows := runtime.GOOS == "windows"
+	invoke := managedHostGatewayCommand()
+	if executable, execErr := os.Executable(); execErr == nil {
+		invoke = enterpriseACPQuotePath(executable, windows)
+	}
+	if windows {
+		invoke = "& " + invoke
+	}
 	result, err := setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
-		client:      strings.ToLower(strings.TrimSpace(enterpriseACPClient)),
-		agent:       strings.ToLower(strings.TrimSpace(enterpriseACPAgent)),
+		client:      client,
+		agent:       agent,
 		profile:     strings.TrimSpace(enterpriseACPProfile),
 		mode:        mode,
 		dataDir:     dataDir,
 		guard:       guard,
-		agentBinary: strings.TrimSpace(enterpriseACPAgentBinary),
+		agentBinary: agentBinary,
 		gatewayURL:  fmt.Sprintf("http://127.0.0.1:%d/api/v1/acp/evaluate", enterpriseACPAPIPort),
+		rerun: func(profile string, mode acp.Mode) string {
+			command := fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s", invoke, client, agent, profile)
+			if mode == acp.ModeAction {
+				command += " --activate"
+			}
+			command += fmt.Sprintf(" --data-dir %s --api-port %d --guard-binary %s", enterpriseACPQuotePath(dataDir, windows),
+				enterpriseACPAPIPort, enterpriseACPQuotePath(guard, windows))
+			if agentBinary != "" {
+				command += " --agent-binary " + enterpriseACPQuotePath(agentBinary, windows)
+			}
+			return command
+		},
 	})
 	if err != nil {
 		return enterpriseACPResult(cmd, nil, err)
@@ -202,6 +228,17 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 	}
 	if err := validateEnterpriseACPUserToken(tokenPath); err != nil {
 		return result, err
+	}
+	if note, ok := readEnterpriseACPUserEnrollment(tokenPath); ok && note.Profile != in.profile {
+		// The copy holds the credential of a newer enrollment: this command
+		// would point the working entry and lock at the replaced profile
+		// (GAP-0733).
+		next := "the setup command that enrollment reported"
+		if in.rerun != nil {
+			next = in.rerun(note.Profile, acp.Mode(note.Mode))
+		}
+		return result, fmt.Errorf("this setup command is for profile %s, but your administrator enrolled you for %s/%s in profile %s "+
+			"(%s), which replaced it; nothing was changed. Run: %s", in.profile, in.client, in.agent, note.Profile, note.EnrolledAt, next)
 	}
 	guard, err := resolveACPExecutable(in.guard, "DefenseClaw ACP guard")
 	if err != nil {
