@@ -130,9 +130,9 @@ if [ "$intune" -eq 1 ] && [ "$command" = add ] && [ "$account" != "$console" ]; 
   # Intune evaluated the assignment for the Mac's primary user; adding
   # whoever is in front would give a non-member the group's profile.
   if [ -z "$console" ]; then
-    die "$account is not in front at the console (the login window is showing); nothing changed, and Intune runs this script again later" 1
+    die "$account is not in front at the console (the login window is showing); nothing changed; configure Intune script frequency or failed-script retries to run it again" 1
   fi
-  die "$account is not the user in front at the console ($console); this copy adds only the account it names while that account is in front. Nothing changed; Intune runs this script again later. DefenseClaw expects one signed-in Entra user per Mac" 1
+  die "$account is not the user in front at the console ($console); this copy adds only the account it names while that account is in front. Nothing changed; configure Intune script frequency or failed-script retries to run it again. DefenseClaw expects one signed-in Entra user per Mac" 1
 fi
 /usr/bin/id "$account" >/dev/null 2>&1 || die "no account named $account"
 
