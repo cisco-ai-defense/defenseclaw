@@ -232,6 +232,7 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 			IDEInventory: opts.IDEInventory,
 		}),
 		catalog:       catalog,
+		userHomeScan:  true,
 		processOwners: map[string]bool{account: true, strconv.Itoa(uid): true},
 	}
 	scanID := newScanID()

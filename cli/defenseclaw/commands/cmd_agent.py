@@ -5825,12 +5825,25 @@ def identities(
     if next_cursor:
         hint = "" if limit else " Narrow the list with --user or --connector."
         click.echo(f"Showing the {len(rows)} most recently seen of {total} agent identities.{hint}", err=True)
+    persisted = payload.get("persisted")
+    persist_error = str(payload.get("persist_error") or "").strip()
     if as_json:
-        click.echo(json.dumps(
-            {"enabled": bool(payload.get("enabled", False)), "identities": rows,
-             "total": total, "next_cursor": next_cursor},
-            indent=2, sort_keys=True))
+        out: dict[str, Any] = {"enabled": bool(payload.get("enabled", False)), "identities": rows,
+                               "total": total, "next_cursor": next_cursor}
+        if isinstance(persisted, bool):
+            out["persisted"] = persisted
+        if persist_error:
+            out["persist_error"] = persist_error
+        click.echo(json.dumps(out, indent=2, sort_keys=True))
         return
+    if persisted is False and payload.get("enabled") is not False:
+        # GAP-0393: the list is the gateway's memory only.
+        reason = f" ({persist_error})" if persist_error else ""
+        click.echo(
+            f"Warning: agent identities are not being saved to inventory.db{reason}; session counts and "
+            "first-seen times reset at the next gateway restart. Run 'defenseclaw doctor'.",
+            err=True,
+        )
     if payload.get("enabled") is False:
         click.echo("Agent identities are not recorded on this deployment.")
         return

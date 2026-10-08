@@ -255,6 +255,7 @@ type APIServer struct {
 	hookSpawnIntentOrder              []string
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
+	copilotSubagents                  []copilotPendingSubagent
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState
@@ -1386,6 +1387,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if ledger := agentIdentityLedgerHealth(); ledger != nil {
+		body["agent_identities"] = ledger
+	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
 		body["acp"] = map[string]interface{}{
 			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),

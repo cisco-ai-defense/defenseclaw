@@ -194,6 +194,31 @@ to that destination. Supported selectors are `buckets`, `sources`, `connectors`,
 Collection happens before routing and controls runtime cost. If a bucket has
 `collect.traces: false`, no destination route can recreate those traces.
 
+The `telemetry.ingest` bucket also carries `correlation.relationship.changed`,
+the links between a session's events, turns, tools and agents that Agent360
+draws. One is sent when a relationship is created or its status changes, not
+for every event that adds evidence to it. Lineage is still a large share of a
+busy session's export. To keep it out of a destination such as Splunk HEC,
+drop it with a route ahead of the routes that send:
+
+```yaml
+observability:
+  destinations:
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+      routes:
+        - name: drop-relationship-changes
+          signals: [logs]
+          selector: {event_names: [correlation.relationship.changed]}
+          action: drop
+        - name: everything-else
+          signals: [logs]
+          selector: {buckets: ["*"]}
+          action: send
+```
+
 A small set of compliance events, the *mandatory floor*, is always written to
 local SQLite even when log collection for its bucket is turned off. These
 events carry no prompt or tool content, and they are never exported.

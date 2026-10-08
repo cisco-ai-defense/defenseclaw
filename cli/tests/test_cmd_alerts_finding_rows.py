@@ -152,6 +152,32 @@ class AlertFindingRowsTests(unittest.TestCase):
                      f"alerts acknowledge --id {blocked_id}"):
             self.assertIn(text, show.output)
 
+    def test_show_names_the_user_agent_session_and_depth(self):
+        # GAP-0381: an admin goes from a block alert to the agent that caused it.
+        for column in ("session_id", "agent_instance_id"):
+            if column not in {row[1] for row in self.app.store.db.execute("PRAGMA table_info(audit_events)")}:
+                self.app.store.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        finding_id = self._finding("req-sub", "connector=claudecode result=ok action=block mode=action",
+                                   datetime.now(timezone.utc))
+        decision = Event(action="hook_decision", target="PreToolUse", severity="INFO", connector="claudecode",
+                         structured={"defenseclaw.user.name": "alice", "defenseclaw.agent.depth": 1,
+                                     "defenseclaw.agent.identity.id": "agt-0123456789abcdef"})
+        self.app.store.log_event(decision)
+        self.app.store.db.execute("UPDATE audit_events SET request_id='req-sub' WHERE id=?", (decision.id,))
+        self.app.store.db.execute("UPDATE audit_events SET session_id=?, agent_instance_id=? WHERE id=?",
+                                  ("sess-1\u202e", "ais-fedcba9876543210", finding_id))
+        self.app.store.db.commit()
+
+        show = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(show.exit_code, 0, show.output)
+        for text in ("alice", "agt-0123456789abcdef", "ais-fedcba9876543210", "1 (sub-agent)",
+                     "agent identities --user alice --connector claudecode"):
+            self.assertIn(text, show.output)
+        self.assertIn("sess-1", show.output)
+        self.assertNotIn("\u202e", show.output)
+        as_json = self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertIn('"agent_depth": 1', as_json.output)
+
     def test_a_block_explained_by_a_finding_is_one_alert(self):
         """GAP-1305: one alert per block, like the TUI; a lone hook block stays."""
         now = datetime.now(timezone.utc)

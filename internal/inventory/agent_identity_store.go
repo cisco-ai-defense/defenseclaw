@@ -76,7 +76,8 @@ func (r *AgentIdentityRecord) NoteSession(id string) {
 }
 
 // ForgetSession takes back a session NoteSession counted in this batch: it
-// turned out to be a sub-agent's, not a chat of the agent.
+// turned out to be a sub-agent's, not a chat of the agent. The last session
+// is then the newest one the batch still counts.
 func (r *AgentIdentityRecord) ForgetSession(id string) {
 	if i := slices.Index(r.SessionIDs, id); i >= 0 {
 		r.SessionIDs = slices.Delete(r.SessionIDs, i, i+1)
@@ -84,6 +85,9 @@ func (r *AgentIdentityRecord) ForgetSession(id string) {
 	}
 	if r.LastSessionID == id {
 		r.LastSessionID = ""
+		if n := len(r.SessionIDs); n > 0 {
+			r.LastSessionID = r.SessionIDs[n-1]
+		}
 	}
 }
 

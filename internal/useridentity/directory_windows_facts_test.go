@@ -64,6 +64,15 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 	if local.Directory != DirectoryLocal || local.Principal != "" || local.UPN != "" || local.AccountDomain != "WS01" {
 		t.Fatalf("local facts = %+v", local)
 	}
+	// GAP-0417: after a UPN sign-in the LSA names the account in UPN form;
+	// the principal is that UPN, not the UPN with the realm appended again.
+	upnSID := "S-1-5-21-1-2-3-1106"
+	reader.accounts[upnSID] = [2]string{"Dave@corp.example.com", "CORP"}
+	upnForm := resolveWindowsDirectoryFacts(reader, upnSID, func(string) string { return "" }, now)
+	if upnForm.Directory != DirectoryActiveDirectory || upnForm.UPN != "dave@corp.example.com" ||
+		upnForm.Principal != "dave@corp.example.com" {
+		t.Fatalf("UPN-form LSA account facts = %+v", upnForm)
+	}
 }
 
 // TestADUPNCacheWaitsAndRetriesFailures pins GAP-0129: a lookup answers within

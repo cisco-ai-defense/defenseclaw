@@ -217,7 +217,10 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 	inv := &IDEInventory{Scope: s.ideInventoryScope(), ScannedAt: now}
 	var signals []AISignal
 	for _, home := range homes {
-		limits := ideplugins.Limits{FollowSymlinks: !serviceContext}
+		// Only a user's own gateway follows links: a link a user planted
+		// toward another readable home must not put that account's
+		// plugins in a managed inventory (GAP-0396).
+		limits := ideplugins.Limits{FollowSymlinks: !serviceContext && !s.userHomeScan}
 		if !serviceContext {
 			limits.RoamingAppData, limits.LocalAppData = platformIDEAppData(home)
 		}

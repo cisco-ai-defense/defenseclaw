@@ -1043,6 +1043,7 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		// identity from the hook path (GAP-0203).
 		AgentIdentityID: agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
 	}
+	meta = a.joinCodexNotifyLineage(meta)
 
 	if prompt := codexNotifyPrompt(payload); prompt != "" {
 		emittedPromptID := a.emitLLMPromptEventV8(ctx, meta, prompt, nil)
@@ -1063,6 +1064,41 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		spanMeta.Source = "codex"
 		a.emitHookLLMSpan(ctx, spanMeta, response)
 	}
+}
+
+// joinCodexNotifyLineage gives a notify model log the lineage the hook path
+// retained for its session (root and parent session, agent root, parent and
+// depth, lifecycle), so the notify pair joins the session's hook rows
+// (GAP-0203). The user's identity facts are taken only when the hook path
+// saw the same user. Secure Client notify logs carry no agent and are left
+// as they are.
+func (a *APIServer) joinCodexNotifyLineage(meta llmEventMeta) llmEventMeta {
+	if a == nil || meta.AgentID == "" || meta.SessionID == "" {
+		return meta
+	}
+	snapshot, ok := a.hookLifecycleSnapshot("codex", meta.SessionID, meta.AgentID)
+	if !ok {
+		// A sub-agent thread's hooks name its own agent node.
+		if snapshot, ok = a.hookLifecycleSnapshot("codex", meta.SessionID, ""); !ok {
+			return meta
+		}
+		meta.AgentID = snapshot.AgentID
+	}
+	meta.RootAgentID = firstNonEmpty(snapshot.RootAgentID, snapshot.AgentID)
+	meta.ParentAgentID = snapshot.ParentAgentID
+	meta.LineageProvenance = snapshot.LineageProvenance
+	meta.RootSessionID = firstNonEmpty(snapshot.RootSessionID, snapshot.SessionID)
+	meta.ParentSessionID = snapshot.ParentSessionID
+	meta.AgentDepth = snapshot.AgentDepth
+	meta.LifecycleID = snapshot.LifecycleID
+	meta.ExecutionID = snapshot.ExecutionID
+	meta.SessionSource = snapshot.SessionSource
+	meta.SessionResumed = snapshot.SessionResumed
+	if meta.UserID != "" && meta.UserID == snapshot.UserID {
+		meta.UserEmail = firstNonEmpty(meta.UserEmail, snapshot.UserEmail)
+		meta.Identity = snapshot.Identity
+	}
+	return meta
 }
 
 func codexNotifyPrompt(payload map[string]any) string {

@@ -53,6 +53,13 @@ func TestCommittedCorrelationRelationshipBuildsExplainableExportLog(t *testing.T
 			RuleID: "bounded-similarity", RuleVersion: "codex-correlation-v1",
 			EvidenceCount: 3,
 			Status:        audit.CorrelationRelationshipCandidate, CreatedAt: time.Now().UTC(),
+		}, {
+			// GAP-0423: an occurrence that only added evidence exports nothing.
+			RelationshipID: "rel-fedcba9876543210", FromKind: audit.CorrelationNodeSemanticEvent,
+			FromID: string(semantic), ToKind: audit.CorrelationNodeSession, ToID: "session-1",
+			Type: audit.CorrelationBelongsTo, Method: audit.CorrelationMethodReported, Confidence: 95,
+			RuleID: "session-membership", RuleVersion: "codex-correlation-v1", EvidenceCount: 37,
+			Status: audit.CorrelationRelationshipActive, Unchanged: true,
 		}},
 	)
 	if err != nil {
