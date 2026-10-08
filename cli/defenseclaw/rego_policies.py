@@ -63,6 +63,7 @@ STOCK_REGO_DIGESTS: dict[str, frozenset[str]] = {
             "9dfe95603d4a738909795a4e77eb7315fc114768dee4f87ec9fab7759f8f30d5",
             "a54e581eb230bb0dd3f97938daca5dcc4d3afef42d48c224f29081f37d8dc3d0",
             "b105ce0e0d756f4ab4be3b185b6201049cc044733572d19deb33e6b24f8f4071",
+            "b7cc8b152464899618781de6ae23eb37efbac5c5f9717c0642068013f7e63011",
             "bf31313dded61d6de664ce71c15644c3817adc8d402d0a5c6805603eff653bf1",
             "c08676ddf79eafee6deae18589c30a2167c708bc8d2dc633b4992d8c8e7a97f2",
         }
