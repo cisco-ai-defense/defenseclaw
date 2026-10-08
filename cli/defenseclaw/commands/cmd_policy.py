@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from typing import NoReturn
 
 import click
@@ -791,9 +792,9 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
     data = _load_policy(path)
 
     watch_raw = data.get("watch", {})
-    if asset_lists.is_secure_client(app.cfg):
-        _sync_opa_data(app, data)
-    else:
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    opa_update = _prepare_opa_data(app, data) if secure_client else None
+    if not secure_client:
         try:
             app.cfg.admission = _admission_from_policy(data)
             _apply_policy_guardrail(app.cfg, data)
@@ -869,7 +870,12 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
                         f"Skipped webhook {label}: a webhook with that name or URL is already configured"
                     )
             app.cfg.webhooks = merged
-    result = app.cfg.save()
+    if opa_update is not None:
+        # The writer validates and saves config first, under its lock. If the
+        # OPA replacement fails, save_verified restores the prior config.
+        result = app.cfg.save_verified(lambda _path: _write_opa_data(*opa_update))
+    else:
+        result = app.cfg.save()
     for note in webhook_notes:
         click.echo(f"  {note}")
     return path, list(getattr(result, "restart_required", None) or [])
@@ -1582,8 +1588,8 @@ def _opa_runtime_action(runtime: str) -> str:
     return "block" if value in ("disable", "block") else "allow"
 
 
-def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
-    """Sync OPA data.json with the activated policy settings.
+def _prepare_opa_data(app: AppContext, policy_data: dict) -> tuple[str, dict]:
+    """Prepare OPA data.json from a named policy without changing the file.
 
     This performs a complete sync of all policy dimensions:
     - config (admission settings, enforcement)
@@ -1725,9 +1731,29 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
             if key in audit_cfg:
                 opa_data["audit"][key] = audit_cfg[key]
 
-    with open(data_json_path, "w") as f:
-        json.dump(opa_data, f, indent=2)
-        f.write("\n")
+    return data_json_path, opa_data
+
+
+def _write_opa_data(path: str, data: dict) -> None:
+    """Replace legacy OPA data atomically, preserving its file mode."""
+    mode = os.stat(path).st_mode & 0o777
+    fd, staged = tempfile.mkstemp(prefix=".data-", suffix=".json", dir=os.path.dirname(path))
+    try:
+        os.chmod(staged, mode)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(staged, path)
+    finally:
+        if os.path.exists(staged):
+            os.unlink(staged)
+
+
+def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
+    """Sync legacy OPA data for an active policy edit."""
+    _write_opa_data(*_prepare_opa_data(app, policy_data))
 
 
 def _validate_legacy_data(rego_dir: str) -> bool:

@@ -633,7 +633,14 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// global entry, mirroring the sidecar lane and the PolicyEngine helpers:
 	//   block @C/T → allow @C/T → block T → allow T → scan
 	// The lists are config.yaml asset_policy (tool and mcp).
-	pe := enforce.NewPolicyEngine(a.store).WithConfig(a.liveConfig)
+	// Keep all static checks in this decision on the request snapshot. The
+	// Secure Client path keeps its pre-1.0 live policy source (issue #1092).
+	policyConfig := a.decisionConfig(ctx)
+	policySource := func() *config.Config { return policyConfig }
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		policySource = a.liveConfig
+	}
+	pe := enforce.NewPolicyEngine(a.store).WithConfig(policySource)
 	// MCP-server runtime block: a blocked MCP server denies ALL of its
 	// tools, regardless of any per-tool allow. This is the Go-side runtime
 	// enforcement of `defenseclaw mcp block <server>` (global or

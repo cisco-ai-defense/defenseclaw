@@ -11,6 +11,7 @@
 package assetfacts
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,5 +38,19 @@ func TestEncodePreservesPinnedMCPWithLargeArguments(t *testing.T) {
 		if got.MCP.Args[i] != args[i] {
 			t.Fatalf("MCP argument %d changed", i)
 		}
+	}
+}
+
+func TestSkillFolderRefsKeepsDistinctPathsWithSameName(t *testing.T) {
+	home := t.TempDir()
+	first := filepath.Join(home, ".agents", "skills", "shared")
+	second := filepath.Join(home, "project", ".agents", "skills", "shared")
+	refs := SkillFolderRefs([]string{
+		filepath.Join(first, "SKILL.md"),
+		filepath.Join(second, "SKILL.md"),
+		filepath.Join(first, "other.md"),
+	}, home, home)
+	if len(refs) != 2 || refs[0].Dir != first || refs[1].Dir != second {
+		t.Fatalf("distinct skill paths were not preserved: %#v", refs)
 	}
 }

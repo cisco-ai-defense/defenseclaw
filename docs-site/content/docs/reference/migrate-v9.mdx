@@ -545,10 +545,12 @@ config-driven policy.
 
 ### Custom providers
 
-The v9 migration imports an ordinary 0.8.x `custom-providers.json` into
-`llm_providers.custom` and `llm_providers.ollama_ports` in `config.yaml`,
-then retires the legacy overlay. A subsequently rendered file marked
-`_derived_from` is derived output and is not read back.
+The migration moves entries from a legacy `custom-providers.json` into
+`llm_providers.custom` and `llm_providers.ollama_ports` in `config.yaml`.
+For an overlay inside the data home, it then renames the old file to
+`custom-providers.json.migrated-v9`. An overlay outside the data home stays
+in place so a 0.8.x rollback can still read it. Future provider changes use
+`config.yaml`; any generated overlay is derived from that config.
 
 If any legacy provider has `request_overrides`, which `llm_providers` cannot
 hold, migration records a note and leaves the entire unmarked overlay as a
@@ -752,7 +754,19 @@ forward again. To stay on 0.8.x, go back by hand:
    module came from 1.0, restore that module from the matching 0.8.x policy
    bundle before starting the gateway. A restored `config.yaml` alone does
    not restore the older admission decisions.
-5. Start the 0.8.x gateway and verify the restored settings.
+5. If the legacy provider overlay was migrated, restore it in the configured
+   data directory before starting the old gateway:
+
+   ```bash
+   cd ~/.defenseclaw
+   if [ -f custom-providers.json.migrated-v9 ]; then
+     mv custom-providers.json.migrated-v9 custom-providers.json
+   fi
+   ```
+
+   Use your configured `data_dir` instead of `~/.defenseclaw` if it differs.
+   An overlay outside the data home was left in place and needs no rename.
+6. Start the 0.8.x gateway and verify the restored settings.
 
 If you do not have a matching pre-upgrade backup, use `defenseclaw rollback`
 from the 1.x install instead (for a Windows 0.8.7-0.8.10 Setup install, the
