@@ -67,3 +67,21 @@ def test_secure_client_agent_command_tree_hides_new_commands() -> None:
     finally:
         cleanup_app(app, db_path, tmp_dir)
 
+def test_secure_client_alerts_omit_agent_facts_in_json_and_detail() -> None:
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        app.store.log_event(Event(action="scan", target="x", severity="HIGH",
+                                  details="test alert", timestamp=datetime.now(timezone.utc)))
+        def facts(_store, ids):
+            return {id_: [("Session", "private-session")] for id_ in ids}
+        with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"), \
+             patch("defenseclaw.commands.cmd_alerts.alert_agent_facts", side_effect=facts) as lookup:
+            json_result = CliRunner().invoke(alerts, ["--json"], obj=app, catch_exceptions=False)
+            detail_result = CliRunner().invoke(alerts, ["--show", "1"], obj=app, catch_exceptions=False)
+        assert json_result.exit_code == 0, json_result.output
+        assert detail_result.exit_code == 0, detail_result.output
+        assert "session_id" not in json_result.output
+        assert "private-session" not in detail_result.output
+        lookup.assert_not_called()
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
