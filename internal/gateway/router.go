@@ -677,7 +677,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// operation. The source reports no start instant, so the adapter
 		// records a truthful zero-duration span and retains only its ended
 		// W3C context for a subsequent tool or approval child.
-		if msg.Role == "assistant" && msg.Model != "" {
+		if msg.Role == "assistant" && msg.Model != "" && r.health != nil && !secureClientGeneration() {
 			r.health.RecordAgentModelActivity()
 		}
 		if msg.Role == "assistant" && msg.Model != "" && emitModelOperation {
