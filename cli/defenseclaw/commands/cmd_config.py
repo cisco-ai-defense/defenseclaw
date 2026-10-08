@@ -280,7 +280,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             _echo_value(value, fmt)
             return
     if written is not None:
-        view = _merge_defaults(written, _v8_defaults(app, profiles=parts[:2] in (["guardrail", "profiles"], ["guardrail", "profile_assignments"])))
+        profile_key = parts[:2] in (["guardrail", "profiles"], ["guardrail", "profile_assignments"])
+        view = _merge_defaults(written, _v8_defaults(app, profiles=profile_key))
         if parts == ["guardrail", "hook_self_heal"]:
             view.setdefault("guardrail", {}).setdefault("hook_self_heal", True)
         _resolve_defaults(app, view, written)
