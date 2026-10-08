@@ -853,6 +853,7 @@ def ensure_rule(client: Okta, report: Report, policy: dict[str, Any] | None, exi
             for kind in ("users", "groups")
         )
         and rule.get("status") == "ACTIVE"
+        and rule.get("priority") == priority
         and action.get("access") == "ALLOW"
         and password_only
     )
@@ -907,6 +908,9 @@ def cmd_signon_policy(client: Okta, args: argparse.Namespace) -> int:
     existing = client.get_all(f"/api/v1/policies/{policy['id']}/rules") if policy is not None else []
     ensure_rule(client, report, policy, existing, f"{args.rule_name} (bind user)", 0,
                 {"users": {"include": [bind["id"]]}}, f"password only for {args.bind_login}")
+    if not report.dry_run and policy is not None:
+        # Okta can shift other rules when the bind rule moves; use current priorities.
+        existing = client.get_all(f"/api/v1/policies/{policy['id']}/rules")
     ensure_rule(client, report, policy, existing, f"{args.rule_name} (group)", 1,
                 {"groups": {"include": [group["id"]]}}, f"password only for members of {args.group}")
 
