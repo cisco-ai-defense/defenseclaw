@@ -209,6 +209,7 @@ func New(cfg Config) *Controller {
 		names:      map[string]known{},
 		totals:     map[string]int64{},
 	}
+	sweepInterruptedWrites(cfg.Dirs.State, cfg.Now(), cfg.Logger)
 	if err := readJSON(cfg.Dirs.StateFile(), &c.st); err != nil && !errors.Is(err, os.ErrNotExist) {
 		cfg.Logger.Warn("kernel policy state unreadable; starting from the live state", "error", err)
 		c.st = FileState{}

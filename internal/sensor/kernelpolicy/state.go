@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -300,6 +301,39 @@ func readJSON(path string, into any) error {
 		return fmt.Errorf("kernelpolicy: %s: %w", path, err)
 	}
 	return nil
+}
+
+// interruptedWriteAge is how old a temp file of an interrupted state write
+// must be before the helper's start removes it: older than any write in
+// flight (the root CLI's pause and cleanup write the same directory).
+const interruptedWriteAge = 10 * time.Minute
+
+// sweepInterruptedWrites removes the temp files that writes into the state
+// directory left when their process ended mid-write. safefile removes its
+// temp file in a defer, which an exit skips, and the helper exits on purpose
+// when the manifest changes, so restarts left one now and then, without
+// bound (GAP-0047).
+func sweepInterruptedWrites(dir string, now time.Time, logger *slog.Logger) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	removed := 0
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".safefile-") || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) < interruptedWriteAge {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, entry.Name())) == nil {
+			removed++
+		}
+	}
+	if removed > 0 && logger != nil {
+		logger.Info("kernel policy: removed the temp files of interrupted state writes", "count", removed)
+	}
 }
 
 func writeJSON(path string, value any) error {
