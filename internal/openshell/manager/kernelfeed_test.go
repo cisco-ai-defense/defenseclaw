@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"slices"
@@ -100,6 +101,39 @@ func exitFrame(sandboxID, exec string, hostPID, code int, at time.Time) sandboxf
 
 func processRecords(e *harnessEnv, name string) []audit.SandboxProcessEvent {
 	return where(&e.tel.mu, &e.tel.processes, func(ev audit.SandboxProcessEvent) bool { return ev.Sandbox.Name == name })
+}
+
+// GAP-0022: OpenShell names pid 0 for every connection, so a destination
+// finds its program's process by path and connect time. On tg the
+// processes came from the kernel feed (curls of a fraction of a second, each
+// with its in-sandbox pid): the curl running when its connection was seen
+// gives the row its lineage, up through the shell and the agent.
+func TestDestinationLineageFromKernelFeedProcesses(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the kernel feed is Linux only")
+	}
+	var sample atomic.Pointer[string]
+	e, b, id := kernelBox(t, "kfdest", &sample)
+	ctx := context.Background()
+	start := time.Now().Add(-2 * time.Second)
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "claude", "", 9300, 82, "/usr/local/bin/claude", "/usr/local/bin/claude", start))
+	e.m.observeKernelFrame(ctx, b, execFrame(id, "bash", "claude", 9301, 91, "/bin/bash", "/bin/bash -c curl -s https://example.com", start.Add(10*time.Millisecond)))
+	for i, offset := range []time.Duration{20, 400, 800} {
+		exec := fmt.Sprintf("curl-%d", i)
+		at := start.Add(offset * time.Millisecond)
+		e.m.observeKernelFrame(ctx, b, execFrame(id, exec, "bash", 9310+i, 100+i, "/usr/bin/curl", "/usr/bin/curl -s https://example.com", at))
+		e.m.observeKernelFrame(ctx, b, exitFrame(id, exec, 9310+i, 0, at.Add(100*time.Millisecond)))
+	}
+	// The second curl's connection, while it ran.
+	e.ocsf("kfdest", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> example.com:443/tcp [policy:allow_example engine:opa]", start.Add(450*time.Millisecond))
+	d, err := e.m.Destinations(ctx, "kfdest")
+	if err != nil || len(d.Destinations) != 1 {
+		t.Fatalf("destinations = %+v, %v", d, err)
+	}
+	lineage := d.Destinations[0].Lineage
+	if len(lineage) != 3 || lineage[0].PID != 101 || lineage[0].Exe != "/usr/bin/curl" || lineage[1].Comm != "bash" || lineage[2].Comm != "claude" {
+		t.Fatalf("lineage = %+v, want curl 101 <- bash <- claude", lineage)
+	}
 }
 
 // Every exec and exit the feed reports joins the tree with Tetragon's ids:

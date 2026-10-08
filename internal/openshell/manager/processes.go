@@ -634,22 +634,54 @@ func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	pid := 0
+	startOf := func(n *procNode) time.Time {
+		if n.Start.IsZero() {
+			// Only OpenShell's launch record named it so far.
+			return n.FirstSeen
+		}
+		return n.Start
+	}
+	var candidates []*procNode
 	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), t.exited} {
 		for _, n := range nodes {
-			start := n.Start
-			if start.IsZero() {
-				// Only OpenShell's launch record named it so far.
-				start = n.FirstSeen
-			}
-			if !n.runs(exe) || start.Before(at.Add(-lineageStartWindow)) || start.After(at.Add(lineageClockSlack)) ||
-				(!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) || n.PID == pid {
+			start := startOf(n)
+			if !n.runs(exe) || n.PID <= 0 || start.Before(at.Add(-lineageStartWindow)) || start.After(at.Add(lineageClockSlack)) ||
+				(!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) {
 				continue
 			}
-			if pid != 0 {
-				return 0
-			}
+			candidates = append(candidates, n)
+		}
+	}
+	if pid := onePID(candidates); pid != 0 || len(candidates) == 0 {
+		return pid
+	}
+	// Several copies. The slack allows for a sample's coarse start, so a
+	// copy that started just after the connection is a candidate too. The
+	// kernel feed's processes carry their exact exec and exit, so when every
+	// candidate is one, the copy running when the program was seen
+	// connecting is the one (GAP-0022: on tg a curl every 0.4 s made every
+	// row ambiguous). A sampled copy keeps the rule: two give none.
+	var running []*procNode
+	for _, n := range candidates {
+		if n.ExecID == "" {
+			return 0
+		}
+		if !startOf(n).After(at) {
+			running = append(running, n)
+		}
+	}
+	return onePID(running)
+}
+
+// onePID is the pid the nodes share, or 0 for none or several.
+func onePID(nodes []*procNode) int {
+	pid := 0
+	for _, n := range nodes {
+		switch {
+		case pid == 0:
 			pid = n.PID
+		case n.PID != pid:
+			return 0
 		}
 	}
 	return pid
