@@ -3802,6 +3802,39 @@ func TestAPIPolicyReload_OTelMetrics_Success(t *testing.T) {
 	}
 }
 
+func TestAPIPolicyDirHotReloadUsesLiveGeneration(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: &config.Config{}}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+
+	policyDir := filepath.Join("..", "..", "policies")
+	prepared, err := policy.Prepare(context.Background(), policyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{Config: &config.Config{PolicyDir: policyDir}, OPA: prepared}
+	})
+	api.SetPolicyReloader(func() error { return nil })
+
+	high := &policy.GuardrailScanResult{Action: "block", Severity: "HIGH", Reason: "marker"}
+	input := policy.GuardrailInput{
+		Mode: "action", LocalResult: high,
+		Thresholds: &policy.ThresholdsInput{Block: 3, Alert: 2, CiscoTrustLevel: "full"},
+	}
+	out, err := api.evaluateGuardrailPolicy(context.Background(), input)
+	if err != nil || out.Action != "block" {
+		t.Fatalf("live policy verdict = %+v, %v; want block", out, err)
+	}
+	w := httptest.NewRecorder()
+	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), policyDir) {
+		t.Fatalf("reload = %d %s; want live policy_dir", w.Code, w.Body.String())
+	}
+}
+
 func TestAPIPolicyReload_OTelMetrics_Failed(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	logger := audit.NewLogger(capture.store)

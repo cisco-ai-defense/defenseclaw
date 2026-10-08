@@ -816,8 +816,11 @@ func (a *APIServer) generation() *Generation {
 // generation's, or for an API server without one, queries prepared once
 // from its start-time policy_dir.
 func (a *APIServer) preparedPolicy(ctx context.Context) (*policy.Prepared, error) {
+	return a.preparedPolicyForGeneration(ctx, a.generation())
+}
+
+func (a *APIServer) preparedPolicyForGeneration(ctx context.Context, g *Generation) (*policy.Prepared, error) {
 	if a.generationSource != nil {
-		g := a.generation()
 		if g == nil || g.OPA == nil {
 			if g != nil && g.opaError != "" {
 				return nil, errors.New(g.opaError)
@@ -3355,7 +3358,21 @@ func configFilePathForSnapshot(cfg *config.Config) string {
 	return config.ConfigPath()
 }
 
+// policyConfigSnapshot keeps Secure Client on its start-time policy, while
+// standalone and per-user requests follow the published generation.
+func (a *APIServer) policyConfigSnapshot(g *Generation) *config.Config {
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
+	}
+	if g != nil && g.Config != nil {
+		return g.Config
+	}
+	return a.runtimeConfigSnapshot()
+}
+
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
+	generation := a.generation()
+	policyCfg := a.policyConfigSnapshot(generation)
 	// Avarice F-3288: when a policy bundle is configured but
 	// either the engine constructor or evaluation fails, the
 	// previous code silently fell back to a built-in
@@ -3366,15 +3383,15 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	// policy directory whose engine/eval fails returns block in
 	// action mode (and an explicit alert in observe mode for
 	// audit visibility).
-	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		if a.scannerCfg.SecureClientIntegration() {
+	if policyCfg != nil && policyCfg.PolicyDir != "" {
+		if policyCfg.SecureClientIntegration() {
 			// Secure Client keeps the engine load error of main (issue #1092).
-			if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+			if err := policy.SecureClientPolicyLoadError(policyCfg.PolicyDir); err != nil {
 				return policyOutageVerdict(input,
 					fmt.Sprintf("policy engine load failed: %v", err)), nil
 			}
 		}
-		prepared, err := a.preparedPolicy(ctx)
+		prepared, err := a.preparedPolicyForGeneration(ctx, generation)
 		if err != nil {
 			return policyOutageVerdict(input,
 				fmt.Sprintf("policy engine load failed: %v", err)), nil
@@ -3408,7 +3425,7 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	}
 
 	action := guardrailFallbackActionForSeverity(sev)
-	if thresholds := input.Thresholds; thresholds != nil && a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() {
+	if thresholds := input.Thresholds; thresholds != nil && policyCfg != nil && !policyCfg.SecureClientIntegration() {
 		// The request carries the resolved thresholds (config levels, pack
 		// posture, Cisco trust level, HILT): apply them as the inspector
 		// fallback does, so both no-OPA paths decide alike. Secure Client
@@ -4137,7 +4154,8 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.scannerCfg == nil || a.scannerCfg.PolicyDir == "" {
+	policyCfg := a.policyConfigSnapshot(a.generation())
+	if policyCfg == nil || policyCfg.PolicyDir == "" {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy_dir not configured"})
 		return
 	}
@@ -4152,8 +4170,8 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	// Secure Client keeps the reload check of main (issue #1092): it fails
 	// while the policy directory has no data.json.
-	if a.scannerCfg.SecureClientIntegration() {
-		if err := policy.SecureClientPolicyLoadError(a.scannerCfg.PolicyDir); err != nil {
+	if policyCfg.SecureClientIntegration() {
+		if err := policy.SecureClientPolicyLoadError(policyCfg.PolicyDir); err != nil {
 			recordFailure(err.Error())
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error":  "reload failed: " + err.Error(),
@@ -4183,7 +4201,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	// the fresh rulepack. Safe no-op when the cache is unset.
 	InvalidateJudgeVerdictCache()
 
-	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), a.scannerCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
+	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), policyCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but compliance logging failed"})
 		return
 	}
@@ -4194,7 +4212,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	reloaded := map[string]any{
 		"status":     "reloaded",
-		"policy_dir": a.scannerCfg.PolicyDir,
+		"policy_dir": policyCfg.PolicyDir,
 	}
 	// The live generation after the rebuild, so a caller can say which policy is enforcing now.
 	if g := livePolicyGeneration(); g != nil {
