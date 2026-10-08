@@ -143,12 +143,17 @@ func executeEnterpriseSetup(
 		}
 		return 0, cleanupErr
 	}
+	timedOut := ctx.Err() != nil
 	if len(output) != 0 {
 		destination := stdout
 		if runErr != nil && !opts.JSON {
 			destination = stderr
 		}
-		if opts.Standalone && opts.JSON {
+		if opts.Standalone && opts.JSON && timedOut {
+			// A stopped run printed no result: what it wrote is diagnostics,
+			// and stdout carries the timeout result alone (GAP-0509).
+			destination = stderr
+		} else if opts.Standalone && opts.JSON {
 			// The lifecycle child's stderr is merged into this capture. An MDM
 			// parses stdout, so only the lifecycle's JSON result goes there.
 			document, diagnostics := splitStandaloneLifecycleJSON(output)
@@ -163,7 +168,10 @@ func executeEnterpriseSetup(
 			return 0, fmt.Errorf("publish enterprise lifecycle output: %w", err)
 		}
 	}
-	if ctx.Err() != nil {
+	if timedOut {
+		if opts.Standalone {
+			return 0, standaloneEnterpriseSetupTimeout(opts, ctx.Err())
+		}
 		return 0, fmt.Errorf("enterprise %s exceeded the bounded %s timeout: %w", opts.Action, opts.LifecycleTimeout, ctx.Err())
 	}
 	if runErr == nil {

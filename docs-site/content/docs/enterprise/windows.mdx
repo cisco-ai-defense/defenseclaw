@@ -663,6 +663,11 @@ finish, the transaction stays pending: the result reports
 vendor machine policy the transaction had already published can still point
 at the stopped gateway. `status` shows the state; `verify` refuses until the
 transaction is recovered. The failed result names the command to run next.
+A run that Setup stopped at its `TIMEOUTSECONDS=` limit (error
+`lifecycle_timeout`) can leave a transaction pending too, and its result
+says so. Until the transaction is recovered, users' agents block with
+`enterprise_managed_gateway_not_running`; starting the gateway service by
+hand does not help.
 
 The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
 that it cannot prove DefenseClaw wrote: a file or folder it did not create,

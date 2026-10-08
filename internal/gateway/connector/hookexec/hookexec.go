@@ -1668,7 +1668,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 			"Try again; if this continues, contact your administrator."
 	case reason == managedGatewayNotRunningReason:
 		cause, advice = "the DefenseClaw gateway service is not running on this computer",
-			"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service."
+			// The service is also stopped while a lifecycle transaction is
+			// pending, which starting it does not fix (GAP-0509).
+			"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do."
 	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":

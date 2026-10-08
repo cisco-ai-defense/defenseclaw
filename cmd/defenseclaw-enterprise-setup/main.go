@@ -662,14 +662,40 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
 	code := "setup_failed"
 	var invalid enterpriseSetupInvalidArguments
-	if errors.As(err, &invalid) {
+	var timeout enterpriseSetupLifecycleTimeout
+	switch {
+	case errors.As(err, &invalid):
 		code = "invalid_arguments"
+	case errors.As(err, &timeout):
+		code = "lifecycle_timeout"
 	}
 	result.AddError(code, err.Error())
 	result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer, so installed, services and readiness are not evaluated; "+
 		name+" /status JSON=1 reports them")
 	result.Finish("windows", exitCode)
 	_ = json.NewEncoder(stdout).Encode(result)
+}
+
+// enterpriseSetupLifecycleTimeout is a lifecycle run Setup stopped at its
+// TIMEOUTSECONDS limit.
+type enterpriseSetupLifecycleTimeout struct{ error }
+
+func (err enterpriseSetupLifecycleTimeout) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupTimeout names what a stopped run may have left
+// and the command that recovers it: a run stopped mid-transaction leaves it
+// pending with the services stopped, which only an ensure run as
+// LocalSystem recovers (GAP-0509).
+func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) error {
+	config := opts.Config
+	if strings.TrimSpace(config) == "" {
+		config = "<config.yaml>"
+	}
+	return enterpriseSetupLifecycleTimeout{fmt.Errorf(
+		"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). It may have left a lifecycle transaction pending with the DefenseClaw services stopped: "+
+			"run %s /status JSON=1 to check, then run Setup as LocalSystem with /ensure CONFIG=%s JSON=1, leaving TIMEOUTSECONDS out or raising it, to recover",
+		opts.Action, int(opts.LifecycleTimeout/time.Second), cause, standaloneSetupArtifactName, config,
+	)}
 }
 
 // writeEnterpriseSetupUsage prints the Secure Client Setup usage.

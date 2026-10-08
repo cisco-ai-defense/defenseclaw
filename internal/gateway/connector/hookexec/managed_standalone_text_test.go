@@ -121,7 +121,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	}
 	code, stdout, stderr, failures := run(true)
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
-		"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do. " +
 		"(" + managedGatewayNotRunningReason + ")"
 	if code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) || !strings.Contains(stdout, mustJSONString(want)) {
 		t.Fatalf("windows standalone: code = %d stdout = %q stderr = %q, want a deny carrying %q", code, stdout, stderr, want)

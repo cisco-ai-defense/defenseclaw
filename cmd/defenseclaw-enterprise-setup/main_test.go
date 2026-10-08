@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -508,5 +509,28 @@ func TestStandaloneSetupFailureUsesTheLifecycleResultShape(t *testing.T) {
 	writeEnterpriseSetupFailureFor(&stdout, &stderr, false, enterpriseSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
 	if !strings.HasPrefix(stdout.String(), `{"schema_version":1,`) {
 		t.Fatalf("Secure Client failure shape changed: %s", stdout.String())
+	}
+}
+
+// GAP-0509: a run Setup stopped at TIMEOUTSECONDS can leave a transaction
+// pending with the services stopped; its result says so and names the
+// LocalSystem /ensure that recovers it.
+func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts,
+		standaloneEnterpriseSetupTimeout(opts, context.DeadlineExceeded), enterpriseFailureExitCode)
+	var result struct {
+		ExitCode int `json:"exit_code"`
+		Errors   []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.ExitCode != enterpriseFailureExitCode ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_timeout" ||
+		!strings.Contains(result.Errors[0].Message, `as LocalSystem with /ensure CONFIG=C:\stage\config.yaml JSON=1`) ||
+		!strings.Contains(result.Errors[0].Message, "TIMEOUTSECONDS=60") {
+		t.Fatalf("timeout result = %s (%v)", stdout.String(), err)
 	}
 }
