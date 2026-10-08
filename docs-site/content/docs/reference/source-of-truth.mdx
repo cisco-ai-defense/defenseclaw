@@ -175,9 +175,10 @@ reverted (see [Managed hosts](#managed-hosts)).
 
 ## What is derived
 
-Derived files are rendered from `config.yaml`. DefenseClaw never reads a
-derived file back as input, so editing one changes nothing except that
-doctor reports the drift.
+Derived files are rendered from `config.yaml` and are not read back as
+configuration input. Connectors execute generated hook scripts, however: an
+edit can affect the next hook event before repair. Doctor detects the drift;
+regenerate the affected file as shown below.
 
 | Derived file | Rendered from | Drift shows as | Regenerate with |
 | --- | --- | --- | --- |
