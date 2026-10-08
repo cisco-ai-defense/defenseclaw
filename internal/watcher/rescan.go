@@ -858,7 +858,8 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 // rescan could not scan it, so a target left unscanned (the scanner runtime
 // missing, GAP-0571) shows in the audit log and not only in gateway.log.
 func (w *InstallWatcher) auditRescanFailure(evt InstallEvent, scannerName string, err error) {
-	if w.logger == nil || errors.Is(err, context.Canceled) {
+	// Secure Client keeps the audit rows of main (issue #1092).
+	if w.logger == nil || errors.Is(err, context.Canceled) || w.secureClientActive() {
 		return
 	}
 	w.rescanFailureMu.Lock()
