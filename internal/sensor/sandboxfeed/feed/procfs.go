@@ -57,6 +57,25 @@ func (p HostProc) NSPid(hostPID int) (int, int64, bool) {
 	return nsPID, before, true
 }
 
+// PPid returns a live process's parent pid (the PPid line of its status),
+// as the reader's pid namespace numbers it.
+func (p HostProc) PPid(hostPID int) (int, bool) {
+	if hostPID <= 0 {
+		return 0, false
+	}
+	data, ok := readProc(filepath.Join(p.root(), strconv.Itoa(hostPID), "status"))
+	if !ok {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if rest, found := strings.CutPrefix(line, "PPid:"); found {
+			pid, err := strconv.Atoi(strings.TrimSpace(rest))
+			return pid, err == nil && pid > 0
+		}
+	}
+	return 0, false
+}
+
 func (p HostProc) root() string {
 	if p.Root == "" {
 		return "/proc"

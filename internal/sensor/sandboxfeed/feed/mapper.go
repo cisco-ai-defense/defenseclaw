@@ -42,6 +42,12 @@ type ProcReader interface {
 	NSPid(hostPID int) (nsPID int, startTicks int64, ok bool)
 }
 
+// ParentReader reads a live host process's parent pid (HostProc does). With
+// it the mapper tells overlapping hook calls apart (hookCallOf).
+type ParentReader interface {
+	PPid(hostPID int) (int, bool)
+}
+
 // MapperConfig configures a Mapper.
 type MapperConfig struct {
 	Containers ContainerResolver

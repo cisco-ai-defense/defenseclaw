@@ -207,11 +207,18 @@ func (m *Mapper) forkOfHook(parent *pb.Process) *hookProcess {
 // its container (every run is in hookScripts until it ends). Nothing is
 // placed while that container and user have another run of the script that
 // was not verified (one the workload started) or that was released.
+//
+// Claude starts several hooks for one event at once, so two verified calls
+// often run together; the newest took the other's tools, and the rows said
+// [hook tools: 5] and [hook tools: 26] for two calls of 12 (GAP-0099). Then
+// the fork's ancestry in /proc names its own call. Every candidate is a
+// verified call, so the choice moves a count, never what is shown.
 func (m *Mapper) hookCallOf(fork *hookProcess) *hookProcess {
 	if m.hookScriptsFull || fork.container == "" || !fork.uidKnown {
 		return nil
 	}
 	var call *hookProcess
+	byHost := map[int]*hookProcess{}
 	for _, run := range m.hookScripts {
 		if run.container != fork.container || !hookSameUID(run, fork) || run.finished {
 			continue
@@ -219,8 +226,23 @@ func (m *Mapper) hookCallOf(fork *hookProcess) *hookProcess {
 		if run.role != hookVerified || run.tainted {
 			return nil
 		}
+		if run.hostPID > 0 {
+			byHost[run.hostPID] = run
+		}
 		if call == nil || run.opened.After(call.opened) {
 			call = run
+		}
+	}
+	if parents, ok := m.config.Proc.(ParentReader); ok && len(byHost) > 1 {
+		for pid, depth := fork.hostPID, 0; pid > 1 && depth < 16; depth++ {
+			ppid, ok := parents.PPid(pid)
+			if !ok {
+				break
+			}
+			if run := byHost[ppid]; run != nil {
+				return run
+			}
+			pid = ppid
 		}
 	}
 	return call
