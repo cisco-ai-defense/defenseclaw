@@ -436,6 +436,36 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 	}
 }
 
+func TestInstallOnMacTMUXHandlesBrewServicesRefusal(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/test-tmux")
+	for _, running := range []bool{false, true} {
+		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f.inst.GOOS = "darwin"
+		f.runner.OnFunc("/bin/sh", func(context.Context, openshell.Command) ([]byte, error) {
+			writeExecutable(t, f.cliPath)
+			return []byte("Usage: brew services restart (formula)\nError: Invalid usage: `brew services` cannot run under tmux!\n"), nil
+		})
+		f.runner.On(f.cliPath+" --version", "openshell 0.1.1", nil)
+		f.inst.VerifyGateway = func(context.Context) error {
+			f.verified++
+			if running {
+				return nil
+			}
+			return errors.New("gateway not registered")
+		}
+		res, err := f.inst.Install(context.Background())
+		if f.verified != 1 || strings.Contains(f.out.String(), "Usage: brew services") {
+			t.Fatalf("running=%v: probe count=%d output=%q", running, f.verified, f.out.String())
+		}
+		if running && (err != nil || res == nil || !res.Installed) {
+			t.Fatalf("running gateway fallback = %+v, %v", res, err)
+		}
+		if !running && !errors.Is(err, openshell.ErrBrewNeedsTerminal) {
+			t.Fatalf("stopped gateway error = %v", err)
+		}
+	}
+}
+
 // TestInstallInAHomebrewOfYourOwn: with Homebrew outside /opt/homebrew and
 // /usr/local (a standard user's own, GAP-0110) the formula installed and
 // the gateway ran, then NVIDIA's script failed registering it ("mTLS
