@@ -92,7 +92,11 @@ type SnapshotRecord struct {
 	// Sentinels are files that can run code on the host, recorded by a
 	// filesystem walk so Review sees changes git ignores (.envrc in
 	// .gitignore, IDE folders) and nested repositories.
-	Sentinels       map[string]FileState      `json:"sentinels,omitempty"`
+	Sentinels map[string]FileState `json:"sentinels,omitempty"`
+	// Skipped are the project-relative paths the snapshot's walks left out
+	// (SnapshotOptions.Skip: the masked secret files), which the review and
+	// undo walks leave out too.
+	Skipped         []string                  `json:"skipped,omitempty"`
 	NestedRepos     []string                  `json:"nested_repos,omitempty"`
 	DependencyDirs  map[string]DirFingerprint `json:"dependency_dirs,omitempty"`
 	SentinelsCapped bool                      `json:"sentinels_capped,omitempty"`
@@ -303,6 +307,7 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 		_ = removeSnapshotDir(dir)
 		return nil, err
 	}
+	rec.Skipped = sortedCopy(opts.Skip)
 	rec.Sentinels, rec.NestedRepos, rec.DependencyDirs, rec.SentinelsCapped = sentinels.files, sentinels.nested, sentinels.deps, sentinels.capped
 	rec.NestedControl, rec.NestedControlCapped = captureNestedControl(src.Path, sentinels.nested)
 	rec.Unreadable = sentinels.unreadable

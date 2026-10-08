@@ -399,11 +399,14 @@ func restoreIgnored(rec *SnapshotRecord, dataDir string, man *ignoredManifest, r
 	res.Warnings = append(res.Warnings, removeIgnored(rec.Project, res.Ignored)...)
 }
 
+// skipList is what the snapshot's walks left out. A git snapshot recorded
+// none, and the review then saw each masked secret file (absent from the
+// snapshot's sentinels) as created during the session (GAP-0257).
 func skipList(rec *SnapshotRecord) []string {
-	if rec.Copy != nil {
-		return rec.Copy.Skipped
+	if rec.Skipped != nil || rec.Copy == nil {
+		return rec.Skipped
 	}
-	return nil
+	return rec.Copy.Skipped
 }
 
 func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {

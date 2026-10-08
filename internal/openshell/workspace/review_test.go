@@ -303,6 +303,32 @@ func TestReviewIgnoresMountPinsInBothOrders(t *testing.T) {
 	}
 }
 
+// GAP-0257: a masked secret file of a git project (.npmrc, git-ignored,
+// left out of the snapshot's walk) was reported "created or changed" and
+// HIGH by every review, though the host file never changed: the review's
+// walk did not leave it out. A real change to another ignored sentinel is
+// still flagged.
+func TestReviewLeavesMaskedFilesOut(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", ".npmrc\n.envrc\n")
+	e.commit("ignore")
+	writeFile(t, e.project, ".npmrc", "//registry.example/:_authToken=dccert-decoy-npm\n")
+	opts := e.snapOpts("s1")
+	opts.Skip = []string{".npmrc"}
+	if _, err := Snapshot(bg, opts); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, e.project, ".envrc", "export X=1\n")
+	rep := review(t, e, "s1", []ContentScanner{})
+	if f, ok := flagByLabel(rep, ".npmrc"); ok {
+		t.Fatalf("an unchanged masked file was flagged: %+v", f)
+	}
+	if _, ok := flagByLabel(rep, ".envrc"); !ok {
+		t.Fatalf("a new ignored sentinel was not flagged: %+v", rep.Flags)
+	}
+}
+
 // TestReviewFlagsIgnoredHarnessConfig: harness configuration git ignores
 // (Claude Code's settings.local.json, CLAUDE.local.md) is not in the diff;
 // a sensitive-change pattern still flags it, while a bare file-name
