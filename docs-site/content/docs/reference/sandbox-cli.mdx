@@ -1006,6 +1006,9 @@ boundary, and says what each one is:
   Each provider raises a `shadow_ai` finding once a session: LOW the first
   time the policy refuses it, MEDIUM the first time the sandbox reaches it
   (a refusal and then a contact raise one of each);
+- **this machine**: a port on this machine reached through
+  `host.openshell.internal` (a `--host-port` service you approved, a local
+  model endpoint), shown as `host.openshell.internal:PORT`;
 - otherwise **blocked** when it was only ever refused (the KIND cell says
   whose list refused it, for example `blocked (paste site)`), else the
   category the egress proxy allowed it under or, when it allowed it without

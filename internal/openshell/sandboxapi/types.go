@@ -458,6 +458,10 @@ const (
 	DestinationUnknownAI = "unknown_ai"
 	// DestinationBlocked: only ever refused.
 	DestinationBlocked = "blocked"
+	// DestinationThisMachine: a port on this machine, reached through
+	// host.openshell.internal (a --host-port service, a local model
+	// endpoint).
+	DestinationThisMachine = "this_machine"
 	// DestinationOther: anything else.
 	DestinationOther = "other"
 )
