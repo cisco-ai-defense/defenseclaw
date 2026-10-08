@@ -267,7 +267,7 @@ type FolderRef struct {
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
-// into: every path with a "skills/<name>" pair of components, in a command
+// into: every distinct path with a "skills/<name>" pair of components, in a command
 // line, a file path or a working folder. "~" and $HOME expand to home and
 // a relative path resolves against cwd.
 func SkillFolderRefs(input any, home, cwd string) []FolderRef {
@@ -278,10 +278,10 @@ func SkillFolderRefs(input any, home, cwd string) []FolderRef {
 	for _, value := range values {
 		for _, token := range strings.FieldsFunc(value, isCommandSeparator) {
 			ref, ok := skillFolderRef(token, home, cwd)
-			if !ok || seen[strings.ToLower(ref.Name)] {
+			if !ok || seen[ref.Dir] {
 				continue
 			}
-			seen[strings.ToLower(ref.Name)] = true
+			seen[ref.Dir] = true
 			refs = append(refs, ref)
 		}
 	}
