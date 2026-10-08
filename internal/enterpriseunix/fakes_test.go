@@ -81,6 +81,22 @@ func (f *fakeServices) FragmentPath(_ context.Context, u Unit) string {
 	return ""
 }
 
+// DropInPaths lists the unit's drop-ins in /etc/systemd/system.
+func (f *fakeServices) DropInPaths(_ context.Context, u Unit) []string {
+	if f.goos != "linux" {
+		return nil
+	}
+	dir := filepath.Join("/etc/systemd/system", u.Name+".d")
+	entries, _ := os.ReadDir(f.env.P(dir))
+	var out []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".conf") {
+			out = append(out, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return out
+}
+
 func (f *fakeServices) record(call string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

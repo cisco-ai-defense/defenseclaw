@@ -102,6 +102,11 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	r.InstalledVersion = record.ProductVersion
 	strict := l.opts.Action == ActionVerify
 	problems := l.verifyInstalled(ctx, record, strict)
+	dropInProblems, dropIns := l.unitDropIns(ctx, record)
+	problems = append(problems, dropInProblems...)
+	if len(dropIns) > 0 {
+		r.AddWarning(codeUnitDropIn, "local drop-ins change DefenseClaw units: "+strings.Join(dropIns, ", ")+"; they keep the units' account, sandbox and config")
+	}
 	l.describe(ctx, record, true)
 	problems = append(problems, l.describeMachinePolicy(record)...)
 	if strict {
