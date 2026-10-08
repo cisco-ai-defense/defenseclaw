@@ -74,6 +74,10 @@ to filter.
 | `P` | Policies | The protection center: posture per connector, opt-in packs, chains, rule families, policies, rule packs and sandbox packs ([below](#policies-panel-protection-center)) |
 | `0` | Setup | Setup tasks grouped by goal, and the config editor ([below](#setup-panel)) |
 
+The Alerts panel counts the detection-only findings of the last 24 hours under its summary line. With an alert selected, its details name the OpenShell sandbox that raised it in the **Sandbox** fact:
+
+![DefenseClaw TUI Alerts panel on Linux: the summary line, a line saying 16 detection-only findings of the last 24 hours are not listed, the alert table with a paste-site block selected, and its details with the Sandbox fact myapp-claude](/images/sandboxes/screens/tui-alerts-sandbox.png)
+
 The Overview panel's **AI Agents** metric intentionally excludes `local_model`
 rows so a large model cache cannot hide agent activity. Open **AI Discovery**
 with `V` for the full model inventory; model rows add Model, Model status, and
@@ -364,6 +368,8 @@ OpenShell MicroVMs, where every run works on a copy (see
 not supported. The
 [macOS app](/docs/macos-app#openshell-sandboxes) shows the same sandboxes in
 its menu bar, notifications and Sandboxes panel.
+
+![DefenseClaw TUI on Windows with the Sandboxes tab open: the panel says OpenShell sandboxes run on Linux and macOS only and that Windows and WSL2 are not supported](/images/sandboxes/screens/tui-sandboxes-windows-unsupported.png)
 
 The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
 `UNREACHABLE`), how many sandboxes run, how many asks wait, the gateway with
