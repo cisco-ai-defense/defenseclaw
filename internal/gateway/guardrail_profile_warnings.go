@@ -430,6 +430,9 @@ func shortNameGroupNote(decision profileDecision) string {
 		strings.HasPrefix(strings.ToUpper(group), "S-1-") || strings.Trim(group, "0123456789") == "" {
 		return ""
 	}
+	if runtime.GOOS != "windows" {
+		return fmt.Sprintf("assignment %d selects this account by bare group %q, which can also match a same-named group in another domain; configure distinct group names and use the exact group name reported by this host", decision.Assignment, group)
+	}
 	return fmt.Sprintf("assignment %d selects this account by bare group %q, which can also match a same-named group in another domain; use DOMAIN\\name or the group SID to select one domain", decision.Assignment, group)
 }
 

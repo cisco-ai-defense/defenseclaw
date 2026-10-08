@@ -1148,7 +1148,7 @@ func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
 
 func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
 	note := shortNameGroupNote(profileDecision{Match: profileMatchGroup, MatchedGroup: "dc-ew-twin", Assignment: 1})
-	if !strings.Contains(note, "same-named group in another domain") || !strings.Contains(note, `DOMAIN\name`) {
+	if !strings.Contains(note, "same-named group in another domain") || runtime.GOOS != "windows" && (strings.Contains(note, "SID") || strings.Contains(note, `DOMAIN\name`)) {
 		t.Fatalf("bare group warning = %q", note)
 	}
 	if qualified := shortNameGroupNote(profileDecision{Match: profileMatchGroup, MatchedGroup: `DCLAB\dc-ew-twin`, Assignment: 1}); qualified != "" {
