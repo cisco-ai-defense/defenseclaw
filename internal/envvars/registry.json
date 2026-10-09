@@ -6875,6 +6875,31 @@
         }
       ],
       "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_STANDALONE_FORCED_UNINSTALL",
+      "category": "upgrade_internal",
+      "purpose": "Carries Setup /uninstall FORCE=1 (enterprise windows uninstall --force) from the native lifecycle CLI to the standalone Windows installer, which removes the deployment without reading its pending transaction. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for an Uninstall and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only when --force was requested for an Uninstall action"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes Force to the lifecycle only for the Uninstall action"
+        }
+      ],
+      "since": "1.0.1",
+      "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
     }
   ]
 }
