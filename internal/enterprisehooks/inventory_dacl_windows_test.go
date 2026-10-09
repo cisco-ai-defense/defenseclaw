@@ -384,6 +384,16 @@ func TestInventoryDACLComponentGrantsCoverWatchedFolders(t *testing.T) {
 			t.Errorf("folder %s on a managed hook path is granted", hookDir)
 		}
 	}
+	// The uninstall revokes every folder the enumerator grants.
+	revoked := map[string]bool{}
+	for _, rel := range inventoryDACLComponentDirs(home) {
+		revoked[strings.ToLower(rel)] = true
+	}
+	for dir := range granted {
+		if !revoked[dir] {
+			t.Errorf("granted folder %s is not revoked at uninstall", dir)
+		}
+	}
 	reg := connector.NewDefaultRegistry()
 	var managed []string
 	for _, name := range names {
