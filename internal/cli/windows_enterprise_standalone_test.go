@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -2504,5 +2505,55 @@ func TestWindowsEnterpriseStandaloneForceIsAnEnvironmentRequestOnUninstall(t *te
 	}
 	if !forced["Uninstall"] || forced["Status"] {
 		t.Fatalf("forced uninstall request by action: %v", forced)
+	}
+}
+
+// GAP-1214: Setup /ensure NOSTART=1 on a clean host exited 1603 with the
+// guardian issues of a deployment whose services stay stopped as asked. The
+// install now succeeds with one not_started warning and records the pending
+// activation a later repair completes (GAP-1162); any other error still
+// fails, and so do the same issues without --no-start.
+func TestWindowsNoStartInstallSucceedsWithNotStartedWarning(t *testing.T) {
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(metadata, []byte(`{"installed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousMetadata := windowsEnterpriseActivationMetadata
+	t.Cleanup(func() { windowsEnterpriseActivationMetadata = previousMetadata })
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	guardian := []string{
+		"guardian status: hook guardian has not completed a reconcile",
+		"guardian status: protected hook guardian authorization is missing",
+		"guardian status: protected hook guardian activation is missing",
+	}
+	run := func(opts *windowsEnterpriseLifecycleOptions, errs ...string) *enterprisestatus.Result {
+		t.Helper()
+		result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.42")
+		report := &windowsEnterpriseInstallerReport{OK: true, Action: "install", Installed: true, Errors: errs}
+		applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{})
+		applyWindowsEnterpriseAgentSessions(result, opts)
+		result.Finish("windows", windowsEnterpriseFailureCodeFor(result))
+		return result
+	}
+	staged := &windowsEnterpriseLifecycleOptions{noStart: true, activationStartedAt: time.Now().UTC()}
+	result := run(staged, guardian...)
+	notStarted := 0
+	for _, warning := range result.Warnings {
+		if warning.Code == "not_started" {
+			notStarted++
+		}
+	}
+	if !result.OK || result.ExitCode != 0 || notStarted != 1 {
+		t.Fatalf("no-start install: ok=%v exit=%d errors=%+v warnings=%+v", result.OK, result.ExitCode, result.Errors, result.Warnings)
+	}
+	record := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
+	if data, err := os.ReadFile(record); err != nil || !strings.Contains(string(data), `"pending":true`) {
+		t.Fatalf("staged activation record = %q, err = %v", data, err)
+	}
+	if result := run(staged, append(guardian, "gateway config check failed")...); result.OK || len(result.Errors) != 1 {
+		t.Fatalf("no-start install with another error: %+v", result.Errors)
+	}
+	if result := run(&windowsEnterpriseLifecycleOptions{}, guardian...); result.OK || len(result.Errors) != len(guardian) {
+		t.Fatalf("install without --no-start: %+v", result.Errors)
 	}
 }
