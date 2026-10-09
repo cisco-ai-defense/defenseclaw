@@ -38,8 +38,11 @@ Bundle metadata is preferred when available. When a known application bundle
 only exposes an executable version probe, the enumerator runs `--version` as
 the target console user through `/usr/bin/sudo`, with bounded output and a
 bounded wall-clock duration. It never executes an app-bundled Codex binary as
-root. Missing, failed, or malformed probes remain unversioned and are rejected
-later when no supported hook contract can be resolved.
+root. A missing, failed, or malformed bundle probe does not stop discovery:
+the enumerator continues through the remaining bundle executables and
+lower-priority sources, including package metadata and the bounded `PATH`
+fallback. Codex remains unversioned and is rejected later only when every
+applicable source fails to yield a supported version.
 
 Reconciliation repeats discovery on every render, so an in-place agent upgrade
 updates `agent_version` without reinstalling DefenseClaw.
