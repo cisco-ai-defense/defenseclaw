@@ -533,6 +533,12 @@ lives. With `runtime_detection.enabled: true`, `mode: action` and a
 `default: deny` or an approved registry, the Skill call and `$name` selection
 of any project skill that is not approved are refused too.
 
+The folder rule covers the `denied` list only. A skill that only a
+`default: deny` or `registry_required` keeps out is refused at the Skill call
+and the `$name` selection, but not when Codex, asked for the skill in plain
+words, reads its `SKILL.md` and follows it. To keep such a skill from running
+in Codex, add it to `asset_policy.skill.denied` or take it off the device.
+
 Take a denied skill off the device to remove it from that index. Where the
 install watcher runs (per-user installs and managed Windows), a config change
 that adds a `denied` entry makes it check the installed skills and plugins at
