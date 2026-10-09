@@ -167,15 +167,6 @@ func insideDiscoveryHomeOf(owners []discoveryHomeOwner, path string) bool {
 	return false
 }
 
-// ProfilePathThroughLink reports whether path, at or below root (a profile or
-// an ai_discovery.home_dirs folder), goes through a link: on Windows any
-// link, junction or mount point below root, elsewhere a link that leads out
-// of root. A managed gateway that reads a user's files refuses such a path,
-// as the AI Discovery scan does (GAP-1097).
-func ProfilePathThroughLink(root, path string) bool {
-	return discoveryPathThroughLink(root, path)
-}
-
 // profilePathThroughLink reports whether a path below a scanned root goes
 // through a link or junction (discoveryPathThroughLink); tests replace it.
 var profilePathThroughLink = discoveryPathThroughLink

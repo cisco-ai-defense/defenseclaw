@@ -1642,7 +1642,7 @@ func TestManagedInventorySkipsTheDaemonsOwnProfile(t *testing.T) {
 func TestInventoryHomeOwnerRefusesEmailWithoutAnOwner(t *testing.T) {
 	withUserEmailCollection(t, true)
 	missing := filepath.Join(t.TempDir(), "no-such-profile")
-	if got := inventoryHomeOwner("claudecode", missing, false); !reflect.DeepEqual(got, llmEventUser{}) {
+	if got := inventoryHomeOwner("claudecode", missing); !reflect.DeepEqual(got, llmEventUser{}) {
 		t.Fatalf("unresolvable profile produced %+v, want an empty owner", got)
 	}
 }

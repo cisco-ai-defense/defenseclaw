@@ -279,12 +279,6 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 	// read a credential file, so they are memoized for the scan: the loops
 	// below revisit the same home once per connector.
 	owners := map[string]llmEventUser{}
-	// Outside the Secure Client profile nothing is read through a link or
-	// junction below a home: the managed gateway may read every enrolled
-	// account's agent folders, so a user's .codex made a junction to another
-	// account's would list that account's servers and address under this
-	// user (GAP-1097).
-	noFollow := !cfg.SecureClientIntegration()
 	ownerFor := func(connectorName, home string) llmEventUser {
 		if home == "" {
 			return llmEventUser{}
@@ -293,7 +287,7 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		if cached, ok := owners[key]; ok {
 			return cached
 		}
-		owner := inventoryHomeOwner(connectorName, home, noFollow)
+		owner := inventoryHomeOwner(connectorName, home)
 		owners[key] = owner
 		return owner
 	}
@@ -371,42 +365,17 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 	// homes stay distinct.
 	for _, home := range homes {
 		home = strings.TrimSpace(home)
-		if home == "" || excludedInventoryHome(cfg, home) {
+		if home == "" {
 			continue
 		}
 		homeScope := endpointInventoryScopeKey(home)
-		var linked func(string) bool
-		if noFollow {
-			linked = func(path string) bool { return inventory.ProfilePathThroughLink(home, path) }
-		}
 		for _, connectorName := range connectors {
-			for _, servers := range readMCPServersUnderHomeChecked(connectorName, home, goos, linked) {
+			for _, servers := range readMCPServersUnderHomeForOS(connectorName, home, goos) {
 				appendServers(connectorName, homeScope, home, servers)
 			}
 		}
 	}
 	return components
-}
-
-// excludedInventoryHome reports a home_dirs entry whose owner the standalone
-// profile's enterprise.enrollment.exclude_users names (by SID or uid,
-// account name or folder name): an excluded account gets no inventory
-// record, as the scan reads none of its profile (GAP-1024).
-func excludedInventoryHome(cfg *config.Config, home string) bool {
-	if cfg == nil || !cfg.StandaloneEnterprise() || len(cfg.Enterprise.Enrollment.ExcludeUsers) == 0 {
-		return false
-	}
-	owner := useridentity.ForHome(home)
-	names := []string{owner.ID, owner.Name, filepath.Base(filepath.Clean(home))}
-	for _, entry := range cfg.Enterprise.Enrollment.ExcludeUsers {
-		entry = strings.TrimSpace(entry)
-		for _, name := range names {
-			if entry != "" && strings.TrimSpace(name) != "" && strings.EqualFold(entry, strings.TrimSpace(name)) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // inventoryHomeOwner resolves who owns one profile directory, and which
@@ -415,7 +384,7 @@ func excludedInventoryHome(cfg *config.Config, home string) bool {
 // The sidecar cannot use its own process identity here. It walks every profile
 // root on the endpoint, and under a managed install it runs as a service
 // account, so "the current user" is either the wrong user or no user at all.
-func inventoryHomeOwner(connectorName, home string, noFollow bool) llmEventUser {
+func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	identity := useridentity.ForHome(home)
 	ownerID := sanitizeLLMEventUser(identity.ID)
 	owner := llmEventUser{
@@ -435,12 +404,7 @@ func inventoryHomeOwner(connectorName, home string, noFollow bool) llmEventUser 
 	// It is still gated, because collecting the address at all is a privacy
 	// decision independent of whether it can be attributed correctly.
 	if UserEmailCollectionEnabled() {
-		read := func() (string, error) { return useridentity.EmailForConnector(connectorName, home, nil) }
-		if noFollow {
-			// Not through a link out of the profile (GAP-1097).
-			read = func() (string, error) { return useridentity.ProfileEmailForConnector(connectorName, home) }
-		}
-		if email, err := read(); err == nil {
+		if email, err := useridentity.EmailForConnector(connectorName, home, nil); err == nil {
 			owner.Email = email
 		}
 	}
@@ -539,43 +503,18 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 }
 
 func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
-	return readMCPServersUnderHomeChecked(connectorName, home, goos, nil)
-}
-
-// readMCPServersUnderHomeChecked is readMCPServersUnderHomeForOS that skips
-// every file, and every agent folder read as a whole, for which linked
-// reports a link below home, before and after the read.
-func readMCPServersUnderHomeChecked(connectorName, home, goos string, linked func(string) bool) [][]config.MCPServerEntry {
 	if home == "" {
 		return nil
-	}
-	refused := func(paths ...string) bool {
-		for _, path := range paths {
-			if linked != nil && linked(path) {
-				return true
-			}
-		}
-		return false
 	}
 	var results [][]config.MCPServerEntry
 	tryFile := func(reader func(string) ([]config.MCPServerEntry, error), relPath string) {
 		full := filepath.Join(home, relPath)
-		if refused(full) {
-			return
-		}
-		if entries, err := reader(full); err == nil && len(entries) > 0 && !refused(full) {
+		if entries, err := reader(full); err == nil && len(entries) > 0 {
 			results = append(results, entries)
 		}
 	}
-	tryHome := func(reader func(string) ([]config.MCPServerEntry, error), relDirs ...string) {
-		dirs := make([]string, 0, len(relDirs))
-		for _, rel := range relDirs {
-			dirs = append(dirs, filepath.Join(home, rel))
-		}
-		if refused(dirs...) {
-			return
-		}
-		if entries, err := reader(home); err == nil && len(entries) > 0 && !refused(dirs...) {
+	tryHome := func(reader func(string) ([]config.MCPServerEntry, error)) {
+		if entries, err := reader(home); err == nil && len(entries) > 0 {
 			results = append(results, entries)
 		}
 	}
@@ -632,9 +571,9 @@ func readMCPServersUnderHomeChecked(connectorName, home, goos string, linked fun
 		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/config/mcp_config.json")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".agents/mcp_config.json")
 	case "opencode":
-		tryHome(config.ReadMCPServersOpenCodeUnderHome, ".config/opencode", ".opencode")
+		tryHome(config.ReadMCPServersOpenCodeUnderHome)
 	case "amp":
-		tryHome(config.ReadMCPServersAMPUnderHome, ".config/amp")
+		tryHome(config.ReadMCPServersAMPUnderHome)
 	}
 	return results
 }
