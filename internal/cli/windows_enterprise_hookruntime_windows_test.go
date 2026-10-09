@@ -52,7 +52,9 @@ func TestWindowsEnterpriseHookRuntimeAccessFailsStatusInBothDirections(t *testin
 	}{
 		{"users modify", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", "(S-1-5-32-545) holds modify (0x"},
 		{"users read removed", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "(S-1-5-32-545) read and execute entry is missing"},
-		{"users read denied", "O:BAD:P(D;OICI;0x1200a9;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", "(S-1-5-32-545) has an explicit deny entry"},
+		// Deny list-folder only: a deny that includes READ_CONTROL also stops
+		// this test, which runs in BUILTIN\Users, from reading the DACL.
+		{"users read denied", "O:BAD:P(D;OICI;0x1;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", "(S-1-5-32-545) has an explicit deny entry"},
 		{"as DefenseClaw sets it", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
