@@ -70,3 +70,23 @@ def test_upgrade_and_init_bring_the_shipped_rego_modules(tmp_path: Path, monkeyp
     assert (result.seeded, result.kept) == (["guardrail.rego"], ["admission.rego"])
     assert (rego / "admission.rego").read_bytes() == mine
     assert (rego / "guardrail.rego").read_bytes() == shipped["guardrail.rego"]
+
+
+def test_upgrade_keeps_rego_beside_external_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    external = tmp_path / "team"
+    rego = external / "policies" / "rego"
+    rego.mkdir(parents=True)
+    edited = rego_policies.shipped_modules()["admission.rego"].read_bytes() + b"\n# operator edit\n"
+    module = rego / "admission.rego"
+    module.write_bytes(edited)
+    config_path = external / "config.yaml"
+    config_path.write_text(f"config_version: {CURRENT_CONFIG_VERSION}\npolicy_dir: {external / 'policies'}\n")
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(config_path))
+
+    migrate(str(data_dir), from_version="0.8.10")
+
+    assert module.read_bytes() == edited
+    assert not list((data_dir / "backups").glob("rego-*"))
