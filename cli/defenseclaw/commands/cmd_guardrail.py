@@ -4381,7 +4381,7 @@ def rule_severity_cmd(
     key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     scope_key = _scope_key(connector_key, profile_name)
-    prune_to = _scope_key(None, profile_name) if profile_name else f"{scope_key}.rules"
+    prune_to = _scope_key(None, profile_name) if profile_name else scope_key
     change = (
         config_writer.Change(key, unset=True, prune_empty_to=prune_to)
         if level == "DEFAULT" else config_writer.Change(key, level)

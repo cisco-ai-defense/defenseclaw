@@ -398,6 +398,17 @@ func applyIdentityPosture(cfg *config.Config) {
 	enabled := !cfg.SecureClientIntegration()
 	setIdentityFactsEnabled(enabled)
 	SetUserPrincipalCollectionEnabled(enabled && cfg.AIDiscovery.IncludeUserPrincipal)
+	// An account of a child AD domain is verified only when
+	// ai_discovery.trusted_ad_child_domains lists its domain (GAP-1255). A
+	// changed list drops the cached facts, so a reload applies it at the
+	// next lookup instead of after the cache lifetime.
+	var trustedChildren []string
+	if enabled {
+		trustedChildren = cfg.AIDiscovery.TrustedADChildDomains
+	}
+	if useridentity.SetTrustedADChildDomains(trustedChildren) {
+		peerDirectoryCache().forgetAll()
+	}
 	spool := ""
 	if enabled && cfg.StandaloneEnterprise() {
 		spool = enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))

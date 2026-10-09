@@ -299,6 +299,16 @@ func (c *identityCache[T]) forget(key string) {
 	c.mu.Unlock()
 }
 
+// forgetAll drops every entry, so each key resolves afresh.
+func (c *identityCache[T]) forgetAll() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	clear(c.entries)
+	c.mu.Unlock()
+}
+
 func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T]) {
 	done := make(chan struct{})
 	entry.inflight = done

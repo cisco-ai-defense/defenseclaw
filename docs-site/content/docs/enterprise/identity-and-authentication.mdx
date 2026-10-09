@@ -459,6 +459,12 @@ defenseclaw guardrail profile explain --user bob@corp.example.com --connector co
   applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
 ```
 
+Users of a child domain of the joined domain (`bob@emea.corp.example.com` on a
+host joined to `corp.example.com`) match `users` assignments only when you list
+their domain in `ai_discovery.trusted_ad_child_domains`; an empty list trusts
+the joined domain only. See
+[Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm).
+
 Use the group name exactly as `id -Gn` prints it. A Windows group is
 `CORP\Contractors`, the bare name or its SID. The full guide, with precedence,
 worked scenarios, the audit record and delivery to managed hosts, is

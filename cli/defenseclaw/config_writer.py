@@ -984,7 +984,9 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
                 continue
             if change.prune_empty_to:
                 stop = parse_path(change.prune_empty_to)
-                while len(parts) > 1 and parts != stop:
+                # Delete an empty child of the stop scope, never the scope itself.
+                # An assigned guardrail profile remains valid even when it is {}.
+                while len(parts) > len(stop) + 1 and parts[: len(stop)] == stop:
                     parent = _lookup(document, parts[:-1])
                     if not isinstance(parent, dict) or len(parent) != 1 or parts[-1] not in parent:
                         break

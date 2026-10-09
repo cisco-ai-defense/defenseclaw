@@ -48,7 +48,8 @@ import (
 // An SSSD account therefore takes its domain from its SID, which SSSD holds
 // for the uid itself (sssd_nss_linux.go): it gets the domain, realm and
 // principal of a joined realm only when SSSD holds a user of the same name
-// with the same SID in that realm's domain. A domain-qualified initgroups
+// with the same SID in that realm's domain, or in a child domain of it that
+// ai_discovery.trusted_ad_child_domains lists. A domain-qualified initgroups
 // lookup supplies its groups, including trusted-domain memberships. An
 // account without a SID, such as one of a plain LDAP domain, gets no
 // realm and no principal (GAP-0497, GAP-0568, GAP-0605).
@@ -441,9 +442,12 @@ func sambaWorkgroup() string {
 // that same SID in the realm's domain, asked in the domain\name form, which
 // SSSD looks up in that domain only (sidOfUserInDomain). A qualified name
 // (use_fully_qualified_names = True, what realm join writes) is asked in the
-// domain it names; a child domain may inherit a joined parent only if
-// SSSD resolves the same SID in the parent. A short name is asked in
-// each joined SSSD realm. The same SID is the same account,
+// domain it names. A child domain of a joined realm holds accounts of that
+// realm only when the administrator lists it in
+// ai_discovery.trusted_ad_child_domains (sssdRealmFor): a plain LDAP domain
+// can carry a name below the joined domain and SIDs of its own, so neither
+// the name nor a SID proves a trusted child (GAP-1255). A short name is asked
+// in each joined SSSD realm and each listed child. The same SID is the same account,
 // so the realm, principal and groups of an account never go to another
 // account that only shares its name: a plain LDAP account of the same short
 // name, one named by an e-mail address in the joined domain, or one SSSD
@@ -476,6 +480,13 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 				candidates = append(candidates, realm.Domain)
 			}
 		}
+		// Under use_fully_qualified_names = False a listed child domain
+		// names its accounts bare too.
+		for _, child := range useridentity.TrustedADChildDomains() {
+			if _, ok := sssdRealmFor(child, realms); ok && !slices.Contains(candidates, child) {
+				candidates = append(candidates, child)
+			}
+		}
 	}
 	for _, candidate := range candidates {
 		held, err := sssd.sidOfUserInDomain(candidate, bare)
@@ -485,25 +496,7 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 		if !strings.EqualFold(held, sid) {
 			continue
 		}
-		realm, ok := realmFor(candidate, useridentity.SourceSSSD, realms)
-		if !ok {
-			// A child DNS name alone does not prove membership in a joined
-			// parent realm: an independent LDAP domain can share its suffix.
-			// Require SSSD to resolve this same SID in the parent domain.
-			for _, parent := range realms {
-				if !strings.EqualFold(parent.ClientSoftware, "sssd") ||
-					!strings.HasSuffix(candidate, "."+parent.Domain) {
-					continue
-				}
-				parentSID, lookupErr := sssd.sidOfUserInDomain(parent.Domain, bare)
-				if lookupErr != nil {
-					return "", fmt.Errorf("unixidentity: SSSD SID of %s in %s: %w", bare, parent.Domain, lookupErr)
-				}
-				if strings.EqualFold(parentSID, sid) && len(parent.Domain) > len(realm.Domain) {
-					realm, ok = parent, true
-				}
-			}
-		}
+		realm, ok := sssdRealmFor(candidate, realms)
 		if !ok {
 			continue
 		}

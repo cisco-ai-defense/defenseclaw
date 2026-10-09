@@ -184,9 +184,9 @@ func netBIOSName(formats []string) string {
 }
 
 // realmFor picks the joined realm whose client (sssd or winbind) serves the
-// account. A DNS domain names its realm, or the nearest parent realm (an
-// Active Directory child domain for winbind. SSSD parent domains require
-// a separate SID check before they can be attributed. A winbind NetBIOS
+// account. A DNS domain names its realm, or for winbind the nearest parent
+// realm (an Active Directory child domain); an SSSD child domain names its
+// parent realm only when it is listed (sssdRealmFor). A winbind NetBIOS
 // domain names the realm of that name, and an unqualified name the only winbind
 // realm. An SSSD domain without a DNS name names no realm: which SSSD domain
 // holds an account comes from its SID (applySSSDDomain).
@@ -223,6 +223,31 @@ func realmFor(domain, source string, realms []Realm) (Realm, bool) {
 			return realm, true
 		}
 		if client == "winbind" && strings.HasSuffix(domain, "."+realm.Domain) && len(realm.Domain) > len(best.Domain) {
+			best, found = realm, true
+		}
+	}
+	return best, found
+}
+
+// sssdRealmFor picks the joined SSSD realm of an SSSD domain: the realm of
+// that DNS domain or, for a child domain the administrator lists in
+// ai_discovery.trusted_ad_child_domains, the nearest joined Active Directory
+// realm it is below. A child that is not listed gets none: nothing a process
+// that is not root can ask proves that a domain below the joined one is a
+// trusted child rather than a plain LDAP domain with that suffix (GAP-1255).
+func sssdRealmFor(domain string, realms []Realm) (Realm, bool) {
+	if realm, ok := realmFor(domain, useridentity.SourceSSSD, realms); ok {
+		return realm, true
+	}
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if !useridentity.TrustedADChildDomain(domain) {
+		return Realm{}, false
+	}
+	best, found := Realm{}, false
+	for _, realm := range realms {
+		if strings.EqualFold(realm.ClientSoftware, "sssd") && realm.Domain != "" &&
+			realmDirectory(realm) == useridentity.DirectoryActiveDirectory &&
+			strings.HasSuffix(domain, "."+realm.Domain) && len(realm.Domain) > len(best.Domain) {
 			best, found = realm, true
 		}
 	}
@@ -269,7 +294,8 @@ func applyRealm(facts *useridentity.DirectoryFacts, accountName string, realms [
 // ApplyHeldSSSDDomain gives an SSSD account without a realm the joined
 // realm of the SSSD domain that a lookup by its uid places it in: InfoPipe
 // Users.FindByID, which only root may call. The domain names its realm by
-// its exact DNS name, or by its Kerberos realm (kerberosRealm). It is
+// its exact DNS name, as a child domain ai_discovery.trusted_ad_child_domains
+// lists (sssdRealmFor), or by its Kerberos realm (kerberosRealm). It is
 // how the guardian attributes an account that has no SID, such as one of an
 // IPA domain without an AD trust; the gateway has no such lookup. A name
 // that carries another domain (an e-mail style name) gets nothing.
@@ -283,7 +309,7 @@ func ApplyHeldSSSDDomain(ctx context.Context, facts *useridentity.DirectoryFacts
 		return err
 	}
 	dnsDomain := strings.ToLower(strings.TrimSpace(domain))
-	realm, ok := realmFor(dnsDomain, useridentity.SourceSSSD, realms)
+	realm, ok := sssdRealmFor(dnsDomain, realms)
 	if !ok && kerberosRealm != "" {
 		for _, candidate := range realms {
 			if strings.EqualFold(candidate.ClientSoftware, "sssd") && strings.EqualFold(candidate.Name, kerberosRealm) {

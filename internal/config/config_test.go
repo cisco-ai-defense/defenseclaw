@@ -1347,3 +1347,21 @@ func TestLLMRequestBaseURL(t *testing.T) {
 		}
 	}
 }
+
+// ai_discovery.trusted_ad_child_domains takes DNS domains only: a wildcard,
+// a NetBIOS name or an account-style entry would widen which accounts are
+// trusted beyond what the administrator named (GAP-1255).
+func TestValidateTrustedADChildDomains(t *testing.T) {
+	ok := AIDiscoveryConfig{TrustedADChildDomains: []string{"emea.corp.example.com", "APAC.Corp.Example.com."}}
+	if err := ok.ValidateTrustedADChildDomains(); err != nil {
+		t.Fatalf("valid list refused: %v", err)
+	}
+	for _, bad := range [][]string{
+		{"*.corp.example.com"}, {"EMEA"}, {"alice@emea.corp.example.com"}, {`EMEA\alice`}, {""},
+		{"emea..corp.example.com"}, {"-emea.corp.example.com"}, {"emea.corp.example.com", "EMEA.corp.example.com"},
+	} {
+		if err := (AIDiscoveryConfig{TrustedADChildDomains: bad}).ValidateTrustedADChildDomains(); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

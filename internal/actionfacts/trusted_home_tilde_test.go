@@ -146,3 +146,30 @@ func TestTrustedHomeTildeRedirectTarget(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1205: a Windows home whose account name has a non-ASCII letter
+// resolves $HOME and ~ to the same path as the literal spelling.
+func TestTrustedWindowsHomeUnicodePath(t *testing.T) {
+	for _, command := range []string{
+		`Add-Content -Path $HOME\.ssh\authorized_keys -Value marker`,
+		`Add-Content -Path ~\.ssh\authorized_keys -Value marker`,
+		`Add-Content -Path C:\Users\Zoë\.ssh\authorized_keys -Value marker`,
+	} {
+		facts := Analyze(Input{
+			Tool: "shell", Command: command, CWD: `C:\Users\Zoë\project`,
+			ActiveHome: `C:\Users\Zoë`, DialectHint: DialectPowerShell,
+		})
+		if !facts.Authoritative() {
+			t.Fatalf("%q parse = %+v, want complete", command, facts.Parse)
+		}
+		found := false
+		for _, path := range facts.Paths {
+			if path.Resolved == "C:/Users/Zoë/.ssh/authorized_keys" && path.Access == PathAccessAppend {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%q paths = %+v, want an append of the home authorized_keys", command, facts.Paths)
+		}
+	}
+}

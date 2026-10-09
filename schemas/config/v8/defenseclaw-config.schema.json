@@ -2745,6 +2745,18 @@
           "default": false,
           "description": "Opt in to attaching the end-user directory principal (UPN) and the session's Kerberos principal to every identity-carrying record: hook decisions, guardrail evaluations, tool activity, agent, model, tool and guardrail spans, and inventory records. Off by default: like the email address, the principal identifies a person across systems."
         },
+        "trusted_ad_child_domains": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "default": [],
+          "description": "Child domains of the joined Active Directory realm whose SSSD accounts are verified on Linux, for example emea.corp.example.com on a host joined to corp.example.com. An account of a child domain that is not listed gets no domain, realm, directory or principal, so no users assignment or profile matches it. Empty trusts the joined domain only.",
+          "items": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\\.?$"
+          }
+        },
         "ide_inventory": {
           "type": "string",
           "enum": [
