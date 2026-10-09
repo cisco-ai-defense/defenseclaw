@@ -754,9 +754,17 @@ func (m *v9Migrator) leftOutsideRollbackCopy(path string) bool {
 	if path == "" || m.in.Managed {
 		return false
 	}
-	for _, home := range []string{filepath.Dir(m.configPath), DefaultDataPath()} {
-		if rel, err := filepath.Rel(home, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return false
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		for _, home := range []string{filepath.Dir(m.configPath), DefaultDataPath()} {
+			resolvedHome, homeErr := filepath.EvalSymlinks(home)
+			if homeErr != nil {
+				continue
+			}
+			rel, relErr := filepath.Rel(resolvedHome, resolvedPath)
+			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return false
+			}
 		}
 	}
 	m.note("%s is outside the data home, so the upgrade's rollback copy does not cover it; it was left as it is", path)

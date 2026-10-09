@@ -165,6 +165,36 @@ func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 	}
 }
 
+// A policy_dir symlink within the data home can point at files the installer's
+// rollback snapshot cannot restore.
+func TestMigrateV9KeepsSymlinkedPolicyDataOutsideRollbackCopy(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	home, external := t.TempDir(), t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	policyDir := filepath.Join(home, "policies")
+	if err := os.Symlink(external, policyDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	dataJSON := filepath.Join(policyDir, "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions":{"HIGH":{"install":"block"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + home + "\npolicy_dir: " + policyDir + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dataJSON); err != nil {
+		t.Fatalf("external data.json must survive rollback: %v", err)
+	}
+}
+
 // A 0.8.x config with rule_pack_dir: "" (the 0.8.10 default: the embedded
 // packs) on a home without the default pack folder upgrades to a config whose
 // default pack exists: the migration writes the shipped pack, and a folder
