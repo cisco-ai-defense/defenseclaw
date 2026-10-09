@@ -541,12 +541,13 @@ func TestSudoTerminalAndShellSemantics(t *testing.T) {
 			t.Fatalf("%v = %#v", argv, facts)
 		}
 	}
-	opaque := Analyze(Input{
+	parsed := Analyze(Input{
 		Argv:        []string{"sudo", "/bin/sh", "-c", "rm -rf /tmp/fixture"},
 		DialectHint: DialectPOSIX,
 	})
-	if opaque.Parse.Status != StatusPartial {
-		t.Fatalf("opaque shell = %#v", opaque)
+	if parsed.Parse.Status != StatusComplete ||
+		!factsHavePath(parsed, PathAccessDelete, "/tmp/fixture") {
+		t.Fatalf("sudo shell status = %s paths = %#v", parsed.Parse.Status, parsed.Paths)
 	}
 }
 
