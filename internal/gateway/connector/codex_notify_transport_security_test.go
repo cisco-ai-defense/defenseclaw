@@ -38,6 +38,26 @@ func TestCodexNotifyBridgeChainsUserProgramWithoutGateway(t *testing.T) {
 	}
 }
 
+func TestCodexNotifyBridgeKeepsSecureClientRendering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Bash bridge runs on Unix")
+	}
+	dataDir := t.TempDir()
+	if err := writeCodexNotifyBridge(
+		SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true},
+		[]string{"/bin/user-notify"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dataDir, "notify-bridge.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "user-notify") {
+		t.Fatal("Secure Client bridge unexpectedly invokes a user notifier")
+	}
+}
+
 func TestCodexNotifyBridgeKeepsCredentialAndPayloadOutOfCurlProcessState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Bash notify bridge is not installed on Windows")

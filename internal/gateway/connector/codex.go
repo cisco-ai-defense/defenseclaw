@@ -2455,7 +2455,7 @@ func writeCodexNotifyBridge(opts SetupOpts, chained ...[]string) error {
 			"unset SF_CA SF_TTY SF_LS SESSION_FACTS\n"
 	}
 	userNotify := ""
-	if len(chained) > 0 && len(chained[0]) > 0 {
+	if !shellHookSecureClientProfile(opts) && len(chained) > 0 && len(chained[0]) > 0 {
 		var words []string
 		for _, part := range chained[0] {
 			words = append(words, shellSingleQuote(part))

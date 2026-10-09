@@ -5743,7 +5743,7 @@ def _foreign_defenseclaw_codex_hook_scripts(
             raw = fh.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             return [], []
-        document = tomllib.loads(raw.decode("utf-8"))
+        document = tomllib.loads(raw.decode("utf-8-sig"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         return [], []
     hooks = document.get("hooks") if isinstance(document, dict) else None
@@ -5867,7 +5867,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             raw = fh.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise ValueError("config.toml exceeds the 1 MiB Doctor limit")
-        document = tomllib.loads(raw.decode("utf-8"))
+        document = tomllib.loads(raw.decode("utf-8-sig"))
         otel = document.get("otel", {}) if isinstance(document, dict) else {}
         actual = otel.get("environment", "") if isinstance(otel, dict) else ""
         if not isinstance(actual, str):

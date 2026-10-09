@@ -30,6 +30,10 @@ func TestCodexOwnedEditPreservesUserTextAndBOM(t *testing.T) {
 	if !bytes.HasPrefix(after, before[:3]) || strings.Contains(string(after), "\r\r\n") {
 		t.Fatal("Codex BOM or line endings changed")
 	}
+	if !(bytes.Index(after, []byte("model =")) < bytes.Index(after, []byte("notify =")) &&
+		bytes.Index(after, []byte("notify =")) < bytes.Index(after, []byte("approval_policy ="))) {
+		t.Fatal("the user key order changed around notify")
+	}
 	var decoded map[string]interface{}
 	if err := parseCodexTOML(after, &decoded); err != nil {
 		t.Fatalf("edited Codex TOML is invalid: %v", err)

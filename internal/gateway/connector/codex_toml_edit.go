@@ -64,6 +64,10 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 		if key, _, ok := strings.Cut(trimmed, "="); ok {
 			key = strings.TrimSpace(key)
 			if section == "" && (key == "notify" || key == "openai_base_url" && desired[key] == nil) {
+				if key == "notify" && !rootWritten {
+					out.Write(rootBytes)
+					rootWritten = true
+				}
 				// A top-level notify array may span lines. Its closing bracket
 				// belongs to the same value, not to the next user key.
 				if key == "notify" && strings.Count(line, "[") > strings.Count(line, "]") {
