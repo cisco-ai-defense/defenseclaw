@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -204,5 +205,56 @@ func TestStartupRescanAdmitsSkillInRootCreatedWhileStopped(t *testing.T) {
 	}
 	if _, err := os.Lstat(skill); !os.IsNotExist(err) {
 		t.Fatalf("skill created while stopped stayed in place: %v", err)
+	}
+}
+
+// stoppingScanner stops the watcher during the scan, as a config reload or
+// a change of the enrolled users' folders does.
+type stoppingScanner struct{ stop context.CancelFunc }
+
+func (s *stoppingScanner) Name() string               { return "skill-scanner" }
+func (s *stoppingScanner) Version() string            { return "fake-1" }
+func (s *stoppingScanner) SupportedTargets() []string { return []string{"skill"} }
+func (s *stoppingScanner) Scan(ctx context.Context, _ string) (*scanner.ScanResult, error) {
+	s.stop()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// GAP-0980: a skill whose admission the watcher's own stop cut off is
+// admitted by the next start, even under a root that start has no baseline
+// for, instead of getting a baseline scan whose verdict nothing acts on.
+func TestStartupRescanAdmitsSkillWhoseAdmissionWasCutOff(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Watch.RescanEnabled = true
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	skill := filepath.Join(skillDir, "w1-amp-bad")
+	if err := os.MkdirAll(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: w1-amp-bad\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	first := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	first.scannerFactory = func(InstallEvent) scanner.Scanner { return &stoppingScanner{stop: stop} }
+	first.pending[skill] = time.Now().Add(-time.Hour)
+	first.processPending(ctx)
+	first.waitAdmissions()
+
+	var admitted []AdmissionResult
+	next := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	next.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{{
+			ID: "f1", RuleID: "SKILL-001", Severity: scanner.SeverityCritical, Title: "critical finding",
+		}}}
+	}
+	next.runRescanCycle(context.Background())
+	if len(admitted) != 1 || admitted[0].Verdict != VerdictRejected {
+		t.Fatalf("restart admitted %+v, want the cut-off skill rejected", admitted)
+	}
+	if _, err := os.Lstat(skill); !os.IsNotExist(err) {
+		t.Fatalf("cut-off CRITICAL skill stayed in place: %v", err)
 	}
 }

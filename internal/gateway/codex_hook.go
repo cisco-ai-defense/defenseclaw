@@ -224,6 +224,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
+		a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
 			count := a.scanCodexComponents(ctx, req)
 			if count > 0 {

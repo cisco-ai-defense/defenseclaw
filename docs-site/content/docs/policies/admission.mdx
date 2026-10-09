@@ -513,21 +513,32 @@ no install watcher for skills and plugins, so there a `default: deny` or
 ### Where a denied skill is refused
 
 An agent hook refuses a denied skill when the agent selects it: Claude Code's
-Skill tool and slash commands, and Codex's `$name` selection. Codex has no hook
+Skill tool and slash commands, and Codex's `$name` selection. A denied name
+also matches the copy a Claude Code plugin bundles (`<plugin>:<name>` at the
+Skill tool and `/<plugin>:<name>`). Codex has no hook
 on its own skill loading, so asked for a skill in plain words it reads the
 skill's `SKILL.md` with a shell command and follows it. The Claude Code and
 Codex hooks therefore also refuse any tool call that reaches into the folder of
 a denied skill: a `.../skills/<name>/...` path in a command, a file path or a
-working folder. Two things stay out of reach of a hook:
+working folder. A skill that install admission blocked and disabled (one whose
+quarantine failed stays in its folder) is refused the same ways, also when
+Codex selects it by the name its `SKILL.md` declares rather than its folder
+name. Two things stay out of reach of a hook:
 
 - the skill's name and description, which Codex lists to the model from its
   own skill index before any hook runs;
 - a command that builds the path at run time, for example from a variable, a
   glob, or a `cd` into the skills folder followed by a relative path.
 
-Project skill folders (`<project>/.claude/skills`, `<project>/.agents/skills`)
-are not watched, so install admission never scans what they hold. The hooks
-cover them as they cover every other folder: a denied name is refused at the
+Project skill folders (`<project>/.claude/skills`, `<project>/.agents/skills`,
+`<project>/.codex/skills`) are watched once an agent session runs in the
+project: its first hook (the session start, or the first skill call) adds the
+project's existing skill folders to the install watcher, which restarts and
+admits what they hold, as at a gateway start. Until a project skill's first
+scan has finished, the hooks refuse it with "is not scanned yet ... try again
+in a minute". Up to 32 project folders are watched; on a managed computer only
+projects inside the user's home count, and explicit
+`gateway.watcher.skill.dirs` add none. The hooks also cover them as they cover every other folder: a denied name is refused at the
 Skill call, the `$name` selection and the folder read, wherever the skill
 lives. With `runtime_detection.enabled: true`, `mode: action` and a
 `default: deny` or an approved registry, the Skill call and `$name` selection
@@ -561,7 +572,9 @@ Code hook refuses the plugin's skills and commands (`/<plugin>:<skill>`), its
 agents (`<plugin>:<agent>`) and its MCP tools
 (`mcp__plugin_<plugin>_<server>__<tool>`). The hook sees the plugin name only,
 so a denied rule written as `plugin@marketplace` refuses that plugin from any
-marketplace.
+marketplace. `claude plugin list` keeps showing such a plugin as enabled, since
+that list is Claude Code's own record and DefenseClaw does not edit it;
+`defenseclaw plugin list` shows the block.
 
 The MCP servers a Claude Code plugin bundles are admitted with their plugin:
 they get no admission row or MCP inventory entry of their own. The hooks hold

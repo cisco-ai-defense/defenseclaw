@@ -86,6 +86,9 @@ type Sidecar struct {
 	// installWatcher is the running install watcher, nil while none runs;
 	// a reload that changes a denied list asks it to rescan (GAP-0627).
 	installWatcher atomic.Pointer[watcher.InstallWatcher]
+	// projectSkills are the project skill folders the hooks report, which
+	// the install watcher watches next to the connectors' (GAP-1063).
+	projectSkills projectSkillRoots
 
 	startedAt  time.Time
 	cfg        *config.Config
@@ -3756,7 +3759,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		if !restart || ctx.Err() != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher: the enrolled users' folders changed; restarting the watcher\n")
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: the watched folders changed; restarting the watcher\n")
 	}
 }
 
@@ -3825,22 +3828,62 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 			}
 		}
 	}
+	// The skill folders of the projects the agents run in are watched too,
+	// unless explicit gateway.watcher.skill.dirs name the folders; a new
+	// one restarts the watcher, which admits it at its start (GAP-1063).
+	// Secure Client keeps main's folders (issue #1092).
+	cfgNow := s.currentConfig()
+	projectActive := wcfg.Skill.Enabled && src.Skill != watcherDirsFromConfig && cfgNow != nil &&
+		cfgNow.Watch.RescanEnabled && !cfgNow.SecureClientIntegration()
+	baseSkillDirs := skillDirs
+	projectRoots, freshProjectRoots := s.projectSkills.start(projectActive)
+	for _, root := range projectRoots {
+		if slices.ContainsFunc(skillDirs, func(dir string) bool { return projectRootKey(dir) == projectRootKey(root.Path) }) {
+			continue
+		}
+		skillDirs = append(append([]string(nil), skillDirs...), root.Path)
+		if enrolled != nil {
+			if enrolled.roots == nil {
+				enrolled.roots = map[string]string{}
+			}
+			enrolled.roots[root.Path] = root.Connector
+			continue
+		}
+		if roots == nil {
+			roots = map[string]string{}
+		}
+		roots[root.Path] = root.Connector
+	}
 	watchCtx := ctx
 	changed := make(chan struct{})
-	if enrolled != nil {
+	if enrolled != nil || projectActive {
 		var cancel context.CancelFunc
 		watchCtx, cancel = context.WithCancel(ctx)
 		defer cancel()
+		var projectChanged <-chan struct{}
+		if projectActive {
+			projectChanged = s.projectSkills.changeSignal()
+		}
+		restartWanted := make(chan struct{})
 		go func() {
 			select {
 			case <-changed:
-				cancel()
+			case <-projectChanged:
+				// A burst of new project folders restarts the watcher once.
+				select {
+				case <-time.After(projectSkillRootsSettle):
+				case <-watchCtx.Done():
+					return
+				}
 			case <-watchCtx.Done():
+				return
 			}
+			close(restartWanted)
+			cancel()
 		}()
 		defer func() {
 			select {
-			case <-changed:
+			case <-restartWanted:
 				restart = ctx.Err() == nil
 			default:
 			}
@@ -3889,7 +3932,10 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// A folder that appeared since the previous watcher (a user made
 		// ~/.claude/skills, or a user was enrolled) holds what was added
 		// meanwhile: admit it at startup (GAP-0571).
-		w.AdmitNewRootsAtStartup(s.newEnrolledWatchRoots(enrolled.readable(append(append([]string(nil), skillDirs...), pluginDirs...))))
+		w.AdmitNewRootsAtStartup(append(s.newEnrolledWatchRoots(enrolled.readable(append(append([]string(nil), baseSkillDirs...), pluginDirs...))),
+			freshProjectRoots...))
+	} else if len(freshProjectRoots) > 0 {
+		w.AdmitNewRootsAtStartup(freshProjectRoots)
 	}
 	w.SetConfigSource(s.currentConfig)
 	w.SetRulePackSource(installScanRulePack)
@@ -3923,7 +3969,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// Retries a server whose admission could not run at the poll.
 		w.SetMCPDiscoveryPoll(true)
 	} else {
-		if len(conns) > 1 {
+		if len(conns) > 1 || len(projectRoots) > 0 {
 			// Each folder belongs to the connector that lists it, so its
 			// events, rule pack and enforcement are that connector's
 			// (GAP-0392).
@@ -7695,6 +7741,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	} else {
 		api.initGuardrailProfiles(api.scannerCfg)
 	}
+	api.projectSkills = &s.projectSkills
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
 	if set := api.guardrailProfileSet(); set != nil {

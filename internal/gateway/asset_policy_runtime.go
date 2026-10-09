@@ -202,11 +202,15 @@ func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest
 }
 
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
+	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
 	if !probe.Matched {
 		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
+	if skill := pluginBundledSkillName(a.liveConfig(), probe.SkillName); skill != "" {
+		probe.DeclaredNames = append(probe.DeclaredNames, skill)
+	}
 	probe.SourcePaths = a.skillSourcePaths(ctx, "claudecode", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
@@ -232,6 +236,7 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 }
 
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
+	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	targetType := slashCommandAssetType(req.CommandSource)
 	trustedAssetPolicySource := claudeCodeSlashSourceTrustsAssetPolicy(req.CommandSource)
 	commandName := strings.TrimSpace(req.CommandName)
@@ -247,12 +252,21 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		(promptPresent && !promptOK) ||
 		(commandOK && promptOK && !commandIdentity.sameAsset(promptIdentity)))
 
-	identities := make([]claudeCodeSlashIdentity, 0, 2)
+	identities := make([]claudeCodeSlashIdentity, 0, 3)
 	if commandOK {
 		identities = append(identities, commandIdentity)
 	}
 	if promptOK && (!commandOK || !commandIdentity.sameAsset(promptIdentity)) {
 		identities = append(identities, promptIdentity)
+	}
+	if targetType == "plugin" && commandOK && !identityMalformed {
+		// /plugin:skill runs a skill the plugin bundles: a skill on
+		// asset_policy.skill.denied is refused there too (GAP-1104).
+		if skill := pluginBundledSkillName(a.liveConfig(), commandName); skill != "" {
+			if bundled, ok := claudeCodeSlashAssetIdentity("skill", skill); ok {
+				identities = append(identities, bundled)
+			}
+		}
 	}
 
 	// Only literal skill/plugin provenance with a non-conflicting identity
@@ -273,6 +287,19 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 			Surface:            "prompt_expansion",
 			Matched:            true,
 			RuntimeDisableOnly: runtimeDisableOnly,
+		}
+		if runtimeDisableOnly && !identityMalformed && identity.targetType == "skill" {
+			// A settings-origin command that is a skill folder (a user or
+			// project skill typed as /name) is held to asset_policy at
+			// that folder as the Skill tool is; it used to get the
+			// runtime-disable lookup only, so a skill on
+			// asset_policy.skill.denied ran (GAP-0968). A custom command
+			// with no skill folder of its name keeps that lookup.
+			if folders := a.installedSkillFolders(ctx, "claudecode", req.CWD, identity.name); len(folders) > 0 {
+				probe.RuntimeDisableOnly = false
+				probe.SourcePath = ""
+				probe.SourcePaths = folders
+			}
 		}
 		probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 		if decision, matched := a.evaluateNativeRuntimeSkillSelection(
@@ -323,6 +350,7 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 }
 
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
+	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
 	if !probe.Matched {
 		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
@@ -339,6 +367,7 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
+	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
 	probe.SourcePaths = a.skillSourcePaths(ctx, "codex", req.CWD, probe)
 	return a.evaluateNativeRuntimeSkillSelection(
@@ -573,6 +602,18 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	paths := []string{probe.SourcePath}
 	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
 		paths = probe.SourcePaths
+		if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
+			return decision, true
+		}
+		// A folder of another name that the call loads (its SKILL.md
+		// declares the name) answers to that folder's runtime disable.
+		for _, path := range probe.SourcePaths {
+			if folder := filepath.Base(path); !config.SameAssetName(folder, probe.SkillName) {
+				if decision, disabled := a.runtimeAssetDisableDecision(targetType, folder, connector, runtimeSurface); disabled {
+					return decision, true
+				}
+			}
+		}
 	}
 	var last config.AssetPolicyDecision
 	for _, path := range paths {
@@ -1091,6 +1132,22 @@ func cursorMCPProbeFromPayload(payload map[string]interface{}, toolName string) 
 		Surface:    "hook",
 		Matched:    true,
 	}
+}
+
+// pluginBundledSkillName is the skill part of a plugin-qualified name
+// (usm-kit:notes, as Claude Code names a skill or command a plugin bundles),
+// or "". A denied skill name matches it, so "skill block notes" stops the
+// plugin's copy as well as a standalone one (GAP-1104). Secure Client keeps
+// main's name match (issue #1092).
+func pluginBundledSkillName(cfg *config.Config, name string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	plugin, skill, namespaced := strings.Cut(strings.TrimPrefix(strings.TrimSpace(name), "/"), ":")
+	if !namespaced || !validNativeSkillSelectionName(plugin) || !validNativeSkillSelectionName(skill) {
+		return ""
+	}
+	return skill
 }
 
 func slashCommandAssetType(commandSource string) string {

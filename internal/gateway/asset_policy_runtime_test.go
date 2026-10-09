@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
 
 func enableSkillRuntimeDetection(cfg *config.Config) {
@@ -980,7 +981,8 @@ func TestPinnedSkillAllowOverridesGlobalDenyAtHook(t *testing.T) {
 	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{
 		Name: "usm-shared", Connector: "claudecode", SourcePathContains: []string{pinned},
 	}}
-	api := &APIServer{scannerCfg: cfg}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
 	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
 	skill := map[string]interface{}{"skill": "usm-shared"}
 	if decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
@@ -993,6 +995,18 @@ func TestPinnedSkillAllowOverridesGlobalDenyAtHook(t *testing.T) {
 	}); !matched || decision.Action != "block" {
 		t.Fatalf("Codex copy: matched=%v decision=%+v, want the global deny", matched, decision)
 	}
+	// GAP-1093: skill allow --connector codex pins the Codex copy; Codex's
+	// $name selection carries no path and is judged at that folder.
+	codexPin := cfg.AssetPolicy.Skill.Allowed[0]
+	cfg.AssetPolicy.Skill.Allowed[0] = config.AssetPolicyRule{
+		Name: "usm-shared", Connector: "codex", SourcePathContains: []string{filepath.Join(home, ".agents", "skills", "usm-shared")},
+	}
+	if decision, matched := api.codexPromptSkillAssetDecision(ctx, codexHookRequest{
+		HookEventName: "UserPromptSubmit", SessionID: "s-1093", Prompt: "$usm-shared Run it.", CWD: home,
+	}); matched && decision.Action == "block" {
+		t.Fatalf("pinned Codex $usm-shared: decision=%+v, want it allowed", decision)
+	}
+	cfg.AssetPolicy.Skill.Allowed[0] = codexPin
 	unreadable := filepath.Join(t.TempDir(), "absent-home")
 	unreadablePin := filepath.Join(unreadable, ".claude", "skills", "usm-shared")
 	cfg.AssetPolicy.Skill.Allowed[0].SourcePathContains = []string{unreadablePin}
@@ -1003,6 +1017,38 @@ func TestPinnedSkillAllowOverridesGlobalDenyAtHook(t *testing.T) {
 		HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: skill, CWD: unreadable,
 	}); matched {
 		t.Fatalf("pinned copy the hook reported: decision=%+v, want it allowed", decision)
+	}
+}
+
+// GAP-1101: a skill admission blocked and disabled under its folder name
+// (usm-crit2) is refused when Codex selects it by the name its SKILL.md
+// declares (usm-crit) and when a tool reads its folder.
+func TestCodexDisabledSkillRefusedByDeclaredNameAndFolderRead(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	home := t.TempDir()
+	folder := filepath.Join(home, ".agents", "skills", "usm-crit2")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "SKILL.md"), []byte("---\nname: usm-crit\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforce.NewPolicyEngine(store).Disable("skill", "usm-crit2", "quarantine failed"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1003, Home: home})
+	if decision, matched := api.codexPromptSkillAssetDecision(ctx, codexHookRequest{
+		HookEventName: "UserPromptSubmit", SessionID: "s-1101", Prompt: "$usm-crit Run it.", CWD: home,
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("$usm-crit = %+v, matched=%v; want the disabled folder refused", decision, matched)
+	}
+	if decision, matched := api.codexSkillAssetDecision(ctx, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Bash", CWD: home,
+		ToolInput: map[string]interface{}{"command": "cat " + folder + "/SKILL.md"},
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("folder read = %+v, matched=%v; want refused", decision, matched)
 	}
 }
 

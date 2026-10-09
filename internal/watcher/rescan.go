@@ -89,7 +89,7 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	// blind for the first full interval after startup.
 	w.runRescanCycle(ctx)
 
-	timer := time.NewTimer(interval)
+	timer := time.NewTimer(w.nextRescanDelay(interval))
 	defer timer.Stop()
 
 	for {
@@ -98,11 +98,35 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 			w.runRescanCycle(ctx)
-			timer.Reset(interval)
+			timer.Reset(w.nextRescanDelay(interval))
 		case <-w.rescanNow:
 			w.runRescanCycle(ctx)
+			if delay := w.nextRescanDelay(interval); delay < interval {
+				timer.Reset(delay)
+			}
 		}
 	}
+}
+
+// scannerRuntimeRetry is the first wait before the rescan cycle after one
+// whose scans found the managed scanner runtime not ready; a var for tests.
+var scannerRuntimeRetry = 2 * time.Minute
+
+// nextRescanDelay is the wait before the next rescan cycle: interval, or a
+// short retry when a scan of the cycle that just ended found the managed
+// scanner runtime not ready. Setup prepares that runtime after it starts the
+// gateway, so every skill and plugin the startup cycle found was left
+// unscanned for a whole interval (60 minutes by default; GAP-0975). The
+// retry doubles on each such cycle in a row, up to interval, so a runtime
+// that stays broken is not checked every two minutes.
+func (w *InstallWatcher) nextRescanDelay(interval time.Duration) time.Duration {
+	if !w.runtimeNotReady.Swap(false) {
+		w.runtimeRetries = 0
+		return interval
+	}
+	delay := scannerRuntimeRetry << min(w.runtimeRetries, 6)
+	w.runtimeRetries++
+	return min(delay, interval)
 }
 
 // rescanOutcome reports whether a single target was actually scanned during a
@@ -871,9 +895,14 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if evt.Type == InstallMCP && w.admitNewMCP && w.startupRescanDone {
+			if evt.Type == InstallMCP && w.admitNewMCP && (w.startupRescanDone || !w.secureClientActive()) {
 				// A server added to an enrolled user's agent after the
 				// watcher started: admit it as `mcp set` would (GAP-0132).
+				// One that was there at start is admitted too, so its
+				// verdict blocks and disables it as the docs say; it used
+				// to get a baseline scan only, a rejected verdict nothing
+				// acted on (GAP-1096). Secure Client keeps main's baseline
+				// (issue #1092).
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
@@ -889,7 +918,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
 				moved := w.movedByAdmission(evt)
-				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted && !moved {
+				if res.Interrupted {
+					w.markInterruptedAdmission(evt, currentSnap, fingerprint)
+				} else if _, statErr := os.Lstat(evt.Path); statErr == nil && !moved {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
 					w.persistSnapshot(evt, currentSnap, res.ScanID, w.admissionFingerprint(res, fingerprint))
@@ -907,6 +938,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
 		return rescanSkipped
+	}
+
+	if strings.HasSuffix(baseline.ScannerFingerprint, interruptedAdmissionMark) && !w.secureClientActive() {
+		return w.readmitInterrupted(ctx, evt, currentSnap, fingerprint)
 	}
 
 	// A rejection decided while take_action was off left the target in
@@ -956,6 +991,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 			w.persistSnapshot(evt, currentSnap, baseline.ScanID, marked(baseline.ScannerFingerprint))
 		}
 		return rescanSkipped
+	}
+
+	if reason == "content-changed" && !w.secureClientActive() {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint)
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
@@ -1088,6 +1127,86 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 	return rescanScanned
 }
 
+// readmitChanged runs install admission for a target whose content changed
+// since its baseline: an installed skill, plugin or MCP server edited to
+// carry HIGH or CRITICAL content is blocked, quarantined and disabled as a
+// new install would be. The rescan used to scan it and emit drift only, so
+// the rejected verdict was never acted on and the agents kept loading it
+// (GAP-1086). The drift alerts stay. A scan that failed or was cut off
+// leaves the old baseline (F-3188), so the next cycle admits it again.
+// Secure Client keeps main's rescan (issue #1092).
+func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[rescan] %s %s changed; running install admission\n", evt.Type, evt.Name)
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	if res.ScanID != "" {
+		if current, err := w.loadScanResult(res.ScanID); err == nil {
+			deltas = append(deltas, w.findingDrift(baseline, current)...)
+		}
+	}
+	if len(deltas) > 0 {
+		w.emitDriftAlerts(evt, deltas)
+	}
+	switch {
+	case res.Interrupted:
+		w.markInterruptedAdmission(evt, snap, fingerprint)
+	case res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt):
+	default:
+		if _, err := os.Lstat(evt.Path); err == nil {
+			scanID := res.ScanID
+			if scanID == "" {
+				// Decided before a scan (a list match): keep the last
+				// scan as the finding baseline for the new content.
+				scanID = baseline.ScanID
+			}
+			w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint))
+		}
+	}
+	return rescanScanned
+}
+
+// interruptedAdmissionMark ends the scanner fingerprint of a baseline that
+// records an admission the watcher's own stop cut off. No scanner
+// fingerprint contains it.
+const interruptedAdmissionMark = "|admission-interrupted"
+
+// BaselineAwaitsAdmission reports whether a target_snapshots fingerprint
+// marks a target whose admission was cut off, so it is not admitted yet.
+func BaselineAwaitsAdmission(fingerprint string) bool {
+	return strings.HasSuffix(fingerprint, interruptedAdmissionMark)
+}
+
+// markInterruptedAdmission records that the admission of a skill or plugin
+// was cut off by the watcher stopping (a config reload or a change of the
+// enrolled users' folders restarts it). Without it the next start found no
+// baseline under a root it had not baselined yet, recorded a baseline scan
+// with verdict warn, and a CRITICAL skill stayed loaded (GAP-0980). The mark
+// makes the next cycle run install admission instead.
+func (w *InstallWatcher) markInterruptedAdmission(evt InstallEvent, snap *TargetSnapshot, fingerprint string) {
+	if snap == nil || w.store == nil || w.secureClientActive() || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return
+	}
+	if _, err := os.Lstat(evt.Path); err != nil {
+		return
+	}
+	w.persistSnapshot(evt, snap, "", strings.TrimSuffix(fingerprint, interruptedAdmissionMark)+interruptedAdmissionMark)
+}
+
+// readmitInterrupted runs the install admission an interrupted one owed. The
+// mark stays until an admission decides; a decided target gets its baseline.
+func (w *InstallWatcher) readmitInterrupted(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[rescan] %s %s: its admission scan was cut off; running install admission\n", evt.Type, evt.Name)
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	if res.Interrupted || res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt) {
+		return rescanScanned
+	}
+	if _, err := os.Lstat(evt.Path); err == nil {
+		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
+	}
+	return rescanScanned
+}
+
 // shouldRescan decides whether a target with an existing baseline needs a fresh
 // scan. It is a pure function of the baseline, the current snapshot, the
 // scanner fingerprint, and whether content-gating is enabled, so it can be unit
@@ -1138,6 +1257,9 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] scan %s: %v\n", evt.Path, err)
+		if errors.Is(err, scanner.ErrScannerRuntimeUnavailable) {
+			w.runtimeNotReady.Store(true)
+		}
 		w.auditRescanFailure(evt, s.Name(), err)
 		return nil, ""
 	}

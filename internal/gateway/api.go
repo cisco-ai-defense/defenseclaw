@@ -71,6 +71,11 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+
+	// projectSkills are the project skill folders the install watcher
+	// watches; nil when no watcher shares them (GAP-1063).
+	projectSkills *projectSkillRoots
+
 	// exemptAuditAt is when each exempt account and connector last got an
 	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
 	exemptAuditMu sync.Mutex

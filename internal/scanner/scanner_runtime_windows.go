@@ -152,7 +152,10 @@ func scannerRuntimePreflight(binary string, defaults ...string) error {
 		return nil
 	}
 	if problem := scannerRuntimeProblem(); problem != nil {
-		return fmt.Errorf("scanner: the managed scanner runtime cannot be run (%v); run the DefenseClaw Setup with /repair", problem)
+		// ErrScannerRuntimeUnavailable lets the rescan loop retry soon: Setup
+		// starts the gateway before it has prepared the runtime (GAP-0975).
+		return fmt.Errorf("scanner: %w: it cannot be run (%v); scans run again once Setup has prepared it, "+
+			"and the DefenseClaw Setup with /repair prepares it again", ErrScannerRuntimeUnavailable, problem)
 	}
 	return nil
 }

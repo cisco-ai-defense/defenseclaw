@@ -12,7 +12,10 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"io/fs"
 	"net/http"
 	"os"
@@ -140,8 +143,54 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 		case !errors.Is(err, fs.ErrNotExist) && len(claimed) == 0:
 			paths = append(paths, dir)
 		}
+		paths = append(paths, foldersDeclaringSkill(root, name)...)
 	}
 	return paths
+}
+
+// maxDeclaredNameScan bounds the skill folders of one root whose SKILL.md
+// a name-only call reads to find the folders that declare that name.
+const maxDeclaredNameScan = 256
+
+// foldersDeclaringSkill lists the folders in root, other than root/name,
+// whose SKILL.md declares name. Codex selects a skill ($name, or by plain
+// words) by the name its SKILL.md declares, while admission blocks and
+// disables it under its folder name, so a skill whose quarantine failed in
+// a folder of another name still ran (GAP-1101).
+func foldersDeclaringSkill(root, name string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var folders []string
+	for i, entry := range entries {
+		if i >= maxDeclaredNameScan {
+			break
+		}
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || config.SameAssetName(entry.Name(), name) {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		if config.SameAssetName(assetfacts.DeclaredSkillName(dir), name) {
+			folders = append(folders, dir)
+		}
+	}
+	return folders
+}
+
+// installedSkillFolders are the folders, in the skill roots the connector
+// loads from, that hold a skill named name (a SKILL.md in the folder).
+// Secure Client keeps main's lookup (issue #1092).
+func (a *APIServer) installedSkillFolders(ctx context.Context, connector, cwd, name string) []string {
+	var folders []string
+	for _, dir := range a.skillSourcePaths(ctx, connector, cwd, skillRuntimeProbe{
+		TargetType: "skill", SkillName: name, Matched: true,
+	}) {
+		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
+			folders = append(folders, dir)
+		}
+	}
+	return folders
 }
 
 // skillFolderAccessDecision blocks a tool call that reaches into the folder
@@ -153,11 +202,24 @@ func (a *APIServer) skillFolderAccessDecision(
 	ctx context.Context, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
 ) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
-	if cfg == nil || cfg.SecureClientIntegration() || len(cfg.AssetPolicy.Skill.Denied) == 0 || !runtimeAssetCanEnforce(hookEvent) {
+	if cfg == nil || cfg.SecureClientIntegration() || !runtimeAssetCanEnforce(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	facts := claimedAssetFactsFromContext(ctx)
 	for _, ref := range assetfacts.SkillFolderRefs(toolInput, hookActiveHome(ctx), cwd) {
+		// A skill admission blocked and disabled (one whose quarantine
+		// failed stays in its folder) is refused when a tool reaches into
+		// its folder, as a denied one is (GAP-1101).
+		if decision, disabled := a.runtimeAssetDisableDecision("skill", ref.Name, connector, "skill_folder"); disabled {
+			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+				TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
+				SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+			})
+			return decision, true
+		}
+		if len(cfg.AssetPolicy.Skill.Denied) == 0 {
+			continue
+		}
 		declared := facts.DeclaredFor(ref.Name)
 		if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
 			declared = append(declared, name)
@@ -211,4 +273,63 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 		}, true
 	}
 	return config.MCPServerEntry{}, false
+}
+
+// noteProjectSkillFolders registers, for the install watcher, the existing
+// skill folders of the project a hook comes from (GAP-1063). A managed
+// caller's project counts only inside the caller's home. Secure Client keeps
+// main's watched folders (issue #1092).
+func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd string) {
+	if a == nil || !a.projectSkills.isActive() || strings.TrimSpace(cwd) == "" || isSandboxHookRequest(ctx) {
+		return
+	}
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return
+	}
+	home := hookActiveHome(ctx)
+	if home == "" || home == unresolvedCallerHome {
+		return
+	}
+	_, peer := managedHookPeerFromContext(ctx)
+	managedCaller := peer || serviceAccountGatewayFromContext(ctx)
+	for _, folder := range projectSkillFolders(connector, home, cwd) {
+		if rel, err := filepath.Rel(home, folder); managedCaller && (err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			continue
+		}
+		a.projectSkills.add(connector, folder)
+	}
+}
+
+// projectSkillScanPending refuses a skill in a registered project skill
+// folder that install admission has not recorded yet: its first scan is
+// running or about to (the watcher restarts to watch the folder), so it is
+// not loaded unscanned (GAP-1063).
+func (a *APIServer) projectSkillScanPending(targetType, connector, surface string, paths []string) (config.AssetPolicyDecision, bool) {
+	if a == nil || a.store == nil || targetType != "skill" || !a.projectSkills.isActive() {
+		return config.AssetPolicyDecision{}, false
+	}
+	for _, path := range paths {
+		// A hidden folder is not enumerated by the rescan, so it never gets
+		// a baseline to wait for.
+		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") ||
+			!a.projectSkills.registered(filepath.Dir(path)) {
+			continue
+		}
+		if _, err := os.Lstat(path); err != nil {
+			continue
+		}
+		row, err := a.store.GetTargetSnapshot("skill", path)
+		if err == nil && !watcher.BaselineAwaitsAdmission(row.ScannerFingerprint) {
+			continue
+		}
+		name := filepath.Base(path)
+		reason := fmt.Sprintf("skill %q in %s is not scanned yet: DefenseClaw is admitting this project's skills now; try again in a minute",
+			name, filepath.Dir(path))
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			reason = fmt.Sprintf("skill %q admission check failed - failing closed: %v", name, err)
+		}
+		return runtimeAssetDisableBlockDecision("skill", name, connector, surface, reason, "project-skill-pending"), true
+	}
+	return config.AssetPolicyDecision{}, false
 }

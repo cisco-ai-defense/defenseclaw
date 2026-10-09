@@ -439,6 +439,72 @@ func TestWatcher_DetectsNewDirectory(t *testing.T) {
 	}
 }
 
+// GAP-1087: a write inside an installed skill folder (here a helper script
+// one level down) reaches admission at once, not at the next rescan.
+func TestWatcher_AdmitsSkillChangedInPlace(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.AssetPolicy.Skill.Allowed = append(cfg.AssetPolicy.Skill.Allowed, config.AssetPolicyRule{Name: "usm-notes", Reason: "pre-approved"})
+	scripts := filepath.Join(skillDir, "usm-notes", "scripts")
+	if err := os.MkdirAll(scripts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "usm-notes", "SKILL.md"), []byte("# notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admitted := make(chan AdmissionResult, 4)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) { admitted <- r })
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx) }()
+	defer func() { cancel(); <-errCh }()
+	time.Sleep(500 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(scripts, "helper.py"), []byte("print('edited')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-admitted:
+		if r.Event.Name != "usm-notes" {
+			t.Fatalf("admitted %+v, want usm-notes", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an edit inside the installed skill reached no admission")
+	}
+}
+
+// GAP-1088: with ~/.claude a link to a dotfiles folder, a CRITICAL skill
+// is quarantined like one under a plain ~/.claude, not left in place.
+func TestQuarantineSkillUnderLinkedClaudeHome(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	home := t.TempDir()
+	realSkills := filepath.Join(home, "dotfiles", "claude-dir", "skills")
+	if err := os.MkdirAll(filepath.Join(realSkills, "ucc-flagged-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realSkills, "ucc-flagged-skill", "SKILL.md"), []byte("---\nname: ucc-flagged-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "dotfiles", "claude-dir"), filepath.Join(home, ".claude")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	skillRoot := filepath.Join(home, ".claude", "skills")
+	w := New(cfg, []string{skillRoot}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "skill-scanner", findings: []scanner.Finding{{
+			ID: "f1", RuleID: "TRUST-IGNORE-PREVIOUS", Severity: scanner.SeverityCritical, Title: "critical finding",
+		}}}
+	}
+	skill := filepath.Join(skillRoot, "ucc-flagged-skill")
+	res := w.runAdmission(context.Background(), w.classifyEvent(skill))
+	if res.Verdict != VerdictRejected {
+		t.Fatalf("verdict = %+v, want rejected", res)
+	}
+	if _, err := os.Lstat(filepath.Join(realSkills, "ucc-flagged-skill")); !os.IsNotExist(err) {
+		t.Fatalf("CRITICAL skill under the linked ~/.claude stayed in place: %v", err)
+	}
+}
+
 func TestAdmission_GatePrecedence_BlockBeatsAllow(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
