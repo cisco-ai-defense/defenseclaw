@@ -103,14 +103,26 @@ func (a *APIServer) acpCallerAccountRefusal(r *http.Request) string {
 		return ""
 	}
 	credential, enrolled := acpEnterpriseCredentialFromContext(r.Context())
-	kind, value, _ := strings.Cut(credential.Principal, ":")
-	if !enrolled || kind != "uid" {
-		// A home: principal names no account and binds none.
+	if !enrolled {
 		return ""
 	}
-	want, err := strconv.Atoi(value)
-	if err != nil {
-		return acpCallerAccountUnverifiedReason
+	kind, value, _ := strings.Cut(credential.Principal, ":")
+	var want int
+	switch kind {
+	case "uid":
+		var err error
+		want, err = strconv.Atoi(value)
+		if err != nil || want < 0 {
+			return acpCallerAccountUnverifiedReason
+		}
+	case "home":
+		var ok bool
+		want, ok = acpHomePrincipalUID(value, credential.UserDataDir)
+		if !ok {
+			return acpCallerAccountUnverifiedReason
+		}
+	default:
+		return ""
 	}
 	got, err := acpLoopbackPeerUID(r)
 	if err != nil {
