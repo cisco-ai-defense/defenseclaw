@@ -348,7 +348,9 @@ def _toggle_connector_guardrail(
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
-    if enable and restart:
+    if enable and (restart or _gateway_running(app)):
+        # A running gateway applies this connector flag on hot reload even
+        # with --no-restart, so its agent proof must exist before the save.
         _verify_agents_before_enable(app, [key])
 
     # Mutate the per-connector entry, preserving its other policy fields.

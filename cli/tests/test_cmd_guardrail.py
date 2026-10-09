@@ -703,6 +703,23 @@ class PerConnectorToggleTests(unittest.TestCase):
         app.cfg.save.assert_not_called()
         restart.assert_not_called()
 
+    def test_enable_no_restart_verifies_agent_before_hot_reload(self):
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        with (
+            patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+            patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections") as record,
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+        ):
+            result = CliRunner().invoke(
+                cmd_guardrail.enable_cmd,
+                ["--connector", "codex", "--yes", "--no-restart"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        record.assert_called_once_with(app.cfg.data_dir, ["codex"])
+        restart.assert_not_called()
+        app.cfg.save.assert_called_once()
+
     def test_disable_already_disabled_is_noop(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": False, "claudecode": None})
