@@ -2128,7 +2128,7 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	var names []string
 	var parseErr error
 	if !s.opts.SecureClient && strings.EqualFold(filepath.Base(path), ".claude.json") {
-		// Managed and per-user discovery apply the one MiB, no-follow
+		// Managed and per-user discovery apply the 256 MiB, no-follow
 		// bound. Secure Client retains its existing parser and byte output.
 		names, _, parseErr = readClaudeDiscoveryState(path)
 	} else {

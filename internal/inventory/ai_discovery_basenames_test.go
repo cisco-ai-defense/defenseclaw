@@ -232,11 +232,33 @@ func TestDetectMCPPathsClaudeStateScopesAreBoundedAndPrivate(t *testing.T) {
 			t.Fatal("MCP credential reached inventory evidence")
 		}
 	}
-	if err := os.WriteFile(state, make([]byte, maxClaudeDiscoveryStateBytes+1), 0o600); err != nil {
+	if err := os.Truncate(state, maxClaudeDiscoveryStateBytes+1); err != nil {
 		t.Fatal(err)
 	}
 	if got := svc.detectMCPPaths(); len(got) != 1 || !got[0].Partial {
 		t.Fatalf("oversized Claude state did not mark coverage partial: %+v", got)
+	}
+}
+
+func TestClaudeStateOverOneMiBRetainsMCPAndProjectSkills(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(project, ".claude", "skills", "project-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"mcpServers":{"user-server":{}},"projects":{"` + filepath.ToSlash(project) + `":{}},"history":"` + strings.Repeat("x", 2<<20) + `"}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home, HomeDirs: []string{home}},
+		catalog: []AISignature{{ID: "claudecode", SupportedConnector: "claudecode", MCPPaths: []string{"~/.claude.json"}}}}
+	mcp := svc.detectMCPPaths()
+	if len(mcp) != 1 || mcp[0].Partial || !slices.Contains(mcp[0].Basenames, "user-server") {
+		t.Fatalf("MCP inventory from multi-megabyte Claude state = %+v", mcp)
+	}
+	skills, err := svc.detectClaudeProjectSkills()
+	if err != nil || len(skills) != 1 || !slices.Contains(skills[0].Basenames, "project-skill") {
+		t.Fatalf("project skills from multi-megabyte Claude state = %+v, err = %v", skills, err)
 	}
 }
 

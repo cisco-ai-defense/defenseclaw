@@ -10,10 +10,10 @@ import (
 )
 
 // Claude's state also holds project history and credentials. Discovery reads
-// only one MiB, never follows a link, and retains only server and project
+// at most 256 MiB, never follows a link, and retains only server and project
 // names; commands, environment variables, headers and URLs never become
 // inventory evidence.
-const maxClaudeDiscoveryStateBytes = 1 << 20
+const maxClaudeDiscoveryStateBytes = 256 << 20
 
 func readClaudeDiscoveryState(path string) (servers, projects []string, err error) {
 	raw, err := readBoundedRegularFileNoFollow(path, maxClaudeDiscoveryStateBytes)
