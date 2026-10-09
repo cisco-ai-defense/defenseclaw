@@ -117,6 +117,15 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			return nil
 		})
 	}
+	// A nested vendor pack can gain an ACL without changing its mode bits.
+	// Include every installed entry, not just the top-level managed folders.
+	_ = filepath.WalkDir(e.P(e.Layout.VendorPolicyDir), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		add(path, nil)
+		return nil
+	})
 	for _, file := range e.configStateFiles(Account{}) {
 		add(e.P(file.path), &yes)
 	}

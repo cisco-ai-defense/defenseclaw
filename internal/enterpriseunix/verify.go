@@ -414,9 +414,6 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	// changes enforcement at the next restart with no trace (GAP-0552).
 	for _, label := range config.RulePackCheckOrder(record.RulePacks) {
 		dir := record.RulePacks[label]
-		if dir == env.Layout.VendorPolicyDir || strings.HasPrefix(dir, env.Layout.VendorPolicyDir+"/") {
-			continue
-		}
 		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && !errors.Is(err, os.ErrNotExist) {
 			add("%s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
 		}
