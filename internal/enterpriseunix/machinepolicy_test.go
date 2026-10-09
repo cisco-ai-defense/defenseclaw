@@ -301,6 +301,41 @@ func TestVerifyNamesTheConnectorAndFileOfMachinePolicyDrift(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 }
 
+// GAP-0957: a skill default deny or registry_required with runtime_detection
+// left at its default has no enforcement point on a managed Linux or macOS
+// host, which runs no install watcher for skills. ensure and status say so,
+// and runtime_detection on clears the warning.
+func TestLifecycleWarnsWhenSkillDefaultDenyHasNoEnforcementPoint(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			config := func(extra string) string {
+				body := string(DefaultConfig(h.env.Layout)) + "  connectors:\n    claudecode: {}\n" +
+					"asset_policy:\n  enabled: true\n  mode: action\n  skill:\n    default: deny\n" +
+					"    registry:\n      - name: acme-review\n" + extra
+				file := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return file
+			}
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: config("")})
+			if got := messagesOf(r.Warnings, "asset_policy_not_enforced"); !strings.Contains(got, "asset_policy.skill default: deny is not enforced") {
+				t.Fatalf("ensure does not warn that the skill default deny is inert: %+v", r.Warnings)
+			}
+			if r := h.run(Options{Action: ActionStatus}); !hasWarning(r, "asset_policy_not_enforced") {
+				t.Fatalf("status does not warn that the skill default deny is inert: %+v", r.Warnings)
+			}
+			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: config("    runtime_detection:\n      enabled: true\n")}))
+			if r := h.run(Options{Action: ActionStatus}); hasWarning(r, "asset_policy_not_enforced") {
+				t.Fatalf("the warning stays with runtime_detection on: %+v", r.Warnings)
+			}
+		})
+	}
+}
+
 // With the documented standalone config (no guardrail.connectors block) the
 // enumerator found eligible users but published no target, and status and
 // verify still reported coverage and security complete with 0 targets. verify

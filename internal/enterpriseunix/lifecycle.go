@@ -1518,6 +1518,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The change that leaves the eligible users without a connector says so
 	// at once, as on Windows, not only at the next status (GAP-0266).
 	l.warnNoConnectorsEnabled(p.config)
+	l.warnUnenforcedAssetPolicy(p.config)
 	if l.opts.Action == ActionRepair && l.machinePolicyErr != nil {
 		// repair exists to put the deployment back; a vendor file it could not
 		// put the hooks into (an administrator line that does not parse) is

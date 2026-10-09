@@ -503,6 +503,12 @@ approved-catalog rules.
 `runtime_detection.enabled: false` (the default for skills and plugins) an
 agent hook still refuses a skill, plugin command or MCP server on the `denied`
 list; only the default, registry and approval rules are skipped at the hook.
+Those rules then apply only where the install watcher admits the asset
+(per-user installs and managed Windows). A managed Linux or macOS device runs
+no install watcher for skills and plugins, so there a `default: deny` or
+`registry_required` for them blocks nothing until you set
+`runtime_detection.enabled: true`; `ensure`, `status` and `verify` warn with
+`asset_policy_not_enforced`, and the gateway log says so when it starts.
 
 ### Where a denied skill is refused
 

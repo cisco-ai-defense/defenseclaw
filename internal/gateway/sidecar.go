@@ -3640,6 +3640,27 @@ func WatcherWatchesDirs(cfg *config.Config) bool {
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
+// warnUnenforcedAssetPolicy logs, at each watcher start, an asset_policy
+// default deny or registry_required that nothing on this host applies: no
+// watched folder admits the type and its runtime_detection is off, so the
+// hooks apply only the denied list (GAP-0957). mcpAdmitted reports whether
+// the watcher admits the agents' MCP servers here.
+func warnUnenforcedAssetPolicy(cfg *config.Config, skillDirs, pluginDirs []string, mcpAdmitted bool) {
+	watched := func(targetType string) bool {
+		switch targetType {
+		case "skill":
+			return len(skillDirs) > 0
+		case "plugin":
+			return len(pluginDirs) > 0
+		default:
+			return mcpAdmitted
+		}
+	}
+	for _, message := range cfg.UnenforcedAssetPolicyRules(watched) {
+		fmt.Fprintf(os.Stderr, "[sidecar] warning: %s\n", message)
+	}
+}
+
 // runWatcher starts the skill/MCP install watcher if enabled in config,
 // and restarts it when a managed gateway's enrolled folders change.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
@@ -3668,6 +3689,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if !wcfg.Enabled {
 		s.health.SetWatcher(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher disabled (set gateway.watcher.enabled=true to enable)\n")
+		warnUnenforcedAssetPolicy(s.currentConfig(), nil, nil, false)
 		<-ctx.Done()
 		return false, nil
 	}
@@ -3745,6 +3767,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin dirs: %v\n", pluginDirs)
 	}
 
+	warnUnenforcedAssetPolicy(s.currentConfig(), skillDirs, pluginDirs,
+		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil)
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
 		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
 			"skill_dirs":  0,
