@@ -742,7 +742,8 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 	}
 	key := profileMatchKey(subject, source, connectorName, agent)
 	if set.groupSIDs != nil {
-		set.groupSIDs.refresh(time.Now())
+		waitForGroup := subject != nil && source != "" && !subject.LookupFailed && len(subject.Groups) > 0
+		set.groupSIDs.refresh(time.Now(), waitForGroup)
 		key = set.groupSIDs.matchKey(key)
 	}
 	if decision, ok := set.matches.get(key); ok {
