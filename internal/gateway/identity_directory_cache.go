@@ -93,6 +93,9 @@ type identityCache[T any] struct {
 	entries map[string]*identityCacheEntry[T]
 	// answeredAt is when a lookup of any key last succeeded.
 	answeredAt time.Time
+	// staleBefore makes facts fetched before it due for a refresh that a
+	// blocking request waits for (invalidate).
+	staleBefore time.Time
 }
 
 type identityCacheEntry[T any] struct {
@@ -154,7 +157,8 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 				"(default_lookup_failed) until a lookup succeeds", key, age.Round(time.Minute))
 		}
 	}
-	expired := age >= c.lifetime(entry.facts)
+	invalidated := entry.ok && entry.fetchedAt.Before(c.staleBefore)
+	expired := age >= c.lifetime(entry.facts) || invalidated
 	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
 	}
@@ -167,7 +171,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		// partial groups also wait: old memberships can select a lenient profile.
 		partial := c.partial != nil && c.partial(facts)
 		incomplete := c.incomplete != nil && c.incomplete(facts)
-		if !block || !expired || (!partial && !incomplete) {
+		if !block || !expired || (!partial && !incomplete && !invalidated) {
 			c.mu.Unlock()
 			return facts, true
 		}
@@ -262,6 +266,26 @@ func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 		return zero, time.Time{}, false
 	}
 	return entry.facts, entry.fetchedAt, true
+}
+
+// invalidate makes every cached answer due for a refresh. A pushed profile
+// assignment that selects by group applied only once the facts cached before
+// the push expired, up to 15 minutes later, while profile-explain already
+// showed the new profile (GAP-1036). A blocking request now waits for the
+// refresh (within the budget); facts stay while the directory is down, as
+// their age still counts from when they were fetched.
+func (c *identityCache[T]) invalidate() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.staleBefore = c.now()
+	for _, entry := range c.entries {
+		if entry.ok {
+			entry.nextAttempt = time.Time{}
+		}
+	}
 }
 
 // forget drops key's entry, so the next get resolves it afresh. A lookup in

@@ -2214,6 +2214,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if api := s.apiSnapshot(); api != nil {
 		previousProfiles := api.guardrailProfileSet()
 		api.setGuardrailProfiles(profileCandidate)
+		refreshDirectoryFactsOnProfileChange(oldCfg, newCfg)
 		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
 		if profileCandidate != nil {
 			profileCandidate.logProfileWarnings()

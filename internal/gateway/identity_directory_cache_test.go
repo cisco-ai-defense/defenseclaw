@@ -136,6 +136,30 @@ func TestIdentityDirectoryCacheBlockingRequestWaitsForIncompleteRefresh(t *testi
 	}
 }
 
+// GAP-1036: a pushed assignment for a group the user had just joined
+// applied only when the facts cached before the push expired, up to
+// 15 minutes later. After invalidate a blocking request gets fresh facts.
+func TestIdentityDirectoryCacheBlockingRequestRefreshesAfterInvalidate(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		if calls == 1 {
+			return useridentity.DirectoryFacts{Groups: []string{"staff"}, ResolvedAt: now}, nil
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"staff", "upc-eng"}, ResolvedAt: now}, nil
+	})
+	cache.now = func() time.Time { return now }
+	if facts, ok := cache.get("1001", true); !ok || len(facts.Groups) != 1 {
+		t.Fatalf("first facts = %+v, %v", facts, ok)
+	}
+	now = now.Add(time.Minute)
+	cache.invalidate()
+	if facts, ok := cache.get("1001", true); !ok || len(facts.Groups) != 2 {
+		t.Fatalf("blocking request after invalidate got %+v, %v; want the refreshed groups", facts, ok)
+	}
+}
+
 // Expired partial groups must be refreshed before a blocking profile lookup.
 func TestIdentityDirectoryCacheBlockingRequestRefreshesPartialGroups(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)

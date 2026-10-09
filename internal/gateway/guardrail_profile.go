@@ -11,6 +11,7 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -1344,6 +1345,22 @@ func diffGuardrailProfileDigests(oldSet, newSet *guardrailProfileSet) []guardrai
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Name < changes[j].Name })
 	return changes
+}
+
+// refreshDirectoryFactsOnProfileChange has the next request of every
+// account refresh its cached directory facts when a reload changes the
+// guardrail profiles or their assignments, so a pushed group assignment
+// applies at the next decision (GAP-1036).
+func refreshDirectoryFactsOnProfileChange(oldCfg, newCfg *config.Config) {
+	if oldCfg == nil || newCfg == nil {
+		return
+	}
+	before, after := oldCfg.Guardrail, newCfg.Guardrail
+	if reflect.DeepEqual(before.Profiles, after.Profiles) && reflect.DeepEqual(before.ProfileAssignments, after.ProfileAssignments) &&
+		before.DefaultProfile == after.DefaultProfile {
+		return
+	}
+	peerDirectoryCache().invalidate()
 }
 
 // auditGuardrailProfileChanges records one config.change.applied per profile
