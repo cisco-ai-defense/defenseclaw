@@ -87,8 +87,14 @@ const (
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	rawServer := probe.ServerName
 	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
 	if decision, refused := a.claudeStateUnreadableDecision(ctx, req.HookEventName, probe); refused {
+		return decision, true
+	}
+	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.liveConfig(), rawServer, probe); refused {
+		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "claudecode", req.HookEventName)
+		a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+rawServer, "action=block source=mcp-definition-unproven")
 		return decision, true
 	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
@@ -135,6 +141,24 @@ func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent
 	a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+probe.ServerName, fmt.Sprintf(
 		"action=block source=%s hook=%s tool=%s connector=claudecode reason=%s", decision.Source, hookEvent, probe.ToolName, reason))
 	return decision, true
+}
+
+// A plugin tool name does not prove its command or URL. If the installed
+// plugin definition cannot be resolved, an endpoint-pinned deny cannot be
+// evaluated safely. This is independent of asset_policy.enabled, like the
+// explicit deny itself. Secure Client retains its original lookup behavior.
+func unresolvedPluginMCPDefinitionDecision(cfg *config.Config, rawServer string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" ||
+		!strings.HasPrefix(rawServer, "plugin_") || strings.HasPrefix(probe.ServerName, "plugin:") ||
+		!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, "claudecode", rawServer) {
+		return config.AssetPolicyDecision{}, false
+	}
+	return config.AssetPolicyDecision{
+		Enabled: true, Mode: config.AssetPolicyModeAction, Action: "block", RawAction: "block",
+		Source: "mcp-definition-unproven", RegistryStatus: "unknown",
+		TargetType: "mcp", TargetName: rawServer, Connector: "claudecode", RuntimeSurface: "hook",
+		Reason: fmt.Sprintf("mcp %q: plugin server definition could not be resolved, so its endpoint cannot be checked against asset_policy", rawServer),
+	}, true
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {

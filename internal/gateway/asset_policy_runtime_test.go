@@ -1094,3 +1094,32 @@ func TestCodexReadChecksEverySameNameSkillFolder(t *testing.T) {
 		t.Fatalf("same-name folder decision = %+v, matched=%v; want denied path block", decision, matched)
 	}
 }
+// GAP-1187: a registry that cannot be read must not erase a command deny.
+func TestUnresolvedClaudePluginMCPDefinitionRefusesEndpointRule(t *testing.T) {
+	home := t.TempDir()
+	pluginDir := filepath.Join(home, ".claude", "plugins")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := `{"plugins":{},"padding":"` + strings.Repeat("x", 4<<20) + `"}`
+	if err := os.WriteFile(filepath.Join(pluginDir, "installed_plugins.json"), []byte(registry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Command: "blocked-command"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__plugin_alpha_clock__now", CWD: home}
+	if decision, blocked := api.claudeCodeMCPAssetDecision(ctx, req); !blocked || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("unresolved plugin endpoint admitted: blocked=%v decision=%+v", blocked, decision)
+	}
+	// An ordinary configured server with the same tool segment must not
+	// stand in for the plugin's endpoint.
+	state := `{"mcpServers":{"plugin_alpha_clock":{"command":"ordinary-command"}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if decision, blocked := api.claudeCodeMCPAssetDecision(ctx, req); !blocked || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("colliding server admitted plugin endpoint: blocked=%v decision=%+v", blocked, decision)
+	}
+}
