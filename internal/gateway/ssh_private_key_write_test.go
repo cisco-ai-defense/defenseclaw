@@ -102,7 +102,7 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 		input := actionfacts.Input{Tool: test.tool, Args: args, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`}
 		if test.tool == "codex-windows" {
 			input.Tool = "Bash"
-			input.DialectHint = codexWindowsShellDialect("Bash", test.command)
+			input.DialectHint = codexWindowsShellDialect("Bash", test.command, input)
 		}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input:              input,
@@ -128,22 +128,28 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 	}
 }
 
-func TestWindowsCodexHomeRedirectUsesPowerShellGrammar(t *testing.T) {
+func TestWindowsCodexShellGrammarKeepsEnforcement(t *testing.T) {
 	const connector = "windows-codex-home-redirect"
 	installToolCallCorpusProfileConnector(t, connector, "default")
-	command := `echo k >> $HOME\.ssh\authorized_keys`
-	args := []byte(`{"command":` + strconv.Quote(command) + `}`)
-	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-		Input: actionfacts.Input{
+	for _, test := range []struct{ command, rule string }{
+		// Complete only as PowerShell, which Codex runs on Windows.
+		{`echo k >> $HOME\.ssh\authorized_keys`, "persistence.ssh_authorized_keys_command"},
+		// Incomplete as PowerShell; the POSIX reading must keep enforcing.
+		{"rm -rf /", "CMD-RM-RF"},
+	} {
+		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
+		input := actionfacts.Input{
 			Tool: "Bash", Args: args, CWD: `C:\Users\alice\project`,
-			ActiveHome:  `C:\Users\alice`,
-			DialectHint: codexWindowsShellDialect("Bash", command),
-		},
-		LegacyText: string(args), Connector: connector, EnforcementCapable: true,
-	})
-	finding := findingWithID(findings, "persistence.ssh_authorized_keys_command")
-	if finding == nil || !finding.contributesToEnforcement() {
-		t.Fatalf("Windows Codex home redirect was not enforceable: %v", FindingStrings(findings))
+			ActiveHome: `C:\Users\alice`,
+		}
+		input.DialectHint = codexWindowsShellDialect("Bash", test.command, input)
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, LegacyText: string(args), Connector: connector, EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, test.rule)
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Errorf("Windows Codex %q: %s not enforceable: %v", test.command, test.rule, FindingStrings(findings))
+		}
 	}
 }
 
@@ -163,7 +169,7 @@ func TestWindowsHomeWithSpacesStillEnforcesSSHPath(t *testing.T) {
 				}
 				if tool == "codex-windows" {
 					input.Tool = "Bash"
-					input.DialectHint = codexWindowsShellDialect("Bash", command)
+					input.DialectHint = codexWindowsShellDialect("Bash", command, input)
 				}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args),

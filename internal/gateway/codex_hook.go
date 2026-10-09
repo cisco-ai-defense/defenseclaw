@@ -269,20 +269,21 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
-		var dialectHint actionfacts.Dialect
+		actionInput := actionfacts.Input{
+			Tool:                     actionTool,
+			Args:                     toolArgs,
+			CWD:                      req.CWD,
+			ActiveHome:               hookActiveHome(ctx),
+			ToolResourceIdentity:     resourceIdentity,
+			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
+		}
 		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) {
-			dialectHint = codexWindowsShellDialect(toolName, codexExactMapString(req.ToolInput, "command"))
+			actionInput.DialectHint = codexWindowsShellDialect(
+				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
+			)
 		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                     actionTool,
-				Args:                     toolArgs,
-				CWD:                      req.CWD,
-				ActiveHome:               hookActiveHome(ctx),
-				ToolResourceIdentity:     resourceIdentity,
-				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
-				DialectHint:              dialectHint,
-			},
+			Input:                     actionInput,
 			LegacyText:                string(toolArgs),
 			Connector:                 "codex",
 			EnforcementCapable:        true,
@@ -804,13 +805,23 @@ func normalizeCodexAction(action string) string {
 // Windows. Codex names its shell tool Bash everywhere, but on Windows it runs
 // the command in PowerShell, so a PowerShell command such as
 // `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
-// and ran with no finding (GAP-0912). The host shell, rather than the
-// connector's tool label or a grammar guess, determines how the command runs.
-func codexWindowsShellDialect(tool, command string) actionfacts.Dialect {
+// and ran with no finding (GAP-0912), and so was the POSIX-looking
+// `echo k >> $HOME\.ssh\authorized_keys` (GAP-1134). A complete PowerShell
+// reading therefore decides. The PowerShell model leaves an unqualified
+// native program such as curl incomplete, because Windows PowerShell aliases
+// it; such a command keeps its inferred grammar, as before GAP-1134, so its
+// POSIX reading can still enforce instead of every finding turning into
+// detection-only.
+func codexWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
 	if !strings.EqualFold(strings.TrimSpace(tool), "bash") || command == "" {
 		return ""
 	}
-	return actionfacts.DialectPowerShell
+	input.DialectHint = actionfacts.DialectPowerShell
+	if actionfacts.Analyze(input).Authoritative() ||
+		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
+		return actionfacts.DialectPowerShell
+	}
+	return ""
 }
 
 func codexToolName(req codexHookRequest) string {
