@@ -225,6 +225,10 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	r.mu.Lock()
 	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
 	r.mu.Unlock()
+	if len(args) > 0 && args[len(args)-1] == "--check" &&
+		strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
+		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	}
 	if len(args) == 1 && args[0] == "--version-json" {
 		version, ok := r.versions[name]
 		if !ok {
