@@ -95,3 +95,22 @@ func TestStatusNamesDropInsThatChangeTheGatewayUnit(t *testing.T) {
 		t.Fatalf("the proxy drop-in is not a %s warning: errors %s warnings %v", codeUnitDropIn, got, status.Warnings)
 	}
 }
+
+// GAP-1195: ensure must reject a foreign command override even when the
+// installed files and the currently running service still look healthy.
+func TestEnsureRefusesGatewayExecStartDropIn(t *testing.T) {
+	h := newTestHost(t, "linux")
+	payload := h.payload("1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: payload}))
+	dir := h.env.P("/etc/systemd/system/" + unitGateway + ".d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "99-command.conf"), []byte("[Service]\nExecStart=\nExecStart=/usr/bin/true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := h.run(Options{Action: ActionEnsure, PayloadDir: payload})
+	if result.OK || result.Noop || !strings.Contains(messagesOf(result.Errors, codeVerify), "99-command.conf") {
+		t.Fatalf("ensure accepted the command override: %+v", result)
+	}
+}
