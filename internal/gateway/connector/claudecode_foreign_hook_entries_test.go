@@ -225,7 +225,10 @@ func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T)
 		}
 		return 0, stderr.String()
 	}
-	if code, stderr := run(); code != 2 || !strings.Contains(stderr, "Rerun the DefenseClaw installer") {
+	// GAP-1079: after rm -rf ~/.defenseclaw the installer alone does not
+	// bring the hooks back; the sentence names the whole repair.
+	if code, stderr := run(); code != 2 ||
+		!strings.Contains(stderr, "Run the DefenseClaw installer, then defenseclaw quickstart") {
 		t.Fatalf("missing script: exit %d stderr %q, want a block (2) that names the repair", code, stderr)
 	}
 	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {

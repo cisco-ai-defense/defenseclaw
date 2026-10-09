@@ -1156,6 +1156,9 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 	if shellHookSecureClientProfile(opts) {
 		return command, nil
 	}
+	if opts.ManagedEnterprise {
+		return claudeCodeMissingHookGuardWith(command, claudeCodeManagedMissingHookGuardMessage), nil
+	}
 	return claudeCodeMissingHookGuard(command), nil
 }
 
@@ -1165,8 +1168,21 @@ const claudeCodeMissingHookGuardSeparator = " || { rc=$?; "
 
 // claudeCodeMissingHookGuardMessage is what Claude Code shows when its
 // hook script cannot start. It must not name the script file:
-// doctor finds the registered script by that name in the command.
-const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook could not start " +
+// doctor finds the registered script by that name in the command. Claude
+// Code prints the whole command line in front of any exit-2 message, so the
+// sentence must hold whatever the reason: a missing script (the data folder
+// was deleted, the home moved) and an unreadable one alike, and the repair
+// it names must work after ~/.defenseclaw is gone, which the installer
+// alone does not do (GAP-1074, GAP-1079).
+const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook script is missing " +
+	"or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, " +
+	"or remove the DefenseClaw hooks from ~/.claude/settings.json."
+
+// claudeCodeManagedMissingHookGuardMessage is the managed-install sentence:
+// there the administrator's installer repairs the hooks, and quickstart does
+// not apply. Earlier per-user 1.0 builds wrote it too, so it is also
+// recognized as a generated guard until Setup rewrites the command.
+const claudeCodeManagedMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook could not start " +
 	"(the script is missing; was this account renamed or its home moved?). " +
 	"Rerun the DefenseClaw installer to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json."
 
@@ -1179,9 +1195,13 @@ const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude 
 // The script path stays the first shell word, so ownership checks and doctor
 // still find it.
 func claudeCodeMissingHookGuard(command string) string {
+	return claudeCodeMissingHookGuardWith(command, claudeCodeMissingHookGuardMessage)
+}
+
+func claudeCodeMissingHookGuardWith(command, message string) string {
 	return command + claudeCodeMissingHookGuardSeparator +
 		`[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; ` +
-		"echo '" + claudeCodeMissingHookGuardMessage + "' >&2; exit 2; }"
+		"echo '" + message + "' >&2; exit 2; }"
 }
 
 // claudeCodeUnguardedHookCommand removes only the exact generated guard,
@@ -1189,10 +1209,16 @@ func claudeCodeMissingHookGuard(command string) string {
 // that changes a blocking hook exit into success.
 func claudeCodeUnguardedHookCommand(command string) string {
 	index := strings.Index(command, claudeCodeMissingHookGuardSeparator)
-	if index <= 0 || command != claudeCodeMissingHookGuard(command[:index]) {
+	if index <= 0 {
 		return command
 	}
-	return command[:index]
+	if command == claudeCodeMissingHookGuard(command[:index]) {
+		return command[:index]
+	}
+	if command == claudeCodeMissingHookGuardWith(command[:index], claudeCodeManagedMissingHookGuardMessage) {
+		return command[:index]
+	}
+	return command
 }
 
 func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string, []string) {
