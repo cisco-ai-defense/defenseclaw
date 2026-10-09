@@ -1529,6 +1529,52 @@ func TestMigrateV9RecordFailureCanRetry(t *testing.T) {
 	}
 }
 
+// An interruption after config commit can leave a pending record and the
+// original operator row. A retry must finish clearing the migrated row.
+func TestMigrateV9RetryClearsPendingAuditRows(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath, auditDB := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", auditDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO actions VALUES ('1', 'skill', 'restored-skill', '', '{"install":"block"}', 'operator', 'now', '')`
+	if _, err := db.Exec(insert); err != nil {
+		t.Fatal(err)
+	}
+	in := MigrateV9Input{ConfigPath: configPath, AuditDBPath: auditDB}
+	if _, err := MigrateV9(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.ActionsRowsMoved != 1 {
+		t.Fatalf("missing migrated row record: %+v", record)
+	}
+	if _, err := db.Exec(insert); err != nil {
+		t.Fatal(err)
+	}
+	record.Pending = true
+	if err := writeMigrationRecord(MigrationRecordPath(configPath), record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM actions WHERE id = '1'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("pending migrated row remains: count=%d err=%v", count, err)
+	}
+}
+
 func TestMigrateV9KeepsOperatorReasonBeginningWithScan(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	db, err := sql.Open("sqlite", path)

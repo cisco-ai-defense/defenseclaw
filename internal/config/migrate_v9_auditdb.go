@@ -18,11 +18,14 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -134,6 +137,59 @@ func lockV9ActionRows(ctx context.Context, path string, snapshot []v9ActionRow) 
 		return nil, fmt.Errorf("audit.db operator rows changed while migration ran; run it again")
 	}
 	return db, nil
+}
+
+// v9ActionRowFingerprint covers every field used to select and clear a row.
+func v9ActionRowFingerprint(row v9ActionRow) string {
+	raw, _ := json.Marshal([]any{row.id, row.targetType, row.targetName,
+		row.sourcePath, row.reason, row.connector, row.state})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// resumeV9ActionCleanup checks the pending row snapshots under a write
+// reservation. Already-cleared rows can be absent after an interrupted retry.
+func resumeV9ActionCleanup(ctx context.Context, cleanup MigrationAuditCleanup) error {
+	if cleanup.Path == "" {
+		return fmt.Errorf("audit cleanup path is empty")
+	}
+	if _, err := os.Stat(cleanup.Path); err != nil {
+		return err
+	}
+	db, err := sql.Open("sqlite", auditDBDSN(cleanup.Path, "_pragma=busy_timeout(5000)"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	defer func() { _, _ = db.Exec("ROLLBACK") }()
+	current, err := readV9ActionRowsDB(db)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]v9ActionRow, len(current))
+	for _, row := range current {
+		byID[row.id] = row
+	}
+	var moved []v9ActionRow
+	for _, planned := range cleanup.Rows {
+		row, present := byID[planned.ID]
+		if !present {
+			continue
+		}
+		if v9ActionRowFingerprint(row) != planned.Fingerprint {
+			return fmt.Errorf("audit.db operator row %s changed after config commit; manual review is required", planned.ID)
+		}
+		moved = append(moved, row)
+	}
+	if err := clearV9ActionRowsDB(db, moved); err != nil {
+		return err
+	}
+	_, err = db.Exec("COMMIT")
+	return err
 }
 
 // clearV9ActionRows removes the install field of moved rows in a transaction.
