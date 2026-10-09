@@ -109,7 +109,10 @@ func processAccountMatchesOwner(user string, owner discoveryHomeOwner, secureCli
 	if user == "" || !strings.EqualFold(strings.TrimSpace(owner.UserName), user) {
 		return false
 	}
-	return secureClient || domain == "" || strings.EqualFold(strings.TrimSpace(owner.Domain), domain)
+	// An owner record without a domain predates domain capture: match it by
+	// name, as before, so a qualified process account still attributes.
+	ownerDomain := strings.TrimSpace(owner.Domain)
+	return secureClient || domain == "" || ownerDomain == "" || strings.EqualFold(ownerDomain, domain)
 }
 
 // discoveryHomeOwner names the account that owns one profile root of a
