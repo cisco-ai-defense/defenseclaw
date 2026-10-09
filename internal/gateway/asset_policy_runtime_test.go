@@ -845,6 +845,31 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 	}
 }
 
+// An unreadable command-line definition cannot make a deny scoped to another
+// server or connector block this MCP call.
+func TestUnprovenMCPDefinitionIgnoresUnrelatedPinnedDeny(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{
+		{Name: "bad-server", URL: "https://bad.example/mcp"},
+		{Name: "good-server", Connector: "codex", URL: "https://good.example/mcp"},
+	}
+	ctx := context.WithValue(context.Background(), claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "good-server"})
+	decision, matched := unprovenMCPDefinitionDecision(ctx, cfg, "claudecode", mcpRuntimeProbe{
+		Matched: true, Surface: "hook", ServerName: "good-server",
+	})
+	if matched {
+		t.Fatalf("unrelated endpoint deny blocked good-server: %+v", decision)
+	}
+	cfg.AssetPolicy.MCP.Denied = append(cfg.AssetPolicy.MCP.Denied,
+		config.AssetPolicyRule{Name: "good-server", Connector: "claude-code", URL: "https://bad.example/mcp"})
+	decision, matched = unprovenMCPDefinitionDecision(ctx, cfg, "claudecode", mcpRuntimeProbe{
+		Matched: true, Surface: "hook", ServerName: "good-server",
+	})
+	if !matched || decision.Action != "block" {
+		t.Fatalf("matching endpoint deny did not fail closed: matched=%v decision=%+v", matched, decision)
+	}
+}
+
 // GAP-0939: Codex shows a hyphenated MCP server to its hooks as
 // mcp__acme_notes__<tool>. The registry and the lists still match the server
 // under the name its Codex config gives it, so an approved acme-notes runs and

@@ -447,9 +447,10 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 	}
 	policy, _ := cfg.EffectiveAssetTypePolicy(connector, "mcp")
 	mode := config.AssetPolicyModeAction
-	if !rulesPinEndpoint(cfg.AssetPolicy.MCP.Denied) {
+	if !rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
 		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
-		if !gated || !(rulesPinEndpoint(cfg.AssetPolicy.MCP.Allowed) || rulesPinEndpoint(policy.Registry)) {
+		if !gated || !(rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) ||
+			rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
 			return config.AssetPolicyDecision{}, false
 		}
 		mode = cfg.EffectiveAssetPolicyModeForConnector(connector)
@@ -472,6 +473,25 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 func rulesPinEndpoint(rules []config.AssetPolicyRule) bool {
 	for _, rule := range rules {
 		if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// rulesPinEndpointForServer checks only constraints that remain provable when
+// the command-line definition is unavailable. An unrelated name or connector
+// cannot make this call fail closed.
+func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server string) bool {
+	for _, rule := range rules {
+		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
+			!config.SameMCPToolServer(connector, rule.Name, server) {
+			continue
+		}
+		if rule.Connector != "" && !config.SameConnector(rule.Connector, connector) {
+			continue
+		}
+		if rulesPinEndpoint([]config.AssetPolicyRule{rule}) {
 			return true
 		}
 	}
