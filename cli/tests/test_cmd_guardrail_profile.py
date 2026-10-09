@@ -119,7 +119,7 @@ def test_unix_current_profile_ignores_environment_account(monkeypatch):
     monkeypatch.setenv("LOGNAME", "other-account")
     monkeypatch.setenv("USER", "other-account")
     account = pwd.getpwuid(os.geteuid()).pw_name
-    assert current_profile_account() == (account, account)
+    assert current_profile_account() == (str(os.geteuid()), account)
     assert current_profile_account(secure_client=True) == ("other-account", "other-account")
 
 

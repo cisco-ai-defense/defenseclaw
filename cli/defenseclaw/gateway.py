@@ -114,11 +114,12 @@ def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
     if os.name != "nt" and not secure_client:
         import pwd
 
+        uid = os.geteuid()
         try:
-            user = pwd.getpwuid(os.geteuid()).pw_name
+            label = pwd.getpwuid(uid).pw_name
         except (KeyError, OSError):
-            return "", ""
-        return user, user
+            label = str(uid)
+        return str(uid), label
 
     import getpass
 
