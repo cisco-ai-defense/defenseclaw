@@ -206,6 +206,65 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	validate("kiro", kiroBinary, result.contractLock)
 }
 
+// A changed editor command cannot be reported as a completed managed setup.
+func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	settings := filepath.Join(home, ".config", "zed", "settings.json")
+	lockPath := acpContractLockPath(dataDir, "zed", "kiro")
+	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, "zed", "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(home, "defenseclaw-acp")
+	writeEntry := func(command string) {
+		t.Helper()
+		document := map[string]any{"agent_servers": map[string]any{
+			acpManagedEntryName("kiro"): map[string]any{
+				"command": command,
+				"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath},
+			},
+		}}
+		body, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settings, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeEntry(guard)
+	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := acp.RuntimeContractLock{}
+	lock.Client.ConfigPath = settings
+	lock.Client.ConfigSHA256 = acp.EntryDigestPrefix + digest
+	lock.Guard.Path = guard
+	lock.Profile, lock.Mode = "locked", "action"
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
+		t.Fatalf("unmodified setup is stale: %s", note)
+	}
+	writeEntry(filepath.Join(home, "another-command"))
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done || note == "" {
+		t.Fatalf("changed command reported as setup done: done=%v note=%q", done, note)
+	}
+}
+
 // The setup command of an enrollment a newer one replaced is refused and
 // changes nothing: it overwrote the working entry and lock (GAP-0733).
 func TestEnterpriseACPUserSetupRefusesAReplacedEnrollment(t *testing.T) {
