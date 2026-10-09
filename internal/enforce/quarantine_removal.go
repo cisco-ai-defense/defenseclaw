@@ -58,6 +58,12 @@ type QuarantineRemovalRequest struct {
 // with access denied and the asset stayed in place (GAP-0825).
 const QuarantineRequestReadGrant = "read-grant"
 
+// QuarantineRequestRemoveLink asks the guardian to remove a skill or plugin
+// that is a link (a symlink or junction) directly in an enrolled user's
+// watched folder. The link entry is deleted; the folder it points to is
+// never opened (GAP-1188).
+const QuarantineRequestRemoveLink = "remove-link"
+
 // QuarantineRemovalResult is the guardian's answer to one request.
 type QuarantineRemovalResult struct {
 	Version int    `json:"version"`
@@ -142,6 +148,21 @@ func (c QuarantineRemovalChannel) ReadGranter(timeout time.Duration) func(target
 		}
 		return c.publish(QuarantineRemovalRequest{
 			ID: "read-" + hex.EncodeToString(id), Kind: QuarantineRequestReadGrant,
+			TargetType: targetType, SourcePath: path,
+		}, timeout)
+	}
+}
+
+// LinkRemover asks the guardian over c to remove the linked asset at path,
+// and waits up to timeout for its answer.
+func (c QuarantineRemovalChannel) LinkRemover(timeout time.Duration) func(targetType, path string) error {
+	return func(targetType, path string) error {
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			return err
+		}
+		return c.publish(QuarantineRemovalRequest{
+			ID: "link-" + hex.EncodeToString(id), Kind: QuarantineRequestRemoveLink,
 			TargetType: targetType, SourcePath: path,
 		}, timeout)
 	}
@@ -330,6 +351,56 @@ func readQuarantineRemovalFile(path string, out any) error {
 		return err
 	}
 	return json.Unmarshal(payload, out)
+}
+
+var linkedAssetRemover atomic.Pointer[func(targetType, path string) error]
+
+// SetLinkedAssetRemover installs what removes a linked asset this process
+// may not delete itself (the hook guardian on a managed Windows computer);
+// nil removes it.
+func SetLinkedAssetRemover(remove func(targetType, path string) error) {
+	if remove == nil {
+		linkedAssetRemover.Store(nil)
+		return
+	}
+	linkedAssetRemover.Store(&remove)
+}
+
+// VerifyLinkRemoval is the guardian's check of a link removal request: a
+// link or reparse point directly in one of sourceRoots (an enrolled user's
+// watched folder), reached without a link. It returns the link and the root
+// that holds it. A link already gone verifies (the removal is a no-op).
+func VerifyLinkRemoval(request QuarantineRemovalRequest, sourceRoots []string) (string, string, error) {
+	if request.Version != quarantineRemovalVersion || request.Kind != QuarantineRequestRemoveLink || !safePathSegment(request.ID) {
+		return "", "", fmt.Errorf("unsupported link removal request")
+	}
+	if _, err := quarantineTypeDir(request.TargetType); err != nil {
+		return "", "", err
+	}
+	source, root, err := pathWithinRoots(request.SourcePath, sourceRoots, false)
+	if err != nil {
+		return "", "", fmt.Errorf("the link is not in an enrolled user's watched folder: %w", err)
+	}
+	if filepath.Dir(source) != root {
+		return "", "", fmt.Errorf("the link %s is not directly in a watched folder", source)
+	}
+	if request.TargetType == "skill" && IsBundledSkillPath(source) {
+		return "", "", ErrBundledSkill
+	}
+	if err := validateExistingAncestors(root); err != nil {
+		return "", "", fmt.Errorf("link ancestry: %w", err)
+	}
+	info, err := os.Lstat(source)
+	if errors.Is(err, fs.ErrNotExist) {
+		return source, root, nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("inspect link %s: %w", source, err)
+	}
+	if !fileInfoIsLinkOrReparse(info) {
+		return "", "", fmt.Errorf("%s is not a link", source)
+	}
+	return source, root, nil
 }
 
 var assetReadGranter atomic.Pointer[func(targetType, path string) error]

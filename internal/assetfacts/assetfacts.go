@@ -58,6 +58,10 @@ type Facts struct {
 	// loads its servers from a command-line source the hook could not read,
 	// so no definition of it can be proven (GAP-0954).
 	MCPUnproven string `json:"mcp_unproven,omitempty"`
+	// SkillDirs lists the folders of the skill a request selects by name
+	// that exist in the skill folders of its agent, found as the user. The
+	// gateway takes only folders it would look at itself (GAP-1212).
+	SkillDirs []string `json:"skill_dirs,omitempty"`
 }
 
 // SourceCommandLine marks an MCP definition read from the agent's command
@@ -88,7 +92,7 @@ type MCPServer struct {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -120,7 +124,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != ""
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -144,6 +148,13 @@ func bounded(facts Facts) Facts {
 		skills = append(skills, Skill{Folder: folder, Declared: declared})
 	}
 	facts.Skills = skills
+	var dirs []string
+	for _, dir := range facts.SkillDirs {
+		if dir = clean(dir, maxFieldBytes); filepath.IsAbs(dir) && len(dirs) < maxSkills {
+			dirs = append(dirs, filepath.Clean(dir))
+		}
+	}
+	facts.SkillDirs = dirs
 	if server := facts.MCP; server != nil {
 		out := MCPServer{
 			Name: clean(server.Name, maxNameBytes), URL: clean(server.URL, maxFieldBytes),

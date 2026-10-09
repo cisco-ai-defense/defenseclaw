@@ -196,6 +196,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
+		if decision, matched := a.claudeCodePluginAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "plugin", decision: decision})
+		}
 	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
 		verdict = a.inspectClaudeCodeToolResult(ctx, req, mode)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
@@ -203,6 +206,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
+		if decision, matched := a.claudeCodePluginAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "plugin", decision: decision})
 		}
 	case "MessageDisplay":
 		// Anthropic sends the displayed assistant text incrementally in delta.

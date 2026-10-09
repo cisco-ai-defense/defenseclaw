@@ -12,8 +12,12 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -101,6 +105,43 @@ func (a *APIServer) declaredSkillNames(ctx context.Context, connector, cwd strin
 		add(declared)
 	}
 	return names
+}
+
+// skillSourcePaths lists the folders a skill selected by name alone loads
+// from: each of the connector's skill folders for the caller that holds a
+// folder of that name. The gateway looks itself; a folder it may not check
+// counts when the standalone hook, which runs as the user, found it, or
+// when the hook reported no folders at all. An allowed rule pinned with
+// source_path_contains then decides at the hook as it does in the watcher,
+// which sees the folder: the pinned copy ran nowhere while the watcher
+// left it in place (GAP-1212). nil keeps the name-only input; Secure
+// Client keeps main (issue #1092).
+func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string, probe skillRuntimeProbe) []string {
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.RuntimeDisableOnly ||
+		strings.TrimSpace(probe.SourcePath) != "" || runtimeSkillAssetTargetType(probe) != "skill" {
+		return nil
+	}
+	name := strings.TrimSpace(probe.SkillName)
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\:`) {
+		return nil
+	}
+	claimed := claimedAssetFactsFromContext(ctx).SkillDirs
+	reported := func(dir string) bool {
+		return slices.ContainsFunc(claimed, func(c string) bool { return sameCleanPath(c, dir) })
+	}
+	var paths []string
+	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), cwd) {
+		dir := filepath.Join(root, name)
+		_, err := os.Lstat(dir)
+		switch {
+		case err == nil, reported(dir):
+			paths = append(paths, dir)
+		case !errors.Is(err, fs.ErrNotExist) && len(claimed) == 0:
+			paths = append(paths, dir)
+		}
+	}
+	return paths
 }
 
 // skillFolderAccessDecision blocks a tool call that reaches into the folder

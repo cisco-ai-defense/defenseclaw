@@ -1352,6 +1352,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	}
 
 	targetType := string(evt.Type)
+	if res, refused := w.refuseForeignLink(ctx, evt, targetType); refused {
+		return res
+	}
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
 	decisionPolicy := w.admissionPolicySnapshot()
 	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID, decisionPolicy)
@@ -2326,19 +2329,69 @@ func linkedAssetTarget(path string) string {
 	return filepath.Clean(target)
 }
 
-// linkedAssetScanTarget limits the gateway's read authority to enrolled roots.
-// A link may be resolved for scanning only when its final target stays in one
-// of this asset type's watched roots.
-var errLinkedAssetOutsideRoots = errors.New("linked asset target is outside watched roots")
+// linkedAssetScanTarget limits the gateway's read authority to the watched
+// folders of the account that holds the link. A link may be resolved for
+// scanning only when its final target stays in one of this asset type's
+// watched roots and, on a computer that watches several accounts, in the
+// home of the account whose folder holds the link: other users' skill
+// folders are watched roots too, and a standard user's junction into one
+// had the gateway scan that user's content and report it under the planter
+// (GAP-1188).
+var errLinkedAssetOutsideRoots = errors.New("linked asset target is outside the watched folders of its account")
 
 func (w *InstallWatcher) linkedAssetScanTarget(evt InstallEvent) (string, error) {
 	target := linkedAssetTarget(evt.Path)
+	linkOwner, linkOwned := w.ownerOf(evt.Path)
+	targetOwner, targetOwned := w.ownerOf(target)
+	if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
+		return "", errLinkedAssetOutsideRoots
+	}
 	for _, root := range w.sourceRootsFor(evt.Type) {
 		if watcherPathAtOrBelow(target, root) {
 			return target, nil
 		}
 	}
 	return "", errLinkedAssetOutsideRoots
+}
+
+// foreignLink reports a skill or plugin that is a link whose target lies
+// outside the watched folders of the account that holds it, and that
+// target. Nothing is read through such a link.
+func (w *InstallWatcher) foreignLink(evt InstallEvent) (string, bool) {
+	if (evt.Type != InstallSkill && evt.Type != InstallPlugin) || !w.admitsLinkedAsset(evt.Path) {
+		return "", false
+	}
+	if _, err := w.linkedAssetScanTarget(evt); !errors.Is(err, errLinkedAssetOutsideRoots) {
+		return "", false
+	}
+	return linkedAssetTarget(evt.Path), true
+}
+
+// refuseForeignLink refuses a link into a folder its account does not own,
+// such as another user's skills folder, without reading it: no scan runs,
+// no finding about the other folder is reported under the planter, and the
+// verdict says the same whatever the target holds. The link is taken out of
+// the folder (never the target), and the install-rejected row names the
+// link, its owner and where it points (GAP-1188).
+func (w *InstallWatcher) refuseForeignLink(ctx context.Context, evt InstallEvent, targetType string) (AdmissionResult, bool) {
+	target, foreign := w.foreignLink(evt)
+	if !foreign {
+		return AdmissionResult{}, false
+	}
+	account := "this account"
+	if owner, ok := w.ownerOf(evt.Path); ok && strings.TrimSpace(owner.Name) != "" {
+		account = owner.Name
+	}
+	reason := fmt.Sprintf("the %s is a link to %s, outside the watched %s folders of %s; it was not scanned and the link is removed",
+		targetType, target, targetType, account)
+	_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+		fmt.Sprintf("type=%s reason=link-outside-own-folders user=%s target=%q", targetType, account, target))
+	if err := w.enforceBlockWith(ctx, evt, false, reason); err != nil && !errors.Is(err, errLinkRemoved) {
+		// The link stays: refuse it at runtime until it is gone.
+		w.recordScanFailureBlock(evt, targetType, scanFailureReason+reason)
+	}
+	w.recordAdmission(ctx, "blocked", targetType)
+	return AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: reason}, true
 }
 
 // removeLinkedAsset takes a skill or plugin that is a symlink or Windows

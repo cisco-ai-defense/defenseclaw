@@ -265,6 +265,10 @@ func LookupMCPServerUnderHome(connector, home, workspaceDir, name string) (MCPSe
 	case "claudecode":
 		entries = readMCPServersClaudeCodeAt(filepath.Join(home, ".claude.json"),
 			filepath.Join(home, ".claude", "settings.json"), workspaceDir)
+		if entry, ok := lookupMCPToolServer(connector, entries, name); ok {
+			return entry, true
+		}
+		return lookupClaudePluginMCPServer(filepath.Join(home, ".claude"), name)
 	case "codex":
 		entries = readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
 	default:
@@ -290,7 +294,14 @@ func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name s
 	if err != nil {
 		return MCPServerEntry{}, false
 	}
-	return lookupMCPToolServer(connector, entries, name)
+	if entry, ok := lookupMCPToolServer(connector, entries, name); ok {
+		return entry, true
+	}
+	if normalizeConnectorKey(connector) == "claudecode" && (c == nil || !c.SecureClientIntegration()) {
+		// A server a plugin bundles (GAP-1191).
+		return lookupClaudePluginMCPServer(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), name)
+	}
+	return MCPServerEntry{}, false
 }
 
 // MCPToolServerName is the server segment an agent puts in the MCP tool

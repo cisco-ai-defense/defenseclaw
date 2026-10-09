@@ -808,6 +808,23 @@ per-user install:
   `<project>\.agents\skills`), inside or outside the profile, get no install
   admission; the agent hooks still refuse a denied skill name there (see
   [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
+- Claude Code runs a plugin installed from a local marketplace folder from
+  that folder, which DefenseClaw does not watch and never changes. When
+  admission blocks such a plugin, or `asset_policy.plugin` denies it, its copy
+  under `.claude\plugins\cache` is quarantined and the Claude Code hook
+  refuses the plugin's skills, commands, agents and MCP tools: the refusal
+  says `plugin "<plugin>@<marketplace>" is blocked by install admission` or
+  that the plugin is denied by asset policy.
+- MCP servers a Claude Code plugin bundles (its `.mcp.json`, or `mcpServers`
+  in `.claude-plugin/plugin.json`) are admitted with the plugin, not on their
+  own: the plugin scan reads their definitions, and the plugin's verdict and
+  `asset_policy.plugin` rules decide for their tool calls. They get no
+  `install-*` row and no entry in the MCP inventory. `asset_policy.mcp` rules
+  still apply to their tool calls at the hook: a rule names such a server
+  `plugin:<plugin>:<server>` (Claude Code's tool names spell it
+  `plugin_<plugin>_<server>`), and a `command`, `args_prefix` or `url` rule
+  matches its definition, so a denied server cannot be brought back inside a
+  plugin.
 - The audit rows of these scans name the user whose profile holds the asset:
   the `scan` and `scan-finding` rows carry `user.id` (the SID) and
   `defenseclaw.user.name`, the `scan` row ends with `judge=<model>` when the
