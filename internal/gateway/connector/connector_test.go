@@ -4773,21 +4773,24 @@ func TestCodexSetupReplacesHookEntriesLeftWithoutCommand(t *testing.T) {
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("first Setup: %v", err)
 	}
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("read config: %v", err)
-	}
-	var kept []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		// The hook command lines (codex-hook.sh, or the native launcher on
-		// Windows) all carry --event.
-		if !strings.HasPrefix(strings.TrimSpace(line), "command") || !strings.Contains(line, "--event") {
-			kept = append(kept, line)
+	// Drop every hook command, as deleting the DefenseClaw lines by hand does;
+	// the rest of each entry (type, timeout, matcher) stays.
+	mutateCodexConfig(t, configPath, func(config map[string]interface{}) {
+		for event, rawGroups := range config["hooks"].(map[string]interface{}) {
+			groups, ok := rawGroups.([]interface{})
+			if event == "state" || !ok {
+				continue
+			}
+			for _, rawGroup := range groups {
+				for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
+					handler := rawHandler.(map[string]interface{})
+					delete(handler, "command")
+					delete(handler, "commandWindows")
+					delete(handler, "command_windows")
+				}
+			}
 		}
-	}
-	if err := os.WriteFile(configPath, []byte(strings.Join(kept, "\n")), 0o600); err != nil {
-		t.Fatalf("write edited config: %v", err)
-	}
+	})
 	if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
 		t.Fatalf("OwnedHooksPresent with command-less entries = %v, %v; want false so the guard repairs", present, err)
 	}
