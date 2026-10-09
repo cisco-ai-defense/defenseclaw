@@ -35,7 +35,8 @@ var enrolledWatchPollInterval = 30 * time.Second
 // Its own home is the service profile, which holds no skill or plugin, so
 // its install watcher watches every enrolled user's connector folders, the
 // set a per-user gateway watches for its user (GAP-0132). The enumerator
-// grants the gateway service read access to those folders; on Linux and
+// grants the gateway service read access to those folders
+// (connector.ComponentDirsForHome, GAP-0913); on Linux and
 // macOS the service account has no such access, and the Secure Client
 // profile is never standalone.
 func watcherUsesEnrolledUserDirs(cfg *config.Config) bool {
@@ -193,17 +194,9 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !ok {
 			continue
 		}
-		componentScanner, ok := conn.(connector.ComponentScanner)
-		if !ok || !componentScanner.SupportsComponentScanning() {
-			continue
-		}
-		components := componentScanner.ComponentTargets("")
+		skillDirs, pluginDirs := connector.ComponentDirsForHome(conn, serviceHome, target.home)
 		add := func(dirs []string, seen map[string]bool, out *[]string) {
-			for _, dir := range dirs {
-				userDir, ok := rebaseUnderHome(dir, serviceHome, target.home)
-				if !ok {
-					continue
-				}
+			for _, userDir := range dirs {
 				key := strings.ToLower(userDir)
 				if seen[key] {
 					continue
@@ -223,10 +216,10 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 			}
 		}
 		if wcfg.Skill.Enabled {
-			add(components["skill"], seenSkill, &set.skillDirs)
+			add(skillDirs, seenSkill, &set.skillDirs)
 		}
 		if wcfg.Plugin.Enabled {
-			add(components["plugin"], seenPlugin, &set.pluginDirs)
+			add(pluginDirs, seenPlugin, &set.pluginDirs)
 		}
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
@@ -286,7 +279,7 @@ func EnrolledWatchRoots(cfg *config.Config) []EnrolledWatchRoot {
 				home = strings.TrimSpace(target.Result.UserHome)
 			}
 			if target.OK && strings.TrimSpace(target.SID) != "" && filepath.IsAbs(home) {
-				if _, ok := rebaseUnderHome(dir, home, home); ok {
+				if _, ok := connector.RebaseUnderHome(dir, home, home); ok {
 					roots = append(roots, EnrolledWatchRoot{Dir: dir, Home: filepath.Clean(home), SID: strings.TrimSpace(target.SID)})
 					break
 				}
@@ -310,19 +303,6 @@ func enrolledRootPrecedence(connectorName string) int {
 	default:
 		return 3
 	}
-}
-
-// rebaseUnderHome moves path from below fromHome to the same place below
-// toHome. Paths outside fromHome are not a user's and are refused.
-func rebaseUnderHome(path, fromHome, toHome string) (string, bool) {
-	if !filepath.IsAbs(path) || !filepath.IsAbs(fromHome) {
-		return "", false
-	}
-	rel, err := filepath.Rel(filepath.Clean(fromHome), filepath.Clean(path))
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", false
-	}
-	return filepath.Join(toHome, rel), true
 }
 
 // pollEnrolledWatchSet re-reads the enrolled watch set until ctx ends. A

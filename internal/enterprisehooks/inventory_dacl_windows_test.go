@@ -357,3 +357,47 @@ func TestInventoryListOnlyDirsCoverGuardianProtectedAgents(t *testing.T) {
 		t.Fatalf("list-only grants miss %v", want)
 	}
 }
+
+// GAP-0913: the enumerator grants the gateway service read access to every
+// skill and plugin folder the managed watcher watches for an enrolled user,
+// except a folder on a managed hook path, which the guardian keeps at its
+// exact DACL. Copilot, OpenCode and Amp skills were never granted, so the
+// watcher could not read them and a skill there was never scanned.
+func TestInventoryDACLComponentGrantsCoverWatchedFolders(t *testing.T) {
+	ownHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := `C:\Users\dc-gap0913`
+	names := []string{"copilot", "opencode", "amp", "hermes"}
+	granted := map[string]bool{}
+	for _, g := range inventoryDACLComponentGrants(home, ownHome, inventoryDACLEnrolledHome{connectors: names}) {
+		granted[strings.ToLower(g.dir)] = true
+	}
+	for _, want := range []string{`.copilot\skills`, `.config\opencode\skills`, `.config\amp\skills`} {
+		if !granted[want] {
+			t.Errorf("watched folder %s is not granted; granted %v", want, granted)
+		}
+	}
+	for _, hookDir := range []string{`.config\amp\plugins`, `.config\opencode\plugins`, `.copilot`, `.config`} {
+		if granted[hookDir] {
+			t.Errorf("folder %s on a managed hook path is granted", hookDir)
+		}
+	}
+	reg := connector.NewDefaultRegistry()
+	var managed []string
+	for _, name := range names {
+		conn, _ := reg.Get(name)
+		managed = append(managed, inventoryDACLManagedHookPaths(conn, home)...)
+	}
+	for _, name := range names {
+		conn, _ := reg.Get(name)
+		skills, plugins := connector.ComponentDirsForHome(conn, ownHome, home)
+		for _, dir := range append(skills, plugins...) {
+			rel, _ := filepath.Rel(home, dir)
+			if !granted[strings.ToLower(rel)] && !inventoryDACLOnManagedPath(dir, managed) {
+				t.Errorf("%s watches %s, which is neither granted nor on a managed hook path", name, rel)
+			}
+		}
+	}
+}

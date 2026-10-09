@@ -1165,7 +1165,11 @@ def _windows_write_new_private_file(
             assert_trusted_owner(current)
             assert_not_broadly_writable(current)
 
-            requested = private_security_for_directory(parent)
+            # A confidential artifact (device.key, its provenance, audit.db)
+            # is readable by this account and LocalSystem only: the
+            # Administrators entry made Doctor fail Private files on every
+            # new Windows install (GAP-0911).
+            requested = private_security_for_directory(parent, administrators=not confidential)
             try:
                 written = write_new_file(path, payload, requested)
             except WindowsAclError as exc:
