@@ -69,6 +69,15 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 			})
 		} else {
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
+			if err == nil && len(data) > maxClaudeMCPSpoolRecordBytes {
+				if logf != nil {
+					logf("[hook-enumerator] WARN Claude Code MCP spool for %s exceeds %d bytes", key, maxClaudeMCPSpoolRecordBytes)
+				}
+				data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
+					User: strings.TrimSpace(target.User), Home: home, Path: filepath.Join(home, ".claude.json"),
+					Reason: "Claude Code MCP server inventory exceeds the spool size limit",
+				})
+			}
 		}
 		if err != nil {
 			continue

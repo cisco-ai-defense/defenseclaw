@@ -87,8 +87,14 @@ const (
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	rawServer := probe.ServerName
 	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
 	if decision, refused := a.claudeStateUnreadableDecision(ctx, req.HookEventName, probe); refused {
+		return decision, true
+	}
+	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.liveConfig(), rawServer, probe); refused {
+		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "claudecode", req.HookEventName)
+		a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+rawServer, "action=block source=mcp-definition-unproven")
 		return decision, true
 	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
@@ -135,6 +141,24 @@ func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent
 	a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+probe.ServerName, fmt.Sprintf(
 		"action=block source=%s hook=%s tool=%s connector=claudecode reason=%s", decision.Source, hookEvent, probe.ToolName, reason))
 	return decision, true
+}
+
+// A plugin tool name does not prove its command or URL. If the installed
+// plugin definition cannot be resolved, an endpoint-pinned deny cannot be
+// evaluated safely. This is independent of asset_policy.enabled, like the
+// explicit deny itself. Secure Client retains its original lookup behavior.
+func unresolvedPluginMCPDefinitionDecision(cfg *config.Config, rawServer string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" ||
+		!strings.HasPrefix(rawServer, "plugin_") || strings.HasPrefix(probe.ServerName, "plugin:") ||
+		!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, "claudecode", rawServer) {
+		return config.AssetPolicyDecision{}, false
+	}
+	return config.AssetPolicyDecision{
+		Enabled: true, Mode: config.AssetPolicyModeAction, Action: "block", RawAction: "block",
+		Source: "mcp-definition-unproven", RegistryStatus: "unknown",
+		TargetType: "mcp", TargetName: rawServer, Connector: "claudecode", RuntimeSurface: "hook",
+		Reason: fmt.Sprintf("mcp %q: plugin server definition could not be resolved, so its endpoint cannot be checked against asset_policy", rawServer),
+	}, true
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
@@ -802,7 +826,7 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	for _, plugin := range claudeCodeToolPlugins(req) {
+	for _, plugin := range a.claudeCodeToolPlugins(ctx, req) {
 		probe := skillRuntimeProbe{
 			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
 		}
@@ -813,10 +837,10 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	return config.AssetPolicyDecision{}, false
 }
 
-// claudeCodeToolPlugins lists the plugins a Claude Code tool call may run
-// part of. Claude Code names a plugin's MCP server plugin_<plugin>_<server>,
-// and both names may hold "_", so every split is a candidate.
-func claudeCodeToolPlugins(req claudeCodeHookRequest) []string {
+// claudeCodeToolPlugins obtains MCP plugin ownership from the configured
+// server. An underscore split is only usable when it has one boundary;
+// otherwise plugin and server names cannot be distinguished from the hook.
+func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHookRequest) []string {
 	var out []string
 	add := func(name string) {
 		if name = strings.TrimSpace(name); validNativeSkillSelectionName(name) && !slices.Contains(out, name) {
@@ -828,10 +852,21 @@ func claudeCodeToolPlugins(req claudeCodeHookRequest) []string {
 		server = serverFromMCPToolName(req.ToolName)
 	}
 	if rest, ok := strings.CutPrefix(server, "plugin_"); ok {
-		for i := 1; i < len(rest)-1; i++ {
-			if rest[i] == '_' {
-				add(rest[:i])
+		cfg := a.liveConfig()
+		resolved := false
+		if cfg != nil {
+			if entry, found := a.lookupCallerMCPServer(ctx, cfg, "claudecode", req.CWD, server); found {
+				if pluginServer, ok := strings.CutPrefix(entry.Name, "plugin:"); ok {
+					if plugin, _, ok := strings.Cut(pluginServer, ":"); ok {
+						add(plugin)
+						resolved = true
+					}
+				}
 			}
+		}
+		if !resolved && strings.Count(rest, "_") == 1 {
+			plugin, _, _ := strings.Cut(rest, "_")
+			add(plugin)
 		}
 	}
 	key := ""

@@ -31,8 +31,12 @@ set -eu
 dc_handoff() {
     # DEFENSECLAW_REPO only changes where the release is downloaded from; the
     # signature is always checked against the official release identity.
-    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 requested="" version_given=0 tag tmp expected major stamped
+    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" release_base yes="" plan=0 requested="" version_given=0 tag tmp expected major stamped
     local signer='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
+    case "${repo}" in
+        https://*) release_base="${repo%/}" ;;
+        *) release_base="https://github.com/${repo}" ;;
+    esac
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes|-y) yes="--yes" ;;
@@ -79,7 +83,7 @@ dc_handoff() {
         if [ "${version_given}" = 1 ]; then
             tag="${requested}"
         else
-            tag="$(curl -fsSI --proto '=https' --tlsv1.2 "https://github.com/${repo}/releases/latest" \
+            tag="$(curl -fsSI --proto '=https' --tlsv1.2 "${release_base}/releases/latest" \
                 | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}' | tail -1)"
             tag="${tag##*/tag/}"
         fi
@@ -88,9 +92,9 @@ dc_handoff() {
             *) echo "  ✗ could not find a DefenseClaw 1.x release; nothing was changed" >&2; return 1 ;;
         esac
         curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/install.sh" \
-            "https://github.com/${repo}/releases/download/${tag}/install.sh"
+            "${release_base}/releases/download/${tag}/install.sh"
         curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt" \
-            "https://github.com/${repo}/releases/download/${tag}/checksums.txt"
+            "${release_base}/releases/download/${tag}/checksums.txt"
         # With cosign 2.0 or later, check the release signature on checksums.txt.
         major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
         case "${major}" in
@@ -102,7 +106,7 @@ dc_handoff() {
         fi
         if [ "${major}" -ge 2 ]; then
             curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt.bundle" \
-                "https://github.com/${repo}/releases/download/${tag}/checksums.txt.bundle"
+                "${release_base}/releases/download/${tag}/checksums.txt.bundle"
             if ! cosign verify-blob --bundle "${tmp}/checksums.txt.bundle" \
                 --certificate-identity-regexp "${signer}" \
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \

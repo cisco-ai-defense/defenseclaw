@@ -378,8 +378,8 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 }
 
 // loadConfigV8Source loads and strict-parses the file. With migrate, a
-// config_version 8 file is first converted in memory to the config_version 9
-// document the migration would write, and that document is what is parsed
+// config_version 8 file is first converted in memory to a config_version 9
+// document, and that document is what is parsed
 // and compiled (loaded.raw is it too): the keys the migration moves
 // (skill_actions and the like) are not in the current schema, so the strict
 // parse of the raw file would refuse the very file the migration exists to
@@ -403,6 +403,7 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
+	legacyV8 := migrate && config.NeedsMigrationV9(raw)
 	if migrate {
 		if raw, err = config.MigrateV8InMemory(absPath, raw, guardrail.RulePackDigest); err != nil {
 			return nil, config.InMemoryMigrationError(absPath, err)
@@ -448,6 +449,7 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
+	runtimeCandidate.RuntimeV8RulePackRebase = legacyV8 && !runtimeCandidate.SecureClientIntegration()
 	compiled.Plan, err = config.WithObservabilityV8ManagedAIDDestination(
 		compiled.Plan, config.ObservabilityV8ManagedAIDOptionsFromConfig(runtimeCandidate, raw))
 	if err != nil {

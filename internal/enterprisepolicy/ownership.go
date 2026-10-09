@@ -277,7 +277,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 		if len(restored) > 0 {
 			dirsRestored = true
-			state.detail("restored %s to mode 0755 so every user's agent can read %s (%s)", strings.Join(restored, ", "), path, problem)
+			state.detail("restored user access through %s to %s (%s)", strings.Join(restored, ", "), path, problem)
 		}
 	}
 	record.PostimageSHA256 = sha256Hex(rendered)
@@ -332,7 +332,7 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 		if problem := publishedDirProblem(opts, record.Path); problem != "" && !dirsReported[problem] {
 			dirsReported[problem] = true
 			state.Drift = true
-			state.conflict("users cannot read %s: %s, so their agents run without DefenseClaw's machine policy there; DefenseClaw keeps the directories above the files it publishes at mode 0755, owned by root, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) restores them", record.Path, problem)
+			state.conflict("users cannot read %s: %s, so their agents run without DefenseClaw's machine policy there; DefenseClaw keeps the directories above the files it publishes accessible, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) restores them", record.Path, problem)
 		}
 	}
 	state.finish()

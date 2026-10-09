@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1092,5 +1093,63 @@ func TestCodexReadChecksEverySameNameSkillFolder(t *testing.T) {
 	})
 	if !matched || decision.Action != "block" || decision.Source != "admin-deny" {
 		t.Fatalf("same-name folder decision = %+v, matched=%v; want denied path block", decision, matched)
+	}
+}
+
+// GAP-1188: a deny for a short plugin name must not capture a separate
+// installed plugin whose name contains that prefix and an underscore.
+func TestClaudePluginMCPDenyUsesInstalledOwner(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "alpha_beta")
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "plugins"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := fmt.Sprintf(`{"plugins":{"alpha_beta@market":[{"installPath":%q}]}}`, root)
+	if err := os.WriteFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), []byte(registry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"clock":{"command":"clock"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "alpha"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__plugin_alpha_beta_clock__now", CWD: home}
+	if decision, blocked := api.claudeCodePluginAssetDecision(ctx, req); blocked {
+		t.Fatalf("unrelated plugin blocked: %+v", decision)
+	}
+}
+
+// GAP-1187: a registry that cannot be read must not erase a command deny.
+func TestUnresolvedClaudePluginMCPDefinitionRefusesEndpointRule(t *testing.T) {
+	home := t.TempDir()
+	pluginDir := filepath.Join(home, ".claude", "plugins")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registry := `{"plugins":{},"padding":"` + strings.Repeat("x", 4<<20) + `"}`
+	if err := os.WriteFile(filepath.Join(pluginDir, "installed_plugins.json"), []byte(registry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Command: "blocked-command"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__plugin_alpha_clock__now", CWD: home}
+	if decision, blocked := api.claudeCodeMCPAssetDecision(ctx, req); !blocked || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("unresolved plugin endpoint admitted: blocked=%v decision=%+v", blocked, decision)
+	}
+	// An ordinary configured server with the same tool segment must not
+	// stand in for the plugin's endpoint.
+	state := `{"mcpServers":{"plugin_alpha_clock":{"command":"ordinary-command"}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if decision, blocked := api.claudeCodeMCPAssetDecision(ctx, req); !blocked || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("colliding server admitted plugin endpoint: blocked=%v decision=%+v", blocked, decision)
 	}
 }

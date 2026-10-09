@@ -346,6 +346,7 @@ STANDALONE_SMOKES = (
     "enterprise-profile-lifecycle-lock-smoke.ps1",
     "enterprise-profile-deployment-record-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
+    "enterprise-standalone-config-acl-repair-smoke.ps1",
     "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",

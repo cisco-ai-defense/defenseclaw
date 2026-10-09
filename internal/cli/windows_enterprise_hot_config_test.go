@@ -336,9 +336,19 @@ func TestWindowsEnterprisePolicyDigestRunsUnderTheServicePins(t *testing.T) {
 	t.Setenv(managed.ConfigPathEnv, "C:\\console\\other.yaml")
 	t.Setenv(managed.DeploymentModeEnv, "")
 
+	// The console environment must not choose the elevated subprocess image.
+	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ProgramFiles", filepath.Join(t.TempDir(), "untrusted"))
 	command, err := windowsEnterprisePolicyDigestCommand(context.Background())
 	if err != nil {
 		t.Fatal(err)
+	}
+	wantCLI := filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe")
+	if !strings.EqualFold(command.Path, wantCLI) {
+		t.Fatalf("policy digest executable = %q, want trusted installed CLI %q", command.Path, wantCLI)
 	}
 	got := map[string][]string{}
 	for _, entry := range command.Env {

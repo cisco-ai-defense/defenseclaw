@@ -718,63 +718,12 @@ def test_generic_windows_wrapper_checks_every_folder_above_config_and_secret(tmp
     assert verdicts["link"]["ancestors"] is False, verdicts
 
 
-_UNTRUSTED_INPUT_PROBE = r"""
-$ErrorActionPreference = 'Stop'
-__FUNCTIONS__
-$identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { '{"skip":true}'; exit 0 }
-$root = Join-Path ([Environment]::GetFolderPath('Windows')) ('Temp\dc-mdm-staging-' + [Guid]::NewGuid().ToString('N'))
-try {
-    # A folder as a Windows client edition creates it under C:\: Authenticated
-    # Users Modify and Users read are its own entries, not inherited ones.
-    $security = [System.Security.AccessControl.DirectorySecurity]::new()
-    $security.SetSecurityDescriptorSddlForm('O:BAG:SYD:P(A;OICI;0x1301bf;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)')
-    [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($root), $security)
-    $config = Join-Path $root 'config.yaml'
-    [System.IO.File]::WriteAllText($config, "deployment_mode: managed_enterprise`n")
-    $before = [bool](Test-DefenseClawAdminOnlyItem -Path $config)
-    $fix = Get-WrapperUntrustedInputFix -Path $config
-    foreach ($command in $fix.Commands) {
-        Invoke-Expression $command | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "fix command failed ($LASTEXITCODE): $command" }
-    }
-    [ordered]@{
-        before = $before
-        after = [bool](Test-DefenseClawAdminOnlyItem -Path $config)
-        folder = [bool](Test-DefenseClawAdminOnlyItem -Path $root)
-        accounts = @($fix.Accounts)
-    } | ConvertTo-Json -Compress
-} finally {
-    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
-}
-"""
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows ACL behaviour")
-def test_generic_windows_wrapper_names_the_fix_for_a_client_edition_staging_folder(tmp_path: Path) -> None:
-    # GAP-0953: a new folder under C:\ on a Windows client edition holds
-    # Authenticated Users Modify as its own entry, which the documented
-    # /inheritance:r line keeps, and the wrapper refused the config without
-    # naming a fix. It now names the account and commands that, run as printed
-    # in PowerShell, leave the folder and the config administrator-only.
-    engine = _pwsh7()
-    assert engine, "Windows CI must provide PowerShell 7"
+def test_generic_windows_wrapper_untrusted_input_repair_is_scoped() -> None:
     text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
-    start = text.index("function Get-WrapperUntrustedInputFix {")
-    describe = text[start : text.index("\nfunction Copy-WrapperInput", start)]
-    probe = tmp_path / "untrusted-input-probe.ps1"
-    probe.write_text(_UNTRUSTED_INPUT_PROBE.replace("__FUNCTIONS__", _shared_region(text) + "\n" + describe), encoding="utf-8")
-    result = subprocess.run(
-        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
-        capture_output=True, text=True, timeout=120, check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    verdicts = json.loads(result.stdout.strip().splitlines()[-1])
-    if verdicts.get("skip"):
-        pytest.skip("an Administrators-owned staging folder needs an elevated token")
-    assert verdicts["before"] is False and verdicts["after"] is True and verdicts["folder"] is True, verdicts
-    accounts = verdicts["accounts"] if isinstance(verdicts["accounts"], list) else [verdicts["accounts"]]
-    assert any("Authenticated Users" in account or account == "S-1-5-11" for account in accounts), verdicts
+    repair = text[text.index("function Get-WrapperUntrustedInputFix {") :
+                  text.index("\nfunction Copy-WrapperInput", text.index("function Get-WrapperUntrustedInputFix {"))]
+    assert "/T /C" not in repair
+    assert "trusted copy in a new administrator-only folder dedicated to DefenseClaw" in text
 
 
 _REMEDIATION_PROBE = r"""

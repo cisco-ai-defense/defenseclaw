@@ -201,13 +201,19 @@ func (m *ConfigManager) getEnvConfigPath() string {
 // thresholds and, on a per-user install, its audit.db block/allow entries
 // keep applying. A file whose migration fails is refused.
 func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
+	legacyV8 := config.NeedsMigrationV9(raw)
 	migrated, err := config.MigrateV8InMemory(source, raw, guardrail.RulePackDigest)
 	if err != nil {
 		// Refused: the previous generation keeps running. As raw v8 the file
 		// would drop its data.json admission and audit.db block/allow policy.
 		return nil, config.InMemoryMigrationError(source, err)
 	}
-	return config.LoadRuntimeV8CandidateFromBytes(source, migrated)
+	candidate, err := config.LoadRuntimeV8CandidateFromBytes(source, migrated)
+	if err != nil {
+		return nil, err
+	}
+	candidate.RuntimeV8RulePackRebase = legacyV8 && !candidate.SecureClientIntegration()
+	return candidate, nil
 }
 
 func newConfigManagerWithSnapshot(
@@ -1192,6 +1198,7 @@ func cloneConfig(in *config.Config) *config.Config {
 	if err := json.Unmarshal(data, &out); err != nil {
 		panic(fmt.Errorf("config manager: decode cloned config: %w", err))
 	}
+	out.RuntimeV8RulePackRebase = in.RuntimeV8RulePackRebase
 	return &out
 }
 

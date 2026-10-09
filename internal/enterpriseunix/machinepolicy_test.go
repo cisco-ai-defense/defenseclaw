@@ -327,6 +327,39 @@ func TestTamperedClaudeDropInIsFoundAndPutBackByEnsure(t *testing.T) {
 	}
 }
 
+// A narrowed matcher leaves the hook commands in place, so coverage-only
+// verification still passes. Ensure must restore the owned drop-in bytes.
+func TestEnsureRestoresTamperedClaudeMatcher(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	want := h.read(claudeDropIn)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(want), &doc); err != nil {
+		t.Fatal(err)
+	}
+	hooks := doc["hooks"].(map[string]any)
+	pre := hooks["PreToolUse"].([]any)[0].(map[string]any)
+	if pre["matcher"] != "*" {
+		t.Fatalf("PreToolUse matcher = %v, want *", pre["matcher"])
+	}
+	pre["matcher"] = "Read"
+	narrowed, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(claudeDropIn), narrowed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{claudeDropIn}) {
+		t.Fatalf("guardian did not find the narrowed matcher: %v", got)
+	}
+	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, ensure)
+	if ensure.Noop || h.read(claudeDropIn) != want {
+		t.Fatalf("ensure left the narrowed matcher: noop=%v changes=%v", ensure.Noop, ensure.Changes)
+	}
+}
+
 // A DefenseClaw entry removed from vendor machine policy was reported twice
 // with a generic "vendor machine policy changed since the last transaction;
 // run ensure" that named neither the connector nor the file, while the

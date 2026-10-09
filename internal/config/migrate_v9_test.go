@@ -572,10 +572,9 @@ func TestMigrateV9TransliteratesANonASCIIPackFolder(t *testing.T) {
 	}
 }
 
-func TestMigrateV9KeepsTheZeroEightBackupOfARelabelledV9File(t *testing.T) {
-	// GAP-0307, GAP-0544: a v9 file relabelled config_version 8 replaced the
-	// pristine 0.8.x config.yaml.v8.bak and migration-v9.json on the next
-	// migration; a default-home v9 file carries no key that tells it apart.
+func TestMigrateV9RefreshesRollbackBackupOnSecondMigration(t *testing.T) {
+	// A second upgrade must leave the immediate pre-migration source at the
+	// documented rollback path, while preserving the first source as history.
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", dir)
@@ -588,30 +587,30 @@ func TestMigrateV9KeepsTheZeroEightBackupOfARelabelledV9File(t *testing.T) {
 	if err := os.WriteFile(MigrationRecordPath(configPath), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	relabelled := "config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n"
-	if err := os.WriteFile(configPath, []byte(relabelled), 0o600); err != nil {
+	updated := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  block_at: HIGH\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(updated), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
 	if err != nil {
 		t.Fatalf("MigrateV9: %v", err)
 	}
-	if kept, _ := os.ReadFile(configPath + ConfigV8BackupSuffix); string(kept) != string(pristine) {
-		t.Errorf("the 0.8.x backup was replaced:\n%s", kept)
+	if backup, _ := os.ReadFile(configPath + ConfigV8BackupSuffix); string(backup) != updated {
+		t.Errorf("rollback backup is not the latest v8 source:\n%s", backup)
 	}
 	sources, _ := filepath.Glob(configPath + ConfigV8BackupSuffix + ".*")
 	records, _ := filepath.Glob(filepath.Join(dir, "migration-v9.*.json"))
 	if len(sources) != 1 || len(records) != 1 {
 		t.Fatalf("want one saved source and one earlier record, got %q %q", sources, records)
 	}
-	if saved, _ := os.ReadFile(sources[0]); string(saved) != relabelled {
-		t.Errorf("the source was not saved beside the backup:\n%s", saved)
+	if saved, _ := os.ReadFile(sources[0]); string(saved) != string(pristine) {
+		t.Errorf("the earlier source was not saved beside the backup:\n%s", saved)
 	}
 	if earlier, _ := os.ReadFile(records[0]); string(earlier) != string(record) {
 		t.Errorf("the earlier migration record was not kept:\n%s", earlier)
 	}
-	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "keeps the config the first") }) {
-		t.Errorf("no note says the backup was kept: %q", result.Record.Notes)
+	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "previous backup") }) {
+		t.Errorf("no note says the previous backup was saved: %q", result.Record.Notes)
 	}
 }
 
@@ -939,6 +938,27 @@ func TestMigrateV8InMemoryReadsTheUnexpandedPolicyDir(t *testing.T) {
 	if got.Guardrail.BlockAt != "MEDIUM" || got.PolicyDir != filepath.Join(home, "team-policies") {
 		t.Fatalf("block_at %q, policy_dir %q; want MEDIUM from the unexpanded folder and the expanded folder:\n%s",
 			got.Guardrail.BlockAt, got.PolicyDir, migrated)
+	}
+}
+
+func TestMigrateV9ReplacesEmptyDotEnvVirusTotalKey(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir +
+		"\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    virustotal_api_key: vt-test-value\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("VIRUSTOTAL_API_KEY=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if env, err := os.ReadFile(envPath); err != nil || string(env) != "VIRUSTOTAL_API_KEY=vt-test-value\n" {
+		t.Errorf(".env did not retain the inline key: %q, %v", env, err)
 	}
 }
 

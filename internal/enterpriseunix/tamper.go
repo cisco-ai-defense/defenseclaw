@@ -195,8 +195,8 @@ func (l *lifecycle) restoreTamperedHookBinary(ctx context.Context, record *Deplo
 
 // restoreTamperedMachinePolicy puts DefenseClaw's machine policy back before
 // ensure checks for changes, when the installed config is the applied one
-// and a connector the deployment published no longer has its hooks in its
-// vendor file. It publishes what the last transaction published, as
+// and a connector the deployment published has lost hook coverage or an
+// owned drop-in changed bytes. It publishes what the last transaction published, as
 // reconcile does, so the config-apply job the hook guardian starts for an
 // edited or deleted drop-in restores it with no transaction and no service
 // restart. A change of the covered connectors still takes the transaction.
@@ -215,8 +215,20 @@ func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
 		return false
 	}
 	want := intersectSorted(record.MachinePolicyConnectors, intended)
+	// Verify checks hook command coverage, but a narrowed Claude matcher can
+	// leave those commands present while disabling the hook for other tools.
+	// The guardian detects byte drift in the drop-in DefenseClaw owns whole;
+	// use that same ownership record before deciding that ensure is a no-op.
+	tamperedDropIn := false
+	if contains(want, enterprisepolicy.ConnectorClaudeCode) {
+		if manager, ok := env.MachinePolicy.(*policyManager); ok {
+			if opts, err := manager.options(nil); err == nil {
+				tamperedDropIn = len(enterprisepolicy.TamperedDropIns(opts)) != 0
+			}
+		}
+	}
 	result, err := env.MachinePolicy.Verify(validated.Loaded)
-	if isCoded(err, codeMachinePolicy) || (sameStrings(coveredMachinePolicy(want, result), want) && missingClaudeVersionFloor(result) == "") {
+	if isCoded(err, codeMachinePolicy) || (sameStrings(coveredMachinePolicy(want, result), want) && missingClaudeVersionFloor(result) == "" && !tamperedDropIn) {
 		return false
 	}
 	published, err := env.MachinePolicy.Publish(validated.Loaded)

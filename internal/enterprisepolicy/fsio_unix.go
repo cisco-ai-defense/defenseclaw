@@ -18,9 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // trustedOwner reports whether uid may own machine policy files and their
@@ -369,8 +373,44 @@ func publishedDirAccess(index int) os.FileMode {
 	return 0o001
 }
 
+// The macOS ACL is independent of POSIX mode. Keep the reader and clearer
+// replaceable so rooted tests on Linux can model a macOS deny entry.
+var publishedDirACLEntries = func(path string) ([]managed.DarwinACLEntry, error) {
+	if runtime.GOOS != "darwin" {
+		return nil, nil
+	}
+	cmd := exec.Command("/bin/ls", "-lde", "--", path)
+	cmd.Env = []string{"LANG=C", "LC_ALL=C"}
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("inspect macOS ACL of %s: %w", path, err)
+	}
+	entries, err := managed.ParseDarwinACLListing(string(output), []string{path})
+	return entries[path], err
+}
+
+var clearPublishedDirACL = func(path string) error {
+	return exec.Command("/bin/chmod", "-h", "-N", path).Run()
+}
+
+func publishedDirACLProblem(opts Options, dir string, index int) (string, error) {
+	if opts.goos() != "darwin" {
+		return "", nil
+	}
+	entries, err := publishedDirACLEntries(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if entry.DeniesDirectoryAccess(index == 0) {
+			return fmt.Sprintf("%s has macOS ACL entry %q", dir, entry.Text), nil
+		}
+	}
+	return "", nil
+}
+
 // publishedDirProblem names the directories above a policy file DefenseClaw
-// published that users cannot pass. After an administrator hardened
+// published that users cannot pass because of mode or a macOS deny ACL. After an administrator hardened
 // /etc/claude-code/managed-settings.d to 0700, Claude Code skipped every
 // managed setting (and offered to continue without them) while verify and
 // status said the deployment was healthy (GAP-0913). "" when users can.
@@ -384,13 +424,18 @@ func publishedDirProblem(opts Options, path string) string {
 		if want := publishedDirAccess(index); info.Mode().Perm()&want != want {
 			problems = append(problems, fmt.Sprintf("%s has mode %04o", dir, info.Mode().Perm()))
 		}
+		if problem, err := publishedDirACLProblem(opts, dir, index); err != nil {
+			problems = append(problems, fmt.Sprintf("cannot inspect %s macOS ACL: %v", dir, err))
+		} else if problem != "" {
+			problems = append(problems, problem)
+		}
 	}
 	return strings.Join(problems, ", ")
 }
 
 // restorePublishedDirs gives the administrator-owned directories above a
-// published policy file that users cannot pass the mode 0755 DefenseClaw
-// creates them with. It returns the directories it changed.
+// published policy file to the access DefenseClaw creates: mode 0755 and no
+// macOS ACL denying list or search. It returns the directories it changed.
 func restorePublishedDirs(opts Options, path string) ([]string, error) {
 	var restored []string
 	for index, dir := range publishedDirs(opts, path) {
@@ -399,14 +444,26 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 			continue
 		}
 		perm := info.Mode().Perm()
-		if want := publishedDirAccess(index); perm&want == want {
+		needMode := perm&publishedDirAccess(index) != publishedDirAccess(index)
+		aclProblem, err := publishedDirACLProblem(opts, dir, index)
+		if err != nil {
+			return restored, err
+		}
+		if !needMode && aclProblem == "" {
 			continue
 		}
 		if stat, ok := info.Sys().(*syscall.Stat_t); !opts.SkipTrustChecks && (!ok || !trustedOwner(stat.Uid)) {
 			continue
 		}
-		if err := os.Chmod(dir, (perm|0o755)&^0o022); err != nil {
-			return restored, err
+		if aclProblem != "" {
+			if err := clearPublishedDirACL(dir); err != nil {
+				return restored, fmt.Errorf("remove macOS ACL of %s: %w", dir, err)
+			}
+		}
+		if needMode {
+			if err := os.Chmod(dir, (perm|0o755)&^0o022); err != nil {
+				return restored, err
+			}
 		}
 		restored = append(restored, dir)
 	}

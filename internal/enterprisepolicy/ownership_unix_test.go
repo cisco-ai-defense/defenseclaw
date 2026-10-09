@@ -14,8 +14,11 @@ package enterprisepolicy
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Every user's agent reads machine policy, so a policy file DefenseClaw
@@ -84,5 +87,50 @@ func TestVerifyRequiresThePublishedModeOfOwnedPolicyFiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A macOS deny ACL on the managed drop-in directory leaves mode 0755 intact
+// while preventing standard users from loading the hooks.
+func TestVerifyAndRestorePublishedDirWithMacOSDenyACL(t *testing.T) {
+	withHigherSources(t)
+	opts := publishTestOptions(t)
+	opts.GOOS = "darwin"
+	if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(opts.Root, "Library/Application Support/ClaudeCode/managed-settings.d")
+	denied := true
+	previousRead, previousClear := publishedDirACLEntries, clearPublishedDirACL
+	t.Cleanup(func() { publishedDirACLEntries, clearPublishedDirACL = previousRead, previousClear })
+	publishedDirACLEntries = func(path string) ([]managed.DarwinACLEntry, error) {
+		if path != dir || !denied {
+			return nil, nil
+		}
+		return []managed.DarwinACLEntry{{Text: "group:everyone deny list,search", Rights: []string{"list", "search"}}}, nil
+	}
+	clearPublishedDirACL = func(path string) error {
+		if path != dir {
+			t.Fatalf("cleared unexpected ACL on %s", path)
+		}
+		denied = false
+		return nil
+	}
+	result, err := VerifyAll(opts, []string{"claudecode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range result.States {
+		if state.Connector == "claudecode" && (state.Covered || !hasConflict(state, "macOS ACL")) {
+			t.Fatalf("denied managed directory reported covered: %+v", state)
+		}
+	}
+	restored, err := RestorePublishedPolicyDirs(opts)
+	if err != nil || !containsString(restored, dir) || denied {
+		t.Fatalf("restore published dirs = %v, %v; denied=%v", restored, err, denied)
+	}
+	result, err = VerifyAll(opts, []string{"claudecode"})
+	if err != nil || !containsString(result.MachinePolicyConnectors, "claudecode") {
+		t.Fatalf("verify after ACL repair: %+v, %v", result, err)
 	}
 }
