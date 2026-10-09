@@ -739,7 +739,17 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
         for sev, action in sevs.items():
             if isinstance(action, dict) and str(sev).lower() in SEVERITIES:
                 holder.actions[str(sev).lower()] = _admission_triple(action)
-    for entry in data.get("first_party_allow_list") or []:
+    if "first_party_allow_list" in data:
+        entries = data["first_party_allow_list"]
+        if not isinstance(entries, list):
+            raise ValueError("first_party_allow_list must be a list")
+        # The preset's top-level list is complete when present. Keep an
+        # explicit empty list so compilation cannot restore built-in entries.
+        for target_type in ("skill", "mcp", "plugin"):
+            getattr(adm, target_type).first_party_allow_list = []
+    else:
+        entries = []
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         holder = getattr(adm, str(entry.get("target_type", "")), None)

@@ -397,6 +397,25 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", ""))
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")))
 
+    def test_activate_explicit_empty_first_party_list_clears_builtin_exemptions(self):
+        import yaml
+        from defenseclaw.enforce.admission import compile_admission
+
+        created = self.invoke(["create", "scan-all"])
+        self.assertEqual(created.exit_code, 0, created.output)
+        path = os.path.join(self.app.cfg.policy_dir, "scan-all.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data["first_party_allow_list"] = []
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+
+        result = self.invoke(["activate", "scan-all", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        for target_type in ("skill", "mcp", "plugin"):
+            self.assertEqual(getattr(self.app.cfg.admission, target_type).first_party_allow_list, [])
+            self.assertEqual(compile_admission(self.app.cfg, target_type).first_party_allow, {})
+
     def test_activate_compares_thresholds_with_the_selected_pack(self):
         # The permissive pack alerts at HIGH; the default preset alerts at
         # MEDIUM, so activating it must write alert_at (block CRITICAL matches).
