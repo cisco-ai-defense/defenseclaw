@@ -301,8 +301,14 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
 	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
 	servers, unreadable, err := enterprisehooks.ReadClaudeMCPSpool(dir, sid, validateManagedGuardianAuthorization)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, &enterprisehooks.ClaudeStateUnreadable{
+			Path:   filepath.Join(dir, strings.ToUpper(strings.TrimSpace(sid))+".json"),
+			Reason: err.Error(),
+		}
 	}
 	return servers, unreadable
 }

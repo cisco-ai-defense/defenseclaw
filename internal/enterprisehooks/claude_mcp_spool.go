@@ -124,6 +124,9 @@ func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) (
 	if err != nil {
 		return nil, nil, err
 	}
+	if len(data) > maxClaudeMCPSpoolRecordBytes {
+		return nil, nil, errors.New("claude mcp spool record exceeds the size limit")
+	}
 	var record ClaudeMCPSpoolRecord
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
