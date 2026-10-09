@@ -1699,3 +1699,25 @@ func TestMigrateV9KeepsDistinctPathPinnedAllow(t *testing.T) {
 		t.Fatalf("migrated allow has source_path_contains = %v", path)
 	}
 }
+
+// A v8 audit block applies to every URL, even when the v9 config already
+// denies one URL for the same server name.
+func TestMigrateV9KeepsNameWideDenyBesideURLDeny(t *testing.T) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(`asset_policy:
+  mcp:
+    denied: [{name: acme, connector: codex, url: https://one.example/mcp}]
+`), &doc); err != nil {
+		t.Fatal(err)
+	}
+	m := &v9Migrator{}
+	row := v9ActionRow{id: "2", targetType: AdmissionTypeMCP, targetName: "acme", connector: "codex"}
+	root := v8DocumentRoot(&doc)
+	if !m.appendAssetRule(root, row, "denied") {
+		t.Fatal("audit block was not migrated")
+	}
+	rules := v9SeqItems(v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "asset_policy"), "mcp"), "denied"))
+	if len(rules) != 2 || v8YAMLMapValue(rules[1], "url") != nil {
+		t.Fatalf("migrated rules did not retain the name-wide block: %v", rules)
+	}
+}
