@@ -9,10 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/gorilla/websocket"
 )
 
 func openShellReloadConfig(edit func(*config.Config)) *config.Config {
@@ -173,6 +178,97 @@ func TestJudgeNeedsRebuildForProviderCARotation(t *testing.T) {
 	}
 	if !judgeNeedsRebuild(cfg, cfg, false, oldProviders, newProviders) {
 		t.Fatal("CA rotation reused the judge with its old TLS provider")
+	}
+}
+
+// Removing OpenClaw closes the live WebSocket and stops reconnection.
+func TestOpenClawConnectorHotDisableStopsFleetConnection(t *testing.T) {
+	connected := make(chan struct{}, 2)
+	closed := make(chan struct{}, 2)
+	server := startMockGW(t, func(t *testing.T, conn *websocket.Conn) {
+		connected <- struct{}{}
+		rpcEchoLoop(t, conn)
+		closed <- struct{}{}
+	})
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := testenv.PrivateTempDir(t)
+	oldCfg := &config.Config{DataDir: dataDir}
+	oldCfg.Gateway.Host = host
+	oldCfg.Gateway.Port = port
+	oldCfg.Gateway.FleetMode = "auto"
+	oldCfg.Gateway.Token = "test-token"
+	oldCfg.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
+	oldCfg.Guardrail.Connector = "codex"
+	oldCfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}, "openclaw": {}}
+	withConfiguredOpenClaw(t, oldCfg)
+	newCfg := cloneConfig(oldCfg)
+	delete(newCfg.Guardrail.Connectors, "openclaw")
+	if !gatewayShouldConnectForConfiguredConnector(oldCfg) || gatewayShouldConnectForConfiguredConnector(newCfg) {
+		t.Fatal("control: removing OpenClaw did not disable the fleet predicate")
+	}
+	client, err := NewClient(&oldCfg.Gateway, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Sidecar{cfg: oldCfg, client: client, logger: audit.NewLogger(nil), health: NewSidecarHealth(), fleetReloadCh: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.runGatewayLoop(ctx) }()
+	defer func() { cancel(); <-done; _ = client.Close() }()
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fleet WebSocket never connected")
+	}
+	deadline := time.After(2 * time.Second)
+	for s.health.Snapshot().Gateway.State != StateRunning {
+		select {
+		case <-deadline:
+			t.Fatal("fleet WebSocket never became ready")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	s.publishConfig(newCfg)
+	signalRestart(s.fleetReloadCh)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("fleet WebSocket stayed open after OpenClaw removal")
+	}
+	deadline = time.After(time.Second)
+	for s.health.Snapshot().Gateway.State != StateDisabled {
+		select {
+		case <-deadline:
+			t.Fatal("fleet loop did not park after OpenClaw removal")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case <-connected:
+		t.Fatal("fleet loop reconnected after OpenClaw removal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	s.publishConfig(oldCfg)
+	signalRestart(s.fleetReloadCh)
+	select {
+	case <-connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fleet loop did not reconnect when OpenClaw was restored")
+	}
+	deadline = time.After(2 * time.Second)
+	for s.health.Snapshot().Gateway.State != StateRunning {
+		select {
+		case <-deadline:
+			t.Fatal("fleet loop did not become ready after OpenClaw was restored")
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 

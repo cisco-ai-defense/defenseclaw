@@ -513,6 +513,20 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// disconnectForReload closes the current WebSocket without announcing a
+// disconnect before its reader has drained. The fleet loop waits on the
+// returned channel before a later reload may reuse this Client.
+func (c *Client) disconnectForReload() <-chan struct{} {
+	done := c.Disconnected()
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return done
+}
+
 // Disconnected returns a channel that is closed when the underlying WebSocket
 // connection drops. Used by the sidecar to trigger reconnection.
 func (c *Client) Disconnected() <-chan struct{} {
