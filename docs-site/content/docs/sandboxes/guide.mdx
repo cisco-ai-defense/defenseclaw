@@ -541,6 +541,28 @@ defenseclaw sandbox activity -f
 Nothing in the feed waits for you except asks. `--sandbox NAME` limits the
 feed to one sandbox, and `-o json` prints the events as JSON.
 
+A real feed, replayed (the `⚠` line is the shadow AI finding):
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.5}
+  height={340}
+  ariaLabel="Animated terminal replay of defenseclaw sandbox activity for a Claude Code sandbox on a Mac: the sandbox is created and ready, the project copy is uploaded, two package and source hosts are allowed, a shadow AI warning for api.openai.com, a paste site refused with its unblock command, and a blocked tool call."
+  caption="Recorded from a real Claude Code sandbox on a Mac. `⚠ shadow AI` is the finding, the `✗` line for the paste site ends with the command that lifts the block, and the last line is a tool call DefenseClaw's hooks blocked (the rule's name is replaced by a placeholder)."
+  frames={[
+    { type: 'cmd', text: "defenseclaw sandbox activity --sandbox myapp-claude", pauseMs: 700 },
+    { type: 'out', text: "19:36:55 creating sandbox myapp-claude" },
+    { type: 'out', text: "19:37:17 sandbox myapp-claude is ready" },
+    { type: 'out', text: "19:37:18 uploaded the project copy" },
+    { type: 'ok', text: "19:39:23 ✓ registry.npmjs.org" },
+    { type: 'ok', text: "19:39:25 ✓ api.github.com" },
+    { type: 'warn', text: "19:39:29 ⚠ shadow AI: reached api.openai.com (OpenAI)" },
+    { type: 'ok', text: "19:39:29 ✓ api.openai.com" },
+    { type: 'out', text: "19:39:32 ✗ pastebin.com (paste site)  → unblock: defenseclaw sandbox unblock pastebin.com --sandbox myapp-claude" },
+    { type: 'out', text: "19:39:35 ✗ tool Bash blocked: <the rule's reason>" },
+  ]}
+/>
+
 A blocked connection shows once, with a short reason. The name lookups
 OpenShell refuses before it denies a connection aren't listed or counted.
 When DefenseClaw starts again, OpenShell replays what it recorded while
@@ -616,6 +638,11 @@ the tree is a view of what ran, not a control.
     { type: 'dim', text: '  sampled every 5s; a process that starts and ends between two samples is not seen' },
   ]}
 />
+
+On Linux (the Docker driver) the root of the tree is OpenShell's runtime
+instead of its bootstrap, and the rest has the same shape:
+
+![defenseclaw sandbox ps myapp-claude --tree on Linux: OpenShell's runtime as the root, a login shell, the DefenseClaw supervisor, Claude Code, a shell it started and the rate-limited curl under that shell](/images/sandboxes/screens/terminal-sandbox-ps-tree-linux.png)
 
 ### See the AI inside the sandbox
 
@@ -780,6 +807,25 @@ the sandbox's attempts at the same destination in the next 10 minutes are
 refused without a new ask, and the one after that asks again. Answering an
 ask that was answered already (in the TUI, or another terminal) says how and
 when it was answered.
+
+An ask and its answer, replayed from a real run:
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.4}
+  height={260}
+  ariaLabel="Animated terminal replay of an ask: defenseclaw sandbox approvals lists one ask, the sandbox asking to reach port 8765 on your machine, then defenseclaw sandbox approve answers it and says it applies at the next quiet moment of the sandbox."
+  caption="Recorded from a real Mac sandbox started with `--host-port 8765`. The ask names the program that connected (`/usr/bin/curl`) and the port on your machine."
+  frames={[
+    { type: 'cmd', text: "defenseclaw sandbox approvals", pauseMs: 700 },
+    { type: 'out', text: "ID                   SANDBOX    KIND       DESTINATION                   BINARY         RISK   REASON" },
+    { type: 'out', text: "ap_d52b76c279798ac7  myapp-ask  host_port  host.openshell.internal:8765  /usr/bin/curl  risky  the sandbox asks to reach port 8765 on your machine (--host-port 8765)" },
+    { type: 'dim', text: "  approve: defenseclaw sandbox approve <sandbox> <id> [--always]   reject: defenseclaw sandbox reject <sandbox> <id>" },
+    { type: 'spacer' },
+    { type: 'cmd', text: "defenseclaw sandbox approve myapp-ask ap_d52b76c279798ac7", pauseMs: 700 },
+    { type: 'ok', text: "  ✓ approved ap_d52b76c279798ac7 (host.openshell.internal); it applies at the next quiet moment of the sandbox (usually within a minute), then retry the connection that asked" },
+  ]}
+/>
 
 The `balanced` profile also asks about sites outside its allowlist, and
 `strict` asks about every request.
@@ -1989,6 +2035,8 @@ which runs NVIDIA's installer and sets up the service.
 | `ssh shim: DefenseClaw found no directory for an ssh with connection sharing off …; set TMPDIR to a directory only you can write, on a filesystem not mounted noexec` | DefenseClaw runs each OpenShell command with a small `ssh` wrapper (your ssh, with connection sharing off) in a private folder in your temporary directory. It skips a temporary directory that other users could change (by its permissions or, on a Mac, an ACL) or that is on a filesystem mounted `noexec` (common for `/tmp` on hardened Linux), where the wrapper could not run, and uses `~/.defenseclaw/openshell-ssh` instead. This error means neither worked; the message names why for each. Point `TMPDIR` at a folder only you can write, on a filesystem that runs programs, for example `mkdir -p -m 700 ~/.cache/tmp` and `export TMPDIR=~/.cache/tmp`. |
 | `ssh shim: <path>/ssh, the first ssh on PATH, does not keep connection sharing off …`, or the doctor's **SSH connection sharing** check fails with it | The first `ssh` on your `PATH` is a wrapper (a script in `~/bin`, for example) that adds its own `ControlMaster` or `ControlPath` options before its arguments, or `-S` or `-M`. Those win over the options DefenseClaw puts first, so every OpenShell session would share one connection into the first sandbox. DefenseClaw checks with `ssh -G sandbox`, which does not connect, and refuses to run the OpenShell command. Make the wrapper pass its arguments on to ssh without options of its own, or put the directory of OpenSSH's `ssh` (the message names it, often `/usr/bin`) before the wrapper's on `PATH`. The same error says "could not confirm" when that `ssh` cannot answer `-G`: run the `ssh -G -o ProxyCommand=true sandbox` command it names to see why. |
 | `upload the project copy: the upload to <name> did not arrive …` | OpenShell reported the upload done, but the sandbox does not have it: the files went elsewhere, for example into another sandbox through an ssh connection shared between sandboxes. The run stops, and the sandbox it made is removed. Run `defenseclaw sandbox doctor` and look at its **SSH connection sharing** check. |
+| `defenseclaw sandbox status` ends with a red **Telemetry** row, or the integration's health reads `openshell_telemetry_failed` | The recorder refused sandbox records, for example because the telemetry runtime was down. They are counted and logged, never dropped silently, and the count and the last error show on the row. Run `defenseclaw doctor` and `defenseclaw observability plan`; see [sandbox telemetry](/docs/observability/sandbox-telemetry#health). |
+| The integration's health reads `openshell_egress_auth_failed`, and the daemon log says ``the sandbox egress proxy refused N request(s) with an invalid proxy credential`` | Something presented the egress proxy a malformed, unknown or revoked proxy credential: a sandbox that kept an environment from before a restart, or another program on this machine trying the proxy. The log line names the last destination. It ends by itself after a minute without a refusal; if it repeats, run `defenseclaw sandbox doctor`. See [sandbox telemetry](/docs/observability/sandbox-telemetry#health). |
 
 Exit statuses: 3 means the platform or deployment is unsupported (Windows,
 WSL2, an Intel Mac, `managed_enterprise`, or running as root), 4 means `pull --apply` left

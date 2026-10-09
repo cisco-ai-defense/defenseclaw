@@ -425,6 +425,33 @@ stopped`. Nothing is changed; use the install command above.
   `config unset` could, for the whole list. An unblock refused by your own
   block list names the command.
 
+### Sandbox documentation
+
+- New [Sandbox telemetry](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/sandbox-telemetry/)
+  page: the v8 records an OpenShell sandbox writes (lifecycle, egress decisions
+  with `log.egress.completed` bytes and duration, asks, policy changes,
+  findings, process and inference records), the attributes that name the
+  sandbox, the egress decision codes, the `openshell_*` health codes
+  (`openshell_egress_auth_failed`, `openshell_telemetry_failed`), the metrics,
+  what leaves the host, and how to reconstruct a session from the records.
+- `sandbox doctor --output json` documents `ready`, `openshell_install`,
+  `openshell_upgrade` and `openshell_install_version`; the guide's error table
+  names the two new health codes; the TUI page says that sandbox components are
+  their own AI Discovery rows and that an alert names its sandbox.
+- The sandboxes overview gains "What you can see, and how far to trust it": for
+  each signal (destinations, shadow AI, the program behind a connection, the
+  process tree, discovery, hooks, the repository policy) where it comes from and
+  what it cannot tell you.
+- Animated replays of real sessions for the sandbox setup, a whole first session,
+  the activity feed, an ask and its answer, applying and undoing a copy's work,
+  record-then-lock and `policy test`.
+- New or retaken screenshots from the 1.0.32 and 1.0.35 builds: the Grafana
+  Sandboxes board (current panel titles), the Linux and Mac Setup wizards, the
+  TUI's Activity view, sandbox details with the process tree and destinations on
+  both drivers, a sandbox in the AI Discovery panel, the Linux doctor, process
+  tree and status, a Linux session end with shadow AI, and a Splunk search of a
+  sandbox's records. The lab account name no longer appears in any shot.
+
 ## [Unreleased] — Enterprise hardening
 
 Entries that name the enterprise standalone profile apply only there; the

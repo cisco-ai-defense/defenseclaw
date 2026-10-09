@@ -20,6 +20,47 @@ Where Linux and macOS differ, the page shows both. The short version: on
 Linux the agent edits your folder live and you can undo it; on a Mac it
 edits a copy and you pull the changes back.
 
+The whole session in one replay, then each step in turn:
+
+<TerminalAnimation
+  cwd="~/code/myapp"
+  speed={1.6}
+  height={520}
+  ariaLabel="Animated terminal replay of one Claude Code session in a Linux sandbox: the launch banner, the activity feed in a second terminal with two allowed sites, a flagged tool call, a blocked webhook site and its unblock, then the end-of-session summary that flags files able to run code and asks whether to keep the changes."
+  caption="Recorded from a real session on Linux (project name shortened). The banner is the first screen; the feed runs in a second terminal; the summary and the keep question come when you exit the harness."
+  frames={[
+    { type: 'cmd', text: "defenseclaw sandbox run claude", pauseMs: 700 },
+    { type: 'dim', text: "  Starting a Claude Code sandbox…" },
+    { type: 'spacer' },
+    { type: 'out', text: "Sandbox myapp-d74e · Claude Code · skip-permissions ON · network: open + blocklist" },
+    { type: 'out', text: "  Project   ~/code/myapp → /work/myapp (live)   undo point taken → `defenseclaw sandbox undo myapp-d74e` restores it" },
+    { type: 'out', text: "  Hidden    .env  (secret files appear empty inside; --unmask PATH to share)" },
+    { type: 'out', text: "  Protected .git/hooks .git/config .git/config.worktree (read-only)" },
+    { type: 'out', text: "            Not visible: everything else on this machine" },
+    { type: 'out', text: "  Model     anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → bedrock-mantle.us-east-1.api.aws only (the sandbox sees a placeholder)" },
+    { type: 'out', text: "            opened to the harness's own program directly, around DefenseClaw's egress proxy; for an npm or Python harness that is its node or python, so a script it runs reaches them too" },
+    { type: 'out', text: "  Asks      Claude Code keeps this terminal's title, so watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-d74e (or `defenseclaw tui`: 7, then t); each one also rings the bell here" },
+    { type: 'spacer' },
+    { type: 'dim', text: "# Claude Code opens here and the agent works. In a second terminal:", pauseMs: 600 },
+    { type: 'cmd', text: "defenseclaw sandbox activity -f", pauseMs: 700 },
+    { type: 'out', text: "12:30:11 myapp-d74e creating sandbox myapp-d74e" },
+    { type: 'out', text: "12:30:28 myapp-d74e sandbox myapp-d74e is ready" },
+    { type: 'ok', text: "12:31:12 myapp-d74e ✓ registry.npmjs.org" },
+    { type: 'ok', text: "12:31:18 myapp-d74e ✓ docs.python.org" },
+    { type: 'warn', text: "12:31:19 myapp-d74e ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))" },
+    { type: 'out', text: "12:31:19 myapp-d74e ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-d74e" },
+    { type: 'out', text: "12:32:18 myapp-d74e unblocked webhook.site for sandbox myapp-d74e" },
+    { type: 'ok', text: "12:32:31 myapp-d74e ✓ webhook.site" },
+    { type: 'spacer' },
+    { type: 'dim', text: "# after you exit Claude Code, in the first terminal:", pauseMs: 600 },
+    { type: 'out', text: "Session ended · 4 tool calls · 3 new sites contacted · 1 site blocked · 2 files changed (+14 −1)" },
+    { type: 'warn', text: "  ⚠ Bash allowed but flagged by DefenseClaw: C2-WEBHOOK-SITE (webhook.site (known exfil))" },
+    { type: 'out', text: "  ✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since" },
+    { type: 'warn', text: "⚠ Changed files that can run code on your machine: package-lock.json, package.json, node_modules/  → review before running" },
+    { type: 'prompt', text: "Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter) ", reply: "", pauseMs: 600 },
+  ]}
+/>
+
 ## The session, step by step
 
 <Steps>
@@ -260,6 +301,13 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
 - **Enter** or `y` keeps the changes.
 - `u` restores the folder to its pre-session snapshot.
 - `d` shows the diff, then asks again.
+
+A session that changed no files ends without the question. The summary lists
+the findings and says how to resume. This one is from a real Linux session in
+which the agent called two AI services the harness does not use and a paste
+site:
+
+![End of a sandbox session on Linux: 7 tool calls, one blocked, 5 new sites contacted, 1 site blocked, 0 files changed, two shadow AI warnings, the blocked paste site with its unblock command, and how to resume or delete the kept sandbox](/images/sandboxes/screens/terminal-session-end-linux.png)
 
 </Tab>
 <Tab value="macOS">

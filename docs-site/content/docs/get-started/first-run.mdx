@@ -52,7 +52,10 @@ unchecked and every connector stays in observe.
 
 The action-only policy settings, the hook fail mode (`open` or `closed`) and
 HITL human approval with its minimum severity, are asked **once** and shared by
-every connector you promote to action. Observe connectors never see them.
+every connector you promote to action. Observe connectors never see them. On a
+new install the fail mode prompt offers `closed`, so Enter picks it; a re-run
+offers the value already saved. `--non-interactive` and `quickstart` use the
+config's value, `closed` for a new install.
 
 Near the end the wizard asks **Start gateway after setup?** (default Yes,
 because the hooks need a running gateway). `--start-gateway` or

@@ -1,0 +1,192 @@
+---
+title: Sandbox telemetry
+description: The v8 records DefenseClaw writes for OpenShell sandboxes — phase changes, egress decisions with bytes and duration, asks, policy changes, shadow AI and other findings, processes, integration health — and the attributes that tie them to one sandbox.
+keywords:
+  - OpenShell sandbox telemetry
+  - sandbox egress records
+  - log.egress.completed
+  - shadow AI finding
+  - openshell_egress_auth_failed
+  - defenseclaw.sandbox.name
+  - sandbox process tree records
+---
+
+Every [OpenShell sandbox](/docs/sandboxes) writes canonical v8 records, the same
+kind as the rest of DefenseClaw's [observability](/docs/observability). They
+go to the local SQLite history and to each destination whose routes select
+them, redacted by that destination's profile. This page lists what is recorded,
+how a record names its sandbox, and which records tell you something is wrong.
+The [Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board)
+and the [Splunk Observability dashboard](/docs/observability/splunk) are built
+from these records; the full attribute registry is
+[`docs/OPENSHELL_SANDBOX_EVENTS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/OPENSHELL_SANDBOX_EVENTS.md).
+
+## What is recorded
+
+| What happened | Record family | Bucket | Notes |
+| --- | --- | --- | --- |
+| A phase change | `log.sandbox.lifecycle` | `agent.lifecycle` | The phases are `creating`, `provisioning`, `starting`, `ready`, `stopping`, `stopped`, `error`, `deleting` and `deleted`. A record names the trigger (`create`, `start`, `stop`, `delete`, `watch`, `reconcile`), the previous phase and the exit code. |
+| A snapshot, undo, mask, review, upload, pull, or the quarantine of a nested repository | `log.sandbox.workspace` | `enforcement.action` | Counts files and lines and lists up to 64 project-relative paths. A state change, and any record that flags files able to run code, is always written to local SQLite. |
+| An egress decision, from the DefenseClaw egress proxy or from OpenShell's own network boundary | `log.egress.allowed`, `log.egress.blocked` | `network.egress` | Source `dc-egress-proxy` or `openshell`. A blocked decision is always written to local SQLite. |
+| The end of a connection the proxy allowed | `log.egress.completed`, `log.egress.failed` | `network.egress` | Bytes up and down and the duration. `failed` is a connection the proxy cut short (`cancelled`, with the bytes), or one whose DNS, connect, TLS or upstream failed (`failed`, a 502) or timed out (`timed_out`, a 504). |
+| An ask, and your answer | `log.approval.requested`, `log.approval.resolved` | `compliance.activity` | A resolution says approved, denied, expired or cancelled, who decided (you, triage or policy) and the scope (this sandbox or always). |
+| A policy change: applied, a rule added or removed, an unblock or block | `log.policy.updated` | `compliance.activity` | Always written to local SQLite. Carries the OpenShell policy revision and the policy hash. |
+| A finding (`sandbox.<kind>`, see below) | `log.finding.observed` | `security.finding` | |
+| A process OpenShell launched or ended, an SSH session, a model call | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` | `tool.activity`, `compliance.activity`, `model.io` | From OpenShell's own reports. Process and SSH records are paced per sandbox (a burst of 200, then 20 a second). An inference record names the provider, model, status and latency, never the content. |
+| A process joined or left the [process tree](/docs/sandboxes/guide#see-what-the-sandbox-runs) | `log.sandbox.process_tree` | `agent.lifecycle` | Only for a sandbox whose tree is on (`observe.process_tree`, or `sandbox run --process-tree`). Carries the parent and the ancestry. |
+| The integration's health | `log.subsystem.lifecycle`, `.ready`, `.degraded`, `.restored` | `platform.health` | Subsystem `openshell`. A transition is always written to local SQLite. |
+| An AI component found inside a sandbox | `ai_component.*` | `ai.discovery` | Carries `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`. See [AI discovery](/docs/ai-discovery#inside-openshell-sandboxes). |
+| A hook decision | `log.compat.hook_decision` | | Carries the sandbox id and name of the binding that authenticated the hook, so a verdict joins to its sandbox. |
+
+The audit actions behind them are `sandbox-lifecycle`, `sandbox-workspace`,
+`sandbox-egress`, `sandbox-approval`, `sandbox-policy`, `sandbox-health`,
+`sandbox-finding`, `sandbox-activity` and `sandbox-process`; they appear in
+`defenseclaw audit export` and the TUI's Audit view.
+
+In Loki the family without its `log.` prefix is `defenseclaw_event_name` (for
+example `egress.blocked`, `finding.observed`, `sandbox.process_tree`).
+
+## Which sandbox a record belongs to
+
+Every sandbox record carries these attributes when they are known. An empty
+value is left out, never guessed.
+
+| Attribute | Meaning |
+| --- | --- |
+| `defenseclaw.sandbox.name` | The sandbox's name. Required on every record except the integration's own health. |
+| `defenseclaw.sandbox.id` | OpenShell's id, once the gateway accepted the sandbox. |
+| `defenseclaw.sandbox.driver` | The compute driver: `docker` on Linux, `vm` (MicroVM) on a Mac. |
+| `defenseclaw.sandbox.profile`, `.pack` | The network profile and the policy pack. |
+| `defenseclaw.sandbox.workdir.mode` | `mount` or `copy`. |
+| `defenseclaw.sandbox.binding.id` | The ingress binding the sandbox's hooks and egress proxy credential authenticate with (`sb_` and hex; never the token). |
+| `user.id`, `defenseclaw.user.name` | The host account that launched the sandbox. |
+| `gen_ai.conversation.id` | The harness session the sandbox's hooks last named, on egress, approval, process, SSH and inference records. |
+| `defenseclaw.connector.source` | The sandbox's harness connector. |
+
+<Callout type="info" title="Sandbox names are never metric labels">
+The sandbox name, id and binding are attributes of the log records only. The
+metrics carry the harness connector, the egress source and the decision, so a
+sandbox that is created and deleted a hundred times does not make a hundred
+series. Per-sandbox views read the logs, which is why the Collector copies
+`defenseclaw.sandbox.name` into Loki structured metadata.
+</Callout>
+
+## Egress records
+
+An egress record names the destination (`server.address`, `server.port`,
+`defenseclaw.network.target_ref`), the dialed address, the decision (`allow` or
+`block`), a stable decision code, a short reason and the source. OpenShell's
+records also name the program that connected (`defenseclaw.sandbox.process.executable`
+and `.pid`); both are what the sandboxed program claims about itself, not
+something DefenseClaw verified.
+
+| Decision code | When |
+| --- | --- |
+| `SANDBOX_EGRESS_ALLOWED` | The end of an allowed proxy connection (`log.egress.completed`). |
+| `SANDBOX_EGRESS_OPENSHELL_DENIED` | OpenShell's own boundary refused the connection. |
+| `SANDBOX_EGRESS_HOST_PORT_ASK` | The refusal of a `--host-port` port that raised an ask. |
+| `SANDBOX_EGRESS_UPSTREAM_FAILED` | The proxy could not reach the site: DNS, connect, TLS or timeout. |
+| `SANDBOX_EGRESS_TERMINATED` | The proxy or OpenShell ended an allowed connection: the large-upload block, the idle timeout, a refused TLS name, a recheck, or a policy reload. |
+| `SANDBOX_EGRESS_LOOKUP_REFUSED`, `SANDBOX_EGRESS_HARNESS_FETCH` | A refused name lookup, or a request the harness makes on its own and does without. Audited at INFO and not an alert. |
+| `SANDBOX_EGRESS_` plus the category (`PACK_BLOCK`, `REPO_POLICY_BLOCK`, `FIREWALL_BLOCK`, `OPERATOR_BLOCK`, `EGRESS_OFF`, ...) | A refusal by the merged block list, naming whose entry it was. |
+
+The model provider's hosts are opened to the harness's own program directly,
+around the egress proxy, so the proxy records no byte counts for a model call.
+OpenShell's report of the call is a `log.sandbox.inference` record.
+
+## Findings
+
+A finding's category is `sandbox.<kind>`:
+
+| Kind | Meaning | Severity |
+| --- | --- | --- |
+| `shadow_ai` | An AI API the sandbox reached or tried to reach that is neither its model provider nor its harness's vendor. At most once per provider and severity per session. | MEDIUM when reached, LOW when refused |
+| `hook_silence` | The harness of a user-tier sandbox worked without a hook request reaching DefenseClaw for `hooks.silence_after`. In `balanced` and `strict` the sandbox is stopped. | HIGH |
+| `hook_tamper` | A tool ran without a DefenseClaw verdict: a `PostToolUse` whose `PreToolUse` was denied or never arrived. | HIGH |
+| `large_upload` | A large upload to a host the sandbox had not contacted before. | MEDIUM when only reported, HIGH when the large-upload block cut it |
+| `nested_repo` | A repository or a gitlink appeared inside a live-mounted project during a session. | HIGH, CRITICAL when the quarantine failed |
+| `ocsf_finding` | A finding OpenShell raised. Its repeats within 10 minutes of a session are one record. | as OpenShell reports |
+
+## Health
+
+Health records use the subsystem `openshell`. A degraded record carries a stable
+error code in lower case (`defenseclaw.schema.error_code`) and a summary that
+says what to do.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `openshell_unavailable` | The OpenShell gateway is not running, is not this account's, or does not answer. | `defenseclaw sandbox doctor` |
+| `openshell_egress_auth_failed` | The egress proxy refused requests that presented an invalid proxy credential (malformed, unknown, revoked or wrong). A request with none is the normal first step of the handshake and is not counted. One record opens a streak, the daemon log counts the later refusals at most once a minute, and a minute without one ends it with a `restored` record. | A sandbox may hold a stale or revoked credential (an environment from before a restart), or another program on this machine is trying the proxy. The summary names the last destination. `defenseclaw sandbox doctor`. |
+| `openshell_telemetry_failed` | The recorder refused a sandbox record. The first refusal of a streak is recorded and logged; every one is counted on `defenseclaw sandbox status` (the red `Telemetry` row) and in `GET /api/v1/sandbox/status` (`telemetry_failures`, `telemetry_error`). | `defenseclaw doctor` and the observability destinations. |
+| `openshell_watch_failed` | Events were lost on a sandbox's stream. A cursor out of range (the gateway restarted, as an upgrade does) is MEDIUM and no alert; one the gateway could not have issued is HIGH. | `defenseclaw sandbox status NAME` |
+
+## Reconstruct a session
+
+To work out what an agent did in a sandbox, from the records alone:
+
+1. On the machine, the same facts are one command each:
+   `defenseclaw sandbox status NAME` (counts, hook traffic, the last blocked
+   call), `defenseclaw sandbox activity --sandbox NAME` (the feed, in order),
+   `defenseclaw sandbox destinations NAME` (every host, what it is, how much
+   moved, which program connected), `defenseclaw sandbox ps NAME --tree` (the
+   processes, when the tree was on), `defenseclaw sandbox discover NAME` (what
+   the agent installed), and `defenseclaw alerts` for the findings.
+   Destinations and the last discovery stay after the sandbox stops;
+   `ps` says when the tree was last sampled. Deleting the sandbox removes them.
+2. `defenseclaw audit export --since 1h` writes the audit records, hook
+   decisions included, for the same window.
+3. In Grafana, set **Sandbox** on the [Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board).
+   To read the records in order, open Explore on Loki and filter on the sandbox
+   name, then on one family:
+
+   ```text
+   {service_name="defenseclaw"} | defenseclaw_sandbox_name="myapp-claude"
+   {service_name="defenseclaw"} | defenseclaw_sandbox_name="myapp-claude" | defenseclaw_event_name="egress.blocked"
+   ```
+
+   Another destination (Splunk, a file) holds the same records; filter on
+   `defenseclaw.sandbox.name` there. In Splunk, the audit action names the kind
+   of record. This search counts a two-hour session's records by action (the
+   search term `spl-ua` is that sandbox's name):
+
+   ![Splunk search index=defenseclaw_local spl-ua, then spath and stats count by action, over the last two hours: sandbox-egress 44, connector-hook 43, hook_decision 43, sandbox-process 40, ai_discovery 8, sandbox-activity 6 and sandbox-lifecycle 4](/images/splunk/sandbox-actions.png)
+4. Treat a program's name and arguments as the agent's own words. The tree
+   samples every 5 seconds, so a process shorter than that is missing from it;
+   a connection's program is what OpenShell reports, and its parents appear
+   only for a process the tree saw. The model provider's traffic does not go
+   through the egress proxy, so it has no byte counts, only OpenShell's
+   `log.sandbox.inference` records.
+
+## Metrics
+
+The labels below are the ones the local Prometheus shows. In OTLP they are
+`defenseclaw.connector.source`, `defenseclaw.metric.source` and
+`defenseclaw.metric.decision`.
+
+| Metric | Labels | Notes |
+| --- | --- | --- |
+| `defenseclaw.sandbox.active` (gauge) | `connector` | Sandboxes provisioning, starting, ready or stopping, per harness connector. |
+| `defenseclaw.sandbox.transitions` (counter) | `connector`, phase from and to | One per phase change. |
+| `defenseclaw.egress.events` (counter) | `connector`, `source` (`openshell`, `dc-egress-proxy`), `decision` | One per decision; none for the end of a connection. A refusal that is audited only does not count. |
+
+## What leaves the host
+
+- The command line of a process is content class: each destination's
+  [redaction profile](/docs/observability/redaction) decides whether it leaves
+  the host. Before that, DefenseClaw replaces the values of arguments that name
+  secrets and keeps at most 1,024 bytes.
+- Destinations, file names, finding targets and the program names in a record
+  come from the sandboxed agent. A value that does not fit its registered shape
+  is cut or left out; it never stops the record from being written.
+- The egress proxy never records URL paths or query strings. OpenShell's HTTP
+  events can add the path of a plain-HTTP request.
+- Local SQLite keeps every collected record; the mandatory ones marked above are
+  kept even when a route turns the bucket's collection off.
+
+## See also
+
+- [Sandbox guide: see where the sandbox connected](/docs/sandboxes/guide#see-where-the-sandbox-connected)
+- [Network and egress: destinations and shadow AI](/docs/sandboxes/network#destinations-and-shadow-ai)
+- [Grafana Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board)
+- [Splunk Observability dashboards and detector](/docs/observability/splunk)
+- [Gateway API: sandbox status and destinations](/docs/reference/gateway-api)

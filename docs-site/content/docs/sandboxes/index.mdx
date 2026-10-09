@@ -138,7 +138,9 @@ instead: Codex, Claude Code and the others run on your machine, and every
 tool call still goes through DefenseClaw's policy. See
 [Windows](/docs/get-started/windows) and
 [platform support](/docs/connectors#platform-support). Run sandboxes on a
-Linux machine or an Apple-silicon Mac.
+Linux machine or an Apple-silicon Mac. The TUI's Sandboxes tab on Windows says so:
+
+![DefenseClaw TUI on Windows with the Sandboxes tab open: the panel says OpenShell sandboxes run on Linux and macOS only and that Windows and WSL2 are not supported](/images/sandboxes/screens/tui-sandboxes-windows-unsupported.png)
 
 | Topic | Linux | macOS (Apple silicon) |
 | --- | --- | --- |
@@ -207,6 +209,27 @@ images.
 6. **Stop or delete.** The sandbox is stopped and kept, so
    `defenseclaw sandbox connect NAME` resumes it. `defenseclaw sandbox delete NAME`
    removes it.
+
+## What you can see, and how far to trust it
+
+DefenseClaw reports a sandbox from several sources. Some it measures itself;
+some are what OpenShell or the sandboxed program says about itself. Read each
+one for what it is:
+
+| You want to know | Look at | It comes from | Read it as |
+| --- | --- | --- | --- |
+| Which sites the agent reached or tried | `sandbox activity`, `sandbox destinations NAME`, the TUI's sandbox details, the Grafana Sandboxes board | The egress proxy (host, port, bytes, decision) and OpenShell's own network records | Measured by DefenseClaw for what goes through the proxy. It never sees an HTTPS path or body, and the model provider's traffic is opened around the proxy. |
+| Whether the agent talked to another AI service | The `shadow AI` and `shadow AI?` kinds in `destinations`, a `shadow_ai` finding, `⚠` in the feed | A catalog of AI providers, and a check for hosts shaped like an inference endpoint | A provider in the catalog is named. `shadow AI?` is a guess from the host's shape. A vendor's own website is an ordinary site. |
+| Which program made a connection | The BINARY column of `destinations` | OpenShell names the program, not a process id; the process tree adds its parents | What the program calls itself. Parents appear only with the tree on, for a process the 5-second sample saw, so a short program can be missing or matched to another copy. |
+| What the agent ran | `sandbox ps NAME --tree` (opt-in) | A sample of the sandbox's processes every 5 seconds and OpenShell's launch and exit reports | Names and arguments are the agent's own words, with secrets replaced. A view of what ran, not a control. |
+| What the agent installed in the sandbox | `sandbox discover NAME`, `agent usage --sandbox NAME`, the TUI's AI Discovery | A read-only command DefenseClaw builds and runs in the sandbox; every path and file it returns is checked on your machine | The files as the agent left them, scanned on your machine, not in the sandbox. |
+| Whether the hooks still guard the agent | The banner's `Hooks` line, the `hook_silence` and `hook_tamper` findings | Hook requests reaching DefenseClaw | Claude Code and Codex keep their hooks in root-owned files. For the other harnesses, silence stops the sandbox under `balanced` and `strict`; a harness that works in bursts shorter than `silence_after` is not flagged. |
+| What the project asked for | The banner's `Policy` row, `policy explain` (source `repo`) | `.defenseclaw/sandbox.yaml`, read on your machine when the sandbox is created | Untrusted input: it can only tighten the policy, and a later edit applies to the next new sandbox. |
+
+None of these sees what a program does in memory, or the contents of the files
+the agent writes (the end-of-session review flags the ones that can run code).
+Every signal is also a v8 record that reaches your telemetry destinations; see
+[sandbox telemetry](/docs/observability/sandbox-telemetry).
 
 ## Which agents can run
 

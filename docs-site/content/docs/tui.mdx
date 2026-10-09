@@ -58,7 +58,7 @@ to filter.
 | Key | Panel | What it shows |
 | --- | --- | --- |
 | `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied policy generation and digest](#policy-generation-and-digest), at-a-glance health |
-| `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them |
+| `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them. The details of an alert raised in an OpenShell sandbox name it in a **Sandbox** fact |
 | `3` | Skills | Scanned skill inventory, with [block and allow actions](#block-and-allow-from-the-panels) |
 | `4` | MCPs | Scanned MCP servers, with block and allow actions |
 | `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others), with block and allow actions |
@@ -74,11 +74,23 @@ to filter.
 | `P` | Policies | The protection center: posture per connector, opt-in packs, chains, rule families, policies, rule packs and sandbox packs ([below](#policies-panel-protection-center)) |
 | `0` | Setup | Setup tasks grouped by goal, and the config editor ([below](#setup-panel)) |
 
+The Alerts panel counts the detection-only findings of the last 24 hours under its summary line. With an alert selected, its details name the OpenShell sandbox that raised it in the **Sandbox** fact:
+
+![DefenseClaw TUI Alerts panel on Linux: the summary line, a line saying 16 detection-only findings of the last 24 hours are not listed, the alert table with a paste-site block selected, and its details with the Sandbox fact myapp-claude](/images/sandboxes/screens/tui-alerts-sandbox.png)
+
 The Overview panel's **AI Agents** metric intentionally excludes `local_model`
 rows so a large model cache cannot hide agent activity. Open **AI Discovery**
 with `V` for the full model inventory; model rows add Model, Model status, and
 Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
+
+What AI discovery finds inside an
+[OpenShell sandbox](/docs/ai-discovery#inside-openshell-sandboxes) is listed
+there too, as its own rows tagged `Product (sandbox NAME)`: the same product on
+your machine and in a sandbox are separate rows, and the detail names the
+sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
+
+![DefenseClaw TUI AI Discovery panel with a row for Claude Code on the host and a separate row, Claude Code (sandbox myapp-claude), for what the scan found inside the sandbox](/images/sandboxes/screens/tui-ai-discovery-sandbox.png)
 
 The Runtime panel reads the same gateway as `agent discovery runtime status`.
 It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
@@ -366,6 +378,8 @@ OpenShell MicroVMs, where every run works on a copy (see
 not supported. The
 [macOS app](/docs/macos-app#openshell-sandboxes) shows the same sandboxes in
 its menu bar, notifications and Sandboxes panel.
+
+![DefenseClaw TUI on Windows with the Sandboxes tab open: the panel says OpenShell sandboxes run on Linux and macOS only and that Windows and WSL2 are not supported](/images/sandboxes/screens/tui-sandboxes-windows-unsupported.png)
 
 The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
 `UNREACHABLE`), how many sandboxes run, how many asks wait, the gateway with
