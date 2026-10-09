@@ -694,23 +694,20 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		defer func() { _, _ = auditDB.Exec("ROLLBACK") }()
 	}
 	var written []string
-	// config.yaml.v8.bak is written once: it holds the config the first
-	// migration replaced, the 0.8.x file a rollback restores. A later
-	// config_version 8 source (a v9 file relabelled 8 by hand, which no key
-	// test can tell from a 0.8.x file, or a 0.8.x file edited after a
-	// rollback) is saved next to it instead (GAP-0307, GAP-0544).
+	// The documented rollback path must hold the v8 source of this run.
+	// Keep an older backup as a timestamped sibling before refreshing it.
 	backup := m.configPath + ConfigV8BackupSuffix
 	earlier, err := os.ReadFile(backup)
 	switch {
 	case err == nil && bytes.Equal(earlier, source):
 	case err == nil:
 		kept := freeSiblingPath(backup + "." + migrationStamp())
-		if err := cfgtxn.WriteFileDurable(kept, source, mode); err != nil {
+		if err := cfgtxn.WriteFileDurable(kept, earlier, 0o600); err != nil {
 			return written, err
 		}
 		written = append(written, kept)
-		m.note("%s keeps the config the first config_version 9 migration replaced; this migration's "+
-			"config_version 8 source is saved as %s", backup, kept)
+		m.note("previous backup %s saved as %s; rollback now restores this migration's config_version 8 source", backup, kept)
+		fallthrough
 	case errors.Is(err, fs.ErrNotExist):
 		if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
 			return written, err
@@ -719,6 +716,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	default:
 		return written, fmt.Errorf("config: read %s: %w", backup, err)
 	}
+
 	// Before the config that pins them.
 	for _, dir := range slices.Sorted(maps.Keys(m.rebasedPacks)) {
 		if err := writeRebasedRulePack(dir, m.rebasedPacks[dir]); err != nil {
