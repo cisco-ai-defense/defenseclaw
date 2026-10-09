@@ -24,7 +24,7 @@ type CommandLineMCP struct {
 	Entry MCPServerEntry
 	Found bool
 	// Exclusive means the command line is the agent's only MCP source
-	// (claude --strict-mcp-config, or codex -c mcp_servers={...}): a server it
+	// (claude --strict-mcp-config): a server it
 	// does not define comes from nowhere the hook can read.
 	Exclusive bool
 }
@@ -183,7 +183,7 @@ func codexConfigOverrides(args []string) []string {
 // applyCodexMCPOverrides applies mcp_servers overrides to the servers the
 // Codex files define, as Codex does: the key is a dotted path, and a value
 // that does not parse as TOML is a string. touched names the servers an
-// override changed; exclusive means one replaced mcp_servers as a whole.
+// override changed. Codex merges whole-table overrides with file entries.
 func applyCodexMCPOverrides(base []MCPServerEntry, overrides []string) ([]MCPServerEntry, map[string]bool, bool, error) {
 	servers := map[string]MCPServerEntry{}
 	var order []string
@@ -196,7 +196,7 @@ func applyCodexMCPOverrides(base []MCPServerEntry, overrides []string) ([]MCPSer
 	for _, entry := range base {
 		put(entry)
 	}
-	touched, exclusive := map[string]bool{}, false
+	touched := map[string]bool{}
 	for _, override := range overrides {
 		key, raw, ok := strings.Cut(override, "=")
 		if !ok {
@@ -210,7 +210,6 @@ func applyCodexMCPOverrides(base []MCPServerEntry, overrides []string) ([]MCPSer
 			if !ok {
 				return nil, nil, false, fmt.Errorf("codex -c %s is not a table of servers", key)
 			}
-			servers, order, exclusive = map[string]MCPServerEntry{}, nil, true
 			for name, def := range table {
 				entry, err := codexOverrideServer(name, def)
 				if err != nil {
@@ -242,7 +241,7 @@ func applyCodexMCPOverrides(base []MCPServerEntry, overrides []string) ([]MCPSer
 	for _, name := range order {
 		out = append(out, servers[name])
 	}
-	return out, touched, exclusive, nil
+	return out, touched, false, nil
 }
 
 // codexOverrideValue parses an override value as Codex does: as a TOML
