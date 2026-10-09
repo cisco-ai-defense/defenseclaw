@@ -192,6 +192,11 @@ func dispatchTrustedAction(
 			if partialArgv {
 				viewCandidate = argvSubsetReductionCandidate
 			}
+		} else if view, ok := actionfacts.UnmodeledProgramArgvReduction(request.Input, facts); ok {
+			// A program with no modeled operand grammar (hostname) left the
+			// action partial, so a custom argv rule about it never ran
+			// (GAP-0912). Only a monotone argv rule's match counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
 		} else if powerShellView != nil {
 			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
 			powerShellView = nil
