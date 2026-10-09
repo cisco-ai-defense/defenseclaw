@@ -1697,6 +1697,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			}
 		}
 	}
+	gatewayPresent := exists(filepath.Join(env.P(env.Layout.BinDir), binGateway))
+	enrollmentKept := exists(env.P(env.Layout.ManifestPath)) && exists(env.P(env.Layout.ConfigPath))
+	removePerUser := gatewayPresent && (record != nil || enrollmentKept)
+	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
+		return 0
+	}
 	// The guardian repairs any DefenseClaw registration that goes missing
 	// from a manifest target, the enumerator republishes the manifest, and
 	// the apply and verify triggers start lifecycle runs. All of them stop
@@ -1719,13 +1725,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// enrollment record and the config it needs are there; otherwise it
 	// names the accounts whose per-user files stay (GAP-2632).
 	perUserLeft := false
-	gatewayPresent := exists(filepath.Join(env.P(env.Layout.BinDir), binGateway))
-	enrollmentKept := exists(env.P(env.Layout.ManifestPath)) && exists(env.P(env.Layout.ConfigPath))
 	// Without a record, the package database says whether the deb/rpm owns
 	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
 	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
 		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
-	if gatewayPresent && (record != nil || enrollmentKept) {
+	if removePerUser {
 		perUserLeft = l.removePerUserRegistrations(ctx)
 	} else if record == nil {
 		l.warnUnpurgedPerUser(ctx)
@@ -1955,6 +1959,50 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	return lines
 }
 
+// refuseUnresolvedPerUserRows asks `enterprise hooks remove-all --check`,
+// before any service stops or any policy goes, whether every manifest row
+// resolves to an account whose registrations can be removed. A row it could
+// not resolve failed the removal only after the services were unloaded and
+// part of the machine policy was removed, which left the deployment stopped
+// and half removed (GAP-1101). It names each such row and refuses with
+// nothing changed. An installed binary without --check answers no report,
+// and the uninstall goes on as before.
+func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
+	env, r := l.env, l.result
+	out, _ := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json", "--check")
+	var report struct {
+		Failed []string `json:"failed"`
+	}
+	if json.Unmarshal(out.Stdout, &report) != nil {
+		return false
+	}
+	refused := false
+	for _, entry := range report.Failed {
+		user, connector, reason, ok := cutPerUserEntry(entry)
+		if !ok {
+			continue
+		}
+		r.AddError(codePerUserHooks, fmt.Sprintf("the %s manifest row of user %s cannot be removed: %s; fix or remove that row in %s and rerun `%s`",
+			connector, user, reason, env.Layout.ManifestPath, l.uninstallCommand()))
+		refused = true
+	}
+	if refused {
+		r.AddError(codeUninstall, "nothing was changed: every service is still running and the machine policy is in place, because the manifest rows listed above do not resolve to an account")
+	}
+	return refused
+}
+
+// cutPerUserEntry splits a remove-all entry "user/connector: reason". The
+// user part may be a home path, so the connector follows the last slash.
+func cutPerUserEntry(entry string) (user, connector, reason string, ok bool) {
+	label, reason, _ := strings.Cut(entry, ": ")
+	i := strings.LastIndex(label, "/")
+	if i < 0 {
+		return "", "", reason, false
+	}
+	return label[:i], label[i+1:], reason, true
+}
+
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
 // --purge on a purge) and reports what it could not do, one message per
 // account and connector: an error for a registration that is still in
@@ -1989,8 +2037,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	rerun := "`" + l.uninstallCommand() + "`"
 	left := false
 	for _, entry := range report.Failed {
-		label, reason, _ := strings.Cut(entry, ": ")
-		user, connector, ok := strings.Cut(label, "/")
+		user, connector, reason, ok := cutPerUserEntry(entry)
 		if !ok {
 			// A check that names no registration (an unreadable eligible
 			// accounts file, say) does not hold up the uninstall.
@@ -2005,7 +2052,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		left = true
 	}
 	for _, entry := range report.Pending {
-		user, connector, _ := strings.Cut(entry, "/")
+		user, connector, _, _ := cutPerUserEntry(entry)
 		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
 	}
 	for _, entry := range report.StateFailed {
