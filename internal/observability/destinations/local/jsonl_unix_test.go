@@ -468,3 +468,18 @@ func TestJSONLUnwritableFileAtStartDefersTheOpen(t *testing.T) {
 		t.Fatalf("file after the open succeeded = %q, %v", body, err)
 	}
 }
+
+func TestJSONLPathProblemRefusesUnusableFolder(t *testing.T) {
+	folder := filepath.Join(t.TempDir(), "closed")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(folder, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(folder, 0o700) })
+	path := filepath.Join(folder, "events.jsonl")
+	if problem := JSONLPathProblem(path); !strings.Contains(problem, "cannot traverse or write") {
+		t.Fatalf("JSONLPathProblem(%s) = %q, want unusable-folder error", path, problem)
+	}
+}
