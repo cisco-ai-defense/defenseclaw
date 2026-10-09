@@ -79,7 +79,9 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 	case strings.HasPrefix(node, "/LDAPv3/"):
 		facts.Directory = DirectoryLDAP
 		facts.Domain = strings.TrimPrefix(node, "/LDAPv3/")
-	case facts.Principal != "" && adDomain != "":
+	case facts.Principal != "" && (facts.AccountDomain != "" || adDomain != ""):
+		// The NetLogon authority identifies AD even when the
+		// machine-wide dsconfigad lookup fails.
 		facts.Directory = DirectoryActiveDirectory
 	}
 	if facts.Directory == DirectoryActiveDirectory && facts.Domain == "" {
