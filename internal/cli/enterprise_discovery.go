@@ -491,7 +491,18 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		if user != "" {
 			findings := view.Findings[:0]
 			for _, finding := range view.Findings {
-				if strings.EqualFold(finding.User, user) {
+				matches := strings.EqualFold(finding.User, user)
+				if !matches && (cfg == nil || !cfg.SecureClientIntegration()) {
+					// The runtime snapshot carries a bare user name, while a
+					// qualified --user or SID selects inventory by account ID.
+					for _, account := range report.Accounts {
+						if strings.EqualFold(finding.User, useridentity.BareAccountName(account.User)) {
+							matches = true
+							break
+						}
+					}
+				}
+				if matches {
 					findings = append(findings, finding)
 				}
 			}

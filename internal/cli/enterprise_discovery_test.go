@@ -444,6 +444,52 @@ func TestWindowsEnterpriseDiscoveryKeepsSameNameAccountsApart(t *testing.T) {
 	}
 }
 
+// GAP-1117: a qualified selector resolves the inventory SID, while runtime
+// discovery records the bare account name.
+func TestWindowsEnterpriseDiscoveryQualifiedUserKeepsRuntimeFindings(t *testing.T) {
+	previousCfg, previousReport, previousIDs := cfg, enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs
+	t.Cleanup(func() {
+		cfg, enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs = previousCfg, previousReport, previousIDs
+	})
+	cfg = nil
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Codex CLI", UserName: "alice", UserID: "S-1-5-21-7"},
+			{Name: "Amp", UserName: "bob", UserID: "S-1-5-21-8"},
+		}}, "127.0.0.1:18970", nil
+	}
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		if user == `DCLAB\alice` {
+			return []string{"S-1-5-21-7"}
+		}
+		return nil
+	}
+	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Findings: []enterpriseRuntimeFinding{
+		{PID: 41, User: "alice"}, {PID: 42, User: "bob"},
+	}}, nil)
+
+	var out bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&out, `DCLAB\alice`, true); err != nil {
+		t.Fatal(err)
+	}
+	var report enterpriseDiscoveryReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil || len(report.Accounts) != 1 ||
+		report.Accounts[0].SID != "S-1-5-21-7" || report.Runtime == nil ||
+		len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].User != "alice" {
+		t.Fatalf("qualified account runtime findings = %s (%v)", out.String(), err)
+	}
+
+	// Secure Client keeps the exact name/SID runtime match of main.
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	out.Reset()
+	if err := writeWindowsEnterpriseDiscovery(&out, "S-1-5-21-7", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil || report.Runtime == nil || len(report.Runtime.Findings) != 0 {
+		t.Fatalf("Secure Client SID runtime findings = %s (%v)", out.String(), err)
+	}
+}
+
 // A Secure Client computer keeps the enterprise groups and the discovery
 // --user match it had before the identity views (GAP-0138), and drops the
 // other commands main does not have (issue #1092).

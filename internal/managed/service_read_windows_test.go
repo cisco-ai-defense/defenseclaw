@@ -83,8 +83,45 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	if err := ValidateServiceCanWriteFile(sink, account); err == nil || !strings.Contains(err.Error(), "cannot create files in "+root) {
 		t.Fatalf("folder the service can only read: %v", err)
 	}
-	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", root)
+	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301ff;;;BU)", root)
 	if err := ValidateServiceCanWriteFile(sink, account); err != nil {
 		t.Fatalf("folder the service may modify: %v", err)
+	}
+}
+
+// A service may append and create files but still be unable to rotate or
+// prune them when its folder lacks FILE_DELETE_CHILD (GAP-1123).
+func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
+	folder := t.TempDir()
+	path := filepath.Join(folder, "audit.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setDACL := func(path, sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const account = `NT SERVICE\TrustedInstaller`
+	// Folder: list, create, read attributes/control. File: append and read
+	// attributes/control. Neither grants deletion.
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20083;;;BU)")
+	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20084;;;BU)")
+	if err := ValidateServiceCanWriteFile(path, account); err == nil {
+		t.Fatal("accepted a JSONL destination that cannot rotate")
+	}
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x200c3;;;BU)")
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("folder permits rotation and pruning: %v", err)
 	}
 }

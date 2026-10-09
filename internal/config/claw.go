@@ -304,6 +304,47 @@ func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name s
 	return MCPServerEntry{}, false
 }
 
+// CodexMCPToolServerAmbiguous reports whether the caller's effective Codex
+// configuration has distinct server names that produce the same hook tool
+// segment. A hook without an explicit server name cannot distinguish them.
+func (c *Config) CodexMCPToolServerAmbiguous(workspaceDir, toolServer string) bool {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" && c != nil {
+		workspaceDir = c.ConnectorWorkspaceDir()
+	}
+	entries, err := c.readMCPServersForConnectorIn("codex", workspaceDir)
+	return err == nil && codexMCPToolServerAmbiguous(entries, toolServer)
+}
+
+// CodexMCPToolServerAmbiguousUnderHome uses the managed caller's Codex
+// configuration instead of the gateway service account's configuration.
+func CodexMCPToolServerAmbiguousUnderHome(home, workspaceDir, toolServer string) bool {
+	home = strings.TrimSpace(home)
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	entries := readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+	return codexMCPToolServerAmbiguous(entries, toolServer)
+}
+
+func codexMCPToolServerAmbiguous(entries []MCPServerEntry, toolServer string) bool {
+	toolServer = strings.TrimSpace(toolServer)
+	if toolServer == "" {
+		return false
+	}
+	first := ""
+	for _, entry := range entries {
+		if MCPToolServerName("codex", entry.Name) != toolServer {
+			continue
+		}
+		if first != "" && first != entry.Name {
+			return true
+		}
+		first = entry.Name
+	}
+	return false
+}
+
 // MCPToolServerName is the server segment an agent puts in the MCP tool
 // names its hooks see (mcp__<server>__<tool>). Codex turns every character
 // other than an ASCII letter, digit or underscore into "_", so a server

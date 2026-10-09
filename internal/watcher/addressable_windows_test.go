@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
 
 // GAP-0573: a skill folder whose name ends with a dot was never detected,
@@ -46,6 +48,7 @@ func TestTrailingWindowsNameCanBeQuarantinedAndRestored(t *testing.T) {
 	for _, name := range []string{"review.", "review "} {
 		t.Run(name, func(t *testing.T) {
 			cfg, store, logger, skillDir := setupTestEnv(t)
+			cfg.Gateway.Watcher.Skill.TakeAction = true
 			normal := filepath.Join(skillDir, "review")
 			if err := os.Mkdir(normal, 0o700); err != nil {
 				t.Fatal(err)
@@ -58,6 +61,10 @@ func TestTrailingWindowsNameCanBeQuarantinedAndRestored(t *testing.T) {
 				t.Fatal(err)
 			}
 			w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+			pe := enforce.NewPolicyEngine(store)
+			if err := pe.Block("skill", name, "fixture"); err != nil {
+				t.Fatal(err)
+			}
 			if !w.isDirectChildDir(path) || w.classifyEvent(path).Name != name {
 				t.Fatal("watcher lost the exact asset name")
 			}
@@ -89,6 +96,14 @@ func TestTrailingWindowsNameCanBeQuarantinedAndRestored(t *testing.T) {
 			}
 			if _, err := os.Lstat(normal); err != nil {
 				t.Fatalf("normalized sibling changed: %v", err)
+			}
+			restored, err := store.GetActionForConnector("skill", name, "claudecode")
+			if err != nil || restored == nil || !strings.HasPrefix(restored.SourcePath, `\\?\`) {
+				t.Fatalf("restored action path = %#v, err = %v", restored, err)
+			}
+			rejectRestored(w, evt)
+			if _, err := os.Lstat(addressableStandalonePath(path)); err != nil {
+				t.Fatalf("restored blocked skill was re-quarantined: %v", err)
 			}
 		})
 	}

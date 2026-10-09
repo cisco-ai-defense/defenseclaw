@@ -819,7 +819,10 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
-	writable := env.installedConfigWritable()
+	writable, err := env.installedConfigWritable(ctx)
+	if err != nil {
+		return nil, &codedError{code: codeConfig, err: fmt.Errorf("check whether the installed config is writable by another account: %w", err)}
+	}
 	if writable != "" && fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
 		return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s changed while %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
 			env.Layout.ConfigPath, writable, env.lifecycleCommand(ActionEnsure))}
@@ -1055,12 +1058,12 @@ func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 }
 
 // installedConfigWritable says how an account other than root could write
-// the installed config.yaml: its mode or owner, or a folder that account can
-// write (it could put another file in its place). "" when only root can, or
-// when there is no file. The apply trigger applied an edit by a standard
-// user (guardrail mode action to observe) to a config.yaml a bad profile push
-// had left 0666, and status and verify stayed green (GAP-0524).
-func (e *Env) installedConfigWritable() string {
+// the installed config.yaml: its mode, owner, a write ACL, or a folder that
+// account can write (it could put another file in its place). An edited
+// config is refused before repair removes those permissions (GAP-0524,
+// GAP-1139, GAP-1141).
+func (e *Env) installedConfigWritable(ctx context.Context) (string, error) {
+	var aclTargets []aclTarget
 	for _, canonical := range []string{e.Layout.ConfigPath, filepath.Dir(e.Layout.ConfigPath)} {
 		path := e.P(canonical)
 		_, _, mode, err := statOwnerMode(path)
@@ -1072,12 +1075,25 @@ func (e *Env) installedConfigWritable() string {
 			continue
 		}
 		folder := canonical != e.Layout.ConfigPath
-		writable := mode.Perm()&0o022 != 0 && (!folder || mode&os.ModeSticky == 0)
-		if writable || (uid != 0 && uid != os.Geteuid()) {
-			return fmt.Sprintf("%s was %04o and owned by uid %d", canonical, mode.Perm(), uid)
+		if mode.Perm()&0o022 != 0 && (!folder || mode&os.ModeSticky == 0) || (uid != 0 && uid != os.Geteuid()) {
+			return fmt.Sprintf("%s was %04o and owned by uid %d", canonical, mode.Perm(), uid), nil
+		}
+		if e.GOOS == "darwin" && (!folder || mode&os.ModeSticky == 0) {
+			aclTargets = append(aclTargets, aclTarget{path: path})
 		}
 	}
-	return ""
+	if len(aclTargets) > 0 {
+		findings, err := e.aclFindings(ctx, aclTargets)
+		if err != nil {
+			return "", err
+		}
+		for _, finding := range findings {
+			if finding.write {
+				return fmt.Sprintf("%s has a macOS ACL entry that lets another account write it", finding.path), nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // replaceWritableConfig puts a new file in place of an installed config.yaml
@@ -2126,7 +2142,7 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 	// place, made it look trusted to the plan, so a write through a
 	// descriptor that account opened while it could write was applied by
 	// the follow-up transaction (GAP-0524).
-	if env.installedConfigWritable() != "" {
+	if writable, err := env.installedConfigWritable(ctx); err != nil || writable != "" {
 		return false
 	}
 	path := env.P(env.Layout.ConfigPath)

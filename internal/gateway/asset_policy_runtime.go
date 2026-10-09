@@ -138,9 +138,43 @@ func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
+	if a.codexMCPServerAmbiguous(ctx, req) {
+		name := serverFromMCPToolName(req.ToolName)
+		decision := config.AssetPolicyDecision{
+			Enabled: true, Mode: config.AssetPolicyModeAction, Action: "block", RawAction: "block",
+			Source: "mcp-server-ambiguous", RegistryStatus: "unknown",
+			TargetType: "mcp", TargetName: name, Connector: "codex", RuntimeSurface: "hook",
+			Reason: fmt.Sprintf("mcp %q: multiple configured Codex servers use this tool name; the server cannot be identified", name),
+		}
+		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "codex", req.HookEventName)
+		a.logAssetPolicyAudit(ctx, "codex", "mcp:"+name, "action=block source=mcp-server-ambiguous")
+		return decision, true
+	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
+}
+
+// codexMCPServerAmbiguous applies only when the hook did not provide an
+// explicit server name. Codex normalizes punctuation in MCP tool names, so
+// an exact configured name is not enough to identify a server on collision.
+func (a *APIServer) codexMCPServerAmbiguous(ctx context.Context, req codexHookRequest) bool {
+	if strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name"))) != "" {
+		return false
+	}
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	toolServer := serverFromMCPToolName(req.ToolName)
+	if toolServer == "" {
+		return false
+	}
+	home, serviceAccount := callerHomeForAssets(ctx)
+	if !serviceAccount {
+		return cfg.CodexMCPToolServerAmbiguous(req.CWD, toolServer)
+	}
+	return home != "" && config.CodexMCPToolServerAmbiguousUnderHome(home, req.CWD, toolServer)
 }
 
 // codexMCPServerName is the MCP server a Codex tool call names, spelled as
@@ -439,9 +473,10 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 	}
 	policy, _ := cfg.EffectiveAssetTypePolicy(connector, "mcp")
 	mode := config.AssetPolicyModeAction
-	if !rulesPinEndpoint(cfg.AssetPolicy.MCP.Denied) {
+	if !rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
 		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
-		if !gated || !(rulesPinEndpoint(cfg.AssetPolicy.MCP.Allowed) || rulesPinEndpoint(policy.Registry)) {
+		if !gated || !(rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) ||
+			rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
 			return config.AssetPolicyDecision{}, false
 		}
 		mode = cfg.EffectiveAssetPolicyModeForConnector(connector)
@@ -464,6 +499,25 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 func rulesPinEndpoint(rules []config.AssetPolicyRule) bool {
 	for _, rule := range rules {
 		if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// rulesPinEndpointForServer checks only constraints that remain provable when
+// the command-line definition is unavailable. An unrelated name or connector
+// cannot make this call fail closed.
+func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server string) bool {
+	for _, rule := range rules {
+		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
+			!config.SameMCPToolServer(connector, rule.Name, server) {
+			continue
+		}
+		if rule.Connector != "" && !config.SameConnector(rule.Connector, connector) {
+			continue
+		}
+		if rulesPinEndpoint([]config.AssetPolicyRule{rule}) {
 			return true
 		}
 	}

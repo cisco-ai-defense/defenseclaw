@@ -90,7 +90,7 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 
 // ValidateServiceCanWriteFile reports a file the gateway NT SERVICE virtual
 // account could not write: a folder it cannot create files in, list or read
-// the permissions of, or an existing file it cannot append to. Setup runs
+// the permissions of or rotate and prune files in, or an existing file it cannot append to. Setup runs
 // its preflight as LocalSystem or an administrator, who write everywhere, so
 // a kind: jsonl destination in a folder only administrators can write
 // passed it; the gateway then could not open the file and did not start,
@@ -118,6 +118,9 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	}
 	if !serviceHasAccess(folder, sids, serviceFolderWriteAccess) {
 		return fmt.Errorf("the gateway service account %s cannot create files in %s", serviceAccount, folder)
+	}
+	if !serviceHasAccess(folder, sids, serviceFolderDeleteChildAccess) {
+		return fmt.Errorf("the gateway service account %s cannot rotate or prune files in %s", serviceAccount, folder)
 	}
 	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && !serviceHasAccess(path, sids, serviceFileAppendAccess) {
 		return fmt.Errorf("the gateway service account %s cannot write %s", serviceAccount, path)
@@ -181,6 +184,9 @@ const (
 	// them to prune, and read the attributes and permissions the gateway
 	// checks before every open.
 	serviceFolderWriteAccess = serviceTreeAccess | windows.ACCESS_MASK(0x0002|0x0080) | windows.READ_CONTROL
+	// FILE_DELETE_CHILD permits renaming the active file and removing old
+	// backups even when an existing file does not grant DELETE.
+	serviceFolderDeleteChildAccess = windows.ACCESS_MASK(0x0040)
 	// serviceFileAppendAccess is what the gateway opens an existing
 	// destination file with (FILE_APPEND_DATA).
 	serviceFileAppendAccess = windows.ACCESS_MASK(0x0004|0x0080) | windows.READ_CONTROL
