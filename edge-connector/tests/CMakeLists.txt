@@ -99,11 +99,11 @@ foreach(_test IN LISTS _all_tests)
     get_test_property(${_test} ENVIRONMENT _env)
     if(NOT _env)
         set_tests_properties(${_test} PROPERTIES
-            ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-${_test}.bin;DCLAW_AUDIT_KEY=${_test_audit_key}")
+            ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-${_test}.bin;DCLAW_AUDIT_KEY=${_test_audit_key};DCLAW_OTA_HMAC_ALLOWED=1")
     else()
         # Append audit key to existing ENVIRONMENT list
         set_tests_properties(${_test} PROPERTIES
-            ENVIRONMENT "${_env};DCLAW_AUDIT_KEY=${_test_audit_key}")
+            ENVIRONMENT "${_env};DCLAW_AUDIT_KEY=${_test_audit_key};DCLAW_OTA_HMAC_ALLOWED=1")
     endif()
 endforeach()
 

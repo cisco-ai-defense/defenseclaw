@@ -278,9 +278,11 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
      * bypass rate limiting and correlation checks. (Comment 18 fix) */
     uint8_t trusted_cap_flags = dclaw_policy_lookup_capability(req->tool_name);
 
-    /* L-3 fix: Use static buffer to avoid ~700-byte stack allocation per
-     * evaluation. Safe for single-threaded embedded (no concurrent callers). */
-    static dclaw_tool_request_t trusted_req;
+    /* P2-3 fix: Reverted from static to stack-local. The static was a premature
+     * optimization for single-threaded use that could hide bugs if multi-threading
+     * is ever added (shared mutable state without synchronization). On 4KB-stack
+     * embedded targets, verify that ~700 bytes fits within the stack budget. */
+    dclaw_tool_request_t trusted_req;
     memcpy(&trusted_req, req, sizeof(dclaw_tool_request_t));
     trusted_req.cap_flags = trusted_cap_flags;
     /* CRT-1 fix: Apply SYSTEM scope override on the mutable copy (not via

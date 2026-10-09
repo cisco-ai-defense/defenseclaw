@@ -190,6 +190,24 @@ func (c *TCPClient) checkRequireTLS() error {
 	return nil
 }
 
+// checkPlaintextMQTT returns an error if running in production mode and the
+// broker address is plaintext (not TLS) and DCLAW_ALLOW_PLAINTEXT_MQTT is not
+// set. P2-2 fix: In production, TLS is required by default. Operators must
+// explicitly opt in to plaintext via DCLAW_ALLOW_PLAINTEXT_MQTT=1.
+func (c *TCPClient) checkPlaintextMQTT() error {
+	if !isProductionMode() {
+		return nil
+	}
+	if isTLSScheme(c.addr) {
+		return nil
+	}
+	if allow := os.Getenv("DCLAW_ALLOW_PLAINTEXT_MQTT"); allow == "1" {
+		log.Printf("[mqtt] WARNING: Using plaintext MQTT in production (DCLAW_ALLOW_PLAINTEXT_MQTT=1 override active)")
+		return nil
+	}
+	return fmt.Errorf("plaintext MQTT refused in production for broker %q — use mqtts:// or set DCLAW_ALLOW_PLAINTEXT_MQTT=1 to allow plaintext MQTT in production (not recommended)", c.addr)
+}
+
 // Connect establishes a TCP connection and sends the MQTT CONNECT packet.
 func (c *TCPClient) Connect(ctx context.Context) error {
 	c.mu.Lock()
@@ -202,6 +220,12 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 	// H-6 fix: Extract REQUIRE_TLS check into helper so it runs in both
 	// Connect() and doConnect() (reconnect) paths.
 	if err := c.checkRequireTLS(); err != nil {
+		return err
+	}
+
+	// P2-2 fix: In production mode, refuse plaintext MQTT by default.
+	// Operators must set DCLAW_ALLOW_PLAINTEXT_MQTT=1 to override.
+	if err := c.checkPlaintextMQTT(); err != nil {
 		return err
 	}
 
@@ -637,6 +661,10 @@ func (c *TCPClient) reconnectLoop(ctx context.Context) {
 func (c *TCPClient) doConnect(ctx context.Context) error {
 	// H-6 fix: Check REQUIRE_TLS in reconnect path too
 	if err := c.checkRequireTLS(); err != nil {
+		return err
+	}
+	// P2-2 fix: Check plaintext MQTT in reconnect path too
+	if err := c.checkPlaintextMQTT(); err != nil {
 		return err
 	}
 

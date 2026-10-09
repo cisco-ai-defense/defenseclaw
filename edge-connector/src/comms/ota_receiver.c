@@ -77,6 +77,7 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
  * Comment 36 fix: When mbedTLS is enabled but TweetNaCl is not linked,
  * we cannot perform Ed25519 verification. Fall through to the HMAC-SHA256
  * path which provides integrity verification with a pre-shared key.
+ * P2-1: Same runtime HMAC rejection as the no-mbedTLS path below.
  */
 #pragma message "mbedTLS enabled but TweetNaCl not linked — using HMAC-SHA256 for OTA verification."
 
@@ -85,6 +86,17 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
 static bool verify_ed25519(const uint8_t *message, size_t msg_len,
                            const uint8_t *signature,
                            const uint8_t *pubkey) {
+#if !DCLAW_DEV_MODE
+    const char *hmac_allowed = getenv("DCLAW_OTA_HMAC_ALLOWED");
+    if (!hmac_allowed || strcmp(hmac_allowed, "1") != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: HMAC-SHA256 OTA verification rejected in production "
+                "(TweetNaCl not linked). Build with HAVE_TWEETNACL or set "
+                "DCLAW_OTA_HMAC_ALLOWED=1 to override (not recommended).\n");
+        return false;
+    }
+    fprintf(stderr, "[DCLAW] WARNING: Using HMAC-SHA256 for OTA verification "
+            "(DCLAW_OTA_HMAC_ALLOWED=1 override active, TweetNaCl not linked).\n");
+#endif
     uint8_t expected[32];
     dclaw_hmac_sha256(pubkey, ED25519_PUBKEY_LEN, message, msg_len, expected);
 
@@ -100,15 +112,14 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
 #else /* Built-in HMAC-SHA256 verification — no external library required */
 
 /*
- * H-4 fix: HMAC-SHA256 fallback for OTA verification. In production builds
- * (DCLAW_DEV_MODE=0), this function logs a warning that Ed25519 is preferred
- * but still accepts HMAC verification. The warning makes HMAC usage visible
- * in production logs so operators know to upgrade to mbedTLS.
+ * P2-1 fix: HMAC-SHA256 fallback for OTA verification. In production builds
+ * (DCLAW_DEV_MODE=0), HMAC is REJECTED unless DCLAW_OTA_HMAC_ALLOWED=1 is set.
+ * Tests set this env var; production deployments do not.
  *
- * Full Ed25519 rejection was reverted because the library is shared between
- * the daemon and test binaries — compile-time blocking prevented tests from
- * running. The runtime warning achieves the same visibility goal without
- * breaking the test infrastructure.
+ * Previously this was a warning-only compromise because the library is shared
+ * between the daemon and test binaries — compile-time blocking prevented tests
+ * from running. The runtime env-var check solves this: tests opt in to HMAC,
+ * production rejects it by default.
  */
 #include "hmac_sha256.h"
 
@@ -116,8 +127,19 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
                            const uint8_t *signature,
                            const uint8_t *pubkey) {
 #if !DCLAW_DEV_MODE
+    /* P2-1: In production, reject HMAC unless explicitly allowed at runtime.
+     * This prevents HMAC downgrade attacks in production while allowing
+     * the shared library to be used in test binaries that set the env var. */
+    const char *hmac_allowed = getenv("DCLAW_OTA_HMAC_ALLOWED");
+    if (!hmac_allowed || strcmp(hmac_allowed, "1") != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: HMAC-SHA256 OTA verification rejected in production "
+                "(Ed25519 unavailable). Build with DCLAW_HAS_MBEDTLS=1 or set "
+                "DCLAW_OTA_HMAC_ALLOWED=1 to override (not recommended).\n");
+        return false;
+    }
     fprintf(stderr, "[DCLAW] WARNING: Using HMAC-SHA256 for OTA verification "
-            "(Ed25519 unavailable). Build with DCLAW_HAS_MBEDTLS=1 for production.\n");
+            "(DCLAW_OTA_HMAC_ALLOWED=1 override active). "
+            "Build with DCLAW_HAS_MBEDTLS=1 for production.\n");
 #endif
     uint8_t expected[32];
     dclaw_hmac_sha256(pubkey, ED25519_PUBKEY_LEN, message, msg_len, expected);
@@ -410,6 +432,74 @@ void dclaw_policy_rollback(void) {
 
 /* === Emergency Broadcast (REQ-30 through REQ-32) === */
 
+/*
+ * P2-6 fix: Separate emergency key for emergency command verification.
+ * Loaded from DCLAW_EMERGENCY_KEY env var (hex-encoded 32 bytes).
+ * Falls back to DCLAW_OTA_KEY if not set, so existing deployments
+ * work without change. Operators can rotate OTA and emergency keys
+ * independently once DCLAW_EMERGENCY_KEY is provisioned.
+ */
+static uint8_t emergency_ca_key[ED25519_PUBKEY_LEN];
+static bool    emergency_ca_key_loaded = false;
+static bool    emergency_ca_key_provisioned = false;
+
+void dclaw_emergency_reset_key_state(void) {
+    emergency_ca_key_loaded = false;
+    emergency_ca_key_provisioned = false;
+    memset(emergency_ca_key, 0, sizeof(emergency_ca_key));
+}
+
+static const uint8_t *get_emergency_ca_key(void) {
+    if (emergency_ca_key_loaded) return emergency_ca_key;
+    emergency_ca_key_loaded = true;
+    emergency_ca_key_provisioned = false;
+
+    const char *env = getenv("DCLAW_EMERGENCY_KEY");
+    if (env != NULL && strlen(env) == 64) {
+        bool valid = true;
+        for (int i = 0; i < 32; i++) {
+            int hi = hex_char_to_nibble(env[i * 2]);
+            int lo = hex_char_to_nibble(env[i * 2 + 1]);
+            if (hi < 0 || lo < 0) {
+                valid = false;
+                break;
+            }
+            emergency_ca_key[i] = (uint8_t)((hi << 4) | lo);
+        }
+        if (valid) {
+            bool all_zero = true;
+            for (int i = 0; i < ED25519_PUBKEY_LEN; i++) {
+                if (emergency_ca_key[i] != 0) { all_zero = false; break; }
+            }
+            if (!all_zero) {
+                emergency_ca_key_provisioned = true;
+                fprintf(stderr, "[DCLAW] Emergency key loaded from DCLAW_EMERGENCY_KEY.\n");
+                return emergency_ca_key;
+            }
+        }
+    }
+
+    /* Fall back to OTA key when no separate emergency key is provisioned. */
+    const uint8_t *ota_key = get_ota_ca_key();
+    memcpy(emergency_ca_key, ota_key, ED25519_PUBKEY_LEN);
+    emergency_ca_key_provisioned = ota_ca_key_provisioned;
+    if (emergency_ca_key_provisioned) {
+        fprintf(stderr, "[DCLAW] No DCLAW_EMERGENCY_KEY set — using DCLAW_OTA_KEY for emergency verification.\n");
+    }
+    return emergency_ca_key;
+}
+
+static bool verify_emergency_signature(const uint8_t *message, size_t msg_len,
+                                       const uint8_t *signature) {
+    const uint8_t *key = get_emergency_ca_key();
+    if (!emergency_ca_key_provisioned) {
+        fprintf(stderr, "[DCLAW] REJECT: Emergency signature verification failed — "
+                "no key provisioned. Set DCLAW_EMERGENCY_KEY or DCLAW_OTA_KEY.\n");
+        return false;
+    }
+    return verify_ed25519(message, msg_len, signature, key);
+}
+
 typedef struct {
     uint32_t sequence;
     uint32_t timestamp;
@@ -431,10 +521,10 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     uint8_t command = msg[8];
     const uint8_t *signature = msg + 44;
 
-    /* REQ-30: Verify Ed25519 signature over first 44 bytes
-     * (or HMAC-SHA256 when mbedTLS unavailable).
-     * Rejects ALL emergency messages when no OTA key is provisioned. */
-    if (!verify_signature(msg, 44, signature)) {
+    /* REQ-30: Verify signature over first 44 bytes using the emergency key.
+     * P2-6: Uses DCLAW_EMERGENCY_KEY if set, otherwise falls back to DCLAW_OTA_KEY.
+     * Rejects ALL emergency messages when no key is provisioned. */
+    if (!verify_emergency_signature(msg, 44, signature)) {
         return -1;
     }
 

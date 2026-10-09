@@ -78,11 +78,10 @@ typedef struct {
 static mqtt_context_t mqtt_ctx;
 
 /*
- * P2-19 fix: QoS 0 publish success only means the bytes hit the kernel
- * buffer — NOT that the broker received them.  For the rollback flag
- * (which signals a safety-critical canary rollback), keep the flag set
- * for ROLLBACK_CLEAR_AFTER consecutive successful heartbeat sends before
- * clearing, so the information is transmitted at least that many times.
+ * P2-19 fix: For the rollback flag (which signals a safety-critical canary
+ * rollback), keep the flag set for ROLLBACK_CLEAR_AFTER consecutive successful
+ * heartbeat sends before clearing, so the information is transmitted at least
+ * that many times for redundancy. P2-5: Heartbeats now use QoS 1 for broker ACK.
  */
 #define ROLLBACK_CLEAR_AFTER 3
 static uint8_t rollback_send_count = 0;
@@ -782,20 +781,23 @@ int dclaw_mqtt_connect(void) {
     }
 #endif
 
-    /* H-4 fix: In production builds, warn loudly about plaintext MQTT.
-     * If DCLAW_REQUIRE_TLS=1, refuse to connect. Otherwise warn but proceed. */
+    /* P2-2 fix: In production builds, TLS is REQUIRED by default.
+     * Plaintext MQTT is only allowed if DCLAW_ALLOW_PLAINTEXT_MQTT=1 is set.
+     * Previously TLS was opt-in via DCLAW_REQUIRE_TLS; now the default is
+     * inverted so production deployments are secure by default. */
 #if !DCLAW_DEV_MODE
     if (!is_tls) {
-        const char *require_tls = getenv("DCLAW_REQUIRE_TLS");
-        if (require_tls &&
-            (strcmp(require_tls, "1") == 0 || strcmp(require_tls, "true") == 0)) {
-            fprintf(stderr, "[DCLAW-MQTT] ERROR: DCLAW_REQUIRE_TLS is set but broker URL "
-                    "uses plaintext mqtt://. Use mqtts:// or unset DCLAW_REQUIRE_TLS.\n");
+        const char *allow_plaintext = getenv("DCLAW_ALLOW_PLAINTEXT_MQTT");
+        if (!allow_plaintext || strcmp(allow_plaintext, "1") != 0) {
+            fprintf(stderr, "[DCLAW-MQTT] ERROR: Plaintext MQTT refused in production. "
+                    "Use mqtts:// URL or set DCLAW_ALLOW_PLAINTEXT_MQTT=1 to allow "
+                    "plaintext MQTT in production (not recommended).\n");
             mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
             return -1;
         }
-        fprintf(stderr, "[DCLAW-MQTT] WARNING: Using plaintext MQTT in production build. "
-                "Set DCLAW_REQUIRE_TLS=1 to enforce TLS or use mqtts:// URL.\n");
+        fprintf(stderr, "[DCLAW-MQTT] WARNING: Using plaintext MQTT in production build "
+                "(DCLAW_ALLOW_PLAINTEXT_MQTT=1 override active). "
+                "Use mqtts:// URL for production deployments.\n");
     }
 #endif
 
@@ -1204,14 +1206,12 @@ int dclaw_mqtt_send_heartbeat(void) {
         }
     }
 
-    int rc = dclaw_mqtt_publish(topic, hb_buf, hb_len, 0 /* QoS 0 */);
+    int rc = dclaw_mqtt_publish(topic, hb_buf, hb_len, 1 /* P2-5: QoS 1 ensures heartbeats are ACKed by broker */);
 
-    /* P2-19 fix: QoS 0 gives no broker-level ack — a successful publish()
-     * only means the bytes were written to the kernel socket buffer.  For
-     * the rollback flag (safety-critical canary rollback signal), we keep
-     * the flag set and count consecutive successful sends.  Only after
+    /* P2-19 fix: Even with QoS 1, the rollback flag is safety-critical.
+     * Keep the flag set and count consecutive successful sends. Only after
      * ROLLBACK_CLEAR_AFTER (3) successful heartbeats do we clear the flag,
-     * ensuring the broker has had multiple chances to receive the signal. */
+     * ensuring redundant delivery of the canary rollback signal. */
     if (rc == 0) {
         dclaw_state_t *st = dclaw_get_state();
         if (st->rollback_pending) {

@@ -203,6 +203,8 @@ func (a *API) registerRoutes() {
 	a.mux.HandleFunc("POST /policy/emergency", wrap(a.pushEmergency))
 	a.mux.HandleFunc("POST /threat-intel/push", wrap(a.pushThreatIntel))
 	a.mux.HandleFunc("POST /devices/decommission-batch", wrap(a.decommissionBatch))
+	a.mux.HandleFunc("POST /token/rotate", wrap(a.rotateToken))
+	a.mux.HandleFunc("POST /devices/{id}/rotate-key", wrap(a.rotateDeviceKey))
 	a.mux.HandleFunc("GET /metrics", wrap(MetricsHandler))
 }
 
@@ -838,6 +840,92 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 
 	resp["status"] = "completed"
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// rotateToken handles POST /token/rotate — generates a new 32-byte random
+// fleet API token, updates DCLAW_FLEET_API_TOKEN in the process environment,
+// and returns the new token once (it is not retrievable later). P2-4 fix:
+// Allows operators to rotate the fleet API token without restarting the gateway.
+func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
+	newToken := make([]byte, 32)
+	if _, err := rand.Read(newToken); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to generate random token: " + err.Error(),
+		})
+		return
+	}
+
+	newTokenHex := hex.EncodeToString(newToken)
+
+	if err := os.Setenv("DCLAW_FLEET_API_TOKEN", newTokenHex); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to update environment: " + err.Error(),
+		})
+		return
+	}
+
+	a.emitAudit("fleet.token.rotated", "DCLAW_FLEET_API_TOKEN",
+		"Fleet API token rotated — old token is now invalid")
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":   newTokenHex,
+		"status":  "rotated",
+		"warning": "This token is shown once and cannot be retrieved later. Store it securely.",
+	})
+}
+
+// rotateDeviceKey handles POST /devices/{id}/rotate-key — generates a new 32-byte
+// device key, saves it to the key store, and returns the new key once. P2-8 fix:
+// Allows operators to rotate individual device keys without re-registering.
+func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	deviceID, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device_id"})
+		return
+	}
+
+	// Verify the device exists
+	_, ok := a.manager.GetDevice(deviceID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
+		return
+	}
+
+	if a.keyStore == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "device key store not configured",
+		})
+		return
+	}
+
+	newKey := make([]byte, 32)
+	if _, err := rand.Read(newKey); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to generate device key: " + err.Error(),
+		})
+		return
+	}
+
+	if err := a.keyStore.SaveDeviceKey(deviceID, newKey); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "failed to save device key: " + err.Error(),
+		})
+		return
+	}
+
+	newKeyHex := hex.EncodeToString(newKey)
+
+	a.emitAudit("fleet.device.key_rotated",
+		fmt.Sprintf("%d", deviceID),
+		"Device key rotated — old key is now invalid")
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"device_id":  deviceID,
+		"device_key": newKeyHex,
+		"status":     "rotated",
+		"warning":    "This key is shown once and cannot be retrieved later. Provision it on the device.",
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
