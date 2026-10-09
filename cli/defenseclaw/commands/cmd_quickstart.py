@@ -326,6 +326,24 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
     from defenseclaw.bootstrap import _rollup_status
 
     if gateway_requested:
+        settings_failure = any(
+            step.name == "Sidecar"
+            and step.status in {"warn", "fail"}
+            and "settings.json" in step.detail
+            for step in report.setup
+        )
+        if settings_failure:
+            from defenseclaw.connector_paths import claude_config_dir
+
+            settings_path = os.path.join(claude_config_dir(), "settings.json")
+            for step in report.setup + report.readiness:
+                if step.name == "Sidecar":
+                    step.status = "fail"
+                    step.detail = (
+                        f"Claude Code settings file {settings_path} cannot be written. "
+                        "Make it writable or ask your administrator, then rerun quickstart."
+                    )
+                    step.next_command = ""
         for step in report.setup + report.readiness:
             if step.name in {"Connector", "Connector runtime", "Sidecar"} and step.status == "warn":
                 step.status = "fail"
