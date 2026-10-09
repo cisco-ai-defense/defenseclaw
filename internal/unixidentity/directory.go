@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -263,23 +264,43 @@ func (r *NSSResolver) winbindAccountDomain(account Account, realms []Realm) (str
 // the same SID for when asked as FLAT\name. The candidates are the flat
 // domain of the account own name (full_name_format = %3$s\%1$s), the
 // realm NetBIOS name, the Samba workgroup and the first label of the DNS
-// domain; only the answer of SSSD confirms one (GAP-0456).
-func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string) (string, error) {
+// domain, and then the flat name the domain's controllers announce
+// (domainShort, adcli info), which the others miss when the first label is
+// longer than 15 characters (an Entra Domain Services domain) or is not the
+// NetBIOS name (GAP-1095). Only the answer of SSSD confirms one, so a first
+// label is never taken on its own (GAP-0456).
+func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string, domainShort func(string) string) (string, error) {
 	bare, nameDomain := useridentity.SplitQualifiedName(name)
 	var candidates []string
 	if strings.Contains(name, `\`) && !strings.Contains(nameDomain, ".") {
 		candidates = append(candidates, nameDomain)
 	}
-	for _, candidate := range append(candidates, netBIOSCandidates(netBIOS, dnsDomain)...) {
+	candidates = append(candidates, netBIOSCandidates(netBIOS, dnsDomain)...)
+	confirm := func(candidate string) (bool, error) {
 		held, err := sssd.sidOfUserInDomain(candidate, bare)
 		if err != nil {
-			return "", fmt.Errorf("unixidentity: SSSD account domain of %s in %s: %w", bare, candidate, err)
+			return false, fmt.Errorf("unixidentity: SSSD account domain of %s in %s: %w", bare, candidate, err)
 		}
-		if held != "" && strings.EqualFold(held, sid) {
+		return held != "" && strings.EqualFold(held, sid), nil
+	}
+	for _, candidate := range candidates {
+		if ok, err := confirm(candidate); err != nil {
+			return "", err
+		} else if ok {
 			return candidate, nil
 		}
 	}
-	return "", nil
+	if domainShort == nil {
+		return "", nil
+	}
+	announced := strings.TrimSpace(domainShort(dnsDomain))
+	if !validNetBIOSCandidate(announced) || slices.ContainsFunc(candidates, func(seen string) bool { return strings.EqualFold(seen, announced) }) {
+		return "", nil
+	}
+	if ok, err := confirm(announced); err != nil || !ok {
+		return "", err
+	}
+	return strings.ToUpper(announced), nil
 }
 
 // netBIOSCandidates lists the NetBIOS names a joined domain may have, to be
@@ -290,13 +311,92 @@ func netBIOSCandidates(netBIOS, dnsDomain string) []string {
 	var out []string
 	for _, candidate := range []string{netBIOS, sambaWorkgroup(), strings.ToUpper(first)} {
 		candidate = strings.TrimSpace(candidate)
-		if candidate == "" || len(candidate) > 15 || strings.ContainsAny(candidate, `\/@. :,`) ||
+		if !validNetBIOSCandidate(candidate) ||
 			slices.ContainsFunc(out, func(seen string) bool { return strings.EqualFold(seen, candidate) }) {
 			continue
 		}
 		out = append(out, candidate)
 	}
 	return out
+}
+
+// validNetBIOSCandidate accepts a name that can be a NetBIOS domain: 1 to 15
+// characters, none of them a separator.
+func validNetBIOSCandidate(candidate string) bool {
+	return candidate != "" && len(candidate) <= 15 && !strings.ContainsAny(candidate, `\/@. :,`)
+}
+
+// adcliPaths are where adcli, the tool realm join uses to join an Active
+// Directory domain for SSSD, is installed; adcliTool picks the trusted one
+// (replaceable in tests).
+var (
+	adcliPaths = []string{"/usr/sbin/adcli", "/usr/bin/adcli"}
+	adcliTool  = func() (string, error) { return firstTrustedTool(adcliPaths...) }
+)
+
+// adcliAnswerTimeout bounds one adcli info call; adcliRetryAfter is how long
+// a domain whose controllers did not announce a flat name is not asked
+// again.
+const (
+	adcliAnswerTimeout = 3 * time.Second
+	adcliRetryAfter    = 10 * time.Minute
+)
+
+// adcliShortNames keeps the flat name each domain's controllers announced,
+// for the process, and when a domain's did not answer.
+var adcliShortNames struct {
+	sync.Mutex
+	byDomain map[string]adcliShortName
+}
+
+type adcliShortName struct {
+	short    string
+	failedAt time.Time
+}
+
+// adcliDomainShort is the NetBIOS (flat) name the controllers of dnsDomain
+// announce, as adcli info prints it (domain-short), or "" when adcli is not
+// installed or no controller answers. SSSD does not report a domain's flat
+// name over its NSS socket, but it confirms one by an account's SID
+// (sssdAccountDomain), which is what makes this answer safe to use.
+func (r *NSSResolver) adcliDomainShort(dnsDomain string) string {
+	dnsDomain = strings.ToLower(strings.TrimSpace(dnsDomain))
+	if dnsDomain == "" || strings.HasPrefix(dnsDomain, "-") || strings.ContainsAny(dnsDomain, " \t\x00\r\n/\\@") {
+		return ""
+	}
+	adcliShortNames.Lock()
+	known, ok := adcliShortNames.byDomain[dnsDomain]
+	adcliShortNames.Unlock()
+	if ok && (known.short != "" || time.Since(known.failedAt) < adcliRetryAfter) {
+		return known.short
+	}
+	answer := adcliShortName{failedAt: time.Now()}
+	if path, err := adcliTool(); err == nil {
+		ctx, cancel := context.WithTimeout(r.context(), adcliAnswerTimeout)
+		result, runErr := r.runner(ctx, path, []string{"info", dnsDomain})
+		cancel()
+		if runErr == nil && result.exitCode == 0 {
+			answer.short = parseADCLIDomainShort(string(result.stdout))
+		}
+	}
+	adcliShortNames.Lock()
+	if adcliShortNames.byDomain == nil {
+		adcliShortNames.byDomain = map[string]adcliShortName{}
+	}
+	adcliShortNames.byDomain[dnsDomain] = answer
+	adcliShortNames.Unlock()
+	return answer.short
+}
+
+// parseADCLIDomainShort reads "domain-short = NAME" of adcli info output.
+func parseADCLIDomainShort(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(key) == "domain-short" {
+			return strings.ToUpper(strings.TrimSpace(value))
+		}
+	}
+	return ""
 }
 
 // sambaWorkgroup reads the workgroup of the [global] section of smb.conf,
@@ -404,7 +504,7 @@ func (r *NSSResolver) applySSSDDomain(facts *useridentity.DirectoryFacts, sssd *
 		}
 		facts.Directory = realmDirectory(realm)
 		facts.Principal = useridentity.AccountPrincipal(bare, facts.Realm)
-		facts.AccountDomain, err = sssdAccountDomain(sssd, name, candidate, realm.NetBIOS, sid)
+		facts.AccountDomain, err = sssdAccountDomain(sssd, name, candidate, realm.NetBIOS, sid, r.adcliDomainShort)
 		if err != nil {
 			return "", err
 		}

@@ -72,5 +72,9 @@ func lsaProfileGroupSID(name string) (string, error) {
 // assignment names a group as DOMAIN\\name or by its SID.
 var profileGroupQualifiedName = func(context.Context, string) string { return "" }
 
+// profileUserEntryUnmatched has nothing to report on Windows, where the LSA
+// names every account DOMAIN\name and the entry is matched against that.
+func profileUserEntryUnmatched() func(context.Context, string) string { return nil }
+
 // accountGroupIDs lists an OS account's group SIDs.
 var accountGroupIDs = func(account *osuser.User) ([]string, error) { return account.GroupIds() }
