@@ -83,6 +83,16 @@ def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
     cfg.watch.rescan_enabled = strict["watch"]["rescan_enabled"]
     cfg.watch.rescan_interval_min = strict["watch"]["rescan_interval_min"]
     assert [p.name for p in pc.list_named_policies(policy_dir, cfg) if p.active] == ["strict"]
+    # GAP-0903: the v8 -> v9 migration spells the same preset as per-type
+    # shorthand and leaves built-in-equal values unset; it is still strict.
+    from defenseclaw.config import AdmissionConfig
+
+    migrated = AdmissionConfig()
+    migrated.defaults.allow_list_bypass_scan = False
+    migrated.skill.actions = {"critical": "quarantine", "high": "quarantine", "medium": "quarantine",
+                              "low": "warn", "info": "warn"}
+    cfg.admission = migrated
+    assert pc.active_policy_name(policy_dir, cfg) == "strict"
     cfg.guardrail.block_at = "LOW"
     assert pc.active_policy_name(policy_dir, cfg) == ""
 

@@ -198,6 +198,9 @@ func TestRescanCycleGatedSkipsUnchangedTargets(t *testing.T) {
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(skillPath, "SKILL.md"), []byte("# demo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	scriptPath := filepath.Join(skillPath, "skill.py")
 	if err := os.WriteFile(scriptPath, []byte("print('v1')\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -298,6 +301,9 @@ func TestRescanCycleUngatedScansEveryCycle(t *testing.T) {
 
 	skillPath := filepath.Join(skillDir, "demo-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillPath, "SKILL.md"), []byte("# demo\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(skillPath, "skill.py"), []byte("print('v1')\n"), 0o600); err != nil {

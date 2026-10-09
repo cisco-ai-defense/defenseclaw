@@ -305,12 +305,26 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
 
     from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
     from defenseclaw.config import AdmissionConfig
+    from defenseclaw.enforce.admission import compile_admission
+
+    def admission(config: Any) -> tuple[Any, ...]:
+        # Compare what admission enforces, not how config.yaml spells it: the
+        # v8 -> v9 migration writes a preset's actions per type in shorthand
+        # (admission.skill.actions.high: quarantine) and leaves values equal
+        # to the built-in defaults unset, where `policy activate` writes
+        # admission.defaults triples (GAP-0903).
+        out = []
+        for target_type in ("skill", "mcp", "plugin"):
+            c = compile_admission(config, target_type)
+            first_party = tuple(sorted((name, tuple(sorted(m))) for name, m in c.first_party_allow.items()))
+            out.append((c.scan_on_install, c.allow_list_bypass_scan, c.actions, c.scanner_overrides, first_party))
+        return tuple(out)
 
     def keys(config: Any) -> tuple[Any, ...]:
         g = config.guardrail
         trust = str(getattr(g, "cisco_trust_level", "") or "").strip() or "full"
         return (
-            getattr(config, "admission", None),
+            admission(config),
             level_value(getattr(g, "block_at", "")),
             level_value(getattr(g, "alert_at", "")),
             trust,
@@ -320,7 +334,11 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
 
     current = keys(cfg)
     sources = _policy_sources(policy_dir)
-    if current == (AdmissionConfig(), "", "", "full", True, 60) and "default" in sources:
+    if (
+        getattr(cfg, "admission", None) == AdmissionConfig()
+        and current[1:] == ("", "", "full", True, 60)
+        and "default" in sources
+    ):
         return "default"
     for stem, (path, _bundled) in sorted(sources.items()):
         data = load_policy_yaml(path)
