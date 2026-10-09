@@ -10,9 +10,9 @@ import (
 
 // trustedWindowsHomeLiteral is a Windows drive ActiveHome, as
 // normalizeActiveHome spells it, that reads as the same path when written
-// into a PowerShell or cmd word: no whitespace, quoting, variable, escape or
+// into a PowerShell or cmd word after quoting: no quoting, variable, escape or
 // glob characters.
-var trustedWindowsHomeLiteral = regexp.MustCompile(`^[A-Za-z]:/[A-Za-z0-9._+/-]*$`)
+var trustedWindowsHomeLiteral = regexp.MustCompile(`^[A-Za-z]:/[A-Za-z0-9._+ /-]*$`)
 
 // windowsShellHomeAnchors are the spellings of the caller's home a PowerShell
 // or cmd word may start with, lower-cased. PowerShell's $HOME is a constant
@@ -67,9 +67,30 @@ func rewriteTrustedWindowsShellHome(source, activeHome string, dialect Dialect) 
 			}
 			out.WriteString(source[last:index])
 			rest.WriteString(source[last:index])
-			out.WriteString(home)
-			last = end
-			index = end - 1
+			if strings.Contains(home, " ") && !double {
+				// Keep a space-bearing home and its literal suffix in one
+				// shell word. Quoting only the home would split the path.
+				suffixEnd := end
+				for suffixEnd < len(source) && strings.ContainsRune(
+					`\/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-`,
+					rune(source[suffixEnd]),
+				) {
+					suffixEnd++
+				}
+				if suffixEnd < len(source) && !strings.ContainsRune(" \t;|&<>)", rune(source[suffixEnd])) {
+					return "", false
+				}
+				out.WriteByte('"')
+				out.WriteString(home)
+				out.WriteString(source[end:suffixEnd])
+				out.WriteByte('"')
+				last = suffixEnd
+				index = suffixEnd - 1
+			} else {
+				out.WriteString(home)
+				last = end
+				index = end - 1
+			}
 			break
 		}
 	}

@@ -5,8 +5,10 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -373,6 +375,37 @@ func TestACPAuthenticatedTransportRejectsSignedPlaintext(t *testing.T) {
 	}
 }
 
+func TestACPHomeCredentialRequiresItsHomeOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix home ownership and loopback peer UID")
+	}
+	home := t.TempDir()
+	owner := os.Getuid()
+	principal := fmt.Sprintf("home:%x", sha256.Sum256([]byte(home)))
+	cfg := acpGatewayTestConfig(t.TempDir(), "managed_enterprise")
+	cfg.Enterprise.Profile = "standalone"
+	api := &APIServer{scannerCfg: cfg}
+	credential := acp.EnterpriseCredential{Principal: principal, UserDataDir: filepath.Join(home, ".defenseclaw")}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", nil)
+	req = req.WithContext(withACPEnterpriseCredential(req.Context(), credential))
+	previous := acpLoopbackPeerUID
+	peer := owner + 1
+	acpLoopbackPeerUID = func(*http.Request) (int, error) { return peer, nil }
+	t.Cleanup(func() { acpLoopbackPeerUID = previous })
+	if got := api.acpCallerAccountRefusal(req); got != acpCallerAccountMismatchReason {
+		t.Fatalf("copied home credential refusal = %q, want account mismatch", got)
+	}
+	peer = owner
+	if got := api.acpCallerAccountRefusal(req); got != "" {
+		t.Fatalf("home owner refusal = %q, want none", got)
+	}
+	credential.UserDataDir = ""
+	req = req.WithContext(withACPEnterpriseCredential(req.Context(), credential))
+	if got := api.acpCallerAccountRefusal(req); got != acpCallerAccountUnverifiedReason {
+		t.Fatalf("home without a recorded directory refusal = %q, want unverified", got)
+	}
+}
+
 func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
@@ -522,12 +555,29 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 		// (GAP-0690).
 		t.Fatalf("a bearer presented by another account: err = %v, want ErrCredentialOtherAccount", err)
 	}
-	peer = 4301
-	unbound := evaluate("home:" + strings.Repeat("ab", 32))
+	home := t.TempDir()
+	peer = os.Getuid()
+	homePrincipal := fmt.Sprintf("home:%x", sha256.Sum256([]byte(home)))
+	homeCredential, err := acp.EnsureEnterpriseCredential(dataDir, homePrincipal, "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := acp.SetEnterpriseCredentialUserDataDir(dataDir, homePrincipal, "zed", "kiro", "locked", filepath.Join(home, ".defenseclaw")); err != nil {
+		t.Fatal(err)
+	}
+	homeEvaluator, err := acp.NewHTTPEvaluator(server.URL, homeCredential.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := homeEvaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err != nil {
+		t.Fatal(err)
+	}
+	unbound := <-got
 	if unbound.verified || unbound.caller != "" || unbound.agent != "" || unbound.profile.Match != profileMatchDefaultUnverified {
 		t.Fatalf("home: credential: verified=%v caller=%q agent user=%q profile=%+v, want unverified and no claimed user",
 			unbound.verified, unbound.caller, unbound.agent, unbound.profile)
 	}
+	peer = 4301
 	setIdentityFactsEnabled(false)
 	if off := evaluate("uid:4301"); off.verified || off.caller != "" {
 		t.Fatalf("identity facts off: verified=%v caller=%q, want nothing bound", off.verified, off.caller)

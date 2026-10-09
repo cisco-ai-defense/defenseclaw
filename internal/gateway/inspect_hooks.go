@@ -31,19 +31,23 @@ import (
 	"github.com/google/uuid"
 )
 
-// inspectMode returns the operator-selected guardrail mode (action or
-// observe) that handleInspect{Request,Response,ToolResponse} use to
-// drive the ToolInspectVerdict.applyMode downgrade.
+// inspectMode returns the authenticated connector's guardrail mode for the
+// ToolInspectVerdict.applyMode downgrade. Secure Client keeps the legacy
+// global mode because its inspect decisions predate connector profiles.
 //
 // Mirroring evaluateCodexHook / evaluateClaudeCodeHook semantics:
 //   - nil/zero config → "observe" (fail-safe-for-the-user)
 //   - explicit "" or whitespace → "observe"
 //   - any value other than "action" → "observe" so the only path
 //     that actually blocks the agent is the explicit operator opt-in.
-func inspectMode(cfg *config.Config) string {
+func inspectMode(cfg *config.Config, connector string) string {
 	mode := ""
 	if cfg != nil {
-		mode = strings.TrimSpace(cfg.Guardrail.Mode)
+		mode = cfg.Guardrail.Mode
+		if !cfg.SecureClientIntegration() {
+			mode = cfg.Guardrail.EffectiveMode(connector)
+		}
+		mode = strings.TrimSpace(mode)
 	}
 	if mode != "action" {
 		return "observe"
@@ -167,7 +171,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		// demote.
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
 	}
-	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -248,7 +252,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		}
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "completion", false)
 	}
-	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -360,7 +364,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
 

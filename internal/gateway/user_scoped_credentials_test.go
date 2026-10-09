@@ -5,11 +5,13 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os/user"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -117,10 +119,15 @@ func userScopedTestToken(t *testing.T, kind, scope, identity string) string {
 	return token
 }
 
-func serveUserScopedTest(handler http.Handler, observed *userScopedObservation, method, path, token string, headers map[string]string) int {
+func serveUserScopedTest(handler http.Handler, observed *userScopedObservation, method, path, token string, headers map[string]string, peerUID ...int) int {
 	*observed = userScopedObservation{}
 	req := httptest.NewRequest(method, path, strings.NewReader("{}"))
 	req.RemoteAddr = "127.0.0.1:54321"
+	uid := 1001
+	if len(peerUID) != 0 {
+		uid = peerUID[0]
+	}
+	req = req.WithContext(context.WithValue(req.Context(), acpConnPeerKey{}, &acpConnPeer{uid: uid, known: true}))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -130,6 +137,26 @@ func serveUserScopedTest(handler http.Handler, observed *userScopedObservation, 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	return response.Code
+}
+
+// A copied credential must not turn another process account into a verified user.
+func TestUserScopedCredentialRequiresTheConnectingAccount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no loopback TCP caller UID")
+	}
+	ledger := &userScopedTestLedger{}
+	ledger.set(managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "codex", OK: true})
+	_, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{"1001": "alice"})
+	alice := userScopedTestToken(t, connector.UserScopedHookCredential, "codex", "1001")
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, nil, 1002); code != http.StatusForbidden || observed.called {
+		t.Fatalf("copied credential: status %d called=%v", code, observed.called)
+	}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, nil, -1); code != http.StatusForbidden || observed.called {
+		t.Fatalf("unverified caller: status %d called=%v", code, observed.called)
+	}
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", alice, nil, 1001); code != http.StatusOK || observed.userID != "1001" {
+		t.Fatalf("credential owner: status %d identity=%q", code, observed.userID)
+	}
 }
 
 // A per-user hook credential authenticates only its own connector, is
@@ -196,7 +223,7 @@ func TestUserScopedHookCredentialIsBoundToItsUser(t *testing.T) {
 		t.Fatalf("revoked user: status %d called=%v", code, observed.called)
 	}
 	bob := userScopedTestToken(t, connector.UserScopedHookCredential, "codex", "1002")
-	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", bob, nil); code != http.StatusOK || observed.userID != "1002" {
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", bob, nil, 1002); code != http.StatusOK || observed.userID != "1002" {
 		t.Fatalf("remaining user: status %d %+v", code, *observed)
 	}
 }
@@ -281,6 +308,9 @@ func TestUserScopedOTLPCredentialIsBoundToItsUser(t *testing.T) {
 // Windows rows bind credentials to the SID; account names compare
 // case-insensitively.
 func TestUserScopedCredentialBindsWindowsSID(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("SID credentials are served only on Windows")
+	}
 	const sid = "S-1-5-21-1111-2222-3333-1001"
 	ledger := &userScopedTestLedger{}
 	ledger.set(managedHookLedgerTarget{User: "alice", SID: strings.ToLower(sid), Connector: "codex", OK: true})

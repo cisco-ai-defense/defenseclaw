@@ -24,27 +24,27 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// An inspect scan must use the authenticated connector profile override.
-func TestInspectScanUsesAuthenticatedConnectorProfilePack(t *testing.T) {
+// An inspect verdict must use the authenticated connector profile settings.
+func TestInspectVerdictUsesAuthenticatedConnectorProfile(t *testing.T) {
 	stubProfileSources(t)
 	resetConnectorRuleCategories(t)
 	withLocalPatternsRestored(t)
-	packDir := filepath.Join(t.TempDir(), "codex-pack")
+	packDir := filepath.Join(t.TempDir(), "strict")
 	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
 category: secret
 rules:
   - id: INSPECT-CONNECTOR-MARKER
     pattern: "inspect_connector_marker_token"
     title: inspect connector fixture
-    severity: HIGH
+    severity: MEDIUM
     confidence: 0.99
     tags: [test]
 `)
 	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
 		"strict": {Connectors: map[string]config.PerConnectorGuardrailConfig{
-			"codex": {RulePackDir: packDir},
+			"codex": {Mode: "action", RulePackDir: packDir},
 		}},
 	}
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
@@ -59,6 +59,22 @@ rules:
 	}
 	if ids := findingIDs(findings); !containsRuleID(ids, "INSPECT-CONNECTOR-MARKER") {
 		t.Fatalf("authenticated connector pack not used: %v", ids)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/response",
+		strings.NewReader(`{"content":"inspect_connector_marker_token"}`))
+	req = req.WithContext(withAuthenticatedInspectConnector(req.Context(), "codex"))
+	rec := httptest.NewRecorder()
+	api.guardrailProfileInspectMiddleware(http.HandlerFunc(api.handleInspectResponse)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inspect status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var verdict ToolInspectVerdict
+	if err := json.Unmarshal(rec.Body.Bytes(), &verdict); err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Action != "block" || verdict.Mode != "action" || verdict.Severity != "MEDIUM" {
+		t.Fatalf("authenticated Codex profile verdict = action %q, mode %q, severity %q; want block, action, MEDIUM",
+			verdict.Action, verdict.Mode, verdict.Severity)
 	}
 }
 
@@ -1443,6 +1459,35 @@ func TestVerifiedUIDAssignmentSurvivesDirectoryFailure(t *testing.T) {
 	subject := &profileSubject{UserID: "1001", LookupFailed: true}
 	if got := set.matchUncached(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchUser {
 		t.Fatalf("verified UID selected %+v; want strict user assignment", got)
+	}
+}
+
+// The first hook after a directory recovery must see a completed retry before
+// it decides against a strict group assignment.
+func TestWindowsGroupAssignmentRetryOnFirstHook(t *testing.T) {
+	var lookups atomic.Int32
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\strict-users`}}},
+	}
+	lookup := func(string) (string, error) {
+		if lookups.Add(1) == 1 {
+			return "", errors.New("directory unavailable")
+		}
+		time.Sleep(25 * time.Millisecond)
+		return "S-1-5-21-860-1-2-1105", nil
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "default", assignments: assignments, matches: newProfileMatchCache(),
+		profiles:  map[string]config.DerivedGuardrailProfile{"default": {}, "strict": {}},
+		groupSIDs: newProfileGroupSIDs(assignments, lookup, time.Second),
+	}
+	set.groupSIDs.mu.Lock()
+	set.groupSIDs.entries[foldKey(`CORP\strict-users`)].nextTry = time.Time{}
+	set.groupSIDs.mu.Unlock()
+	subject := &profileSubject{UserID: "S-1-5-21-860-1-2-1001", IDKind: useridentity.KindWindowsSID,
+		Groups: []string{"S-1-5-21-860-1-2-1105"}}
+	if got := set.match(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchGroup {
+		t.Fatalf("first hook after retry selected %+v, want strict group profile", got)
 	}
 }
 

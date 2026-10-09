@@ -39,3 +39,27 @@ func TestWindowsHomeGrantsIgnoreLinkedNvimLockfile(t *testing.T) {
 		t.Fatal("installed plugin directory was not granted")
 	}
 }
+
+func TestWindowsHomeGrantsIncludeLiveStateSidecars(t *testing.T) {
+	home := t.TempDir()
+	profileDir := filepath.Join(home, "AppData", "Roaming", "Code", "User", "profiles", "profile1")
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	grants := WindowsHomeGrants(home)
+	byPath := make(map[string]WindowsGrant, len(grants))
+	for _, grant := range grants {
+		byPath[grant.Path] = grant
+	}
+	for _, base := range []string{
+		`AppData\Roaming\Code\User\globalStorage\state.vscdb`,
+		`AppData\Roaming\Code\User\profiles\profile1\globalStorage\state.vscdb`,
+	} {
+		for _, suffix := range []string{"-wal", "-shm"} {
+			grant, ok := byPath[base+suffix]
+			if !ok || grant.Tree || grant.Attributes {
+				t.Errorf("missing narrow state sidecar grant: %s%s", base, suffix)
+			}
+		}
+	}
+}

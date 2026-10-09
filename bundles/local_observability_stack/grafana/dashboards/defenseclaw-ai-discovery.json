@@ -1222,7 +1222,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_plugin_ai=\"true\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "expr": "sum((defenseclaw_inventory_ide_plugins{defenseclaw_ide_plugin_ai=\"true\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"} > 0))) or on() (sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"}) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1268,7 +1268,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_plugin_enabled=\"disabled\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "expr": "sum((defenseclaw_inventory_ide_plugins{defenseclaw_ide_plugin_enabled=\"disabled\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"} > 0))) or on() (sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"}) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1314,7 +1314,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (defenseclaw_ide_product) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"}))",
+          "expr": "sort_desc(sum by (defenseclaw_ide_product) ((defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"} > 0))))",
           "legendFormat": "{{defenseclaw_ide_product}}",
           "refId": "A",
           "instant": true
@@ -1357,7 +1357,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (defenseclaw_ide_product, defenseclaw_ide_plugin_ai, defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"}))",
+          "expr": "sort_desc(sum by (defenseclaw_ide_product, defenseclaw_ide_plugin_ai, defenseclaw_ide_plugin_enabled) ((defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"} > 0))))",
           "format": "table",
           "refId": "A",
           "instant": true
@@ -1422,7 +1422,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (defenseclaw_ide_plugin_ai) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"})",
+          "expr": "sum by (defenseclaw_ide_plugin_ai) ((defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"} > 0)))",
           "legendFormat": "ai={{defenseclaw_ide_plugin_ai}}",
           "refId": "A",
           "instant": true
@@ -1476,7 +1476,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (defenseclaw_ide_plugin_enabled) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"})",
+          "expr": "sum by (defenseclaw_ide_plugin_enabled) ((defenseclaw_inventory_ide_plugins{defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=\"\"} > 0)))",
           "legendFormat": "{{defenseclaw_ide_plugin_enabled}}",
           "refId": "A",
           "instant": true

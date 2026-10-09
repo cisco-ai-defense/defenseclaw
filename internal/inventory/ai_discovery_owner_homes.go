@@ -122,11 +122,31 @@ func (s *ContinuousDiscoveryService) withoutExcludedAccounts(procs []processInfo
 	if len(s.opts.excludedOwners) == 0 {
 		return procs
 	}
+	var accounts map[int]ProcessAccount
 	out := procs[:0]
 	for _, proc := range procs {
-		if !s.excludedAccountSID(proc.SessionOwnerID) {
-			out = append(out, proc)
+		if s.excludedAccountSID(proc.SessionOwnerID) || s.excludedAccountSID(proc.OwnerID) {
+			continue
 		}
+		if proc.SessionOwnerID == "" && proc.Connector != "" {
+			if accounts == nil {
+				accounts = brokeredProcessAccounts()
+			}
+			if account, ok := accounts[proc.PID]; ok &&
+				windowsProcessBasename(account.Name) == windowsProcessBasename(proc.Comm) {
+				excluded := false
+				for _, owner := range s.opts.excludedOwners {
+					if processAccountMatchesOwner(account.User, owner, false) {
+						excluded = true
+						break
+					}
+				}
+				if excluded {
+					continue
+				}
+			}
+		}
+		out = append(out, proc)
 	}
 	return out
 }

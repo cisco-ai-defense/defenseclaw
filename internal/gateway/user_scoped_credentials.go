@@ -38,8 +38,8 @@ import (
 // connector.UserScopedHookAPIToken. The gateway derives the same credentials
 // for every protected target in the guardian's root-owned authorization
 // ledger. A request that presents one is attributed to the identity it is
-// bound to, and a request whose identity headers name anyone else is
-// refused, so user A cannot post an event attributed to user B. The
+// bound to. On Linux and macOS the TCP peer's kernel UID must also match
+// that identity, and conflicting identity headers are refused. The
 // connector-wide credentials of other profiles are not accepted here:
 // before per-user credentials existed every user of a connector held the
 // same one.
@@ -61,7 +61,11 @@ import (
 // are revalidated on the request path.
 const userScopedCredentialRefreshInterval = time.Second
 
-const userScopedIdentityMismatchReason = "user_scoped_identity_mismatch"
+const (
+	userScopedIdentityMismatchReason        = "user_scoped_identity_mismatch"
+	userScopedCallerAccountMismatchReason   = "user_scoped_caller_account_mismatch"
+	userScopedCallerAccountUnverifiedReason = "user_scoped_caller_account_unverified"
+)
 
 type userScopedCredential struct {
 	kind     string
@@ -402,6 +406,30 @@ func (a *APIServer) lookupUserScopedCredential(kind, scope, presented string) (s
 	return a.userScopedCredentialStore().lookup(kind, scope, presented)
 }
 
+// userScopedCallerAccountRefusal binds a standalone user credential to the
+// account that opened the loopback TCP connection. Windows has no kernel UID
+// lookup for a TCP peer, so its SID-bound credential remains the authority.
+func (a *APIServer) userScopedCallerAccountRefusal(r *http.Request, identity string) string {
+	if runtime.GOOS == "windows" || !a.userScopedCredentialsRequired() {
+		return ""
+	}
+	want, err := strconv.Atoi(identity)
+	if err != nil || want < 0 {
+		return userScopedCallerAccountUnverifiedReason
+	}
+	got, err := acpLoopbackPeerUID(r)
+	if err != nil || got < 0 {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] per-user credential caller account unavailable: %v\n", err)
+		}
+		return userScopedCallerAccountUnverifiedReason
+	}
+	if got != want {
+		return userScopedCallerAccountMismatchReason
+	}
+	return ""
+}
+
 // serveUserScoped runs next for a request authenticated by a per-user
 // credential bound to identity, after binding that identity to the request.
 func (a *APIServer) serveUserScoped(
@@ -411,6 +439,11 @@ func (a *APIServer) serveUserScoped(
 	next http.Handler,
 	mark func(context.Context) context.Context,
 ) {
+	if reason := a.userScopedCallerAccountRefusal(r, identity); reason != "" {
+		a.emitHTTPAuthFailure(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
+		writeManagedHookRefusal(w, http.StatusForbidden, reason)
+		return
+	}
 	r, release := a.admitHookCaller(w, r, identity, route)
 	if release == nil {
 		return

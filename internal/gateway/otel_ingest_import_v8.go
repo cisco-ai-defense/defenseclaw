@@ -428,6 +428,18 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 		return fields, false, nil
 	}
 	meta, found := a.hookLifecycleSnapshot(authenticatedSource, conversationID, "")
+	if found && !a.managedAIDOnly() {
+		// Conversation IDs are supplied by the OTLP sender. A shared
+		// gateway token does not prove ownership of another user's hook
+		// session, so retain topology only for the same caller and agent
+		// identity. Secure Client keeps its existing correlation output.
+		caller := auditCallerIdentity(ctx)
+		identityID := agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), conversationID)
+		if (meta.UserID != "" && meta.UserID != caller.ID) ||
+			(meta.AgentIdentityID != "" && meta.AgentIdentityID != identityID) {
+			found = false
+		}
+	}
 	if !found {
 		// Secure Client keeps its agentless native rows (issue #1092).
 		if a.managedAIDOnly() {

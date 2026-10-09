@@ -216,6 +216,10 @@ sudo --preserve-env=OKTA_BIND_PASSWORD ./install-sssd-okta.sh --org example \
 unset OKTA_BIND_PASSWORD
 ```
 
+Choose an Okta group name absent from the host's `/etc/group`. The installer
+rejects a local name collision before changing the host because the sshd group
+rule would also permit password sign-in for members of that local group.
+
 For Ansible, Puppet or another configuration manager, the final line is
 `changed: 0` or `changed: 1` on a successful apply. A dry run exits `0` when
 unchanged and `4` when it would change the host; it still checks the bind and
