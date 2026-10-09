@@ -264,14 +264,21 @@ func inventoryDACLComponentGrants(home, ownHome string, enrolled inventoryDACLEn
 	reg := connector.NewDefaultRegistry()
 	var managed []string
 	var dirs []string
-	for _, name := range enrolled.connectors {
-		conn, ok := reg.Get(name)
-		if !ok {
-			continue
+	// Connector paths resolve through a process-wide home override; hold it
+	// at this process profile so no other user resolution interleaves.
+	_ = connector.WithUserHomeDir(ownHome, func() error {
+		for _, name := range enrolled.connectors {
+			if conn, ok := reg.Get(name); ok {
+				skills, plugins := connector.ComponentDirsForHome(conn, ownHome, home)
+				dirs = append(append(dirs, skills...), plugins...)
+			}
 		}
-		managed = append(managed, inventoryDACLManagedHookPaths(conn, home)...)
-		skills, plugins := connector.ComponentDirsForHome(conn, ownHome, home)
-		dirs = append(append(dirs, skills...), plugins...)
+		return nil
+	})
+	for _, name := range enrolled.connectors {
+		if conn, ok := reg.Get(name); ok {
+			managed = append(managed, inventoryDACLManagedHookPaths(conn, home)...)
+		}
 	}
 	target, _ := windows.StringToSid(enrolled.sid)
 	seen := map[string]struct{}{}
