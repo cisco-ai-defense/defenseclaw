@@ -100,3 +100,27 @@ func TestARecoveringEnsureClearsTheFailedApplyOneshot(t *testing.T) {
 		t.Fatalf("status still warns: %s", got)
 	}
 }
+
+// GAP-0956: with the apply and daily verify jobs booted out, status and
+// verify read ok (rc 0) although nothing would apply the next config push.
+// Both fail naming the label and the repair, and repair loads them again.
+func TestVerifyFailsWhileTheApplyOrVerifyJobIsNotLoaded(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	for _, label := range []string{labelApply, labelVerify} {
+		_ = h.services.Stop(context.Background(), Unit{Name: label})
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		requireError(t, r, codeVerify)
+		got := messagesOf(r.Errors, codeVerify)
+		for _, label := range []string{labelApply, labelVerify} {
+			if !strings.Contains(got, label+" is not loaded") || !strings.Contains(got, " repair`") {
+				t.Fatalf("%s does not name %s and the repair: %s", action, label, got)
+			}
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}

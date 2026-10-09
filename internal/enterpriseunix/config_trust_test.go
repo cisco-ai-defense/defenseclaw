@@ -3,6 +3,7 @@
 package enterpriseunix
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,5 +67,31 @@ func TestEnsureExplainsASymlinkedOrMissingConfig(t *testing.T) {
 	}
 	if strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
 		t.Fatal("the symlinked config was installed")
+	}
+}
+
+// GAP-0937: macOS keeps the mode bits when an ACL entry is added, so ensure
+// --config applied (and re-applied after the edit) an input file with a
+// write,append entry for a standard user. The refusal names the ACL and how
+// to remove it.
+func TestEnsureRefusesAConfigWithAWriteACLEntry(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	cfg := writeChangedConfig(t, h, "mode: observe", "mode: action")
+	restore := inputPathACL
+	t.Cleanup(func() { inputPathACL = restore })
+	inputPathACL = func(path string) error {
+		if path == cfg {
+			return fmt.Errorf("%s has write-capable macOS ACL entry", path)
+		}
+		return nil
+	}
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: cfg})
+	requireError(t, r, codeConfig)
+	if msg := r.Errors[len(r.Errors)-1].Message; !strings.Contains(msg, "ACL entry") || !strings.Contains(msg, aclRemoveCommand(cfg)) {
+		t.Fatalf("the refusal must name the ACL and how to remove it: %q", msg)
+	}
+	if strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
+		t.Fatal("the config with a write ACL entry was installed")
 	}
 }

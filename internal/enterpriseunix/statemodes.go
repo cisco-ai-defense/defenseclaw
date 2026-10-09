@@ -17,11 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -266,6 +268,43 @@ func (e *Env) settleStateEntry(entry *os.File, tree stateTree, rel string, depth
 		return e.settleStateEntries(entry, tree, rel, depth+1, changed)
 	}
 	return nil
+}
+
+// clearStaleHookSocket removes what keeps the macOS gateway from binding its
+// hook socket: it binds run/hook.sock itself and refuses to replace a socket
+// another account owns, or anything that is not a socket. After chown -R
+// root:wheel over the deployment the stale socket belonged to root, and every
+// repair, ensure and apply trigger run failed activation and rolled back
+// until someone removed it by hand (GAP-0746). Only root and the service
+// account can create entries in run/, so such an entry is a leftover; a
+// socket something still answers on is kept. On Linux systemd creates and
+// owns the hook socket.
+func (l *lifecycle) clearStaleHookSocket(account Account) {
+	env := l.env
+	if env.GOOS != "darwin" {
+		return
+	}
+	path := env.P(env.Layout.HookSocketPath)
+	info, err := os.Lstat(path)
+	if err != nil || info.IsDir() {
+		return
+	}
+	uid, _, err := env.OwnerOf(path)
+	if err != nil {
+		return
+	}
+	if info.Mode()&os.ModeSocket != 0 {
+		if uid == account.UID {
+			return // the gateway replaces a stale socket of its own
+		}
+		if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
+			_ = conn.Close()
+			return
+		}
+	}
+	if err := os.Remove(path); err == nil {
+		l.noteChange("removed the stale %s (owner uid %d), which kept the gateway from binding its hook socket", env.Layout.HookSocketPath, uid)
+	}
 }
 
 // stateModeProblems names the entries of the state folders and the state
