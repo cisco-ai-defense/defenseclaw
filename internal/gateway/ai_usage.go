@@ -184,8 +184,9 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	resp["scanned_at"] = inv.ScannedAt
 	plugins := []inventory.IDEPlugin{}
 	withPlugin := map[string]bool{}
+	account := useridentity.NewAccountFilter(user, adminViewAccountIDs(user)...)
 	for _, p := range inv.Plugins {
-		if useridentity.AccountFilterMatches(user, p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
+		if account.Matches(p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
 			plugins = append(plugins, p)
 			withPlugin[p.InstallID] = true
 		}
@@ -194,7 +195,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	// (GAP-0104); the user and ide filters keep plugin-less installations.
 	installs := []inventory.IDEInstallation{}
 	for _, inst := range inv.Installations {
-		if useridentity.AccountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) && (!aiOnly || withPlugin[inst.InstallID]) {
+		if account.Matches(inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) && (!aiOnly || withPlugin[inst.InstallID]) {
 			installs = append(installs, inst)
 		}
 	}

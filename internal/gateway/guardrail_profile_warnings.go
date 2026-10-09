@@ -216,7 +216,8 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 	if set != nil && runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 		return perUserWindowsGroupWarnings(set.assignments)
 	}
-	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent, directoryCacheHealth, wait)
+	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent, profileUserEntryUnmatched(),
+		directoryCacheHealth, wait)
 }
 
 // Per-user Windows has no trusted group facts; these assignments cannot match.
@@ -234,7 +235,8 @@ func perUserWindowsGroupWarnings(assignments []config.ProfileAssignment) []strin
 // the directory cache health taken from the caller. A pass can outlive the
 // caller, so it uses these and never reads the package hooks tests replace.
 func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Context, string) (bool, error), qualify func(context.Context, string) string,
-	silent func(context.Context) bool, health func() identityCacheHealth, wait time.Duration) []string {
+	silent func(context.Context) bool, unmatchedUser func(context.Context, string) string, health func() identityCacheHealth,
+	wait time.Duration) []string {
 	if set == nil {
 		return nil
 	}
@@ -251,6 +253,7 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
 			warnings := unknownAssignmentGroups(ctx, set.assignments, exists, qualify, silent)
+			warnings = append(warnings, unmatchedUserEntries(ctx, set.assignments, unmatchedUser)...)
 			cancel()
 			warnings = append(warnings, spoolUPNAssignmentWarnings(set.assignments, time.Now())...)
 			failing := health().Failing > 0
@@ -297,7 +300,8 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 	for _, warning := range set.unknownConnectorWarnings() {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 	}
-	exists, qualify, silent, health := profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent, directoryCacheHealth
+	exists, qualify, silent, unmatchedUser, health := profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent,
+		profileUserEntryUnmatched(), directoryCacheHealth
 	go func() {
 		if runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 			for _, warning := range perUserWindowsGroupWarnings(set.assignments) {
@@ -305,7 +309,7 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 			}
 			return
 		}
-		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, silent, health, profileGroupCheckBudget+time.Second) {
+		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, silent, unmatchedUser, health, profileGroupCheckBudget+time.Second) {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 		}
 	}()
@@ -466,6 +470,36 @@ func directoryDownHint(platform string) string {
 		return "check the directory binding of this Mac (dsconfigad -show) and the domain controller; the groups are checked again once it answers"
 	}
 	return "check SSSD (sssctl domain-status <domain>) and its server; the groups are checked again once it answers"
+}
+
+// unmatchedUserEntries warns for each DOMAIN\user users entry that names an
+// account the host resolves but selects nobody, because the host does not
+// confirm the domain written for that account (unmatched says why, "" when
+// the entry selects it or names no account): its users get the next
+// assignment or the default profile, and nothing else showed it (GAP-1095).
+func unmatchedUserEntries(ctx context.Context, assignments []config.ProfileAssignment, unmatched func(context.Context, string) string) []string {
+	if unmatched == nil {
+		return nil
+	}
+	var warnings []string
+	checked := 0
+	for i, assignment := range assignments {
+		for _, entry := range assignment.Match.Users {
+			entry = strings.TrimSpace(entry)
+			if !strings.Contains(entry, `\`) || strings.HasPrefix(entry, `.\`) {
+				continue
+			}
+			if checked >= profileGroupCheckMax || ctx.Err() != nil {
+				return warnings
+			}
+			checked++
+			if why := unmatched(ctx, norm.NFC.String(entry)); why != "" {
+				warnings = append(warnings, fmt.Sprintf("assignment %d: users entry %q %s, so it selects nobody; write the "+
+					"domain this host confirms, or the uid", i+1, entry, why))
+			}
+		}
+	}
+	return warnings
 }
 
 // directoryAnswers reports whether the host knows the Domain Users group of

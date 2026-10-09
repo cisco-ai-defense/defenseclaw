@@ -168,25 +168,26 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			}
 			runtimeCommand = cmd
 			if view.use == "agent-identities" && query.Get("user") != "" {
-				var resolved struct {
-					LookupError string `json:"lookup_error"`
-					Subject     struct {
-						UserID string `json:"user_id"`
-					} `json:"subject"`
+				// The rows carry the bare account name and the gateway matches it
+				// as ide-plugins does, so the listing decides; only an empty one
+				// asks whether the account exists, and a name that resolves to
+				// no account is refused with its reason (GAP-1081).
+				var answer json.RawMessage
+				if _, err := enterpriseIdentityViewGet(path, &answer); err != nil {
+					return enterpriseIdentityViewError(err)
 				}
-				_, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(query.Get("user")), &resolved)
-				if err != nil {
-					return withExitCode(err, enterprisestatus.UnixExitFailure)
+				var listed struct {
+					Total int `json:"total"`
 				}
-				if resolved.Subject.UserID == "" && resolved.LookupError != "" {
-					return invalidLifecycleArguments(fmt.Errorf("%s", resolved.LookupError))
+				if json.Unmarshal(answer, &listed) == nil && listed.Total == 0 {
+					if err := refuseUnknownIdentityViewAccount(query.Get("user")); err != nil {
+						return err
+					}
 				}
+				return printEnterpriseIdentityView(cmd.OutOrStdout(), answer)
 			}
 			if err := writeEnterpriseIdentityView(cmd.OutOrStdout(), path); err != nil {
-				if commandExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
-					return err
-				}
-				return withExitCode(err, enterprisestatus.UnixExitFailure)
+				return enterpriseIdentityViewError(err)
 			}
 			return nil
 		},
@@ -209,9 +210,44 @@ func writeEnterpriseIdentityView(w io.Writer, path string) error {
 	if _, err := enterpriseIdentityViewGet(path, &answer); err != nil {
 		return err
 	}
+	return printEnterpriseIdentityView(w, answer)
+}
+
+func printEnterpriseIdentityView(w io.Writer, answer json.RawMessage) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(answer)
+}
+
+// enterpriseIdentityViewError keeps an invalid-arguments refusal's exit code
+// and gives any other failure the platform's failure code.
+func enterpriseIdentityViewError(err error) error {
+	if commandExitCode(err) == enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+		return err
+	}
+	return withExitCode(err, enterprisestatus.UnixExitFailure)
+}
+
+// refuseUnknownIdentityViewAccount refuses a --user that names no account,
+// with the reason profile-explain gives and the spellings the view takes.
+func refuseUnknownIdentityViewAccount(user string) error {
+	var resolved struct {
+		LookupError string `json:"lookup_error"`
+		Subject     struct {
+			UserID string `json:"user_id"`
+		} `json:"subject"`
+	}
+	if _, err := enterpriseIdentityViewGet("/api/v1/guardrail/profiles/resolve?user="+url.QueryEscape(user), &resolved); err != nil {
+		return enterpriseIdentityViewError(err)
+	}
+	if resolved.Subject.UserID != "" || resolved.LookupError == "" {
+		return nil
+	}
+	spellings := "the account name, user@domain as id prints it, DOMAIN\\name or the uid"
+	if runtime.GOOS == "windows" {
+		spellings = "the account name, DOMAIN\\name, .\\name or the SID"
+	}
+	return invalidLifecycleArguments(fmt.Errorf("%s; --user takes %s", resolved.LookupError, spellings))
 }
 
 // enterprisePlatformGOOS is the GOOS of an `enterprise <platform>` group.

@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	osuser "os/user"
 	"runtime"
 	"strconv"
@@ -115,4 +116,46 @@ var bareGroupsDirectorySilent = func(ctx context.Context) bool {
 // buffer (an account in more groups, GAP-0201).
 var accountGroupIDs = func(account *osuser.User) ([]string, error) {
 	return unixidentity.AccountGroupIDs(context.Background(), account)
+}
+
+// profileUserEntryUnmatched returns the check that says why a DOMAIN\user
+// users entry selects nobody (GAP-1095): it names an account the host
+// resolves the way profile-explain does, but the domain written is neither
+// the account's verified NetBIOS account domain nor its DNS domain, which an
+// entry must name; or getent passwd finds no account by it, in a domain the
+// host answers for (its Domain Users group resolves) or in none. The check
+// answers "" when the entry selects its account or a lookup fails. It takes
+// the lookups when it is made, since the background pass can outlive its
+// caller.
+func profileUserEntryUnmatched() func(context.Context, string) string {
+	lookupAccount, lookupFacts, groupExists := profileExplainAccount, profileExplainDirectoryFacts, profileGroupExists
+	return func(ctx context.Context, entry string) string {
+		domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
+		if !qualified || domain == "" || domain == "." || account == "" || ctx.Err() != nil {
+			return ""
+		}
+		id, _, err := lookupAccount(entry)
+		if unixidentity.IsNotFound(err) {
+			if known, probeErr := groupExists(ctx, domain+`\domain users`); probeErr != nil {
+				return ""
+			} else if known {
+				return "names no account this host knows (getent passwd finds none)"
+			}
+			return fmt.Sprintf("names %s, a domain this host does not answer for (another prefix than its NetBIOS or DNS "+
+				"name, or the directory is unavailable)", domain)
+		}
+		if err != nil || id == "" {
+			return ""
+		}
+		facts, err := lookupFacts(id)
+		if err != nil || facts.ResolvedAt.IsZero() ||
+			useridentity.EqualFold(domain, facts.AccountDomain) || useridentity.EqualFold(domain, facts.Domain) {
+			return ""
+		}
+		confirmed := firstNonEmpty(facts.AccountDomain, facts.Domain)
+		if confirmed == "" {
+			return fmt.Sprintf("names uid %s, but this host confirms no domain for that account", id)
+		}
+		return fmt.Sprintf("names uid %s, but this host confirms that account's domain as %s, not %s", id, confirmed, domain)
+	}
 }

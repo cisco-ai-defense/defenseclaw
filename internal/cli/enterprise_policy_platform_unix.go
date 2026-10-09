@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // standaloneEnterprisePolicyLayout returns the standalone layout and, on
@@ -120,13 +121,25 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 	account, err := unixidentity.LookupAccountSpelling(resolver, name, unixidentity.DirectoryFactsFunc(ctx))
 	if err != nil {
 		// A uid names its account as profile-explain takes it: getent answers
-		// a uid with the account name, which is not the spelling typed.
+		// a uid with the account name, which is not the spelling typed. A name
+		// that resolves to nothing gets profile-explain's plain sentence and
+		// its did-you-mean spelling (GAP-1089).
 		uid, convErr := strconv.Atoi(name)
 		if convErr != nil || uid < 0 {
-			return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+			return enterprisehooks.TargetCredentials{}, unixidentity.AccountLookupError(name, unixidentity.QualifiedUserName(ctx, resolver, name), err)
 		}
 		if account, err = resolver.LookupUID(uid); err != nil {
-			return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+			return enterprisehooks.TargetCredentials{}, unixidentity.AccountLookupError(name, "", err)
+		}
+	} else if !strings.ContainsAny(name, `@\`) && strings.Trim(name, "0123456789") != "" {
+		// A bare name a local and a directory account share names both;
+		// policy show refuses it as profile-explain does (GAP-1087).
+		if twins := unixidentity.SameNameAccounts(ctx, resolver, account); len(twins) > 0 {
+			refs := []useridentity.AccountRef{{ID: strconv.Itoa(account.UID), Name: account.Name}}
+			for _, twin := range twins {
+				refs = append(refs, useridentity.AccountRef{ID: strconv.Itoa(twin.UID), Name: twin.Name})
+			}
+			return enterprisehooks.TargetCredentials{}, &useridentity.AmbiguousAccountError{Name: name, Accounts: refs}
 		}
 	}
 	return enterprisehooks.TargetCredentials{UserHome: account.Home, UID: account.UID, GID: account.GID, Username: account.Name}, nil

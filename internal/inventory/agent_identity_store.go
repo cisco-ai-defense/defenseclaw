@@ -97,8 +97,12 @@ func (r *AgentIdentityRecord) ForgetSession(id string) {
 type AgentIdentityFilter struct {
 	// User matches the user id exactly or the user name case-insensitively;
 	// a bare name selects every domain's account of that name, a qualified
-	// one only rows of exactly that domain (useridentity.AccountFilterMatches).
-	User      string
+	// one only rows of exactly that domain or of UserIDs
+	// (useridentity.AccountFilter).
+	User string
+	// UserIDs are the ids of the account the OS resolves a qualified User
+	// to, so a row recorded with the bare name matches it by id.
+	UserIDs   []string
 	Connector string
 	// AgentIDs, when set, selects only these agents.
 	AgentIDs []string
@@ -310,11 +314,12 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
 		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities` + where +
 		` ORDER BY last_seen DESC, agent_id`
-	// The user filter runs in Go (useridentity.AccountFilterMatches), so a
+	// The user filter runs in Go (useridentity.AccountFilter), so a
 	// bare name selects a row stored as user@realm or DOMAIN\user, and the
 	// loop below counts, skips and limits. Without
 	// it SQLite does.
 	user := strings.TrimSpace(filter.User)
+	account := useridentity.NewAccountFilter(user, filter.UserIDs...)
 	total := -1
 	if user == "" && (filter.Limit > 0 || filter.Offset > 0) {
 		counted, err := s.queryDB(ctx, "agent_identities.count", `SELECT COUNT(*) FROM agent_identities`+where, args...)
@@ -356,7 +361,7 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen); err != nil {
 			return nil, 0, err
 		}
-		if user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
+		if user != "" && !account.Matches(rec.UserID, rec.UserName) {
 			continue
 		}
 		matched++

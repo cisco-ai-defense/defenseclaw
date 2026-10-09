@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -634,6 +635,10 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return profileSubject{}, fmt.Errorf("no user named")
 	}
 	id, userName, err := profileExplainAccount(name)
+	var ambiguous *useridentity.AmbiguousAccountError
+	if errors.As(err, &ambiguous) {
+		return profileSubject{UserName: name}, err
+	}
 	if err != nil {
 		return profileExplainUnresolved(name, err)
 	}
@@ -1376,6 +1381,17 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	source := ""
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
+		var ambiguous *useridentity.AmbiguousAccountError
+		if errors.As(err, &ambiguous) {
+			// A bare name two accounts share is explained as neither: the
+			// answer names both, and the administrator names one (GAP-1087).
+			out["lookup_error"] = err.Error()
+			out["accounts"] = ambiguous.Accounts
+			out["profile"], out["match"] = "", ""
+			out["effective"] = profileEffectiveView(base, connectorName)
+			a.writeJSON(w, http.StatusOK, out)
+			return
+		}
 		if err != nil {
 			if found.UserID == "" {
 				found = profileSubject{UserName: user}

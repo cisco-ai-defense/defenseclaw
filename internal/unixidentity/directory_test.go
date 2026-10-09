@@ -21,6 +21,28 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// GAP-1087: a bare name shared by a local account and a directory account
+// of a joined realm names both, so the admin views refuse it with both.
+func TestSameNameAccountsFindsTheDirectoryTwin(t *testing.T) {
+	previous := hostRealms
+	hostRealms = func(context.Context) ([]Realm, error) { return []Realm{{Domain: "dclab.test"}}, nil }
+	t.Cleanup(func() { hostRealms = previous })
+	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
+		"passwd dcad-o4ud":            {stdout: []byte("dcad-o4ud:*:1008:1008::/home/dcad-o4ud:/bin/bash\n")},
+		"passwd dcad-o4ud@dclab.test": {stdout: []byte("dcad-o4ud@dclab.test:*:94403993:94400513::/home/dcad-o4ud@dclab.test:/bin/bash\n")},
+	}})
+	local := Account{Name: "dcad-o4ud", UID: 1008}
+	twins := SameNameAccounts(context.Background(), r, local)
+	if len(twins) != 1 || twins[0].UID != 94403993 {
+		t.Fatalf("twins of the local account = %+v", twins)
+	}
+	err := &useridentity.AmbiguousAccountError{Name: "dcad-o4ud", Accounts: []useridentity.AccountRef{
+		{ID: "1008", Name: local.Name}, {ID: "94403993", Name: twins[0].Name}}}
+	if !strings.Contains(err.Error(), "dcad-o4ud (uid 1008), dcad-o4ud@dclab.test (uid 94403993)") {
+		t.Fatalf("ambiguity = %v", err)
+	}
+}
+
 func TestQualifiedUserNameUsesSpellingNSSKnows(t *testing.T) {
 	previous := hostRealms
 	hostRealms = func(context.Context) ([]Realm, error) {
