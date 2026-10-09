@@ -299,7 +299,11 @@ enabled:
   MCP records (`ai_component.observed`, which name each entry) carry the
   user too, but stay in the local inventory (a Secure Client deployment
   also sends them to Cisco AI Defense). Read entry names with the
-  `discovery` view below.
+  `discovery` view below. With `ai_discovery.include_user_email` on, each
+  account's Claude Code and Codex address goes to your destinations on one
+  `ai_component.observed` record per account and connector each discovery
+  cycle, without entry names
+  ([Optional connector email](/docs/observability/end-user-identity#optional-connector-email)).
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
 - A user's results turn `gone` when the user leaves the manifest, or after the longer of three

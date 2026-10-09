@@ -13,7 +13,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -559,6 +561,70 @@ func TestContinuousAIDiscoveryV8ObservationCarriesTheOwnerEmail(t *testing.T) {
 		if observed != 2 {
 			t.Fatalf("enabled=%t: %d ai_component.observed records, want 2", enabled, observed)
 		}
+	}
+}
+
+// The standalone profile exports only lifecycle deltas, so the owner's
+// address rides one ai_component.observed record per account and connector
+// each cycle: the owner's own, never one without a user, and the strict
+// profile drops it (GAP-0961, GAP-1099).
+func TestStandaloneAIDiscoveryV8DeliversTheOwnerEmail(t *testing.T) {
+	withManagedEnterprise(t, false)
+	previous := standaloneEnterpriseActive.Load()
+	setStandaloneEnterpriseActive(true)
+	t.Cleanup(func() { setStandaloneEnterpriseActive(previous) })
+	withUserEmailCollection(t, true)
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	signal := func(id, user, category, state string) inventory.AISignal {
+		return inventory.AISignal{
+			SignalID: id, SignatureID: "codex", Category: category, Vendor: "OpenAI", Product: "Codex",
+			Confidence: .9, State: state, Detector: "config", SupportedConnector: "codex",
+			UserID: user, UserName: user, UserEmail: "rs4a@example.test",
+		}
+	}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScanID: "scan-email", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok", TotalSignals: 3, ActiveSignals: 3},
+		Signals: []inventory.AISignal{
+			signal("owned-mcp", "1001", inventory.SignalMCPServer, inventory.AIStateSeen),
+			signal("owned", "1001", inventory.SignalSupportedConnector, inventory.AIStateNew),
+			signal("unowned", "", inventory.SignalSupportedConnector, inventory.AIStateSeen),
+		},
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	var observed []observability.Record
+	for _, record := range capture.snapshot() {
+		if record.EventName() == "ai_component.observed" {
+			observed = append(observed, record)
+		}
+	}
+	if len(observed) != 1 {
+		t.Fatalf("%d ai_component.observed records, want one for the owner", len(observed))
+	}
+	body := canonicalBody(t, observed[0])
+	email := observability.TelemetryAttributeDefenseClawUserEmail
+	if body[observability.TelemetryAttributeDefenseClawAIComponentID] != "owned" || body[email] != "rs4a@example.test" {
+		t.Fatalf("observed record = %v", body)
+	}
+	key, err := observabilityredaction.LoadOrCreateCorrelationKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	engine, err := newObservabilityV8RedactionEngine(cfg, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, _ := observabilityredaction.BuiltInProfile(observabilityredaction.ProfileStrict)
+	projection, _, err := engine.Project(observed[0], strict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object, _ := projection.Payload().Object(); object[email] != nil {
+		t.Fatalf("strict kept %s", email)
 	}
 }
 

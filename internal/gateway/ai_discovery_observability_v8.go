@@ -183,17 +183,24 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	logErr := adapter.emitSummaryLog(ctx, report.Summary)
-	for _, signal := range report.Signals {
+	ownerEmails := standaloneOwnerEmailObservations(report.Signals)
+	for i, signal := range report.Signals {
 		// Managed enterprise receives a complete endpoint snapshot on every
 		// cadence, including steady-state `seen` observations. Other modes keep
 		// the historical lifecycle-delta contract.
 		isDelta := signal.State == inventory.AIStateNew ||
 			signal.State == inventory.AIStateChanged || signal.State == inventory.AIStateGone
-		if !isDelta && !(ManagedEnterpriseActive() && signal.State == inventory.AIStateSeen) {
-			continue
+		if isDelta || (ManagedEnterpriseActive() && signal.State == inventory.AIStateSeen) {
+			if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil && logErr == nil {
+				logErr = err
+			}
 		}
-		if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil && logErr == nil {
-			logErr = err
+		if ownerEmails[i] {
+			observed := signal
+			observed.State = inventory.AIStateSeen
+			if err := adapter.emitSignalLog(ctx, report.Summary, observed); err != nil && logErr == nil {
+				logErr = err
+			}
 		}
 	}
 	for _, component := range components {
@@ -231,6 +238,38 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		return logErr
 	}
 	return metricErr
+}
+
+// standaloneOwnerEmailObservations picks, on the standalone enterprise
+// profile, the signals whose ai_component.observed record carries their
+// owner's connector address this cycle: one per account and connector
+// (Claude Code, Codex), its supported_connector signal when it has one. The
+// standalone profile exports only lifecycle deltas, which carry no address,
+// so with ai_discovery.include_user_email on no destination ever received
+// it (GAP-0961, GAP-1099). Only a signal with an owner and an address read
+// from that owner's own profile qualifies; the strict profile drops the
+// address. The Secure Client profile already sends every observation.
+func standaloneOwnerEmailObservations(signals []inventory.AISignal) map[int]bool {
+	if ManagedEnterpriseActive() || !standaloneEnterpriseActive.Load() || !UserEmailCollectionEnabled() {
+		return nil
+	}
+	chosen := map[string]int{}
+	for i, signal := range signals {
+		if signal.State == inventory.AIStateGone || discoveryUserEmail(signal) == "" {
+			continue
+		}
+		key := strings.ToUpper(signal.UserID) + "\x00" + strings.ToLower(strings.TrimSpace(signal.SupportedConnector))
+		if prior, ok := chosen[key]; ok && (signals[prior].Category == inventory.SignalSupportedConnector ||
+			signal.Category != inventory.SignalSupportedConnector) {
+			continue
+		}
+		chosen[key] = i
+	}
+	out := make(map[int]bool, len(chosen))
+	for _, i := range chosen {
+		out[i] = true
+	}
+	return out
 }
 
 func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
