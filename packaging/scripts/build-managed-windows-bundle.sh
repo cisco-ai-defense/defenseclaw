@@ -35,7 +35,7 @@
 #      appends the signed payload as a trailer at AVC-time) and
 #      DefenseClawAssembler.exe (the native windows-amd64 tool AVC's CI
 #      runs). Both are deterministic under -trimpath + SOURCE_DATE_EPOCH.
-#   7. Assemble the AVC-facing kit: payload/ (6 unsigned inner files),
+#   7. Assemble the AVC-facing kit: payload/ (8 unsigned inner files),
 #      DefenseClawSetup-Enterprise-x64.exe.unsigned + DefenseClawAssembler.exe
 #      at the kit root, packaging/scripts/lib/finalize.{sh,ps1} (post-sign
 #      helper — unchanged), a payload-metadata.json + README-AVC.md.
@@ -71,7 +71,7 @@
 # AVC-facing kit (spec 002 §2.3.A1): every invocation also emits
 #     ${DIST_DIR}/windows-enterprise-buildkit-${VERSION}/
 # whose contents match docs/WINDOWS-AVC-PACKAGING-HANDOFF.md. AVC signs
-# the six inner files under payload/, runs the shipped
+# the eight inner files under payload/, runs the shipped
 # assemble.{sh|ps1}, then signs the resulting outer Setup EXE.
 #
 # Environment overrides (all optional):

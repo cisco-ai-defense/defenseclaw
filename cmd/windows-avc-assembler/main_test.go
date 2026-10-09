@@ -17,7 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
-// stagePayloadDir writes the six required payload files with unique
+// stagePayloadDir writes the eight required payload files with unique
 // per-file contents so hash mismatches surface as different digests
 // rather than accidental collisions.
 func stagePayloadDir(t *testing.T) string {

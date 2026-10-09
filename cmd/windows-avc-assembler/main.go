@@ -52,9 +52,11 @@ const (
 // requiredPayloadFiles verbatim.
 var requiredPayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
+	"defenseclaw-acp.exe",
 	"defenseclaw-cmid-broker.exe",
 	"defenseclaw-gateway.exe",
 	"defenseclaw-hook.exe",
+	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
 }
@@ -350,7 +352,7 @@ func assemble(opts options, stdout io.Writer) error {
 }
 
 // verifyPayloadInventory asserts that -PayloadDir contains EXACTLY the
-// six pinned filenames, no more, no less. Rejects subdirectories and
+// eight pinned filenames, no more, no less. Rejects subdirectories and
 // symlinks so a mis-staged kit does not slip past.
 func verifyPayloadInventory(dir string) error {
 	seen := make(map[string]struct{})

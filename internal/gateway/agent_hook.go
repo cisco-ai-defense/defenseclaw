@@ -782,16 +782,17 @@ func (a *APIServer) finalizeAgentHook(
 	//     otherwise every allow and block disappears from Grafana and Galileo
 	//     while the local audit is down. Only an exact replay stays unexported.
 	// (b) #850: an enforced block MUST write the audit row + enforcement
-	//     companion even when the correlation ledger flagged this as a replay,
-	//     so the AVC tile Active Alerts count no longer pins at 0 for real
-	//     blocks whose UserPromptSubmit bytes hashed to a prior fingerprint.
-	if env.Enforced || !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	// Keep the observability_v8 and audit row gated by the same replay
+	// classification so a suppressed replay stays silent across both and
+	// notificationReady() does not fire on half of its invariants. The AVC
+	// enforcement companion that #850 wanted to persist here is not
+	// forward-ported; the primary hook_decision log + audit row are the
+	// only durable artefacts of this decision in Part 1.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("observability_v8", func() {
 			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-			// The AVC enforcement companion from #850 is not forward-ported;
-			// treat an enforced hook as notification-ready once the primary
-			// hook_decision log + audit row are persisted. notificationReady()
-			// still gates on AuditPersisted below.
+			// With no companion to persist, an enforced hook is
+			// notification-ready as soon as the audit row below lands.
 			result.EnforcementPersisted = env.Enforced
 			if !panicked {
 				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
@@ -1133,11 +1134,10 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	}
 	a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-	// Same durable-audit invariant as the primary hook path: an enforced
-	// block MUST write the audit row + enforcement companion even when the
-	// correlation ledger flagged this as a replay/unavailable. See the
-	// comment on the parallel branch in finalizeAgentHook.
-	if env.Enforced || !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	// Keep observability and audit row gated by the same replay classification
+	// so a suppressed replay stays silent on both; the enforcement companion
+	// that #850 wanted here is not forward-ported in Part 1.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	}
 	// As in finalizeAgentHook: only an exact replay goes without its row.
