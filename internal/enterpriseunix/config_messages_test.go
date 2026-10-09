@@ -225,6 +225,23 @@ func TestManagedConfigRefusesJSONLFileOwnedByAnotherAccount(t *testing.T) {
 	}
 }
 
+// GAP-1146: a missing JSONL parent still needs a writable existing ancestor.
+func TestManagedConfigRefusesJSONLUnderUnwritableAncestor(t *testing.T) {
+	h := newTestHost(t, "linux")
+	ancestor := h.env.P("/var/log/defenseclaw/exports")
+	if err := os.MkdirAll(ancestor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(ancestor, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	path := "/var/log/defenseclaw/exports/new/events.jsonl"
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
+	if got := installMessage(t, h, raw); !strings.Contains(got, "exports") || !strings.Contains(got, "cannot create") {
+		t.Fatalf("missing JSONL parent accepted or unclear refusal: %s", got)
+	}
+}
+
 // GAP-0890: a jsonl destination the gateway cannot write is refused before
 // anything changes, naming the destination, the path and the rule.
 func TestManagedConfigRefusesUnsafeJSONLDestinations(t *testing.T) {

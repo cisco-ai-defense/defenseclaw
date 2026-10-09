@@ -335,6 +335,10 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 			return fmt.Errorf("observability destination %q writes %s, which %s; a jsonl destination writes a file only the gateway account can read and write (mode 0600, or a missing file it creates) in a folder only root and the gateway account can write",
 				destination.Name, path, problem)
 		}
+		if problem := e.jsonlMissingParentProblem(path); problem != "" {
+			return fmt.Errorf("observability destination %q writes %s, which %s; choose a directory the %s gateway service account can create and write",
+				destination.Name, path, problem, e.Layout.ServiceUser)
+		}
 		// A safe parent does not make an existing file writable. The gateway
 		// opens it as the service account with O_APPEND and never changes its
 		// owner or mode. A fresh install may not have that account yet.
@@ -354,6 +358,51 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 		}
 	}
 	return nil
+}
+
+// jsonlMissingParentProblem checks the first existing ancestor of a missing
+// output directory. The gateway creates missing subdirectories as its service
+// account; lifecycle-created service directories are available after apply.
+func (e *Env) jsonlMissingParentProblem(path string) string {
+	parent := filepath.Dir(path)
+	if _, err := os.Lstat(e.P(parent)); err == nil {
+		return ""
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Sprintf("cannot inspect its parent %s: %v", parent, err)
+	}
+	for dir := parent; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		// These roots are created for the gateway during a fresh install.
+		if dir == e.Layout.DataDir ||
+			(e.GOOS == "linux" && dir == e.Layout.LogDir) ||
+			(e.GOOS == "darwin" && dir == filepath.Join(e.Layout.LogDir, "gateway")) {
+			if _, err := os.Lstat(e.P(dir)); errors.Is(err, os.ErrNotExist) {
+				return ""
+			}
+		}
+		info, err := os.Lstat(e.P(dir))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Sprintf("cannot inspect the existing ancestor %s: %v", dir, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Sprintf("cannot create its missing directory below %s, which is not a regular directory", dir)
+		}
+		account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+		if err != nil || !ok {
+			return fmt.Sprintf("cannot confirm the %s gateway service account can create its missing directory below %s", e.Layout.ServiceUser, dir)
+		}
+		uid, gid, err := e.OwnerOf(e.P(dir))
+		if err != nil {
+			return fmt.Sprintf("cannot inspect the owner of %s: %v", dir, err)
+		}
+		if !accountMayAccess(uid, gid, info.Mode(), account, 0o3) {
+			return fmt.Sprintf("cannot create its missing directory below %s as the %s gateway service account", dir, e.Layout.ServiceUser)
+		}
+		return ""
+	}
+	return ""
 }
 
 func pathWithin(path, dir string) bool {
