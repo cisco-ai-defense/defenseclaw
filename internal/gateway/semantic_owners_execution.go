@@ -43,7 +43,7 @@ func curlDownloadExecPrerequisite(facts actionfacts.Facts) bool {
 	}
 	for _, command := range facts.Commands {
 		if command.PipelineID == 0 || !oneOfFold(command.Program, "curl", "curl.exe") ||
-			!hasExternalNetworkAction(facts, command.ID, actionfacts.NetworkDownload) ||
+			!hasExternalNetworkAction(facts, command.ID, actionfacts.NetworkDownload, actionfacts.NetworkUpload) ||
 			!actionfacts.ProvesPOSIXPipelineInterpreterSource(command) {
 			continue
 		}
