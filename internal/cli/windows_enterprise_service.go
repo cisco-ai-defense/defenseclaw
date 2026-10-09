@@ -865,9 +865,6 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	if opts.purge {
 		args = append(args, "-Purge")
 	}
-	if opts.force {
-		args = append(args, "-Force")
-	}
 	if opts.allowUnsigned {
 		args = append(args, "-AllowUnsigned")
 	}
