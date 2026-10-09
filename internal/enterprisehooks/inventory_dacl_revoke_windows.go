@@ -141,25 +141,27 @@ func daclHasACEFor(dacl *windows.ACL, sids []*windows.SID) bool {
 
 // inventoryDACLComponentDirs lists, relative to home, the skill and plugin
 // folders of every connector, the folders inventoryDACLComponentGrants can
-// grant.
+// grant. They are resolved below home itself (connector.WithUserHomeDir), so
+// they do not depend on the token of the process that revokes: under Setup
+// /uninstall the Known Folder Hermes resolves by left its bundled plugins
+// folder out, and the gateway kept its read ACE there (GAP-0913).
 func inventoryDACLComponentDirs(home string) []string {
-	ownHome, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
 	reg := connector.NewDefaultRegistry()
 	var out []string
-	for _, name := range reg.Names() {
-		conn, ok := reg.Get(name)
-		if !ok {
-			continue
-		}
-		skills, plugins := connector.ComponentDirsForHome(conn, ownHome, home)
-		for _, dir := range append(skills, plugins...) {
-			if rel, err := filepath.Rel(home, dir); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
-				out = append(out, rel)
+	_ = connector.WithUserHomeDir(home, func() error {
+		for _, name := range reg.Names() {
+			conn, ok := reg.Get(name)
+			if !ok {
+				continue
+			}
+			skills, plugins := connector.ComponentDirsForHome(conn, home, home)
+			for _, dir := range append(skills, plugins...) {
+				if rel, err := filepath.Rel(home, dir); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+					out = append(out, rel)
+				}
 			}
 		}
-	}
+		return nil
+	})
 	return out
 }
