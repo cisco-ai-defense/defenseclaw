@@ -83,6 +83,8 @@ The rule pack directory (`policies/guardrail/<name>/`) holds the regex YAMLs, ju
 
 The counts are what `defenseclaw guardrail validate-pack` reports for the packs shipped with this release. Each pack also sets its default [block and alert levels](/docs/policies/thresholds#rule-pack-default-posture) through its posture.
 
+The `default` and `permissive` packs ship the `curl ... | bash` rule `CMD-PIPE-CURL` off; `strict` enables it. See [Download piped into a shell](/docs/policies/deterministic-detection#download-piped-into-a-shell).
+
 All three packs share the same [severity rubric](/docs/policies#shared-severity-rubric) and the same `signal_strength` output schema — only the per-category thresholds and suppression scope differ between packs. Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.
 
 ## What `setup guardrail` actually writes
