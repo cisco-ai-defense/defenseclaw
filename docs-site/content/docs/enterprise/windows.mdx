@@ -201,15 +201,22 @@ $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
 icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
 icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
-Copy-Item -Recurse .\my-pack "$Packs\my-pack"
+if (Test-Path -LiteralPath "$Packs\my-pack") {
+    icacls "$Packs\my-pack" /reset /T /C | Out-Null
+    Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction Stop
+}
+Copy-Item -LiteralPath .\my-pack -Destination $Packs -Recurse -ErrorAction Stop
 icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
 ```
 
 The snippet is safe to run again, for example after you fix a permission:
-it replaces the pack folder instead of copying into it. Copying a folder
-onto one that exists nests a copy (`my-pack\my-pack`), which Setup refuses,
-naming the nested folder.
+it replaces the pack folder instead of copying into it, and every file of
+the new copy inherits the permissions of `$Packs`. Do not add `/T` to the
+`/inheritance:r /grant:r` line: on a file an `(OI)(CI)` grant does not
+apply, so `/T` leaves every file in an existing pack with no permissions at
+all. The `/reset` line repairs such a pack before it is removed. Copying a
+folder onto one that exists nests a copy (`my-pack\my-pack`), which Setup
+refuses, naming the nested folder.
 
 Then name the pack in the config and select it:
 
