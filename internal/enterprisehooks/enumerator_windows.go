@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -304,6 +305,15 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			sessionActive: sessionActive,
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
+		}
+		if standalone && windowsDisabledLocalAccount(profile.SID, lookupAccount) {
+			// No one can sign in as a disabled account, so no agent in its
+			// profile can run: an offboarded account whose profile still held
+			// a never-started Claude Code kept agent_unprotected, and
+			// security_complete false, for good (GAP-1034).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account is disabled; agents installed in its profile cannot run and are not reported as unprotected")
+			rowContext.report = nil
 		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
@@ -709,6 +719,51 @@ func windowsDeletedLocalAccount(sid string, lookup windowsEnrollmentAccountLooku
 	}
 	_, _, err := lookup(sid)
 	return errors.Is(err, windows.ERROR_NONE_MAPPED)
+}
+
+// windowsUserInfo1 is USER_INFO_1, the NetUserGetInfo level that carries
+// the account flags.
+type windowsUserInfo1 struct {
+	Name        *uint16
+	Password    *uint16
+	PasswordAge uint32
+	Priv        uint32
+	HomeDir     *uint16
+	Comment     *uint16
+	Flags       uint32
+	ScriptPath  *uint16
+}
+
+// windowsUFAccountDisable is UF_ACCOUNTDISABLE.
+const windowsUFAccountDisable = 0x0002
+
+// windowsLocalAccountDisabled reports whether the local account named
+// account is disabled (NetUserGetInfo); tests replace it.
+var windowsLocalAccountDisabled = func(account string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(account)
+	if err != nil {
+		return false, err
+	}
+	var buf *byte
+	if err := windows.NetUserGetInfo(nil, name, 1, &buf); err != nil {
+		return false, err
+	}
+	defer windows.NetApiBufferFree(buf)
+	return (*windowsUserInfo1)(unsafe.Pointer(buf)).Flags&windowsUFAccountDisable != 0, nil
+}
+
+// windowsDisabledLocalAccount reports a local account that exists but is
+// disabled. Only local accounts are judged, and a failed lookup is no proof.
+func windowsDisabledLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	account, _, err := lookup(sid)
+	if err != nil || strings.TrimSpace(account) == "" {
+		return false
+	}
+	disabled, err := windowsLocalAccountDisabled(account)
+	return err == nil && disabled
 }
 
 // windowsProfileEnrollmentDecision applies enterprise.enrollment to one

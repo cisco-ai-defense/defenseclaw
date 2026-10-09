@@ -973,6 +973,37 @@ func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *t
 	})
 }
 
+// GAP-1034: a disabled local account cannot sign in, so a never-started
+// Claude Code in its profile is not reported as unprotected (which kept
+// security_complete false for good); an enabled account's still is.
+func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	previousDomain, previousDisabled := windowsMachineAccountDomainSID, windowsLocalAccountDisabled
+	t.Cleanup(func() { windowsMachineAccountDomainSID, windowsLocalAccountDisabled = previousDomain, previousDisabled })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubActiveSessions(t, map[string][]string{})
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	for _, disabled := range []bool{true, false} {
+		windowsLocalAccountDisabled = func(string) (bool, error) { return disabled, nil }
+		var reported []UnprotectedAgent
+		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[bool]int{true: 0, false: 1}[disabled]; len(reported) != want {
+			t.Fatalf("disabled=%v: reported %+v, want %d", disabled, reported, want)
+		}
+	}
+}
+
 // GAP-0430: a deleted local account (LookupAccountSid says ERROR_NONE_MAPPED)
 // is revoked even when its profile folder remains; a domain account whose
 // lookup fails, or a lookup that timed out, is not judged deleted.
