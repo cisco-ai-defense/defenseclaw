@@ -23,6 +23,21 @@ The bundle name is
 `defenseclaw-macos-${VERSION}-darwin-${BUNDLE_GOARCH}`. The build creates that
 directory plus a `.tar.gz` archive and a sibling `.sha256` file under `dist/`.
 
+## Managed agent-version discovery
+
+The managed hook enumerator renders each connector's discovered version into
+the hook-guardian target manifest. Codex discovery prefers the current
+`/Applications/ChatGPT.app` bundle, then the legacy standalone
+`/Applications/Codex.app` bundle, before consulting Homebrew, npm, or `PATH`.
+Only fixed bundle-relative CLI locations are eligible.
+
+Bundle metadata is preferred when available. When a known application bundle
+only exposes an executable version probe, the enumerator runs `--version` as
+the target console user through `/usr/bin/sudo`, with bounded output and a
+bounded wall-clock duration. It never executes an app-bundled Codex binary as
+root. Missing, failed, or malformed probes remain unversioned and are rejected
+later when no supported hook contract can be resolved.
+
 ## Bundle contents
 
 The build script assembles:

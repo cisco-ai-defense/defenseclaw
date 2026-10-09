@@ -183,14 +183,28 @@ _probe_json_version() {
 
 # discover_agent_version CONNECTOR HOME -> echoes the agent version or "".
 #
-# Metadata-only: reads files under HOME or under signed system app bundles
-# and never executes user-installed agent binaries. install.sh runs as root,
-# so invoking $PATH-resolved `codex` / `claude` / etc. would be a
-# privilege-escalation surface — the caller must pass --agent-version
-# explicitly for connectors that don't ship a stable metadata file.
-# _read_codex_version_as_user USER -> echoes codex --version output (first line, ≤512 bytes) or "".
+# Version discovery prefers metadata. The only executable probes are fixed
+# Codex application-bundle paths and the final PATH fallback, and both execute
+# as the target user rather than as the root installer/LaunchDaemon.
+
+# _run_as_target_user USER COMMAND [ARG...] -> command output/status.
 #
-# Runs `sudo -n -u USER codex --version` with a bounded wall-clock
+# Keep the privilege boundary in one helper. The absolute sudo path prevents a
+# root LaunchDaemon from resolving an attacker-controlled PATH shim. Tests may
+# replace this shell function after sourcing the trusted installer library.
+_run_as_target_user() {
+  local user="$1"
+  shift
+  [[ -n "${user}" && $# -gt 0 ]] || return 1
+  /usr/bin/sudo -n -u "${user}" -- "$@"
+}
+
+# _read_codex_version_as_user USER [CODEX_BIN] -> echoes `--version` output
+# (first line, <=512 bytes) or "". CODEX_BIN defaults to PATH-resolved codex
+# for the final, unprivileged fallback; bundle callers pass a trusted absolute
+# path.
+#
+# Runs the command as USER with a bounded wall-clock
 # limit (5 s) so a hung codex cannot stall the installer. Pure-bash
 # implementation: previously this shelled out to python3 for the
 # timeout + bounded-read logic, but that violated the "no python3
@@ -202,6 +216,7 @@ _probe_json_version() {
 # 512 bytes via `head -c` so a chatty codex cannot fill the pipe.
 _read_codex_version_as_user() {
   local user="$1"
+  local codex_bin="${2:-codex}"
   local out_file rc=0
   # Fail closed on mktemp failure. The prior fallback
   # `/tmp/defenseclaw-codex-version.$$` was predictable — a
@@ -222,7 +237,7 @@ _read_codex_version_as_user() {
   # macOS the child inherits the shell's session and $$ but exec's
   # `-a` and `sudo`'s `-b` do not give us a clean PGID, so we settle
   # for killing the immediate PID plus a wait.
-  ( sudo -n -u "${user}" codex --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
+  ( _run_as_target_user "${user}" "${codex_bin}" --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
   local pid=$!
   # Poll for completion with a 5-second wall-clock budget. `wait -n`
   # would block indefinitely; a tight sleep+kill loop hits the
@@ -698,15 +713,14 @@ _claude_desktop_embedded_version_from_home() {
   [[ -n "${best}" ]] && echo "${best}"
 }
 
-# _codex_chatgpt_bundle_metadata_version APP_ROOT -> echoes version or "".
+# _codex_app_bundle_metadata_version APP_ROOT -> echoes version or "".
 #
-# Current ChatGPT.app releases package Codex under Resources/codex-cli/ and
-# publish the bundled CLI version in codex-package.json. Prefer that fixed,
-# signed-bundle metadata over executing the embedded CLI: the hook enumerator
-# runs as root, and version discovery must not introduce a privileged code
-# execution surface. APP_ROOT is an explicit argument so tests can stage a
-# hermetic bundle without overriding the production /Applications path.
-_codex_chatgpt_bundle_metadata_version() {
+# Current app releases package Codex under Resources/codex-cli/ and publish the
+# bundled CLI version in codex-package.json. Prefer that fixed-bundle metadata
+# over executing the embedded CLI. APP_ROOT is an explicit argument so tests
+# can stage a hermetic bundle without overriding production /Applications
+# paths.
+_codex_app_bundle_metadata_version() {
   local app_root="$1"
   local metadata="${app_root}/Contents/Resources/codex-cli/codex-package.json"
   [[ -f "${metadata}" ]] || return 0
@@ -719,6 +733,55 @@ _codex_chatgpt_bundle_metadata_version() {
     return 0
   fi
   printf '%s\n' "${version}"
+}
+
+# _codex_app_bundle_version APP_ROOT -> echoes version or "".
+#
+# Supports both the current codex-cli package layout and the original
+# standalone Codex.app layout whose CLI is Contents/Resources/codex. The
+# caller supplies one of the fixed /Applications roots below in production;
+# the argument exists so tests can stage the same bundle-relative structure.
+# Executable probes require DC_INSTALLER_TARGET_USER and always cross the
+# privilege boundary through _run_as_target_user. A root caller never executes
+# the app-bundled CLI directly.
+_codex_app_bundle_version() {
+  local app_root="$1"
+  local version raw candidate relative
+
+  version="$(_codex_app_bundle_metadata_version "${app_root}")"
+  if [[ -n "${version}" ]]; then
+    printf '%s\n' "${version}"
+    return 0
+  fi
+
+  [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] || return 0
+
+  for relative in \
+    Contents/Resources/codex-cli/bin/codex \
+    Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex \
+    Contents/Resources/codex \
+    Contents/MacOS/codex; do
+    candidate="${app_root}/${relative}"
+    [[ -f "${candidate}" && -x "${candidate}" ]] || continue
+
+    raw="$(_read_codex_version_as_user \
+      "${DC_INSTALLER_TARGET_USER}" "${candidate}" || true)"
+    if [[ -z "${raw}" ]]; then
+      _record_discovery_error codex "${candidate}" "version-probe-failed"
+      continue
+    fi
+
+    # Codex prints "codex-cli X.Y.Z" (optionally with a prerelease/build
+    # suffix). Accept exactly one semver-shaped token and reject everything
+    # else rather than carrying untrusted command output into targets.yaml.
+    version="$(printf '%s' "${raw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$/) {print $i; exit}}')"
+    if [[ -z "${version}" ]]; then
+      _record_discovery_error codex "${candidate}" "invalid-version"
+      continue
+    fi
+    printf '%s\n' "${version}"
+    return 0
+  done
 }
 
 discover_agent_version() {
@@ -744,54 +807,30 @@ discover_agent_version() {
       done
       ;;
     codex)
-      # Codex-cli is a Rust binary that ships from three OpenAI-owned
+      # Codex-cli is a Rust binary that ships from multiple OpenAI-owned
       # channels on macOS. Probe order picks the first-party
-      # ChatGPT.app bundled copy FIRST because it is the newest
-      # distribution (auto-updated with the desktop app) and it is
-      # what customers actually have on a fresh Mac — stray old
+      # current ChatGPT.app bundle FIRST, followed by the legacy standalone
+      # Codex.app bundle. Stray old
       # `npm i -g @openai/codex` installs from an earlier engagement
       # frequently linger and would otherwise win with a stale
       # version that fails our MinAgentVersion contract gate.
       #
       # Order:
-      #   1. ChatGPT.app bundled metadata/binary (Codex 0.145.0+ current)
-      #   2. Homebrew Caskroom                (versioned dir name)
-      #   3. npm module package.json         (user-global then system)
-      #   4. `command -v codex` last resort   (arbitrary PATH install)
+      #   1. ChatGPT.app bundled metadata/binary (current distribution)
+      #   2. Codex.app bundled metadata/binary   (legacy standalone app)
+      #   3. Homebrew Caskroom                   (versioned dir name)
+      #   4. npm module package.json             (user-global then system)
+      #   5. `command -v codex` last resort      (arbitrary PATH install)
       #
-      # Every probe runs as the target user via sudo -u (not root).
-      # The app bundle is Gatekeeper-signed and world-readable by
-      # design; running its --version as an unprivileged user is
-      # safe. install.sh's outer sudo already dropped privs before
-      # calling this helper, matching the security posture of the
-      # hook guardian's connector.Setup call.
-      local vraw
-
-      # 1. ChatGPT.app bundled Codex. Current releases use
-      # Contents/Resources/codex-cli/{codex-package.json,bin/codex}; retain
-      # the older Resources/codex and MacOS/codex paths as fallbacks.
-      vraw="$(_codex_chatgpt_bundle_metadata_version /Applications/ChatGPT.app)"
-      if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
-
-      local chatgpt_codex
-      for chatgpt_codex in \
-        /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex \
-        /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex \
-        /Applications/ChatGPT.app/Contents/Resources/codex \
-        /Applications/ChatGPT.app/Contents/MacOS/codex; do
-        [[ -x "${chatgpt_codex}" ]] || continue
-        if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]]; then
-          vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" "${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        else
-          vraw="$("${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        fi
-        # Codex prints "codex-cli X.Y.Z" (or "codex-cli X.Y.Z-alpha.N");
-        # take the first token that looks like a version.
-        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
+      # Bundle metadata is read directly. Bundle executable fallbacks use the
+      # bounded target-user probe and are never executed as root.
+      local vraw app_root
+      for app_root in /Applications/ChatGPT.app /Applications/Codex.app; do
+        vraw="$(_codex_app_bundle_version "${app_root}")"
         if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
       done
 
-      # 2. Homebrew cask keeps the binary under Caskroom with a
+      # 3. Homebrew cask keeps the binary under Caskroom with a
       # version in the path itself:
       #   /opt/homebrew/Caskroom/codex/<version>/...
       # Glob-based version pick (avoids shellcheck SC2010 on ls|grep).
@@ -811,7 +850,7 @@ discover_agent_version() {
         if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
       done
 
-      # 3. npm module package.json — user-global first (most likely
+      # 4. npm module package.json — user-global first (most likely
       # up to date on developer boxes), then system dirs.
       local pkg
       for pkg in \
@@ -823,7 +862,7 @@ discover_agent_version() {
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
 
-      # 4. Last resort: exec codex --version as the target user (not
+      # 5. Last resort: exec codex --version as the target user (not
       # as root). Requires TARGET_USER to be known to the caller.
       if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
         local vraw
