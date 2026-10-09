@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,21 @@ func TestRelaunchHelperGuard(t *testing.T) {
 		fmt.Printf(`{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"relaunched"}}`+"\n", id)
 	}
 	os.Exit(0)
+}
+
+func TestEditorInputKeepsNextRequestAfterProxyStops(t *testing.T) {
+	first := []byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/prompt\"}\n")
+	next := []byte("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\"}\n")
+	editor := newEditorInput(bytes.NewReader(append(first, next...)))
+	proxy := bufio.NewReaderSize(editor, 64<<10)
+	if got, err := proxy.ReadBytes('\n'); err != nil || !bytes.Equal(got, first) {
+		t.Fatalf("proxy first frame = %q, %v", got, err)
+	}
+	editor.detach()
+	rest, err := io.ReadAll(editor.rest())
+	if err != nil || !bytes.Equal(rest, next) {
+		t.Fatalf("editor after refusal = %q, %v; want %q", rest, err, next)
+	}
 }
 
 // A guard that ended its session for a central change stays for Zed's next
