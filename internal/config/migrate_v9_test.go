@@ -1575,6 +1575,36 @@ func TestMigrateV9RetryClearsPendingAuditRows(t *testing.T) {
 	}
 }
 
+// Watcher enforcement rows are a journal, including failed scans and failed
+// quarantine attempts. They must not become permanent operator policy.
+func TestMigrateV9LeavesWatcherBlocksInAuditJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ name, reason string }{
+		{"finding", "auto-block: watch detected HIGH findings (scanner=plugin): RULE suspicious title"},
+		{"readmit", "auto-block: watch detected HIGH findings (scanner=plugin); rescan retained block"},
+		{"scan-error", "scanner failure (fail-closed): scanner unavailable"},
+		{"quarantine-error", "quarantine failed: permission denied"},
+		{"link-error", "link removed: target changed"},
+		{"operator", "scan: incident review"},
+	} {
+		if _, err := db.Exec(`INSERT INTO actions VALUES (?, 'skill', ?, '', '{"install":"block"}', ?, 'now', '')`, item.name, item.name, item.reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := readV9ActionRows(path)
+	if err != nil || len(rows) != 1 || rows[0].targetName != "operator" {
+		t.Fatalf("operator rows = %v, err = %v; want only operator decision", rows, err)
+	}
+}
+
 func TestMigrateV9KeepsOperatorReasonBeginningWithScan(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	db, err := sql.Open("sqlite", path)
