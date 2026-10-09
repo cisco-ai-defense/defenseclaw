@@ -354,6 +354,10 @@ func (w *InstallWatcher) newScanner(evt InstallEvent) scanner.Scanner {
 // to the built-in Go admission logic. Watcher observability is exclusively
 // emitted through the audit logger's generated v8 runtime.
 func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
+	addressable := addressableStandalonePath
+	if cfg.SecureClientIntegration() {
+		addressable = addressablePath
+	}
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
@@ -372,7 +376,7 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 
 		admitMCPNow: make(chan struct{}, 1),
 
-		state:        newAdmissionState(cfg.DataDir),
+		state:        newAdmissionState(cfg.DataDir, addressable),
 		inFlight:     make(map[string]bool),
 		liveSlots:    make(chan struct{}, liveAdmissionWorkers),
 		startupSlots: make(chan struct{}, startupAdmissionWorkers),
@@ -787,6 +791,22 @@ func (w *InstallWatcher) isBundledPluginDir(path string) bool {
 	return err1 == nil && err2 == nil && filepath.Clean(got) == filepath.Clean(want)
 }
 
+// addressableAssetPath preserves standalone Windows trailing names while the
+// Secure Client profile keeps its original watcher path handling.
+func (w *InstallWatcher) addressableAssetPath(path string) string {
+	if w.secureClientActive() {
+		return addressablePath(path)
+	}
+	return addressableStandalonePath(path)
+}
+
+func (w *InstallWatcher) assetEventName(path string) string {
+	if w.secureClientActive() {
+		return filepath.Base(path)
+	}
+	return physicalAssetName(path)
+}
+
 // isOwnPlugin reports whether a plugin path is connector-managed or
 // DefenseClaw's own unmodified plugin. Admission and the periodic rescan both
 // skip such plugins, so neither raises findings on DefenseClaw's own code.
@@ -1057,7 +1077,7 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 	w.mu.Unlock()
 
 	for _, path := range ready {
-		if _, err := os.Stat(addressablePath(path)); err != nil && !w.admitsLinkedAsset(path) {
+		if _, err := os.Stat(w.addressableAssetPath(path)); err != nil && !w.admitsLinkedAsset(path) {
 			w.endAdmission(path)
 			continue
 		}
@@ -1223,7 +1243,7 @@ func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
 
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 	installType := InstallSkill
-	name := filepath.Base(path)
+	name := w.assetEventName(path)
 	owner := w.connectorForPath(path)
 	if owner == "claudecode" {
 		if pluginID, isPlugin := w.claudePluginIdentity(path); isPlugin {
@@ -1417,7 +1437,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	defer cancel()
 
 	// An MCP event's Path is its watcher key; the scanner gets the server.
-	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	target, err := w.scanTargetFor(evt)
+	var result *scanner.ScanResult
+	if err == nil {
+		result, err = s.Scan(scanCtx, target)
+	}
 	if err == nil && !w.secureClientActive() {
 		err = scanner.JudgeFailure(result)
 	}
@@ -1425,7 +1449,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if retry, unreadable := w.readableAfterGrant(evt); retry {
 			retryCtx, cancelRetry := context.WithTimeout(ctx, w.scanTimeout(evt))
 			defer cancelRetry()
-			if result, err = s.Scan(retryCtx, w.scanTargetFor(evt)); err == nil {
+			if result, err = s.Scan(retryCtx, target); err == nil {
 				err = scanner.JudgeFailure(result)
 			}
 		} else if unreadable != "" {
@@ -1941,13 +1965,13 @@ func (w *InstallWatcher) readableAfterGrant(evt InstallEvent) (bool, string) {
 	if (evt.Type != InstallSkill && evt.Type != InstallPlugin) || w.admitsLinkedAsset(evt.Path) {
 		return false, ""
 	}
-	denied := unreadableAssetEntry(addressablePath(evt.Path))
+	denied := unreadableAssetEntry(w.addressableAssetPath(evt.Path))
 	if denied == "" {
 		return false, ""
 	}
 	grantErr := enforce.GrantAssetRead(string(evt.Type), evt.Path)
 	if grantErr == nil {
-		if denied = unreadableAssetEntry(addressablePath(evt.Path)); denied == "" {
+		if denied = unreadableAssetEntry(w.addressableAssetPath(evt.Path)); denied == "" {
 			fmt.Fprintf(os.Stderr, "[watch] %s %s: the gateway could not read it; read access granted, scanning again\n", evt.Type, evt.Path)
 			return true, ""
 		}
@@ -2077,10 +2101,14 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	// quarantine planner deliberately binds filesystem mutations to the exact
 	// source basename.  Keep those identities separate so a valid manifest name
 	// cannot weaken the path check or prevent an otherwise valid quarantine.
-	physicalName := filepath.Base(filepath.Clean(evt.Path))
+	physicalName := w.assetEventName(evt.Path)
+	quarantinePath, quarantineRoots, quarantineRoot := evt.Path, w.sourceRootsFor(evt.Type), w.cfg.QuarantineDir
+	if !w.secureClientActive() {
+		quarantinePath, quarantineRoots, quarantineRoot = addressableQuarantinePaths(evt.Path, quarantineRoots, quarantineRoot)
+	}
 	plan, err := enforce.NewAssetQuarantinePlan(
-		w.cfg.QuarantineDir, w.sourceRootsFor(evt.Type), evt.Type.String(),
-		physicalName, connector, evt.Path,
+		quarantineRoot, quarantineRoots, evt.Type.String(),
+		physicalName, connector, quarantinePath,
 	)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
@@ -2183,7 +2211,8 @@ func (w *InstallWatcher) releaseAllowListed(evt InstallEvent, reason string) {
 	}
 	scope := w.journalScope(w.eventConnector(evt))
 	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
-	if err != nil || entry == nil {
+	if err != nil || entry == nil ||
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return
 	}
 	var cleared []string
@@ -2211,7 +2240,8 @@ func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent
 	}
 	connector := w.eventConnector(evt)
 	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, w.journalScope(connector))
-	if err != nil || entry == nil || (entry.Actions.Runtime == "" && entry.Actions.Install == "") {
+	if err != nil || entry == nil || (entry.Actions.Runtime == "" && entry.Actions.Install == "") ||
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return false
 	}
 	cfg := w.liveConfig()
@@ -2225,7 +2255,7 @@ func (w *InstallWatcher) quarantinedCopyIsBack(ctx context.Context, evt InstallE
 	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
 		return false
 	}
-	records, err := w.store.ListQuarantineRecordsForConnector(ctx, evt.Type.String(), evt.Name, w.eventConnector(evt))
+	records, err := w.quarantineRecordsForName(ctx, evt.Type.String(), evt.Name, w.eventConnector(evt))
 	if err != nil {
 		return false
 	}
@@ -2270,6 +2300,21 @@ func linkedAssetTarget(path string) string {
 	return filepath.Clean(target)
 }
 
+// linkedAssetScanTarget limits the gateway's read authority to enrolled roots.
+// A link may be resolved for scanning only when its final target stays in one
+// of this asset type's watched roots.
+var errLinkedAssetOutsideRoots = errors.New("linked asset target is outside watched roots")
+
+func (w *InstallWatcher) linkedAssetScanTarget(evt InstallEvent) (string, error) {
+	target := linkedAssetTarget(evt.Path)
+	for _, root := range w.sourceRootsFor(evt.Type) {
+		if watcherPathAtOrBelow(target, root) {
+			return target, nil
+		}
+	}
+	return "", errLinkedAssetOutsideRoots
+}
+
 // removeLinkedAsset takes a skill or plugin that is a symlink or Windows
 // junction out of the watched folder: the link is removed and the folder it
 // points to is never touched (GAP-0394). Before, quarantine refused the link
@@ -2296,6 +2341,15 @@ func (w *InstallWatcher) removeLinkedAsset(ctx context.Context, evt InstallEvent
 	return removed
 }
 
+func (w *InstallWatcher) quarantineRecordsForName(
+	ctx context.Context, targetType, targetName, connector string,
+) ([]audit.QuarantineRecord, error) {
+	if !w.secureClientActive() && runtime.GOOS == "windows" && strings.HasSuffix(targetName, " ") {
+		return w.store.ListQuarantineRecordsForConnectorExact(ctx, targetType, targetName, connector)
+	}
+	return w.store.ListQuarantineRecordsForConnector(ctx, targetType, targetName, connector)
+}
+
 // RestoreQuarantined restores one connector-owned watcher quarantine. The
 // physical file action is cleared transactionally at completion, while an
 // install block or runtime disable remains intact.
@@ -2310,14 +2364,14 @@ func (w *InstallWatcher) RestoreQuarantined(
 		return fmt.Errorf("watcher: restore context is required")
 	}
 	targetType = strings.TrimSpace(targetType)
-	targetName = strings.TrimSpace(targetName)
+	if w.secureClientActive() || runtime.GOOS != "windows" || !strings.HasSuffix(targetName, " ") {
+		targetName = strings.TrimSpace(targetName)
+	}
 	connector = strings.TrimSpace(connector)
 	if targetType != InstallSkill.String() && targetType != InstallPlugin.String() {
 		return fmt.Errorf("watcher: unsupported restore target type %q", targetType)
 	}
-	records, err := w.store.ListQuarantineRecordsForConnector(
-		ctx, targetType, targetName, connector,
-	)
+	records, err := w.quarantineRecordsForName(ctx, targetType, targetName, connector)
 	if err != nil {
 		return err
 	}
@@ -2328,8 +2382,11 @@ func (w *InstallWatcher) RestoreQuarantined(
 		return fmt.Errorf("watcher: restore is ambiguous for %s %q connector %q", targetType, targetName, connector)
 	}
 	record := records[0]
-	requestedRestorePath := strings.TrimSpace(restorePath)
-	boundRestorePath := strings.TrimSpace(record.RestorePath)
+	requestedRestorePath, boundRestorePath := restorePath, record.RestorePath
+	if w.secureClientActive() || runtime.GOOS != "windows" || !strings.HasSuffix(targetName, " ") {
+		requestedRestorePath = strings.TrimSpace(requestedRestorePath)
+		boundRestorePath = strings.TrimSpace(boundRestorePath)
+	}
 	if record.State == audit.QuarantineStateRestoring && boundRestorePath != "" {
 		if requestedRestorePath == "" {
 			restorePath = boundRestorePath
@@ -2350,11 +2407,16 @@ func (w *InstallWatcher) RestoreQuarantined(
 	); err != nil {
 		return fmt.Errorf("watcher: journal quarantine restore: %w", err)
 	}
+	restoreRoots := w.sourceRootsFor(InstallType(record.TargetType))
+	quarantineRoot := w.cfg.QuarantineDir
+	if !w.secureClientActive() {
+		restorePath, restoreRoots, quarantineRoot = addressableQuarantinePaths(restorePath, restoreRoots, quarantineRoot)
+	}
 	plan := enforce.AssetRestorePlan{
 		RecordID: record.ID, TargetType: record.TargetType,
-		TargetName:     filepath.Base(filepath.Clean(record.QuarantinePath)),
-		QuarantineRoot: w.cfg.QuarantineDir, QuarantinePath: record.QuarantinePath,
-		RestorePath: restorePath, AllowedRoots: w.sourceRootsFor(InstallType(record.TargetType)),
+		TargetName:     w.assetEventName(record.QuarantinePath),
+		QuarantineRoot: quarantineRoot, QuarantinePath: record.QuarantinePath,
+		RestorePath: restorePath, AllowedRoots: restoreRoots,
 		ContentHash: record.ContentHash,
 	}
 	if err := enforce.ExecuteAssetRestore(plan); err != nil {
@@ -2504,7 +2566,7 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 			continue
 		}
 		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
-		if !strings.HasPrefix(strings.ToLower(first), "temp_") {
+		if !strings.HasPrefix(strings.ToLower(first), "temp_local_") || len(first) <= len("temp_local_") {
 			return false
 		}
 		if grace <= 0 {
@@ -2576,7 +2638,7 @@ func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionRes
 	if res.Interrupted || w.secureClientActive() {
 		return
 	}
-	if _, err := os.Lstat(addressablePath(evt.Path)); err != nil && evt.Type != InstallMCP {
+	if _, err := os.Lstat(w.addressableAssetPath(evt.Path)); err != nil && evt.Type != InstallMCP {
 		w.state.clearIssue(evt.Path) // moved to quarantine or removed
 		return
 	}
@@ -2660,7 +2722,7 @@ func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit
 // subdirectories inside a skill are ignored — a skill is always a top-level
 // directory under a skill dir.
 func (w *InstallWatcher) isDirectChildDir(path string) bool {
-	info, err := os.Stat(addressablePath(path))
+	info, err := os.Stat(w.addressableAssetPath(path))
 	// A link whose target the gateway cannot read is still admitted: its
 	// scan fails closed and the link is taken out (GAP-0394).
 	if (err != nil && !w.admitsLinkedAsset(path)) || (err == nil && !info.IsDir()) {

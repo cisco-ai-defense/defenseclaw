@@ -58,7 +58,7 @@ func NewAssetQuarantinePlan(
 	if err != nil {
 		return AssetQuarantinePlan{}, err
 	}
-	if !safePathSegment(targetName) {
+	if !safeQuarantineAssetName(targetName, sourcePath) {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: invalid quarantine target name")
 	}
 	connector = strings.TrimSpace(connector)
@@ -82,7 +82,7 @@ func NewAssetQuarantinePlan(
 	if err := validateExistingAncestors(filepath.Dir(sourcePath)); err != nil {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine source ancestry: %w", err)
 	}
-	if filepath.Base(sourcePath) != targetName {
+	if exactAssetBase(sourcePath) != targetName {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine source identity mismatch")
 	}
 	quarantineRootInput := strings.TrimSpace(quarantineRoot)
@@ -103,6 +103,9 @@ func NewAssetQuarantinePlan(
 	}
 	parts = append(parts, targetName)
 	destination := filepath.Join(parts...)
+	if extendedTrailingNamePath(sourcePath) && strings.HasSuffix(targetName, " ") {
+		destination = filepath.Join(parts[:len(parts)-1]...) + string(filepath.Separator) + targetName
+	}
 	if !pathWithin(destination, quarantineRoot, false) {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine destination escaped storage")
 	}
@@ -134,7 +137,7 @@ const perSourceQuarantineDir = "per-source"
 // same way, and the same source and content always get the same slot.
 func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
 	typeDir, _ := quarantineTypeDir(plan.TargetType)
-	key := filepath.Clean(plan.SourcePath)
+	key := cleanQuarantineSourcePath(plan.SourcePath)
 	if runtime.GOOS == "windows" {
 		key = strings.ToLower(key)
 	}
@@ -142,6 +145,9 @@ func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
 	parts := []string{plan.QuarantineRoot, perSourceQuarantineDir, typeDir}
 	if plan.Connector != "" {
 		parts = append(parts, plan.Connector)
+	}
+	if extendedTrailingNamePath(plan.SourcePath) && strings.HasSuffix(plan.TargetName, " ") {
+		return filepath.Join(append(parts, hex.EncodeToString(sum[:8]))...) + string(filepath.Separator) + plan.TargetName
 	}
 	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), plan.TargetName)...)
 }
@@ -330,14 +336,21 @@ func ExecuteAssetRestore(plan AssetRestorePlan) error {
 // and bytes all contribute to the digest.
 func AssetContentHash(path string) (string, error) {
 	pathInput := strings.TrimSpace(path)
+	if extendedTrailingNamePath(path) {
+		pathInput = path
+	}
 	if pathInput == "" {
 		return "", fmt.Errorf("enforce: invalid asset path")
 	}
-	path, err := filepath.Abs(pathInput)
-	if err != nil {
-		return "", fmt.Errorf("enforce: invalid asset path")
+	path = pathInput
+	if !extendedTrailingNamePath(path) {
+		var err error
+		path, err = filepath.Abs(pathInput)
+		if err != nil {
+			return "", fmt.Errorf("enforce: invalid asset path")
+		}
+		path = filepath.Clean(path)
 	}
-	path = filepath.Clean(path)
 	info, err := safeAssetInfo(path)
 	if err != nil {
 		return "", err
@@ -373,7 +386,7 @@ func validateQuarantinePlan(plan AssetQuarantinePlan) error {
 	if _, err := quarantineTypeDir(plan.TargetType); err != nil {
 		return err
 	}
-	if !safePathSegment(plan.TargetName) || !safePathSegment(plan.Connector) && plan.Connector != "" {
+	if !safeQuarantineAssetName(plan.TargetName, plan.SourcePath) || !safePathSegment(plan.Connector) && plan.Connector != "" {
 		return fmt.Errorf("enforce: invalid quarantine identity")
 	}
 	if !filepath.IsAbs(plan.SourcePath) || !filepath.IsAbs(plan.SourceRoot) ||
@@ -384,8 +397,8 @@ func validateQuarantinePlan(plan AssetQuarantinePlan) error {
 		!pathWithin(plan.QuarantinePath, plan.QuarantineRoot, false) {
 		return fmt.Errorf("enforce: quarantine plan escaped an allowed root")
 	}
-	if filepath.Base(plan.SourcePath) != plan.TargetName ||
-		filepath.Base(plan.QuarantinePath) != plan.TargetName {
+	if exactAssetBase(plan.SourcePath) != plan.TargetName ||
+		exactAssetBase(plan.QuarantinePath) != plan.TargetName {
 		return fmt.Errorf("enforce: quarantine plan identity mismatch")
 	}
 	if err := validateSHA256Hex(plan.ContentHash); err != nil {
@@ -398,7 +411,7 @@ func normalizeRestorePlan(plan AssetRestorePlan) (AssetRestorePlan, string, erro
 	if _, err := quarantineTypeDir(plan.TargetType); err != nil {
 		return AssetRestorePlan{}, "", err
 	}
-	if !safePathSegment(plan.TargetName) || !safePathSegment(plan.RecordID) {
+	if !safeQuarantineAssetName(plan.TargetName, plan.QuarantinePath) || !safePathSegment(plan.RecordID) {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid restore identity")
 	}
 	var err error
@@ -411,15 +424,22 @@ func normalizeRestorePlan(plan AssetRestorePlan) (AssetRestorePlan, string, erro
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine root")
 	}
 	quarantinePathInput := strings.TrimSpace(plan.QuarantinePath)
+	if extendedTrailingNamePath(plan.QuarantinePath) {
+		quarantinePathInput = plan.QuarantinePath
+	}
 	if quarantinePathInput == "" || !filepath.IsAbs(quarantinePathInput) {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: quarantine path must be absolute")
 	}
-	plan.QuarantinePath, err = filepath.Abs(quarantinePathInput)
-	if err != nil {
-		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine path")
+	if extendedTrailingNamePath(quarantinePathInput) {
+		plan.QuarantinePath = quarantinePathInput
+	} else {
+		plan.QuarantinePath, err = filepath.Abs(quarantinePathInput)
+		if err != nil {
+			return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine path")
+		}
 	}
 	if !pathWithin(plan.QuarantinePath, plan.QuarantineRoot, false) ||
-		filepath.Base(plan.QuarantinePath) != plan.TargetName {
+		exactAssetBase(plan.QuarantinePath) != plan.TargetName {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: restore quarantine path escaped storage")
 	}
 	if err := validateExistingAncestors(filepath.Dir(plan.QuarantinePath)); err != nil {
@@ -430,7 +450,7 @@ func normalizeRestorePlan(plan AssetRestorePlan) (AssetRestorePlan, string, erro
 	if err != nil {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: restore destination: %w", err)
 	}
-	if filepath.Base(plan.RestorePath) != plan.TargetName {
+	if exactAssetBase(plan.RestorePath) != plan.TargetName {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: restore destination identity mismatch")
 	}
 	if err := validateExistingAncestors(filepath.Dir(plan.RestorePath)); err != nil {
@@ -460,12 +480,44 @@ func safePathSegment(value string) bool {
 		!strings.ContainsAny(value, "/\\\x00")
 }
 
+// Win32's filepath.Clean drops a final dot or space even on an extended
+// path. Preserve the watcher's exact spelling through the checked move.
+func extendedTrailingNamePath(path string) bool {
+	return runtime.GOOS == "windows" && strings.HasPrefix(path, `\\?\`) &&
+		(strings.HasSuffix(path, ".") || strings.HasSuffix(path, " "))
+}
+
+func exactAssetBase(path string) string {
+	if extendedTrailingNamePath(path) && strings.HasSuffix(path, " ") {
+		return path[strings.LastIndexAny(path, `/\`)+1:]
+	}
+	return filepath.Base(path)
+}
+
+func safeQuarantineAssetName(name, path string) bool {
+	if safePathSegment(name) {
+		return true
+	}
+	return extendedTrailingNamePath(path) && strings.HasSuffix(name, " ") &&
+		strings.TrimSpace(name) != "" && !strings.ContainsAny(name, "/\\\x00")
+}
+
+func cleanQuarantineSourcePath(path string) string {
+	if extendedTrailingNamePath(path) {
+		return path
+	}
+	return filepath.Clean(path)
+}
+
 func pathWithinRoots(path string, roots []string, allowEqual bool) (string, string, error) {
 	pathInput := strings.TrimSpace(path)
+	if extendedTrailingNamePath(path) {
+		pathInput = path
+	}
 	if pathInput == "" || !filepath.IsAbs(pathInput) {
 		return "", "", fmt.Errorf("path is not absolute")
 	}
-	path = filepath.Clean(pathInput)
+	path = cleanQuarantineSourcePath(pathInput)
 	for _, root := range roots {
 		rootInput := strings.TrimSpace(root)
 		if rootInput == "" {
