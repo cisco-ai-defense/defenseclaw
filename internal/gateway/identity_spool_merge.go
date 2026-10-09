@@ -43,17 +43,15 @@ func awaitingSpool(facts useridentity.DirectoryFacts) bool {
 	return currentIdentitySpoolDir() != "" && len(facts.Groups) == 0
 }
 
-// awaitingSpoolUPN marks the facts of an SSSD account on a gateway that takes
-// the UPN from the guardian's identity spool (standalone Linux) while they
-// carry none: the guardian reads InfoPipe after the reconcile that enrolls the
-// account, which is often after the account's first request. Held for the
-// full TTL, those facts recorded the principal as sAMAccountName@REALM for up
-// to 15 minutes and then as the UPN (GAP-0334); refreshed after the short
-// incomplete lifetime, the UPN appears within about two minutes of the
-// guardian's record. An account InfoPipe never names keeps refreshing at
-// that pace, which costs an SSSD cache read.
+// awaitingSpoolUPN marks guardian-backed facts that lack a UPN. On Linux,
+// SSSD names the account before the guardian can read InfoPipe; on a managed
+// Mac, Open Directory supplies groups even when the guardian record is absent.
+// Refresh these answers after the short incomplete lifetime so a restored
+// guardian record does not leave a users-by-UPN assignment on the default
+// profile for the full directory TTL.
 func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
-	return currentIdentitySpoolDir() != "" && facts.Source == useridentity.SourceSSSD && facts.UPN == ""
+	return currentIdentitySpoolDir() != "" && facts.UPN == "" &&
+		(facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceMacOSOpenDirectory)
 }
 
 // spoolRecordNote is the explain note for an account the enumerator has no

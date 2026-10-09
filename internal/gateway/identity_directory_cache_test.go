@@ -77,6 +77,41 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 	t.Fatal("incomplete facts were not refreshed after identityDirectoryIncompleteTTL")
 }
 
+// TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts pins the managed Mac
+// case: Open Directory groups are available before the guardian record, but
+// its UPN must be picked up after the short incomplete lifetime.
+func TestMacOSGuardianUPNRecoveryRefreshesCachedLocalFacts(t *testing.T) {
+	previousDir := currentIdentitySpoolDir()
+	setIdentitySpoolDir(t.TempDir())
+	t.Cleanup(func() { setIdentitySpoolDir(previousDir) })
+
+	now := time.Unix(1_800_000_000, 0)
+	recovered := false
+	calls := 0
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		facts := useridentity.DirectoryFacts{
+			Directory: useridentity.DirectoryLocal, Source: useridentity.SourceMacOSOpenDirectory,
+			Groups: []string{"staff"}, ResolvedAt: now,
+		}
+		if recovered {
+			facts.Directory = useridentity.DirectoryActiveDirectory
+			facts.UPN = "alice@corp.example.com"
+		}
+		return facts, nil
+	})
+	cache.now = func() time.Time { return now }
+	cache.incomplete = awaitingSpoolUPN
+	if facts, ok := cache.get("501", true); !ok || facts.UPN != "" || calls != 1 {
+		t.Fatalf("first facts = %+v, ok = %v, calls = %d", facts, ok, calls)
+	}
+	recovered = true
+	now = now.Add(identityDirectoryIncompleteTTL)
+	if facts, ok := cache.get("501", true); !ok || facts.UPN != "alice@corp.example.com" || calls != 2 {
+		t.Fatalf("recovered facts = %+v, ok = %v, calls = %d; want guardian UPN after short TTL", facts, ok, calls)
+	}
+}
+
 // TestIdentityDirectoryCacheRefreshesPartialGroupsSoon pins GAP-0243: groups
 // the enumerator took from an account's last session token (it had no active
 // session) stay marked partial through the spool merge and are refreshed after
