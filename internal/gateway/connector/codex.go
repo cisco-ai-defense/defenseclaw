@@ -1300,6 +1300,15 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 			for _, key := range []string{"hooks", "codex_hooks"} {
 				if rawEnabled, exists := features[key]; exists {
 					enabled, ok := rawEnabled.(bool)
+					if ok && !enabled && !opts.ManagedEnterprise && !codexUsesManagedHookLayer(opts) {
+						// The user turned Codex hooks off. Setup must not override
+						// that, so say it at once instead of attempting a repair
+						// that can only fail (GAP-1094).
+						return false, fmt.Errorf(
+							"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks",
+							userConfigPath, key,
+						)
+					}
 					if !ok || !enabled {
 						return false, nil
 					}

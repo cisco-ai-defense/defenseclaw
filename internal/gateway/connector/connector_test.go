@@ -4726,6 +4726,33 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	}
 }
 
+// GAP-1094: `codex features disable hooks` leaves the DefenseClaw entries in
+// place but Codex runs none of them. Setup must not override the user's
+// switch, so the guard has to hear at once that hooks are off and how to turn
+// them back on, not attempt a repair that can only fail.
+func TestCodexOwnedHooksPresentNamesTurnedOffHooks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if err := os.WriteFile(configPath, append(raw, []byte("\n[features]\nhooks = false\n")...), 0o600); err != nil {
+		t.Fatalf("turn hooks off: %v", err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if present || err == nil || !strings.Contains(err.Error(), "codex features enable hooks") {
+		t.Fatalf("OwnedHooksPresent = %v, %v; want an error naming codex features enable hooks", present, err)
+	}
+}
+
 // GAP-1102: deleting the DefenseClaw command lines from config.toml leaves
 // hook entries without a command, and Codex then refuses to start. Setup
 // (which the hook self-heal, setup codex and a gateway restart all run) takes
