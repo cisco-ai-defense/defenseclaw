@@ -2173,9 +2173,11 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	nextGen.Config = appliedCfg
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
-	if assetDenyListsChanged(oldCfg, appliedCfg) {
+	if assetDenyListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills and plugins a new denied entry names are refused
-		// now, not when their content next changes (GAP-0627).
+		// now, not when their content next changes (GAP-0627), and an MCP
+		// server a new allow pin or scan_on_install false admits without a
+		// scan is admitted now, not at the next interval (GAP-0910).
 		if w := s.installWatcher.Load(); w != nil {
 			w.RequestRescan()
 		}
@@ -2362,6 +2364,17 @@ func assetDenyListsChanged(oldCfg, newCfg *config.Config) bool {
 	}
 	return !reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Denied, newCfg.AssetPolicy.Skill.Denied) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied)
+}
+
+// mcpUnscannedAdmissionChanged reports a reload that changes what admits an
+// MCP server without a scan, asset_policy.mcp.allowed or admission:, outside
+// Secure Client, whose watcher keeps the cycle of main (issue #1092).
+func mcpUnscannedAdmissionChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AssetPolicy.MCP.Allowed, newCfg.AssetPolicy.MCP.Allowed) ||
+		!reflect.DeepEqual(oldCfg.Admission, newCfg.Admission)
 }
 
 // inspectorNeedsRebuild reports whether any field on
@@ -3694,6 +3707,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		if watcherUsesEnrolledUserDirs(cfg) {
 			set := resolveEnrolledWatchSet(cfg, reg, wcfg, serviceHomeDir())
+			publishClaudeStatesUnreadable(set.claudeUnreadable)
 			enrolled = &set
 			// The service reads the users' folders but may not delete in
 			// them: the hook guardian removes a quarantined source (GAP-0202).

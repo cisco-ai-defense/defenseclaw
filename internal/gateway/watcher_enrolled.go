@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -70,6 +71,30 @@ type enrolledWatchSet struct {
 	// watcher once the enumerator grants access, and readable leaves them
 	// out, so that watcher admits what they hold (GAP-0913).
 	denied map[string]bool
+	// claudeUnreadable holds, by lowercased home, the enrolled users whose
+	// Claude Code state the hook enumerator could not read (GAP-0829).
+	claudeUnreadable map[string]enterprisehooks.ClaudeStateUnreadable
+}
+
+// claudeStatesUnreadable is claudeUnreadable of the enrolled watch set the
+// gateway resolved last. The hook refuses those users' Claude Code MCP tool
+// calls: the gateway cannot see their servers, so it cannot admit them, and
+// a changed server would run unscanned (GAP-0829).
+var claudeStatesUnreadable atomic.Pointer[map[string]enterprisehooks.ClaudeStateUnreadable]
+
+func publishClaudeStatesUnreadable(states map[string]enterprisehooks.ClaudeStateUnreadable) {
+	claudeStatesUnreadable.Store(&states)
+}
+
+// claudeStateUnreadableFor returns the unreadable Claude Code state of the
+// enrolled user whose home is home.
+func claudeStateUnreadableFor(home string) (enterprisehooks.ClaudeStateUnreadable, bool) {
+	states := claudeStatesUnreadable.Load()
+	if states == nil || strings.TrimSpace(home) == "" {
+		return enterprisehooks.ClaudeStateUnreadable{}, false
+	}
+	state, ok := (*states)[strings.ToLower(filepath.Clean(home))]
+	return state, ok
 }
 
 // readable returns dirs without the folders the gateway could not stat.
@@ -161,7 +186,10 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 }
 
 func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry, wcfg config.GatewayWatcherConfig, serviceHome string, stat func(string) (os.FileInfo, error)) enrolledWatchSet {
-	set := enrolledWatchSet{roots: map[string]string{}, live: &enrolledMCPServers{}, denied: map[string]bool{}}
+	set := enrolledWatchSet{
+		roots: map[string]string{}, live: &enrolledMCPServers{}, denied: map[string]bool{},
+		claudeUnreadable: map[string]enterprisehooks.ClaudeStateUnreadable{},
+	}
 	defer func() { set.live.set(set.mcp) }()
 	if cfg == nil || reg == nil || strings.TrimSpace(serviceHome) == "" {
 		return set
@@ -245,7 +273,12 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		// connector's) server with the same name is admitted on its own.
 		entries := config.ReadUserMCPServersForHome(target.connector, target.home)
 		if target.connector == "claudecode" {
-			entries = append(entries, enrolledClaudeMCPServers(cfg, target.sid)...)
+			servers, unreadable := enrolledClaudeMCPServers(cfg, target.sid)
+			entries = append(entries, servers...)
+			if unreadable != nil {
+				unreadable.Home = target.home
+				set.claudeUnreadable[strings.ToLower(target.home)] = *unreadable
+			}
 		}
 		for _, entry := range entries {
 			entry.Home = target.home
@@ -263,14 +296,15 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 // enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
 // published for the account sid: the gateway service account cannot read
 // ~/.claude.json in the profile root, which holds the user-scope and
-// local-scope servers (GAP-0424).
-func enrolledClaudeMCPServers(cfg *config.Config, sid string) []config.MCPServerEntry {
+// local-scope servers (GAP-0424). The marker is set when the enumerator
+// could not read that file either (GAP-0829).
+func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
 	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	servers, err := enterprisehooks.ReadClaudeMCPSpool(dir, sid, validateManagedGuardianAuthorization)
+	servers, unreadable, err := enterprisehooks.ReadClaudeMCPSpool(dir, sid, validateManagedGuardianAuthorization)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return servers
+	return servers, unreadable
 }
 
 // EnrolledWatchRoot is a skill or plugin folder a managed Windows gateway
@@ -338,6 +372,7 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 			return
 		case <-ticker.C:
 			next := resolveEnrolledWatchSet(s.currentConfig(), reg, wcfg, serviceHomeDir())
+			publishClaudeStatesUnreadable(next.claudeUnreadable)
 			if next.dirsKey() != dirs {
 				close(changed)
 				return

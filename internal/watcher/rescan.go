@@ -817,6 +817,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 
 	fingerprint := w.cachedFingerprint(evt, fpCache)
 
+	if w.admitsMCPWithoutScan(ctx, evt) {
+		return w.rescanMCPAdmittedWithoutScan(ctx, evt, currentSnap, fingerprint)
+	}
+
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -938,17 +942,81 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	return rescanScanned
 }
 
+// admittedWithoutScanMark ends the scanner fingerprint of an MCP server
+// baseline that install admission allowed without a scan. No scanner
+// fingerprint contains it.
+const admittedWithoutScanMark = "|admitted-without-scan"
+
+// admitsMCPWithoutScan reports an MCP server that install admission allows
+// before any scan: an asset_policy.mcp allowed rule that matches its
+// definition, a first-party entry while allow_list_bypass_scan is on, or
+// admission.mcp.scan_on_install false. The rescan scanned such a server, so
+// a server on a loopback address the admin had pinned or admitted without a
+// scan got an install-scan-error row every time it changed, and one whose
+// first scan had failed stayed blocked and reported as not scanned
+// (GAP-0424, GAP-0910). Secure Client keeps the rescan of main (issue
+// #1092).
+func (w *InstallWatcher) admitsMCPWithoutScan(ctx context.Context, evt InstallEvent) bool {
+	if evt.Type != InstallMCP || w.secureClientActive() {
+		return false
+	}
+	snapshot := w.admissionPolicySnapshot()
+	if snapshot.Config == nil {
+		return false
+	}
+	input := w.admissionInputFor(snapshot.Config, evt, string(evt.Type), w.eventConnector(evt))
+	out := w.evaluateAdmissionSnapshot(ctx, input, snapshot)
+	return out != nil && out.Verdict == "allowed"
+}
+
+// rescanMCPAdmittedWithoutScan admits, without a scan, an MCP server that
+// admission allows before scanning. A baseline of the same definition that
+// admission recorded, or one a scan recorded, is left as it is. Otherwise
+// admission runs: it writes the install-allowed row (reason=scan-disabled or
+// allow-listed), releases the block a failed scan left and clears the
+// asset_not_scanned issue, and the baseline records that it ran. A server
+// the first cycle after a start lists without a baseline only gets one, as a
+// scanned server does.
+func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
+	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	switch {
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
+		return rescanSkipped
+	case err == nil && baseline.ContentHash == snap.ContentHash &&
+		(baseline.ScanID != "" || strings.HasSuffix(baseline.ScannerFingerprint, admittedWithoutScanMark)):
+		return rescanSkipped
+	case err != nil && (!w.admitNewMCP || !w.startupRescanDone):
+		w.persistSnapshot(evt, snap, "", fingerprint+admittedWithoutScanMark)
+		return rescanSkipped
+	}
+	fmt.Fprintf(os.Stderr, "[rescan] mcp %s is admitted without a scan; running install admission\n", evt.Name)
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	if !res.Interrupted {
+		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
+	}
+	return rescanScanned
+}
+
 // unenforcedRejectionMark ends the scanner fingerprint of a baseline whose
 // admission rejected the target while take_action was off for its type. No
 // scanner fingerprint contains it.
 const unenforcedRejectionMark = "|rejected-unenforced"
 
 // admissionFingerprint is the baseline fingerprint for an admission result:
-// fingerprint, marked when the result is a rejection nothing enforced.
-// Secure Client keeps the baseline of main (issue #1092).
+// fingerprint, marked when the result is a rejection nothing enforced or an
+// MCP server admitted without a scan. Secure Client keeps the baseline of
+// main (issue #1092).
 func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint string) string {
-	if res.Unenforced && !w.secureClientActive() {
+	if w.secureClientActive() {
+		return fingerprint
+	}
+	if res.Unenforced {
 		return fingerprint + unenforcedRejectionMark
+	}
+	if res.Event.Type == InstallMCP && res.Verdict == VerdictAllowed && res.ScanID == "" {
+		return fingerprint + admittedWithoutScanMark
 	}
 	return fingerprint
 }

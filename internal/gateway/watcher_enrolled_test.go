@@ -5,10 +5,12 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,5 +141,62 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 		servers[2].Connector != "codex" || servers[2].Home != bob ||
 		watcher.MCPEventPath(servers[0]) == watcher.MCPEventPath(servers[2]) {
 		t.Fatalf("enrolled MCP servers = %+v", servers)
+	}
+}
+
+// GAP-0829: an enrolled user whose ~/.claude.json the hook enumerator could
+// not read has no servers the gateway could admit, so the hook refuses that
+// user's Claude Code MCP tool calls and names the file, instead of letting a
+// server changed meanwhile run unscanned. Other users are not affected.
+func TestUnreadableClaudeStateRefusesThatUsersMCPToolCalls(t *testing.T) {
+	restore := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() {
+		validateManagedGuardianAuthorization = restore
+		publishClaudeStatesUnreadable(nil)
+	})
+	root := t.TempDir()
+	alice, bob, dataDir := filepath.Join(root, "alice"), filepath.Join(root, "bob"), filepath.Join(root, "data")
+	record := map[string]any{
+		"version": 1, "updated_at": time.Now().UTC().Format(time.RFC3339), "ok": true,
+		"target_count": 2, "success_count": 2, "failure_count": 0,
+		"protected_targets": []map[string]any{
+			{"user": "alice", "user_home": alice, "sid": "S-1-5-21-1-1001", "connector": "claudecode", "ok": true},
+			{"user": "bob", "user_home": bob, "sid": "S-1-5-21-1-1002", "connector": "claudecode", "ok": true},
+		},
+	}
+	raw, _ := json.Marshal(record)
+	path := managed.HookGuardianAuthorizationPath(dataDir)
+	spoolDir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(dataDir))
+	for _, dir := range []string{filepath.Dir(path), spoolDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(alice, ".claude.json")
+	marker, err := enterprisehooks.MarshalClaudeMCPSpoolUnreadable("S-1-5-21-1-1001", enterprisehooks.ClaudeStateUnreadable{
+		User: "alice", Home: alice, Path: state, Reason: "access denied",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spoolDir, "S-1-5-21-1-1001.json"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	set := resolveEnrolledWatchSet(&config.Config{DataDir: dataDir}, connector.NewDefaultRegistry(),
+		config.GatewayWatcherConfig{Enabled: true}, filepath.Join(root, "service"))
+	publishClaudeStatesUnreadable(set.claudeUnreadable)
+
+	api := &APIServer{scannerCfg: &config.Config{}}
+	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__notes__read"}
+	decision, refused := api.claudeCodeMCPAssetDecision(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: alice}), req)
+	if !refused || decision.Action != "block" || !strings.Contains(decision.Reason, "of alice are blocked") || !strings.Contains(decision.Reason, state) {
+		t.Fatalf("alice: refused=%v decision %+v; want the call refused naming %s", refused, decision, state)
+	}
+	if _, refused := api.claudeCodeMCPAssetDecision(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: bob}), req); refused {
+		t.Fatal("bob's Claude Code state is readable; his MCP tool call was refused")
 	}
 }

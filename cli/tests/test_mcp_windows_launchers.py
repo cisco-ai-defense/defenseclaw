@@ -259,6 +259,26 @@ def test_uvx_resolves_to_trusted_exe_and_keeps_literal_arguments(
     assert plan.launcher == "uvx"
 
 
+def test_uvx_does_not_see_the_embeddable_scanner_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0915: the managed scanner runtime is an embeddable CPython first on
+    # PATH; uvx built the server on it and the server crashed before initialize.
+    runtime = tmp_path / "runtime" / "python"
+    _touch(runtime / "python313._pth")
+    monkeypatch.setattr(mcp.sys, "executable", _touch(runtime / "python.exe"))
+    uvx = _touch(tmp_path / "uv" / "uvx.exe")
+    path = os.fspath(runtime) + ";" + os.fspath(Path(uvx).parent)
+    monkeypatch.setattr(mcp, "_safe_subprocess_env", lambda _operator: {"PATH": path})
+    _which_map(monkeypatch, {"uvx": uvx, "uvx.exe": uvx})
+    _trusted(monkeypatch, {uvx})
+
+    plan = mcp._windows_stdio_launch_plan(MCPServerEntry(name="fixture", command="uvx", args=["mcp-server-time"]))
+
+    assert plan.env["PATH"] == os.fspath(Path(uvx).parent)
+
+
 def test_missing_uvx_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
     _which_map(monkeypatch, {"uvx": None, "uvx.exe": None})
     with pytest.raises(mcp.MCPStdioLaunchError, match="not found as native 'uvx.exe'"):
@@ -879,7 +899,15 @@ def test_error_boundaries_are_distinct_and_stderr_safe(
     assert expected in message
     assert "Connection closed" not in message
     assert "do-not-disclose-this-marker" not in message
-    assert "printed above and not stored" in message
+    assert "last stderr lines are printed above" in message
+
+
+def test_early_exit_names_the_launcher_exit_code() -> None:
+    # GAP-0915: a uvx server that crashed before initialize printed nothing,
+    # and the error said only that the launcher exited.
+    plan = mcp._StdioLaunchPlan("resolved", (), {}, "uvx")
+    message = str(mcp._classify_windows_stdio_error(ConnectionError("Connection closed"), plan, [], 0, 7, -1073741819))
+    assert "'uvx' exited with code 0xC0000005 before completing" in message
 
 
 def test_windows_scan_preserves_cancellation() -> None:

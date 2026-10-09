@@ -54,7 +54,7 @@ func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
 		t.Fatal(err)
 	}
-	servers, err := ReadClaudeMCPSpool(dir, sid, nil)
+	servers, _, err := ReadClaudeMCPSpool(dir, sid, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +67,10 @@ func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 	}
 }
 
-// An unreadable or malformed state must not leave the previously admitted
-// definition in the gateway's inventory.
-func TestWriteWindowsClaudeMCPSpoolDropsStaleState(t *testing.T) {
+// GAP-0829: an unreadable or malformed state must not leave the previously
+// admitted definition in the gateway's inventory; the record says the state
+// is unreadable instead, so the gateway fails closed for that user.
+func TestWriteWindowsClaudeMCPSpoolMarksUnreadableState(t *testing.T) {
 	home := t.TempDir()
 	state := filepath.Join(home, ".claude.json")
 	if err := os.WriteFile(state, []byte(`{"mcpServers":{"old":{"command":"old"}}}`), 0o600); err != nil {
@@ -77,7 +78,7 @@ func TestWriteWindowsClaudeMCPSpoolDropsStaleState(t *testing.T) {
 	}
 	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
 	const sid = "S-1-5-21-1-1001"
-	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, User: `DCLAB\dcw-std1`, UserHome: home, Connector: "claudecode"}}}
 	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
 		t.Fatal(err)
 	}
@@ -87,8 +88,8 @@ func TestWriteWindowsClaudeMCPSpoolDropsStaleState(t *testing.T) {
 	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
 		t.Fatal(err)
 	}
-	servers, err := ReadClaudeMCPSpool(dir, sid, nil)
-	if err == nil && len(servers) != 0 {
-		t.Fatalf("stale servers remain: %v", servers)
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != state || unreadable.Account() != `DCLAB\dcw-std1` {
+		t.Fatalf("servers %v, unreadable %+v (err %v); want no servers and the state marked unreadable", servers, unreadable, err)
 	}
 }
