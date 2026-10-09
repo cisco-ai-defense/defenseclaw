@@ -1506,6 +1506,12 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	})
 	measure("mcp", func() ([]AISignal, int, error) { return s.detectMCPPaths(), 0, nil })
 	measure("skill", func() ([]AISignal, int, error) { return s.detectSkills(), 0, nil })
+	if !s.opts.SecureClient {
+		measure("project_skill", func() ([]AISignal, int, error) {
+			out, err := s.detectClaudeProjectSkills()
+			return out, 0, err
+		})
+	}
 	measure("rule", func() ([]AISignal, int, error) { return s.detectRules(), 0, nil })
 	measure("plugin", func() ([]AISignal, int, error) { return s.detectPlugins(), 0, nil })
 	if s.opts.IncludeNetworkDomains {

@@ -83,6 +83,29 @@ func TestDetectSkills_EnumeratesChildBasenames(t *testing.T) {
 	}
 }
 
+func TestDetectClaudeProjectSkillsOnlyInsideOwningHome(t *testing.T) {
+	home, outside := t.TempDir(), t.TempDir()
+	project := filepath.Join(home, "work", "app")
+	for _, root := range []string{project, outside} {
+		if err := os.MkdirAll(filepath.Join(root, ".claude", "skills", "project-skill"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := `{"projects":{"` + filepath.ToSlash(project) + `":{},"` + filepath.ToSlash(outside) + `":{}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home, HomeDirs: []string{home}, StoreRawLocalPaths: true},
+		catalog: []AISignature{{ID: "claudecode", Name: "Claude Code", SupportedConnector: "claudecode"}}}
+	signals, err := svc.detectClaudeProjectSkills()
+	if err == nil || len(signals) != 1 || !slices.Contains(signals[0].Basenames, "project-skill") {
+		t.Fatalf("project skills = %+v, warning = %v", signals, err)
+	}
+	if !evidenceInsideHome(signals[0].Evidence, []string{home}) {
+		t.Fatalf("outside project entered inventory: %+v", signals[0])
+	}
+}
+
 // TestDetectPlugins_EnumeratesChildBasenames — same fix, plugins.
 func TestDetectPlugins_EnumeratesChildBasenames(t *testing.T) {
 	tmp := t.TempDir()
