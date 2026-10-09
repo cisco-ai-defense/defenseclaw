@@ -513,7 +513,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	}
 	name := resolveActiveConnectorName(dataDir)
 	if name == "codex" && connectorFlagConfigHome == "" {
-		connector.PinConnectorConfigRootsToSetup(dataDir)
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
 	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
@@ -867,7 +867,7 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	}
 	name := resolveActiveConnectorName(dataDir)
 	if name == "codex" && connectorFlagConfigHome == "" {
-		connector.PinConnectorConfigRootsToSetup(dataDir)
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
 	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
@@ -940,7 +940,7 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	}
 	name := resolveActiveConnectorName(dataDir)
 	if name == "codex" && connectorFlagConfigHome == "" {
-		connector.PinConnectorConfigRootsToSetup(dataDir)
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
 	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {

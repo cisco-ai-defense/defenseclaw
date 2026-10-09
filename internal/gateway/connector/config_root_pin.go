@@ -23,6 +23,30 @@ var connectorConfigRootPins = []struct {
 	{"codex", "CODEX_HOME", "config.toml", []string{".codex"}, []string{"config.toml"}},
 }
 
+// PinConnectorConfigRootsForCommand pins the config roots for one connector
+// command and returns a func that puts the variables back, so the pin does not
+// outlive the command in a longer-lived process.
+func PinConnectorConfigRootsForCommand(dataDir string) func() {
+	saved := make(map[string]*string, len(connectorConfigRootPins))
+	for _, pin := range connectorConfigRootPins {
+		if value, ok := os.LookupEnv(pin.variable); ok {
+			saved[pin.variable] = &value
+		} else {
+			saved[pin.variable] = nil
+		}
+	}
+	PinConnectorConfigRootsToSetup(dataDir)
+	return func() {
+		for variable, value := range saved {
+			if value == nil {
+				_ = os.Unsetenv(variable)
+			} else {
+				_ = os.Setenv(variable, *value)
+			}
+		}
+	}
+}
+
 // PinConnectorConfigRootsToSetup points the gateway process at the connector
 // config roots its setup bound, whatever the shell that started the gateway
 // has set. A restart with only CLAUDE_CONFIG_DIR set to another directory
