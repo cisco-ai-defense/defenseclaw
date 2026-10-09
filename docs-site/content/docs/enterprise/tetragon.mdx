@@ -786,8 +786,14 @@ Read these rules before you roll it out:
 5. **Restart agent sessions after enforce starts.** Tetragon marks an agent's
    processes when the agent starts, so a session that was already running when
    the controls loaded in enforce is monitored, not denied, until it restarts.
-   The same holds after a Tetragon restart, which loads the controls again. A
-   pause and a resume keep the controls loaded and keep their sessions.
+   The same holds after a Tetragon restart, which loads the controls again,
+   and after an agent's own update: a new version (for example Claude Code
+   updating itself during a session) is a new native binary, so the helper
+   loads a new controls policy for it at a later pass, and the session that
+   was already running is only monitored until it restarts. The restarted
+   session is denied. A follow-up keeps the old controls policy loaded while
+   the sessions it anchors are alive. A pause and a resume keep the controls
+   loaded and keep their sessions.
    `status` lists such sessions under "Observed, not enforced" and warns with
    `kernel_sessions_predate_controls`; `verify` warns on the agents check. Ask
    developers to restart their agents, or roll enforce out at a time they
@@ -1324,6 +1330,7 @@ reports in its load-error or error state is the problem
 | The ack went stale after an upgrade | The release changed a control, so the digest changed | Push the list form of `enforce_ack` with the old and the new digest |
 | Tetragon restarted and my own policies are gone | A restart drops policies added with `tetra` | Put the policies you keep in `/etc/tetragon/tetragon.tp.d` |
 | A pause is still on | The default pause is 4 hours | `tetragon status` shows who set it and when it ends; `tetragon resume` ends it |
+| An enforced user's running agent session is not denied (`kernel_sessions_predate_controls`) | The session started before the controls policy loaded: enforce turned on, Tetragon restarted, or the agent updated itself. An agent's own update (for example Claude Code updating itself mid-session) loads a new controls policy, and the already-running session is only monitored until it restarts | Restart the session; the restarted session is denied. A follow-up keeps the old controls policy loaded while the sessions it anchors are alive |
 
 Every code and its fix is under
 [Kernel sensor warnings](/docs/enterprise/troubleshooting#kernel-sensor-warnings).
@@ -1478,10 +1485,14 @@ Known limits of these controls:
 - A new agent session may wait a minute or two for its process id to reach an enabled controls policy. The helper reports `kernel_session_policy_pending` and accrues no covered time for that user while it waits; the user's earlier covered time stays. If loading fails, the warning remains until the policy is repaired.
 - A control denies below an agent session that Tetragon saw start while the
   controls were loaded. A session that was already running when they loaded
-  (enforce turned on, or Tetragon restarted) is monitored until it restarts
-  (`kernel_sessions_predate_controls`; "started before the kernel controls
-  loaded" under "Observed, not enforced" in `status`). A pause and a resume
-  keep the same policy loaded, so they do not have this effect.
+  (enforce turned on, Tetragon restarted, or the agent updated itself, which
+  loads a new controls policy for the new version's binary) is monitored
+  until it restarts (`kernel_sessions_predate_controls`; "started before the
+  kernel controls loaded" under "Observed, not enforced" in `status`); the
+  restarted session is denied. A pause and a resume keep the same policy
+  loaded, so they do not have this effect. A follow-up keeps the old controls
+  policy loaded while the sessions it anchors are alive, so that an agent's
+  update no longer leaves its running sessions monitored.
 - A rule matches the name that is opened. A second name for the same file,
   created beforehand (a link), is outside the control.
 - Replacing a shell profile by rename, or removing it, is not denied.
@@ -1577,6 +1588,7 @@ widen it.
 | --- | --- |
 | Tetragon stops | No kernel enforcement (fail open). Plane C falls back to `cn_proc` and `fanotify` in the same stream; status warns `tetragon_unavailable`. `enterprise linux verify` still passes; `tetragon verify` fails its Tetragon checks (running, socket, the helper reads Tetragon's events), so a ring gate on it stops until Tetragon is back |
 | Tetragon restarts | The policies it held are gone. The helper loads them again within a pass (about a minute), honoring the pause and any operator override. Agent sessions that were running are then monitored, not denied, until they restart (`kernel_sessions_predate_controls`) |
+| An agent updates itself | The new version is a new native binary, so the helper loads a new controls policy for it at a later pass and removes the old one. The session that was already running is then monitored, not denied, until it restarts (`kernel_sessions_predate_controls`); the restarted session is denied. A follow-up keeps the old controls policy loaded while the sessions it anchors are alive |
 | The computer reboots | Tetragon and the sensor helper start by themselves, the helper after Tetragon. The policies Tetragon held are gone, so the helper loads them again at its first pass (about a minute), honoring a pause set with `--for` (an `--until-reboot` pause ends with the reboot). The burn-in progress is kept; the helper saves it every 30 seconds. Every agent session is new, and one that starts before the policies load is monitored until it restarts (`kernel_sessions_predate_controls`) |
 | The helper stops | Loaded policies keep running with the scope they had. Start the helper again, or run the cleanup above. When it is back, the gateway re-attaches to its event stream within seconds |
 | Events are lost | Enforcement is unaffected. Coverage is reported as partial, and burn-in time stops |

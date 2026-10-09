@@ -52,8 +52,13 @@ says otherwise. Per-user installs never connect to Tetragon.
     An agent session that was already running when the controls loaded
     (`enforce` turned on, or Tetragon restarted) is monitored until it
     restarts (`kernel_sessions_predate_controls`); a pause and a resume keep
-    the controls loaded and the session denied. At most eight running agent
-    sessions are anchored in one monitor controls policy, because every extra
+    the controls loaded and the session denied. An agent's own update (for
+    example Claude Code updating itself mid-session) loads a new controls
+    policy, and the already-running session is only monitored until it
+    restarts; the restarted session is denied. A follow-up keeps the old
+    controls policy loaded while the sessions it anchors are alive. At most
+    eight running agent sessions are anchored in one monitor controls policy,
+    because every extra
     `file_open` hook runs for every open on the computer: further sessions
     are reported as `kernel_roots_over_limit` and their user's burn-in pauses
     until every live session is measured. A new session may wait a minute
