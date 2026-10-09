@@ -272,6 +272,34 @@ def test_a_managed_device_without_a_user_config_is_not_told_to_run_init(tmp_path
     assert not home.exists()
 
 
+def test_a_managed_device_does_not_answer_from_a_leftover_per_user_install(tmp_path, monkeypatch):
+    # GAP-0986, GAP-0987: a per-user install left on a managed computer answered
+    # config get, guardrail mode, status and doctor from its own config and
+    # gateway ("already observe", "start it: defenseclaw-gateway start").
+    from click.testing import CliRunner
+    from defenseclaw import upgrade_shim
+    from defenseclaw.main import cli
+
+    home = tmp_path / ".defenseclaw"
+    home.mkdir()
+    _config(home, "guardrail:\n  mode: observe\n")
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    for argv in (
+        ["config", "get", "guardrail.mode"],
+        ["guardrail", "mode", "observe"],
+        ["status"],
+        ["doctor"],
+    ):
+        monkeypatch.setattr("sys.argv", ["defenseclaw", *argv])
+        result = CliRunner().invoke(cli, argv)
+        assert result.exit_code == 3, (argv, result.output)
+        assert "per-user" in result.output and "uninstall --all --binaries --yes" in result.output, (argv, result.output)
+        assert "already" not in result.output and "defenseclaw-gateway start" not in result.output, (argv, result.output)
+
+
 def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
     # `config` skips the startup load, so the refusal opens its own logger.
     from unittest.mock import MagicMock

@@ -496,6 +496,12 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
+A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy
+the device enforces. `defenseclaw config get`, `guardrail`, `status` and the
+other per-user commands exit `3` and name it instead of answering from it, and
+`doctor` reports the device as managed. `defenseclaw uninstall --all --binaries
+--yes` removes it.
+
 A per-user gateway that is still running holds the managed gateway port,
 `127.0.0.1:18970`, unless its user moved it to another port. The install then
 stops before it changes anything: it fails with `api_port_held`, which names

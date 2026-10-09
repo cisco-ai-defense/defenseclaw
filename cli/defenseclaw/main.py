@@ -166,6 +166,42 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
+#: Commands a managed device still runs for an account with a leftover
+#: per-user install: removing it, the version, and doctor (which reports the
+#: device as managed and names the leftover).
+MANAGED_LEFTOVER_COMMANDS = {"uninstall", "version", "doctor"}
+
+
+def _refuse_managed_leftover(ctx: click.Context) -> None:
+    """Exit 3 when a per-user install left on a managed device would answer.
+
+    Its config and gateway are not what the device enforces, so config get,
+    guardrail mode, status and the other per-user views must not present them
+    as the policy (GAP-0986, GAP-0987). ``config validate`` still checks a
+    file an administrator is about to push.
+    """
+    invoked = ctx.invoked_subcommand
+    if invoked in MANAGED_LEFTOVER_COMMANDS or (invoked == "config" and _group_child(ctx, "config") == "validate"):
+        return
+    from defenseclaw.config_writer import managed_leftover_config, managed_leftover_message
+
+    if leftover := managed_leftover_config():
+        ux.echo(managed_leftover_message(leftover), err=True)
+        raise SystemExit(3)
+
+
+def _group_child(ctx: click.Context, group: str) -> str:
+    """The token after ``group`` in argv when ``group`` is the invoked command."""
+    if ctx.invoked_subcommand != group:
+        return ""
+    argv = sys.argv[1:]
+    try:
+        index = argv.index(group)
+    except ValueError:
+        return ""
+    return argv[index + 1] if index + 1 < len(argv) else ""
+
+
 def _guardrail_child(ctx: click.Context) -> str:
     """The exact ``guardrail`` subcommand token, or "" for anything else.
 
@@ -175,14 +211,7 @@ def _guardrail_child(ctx: click.Context) -> str:
     next token must be the nested command; intervening options or a different
     subcommand do not receive a bypass.
     """
-    if ctx.invoked_subcommand != "guardrail":
-        return ""
-    argv = sys.argv[1:]
-    try:
-        guardrail_index = argv.index("guardrail")
-    except ValueError:
-        return ""
-    return argv[guardrail_index + 1] if guardrail_index + 1 < len(argv) else ""
+    return _group_child(ctx, "guardrail")
 
 
 def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
@@ -313,6 +342,7 @@ def cli(ctx: click.Context) -> None:
 
     from defenseclaw import config as cfg_mod
 
+    _refuse_managed_leftover(ctx)
     if invoked in SKIP_LOAD_COMMANDS:
         if invoked not in LEGACY_CONFIG_BOUNDARY_COMMANDS:
             try:

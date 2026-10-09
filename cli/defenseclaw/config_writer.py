@@ -596,6 +596,46 @@ def machine_managed_standalone() -> bool:
     return bool(deployment) and (os.name != "nt" or str(deployment).strip().lower() == "standalone")
 
 
+def managed_leftover_config() -> str:
+    """The per-user config.yaml a managed standalone host does not use, or "".
+
+    A per-user install left on a managed computer answered config get,
+    guardrail mode, status and doctor from its own config and gateway as if
+    they were the policy, and printed per-user remedies the host refuses
+    (GAP-0986, GAP-0987). The managed config declares managed_enterprise;
+    any other config.yaml this account reads is such a leftover.
+    """
+    if not machine_managed_standalone():
+        return ""
+    from defenseclaw.config import _DECLARES_MANAGED, config_path
+
+    path = config_path()
+    try:
+        if not path.is_file():
+            return ""
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            if _DECLARES_MANAGED.search(handle.read(1 << 20)):
+                return ""
+    except OSError:
+        return ""
+    return str(path)
+
+
+def managed_leftover_message(path: str) -> str:
+    """Why a command does not answer from a leftover per-user install on a
+    managed device, and what to do instead."""
+    from defenseclaw.upgrade_shim import managed_lifecycle_command
+
+    lifecycle = managed_lifecycle_command()
+    admin = f" An administrator checks the policy with: sudo {lifecycle} status." if lifecycle else ""
+    return (
+        "This device is managed: the gateway enforces your administrator's config, not the per-user "
+        f"DefenseClaw install this account still has ({path}). Its settings and its gateway are not used "
+        "on this device, so this command does not report them. Remove that install with: "
+        f"defenseclaw uninstall --all --binaries --yes.{admin} Nothing was changed."
+    )
+
+
 def _managed_document(current: bytes) -> tuple[bool, dict[str, Any]]:
     """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) say managed
     enterprise, with the parsed document."""
