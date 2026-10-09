@@ -48,7 +48,7 @@ func cleanDiscoveryHomes(homes []string) []string {
 // wins. An empty answer (the registry unreadable, or a platform without a
 // profile list) keeps the current list.
 func (o *AIDiscoveryOptions) applyPlatformHomeOwners(owners []discoveryHomeOwner) {
-	if len(owners) == 0 {
+	if owners == nil || (o.SecureClient && len(owners) == 0) {
 		return
 	}
 	kept, excluded := splitExcludedHomeOwners(owners, o.ExcludeUsers)
@@ -65,6 +65,8 @@ func (o *AIDiscoveryOptions) applyPlatformHomeOwners(owners []discoveryHomeOwner
 	o.homeOwners, o.excludedOwners, o.HomeDirs = kept, excluded, homes
 	if len(homes) > 0 {
 		o.HomeDir = homes[0]
+	} else {
+		o.HomeDir = ""
 	}
 }
 

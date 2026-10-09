@@ -308,6 +308,35 @@ func TestManagedDiscoveryRereadsTheProfileListEachFullScan(t *testing.T) {
 	}
 }
 
+func TestManagedDiscoveryRemovesDeletedLastProfileOnce(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "deleted-user")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owners := []discoveryHomeOwner{{Home: home, UserID: "S-1-5-21-1-2-3-1125", UserName: "deleted-user"}}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return owners }
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+	}, []AISignature{{ID: "claudecode", Name: "Claude Code", SupportedConnector: "claudecode", ConfigPaths: []string{"~/.claude"}}})
+	cleanupPreparedDiscoveryService(t, svc)
+	first, err := svc.runScan(context.Background(), true, "test")
+	if err != nil || first.Summary.ActiveSignals == 0 {
+		t.Fatalf("first scan = %+v, %v", first.Summary, err)
+	}
+	owners = []discoveryHomeOwner{} // successful ProfileList read, no resolvable SID
+	second, err := svc.runScan(context.Background(), true, "test")
+	if err != nil || second.Summary.GoneSignals == 0 || second.Summary.ActiveSignals != 0 {
+		t.Fatalf("deleted account scan = %+v, %v", second.Summary, err)
+	}
+	third, err := svc.runScan(context.Background(), true, "test")
+	if err != nil || third.Summary.GoneSignals != 0 || third.Summary.ActiveSignals != 0 {
+		t.Fatalf("repeated deletion scan = %+v, %v", third.Summary, err)
+	}
+}
+
 // ai_discovery.home_dirs adds folders to a managed scan's profile list. It
 // replaced the list, so every IDE row and signal lost its owner (GAP-0969).
 func TestManagedDiscoveryHomeDirsAddToTheProfileList(t *testing.T) {
