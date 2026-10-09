@@ -189,36 +189,38 @@ version 8 file: it applies the installed config.
 | OS and channel | How to go back |
 | --- | --- |
 | Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade CONFIG=<version 8 config> JSON=1`: an explicit `upgrade` does not compare versions. Uninstalling and installing the older release also works |
-| Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`, then `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak --json` |
-| RHEL | `rpm -U` refuses an older package. Use `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm`, then run the same `ensure --from-package --allow-downgrade --config ...` |
+| Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`. A release that reads `config_version: 8` then needs `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak --json` |
+| RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package). A release that reads `config_version: 8` then needs the same `ensure --from-package --allow-downgrade --config ...` |
 | Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak --json` |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /`. An older release that reads `config_version: 9` applies the installed config and is done (`last-package-result.json` reads `ok`). Only a release that reads version 8 fails on the version 9 config; then run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --from-package --allow-downgrade --config <version 8 config> --json` with your version 8 administrator config, or `/opt/cisco/defenseclaw/etc/config.yaml.v8.bak` (the config before this host's last migration) |
 
-- **Linux packages.** The package's install script runs
-  `ensure --from-package` without `--allow-downgrade`, so after the package
-  manager installs the older package the lifecycle refuses with
-  `downgrade_refused` and records that in `last-package-result.json`. Run the
-  `ensure --from-package --allow-downgrade` command above to apply the older
-  release. Run the two steps back to back: until the second one runs, the
-  older release cannot read a version 9 config, so a restart of its services
-  fails.
+- **Linux packages and macOS.** The package's preinstall script refuses an
+  older package before any file changes, unless the marker exists: the
+  package manager reports the failure, and the deployed release keeps running
+  unchanged. With the marker, the postinstall script runs
+  `ensure --from-package --allow-downgrade` and deletes the marker, so each
+  rollback needs a new marker. An `ensure --from-package` that you run
+  yourself, to finish an install or a rollback, records its result in
+  `last-package-result.json` as the install script does.
+- **A release that reads `config_version: 8` (Linux).** Its install script
+  cannot apply the version 9 config, so it records the failure in
+  `last-package-result.json`. Run the `ensure --from-package
+  --allow-downgrade --config ...` command above right after the package
+  manager finishes: until it runs, the older release cannot read a version 9
+  config, so a restart of its services fails.
 - **Debian and Ubuntu.** An apt hook shipped with the package
   (`/etc/apt/apt.conf.d/50defenseclaw-enterprise`) refuses an older `.deb`
   before dpkg replaces any file, unless the rollback marker
   `/var/lib/defenseclaw-enterprise/allow-downgrade` exists. `apt` shows the
-  refusal and the running deployment is untouched. The marker is used up by
-  the downgrade it allows, so each rollback needs a new one. The hook runs
+  refusal and the running deployment is untouched. The hook leaves the marker
+  for the older package's own scripts above. The hook runs
   only for `apt` and `apt-get`: `dpkg -i` of an older package is
-  not refused, so do not use it to go back. The hook comes with the package
+  not refused by it, so do not use it to go back. The hook comes with the package
   that is installed now, so a release from before it was added does not
   refuse.
 - **RHEL.** `dnf` and `rpm` run the installed package's scripts after the
-  older files are in place, so they cannot refuse the downgrade; use the
-  rollback only on purpose.
-- **macOS.** The package's preinstall script refuses an older package before
-  any file changes, unless the marker exists. The postinstall script passes
-  `--allow-downgrade` to the lifecycle and deletes the marker, so each
-  rollback needs a new marker.
+  older files are in place, so only the older package's own preinstall can
+  refuse the downgrade.
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so
   it refuses older RHEL packages.
 
@@ -598,6 +600,13 @@ to keep the machine state for a reinstall instead.
   that runs out of time (60 seconds; a large `~/.defenseclaw` on slow storage
   after a reboot, say) is retried once with five minutes; one that times out
   again says what usually holds it up.
+- **Manifest rows (Linux and macOS).** Uninstall resolves each row of
+  `targets.yaml` to its account the way reconcile does, so a row with only
+  `user` or `user_home` works. When a row does not resolve (the account does
+  not exist, or the directory does not answer), uninstall refuses before it
+  stops any service or removes any policy: the result names the row with
+  `per_user_hooks_remaining` and says nothing was changed. Fix or remove that
+  row and run the uninstall again.
 - **Per-user state (Linux and macOS).** `--purge` also removes everything
   DefenseClaw put in each enrolled user's home, as that user. It first stops
   the user's per-user gateway and watchdog, if one runs, and restores the

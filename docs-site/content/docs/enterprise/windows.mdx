@@ -685,7 +685,10 @@ admission is separate: see [Scan skills, MCP servers and plugins](#scan-skills-m
 `ai_component.discovered`, `changed` and `removed` records with the user
 (`user.id`, `defenseclaw.user.name`) but without the skill or MCP server
 name: the per-entry `ai_component.observed` records stay in the local
-inventory, so read the names with `discovery --user <account> --json`. See
+inventory, so read the names with `discovery --user <account> --json`. The
+one exception is the connector address: with `ai_discovery.include_user_email`
+on, one `ai_component.observed` record per account and connector carries the
+account's Claude Code or Codex address, without entry names. See
 [AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)
 for the folders the service may read in each profile.
 

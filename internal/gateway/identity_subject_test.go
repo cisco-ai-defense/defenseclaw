@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -487,4 +488,96 @@ func TestProcessOwnerProfileSubjectKeepsConnectorWithoutIdentityLookup(t *testin
 	if got := set.matchUncached(&subject, profileSubjectProcessOwner, "openclaw", ""); got.Match != profileMatchConnector {
 		t.Fatalf("optional lookup selected %+v", got)
 	}
+}
+
+// TestUPNAssignmentWarnsWhenInfoPipeReportsNoUPN: a users entry written as a
+// UPN matches only through the UPN the guardian reads from InfoPipe. When
+// InfoPipe stops reporting userPrincipalName the entry selects nobody, so the
+// assignment warnings name the entry and the likely cause; a kept UPN still
+// matches but is reported (GAP-1114).
+func TestUPNAssignmentWarnsWhenInfoPipeReportsNoUPN(t *testing.T) {
+	now := time.Now()
+	assignments := []config.ProfileAssignment{{Profile: "w4-strict", Match: config.ProfileMatch{Users: []string{"w4a2.alt@alt.dclab.test"}}}}
+	record := enterprisehooks.IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", UpdatedAt: now,
+		UPNSource: enterprisehooks.UPNSourceDerived, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@dclab.test"}}
+	got := upnAssignmentWarnings(assignments, []enterprisehooks.IdentitySpoolRecord{record}, now)
+	if len(got) != 1 || !strings.Contains(got[0], `assignment 1: user "w4a2.alt@alt.dclab.test"`) || !strings.Contains(got[0], "userPrincipalName") {
+		t.Fatalf("warnings = %q, want the unmatched UPN entry and the InfoPipe cause", got)
+	}
+	record.UPNSource, record.Facts.UPN = enterprisehooks.UPNSourceInfoPipeKept, "w4a2.alt@alt.dclab.test"
+	got = upnAssignmentWarnings(assignments, []enterprisehooks.IdentitySpoolRecord{record}, now)
+	if len(got) != 1 || !strings.Contains(got[0], "keeps the UPN") || strings.Contains(got[0], "match no account") {
+		t.Fatalf("warnings = %q, want only the kept-UPN note", got)
+	}
+	record.UPNSource = enterprisehooks.UPNSourceInfoPipe
+	if got = upnAssignmentWarnings(assignments, []enterprisehooks.IdentitySpoolRecord{record}, now); len(got) != 0 {
+		t.Fatalf("warnings = %q with InfoPipe reporting the UPN, want none", got)
+	}
+}
+
+// TestOpenDirectoryGroupsUnavailableIsALookupFailure: with the domain
+// controller down a bound Mac lists an Active Directory account without its
+// domain groups, its primary group only as a number. That is a failed lookup,
+// whose reason names the flush, not facts that send the user to the default
+// profile without a warning (GAP-1106).
+func TestOpenDirectoryGroupsUnavailableIsALookupFailure(t *testing.T) {
+	ad := enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}}
+	unnamed := func(string) bool { return false }
+	err := openDirectoryGroupsUnavailable(ad, "2027364327", unnamed)
+	if err == nil || !strings.Contains(err.Error(), "dsmemberutil flushcache") {
+		t.Fatalf("err = %v, want a lookup failure naming the flush", err)
+	}
+	if err := openDirectoryGroupsUnavailable(ad, "2027364327", func(string) bool { return true }); err != nil {
+		t.Fatalf("named primary group: %v", err)
+	}
+	local := enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}}
+	if err := openDirectoryGroupsUnavailable(local, "20", unnamed); err != nil {
+		t.Fatalf("local account: %v", err)
+	}
+}
+
+// An ide.plugin record carries the directory attribution every other
+// inventory record carries, so a local account and a directory account with
+// the same bare name differ by more than user.id in the strict sink
+// (GAP-1088).
+func TestIDEPluginRecordsCarryTheOwnersDirectory(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	facts := useridentity.DirectoryFacts{
+		Principal: "dcad-o4ud@dclab.test", Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+		Source: useridentity.SourceSSSDInfoPipe, Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(),
+	}
+	original := managedHookPeerDirectory
+	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) { return facts, uid == 1201 }
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScanID: "scan-ide", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok"},
+		IDEInventory: &inventory.IDEInventory{Plugins: []inventory.IDEPlugin{{
+			PluginID: "anthropic.claude-code", Product: "vscode", Version: "2.0.1", Enabled: "enabled", IsAI: true,
+			UserID: "1201", UserName: "dcad-o4ud", State: inventory.AIStateNew,
+		}}},
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range capture.snapshot() {
+		if record.EventName() != observability.EventName(observability.TelemetryEventIdePluginDiscovered) {
+			continue
+		}
+		body := canonicalBody(t, record)
+		for key, want := range map[string]string{
+			observability.TelemetryAttributeDefenseClawUserDirectory:          string(facts.Directory),
+			observability.TelemetryAttributeDefenseClawUserDomain:             facts.Domain,
+			observability.TelemetryAttributeDefenseClawUserIdentitySource:     string(facts.Source),
+			observability.TelemetryAttributeDefenseClawUserPrincipalAssurance: string(facts.Assurance),
+		} {
+			if got, _ := body[key].(string); got != want {
+				t.Errorf("%s = %q, want %q", key, got, want)
+			}
+		}
+		return
+	}
+	t.Fatal("no ide.plugin.discovered record")
 }

@@ -299,7 +299,11 @@ enabled:
   MCP records (`ai_component.observed`, which name each entry) carry the
   user too, but stay in the local inventory (a Secure Client deployment
   also sends them to Cisco AI Defense). Read entry names with the
-  `discovery` view below.
+  `discovery` view below. With `ai_discovery.include_user_email` on, each
+  account's Claude Code and Codex address goes to your destinations on one
+  `ai_component.observed` record per account and connector each discovery
+  cycle, without entry names
+  ([Optional connector email](/docs/observability/end-user-identity#optional-connector-email)).
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
 - A user's results turn `gone` when the user leaves the manifest, or after the longer of three
@@ -344,7 +348,8 @@ such as the profile root that `scan_roots: ["~"]` names, are skipped
 without failing the scan. Only enrolled profiles are read: the profile of an
 account that `enterprise.enrollment.exclude_users` names is not, the
 processes in its sessions are left out, and the components it reported
-before are reported `removed` once; the enumerator also takes away the read
+before are reported `removed` once, at the first scan after the change is
+applied, without a gateway restart; the enumerator also takes away the read
 access an earlier install granted it. `ai_discovery.home_dirs` adds folders
 to the enrolled profiles and never replaces them, and a folder inside an
 excluded profile is not read.
@@ -461,7 +466,7 @@ its own owner's inventory.
 | --- | --- | --- |
 | Per-user (OSS) | The user's own gateway | That user's home only |
 | Standalone enterprise, Linux and macOS | The hook guardian, as each enrolled user | Each enrolled user's home. It does not follow links out of the home |
-| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each enrolled profile; Visual Studio installs under Program Files are machine-wide |
+| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each enrolled profile; Visual Studio installs under Program Files are machine-wide. It reads nothing through a link, junction or mount point below a profile, and skips an `ai_discovery.home_dirs` folder that is one; each refused path gets one `ai_discovery_link_refused` warning in the gateway log |
 
 A machine-wide row belongs to no account. A Visual Studio extension
 installed for all users under `Program Files` is listed once, however many

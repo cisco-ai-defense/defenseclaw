@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
@@ -249,24 +250,41 @@ func TestStandaloneForeignCleanupSkipsRecreatedHomes(t *testing.T) {
 	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, time.Now(), enterprisehooks.Manifest{}, nil)
 }
 
+// GAP-1101: rows written as enrollment.mdx documents (user, or user_home,
+// with the connector) carry no uid, gid or home. remove-all failed them, so
+// uninstall stopped halfway; it now resolves them as reconcile does, and a
+// row it cannot resolve is failed under a name, never an empty one.
 func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 	previousCheck := enterpriseHookCheckHome
-	t.Cleanup(func() { enterpriseHookCheckHome = previousCheck })
+	t.Cleanup(func() {
+		enterpriseHookCheckHome = previousCheck
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
 	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
 		if home == "/home/pending" {
 			return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending}
 		}
 		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
 	}
+	ownHome := t.TempDir()
+	accounts := map[string]unixidentity.Account{"bob": {Name: "bob", UID: 1002, GID: 20, Home: "/home/bob"}}
+	if os.Getuid() > 0 {
+		accounts["dana"] = unixidentity.Account{Name: "dana", UID: os.Getuid(), GID: os.Getgid(), Home: ownHome}
+	}
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: accounts})
 	uid := func(value int) *int { return &value }
+	missingHome := filepath.Join(ownHome, "gone")
 	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
 		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "codex"},
 		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "devin", DataDir: "/home/alice/.dc"},
 		{User: "carol", UserHome: "/home/pending", UID: uid(1003), GID: uid(1003), Connector: "codex"},
 		{User: "legacy", UserHome: "/home/legacy", Connector: "codex"},
+		{User: "bob", Connector: "claudecode", AgentVersion: "2.1.0"},
+		{UserHome: ownHome, Connector: "claudecode"},
+		{UserHome: missingHome, Connector: "claudecode"},
 	}}
-	jobs, pending, failed := enterpriseHookRemoveJobs(manifest)
-	if len(jobs) != 1 || len(jobs[1001].Request.Targets) != 2 {
+	jobs, pending, failed := enterpriseHookRemoveJobs(resolveEnterpriseHookRemoveRows(manifest))
+	if len(jobs[1001].Request.Targets) != 2 {
 		t.Fatalf("jobs %+v", jobs)
 	}
 	for _, target := range jobs[1001].Request.Targets {
@@ -277,7 +295,18 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 	if jobs[1001].Request.Targets[1].Options.DataDir != "/home/alice/.dc" || jobs[1001].Request.Targets[0].Options.DataDir != "/home/alice/.defenseclaw" {
 		t.Fatalf("data dirs %+v", jobs[1001].Request.Targets)
 	}
-	if strings.Join(pending, ",") != "carol/codex" || len(failed) != 1 || !strings.HasPrefix(failed[0], "legacy/codex") {
+	if bob := jobs[1002]; bob == nil || bob.Account != (enterpriseHookWorkerAccount{UID: 1002, GID: 20, User: "bob", Home: "/home/bob"}) ||
+		len(bob.Request.Targets) != 1 || bob.Request.Targets[0].Options.ConnectorName != "claudecode" {
+		t.Fatalf("the user-only row did not resolve to bob's account: %+v", bob)
+	}
+	if os.Getuid() > 0 {
+		if dana := jobs[os.Getuid()]; dana == nil || dana.Account.User != "dana" || dana.Account.Home != ownHome {
+			t.Fatalf("the home-only row did not resolve to the home's owner: %+v", dana)
+		}
+	}
+	if strings.Join(pending, ",") != "carol/codex" || len(failed) != 2 ||
+		!strings.HasPrefix(failed[0], "legacy/codex: target account \"legacy\" does not exist") ||
+		!strings.HasPrefix(failed[1], missingHome+"/claudecode: user home "+missingHome+" is not available") {
 		t.Fatalf("pending %v failed %v", pending, failed)
 	}
 }

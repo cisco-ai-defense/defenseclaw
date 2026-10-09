@@ -29,6 +29,10 @@ func GroupNameLookupDefinitive() bool { return true }
 func QualifiedGroupName(context.Context, Resolver, string) string { return "" }
 func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
 
+// SameNameAccounts finds no twins on macOS: Open Directory resolves a short
+// name to one account.
+func SameNameAccounts(context.Context, Resolver, Account) []Account { return nil }
+
 const darwinDSCL = "/usr/bin/dscl"
 
 // DefaultUIDRange is the interactive-account uid range. macOS local

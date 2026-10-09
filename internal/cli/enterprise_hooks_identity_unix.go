@@ -56,7 +56,11 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 	keys := []string{}
 	seen := map[int]bool{}
 	for _, row := range run.Rows {
-		if row.UID <= 0 || row.Pending || seen[row.UID] {
+		// A pending row with a resolved uid (its home is not available, or
+		// was recreated) stays enrolled: its record keeps being refreshed,
+		// since a pass removes the records of the accounts it does not list
+		// (GAP-1113).
+		if row.UID <= 0 || seen[row.UID] {
 			continue
 		}
 		seen[row.UID] = true
@@ -117,7 +121,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	// The interval runs on the monotonic clock, but the gateway trusts a
 	// record by its wall-clock age: after a clock step the records are
 	// rewritten at the next one-minute tick (GAP-0921).
-	_, stepped := enterprisehooks.IdentitySpoolStale(dir, now, enterpriseHookIdentitySpoolInterval+2*enterpriseHookIdentitySpoolRetryInterval)
+	_, _, stepped := enterprisehooks.IdentitySpoolStale(dir, now, enterpriseHookIdentitySpoolInterval+2*enterpriseHookIdentitySpoolRetryInterval)
 	due := !state.running && (fingerprint != state.fingerprint || now.Sub(state.last) >= interval || stepped)
 	if due {
 		state.running = true

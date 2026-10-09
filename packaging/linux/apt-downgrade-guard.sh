@@ -14,8 +14,9 @@
 # apt sends the "VERSION 2" protocol on stdin (see apt.conf(5)): the
 # configuration, a blank line, then one line per package action:
 #   name old-version direction new-version action
-# A deliberate rollback creates the root-owned marker first; the marker is
-# used up by the downgrade it allows.
+# A deliberate rollback creates the root-owned marker first. The hook leaves
+# it in place: the older package's preinstall checks it as well, and its
+# postinstall applies the package with --allow-downgrade and deletes it.
 
 set -u
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
@@ -34,10 +35,11 @@ dpkg --compare-versions "$(release "$incoming")" lt "$(release "$installed")" ||
 
 marker=$state/allow-downgrade
 if [ -f "$marker" ] && [ ! -L "$marker" ]; then
-    rm -f "$marker"
+    # Leave the marker: the older package's preinstall checks it too, and its
+    # postinstall applies the package with --allow-downgrade and deletes it.
     exit 0
 fi
 echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming, because the older release cannot read this release's config_version 9 config. Nothing was changed." >&2
 echo "  For a deliberate rollback create the marker first: sudo touch $marker" >&2
-echo "  then install the older package and finish with: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak" >&2
+echo "  then install the older package. A release that reads config_version 8 must then be finished with: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak" >&2
 exit 1

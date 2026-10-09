@@ -67,12 +67,22 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 
 umask 077
 mkdir -p "$state" && chmod 0700 "$state"
+# The preinstall let an older package through only for the root-owned
+# rollback marker; apply it as the deliberate rollback it is, and delete the
+# marker, so each rollback needs a new one (GAP-1115).
+marker="$state/allow-downgrade"
+downgrade=""
+if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(stat -c %u "$marker" 2>/dev/null)" = 0 ]; then
+    downgrade=" --allow-downgrade"
+fi
 # An apply run that started before the trigger was held may hold the lock
 # for a whole transaction; wait for it like the apply trigger does. When it
 # already applied this package, ensure is a no-op and reports success.
-"$gateway" enterprise linux ensure --from-package --reason package --json --lock-wait 10m \
+# shellcheck disable=SC2086 # $downgrade is empty or one flag
+"$gateway" enterprise linux ensure --from-package$downgrade --reason package --json --lock-wait 10m \
     >"$state/last-package-result.json" 2>"$state/last-package-result.log"
 status=$?
+rm -f "$marker"
 if [ "$apply_path_was_active" = 1 ]; then
     if systemctl start "$apply_path" >/dev/null 2>&1; then
         rm -f "$held"
@@ -106,7 +116,7 @@ case "$status" in
         ;;
     75)
         echo "defenseclaw-enterprise: installed, but another DefenseClaw lifecycle run held the lock for 10 minutes." >&2
-        echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package" >&2
+        echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         ;;
     *)
         # Name the cause (the first error of the JSON result, one line) so
@@ -128,7 +138,7 @@ case "$status" in
         if [ -n "$cause" ]; then
             echo "  $cause" >&2
         fi
-        echo "  Fix that, then $finish: sudo $gateway enterprise linux ensure --from-package" >&2
+        echo "  Fix that, then $finish: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         echo "  The full result is in $state/last-package-result.json." >&2
         ;;
 esac

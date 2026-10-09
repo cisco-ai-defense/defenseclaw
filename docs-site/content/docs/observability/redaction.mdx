@@ -29,7 +29,11 @@ local destination's v8 profile upstream; do not rely on panel queries.
 <Callout type="warn" title="Review the effective plan before enabling export">
 An enabled destination with no `send` or `routes` receives every signal it supports,
 from every bucket, with profile `none`. Run `defenseclaw observability plan` and
-`defenseclaw doctor` to find unredacted legs.
+`defenseclaw doctor` to find unredacted legs. On a managed install, where those
+per-user commands are not available, run `defenseclaw enterprise <os> status`
+(`linux`, `macos` or `windows`) as an administrator: it lists each destination
+with its kind, signals and effective redaction profile (`destinations[]` in
+`--json`).
 </Callout>
 
 ## Guided CLI workflow
@@ -488,6 +492,9 @@ defenseclaw config show --effective --section observability
 defenseclaw observability plan
 defenseclaw doctor
 ```
+
+On a managed install, `defenseclaw enterprise <os> status` run as an
+administrator lists the same destinations and resolved profiles.
 
 The source view shows deliberate choices. The effective/plan views show generated
 local SQLite policy, capability-default routes, resolved profiles, and warnings.

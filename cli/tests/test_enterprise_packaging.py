@@ -888,6 +888,38 @@ def test_linux_preinstall_refuses_a_config_newer_than_the_package(tmp_path: Path
     assert host.calls() == []
 
 
+# GAP-1115: dnf downgrade replaced every binary before the postinstall ensure
+# refused the downgrade, which left the older binaries under the newer
+# deployment (verify_failed, a failed apply unit). The stamped preinstall now
+# refuses an older package before anything changes, unless the root-owned
+# rollback marker exists; the postinstall then applies it with
+# --allow-downgrade and deletes the marker.
+def test_linux_preinstall_refuses_a_downgrade_without_the_rollback_marker(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    (host.state / "deployment.json").write_text('{\n  "product_version": "1.0.7101-SNAPSHOT-37ba9cdbb"\n}\n', encoding="utf-8")
+    _write_stub(host.bin, "stat", "echo 0")  # the record and the marker are root-owned
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+    }
+    script = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting)
+    older, deployed = "1.0.7100-SNAPSHOT-37ba9cdbb", "1.0.7101-SNAPSHOT-37ba9cdbb"
+    refused = host.run(script.replace("@DC_PKG_VERSION@", older), "2")
+    assert refused.returncode == 1
+    assert "Nothing was changed" in refused.stderr and "--allow-downgrade" in refused.stderr
+    assert host.calls() == []
+    assert host.run(script.replace("@DC_PKG_VERSION@", deployed), "2").returncode == 0
+    marker = host.state / "allow-downgrade"
+    marker.write_text("", encoding="utf-8")
+    assert host.run(script.replace("@DC_PKG_VERSION@", older), "2").returncode == 0
+    post = host.run(_linux_scriptlet(host, "postinstall.sh").replace("/run/defenseclaw-enterprise-apply-path.held", str(tmp_path / "held")), "2")
+    assert post.returncode == 0, post.stderr
+    assert "gateway enterprise linux ensure --from-package --allow-downgrade --reason package" in "\n".join(host.calls())
+    assert not marker.exists()
+
+
 # Preremove ran uninstall with the 5 s default and exited 0
 # on busy (75), so dpkg/rpm deleted the binaries and units while machine
 # policy, per-user hooks and the running gateway still named them.
@@ -960,7 +992,7 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
         timeout=60,
     )
     assert result.returncode == exit_code, (result.stdout, result.stderr)
-    assert not allow.exists() or exit_code == 1
+    assert allow.exists() == marker  # left for the older package's preinstall and postinstall (GAP-1115)
     if exit_code:
         assert "refusing to downgrade to 1.0.45~SNAPSHOT-aaa" in result.stderr
         assert f"sudo touch {allow}" in result.stderr

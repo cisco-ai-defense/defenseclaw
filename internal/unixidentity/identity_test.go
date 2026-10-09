@@ -347,10 +347,12 @@ func TestLookupAccountSpelling(t *testing.T) {
 	eli6 := Account{Name: `DCLAB\dcad-eli6`, UID: 2003912}
 	eli7 := Account{Name: "dcad-eli7", UID: 2003913}
 	ldap := Account{Name: "ldapcarol", UID: 4001}
+	w4a1 := Account{Name: "dcad-w4a1@dclab.test", UID: 94403999}
 	r := spellingResolver{answers: map[string]Account{
 		`DCLAB\dcad-eli6`: eli6, "dcad-eli6@dclab.test": eli6, "dcad-eli6": eli6,
 		"dcad-eli7": eli7, `DCLAB\dcad-eli7`: eli7, "eli7.alt@alt.dclab.test": eli7,
-		"carol@dclab.test": ldap,
+		"carol@dclab.test":     ldap,
+		"dcad-w4a1@dclab.test": w4a1, `DCLAB\dcad-w4a1`: w4a1, `OTHER\dcad-w4a1`: w4a1,
 	}}
 	facts := func(uid int) (useridentity.DirectoryFacts, bool) {
 		switch uid {
@@ -358,6 +360,8 @@ func TestLookupAccountSpelling(t *testing.T) {
 			return useridentity.DirectoryFacts{Domain: "dclab.test", Realm: "DCLAB.TEST"}, true
 		case eli7.UID:
 			return useridentity.DirectoryFacts{Domain: "dclab.test", UPN: "eli7.alt@alt.dclab.test"}, true
+		case w4a1.UID:
+			return useridentity.DirectoryFacts{Domain: "dclab.test", Realm: "DCLAB.TEST", AccountDomain: "DCLAB"}, true
 		}
 		return useridentity.DirectoryFacts{Domain: "dclab.test"}, true
 	}
@@ -372,6 +376,11 @@ func TestLookupAccountSpelling(t *testing.T) {
 		{`DCLAB\dcad-eli7`, false, eli7.UID},
 		{"eli7.alt@alt.dclab.test", true, eli7.UID},
 		{"carol@dclab.test", true, -1},
+		// GAP-1089: DOMAIN\user, the users entry spelling, takes the qualified
+		// name SSSD answers for it when the account's verified NetBIOS domain
+		// is the one written, and no other domain.
+		{`DCLAB\dcad-w4a1`, true, w4a1.UID},
+		{`OTHER\dcad-w4a1`, true, -1},
 	} {
 		lookupFacts := facts
 		if !tt.facts {
@@ -380,6 +389,9 @@ func TestLookupAccountSpelling(t *testing.T) {
 		got, err := LookupAccountSpelling(r, tt.name, lookupFacts)
 		if tt.want < 0 && err == nil || tt.want >= 0 && (err != nil || got.UID != tt.want) {
 			t.Fatalf("LookupAccountSpelling(%q, facts=%v) = %+v, %v; want uid %d", tt.name, tt.facts, got, err, tt.want)
+		}
+		if err != nil && strings.Contains(AccountLookupError(tt.name, "", err).Error(), "unixidentity:") {
+			t.Fatalf("the lookup error of %q keeps the package prefix: %v", tt.name, AccountLookupError(tt.name, "", err))
 		}
 	}
 }

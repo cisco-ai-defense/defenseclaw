@@ -78,6 +78,10 @@ func sampleResults() map[string]*Result {
 		HigherPrecedence: []string{"mdm_managed_preferences"}, Conflicts: []string{}, LiveVerifiedAt: "2026-09-26T18:00:00Z",
 	}
 	installed.Enrollment = Enrollment{Targets: 3, Pending: 1, Exempt: 1}
+	installed.Destinations = []Destination{
+		{Name: "local-sqlite", Kind: "local_sqlite", Enabled: true, Signals: []string{"logs"}, RedactionProfiles: []string{"none"}},
+		{Name: "galileo", Kind: "otlp", Enabled: true, Preset: "galileo", Signals: []string{"traces"}, RedactionProfiles: []string{"strict"}},
+	}
 	installed.CoverageComplete = true
 	installed.SecurityComplete = true
 	installed.AddWarning("not_started", "installed with --no-start")

@@ -107,7 +107,7 @@ func ParseGroupLine(line string) (Group, error) {
 	if len(fields) != 4 {
 		return Group{}, fmt.Errorf("unixidentity: group entry has %d fields, want 4", len(fields))
 	}
-	if err := validName(fields[0]); err != nil {
+	if err := validGroupName(fields[0]); err != nil {
 		return Group{}, err
 	}
 	gid, err := parseID(fields[2], "gid")
@@ -183,6 +183,19 @@ func validName(name string) error {
 		}
 	}
 	return nil
+}
+
+// validGroupName is validName for a group looked up or read by name, which
+// may hold a space between words: directory groups are named "domain
+// users@corp.example.com" or "CORP\Domain Users". Refusing the space made
+// every such lookup an error, which the profile assignment check reads as
+// "unknown", so an assignment naming one was never warned about (GAP-1111).
+// A leading or trailing space is still refused.
+func validGroupName(name string) error {
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf("unixidentity: group name %q starts or ends with a space", name)
+	}
+	return validName(strings.ReplaceAll(name, " ", "_"))
 }
 
 func parseID(raw, label string) (int, error) {

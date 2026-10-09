@@ -104,6 +104,9 @@ type enterpriseDiscoveryAccount struct {
 	UpdatedAt time.Time            `json:"updated_at"`
 	Result    string               `json:"result"`
 	Signals   []inventory.AISignal `json:"signals"`
+	// twin marks an account that shares its bare name with another one; the
+	// summary then shows its SID too (GAP-1091).
+	twin bool
 }
 
 type enterpriseDiscoveryReport struct {
@@ -312,30 +315,40 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 		return err
 	}
 	report := enterpriseDiscoveryReport{Gateway: host, Accounts: []enterpriseDiscoveryAccount{}}
-	byUser := map[string]int{}
-	// Secure Client keeps the exact account name or SID match and its
-	// message (issue #1092).
+	byAccount := map[string]int{}
+	// One entry per account, keyed by its SID: a domain account and a local
+	// account of the same name are two accounts, and a component one of them
+	// holds is never listed under the other's SID (GAP-1091). Secure Client
+	// keeps the exact account name or SID match and the grouping by name of
+	// main (issue #1092).
 	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	account := useridentity.NewAccountFilter(user)
+	if user != "" && !secureClient {
+		account = useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+	}
 	for _, signal := range usage.Signals {
 		name := signal.UserName
-		matches := useridentity.AccountFilterMatches(user, signal.UserID, name)
+		matches, key := account.Matches(signal.UserID, name), windowsDiscoveryAccountKey(signal)
 		if secureClient {
-			matches = strings.EqualFold(user, name) || strings.EqualFold(user, signal.UserID)
+			matches, key = strings.EqualFold(user, name) || strings.EqualFold(user, signal.UserID), strings.ToLower(name)
 		}
 		if user != "" && !matches {
 			continue
 		}
-		index, ok := byUser[strings.ToLower(name)]
+		index, ok := byAccount[key]
 		if !ok {
 			index = len(report.Accounts)
-			byUser[strings.ToLower(name)] = index
+			byAccount[key] = index
 			report.Accounts = append(report.Accounts, enterpriseDiscoveryAccount{
 				User: name, SID: signal.UserID, UpdatedAt: usage.Summary.ScannedAt, Result: usage.Summary.Result,
 			})
 		}
 		report.Accounts[index].Signals = append(report.Accounts[index].Signals, signal)
 	}
-	sort.Slice(report.Accounts, func(i, j int) bool {
+	if !secureClient {
+		nameWindowsDiscoveryTwins(report.Accounts)
+	}
+	sort.SliceStable(report.Accounts, func(i, j int) bool {
 		return strings.ToLower(report.Accounts[i].User) < strings.ToLower(report.Accounts[j].User)
 	})
 	if user != "" && len(report.Accounts) == 0 {
@@ -362,14 +375,53 @@ func addWindowsDiscoveryUserFlag(cmd *cobra.Command, user *string) {
 	_ = cmd.Flags().SetAnnotation("user", secureClientUsageAnnotation, []string{"list one account's signals (account name or SID)"})
 }
 
+// windowsDiscoveryAccountKey is the account a signal was found for: its SID,
+// or its name for a signal without one.
+func windowsDiscoveryAccountKey(signal inventory.AISignal) string {
+	if signal.UserID != "" {
+		return strings.ToUpper(signal.UserID)
+	}
+	return "name:" + strings.ToLower(signal.UserName)
+}
+
+// enterpriseDiscoveryAccountIDs resolves a qualified --user (DOMAIN\name,
+// .\name, user@domain) to the id of the account the OS names so, and
+// enterpriseDiscoveryAccountName names a SID DOMAIN\name as the LSA does
+// ("" when it does not answer). Both are replaceable in tests.
+var (
+	enterpriseDiscoveryAccountIDs  = platformDiscoveryAccountIDs
+	enterpriseDiscoveryAccountName = platformDiscoveryAccountName
+)
+
+// nameWindowsDiscoveryTwins names each account that shares its bare name
+// with another one (a domain and a local account of one name) DOMAIN\name or
+// COMPUTER\name, so the two entries say whose they are (GAP-1091).
+func nameWindowsDiscoveryTwins(accounts []enterpriseDiscoveryAccount) {
+	shared := map[string]int{}
+	for _, account := range accounts {
+		if account.SID != "" {
+			shared[strings.ToLower(useridentity.BareAccountName(account.User))]++
+		}
+	}
+	for i, account := range accounts {
+		if account.SID == "" || shared[strings.ToLower(useridentity.BareAccountName(account.User))] < 2 {
+			continue
+		}
+		if qualified := enterpriseDiscoveryAccountName(account.SID); qualified != "" {
+			accounts[i].User = qualified
+		}
+		accounts[i].twin = true
+	}
+}
+
 // windowsDiscoveryAccountNotFound says why --user selected nothing: the
 // scan is off, found nothing yet, or found other accounts only (GAP-0079).
 func windowsDiscoveryAccountNotFound(user string, usage enterpriseGatewayAIUsage) string {
 	message := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's last scan", user)
 	accounts := map[string]struct{}{}
 	for _, signal := range usage.Signals {
-		if signal.UserName != "" {
-			accounts[strings.ToLower(signal.UserName)] = struct{}{}
+		if signal.UserName != "" || signal.UserID != "" {
+			accounts[windowsDiscoveryAccountKey(signal)] = struct{}{}
 		}
 	}
 	switch {
@@ -392,6 +444,11 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 		return err
 	}
 	report := enterpriseDiscoveryReport{Spool: dir, Accounts: []enterpriseDiscoveryAccount{}}
+	// The view matches --user as agent-identities and ide-plugins do: the
+	// bare name the records carry, user@domain as id prints it, DOMAIN\name
+	// and the uid all name the account (GAP-1081).
+	account := useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+	scanned := 0
 	for _, entry := range entries {
 		uid, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || uid == "" || strings.Trim(uid, "0123456789") != "" {
@@ -402,7 +459,8 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 			report.Errors = append(report.Errors, fmt.Sprintf("uid %s: %v", uid, err))
 			continue
 		}
-		if user != "" && user != record.User && user != strconv.Itoa(record.UID) {
+		scanned++
+		if !account.Matches(strconv.Itoa(record.UID), record.User) {
 			continue
 		}
 		accountUID := record.UID
@@ -413,7 +471,9 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 	}
 	sort.Slice(report.Accounts, func(i, j int) bool { return *report.Accounts[i].UID < *report.Accounts[j].UID })
 	if user != "" && len(report.Accounts) == 0 && len(report.Errors) == 0 {
-		return fmt.Errorf("no AI Discovery record for account %q in %s; the account is not enrolled or has not been scanned yet", user, dir)
+		return fmt.Errorf("no AI Discovery record for account %q in %s (%d account(s) scanned); name the account as its bare "+
+			"name, user@domain as id prints it, DOMAIN\\name or its uid. If that is the account, it is not enrolled or has not "+
+			"been scanned yet", user, dir, scanned)
 	}
 	return writeEnterpriseDiscoveryReport(w, report, user, asJSON,
 		fmt.Sprintf("AI Discovery inventory from the hook guardian's per-user scans (%s)", dir))
@@ -455,6 +515,8 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 			name = "machine-wide (no account)"
 		case account.UID != nil:
 			name = fmt.Sprintf("%s (uid %d)", name, *account.UID)
+		case account.twin:
+			name = fmt.Sprintf("%s (SID %s)", name, account.SID)
 		}
 		fmt.Fprintf(w, "%s: scanned %s, result %s, %d signal(s)\n",
 			name, account.UpdatedAt.UTC().Format(time.RFC3339), account.Result, len(account.Signals))
