@@ -1388,6 +1388,35 @@ func TestVerifiedUIDAssignmentSurvivesDirectoryFailure(t *testing.T) {
 	}
 }
 
+// The first hook after a directory recovery must see a completed retry before
+// it decides against a strict group assignment.
+func TestWindowsGroupAssignmentRetryOnFirstHook(t *testing.T) {
+	var lookups atomic.Int32
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\strict-users`}}},
+	}
+	lookup := func(string) (string, error) {
+		if lookups.Add(1) == 1 {
+			return "", errors.New("directory unavailable")
+		}
+		time.Sleep(25 * time.Millisecond)
+		return "S-1-5-21-860-1-2-1105", nil
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "default", assignments: assignments, matches: newProfileMatchCache(),
+		profiles:  map[string]config.DerivedGuardrailProfile{"default": {}, "strict": {}},
+		groupSIDs: newProfileGroupSIDs(assignments, lookup, time.Second),
+	}
+	set.groupSIDs.mu.Lock()
+	set.groupSIDs.entries[foldKey(`CORP\strict-users`)].nextTry = time.Time{}
+	set.groupSIDs.mu.Unlock()
+	subject := &profileSubject{UserID: "S-1-5-21-860-1-2-1001", IDKind: useridentity.KindWindowsSID,
+		Groups: []string{"S-1-5-21-860-1-2-1105"}}
+	if got := set.match(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchGroup {
+		t.Fatalf("first hook after retry selected %+v, want strict group profile", got)
+	}
+}
+
 // GAP-0860: stalled SID-to-name lookups left the caller groups bare SIDs, so
 // a standalone Windows assignment that names the group missed. Assignment
 // group names resolve to SIDs once per profile set and match the SIDs of the
