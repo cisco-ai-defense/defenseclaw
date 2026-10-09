@@ -209,6 +209,69 @@ t_codex_no_home_metadata_uses_system_or_empty() {
   fi
 }
 
+t_codex_from_official_standalone_installer() {
+  local home; home="$(mktest_tmp)"
+  local releases="${home}/.codex/packages/standalone/releases"
+  local release="${releases}/0.161.0-aarch64-apple-darwin"
+  mkdir -p "${release}/bin" "${home}/.local/bin"
+  : > "${release}/bin/codex"
+  chmod 0755 "${release}/bin/codex"
+  printf '%s\n' \
+    '{"layoutVersion":1,"version":"0.161.0","target":"aarch64-apple-darwin","variant":"codex"}' \
+    > "${release}/codex-package.json"
+  ln -s "${release}" "${home}/.codex/packages/standalone/current"
+  ln -s "${home}/.codex/packages/standalone/current/bin/codex" \
+    "${home}/.local/bin/codex"
+
+  local got
+  got="$(_codex_native_version_from_home "${home}")"
+  assert_eq "${got}" "0.161.0" \
+    "codex version from official standalone installer metadata"
+}
+
+t_codex_official_standalone_rejects_external_selection() {
+  local home; home="$(mktest_tmp)"
+  local outside; outside="$(mktest_tmp)/0.161.0-aarch64-apple-darwin"
+  mkdir -p "${home}/.codex/packages/standalone/releases" \
+    "${home}/.local/bin" "${outside}/bin"
+  : > "${outside}/bin/codex"
+  chmod 0755 "${outside}/bin/codex"
+  printf '%s\n' '{"version":"0.161.0"}' > "${outside}/codex-package.json"
+  ln -s "${outside}" "${home}/.codex/packages/standalone/current"
+  ln -s "${home}/.codex/packages/standalone/current/bin/codex" \
+    "${home}/.local/bin/codex"
+
+  local got
+  got="$(_codex_native_version_from_home "${home}")"
+  assert_eq "${got}" "" \
+    "codex standalone current link outside releases root rejected"
+}
+
+t_codex_from_nvm_global_metadata() {
+  _codex_app_bundle_version() { :; }
+  _codex_native_version_from_home() { :; }
+  local home; home="$(mktest_tmp)"
+  local pkg="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex/package.json"
+  mkdir -p "$(dirname -- "${pkg}")"
+  printf '%s\n' '{"name":"@openai/codex","version":"0.162.0"}' > "${pkg}"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version codex "${home}")"
+  assert_eq "${got}" "0.162.0" "codex version from NVM global metadata"
+  . "${PKG_DIR}/lib/installer_lib.sh"
+}
+
+t_claudecode_from_nvm_global_metadata() {
+  local home; home="$(mktest_tmp)"
+  local pkg="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@anthropic-ai/claude-code/package.json"
+  mkdir -p "$(dirname -- "${pkg}")"
+  printf '%s\n' '{"name":"@anthropic-ai/claude-code","version":"2.1.301"}' > "${pkg}"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.301" "claudecode version from NVM global metadata"
+}
+
 t_codex_from_chatgpt_bundle_metadata() {
   # Current ChatGPT.app releases moved the embedded CLI below
   # Resources/codex-cli/ and publish its version in codex-package.json.
@@ -791,6 +854,10 @@ run_case "claudecode via Claude Desktop embedded bundle" t_claudecode_via_claude
 run_case "claudecode Claude Desktop picks highest bundled" t_claudecode_desktop_embedded_picks_highest_version
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
+run_case "codex via official standalone installer" t_codex_from_official_standalone_installer
+run_case "codex standalone rejects external current link" t_codex_official_standalone_rejects_external_selection
+run_case "codex via NVM global metadata"     t_codex_from_nvm_global_metadata
+run_case "claudecode via NVM global metadata" t_claudecode_from_nvm_global_metadata
 run_case "codex via current ChatGPT.app bundle metadata" t_codex_from_chatgpt_bundle_metadata
 run_case "codex rejects invalid ChatGPT.app bundle version" t_codex_chatgpt_bundle_metadata_rejects_invalid_version
 run_case "codex via standalone Codex.app as target user" t_codex_from_standalone_app_executes_as_target_user
