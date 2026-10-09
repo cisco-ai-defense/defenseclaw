@@ -4801,6 +4801,18 @@ func TestGuardrailInspector_SetScannerMode(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleGuardrailEvent_GeneratedMetricsRecorded(t *testing.T) {
+	// The shared registry keeps the first agent identity for the process, so
+	// restore the previous one; otherwise later tests in the same Windows CI
+	// shard (TestSecureClientEvaluationMatchesMain) record this agent id.
+	sharedRegMu.Lock()
+	prior := sharedReg
+	sharedReg = nil
+	sharedRegMu.Unlock()
+	t.Cleanup(func() {
+		sharedRegMu.Lock()
+		sharedReg = prior
+		sharedRegMu.Unlock()
+	})
 	InstallSharedAgentRegistry("agent-h3-test", "openclaw")
 	api, capture := newGuardrailEventV8TestAPI(t)
 	tokIn, tokOut := int64(250), int64(120)
