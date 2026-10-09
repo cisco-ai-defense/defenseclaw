@@ -65,6 +65,12 @@ func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
+	// Windows registers the native hook launcher through an encoded
+	// PowerShell command instead of hooks/codex-hook.sh.
+	hookMarker := []byte("codex-hook")
+	if runtime.GOOS == "windows" {
+		hookMarker = []byte("-EncodedCommand")
+	}
 	for _, root := range []struct {
 		path     string
 		wantHook bool
@@ -73,7 +79,7 @@ func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		if got := bytes.Contains(raw, []byte("codex-hook")); got != root.wantHook {
+		if got := bytes.Contains(raw, hookMarker); got != root.wantHook {
 			t.Fatalf("%s hook presence = %t, want %t", root.path, got, root.wantHook)
 		}
 	}
