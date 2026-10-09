@@ -3658,7 +3658,7 @@ def _refresh_rego_policies(data_dir: str, config_path: str) -> None:
     if _guardrail_runtime_migration_is_managed(text):
         return
     policy_dir = _configured_policy_dir(data_dir, text)
-    if not any(_path_within(policy_dir, home) for home in (data_dir, os.path.dirname(config_path))):
+    if not _path_within(os.path.join(policy_dir, "rego"), data_dir):
         stale = stale_modules(policy_dir)
         if stale:
             ux.warn(
@@ -3698,7 +3698,7 @@ def _refresh_rego_policies(data_dir: str, config_path: str) -> None:
 
 
 def _path_within(path: str, root: str) -> bool:
-    path, root = (os.path.normcase(os.path.abspath(os.path.expanduser(p))) for p in (path, root))
+    path, root = (os.path.normcase(os.path.realpath(os.path.expanduser(p))) for p in (path, root))
     try:
         return os.path.commonpath([path, root]) == root
     except ValueError:  # different drives on Windows
