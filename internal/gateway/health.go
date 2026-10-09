@@ -196,10 +196,30 @@ type InterceptionHealth struct {
 	LastVerifiedAt     string `json:"last_verified_at,omitempty"`
 	LastAgentTrafficAt string `json:"last_agent_traffic_at,omitempty"`
 	// LastAgentModelActivityAt is when the agent last completed a model call, as
-	// the gateway event stream reports it. A call that completed with no proxy
-	// hop (LastAgentTrafficAt) near it did not go through the proxy.
+	// the gateway event stream reports it.
 	LastAgentModelActivityAt string `json:"last_agent_model_activity_at,omitempty"`
+	// AgentModelCalls counts the model calls OpenClaw reported as completed
+	// since this gateway started; AgentModelCallsProxied counts those paired
+	// with an agent proxy hop of their own. Each hop pairs with at most one
+	// call, so a proxied call never vouches for a later one (GAP-0836). Both
+	// are omitted at zero, so a Secure Client health document is unchanged.
+	AgentModelCalls        uint64 `json:"agent_model_calls,omitempty"`
+	AgentModelCallsProxied uint64 `json:"agent_model_calls_proxied,omitempty"`
+	// LastUnproxiedModelCallAt and LastProxiedModelCallAt are when a model
+	// call last completed without and with a hop of its own.
+	LastUnproxiedModelCallAt string `json:"last_unproxied_model_call_at,omitempty"`
+	LastProxiedModelCallAt   string `json:"last_proxied_model_call_at,omitempty"`
 }
+
+// agentHopPairingWindow bounds how long an agent proxy hop waits for the
+// model call it carried to complete; an older hop pairs with no call.
+const agentHopPairingWindow = 10 * time.Minute
+
+// maxUnpairedAgentHops and maxCountedModelCallIDs bound the pairing state.
+const (
+	maxUnpairedAgentHops   = 256
+	maxCountedModelCallIDs = 512
+)
 
 type SidecarHealth struct {
 	mu                                    sync.RWMutex
@@ -272,6 +292,16 @@ type SidecarHealth struct {
 	interceptionVerifiedAt   time.Time
 	lastAgentProxyTrafficAt  time.Time
 	lastAgentModelActivityAt time.Time
+	// Model-call pairing (GAP-0836): agent proxy hops not yet paired with a
+	// completed model call (oldest first), the paired counters, and the
+	// message IDs already counted, so a repeated frame counts once.
+	unpairedAgentHops        []time.Time
+	agentModelCalls          uint64
+	agentModelCallsProxied   uint64
+	lastProxiedModelCallAt   time.Time
+	lastUnproxiedModelCallAt time.Time
+	countedModelCallIDs      map[string]struct{}
+	countedModelCallOrder    []string
 
 	// subscribers receive a non-blocking notification after every Set*
 	// call, so long-lived consumers (like the IPC GetHealth stream)
@@ -767,21 +797,61 @@ func (h *SidecarHealth) RecordAgentProxyTraffic() {
 	if h == nil {
 		return
 	}
+	now := time.Now()
 	h.mu.Lock()
-	h.lastAgentProxyTrafficAt = time.Now().UTC()
+	h.lastAgentProxyTrafficAt = now.UTC()
+	h.unpairedAgentHops = append(h.unpairedAgentHops, now)
+	if n := len(h.unpairedAgentHops); n > maxUnpairedAgentHops {
+		h.unpairedAgentHops = h.unpairedAgentHops[n-maxUnpairedAgentHops:]
+	}
 	h.mu.Unlock()
 	h.notifySubscribers()
 }
 
-// RecordAgentModelActivity records that the agent completed a model call, as
-// the OpenClaw gateway event stream reports it. Doctor compares it with the
-// proxy hops to tell a self-test that passes from traffic that is intercepted.
-func (h *SidecarHealth) RecordAgentModelActivity() {
+// RecordAgentModelActivity records that the agent completed the model call
+// messageID, as the OpenClaw gateway event stream reports it, and pairs it
+// with the oldest unpaired agent proxy hop of the pairing window. A call with
+// no hop left did not go through the proxy. A failed call is counted only
+// when it took a hop: one that failed before any request is no evidence of a
+// bypass. Doctor reads the paired counters (GAP-0836).
+func (h *SidecarHealth) RecordAgentModelActivity(messageID string, failed bool) {
 	if h == nil {
 		return
 	}
+	now := time.Now()
 	h.mu.Lock()
-	h.lastAgentModelActivityAt = time.Now().UTC()
+	if messageID != "" {
+		if _, seen := h.countedModelCallIDs[messageID]; seen {
+			h.mu.Unlock()
+			return
+		}
+		if h.countedModelCallIDs == nil {
+			h.countedModelCallIDs = make(map[string]struct{})
+		}
+		h.countedModelCallIDs[messageID] = struct{}{}
+		h.countedModelCallOrder = append(h.countedModelCallOrder, messageID)
+		if len(h.countedModelCallOrder) > maxCountedModelCallIDs {
+			delete(h.countedModelCallIDs, h.countedModelCallOrder[0])
+			h.countedModelCallOrder = h.countedModelCallOrder[1:]
+		}
+	}
+	for len(h.unpairedAgentHops) > 0 && now.Sub(h.unpairedAgentHops[0]) > agentHopPairingWindow {
+		h.unpairedAgentHops = h.unpairedAgentHops[1:]
+	}
+	paired := len(h.unpairedAgentHops) > 0
+	if paired {
+		h.unpairedAgentHops = h.unpairedAgentHops[1:]
+	}
+	if paired || !failed {
+		h.lastAgentModelActivityAt = now.UTC()
+		h.agentModelCalls++
+		if paired {
+			h.agentModelCallsProxied++
+			h.lastProxiedModelCallAt = now.UTC()
+		} else {
+			h.lastUnproxiedModelCallAt = now.UTC()
+		}
+	}
 	h.mu.Unlock()
 	h.notifySubscribers()
 }
@@ -1588,6 +1658,14 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		}
 		if !h.lastAgentModelActivityAt.IsZero() {
 			info.LastAgentModelActivityAt = h.lastAgentModelActivityAt.UTC().Format(time.RFC3339)
+		}
+		info.AgentModelCalls = h.agentModelCalls
+		info.AgentModelCallsProxied = h.agentModelCallsProxied
+		if !h.lastUnproxiedModelCallAt.IsZero() {
+			info.LastUnproxiedModelCallAt = h.lastUnproxiedModelCallAt.UTC().Format(time.RFC3339)
+		}
+		if !h.lastProxiedModelCallAt.IsZero() {
+			info.LastProxiedModelCallAt = h.lastProxiedModelCallAt.UTC().Format(time.RFC3339)
 		}
 		snap.Interception = info
 	}

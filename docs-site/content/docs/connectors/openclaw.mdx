@@ -234,8 +234,11 @@ was proxied and inspected.
 OpenClaw ≥2026.6.8 is the release range that first required the undici
 dispatcher layers. `defenseclaw doctor` fails the **OpenClaw interception**
 row when the plugin self-test cannot prove a rewrite onto the guardrail proxy,
-even if `/health` returns 200, and warns when OpenClaw completed a model call
-that never reached the proxy.
+even if `/health` returns 200. The gateway pairs each model call OpenClaw
+completes with a proxy hop of its own, so earlier proxied traffic never covers
+a later call. Doctor fails the row when the latest such call took no hop, and
+warns when an earlier one did not but the calls after it did. The counts start
+again when `defenseclaw-gateway` restarts.
 
 ## What the plugin does
 
