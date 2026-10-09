@@ -421,12 +421,28 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 			return errors.New("detector notes must be short printable text")
 		}
 	}
+	// Marketplace AI extensions use generated ide-* signatures. Tie those
+	// signatures to the AI plugin rows in this report when inventory is on.
+	dynamicIDE := make(map[string]bool)
+	if report.IDEInventory != nil {
+		for _, plugin := range report.IDEInventory.Plugins {
+			if plugin.IsAI && plugin.Family == "vscode" &&
+				plugin.AISignatureID == "ide-"+strings.ToLower(plugin.PluginID) {
+				dynamicIDE[plugin.AISignatureID] = true
+			}
+		}
+	}
 	known := make(map[string]bool, len(catalog))
 	for _, sig := range catalog {
 		known[sig.ID] = true
 	}
 	for _, sig := range report.Signals {
-		if !known[sig.SignatureID] && (sig.SignatureID != localModelArtifactSignatureID || sig.Detector != "model_file") {
+		marketplaceIDE := sig.Category == SignalEditorExtension && sig.Detector == "editor_extension" &&
+			strings.HasPrefix(sig.SignatureID, "ide-") &&
+			len(sig.SignatureID) > len("ide-") && len(sig.SignatureID) <= maxUserScanField &&
+			(report.IDEInventory == nil || dynamicIDE[sig.SignatureID])
+		if !known[sig.SignatureID] && !marketplaceIDE &&
+			(sig.SignatureID != localModelArtifactSignatureID || sig.Detector != "model_file") {
 			return errors.New("signal names a signature outside the scan catalog")
 		}
 		if !isSHA256Hash(sig.Fingerprint) {
