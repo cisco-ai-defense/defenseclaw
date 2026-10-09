@@ -484,9 +484,10 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	}
 	user := strings.TrimSpace(q.Get("user"))
 	filter := inventory.AgentIdentityFilter{
-		User:      user,
-		UserIDs:   adminViewAccountIDs(user),
-		Connector: strings.ToLower(strings.TrimSpace(q.Get("connector"))),
+		User:           user,
+		UserIDs:        adminViewAccountIDs(user),
+		RemovedAccount: adminViewRemovedAccount(user),
+		Connector:      strings.ToLower(strings.TrimSpace(q.Get("connector"))),
 	}
 	// Write the buffered rows first, so one count of sessions serves the
 	// listing. A failed write leaves them buffered and merged below.
@@ -711,8 +712,24 @@ var adminViewAccountIDs = func(user string) []string {
 	return []string{id}
 }
 
+// adminViewRemovedAccount is the RemovedAccount of an agent identity
+// listing for user: a deleted account's rows keep its last name and its uid
+// or SID, so its qualified name still lists the ones recorded with the bare
+// name (GAP-1221). An id is a removed account's when no account holds it now
+// and the domain user names could have held it (adminViewDomainCouldHold).
+// A bare name or an id needs none.
+func adminViewRemovedAccount(user string) func(id string) bool {
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	name := hostAccountNamer()
+	return func(id string) bool {
+		return useridentity.KindForID(id) != "" && name(id) == "" && adminViewDomainCouldHold(user, id)
+	}
+}
+
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if user := filter.User; user != "" && !useridentity.NewAccountFilter(user, filter.UserIDs...).Matches(rec.UserID, rec.UserName) {
+	if filter.User != "" && !filter.Account().Matches(rec.UserID, rec.UserName) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

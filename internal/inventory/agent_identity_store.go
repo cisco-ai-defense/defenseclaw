@@ -102,14 +102,24 @@ type AgentIdentityFilter struct {
 	User string
 	// UserIDs are the ids of the account the OS resolves a qualified User
 	// to, so a row recorded with the bare name matches it by id.
-	UserIDs   []string
-	Connector string
+	UserIDs []string
+	// RemovedAccount reports whether no account holds a row's user id now
+	// and the domain of a qualified User could have held it: such a User
+	// that resolves to no account (a deleted one) still selects its rows
+	// recorded with the bare name (GAP-1221).
+	RemovedAccount func(id string) bool
+	Connector      string
 	// AgentIDs, when set, selects only these agents.
 	AgentIDs []string
 	// Offset skips that many matching rows; Limit caps the rows returned
 	// after them (0 or less: no cap). The total counts every match.
 	Offset int
 	Limit  int
+}
+
+// Account is the compiled user filter (useridentity.AccountFilter).
+func (f AgentIdentityFilter) Account() useridentity.AccountFilter {
+	return useridentity.NewAccountFilter(f.User, f.UserIDs...).WithRemovedAccounts(f.RemovedAccount)
 }
 
 func ensureAgentIdentitiesTable(ctx context.Context, exec interface {
@@ -319,7 +329,7 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	// loop below counts, skips and limits. Without
 	// it SQLite does.
 	user := strings.TrimSpace(filter.User)
-	account := useridentity.NewAccountFilter(user, filter.UserIDs...)
+	account := filter.Account()
 	total := -1
 	if user == "" && (filter.Limit > 0 || filter.Offset > 0) {
 		counted, err := s.queryDB(ctx, "agent_identities.count", `SELECT COUNT(*) FROM agent_identities`+where, args...)

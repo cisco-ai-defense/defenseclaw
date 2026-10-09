@@ -88,6 +88,30 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{Connector: "codex"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
 		t.Fatalf("connector filter rows = %+v, err %v", rows, err)
 	}
+	// GAP-1221: a deleted account's qualified name resolves to no account,
+	// yet still lists its rows, which a Windows host records with the bare
+	// name next to the SID; the live local twin's stay out (GAP-0366). Once
+	// the name is re-hired under a new SID it lists that account's rows only.
+	const goneSID, twinSID, rehiredSID = "S-1-5-21-1-2-3-1201", "S-1-5-21-9-8-7-1001", "S-1-5-21-1-2-3-1301"
+	carol := AgentIdentityRecord{AgentID: "agt-00000000000000c1", UserID: goneSID, UserName: "carol", Connector: "codex",
+		MachineHash: "m", FirstSeen: t0, LastSeen: t0}
+	twin, rehired := carol, carol
+	twin.AgentID, twin.UserID = "agt-00000000000000c2", twinSID
+	rehired.AgentID, rehired.UserID = "agt-00000000000000c3", rehiredSID
+	if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{carol, twin}); err != nil {
+		t.Fatal(err)
+	}
+	byName := AgentIdentityFilter{User: `DCLAB\carol`, RemovedAccount: func(id string) bool { return id == goneSID }}
+	if rows, _, err = st.ListAgentIdentities(ctx, byName); err != nil || len(rows) != 1 || rows[0].UserID != goneSID {
+		t.Fatalf("deleted account's qualified name lists %+v, err %v; want its own rows only", rows, err)
+	}
+	if err := st.UpsertAgentIdentities(ctx, []AgentIdentityRecord{rehired}); err != nil {
+		t.Fatal(err)
+	}
+	byName.UserIDs = []string{rehiredSID}
+	if rows, _, err = st.ListAgentIdentities(ctx, byName); err != nil || len(rows) != 1 || rows[0].UserID != rehiredSID {
+		t.Fatalf("re-hired account's qualified name lists %+v, err %v; want the new account's rows only", rows, err)
+	}
 	if _, err := st.PruneAgentIdentities(ctx, t0.Add(4*time.Hour)); err != nil {
 		t.Fatal(err)
 	}

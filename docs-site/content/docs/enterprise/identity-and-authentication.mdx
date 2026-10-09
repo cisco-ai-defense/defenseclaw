@@ -510,6 +510,9 @@ PowerShell prompt (or as LocalSystem from an MDM script):
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows ide-plugins --user alice
 ```
 
+After an account is deleted, `agent-identities --user` still finds its agent
+identities by the name they are listed under, by its uid or by its SID.
+
 `profile-explain` also lists every configured profile with its digest under
 `profiles`, in place of `profile list` and `profile show`. For fleet-wide
 views, use the Grafana **Identity & Users** board.

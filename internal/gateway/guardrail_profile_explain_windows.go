@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -36,6 +37,20 @@ func LookupWindowsAccount(name string) (id, userName string, err error) {
 		}
 	}
 	return resolveWindowsExplainAccount(name, lsaAccountBySID, lsaAccountByName)
+}
+
+// adminViewDomainCouldHold reports whether the domain of user, a qualified
+// --user filter, could hold sid: .\name and COMPUTER\name name an account of
+// this computer, any other domain or a UPN a directory account, and the SID
+// tells which. A deleted account read by its qualified name is never its
+// twin of the other kind (GAP-0366, GAP-1221).
+func adminViewDomainCouldHold(user, sid string) bool {
+	local := false
+	if domain, _, qualified := strings.Cut(strings.TrimSpace(user), `\`); qualified {
+		computer, _ := windows.ComputerName()
+		local = domain == "." || computer != "" && strings.EqualFold(domain, computer)
+	}
+	return enterprisehooks.WindowsLocalAccountSID(sid) == local
 }
 
 // profileExplainUnresolved reports an account the LSA cannot name with the
