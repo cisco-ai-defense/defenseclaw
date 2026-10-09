@@ -396,8 +396,10 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("self-test", result.checks[0]["detail"])
         self.assertIn("agent traffic", result.checks[0]["detail"])
 
-    def test_proxy_interception_warns_when_a_model_call_missed_the_proxy(self):
+    def test_proxy_interception_fails_when_a_model_call_missed_the_proxy(self):
         # GAP-0190: a passing self-test is not proof that real model calls take the proxy.
+        # GAP-0836: each call needs a hop of its own, so a proxied call does not
+        # vouch for a later call that took no hop.
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -413,14 +415,20 @@ class DoctorGuardrailTests(unittest.TestCase):
         def stamp(minutes_ago: int) -> str:
             return (now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        for traffic, missed in ((None, True), (stamp(30), True), (stamp(1), False)):
-            info = {"verified": True, "last_verified_at": stamp(0), "last_agent_model_activity_at": stamp(0)}
-            if traffic:
-                info["last_agent_traffic_at"] = traffic
+        for calls, proxied, last_missed, last_proxied, want in (
+            (2, 1, stamp(0), stamp(4), "fail"),
+            (2, 2, None, stamp(0), "pass"),
+            (3, 2, stamp(4), stamp(0), "warn"),
+        ):
+            info = {"verified": True, "last_verified_at": stamp(0), "last_agent_traffic_at": stamp(4),
+                    "agent_model_calls": calls, "agent_model_calls_proxied": proxied,
+                    "last_proxied_model_call_at": last_proxied}
+            if last_missed:
+                info["last_unproxied_model_call_at"] = last_missed
             result = _DoctorResult()
             _check_proxy_interception(cfg, result, live_health={"interception": info})
-            self.assertEqual((result.passed, result.warned), (0, 1) if missed else (1, 0), result.checks)
-            if missed:
+            self.assertEqual(result.checks[0]["status"], want, result.checks)
+            if want != "pass":
                 self.assertIn("did not go through the guardrail proxy", result.checks[0]["detail"])
 
     def test_proxy_interception_fails_when_self_test_is_stale(self):

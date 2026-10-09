@@ -682,8 +682,11 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// operation. The source reports no start instant, so the adapter
 		// records a truthful zero-duration span and retains only its ended
 		// W3C context for a subsequent tool or approval child.
-		if msg.Role == "assistant" && msg.Model != "" && r.health != nil && !secureClientGeneration() {
-			r.health.RecordAgentModelActivity()
+		// OpenClaw's own assistant frames (provider "openclaw", such as a
+		// delivery mirror) are not provider calls a proxy hop carries.
+		if msg.Role == "assistant" && msg.Model != "" && r.health != nil && !secureClientGeneration() &&
+			!strings.EqualFold(msg.Provider, "openclaw") {
+			r.health.RecordAgentModelActivity(envelope.MessageID, msg.StopReason == "error" || msg.ErrorMessage != "")
 		}
 		if msg.Role == "assistant" && msg.Model != "" && emitModelOperation {
 			promptTokens, completionTokens := int64(0), int64(0)

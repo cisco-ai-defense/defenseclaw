@@ -247,9 +247,18 @@ func TestSidecarHealthInterceptionSnapshot(t *testing.T) {
 	if snap.Interception.LastAgentModelActivityAt != "" {
 		t.Fatal("no model call was reported yet")
 	}
-	h.RecordAgentModelActivity()
+	h.RecordAgentModelActivity("msg-1", false)
 	if h.Snapshot().Interception.LastAgentModelActivityAt == "" {
 		t.Fatal("expected last_agent_model_activity_at after a completed model call")
+	}
+	// GAP-0836: each hop pairs with one call, so a proxied call followed by
+	// one that took no hop leaves one call unproxied; a repeated frame of the
+	// same message counts once.
+	h.RecordAgentModelActivity("msg-2", false)
+	h.RecordAgentModelActivity("msg-2", false)
+	if got := h.Snapshot().Interception; got.AgentModelCalls != 2 || got.AgentModelCallsProxied != 1 ||
+		got.LastUnproxiedModelCallAt == "" {
+		t.Fatalf("paired counters = %+v, want 2 calls with 1 proxied", got)
 	}
 
 	h.RecordInterceptionResult(false)

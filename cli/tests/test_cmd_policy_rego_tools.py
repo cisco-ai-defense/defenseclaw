@@ -102,6 +102,18 @@ class TestPolicyRegoToolsWithoutOPA(PolicyCommandTestBase):
         self.assertIn(user_rego, result.output)
         self.assertNotIn("site-packages", result.output)
 
+    def test_validate_fails_when_the_policy_directory_is_gone(self):
+        # GAP-0889: after init a deleted policy_dir fails, as in
+        # defenseclaw-gateway policy validate, instead of passing on the
+        # bundled copy inside the package.
+        with open(os.path.join(self.app.cfg.data_dir, "config.yaml"), "w") as f:
+            f.write("config_version: 9\n")
+        shutil.rmtree(self.app.cfg.policy_dir)
+        result, calls = self._run(["validate"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("read rego directory", result.output)
+        self.assertEqual(calls, [])
+
     def test_delete_help_has_no_internal_tags(self):
         result = self.invoke(["delete", "--help"])
         self.assertEqual(result.exit_code, 0, result.output)

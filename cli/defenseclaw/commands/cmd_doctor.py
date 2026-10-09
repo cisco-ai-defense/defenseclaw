@@ -8742,8 +8742,6 @@ _INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
 # The plugin reports every 60 s and a restarted sidecar starts with no
 # report, so a fresh sidecar gets two cadences before a missing one fails.
 _INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
-# A model call completes after its proxy hop; a longer gap means it took no hop.
-_INTERCEPTION_MODEL_CALL_GRACE = timedelta(minutes=10)
 
 
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -8813,15 +8811,16 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         )
         return
     if info.get("verified") is True and _interception_self_test_is_fresh(info):
-        missed = _model_call_missed_the_proxy(info)
+        level, missed = _model_call_missed_the_proxy(info)
         if missed:
             _emit(
-                "warn",
+                level,
                 label,
                 f"the plugin self-test passed, but {missed} - possible bypass",
                 remediation=(
                     "restart the OpenClaw gateway so the DefenseClaw plugin reloads, then rerun doctor; if "
-                    "this returns, look for '[defenseclaw] intercept via=' lines in the OpenClaw gateway log"
+                    "this returns, look for '[defenseclaw] intercept via=' lines in the OpenClaw gateway log "
+                    "(the counts start again when the DefenseClaw gateway restarts)"
                 ),
                 r=r,
             )
@@ -8873,25 +8872,36 @@ def _interception_self_test_is_fresh(info: dict) -> bool:
     return verified_at is not None and datetime.now(timezone.utc) - verified_at <= _INTERCEPTION_SELF_TEST_FRESHNESS
 
 
-def _model_call_missed_the_proxy(info: dict) -> str:
-    """Say when the agent completed a model call that never reached the proxy.
+def _interception_count(info: dict, key: str) -> int:
+    raw = info.get(key)
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0
+
+
+def _model_call_missed_the_proxy(info: dict) -> tuple[str, str]:
+    """Return (level, detail) when OpenClaw completed model calls that never
+    reached the proxy, or ("", "").
 
     The plugin self-test proves the patched transports work, not that the
-    application sends its model calls through them (GAP-0190). A call finishes
-    after its proxy hop, so a completed call with no hop in the grace window
-    before it took another path.
+    application sends its model calls through them (GAP-0190). The gateway
+    pairs every completed model call with an agent proxy hop of its own, so
+    recent proxied traffic never vouches for a later call (GAP-0836). It
+    fails while the latest such call is newer than the latest proxied one.
     """
-    called_at = _interception_time(info, "last_agent_model_activity_at")
-    if called_at is None:
-        return ""
-    proxied_at = _interception_time(info, "last_agent_traffic_at")
-    if proxied_at is not None and called_at - proxied_at <= _INTERCEPTION_MODEL_CALL_GRACE:
-        return ""
-    proxied = f"at {proxied_at:%H:%M:%S}Z" if proxied_at is not None else "never"
-    return (
-        f"OpenClaw completed a model call at {called_at:%H:%M:%S}Z that did not go through the guardrail "
-        f"proxy (last proxied call: {proxied})"
+    calls = _interception_count(info, "agent_model_calls")
+    missed = calls - _interception_count(info, "agent_model_calls_proxied")
+    if missed <= 0:
+        return "", ""
+    last_missed = _interception_time(info, "last_unproxied_model_call_at")
+    last_proxied = _interception_time(info, "last_proxied_model_call_at")
+    detail = (
+        f"{missed} of {calls} OpenClaw model calls since the DefenseClaw gateway started did not go "
+        "through the guardrail proxy"
     )
+    if last_missed is not None:
+        detail += f" (latest at {last_missed:%H:%M:%S}Z)"
+    if last_missed is not None and last_proxied is not None and last_proxied > last_missed:
+        return "warn", detail + "; the calls after it did"
+    return "fail", detail
 
 
 def agent_identity_ledger_failure(health: dict | None) -> str:
