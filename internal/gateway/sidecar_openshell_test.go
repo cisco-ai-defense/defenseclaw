@@ -6,6 +6,8 @@ package gateway
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -142,8 +144,35 @@ func TestJudgeNeedsRebuildForProviderEdit(t *testing.T) {
 	newCfg := &config.Config{}
 	oldCfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "review", BaseURL: "https://old.example"}}
 	newCfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "review", BaseURL: "https://new.example"}}
-	if !judgeNeedsRebuild(oldCfg, newCfg, false) {
+	if !judgeNeedsRebuild(oldCfg, newCfg, false, nil, nil) {
 		t.Fatal("custom provider endpoint edit left the judge bound to the old registry")
+	}
+}
+
+// A CA rotation at the same path must replace the judge's captured TLS provider.
+func TestJudgeNeedsRebuildForProviderCARotation(t *testing.T) {
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	cfg := &config.Config{}
+	cfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "review", TLS: &config.LLMCustomProviderTLS{CACertFile: ca}}}
+	if err := os.WriteFile(ca, []byte("old CA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldProviders, err := buildGenerationProviders(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ca, []byte("new CA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newProviders, err := buildGenerationProviders(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldProviders.digest() == newProviders.digest() {
+		t.Fatal("control: provider digest did not change")
+	}
+	if !judgeNeedsRebuild(cfg, cfg, false, oldProviders, newProviders) {
+		t.Fatal("CA rotation reused the judge with its old TLS provider")
 	}
 }
 
