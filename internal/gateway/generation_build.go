@@ -427,10 +427,7 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 		ConfigGeneration:         g.ConfigGen,
 		ConfigGenerationRecorded: g.ConfigGenRecorded,
 		BuiltAt:                  g.BuiltAt.Format(time.RFC3339),
-		Components:               make(map[string]string, len(g.Components)),
-	}
-	for key, value := range g.Components {
-		health.Components[key] = value
+		ComponentCount:           len(g.Components),
 	}
 	health.PendingRestart, _ = livePendingRestart.Load().([]string)
 	if msg, _ := liveReloadError.Load().(string); msg != "" {
