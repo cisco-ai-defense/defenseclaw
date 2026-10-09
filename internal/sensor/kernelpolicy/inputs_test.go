@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func TestIntentFromLookupFallsBackToTheNarrowSide(t *testing.T) {
@@ -331,7 +333,7 @@ func TestPidReuseIsNotTheSameRoot(t *testing.T) {
 }
 
 func TestCLIConnectorsCoverOnlyCLIs(t *testing.T) {
-	for _, connector := range []string{"antigravity", "windsurf", "cursor-ide", "kiro-ide", "", "vscode"} {
+	for _, connector := range []string{"antigravity", legacyconnector.RetiredDesktopID, "cursor-ide", "kiro-ide", "", "vscode"} {
 		if IsCLIConnector(connector) {
 			t.Errorf("%q is not an anchorable CLI", connector)
 		}

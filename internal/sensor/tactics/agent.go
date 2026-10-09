@@ -216,7 +216,7 @@ var cliConnectors = map[string]string{
 // so they are never anchors.
 var ideHostedAgents = map[string]bool{
 	"cursor": true, "copilot-language-server": true, "continue": true, "cline": true,
-	"code": true, "kiro": true, "antigravity": true, "windsurf": true,
+	"code": true, "kiro": true, "antigravity": true, legacyconnector.ProcessName: true,
 }
 
 // IdentifyAgent recognises an agent from a process's resolved executable
