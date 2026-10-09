@@ -499,6 +499,17 @@ func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspecto
 	}
 }
 
+// SetSecureClientIntegration preserves the existing judge prompt for Secure Client.
+// The sidecar calls this before serving proxy requests.
+func (p *GuardrailProxy) SetSecureClientIntegration(enabled bool) {
+	if p == nil {
+		return
+	}
+	if g, ok := p.inspector.(*GuardrailInspector); ok && g.judge != nil {
+		g.judge.secureClient = enabled
+	}
+}
+
 // servedConnector is the connector this proxy serves: the wired connector
 // (guardrail.connector may be empty for OpenClaw), never the /c/<name>/ path
 // prefix or a header.

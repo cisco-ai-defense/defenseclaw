@@ -1706,6 +1706,7 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) (*LLMJudge, er
 	if judge == nil {
 		return nil, nil
 	}
+	judge.secureClient = cfg.SecureClientIntegration()
 
 	features := "tool-result-pii"
 	if cfg.Guardrail.Judge.ToolInjection {
@@ -3966,6 +3967,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetWebhookDispatcher(webhooks)
 	}
 	if err == nil && proxy != nil {
+		proxy.SetSecureClientIntegration(s.currentConfig().SecureClientIntegration())
 		proxy.SetModelRouter(s.modelRouter)
 		s.setGuardrailProxy(proxy)
 		defer s.setGuardrailProxy(nil)

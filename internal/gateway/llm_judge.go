@@ -98,6 +98,7 @@ type LLMJudge struct {
 	providerName string
 	provider     LLMProvider
 	rp           *guardrail.RulePack
+	secureClient bool
 
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
@@ -1672,7 +1673,7 @@ func (j *LLMJudge) exfilPrompt() string {
 	if jc := j.rp.ExfilJudge(); jc != nil && jc.SystemPrompt != "" {
 		prompt = jc.SystemPrompt
 	}
-	if !ManagedEnterpriseActive() {
+	if !j.secureClient {
 		prompt += "\n\n" + exfilAuthorizedKeysInspectionGuidance
 	}
 	return prompt

@@ -25,15 +25,12 @@ import (
 )
 
 func TestExfilAuthorizedKeysInspectionGuidanceScope(t *testing.T) {
-	previous := ManagedEnterpriseActive()
-	t.Cleanup(func() { SetManagedEnterpriseActive(previous) })
 	judge := &LLMJudge{rp: &guardrail.RulePack{}}
 
-	SetManagedEnterpriseActive(false)
 	if !strings.Contains(judge.exfilPrompt(), exfilAuthorizedKeysInspectionGuidance) {
 		t.Fatal("managed hook prompt lacks public-key inspection guidance")
 	}
-	SetManagedEnterpriseActive(true)
+	judge.secureClient = true
 	if got := judge.exfilPrompt(); got != exfilSystemPrompt {
 		t.Fatal("Secure Client exfil prompt changed")
 	}
