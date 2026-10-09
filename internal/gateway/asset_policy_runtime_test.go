@@ -1023,6 +1023,17 @@ func TestCodexCollidingMCPNamesFailClosed(t *testing.T) {
 	}); matched {
 		t.Fatalf("colliding MCP names with no rule refused: %+v", decision)
 	}
+	// GAP-0662: one of them disabled by its install admission.
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	if err := store.SetActionFieldForConnector("mcp", "acme-notes", "codex", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	api = &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	if decision, matched := api.codexMCPAssetDecision(ctx, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "mcp__acme_notes__sensitive", CWD: home,
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("colliding MCP names, one install-blocked: matched=%v decision=%+v, want block", matched, decision)
+	}
 }
 
 // GAP-1101: a skill admission blocked and disabled under its folder name

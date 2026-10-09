@@ -146,6 +146,16 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 		if decision, blocked := a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe); blocked {
 			return decision, true
 		}
+		// The runtime check after this one sees one name only, so a
+		// server install admission blocked must not hide behind its clean
+		// twin (GAP-0662).
+		if a.store != nil {
+			if deny, _, reason := mcpServerRuntimeBlock(enforce.NewPolicyEngine(a.store), req.ToolName, "codex", name); deny {
+				decision := runtimeAssetDisableBlockDecision("mcp", name, "codex", "hook", reason, "runtime-disable")
+				a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "codex", req.HookEventName)
+				return decision, true
+			}
+		}
 	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
