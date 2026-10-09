@@ -117,6 +117,17 @@ def test_systemd_root_hook_units_keep_setid_capabilities_under_a_syscall_filter(
         assert "User=root" in lines and "NoNewPrivileges=true" in lines, name
 
 
+def test_tmpfiles_touches_no_path_the_apply_trigger_watches():
+    # rpm runs systemd-tmpfiles on the package entry at the end of every
+    # transaction; it relabels each existing directory it lists, and a
+    # watched one started an unrequested apply run after every upgrade, which
+    # applied a rolled-back upgrade anyway (GAP-0984).
+    watched = {line.split("=", 1)[1] for line in _unit("defenseclaw-enterprise-apply.path") if line.startswith("PathChanged=")}
+    listed = {line.split()[1] for line in _unit("defenseclaw.conf") if line and not line.startswith("#")}
+    assert "/etc/defenseclaw/policies" in watched
+    assert not watched & listed
+
+
 def test_systemd_enumerator_can_publish_refused_surfaces():
     # The enumerator writes refused-surfaces.json into the guardian data dir;
     # under ProtectSystem=strict that dir must be writable or every cycle

@@ -27,6 +27,12 @@ SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-insta
 # or not) without any individual test hanging; targets that run all or most
 # of it set this timeout.
 GO_TEST_TIMEOUT ?= 60m
+# Race-enabled, the gateway and audit packages each take well over an hour as
+# one test binary. gateway-test and go-test-cov run them as this many parallel
+# shards (the CI split, scripts/go_test_shards.py); each shard keeps
+# GO_TEST_TIMEOUT.
+GO_TEST_SHARDS ?= 8
+GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py --shard-count $(GO_TEST_SHARDS)
 # -race also turns on checkptr in every package. In the transpiled SQLite
 # (modernc.org) that every audit store runs, checkptr alone doubles the cost
 # of the race suites; race detection stays on everywhere. CI uses the same flags.
@@ -832,7 +838,9 @@ tui-test: pycli
 	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q
 
 gateway-test: sync-openclaw-extension
-	go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
+	$(GO_SHARD_RUN) --package-dir internal/gateway -- \
+		go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) -v ./internal/gateway
+	go test $(GO_RACE_FLAGS) -timeout $(GO_TEST_TIMEOUT) ./test/... -v
 
 # packaging-macos-test runs the pure-bash unit tests for the macOS installer
 # scripts under packaging/macos/. They don't touch /Library, sudo, or
@@ -1074,7 +1082,15 @@ contextual-judge-test:
 		benchmarks.scripts.test_benchmark_score_contextual_judge
 
 go-test-cov: sync-openclaw-extension
-	go test $(GO_RACE_FLAGS) -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...
+	@rm -f coverage-go-*.out
+	go test $(GO_RACE_FLAGS) -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage-go-other.out \
+		$$(go list ./... | grep -Ev "^github.com/defenseclaw/defenseclaw/internal/(audit|gateway)$$")
+	$(GO_SHARD_RUN) --package-dir internal/gateway -- go test $(GO_RACE_FLAGS) -count=1 \
+		-timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage-go-gateway-{shard}.out ./internal/gateway
+	$(GO_SHARD_RUN) --package-dir internal/audit -- go test $(GO_RACE_FLAGS) -count=1 \
+		-timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage-go-audit-{shard}.out ./internal/audit
+	$(HOST_PYTHON) scripts/merge_go_coverage.py --output coverage.out coverage-go-*.out
+	@rm -f coverage-go-*.out
 
 connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
 
