@@ -96,6 +96,38 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	}
 }
 
+// A successful refresh of one SSSD domain cannot establish that a missing
+// account from another SSSD domain left enrollment.
+func TestIdentitySpoolCleanupRequiresTheRecordsDomainToAnswer(t *testing.T) {
+	dir := t.TempDir()
+	for _, record := range []IdentitySpoolRecord{
+		{Key: "94401103", User: "alice", SSSDDomain: "unreachable.test",
+			Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, UPN: "alice@unreachable.test"}},
+		{Key: "94401104", User: "bob", SSSDDomain: "reachable.test",
+			Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, UPN: "bob@reachable.test"}},
+	} {
+		data, err := MarshalIdentitySpoolRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, record.Key+".json"), data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered := map[string]bool{"sssd:reachable.test": true}
+	for _, entry := range entries {
+		got := identitySpoolRecordLeft(dir, entry, answered)
+		want := entry.Name() == "94401104.json"
+		if got != want {
+			t.Errorf("cleanup %s = %v, want %v", entry.Name(), got, want)
+		}
+	}
+}
+
 // GAP-0284: a record that resolved no UPN (a signed-out Windows user) keeps
 // the account's last known UPN and principal instead of account@REALM.
 func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {

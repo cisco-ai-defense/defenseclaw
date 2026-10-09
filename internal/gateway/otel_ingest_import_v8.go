@@ -323,6 +323,14 @@ func unverifiedNativeOTLPIdentityClaimV8(leaf otlpDecodedLeaf) bool {
 	if json.Unmarshal([]byte(text), &wire) != nil {
 		return false
 	}
+	correlation, err := decodeInboundJSONObject(wire.Correlation)
+	if err == nil {
+		for _, member := range correlation {
+			if strings.EqualFold(member.name, "agent_instance_id") {
+				return true
+			}
+		}
+	}
 	members, err := decodeInboundJSONObject(wire.Body)
 	if err != nil {
 		return false

@@ -97,6 +97,7 @@ _UV_RECORD_MAX_BYTES = 4096
 # _UV_RECORD, only when the evidence shows that installer put them there
 # (scripts/install.sh, find_legacy_leftovers; GAP-0908). One claim per line:
 # "uv-cache", "uv-python <folder in uv's Python folder>" or "sigstore".
+# The uv-python claim is historical; uninstall preserves shared managed Python.
 _LEGACY_LEFTOVERS_RECORD = "legacy-install-leftovers"
 _LEGACY_LEFTOVERS_MAX_BYTES = 4096
 # The folders DefenseClaw created because they were missing (the gateway's
@@ -202,11 +203,8 @@ class UninstallPlan:
     # (`defenseclaw setup local-observability`) and its data volumes before
     # its Compose files in data_dir go (uninstall --all only).
     observability_teardown: bool = False
-    # uv_leftovers are uv's download cache and the Python it fetched, which
-    # installers before 1.0.2 left outside data_dir (~/.cache/uv,
-    # ~/.local/share/uv/python; %LOCALAPPDATA%\uv\cache, %APPDATA%\uv\python)
-    # when they installed uv (--all --binaries only, and only when that uv
-    # goes too and no other uv is on PATH).
+    # uv_leftovers contains only the legacy uv installer receipt, when the
+    # upgrade recorded it and the installer uv is being removed.
     uv_leftovers: tuple[str, ...] = ()
     # uv_cache_entries is uv's cache folder when it holds DefenseClaw entries
     # an earlier installer's uv downloaded there; `uv cache clean defenseclaw`
@@ -731,7 +729,7 @@ def _build_plan(
         mac_app=_installed_mac_app(platform_name) if wipe_data and binaries else "",
         uv_leftovers=uv_leftovers,
         uv_cache_entries=(
-            _uv_cache_with_defenseclaw(data_dir, platform_name, uv_leftovers)
+            _uv_cache_with_defenseclaw(data_dir, platform_name)
             if wipe_data and binaries and not preserve_data_entries
             else ""
         ),
@@ -960,79 +958,38 @@ def _uv_default_dirs(platform_name: str) -> tuple[str, str]:
     return os.path.join(cache, "uv"), os.path.join(data, "uv", "python")
 
 
-def _venv_base_python_dir(data_dir: str, python_root: str) -> str:
-    """Return the folder in python_root that the data dir's venv runs on, or ""."""
-    try:
-        with open(os.path.join(data_dir, ".venv", "pyvenv.cfg"), encoding="utf-8") as stream:
-            lines = stream.read(16_384).splitlines()
-    except (OSError, UnicodeError):
-        return ""
-    home = next(
-        (value.strip() for key, _, value in (line.partition("=") for line in lines) if key.strip() == "home"),
-        "",
-    )
-    if not home or not os.path.isabs(home):
-        return ""
-    root = _normalized(os.path.realpath(python_root))
-    base = _normalized(os.path.realpath(home))
-    try:
-        if os.path.commonpath((root, base)) != root or base == root:
-            return ""
-    except ValueError:
-        return ""
-    first = os.path.relpath(base, root).split(os.sep)[0]
-    return os.path.join(python_root, first)
-
-
 def _installer_uv_leftovers(
     install_root: str, binary_targets: tuple[str, ...], data_dir: str, platform_name: str
 ) -> tuple[str, ...]:
-    """Name the uv cache and Python an older installer left for DefenseClaw.
+    """Name uv's installer receipt when the legacy upgrade recorded it.
 
-    Only when uninstall removes the uv the installer installed (its digest
-    still matches), no other uv is on PATH, and uv's folders are the
-    defaults. The Python folder goes only when it holds nothing but the
-    Python the data dir's venv runs on (and uv's links and bookkeeping).
+    The default uv cache and managed Python are account-wide resources. A
+    DefenseClaw upgrade record cannot prove that another project has not used
+    either one since installation, so neither directory belongs in this plan.
     """
     uv_name = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)[0]
     if not any(os.path.basename(target) == uv_name for target in binary_targets):
         return ()
     claims = _legacy_leftover_claims(data_dir)
-    # Current installers keep uv's cache and Python in data_dir/.uv, so uv's
-    # default folders then hold the user's own uv data, never DefenseClaw's,
-    # unless the upgrade from 0.8.x recorded that the 0.8.x installer's uv
-    # used them.
-    if os.path.isdir(os.path.join(data_dir, ".uv")) and "uv-cache" not in claims:
+    if "uv-cache" not in claims:
         return ()
     root = _normalized(install_root)
     for directory in os.get_exec_path():
         if directory and _normalized(directory) != root and os.path.isfile(os.path.join(directory, uv_name)):
             return ()
-    cache, python_root = _uv_default_dirs(platform_name)
-    leftovers: list[str] = []
-    if cache and not os.environ.get("UV_CACHE_DIR") and _plain_owned_dir(cache):
-        leftovers.append(cache)
-    if python_root and not os.environ.get("UV_PYTHON_INSTALL_DIR") and _plain_owned_dir(python_root):
-        legacy_python = claims.get("uv-python", "")
-        base = (
-            os.path.join(python_root, legacy_python) if legacy_python else _venv_base_python_dir(data_dir, python_root)
-        )
-        if base and os.path.isdir(base) and _only_python(python_root, base):
-            leftovers.append(python_root)
-    if "uv-cache" in claims:
-        # uv's own installer, which the 0.8.x installer ran, left its receipt.
-        config = os.environ.get("XDG_CONFIG_HOME", "")
-        config = os.path.join(config if os.path.isabs(config) else os.path.expanduser("~/.config"), "uv")
-        receipt = os.path.join(config, "uv-receipt.json")
-        try:
-            names = os.listdir(config) if _plain_owned_dir(config) else []
-            with open(receipt, encoding="utf-8") as stream:
-                prefix = json.loads(stream.read(16_384)).get("install_prefix", "")
-        except (OSError, ValueError, AttributeError):
-            names, prefix = [], ""
-        if names == ["uv-receipt.json"] and isinstance(prefix, str) and _normalized(prefix) == root:
-            leftovers.append(config)
-    return tuple(leftovers)
+    # uv's own installer, which the 0.8.x installer ran, left its receipt.
+    config = os.environ.get("XDG_CONFIG_HOME", "")
+    config = os.path.join(config if os.path.isabs(config) else os.path.expanduser("~/.config"), "uv")
+    receipt = os.path.join(config, "uv-receipt.json")
+    try:
+        names = os.listdir(config) if _plain_owned_dir(config) else []
+        with open(receipt, encoding="utf-8") as stream:
+            prefix = json.loads(stream.read(16_384)).get("install_prefix", "")
+    except (OSError, ValueError, AttributeError):
+        names, prefix = [], ""
+    if names == ["uv-receipt.json"] and isinstance(prefix, str) and _normalized(prefix) == root:
+        return (config,)
+    return ()
 
 
 def _legacy_leftover_claims(data_dir: str) -> dict[str, str]:
@@ -1051,8 +1008,6 @@ def _legacy_leftover_claims(data_dir: str) -> dict[str, str]:
         key, _, value = line.strip().partition(" ")
         if key in ("uv-cache", "sigstore") and not value:
             claims[key] = ""
-        elif key == "uv-python" and value not in ("", ".", "..") and os.path.basename(value) == value:
-            claims[key] = value
     return claims
 
 
@@ -1079,18 +1034,17 @@ def _legacy_sigstore_cache(data_dir: str) -> str:
     return path
 
 
-def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str, uv_leftovers: tuple[str, ...]) -> str:
+def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str) -> str:
     """Return uv's cache folder when it holds DefenseClaw entries, else "".
 
     Installers before 1.0.2 had uv download DefenseClaw into uv's own cache,
-    one entry per install (GAP-1411). The cache is the account's, so only
-    those entries go (`uv cache clean defenseclaw`), unless the plan removes
-    the whole cache anyway (uv_leftovers).
+    one entry per install (GAP-1411). The cache is account-wide, so only
+    DefenseClaw entries go (`uv cache clean defenseclaw`).
     """
     cache = os.environ.get("UV_CACHE_DIR", "")
     if not os.path.isabs(cache) or _normalized(cache) == _normalized(data_dir) or _below(data_dir, cache):
         cache = _uv_default_dirs(platform_name)[0]
-    if not cache or cache in uv_leftovers or not _plain_owned_dir(cache):
+    if not cache or not _plain_owned_dir(cache):
         return ""
     patterns = (
         "archive-v*/*/defenseclaw-*.dist-info",
@@ -1226,24 +1180,6 @@ def _plain_owned_dir(path: str) -> bool:
     return not hasattr(os, "getuid") or info.st_uid == os.getuid()
 
 
-def _only_python(python_root: str, base: str) -> bool:
-    """Report whether python_root holds only base, links to it and uv's dot files."""
-    wanted = _normalized(os.path.realpath(base))
-    try:
-        entries = list(os.scandir(python_root))
-    except OSError:
-        return False
-    for entry in entries:
-        if entry.name.startswith("."):
-            continue
-        if _normalized(entry.path) == _normalized(base) and not _is_reparse_path(entry.path):
-            continue
-        if _is_reparse_path(entry.path) and _normalized(os.path.realpath(entry.path)) == wanted:
-            continue
-        return False
-    return True
-
-
 def _running_base_python() -> str:
     return os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
 
@@ -1259,13 +1195,11 @@ def _deferred_interpreter_dirs(plan: UninstallPlan, base_python: str) -> list[st
     """Name the folders holding base_python that the deferred helper removes after it exits.
 
     The helper runs on base_python, so it cannot remove them while it runs:
-    the installer's <data_dir>/.uv (scripts/install.ps1), or a uv Python
-    folder the plan removes (uv_leftovers).
+    the installer's <data_dir>/.uv (scripts/install.ps1).
     """
     candidates = []
     if plan.remove_data_dir and not plan.preserve_data_entries:
         candidates.append(os.path.join(plan.data_dir, ".uv"))
-    candidates.extend(plan.uv_leftovers)
     return [path for path in candidates if os.path.isdir(path) and _below(os.path.realpath(path), base_python)]
 
 

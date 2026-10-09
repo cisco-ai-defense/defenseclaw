@@ -286,6 +286,10 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	if reply, ok := r.replies[filepath.Base(name)+" "+strings.Join(args, " ")]; ok {
 		return reply.result, reply.err
 	}
+	if len(args) > 0 && args[len(args)-1] == "--check" &&
+		strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
+		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	}
 	if len(args) == 1 && args[0] == "--version-json" {
 		version, ok := r.versions[name]
 		if !ok {
