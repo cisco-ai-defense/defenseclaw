@@ -3369,7 +3369,11 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		}
 		if decisionCfg.SecureClientIntegration() {
 			// The 1.0 verdict of this route read the data.json levels.
-			thresholds := policy.SecureClientGuardrailThresholds(decisionCfg.PolicyDir)
+			g := pinnedGeneration(r.Context())
+			if g == nil {
+				g = a.generation()
+			}
+			thresholds := secureClientThresholdsForGeneration(g, decisionCfg.PolicyDir)
 			input.Thresholds = &thresholds
 		}
 	}

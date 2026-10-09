@@ -130,6 +130,10 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 	}
 
+	if cfg.SecureClientIntegration() {
+		thresholds := policy.SecureClientGuardrailThresholds(cfg.PolicyDir)
+		g.secureClientThresholds = &thresholds
+	}
 	g.Thresholds = buildThresholdTable(cfg, in.profiles)
 	g.ConfigGen, g.ConfigGenRecorded = readConfigGeneration(cfg.ConfigFilePath, in.raw)
 

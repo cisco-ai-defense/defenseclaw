@@ -375,10 +375,32 @@ func TestSecureClientProxyKeepsTheDataJSONLevels(t *testing.T) {
 	if !cfg.SecureClientIntegration() {
 		t.Fatal("fixture is not a Secure Client configuration")
 	}
+	g, err := buildGeneration(t.Context(), generationInputs{cfg: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
 	previous := liveGeneration.Load()
-	liveGeneration.Store(&Generation{Config: cfg})
+	liveGeneration.Store(g)
 	t.Cleanup(func() { liveGeneration.Store(previous) })
-	if got := requestThresholds(context.Background()); got != (policy.ThresholdsInput{Block: 3, Alert: 1, CiscoTrustLevel: "advisory"}) {
-		t.Fatalf("Secure Client proxy thresholds = %+v, want the data.json levels", got)
+	want := policy.ThresholdsInput{Block: 3, Alert: 1, CiscoTrustLevel: "advisory"}
+	if got := requestThresholds(context.Background()); got != want {
+		t.Fatalf("Secure Client proxy thresholds = %+v, want %+v", got, want)
+	}
+	data = `{"guardrail":{"block_threshold":4,"alert_threshold":2,"cisco_trust_level":"full"}}`
+	if err := os.WriteFile(filepath.Join(policyDir, "rego", "data.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := requestThresholds(context.Background()); got != want {
+		t.Fatalf("Secure Client proxy thresholds changed without policy reload: got %+v, want %+v", got, want)
+	}
+	if got := secureClientThresholdsForGeneration(g, policyDir); got != want {
+		t.Fatalf("Secure Client evaluate thresholds changed without policy reload: got %+v, want %+v", got, want)
+	}
+	reloaded, err := buildGeneration(t.Context(), generationInputs{cfg: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := secureClientThresholdsForGeneration(reloaded, policyDir); got.Block != 4 {
+		t.Fatalf("Secure Client thresholds after reload = %+v, want block 4", got)
 	}
 }

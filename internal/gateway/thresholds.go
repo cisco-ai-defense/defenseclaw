@@ -381,7 +381,7 @@ func requestThresholds(ctx context.Context) policy.ThresholdsInput {
 		// The 1.0 proxy verdict sent no thresholds, so the policy used the
 		// data.json levels and trust level (as /v1/guardrail/evaluate does),
 		// whatever the rule pack.
-		return policy.SecureClientGuardrailThresholds(g.Config.PolicyDir)
+		return secureClientThresholdsForGeneration(g, g.Config.PolicyDir)
 	}
 	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
 	block, alert := guardrailThresholdRanks(resolved)
@@ -390,4 +390,14 @@ func requestThresholds(ctx context.Context) policy.ThresholdsInput {
 		trust = g.Config.Guardrail.EffectiveCiscoTrustLevel()
 	}
 	return policy.ThresholdsInput{Block: block, Alert: alert, CiscoTrustLevel: trust}
+}
+
+// secureClientThresholdsForGeneration uses the threshold snapshot captured
+// when this generation loaded policy. Detached callers without a generation
+// still read the policy directory directly.
+func secureClientThresholdsForGeneration(g *Generation, policyDir string) policy.ThresholdsInput {
+	if g != nil && g.secureClientThresholds != nil {
+		return *g.secureClientThresholds
+	}
+	return policy.SecureClientGuardrailThresholds(policyDir)
 }

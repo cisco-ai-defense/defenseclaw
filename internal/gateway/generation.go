@@ -50,8 +50,11 @@ type Generation struct {
 	Admission   map[string]policy.CompiledAdmission
 	AssetPolicy *config.AssetPolicyConfig
 	Thresholds  thresholdTable
-	Scanners    scannerSettings
-	Providers   *generationProviders
+	// Secure Client keeps the data.json guardrail levels captured at policy
+	// load, as the pre-1.0 OPA store did. It is nil for other profiles.
+	secureClientThresholds *policy.ThresholdsInput
+	Scanners               scannerSettings
+	Providers              *generationProviders
 	// Digest is effective_policy_digest: "sha256:" + hex of the canonical
 	// JSON of the migrated config (secrets dropped, data_dir paths
 	// rewritten), the asset digests and the profile digests.
