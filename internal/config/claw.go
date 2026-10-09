@@ -270,12 +270,84 @@ func LookupMCPServerUnderHome(connector, home, workspaceDir, name string) (MCPSe
 	default:
 		return MCPServerEntry{}, false
 	}
+	return lookupMCPToolServer(connector, entries, name)
+}
+
+// LookupMCPToolServerForConnector is LookupMCPServerForConnector for the
+// server name a tool call carries, which an agent may have rewritten from
+// the configured name (MCPToolServerName). The standalone hooks and gateway
+// use it; Secure Client keeps the exact lookup of main (issue #1092).
+func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name string) (MCPServerEntry, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return MCPServerEntry{}, false
+	}
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" && c != nil {
+		workspaceDir = c.ConnectorWorkspaceDir()
+	}
+	entries, err := c.readMCPServersForConnectorIn(connector, workspaceDir)
+	if err != nil {
+		return MCPServerEntry{}, false
+	}
+	return lookupMCPToolServer(connector, entries, name)
+}
+
+// MCPToolServerName is the server segment an agent puts in the MCP tool
+// names its hooks see (mcp__<server>__<tool>). Codex turns every character
+// other than an ASCII letter, digit or underscore into "_", so a server
+// configured as acme-notes reaches the hook as acme_notes (GAP-0939); Claude
+// Code keeps "-" as well. Other connectors keep the name.
+func MCPToolServerName(connector, name string) string {
+	var keepDash bool
+	switch normalizeConnectorKey(connector) {
+	case "codex":
+	case "claudecode":
+		keepDash = true
+	default:
+		return name
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || keepDash && r == '-' {
+			return r
+		}
+		return '_'
+	}, name)
+}
+
+// SameMCPToolServer reports whether a tool call's server name, as the
+// connector's hook sees it, names the configured server.
+func SameMCPToolServer(connector, configured, toolServer string) bool {
+	configured, toolServer = strings.TrimSpace(configured), strings.TrimSpace(toolServer)
+	if configured == "" || toolServer == "" {
+		return false
+	}
+	return configured == toolServer || MCPToolServerName(connector, configured) == toolServer
+}
+
+// lookupMCPToolServer finds the entry a tool call's server name names: the
+// exact name, or else the one configured name whose tool-name form it is.
+// Two names with the same form are ambiguous and match neither, so the call
+// keeps the name it came with and an approval never moves between them.
+func lookupMCPToolServer(connector string, entries []MCPServerEntry, name string) (MCPServerEntry, bool) {
 	for _, entry := range entries {
 		if entry.Name == name {
 			return entry, true
 		}
 	}
-	return MCPServerEntry{}, false
+	var found MCPServerEntry
+	for _, entry := range entries {
+		if !SameMCPToolServer(connector, entry.Name, name) {
+			continue
+		}
+		if found.Name != "" && found.Name != entry.Name {
+			return MCPServerEntry{}, false
+		}
+		if found.Name == "" {
+			found = entry
+		}
+	}
+	return found, found.Name != ""
 }
 
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {

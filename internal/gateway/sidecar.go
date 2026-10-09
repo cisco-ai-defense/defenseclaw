@@ -2183,9 +2183,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	nextGen.Config = appliedCfg
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
-	if assetAdmissionListsChanged(oldCfg, appliedCfg) {
+	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills and plugins affected by a list change are
-		// readmitted now, without waiting for content drift.
+		// readmitted now, without waiting for content drift (GAP-0627,
+		// GAP-0993), and an MCP server a new allow pin or scan_on_install
+		// false admits without a scan is admitted now, not at the next
+		// interval (GAP-0910).
 		if w := s.installWatcher.Load(); w != nil {
 			w.RequestRescan()
 		}
@@ -2374,6 +2377,17 @@ func assetAdmissionListsChanged(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Allowed, newCfg.AssetPolicy.Skill.Allowed) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Allowed, newCfg.AssetPolicy.Plugin.Allowed)
+}
+
+// mcpUnscannedAdmissionChanged reports a reload that changes what admits an
+// MCP server without a scan, asset_policy.mcp.allowed or admission:, outside
+// Secure Client, whose watcher keeps the cycle of main (issue #1092).
+func mcpUnscannedAdmissionChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AssetPolicy.MCP.Allowed, newCfg.AssetPolicy.MCP.Allowed) ||
+		!reflect.DeepEqual(oldCfg.Admission, newCfg.Admission)
 }
 
 // inspectorNeedsRebuild reports whether any field on
@@ -3710,6 +3724,27 @@ func WatcherWatchesDirs(cfg *config.Config) bool {
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
+// warnUnenforcedAssetPolicy logs, at each watcher start, an asset_policy
+// default deny or registry_required that nothing on this host applies: no
+// watched folder admits the type and its runtime_detection is off, so the
+// hooks apply only the denied list (GAP-0957). mcpAdmitted reports whether
+// the watcher admits the agents' MCP servers here.
+func warnUnenforcedAssetPolicy(cfg *config.Config, skillDirs, pluginDirs []string, mcpAdmitted bool) {
+	watched := func(targetType string) bool {
+		switch targetType {
+		case "skill":
+			return len(skillDirs) > 0
+		case "plugin":
+			return len(pluginDirs) > 0
+		default:
+			return mcpAdmitted
+		}
+	}
+	for _, message := range cfg.UnenforcedAssetPolicyRules(watched) {
+		fmt.Fprintf(os.Stderr, "[sidecar] warning: %s\n", message)
+	}
+}
+
 // runWatcher starts the skill/MCP install watcher if enabled in config,
 // and restarts it when a managed gateway's enrolled folders change.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
@@ -3738,6 +3773,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if !wcfg.Enabled {
 		s.health.SetWatcher(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher disabled (set gateway.watcher.enabled=true to enable)\n")
+		warnUnenforcedAssetPolicy(s.currentConfig(), nil, nil, false)
 		<-ctx.Done()
 		return false, nil
 	}
@@ -3764,6 +3800,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		if watcherUsesEnrolledUserDirs(cfg) {
 			set := resolveEnrolledWatchSet(cfg, reg, wcfg, serviceHomeDir())
+			publishClaudeStatesUnreadable(set.claudeUnreadable)
 			enrolled = &set
 			// The service reads the users' folders but may not delete in
 			// them: the hook guardian removes a quarantined source (GAP-0202).
@@ -3815,6 +3852,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin dirs: %v\n", pluginDirs)
 	}
 
+	warnUnenforcedAssetPolicy(s.currentConfig(), skillDirs, pluginDirs,
+		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil)
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
 		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
 			"skill_dirs":  0,

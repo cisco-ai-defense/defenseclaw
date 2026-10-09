@@ -312,6 +312,12 @@ class TestScanPath(unittest.TestCase):
         pack = rulepack.load_rule_pack(self.pack_dir)
         self.assertEqual(pack.scan_path(self.target), [])
         self.assertEqual(pack.scan_path(os.path.join(self.target, "linked.py")), [])
+        # GAP-0891: a linked skill folder is scanned as the folder it names.
+        with open(os.path.join(self.target, "inner.md"), "w") as fh:
+            fh.write("linked-file-marker\n")
+        dirlink = os.path.join(self.tmp, "dirlink")
+        os.symlink(self.target, dirlink)
+        self.assertEqual([f.location for f in pack.scan_path(dirlink)], ["inner.md:1"])
 
     def test_skips_binary_and_oversize(self):
         # Binary extension is skipped even if it contains the pattern bytes.

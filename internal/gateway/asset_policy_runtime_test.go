@@ -819,6 +819,62 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 	if call(other) {
 		t.Fatal("url deny matched another user's server")
 	}
+
+	// GAP-0954: a server the agent's command line defines (claude
+	// --mcp-config) wins over the one the caller's files name, and a
+	// command-line source the hook could not read fails closed.
+	benign := t.TempDir()
+	if err := os.WriteFile(filepath.Join(benign, ".claude.json"), []byte(`{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28562/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1004, Home: benign})
+	commandLine := context.WithValue(peer, claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: &assetfacts.MCPServer{
+		Name: "notes", URL: "http://127.0.0.1:28561/mcp", Source: assetfacts.SourceCommandLine}})
+	if !call(commandLine) {
+		t.Fatal("url deny did not match the server the agent's command line defines")
+	}
+	if call(peer) {
+		t.Fatal("url deny matched the caller's benign server")
+	}
+	unproven := context.WithValue(peer, claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "notes"})
+	decision, matched := api.claudeCodeMCPAssetDecision(unproven, claudeCodeHookRequest{
+		HookEventName: "PreToolUse", ToolName: "mcp__notes__count_words", CWD: project,
+	})
+	if !matched || decision.Action != "block" || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("unproven command-line server: matched=%v decision=%+v, want a fail-closed block", matched, decision)
+	}
+}
+
+// GAP-0939: Codex shows a hyphenated MCP server to its hooks as
+// mcp__acme_notes__<tool>. The registry and the lists still match the server
+// under the name its Codex config gives it, so an approved acme-notes runs and
+// a denied wiki-rogue is refused, with asset_policy enabled or not.
+func TestCodexHyphenatedMCPServerMatchesItsConfiguredName(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[mcp_servers.acme-notes]\nurl = \"http://127.0.0.1:28581/mcp\"\n\n[mcp_servers.wiki-rogue]\nurl = \"http://127.0.0.1:28583/mcp\"\n"
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled, cfg.AssetPolicy.Mode = true, config.AssetPolicyModeAction
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "acme-notes", URL: "http://127.0.0.1:28581/mcp"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	call := func(tool string) (config.AssetPolicyDecision, bool) {
+		return api.codexMCPAssetDecision(ctx, codexHookRequest{HookEventName: "PreToolUse", ToolName: tool, CWD: home})
+	}
+	if decision, matched := call("mcp__acme_notes__count_words"); matched || decision.RegistryStatus != "registered" {
+		t.Fatalf("approved acme-notes: matched=%v decision=%+v, want it registered", matched, decision)
+	}
+	cfg.AssetPolicy = config.DefaultAssetPolicy()
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "wiki-rogue"}}
+	if decision, matched := call("mcp__wiki_rogue__count_words"); !matched || decision.Action != "block" || decision.TargetName != "wiki-rogue" {
+		t.Fatalf("denied wiki-rogue: matched=%v decision=%+v, want an admin-deny block", matched, decision)
+	}
 }
 
 // Every source path for a skill name must be checked before the tool runs.

@@ -200,7 +200,7 @@ locked staging folder below; give it its own folder:
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
 icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
-icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C | Out-Null
+icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
 Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
 icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
@@ -266,7 +266,7 @@ only SYSTEM and Administrators can write:
 $Stage = 'C:\ProgramData\DefenseClaw-Staging'
 New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 icacls $Stage /setowner '*S-1-5-32-544' /T /C | Out-Null
-icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
     throw "$Stage is not owned by Administrators"
 }
@@ -777,7 +777,11 @@ per-user install:
 
   or admit new MCP servers without a scan with
   `admission.mcp.scan_on_install: false`. There is no setting that lets the
-  scanner connect to these addresses.
+  scanner connect to these addresses. The periodic rescan does not scan such
+  a server either. A server that is already blocked because its scan failed
+  is admitted by the rescan that the config change starts: the
+  `install-allowed` row follows, the block is released and `status` stops
+  warning `asset_not_scanned` for it.
 - A stdio server started with `npx` or `uvx` is scanned only when the
   launcher is installed for all users in a folder that only administrators
   can change, such as Node.js in `C:\Program Files\nodejs` or uv under
@@ -791,6 +795,12 @@ per-user install:
   enumerator reads that file, and the `.mcp.json` of each project inside the
   profile, every 30 seconds and publishes the servers to the gateway, so
   `claude mcp add` (any scope) reaches admission within about a minute.
+  When the enumerator cannot read or parse a user's `.claude.json` (an
+  access list that leaves SYSTEM out, or broken JSON), DefenseClaw cannot
+  see that user's servers, so it fails closed: it refuses every Claude Code
+  MCP tool call of that user, and `enterprise windows status` and `verify`
+  warn with `claude_state_unreadable`, naming the account and the file,
+  until the file can be read again.
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
 - Only the skill and plugin folders of the agents in each profile are

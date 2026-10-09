@@ -320,7 +320,8 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 	// Not part of the check after activation: a guardian or gateway writing
 	// its state at that moment is not drift.
 	account := Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}
-	return append(problems, l.env.stateModeProblems(account)...)
+	problems = append(problems, l.env.stateModeProblems(account)...)
+	return append(problems, l.env.aclProblems(ctx, record)...)
 }
 
 // verifyDeployment is verifyInstalled; with inputsChanged the checks of
@@ -455,6 +456,20 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		for _, unit := range env.Services.Units() {
 			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) {
 				add("%s is not active", unit.Name)
+			}
+		}
+		// The launchd apply and daily verify jobs are not readiness checks
+		// (a loaded job waits for its trigger), but launchd runs neither
+		// once it is booted out: status and verify read ok while nothing
+		// would apply the next config push (GAP-0956).
+		for _, unit := range env.Services.Units() {
+			if !unit.Required && unit.Activate && unit.Name != env.SelfUnit && !env.Services.Active(ctx, unit) {
+				switch unit.Kind {
+				case "path":
+					add("%s is not loaded, so nothing applies the next change to config.yaml, a secret or a policy file; run `%s` to load it", unit.Name, env.lifecycleCommand(ActionRepair))
+				case "timer":
+					add("%s is not loaded, so the daily verify does not run; run `%s` to load it", unit.Name, env.lifecycleCommand(ActionRepair))
+				}
 			}
 		}
 		for _, unit := range env.Services.Units() {

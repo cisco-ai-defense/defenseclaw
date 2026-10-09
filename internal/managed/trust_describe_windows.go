@@ -41,11 +41,8 @@ func DescribeUntrustedSource(label, source string, err error) (string, bool) {
 	if !strings.EqualFold(failed, source) && !strings.EqualFold(failed, folder) {
 		return text + fmt.Sprintf(". Copy the %s into a folder that only administrators can write, such as C:\\ProgramData\\DefenseClaw-Staging, and run it again (nothing was changed)", label), true
 	}
-	fix := fmt.Sprintf(`icacls "%s" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /T /C`, folder)
-	if principal.Owner {
-		fix = fmt.Sprintf(`icacls "%s" /setowner *S-1-5-32-544 /T /C, then `, folder) + fix
-	}
-	return text + ". From an elevated prompt run " + fix + ", and run it again (nothing was changed)", true
+	fix := untrustedFolderFix(folder, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F")
+	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)", true
 }
 
 // DescribeUntrustedRulePack explains, for the standalone profile, why an
@@ -76,12 +73,31 @@ func DescribeUntrustedRulePack(label, pack string, err error) (string, bool) {
 	if !inside {
 		return text + `. Copy the pack into a folder that only administrators can write, such as C:\ProgramData\DefenseClaw-RulePacks, set that path in the config, and run it again (nothing was changed)`, true
 	}
-	first := fmt.Sprintf(`icacls "%s" /remove:g *%s /T /C`, pack, principal.SID)
+	fix := untrustedFolderFix(pack, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX")
+	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)", true
+}
+
+// untrustedFolderFix is the icacls commands that leave folder, and the files
+// in it, with only the given grants and take the refused principal off them
+// (GAP-0953):
+//   - Each argument is quoted, so the commands also run in PowerShell, where
+//     an unquoted (OI) is a command.
+//   - The grants go on the folder alone and its files inherit them. With /T
+//     icacls would also strip each file's inherited entries and give it the
+//     container grants, which a file cannot use: its DACL would be empty.
+//   - /inheritance:r keeps an entry that is the folder's own, and on a Windows
+//     client edition a new folder under C:\ holds Authenticated Users that
+//     way, so the principal is removed by name from the folder and its files.
+func untrustedFolderFix(folder string, principal *UntrustedPrincipalError, grants ...string) []string {
+	var fix []string
 	if principal.Owner {
-		first = fmt.Sprintf(`icacls "%s" /setowner *S-1-5-32-544 /T /C`, pack)
+		fix = append(fix, fmt.Sprintf(`icacls "%s" /setowner "*S-1-5-32-544" /T /C`, folder))
 	}
-	grant := fmt.Sprintf(`icacls "%s" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX /T /C`, pack)
-	return text + ". From an elevated prompt run " + first + ", then " + grant + ", and run it again (nothing was changed)", true
+	grant := fmt.Sprintf(`icacls "%s" /inheritance:r /grant:r`, folder)
+	for _, entry := range grants {
+		grant += ` "` + entry + `"`
+	}
+	return append(fix, grant, fmt.Sprintf(`icacls "%s" /remove:g "*%s" /T /C`, folder, principal.SID))
 }
 
 // windowsAccountName is DOMAIN\name for a SID, or "" when it does not resolve.

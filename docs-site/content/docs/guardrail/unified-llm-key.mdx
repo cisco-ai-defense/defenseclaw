@@ -385,9 +385,11 @@ During the v9 migration, DefenseClaw imports an ordinary hand-written
 overlay. If any provider uses `request_overrides`, which `llm_providers`
 cannot represent, migration reports it and leaves the legacy file as a
 **live input**. The gateway continues to merge that overlay with
-`llm_providers` after config changes. Preserve and review the file until
-those request overrides are no longer needed; changing `llm_providers` alone
-does not remove them. See [v9 migration](/docs/reference/migrate-v9#custom-providers).
+`llm_providers` after config changes. `defenseclaw setup provider add` and
+`remove` copy its providers into `llm_providers` (without the overrides) and
+leave the file in place. Preserve and review the file until those request
+overrides are no longer needed; changing `llm_providers` alone does not remove
+them. See [v9 migration](/docs/reference/migrate-v9#custom-providers).
 
 ```bash
 defenseclaw setup provider add \

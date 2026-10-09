@@ -447,14 +447,24 @@ async def _terminate_contained_windows_process(
 
 
 @contextmanager
-def _contained_mcp_windows_process_factory() -> Iterator[None]:
-    """Scope the official MCP stdio client to DefenseClaw's safe factory."""
+def _contained_mcp_windows_process_factory(started: list[object] | None = None) -> Iterator[None]:
+    """Scope the official MCP stdio client to DefenseClaw's safe factory.
+
+    Each process it starts is appended to ``started``, so a failed scan can
+    report the launcher's exit code.
+    """
     import mcp.client.stdio as mcp_stdio
+
+    async def create(*args: Any, **kwargs: Any) -> _ContainedWindowsProcess:
+        process = await _create_contained_windows_process(*args, **kwargs)
+        if started is not None:
+            started.append(process)
+        return process
 
     with _MCP_WINDOWS_PROCESS_FACTORY_LOCK:
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
-        mcp_stdio._create_platform_compatible_process = _create_contained_windows_process
+        mcp_stdio._create_platform_compatible_process = create
         mcp_stdio._terminate_process_tree = _terminate_contained_windows_process
         try:
             yield
@@ -762,9 +772,47 @@ def _validate_windows_npx_arguments(npx_path: str, args: list[str]) -> None:
             )
 
 
+def _embeddable_interpreter_dir() -> str:
+    """Folder of this interpreter when it is an embeddable CPython, else "".
+
+    An embeddable CPython has a ``python*._pth`` file beside it; the managed
+    Windows scanner runtime is one.
+    """
+    folder = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ""
+    try:
+        names = os.listdir(folder) if folder else []
+    except OSError:
+        return ""
+    if any(name.lower().startswith("python") and name.lower().endswith("._pth") for name in names):
+        return folder
+    return ""
+
+
+def _without_scanner_interpreter_on_path(env: dict[str, str]) -> dict[str, str]:
+    """Drop an embeddable scanner interpreter from a launcher's PATH (GAP-0915).
+
+    The managed Windows scanner runtime runs an embeddable CPython and puts
+    its folder first on PATH. uvx took that interpreter for the server's
+    environment, which an embeddable CPython cannot host: the server crashed
+    (0xC0000005) before initialize, printed nothing, and every uvx server was
+    blocked as not scanned. Without it uvx uses a Python installed for all
+    users, or its own.
+    """
+    folder = _embeddable_interpreter_dir()
+    path = env.get("PATH", "")
+    if not folder or not path:
+        return env
+    own = ntpath.normcase(ntpath.normpath(folder))
+    kept = [
+        item for item in path.split(";")
+        if item.strip() and ntpath.normcase(ntpath.normpath(item.strip().strip('"'))) != own
+    ]
+    return {**env, "PATH": ";".join(kept)}
+
+
 def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
     """Resolve a Windows stdio definition to a trusted, injection-safe argv."""
-    env = _safe_subprocess_env(entry.env)
+    env = _without_scanner_interpreter_on_path(_safe_subprocess_env(entry.env))
     args = list(entry.args or [])
     command = (entry.command or "").strip()
     lowered = _bare_stdio_launcher(command)
@@ -823,21 +871,36 @@ def _protocol_error_was_logged(errors: list[tuple[str, str]]) -> bool:
     )
 
 
+def _exit_code_text(code: int) -> str:
+    """An exit code as Windows reports it: NTSTATUS values in hex."""
+    unsigned = code & 0xFFFFFFFF
+    return f"0x{unsigned:08X}" if unsigned >= 0xC0000000 else str(code)
+
+
 def _classify_windows_stdio_error(
     exc: BaseException,
     plan: _StdioLaunchPlan,
     errors: list[tuple[str, str]],
     stderr_size: int,
     timeout_seconds: float,
+    exit_code: int | None = None,
 ) -> MCPStdioLaunchError:
-    """Translate dependency exceptions into stable, secret-safe boundaries."""
+    """Translate dependency exceptions into stable, secret-safe boundaries.
+
+    The launcher's exit code is named when it is known: a server that crashed
+    before initialize printed nothing, and the error said only that it
+    exited (GAP-0915). Its stderr is never part of the error text; the last
+    lines go to this process's stderr (_echo_server_stderr_tail), which the
+    gateway keeps with the failed scan.
+    """
     leaves = list(_exception_leaves(exc))
     leaf_text = " ".join(str(item).lower() for item in leaves)
     stderr_note = (
-        "; the server's stderr is printed above and not stored"
+        "; the launcher's last stderr lines are printed above"
         if stderr_size
         else ""
     )
+    exited = "exited" if exit_code is None else f"exited with code {_exit_code_text(exit_code)}"
 
     if _protocol_error_was_logged(errors) or any(
         type(item).__name__ in {"JSONDecodeError", "ValidationError"}
@@ -858,7 +921,7 @@ def _classify_windows_stdio_error(
         for token in ("connection closed", "endofstream", "brokenresource")
     ):
         return MCPStdioLaunchError(
-            f"MCP stdio launcher {plan.launcher!r} exited before completing "
+            f"MCP stdio launcher {plan.launcher!r} {exited} before completing "
             f"initialize/initialized/tools/list{stderr_note}"
         )
     # ``ConnectionError`` derives from ``OSError``. Check early-exit signals
@@ -928,6 +991,7 @@ async def _scan_windows_stdio_tools(
     validate(selected)
 
     stderr_size = 0
+    started: list[object] = []
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errlog:
         try:
             with anyio.fail_after(timeout_seconds):
@@ -940,7 +1004,7 @@ async def _scan_windows_stdio_tools(
                 # task. The child remains attached through tools/list and the
                 # official context manager owns process-tree cleanup.
                 _trace_windows_stdio_lifecycle("transport-opening", launcher=plan.launcher)
-                with _contained_mcp_windows_process_factory():
+                with _contained_mcp_windows_process_factory(started):
                     async with stdio_client(params, errlog=errlog) as (read, write):
                         _trace_windows_stdio_lifecycle("transport-opened", launcher=plan.launcher)
                         async with ClientSession(read, write) as session:
@@ -966,6 +1030,8 @@ async def _scan_windows_stdio_tools(
             errlog.flush()
             stderr_size = errlog.tell()
             setattr(exc, "_defenseclaw_stderr_size", stderr_size)
+            if started:
+                setattr(exc, "_defenseclaw_exit_code", getattr(started[-1], "returncode", None))
             _echo_server_stderr_tail(errlog, plan.launcher)
             raise
 
@@ -1428,6 +1494,7 @@ class MCPScannerWrapper:
                     errors,
                     stderr_size,
                     _STDIO_SCAN_TIMEOUT_SECONDS,
+                    getattr(exc, "_defenseclaw_exit_code", None),
                 ) from exc
 
             all_findings: list[object] = []

@@ -43,6 +43,29 @@ type ClaudeMCPSpoolRecord struct {
 	// Key is the SID of the account; it must match the file name.
 	Key     string                 `json:"key"`
 	Servers []ClaudeMCPSpoolServer `json:"servers"`
+	// Unreadable is set when the enumerator could not read or parse the
+	// account's Claude Code state; Servers is then empty.
+	Unreadable *ClaudeStateUnreadable `json:"unreadable,omitempty"`
+}
+
+// ClaudeStateUnreadable is an enrolled account whose Claude Code state
+// (~/.claude.json) the enumerator could not read or parse. Its servers are
+// unknown, so none of them can be admitted: the gateway refuses that
+// account's Claude Code MCP tool calls and status names the account and the
+// file until it can be read again (GAP-0829).
+type ClaudeStateUnreadable struct {
+	User   string `json:"user,omitempty"`
+	Home   string `json:"home"`
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+// Account is how status and the refusal name the account.
+func (u ClaudeStateUnreadable) Account() string {
+	if strings.TrimSpace(u.User) != "" {
+		return u.User
+	}
+	return u.Home
 }
 
 // ClaudeMCPSpoolDir is the spool folder below the hook guardian
@@ -63,46 +86,55 @@ func MarshalClaudeMCPSpoolRecord(sid string, servers []config.MCPServerEntry) ([
 	return json.Marshal(record)
 }
 
+// MarshalClaudeMCPSpoolUnreadable serializes the record of sid whose Claude
+// Code state could not be read.
+func MarshalClaudeMCPSpoolUnreadable(sid string, unreadable ClaudeStateUnreadable) ([]byte, error) {
+	return json.Marshal(ClaudeMCPSpoolRecord{
+		Version: ClaudeMCPSpoolRecordVersion, Key: sid, Servers: []ClaudeMCPSpoolServer{}, Unreadable: &unreadable,
+	})
+}
+
 // ReadClaudeMCPSpool returns the Claude Code MCP servers published for sid,
-// tagged claudecode, after trust validates the record file.
-func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, error) {
+// tagged claudecode, after trust validates the record file, and the marker
+// of a state the enumerator could not read.
+func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
 	key := strings.ToUpper(strings.TrimSpace(sid))
 	if dir == "" || !strings.HasPrefix(key, "S-1-") || !validIdentitySpoolKey(key) {
-		return nil, os.ErrNotExist
+		return nil, nil, os.ErrNotExist
 	}
 	path := filepath.Join(dir, key+".json")
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > maxClaudeMCPSpoolRecordBytes {
-		return nil, errors.New("claude mcp spool record is not a regular file within the size limit")
+		return nil, nil, errors.New("claude mcp spool record is not a regular file within the size limit")
 	}
 	if trust != nil {
 		if err := trust(path, "claude mcp spool record"); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxClaudeMCPSpoolRecordBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var record ClaudeMCPSpoolRecord
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&record); err != nil {
-		return nil, fmt.Errorf("parse claude mcp spool record: %w", err)
+		return nil, nil, fmt.Errorf("parse claude mcp spool record: %w", err)
 	}
 	if record.Version != ClaudeMCPSpoolRecordVersion {
-		return nil, fmt.Errorf("unsupported claude mcp spool record version %d", record.Version)
+		return nil, nil, fmt.Errorf("unsupported claude mcp spool record version %d", record.Version)
 	}
 	if !strings.EqualFold(record.Key, key) {
-		return nil, errors.New("claude mcp spool record names another account")
+		return nil, nil, errors.New("claude mcp spool record names another account")
 	}
 	out := make([]config.MCPServerEntry, 0, len(record.Servers))
 	for _, server := range record.Servers {
@@ -110,5 +142,25 @@ func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) (
 		entry.Connector, entry.Project = "claudecode", server.Project
 		out = append(out, entry)
 	}
-	return out, nil
+	return out, record.Unreadable, nil
+}
+
+// ReadClaudeStateUnreadable lists the accounts whose Claude Code state the
+// enumerator could not read, from the records in dir.
+func ReadClaudeStateUnreadable(dir string) []ClaudeStateUnreadable {
+	entries, err := os.ReadDir(dir)
+	if dir == "" || err != nil {
+		return nil
+	}
+	var out []ClaudeStateUnreadable
+	for _, entry := range entries {
+		sid, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok {
+			continue
+		}
+		if _, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil); err == nil && unreadable != nil {
+			out = append(out, *unreadable)
+		}
+	}
+	return out
 }

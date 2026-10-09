@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -462,6 +463,52 @@ func (c *Config) AssetRuntimeDetectionFor(targetType string) (AssetRuntimeDetect
 		return AssetRuntimeDetection{}, false
 	}
 	return p.RuntimeDetection, true
+}
+
+// UnenforcedAssetPolicyRules describes, per asset type, a default deny or
+// registry_required that nothing on this host applies: with the type's
+// runtime_detection.enabled false the agent hooks apply only its denied
+// list, and watched reports whether an install watcher admits the type here.
+// Such a policy reads as deny-by-default and blocks nothing, so ensure,
+// status, verify and the gateway log say so (GAP-0957). Secure Client keeps
+// main (issue #1092).
+func (c *Config) UnenforcedAssetPolicyRules(watched func(targetType string) bool) []string {
+	if c == nil || !c.AssetPolicy.Enabled || c.SecureClientIntegration() {
+		return nil
+	}
+	connectors := []string{""}
+	for name := range c.AssetPolicy.Connectors {
+		connectors = append(connectors, name)
+	}
+	sort.Strings(connectors[1:])
+	var out []string
+	for _, targetType := range []string{"skill", "plugin", "mcp"} {
+		detection, ok := c.AssetRuntimeDetectionFor(targetType)
+		if !ok || detection.Enabled || (watched != nil && watched(targetType)) {
+			continue
+		}
+		var rules []string
+		for _, connector := range connectors {
+			p, ok := c.assetPolicyFor(connector, targetType)
+			if !ok {
+				continue
+			}
+			if normalizeAssetDefault(p.Default) == "deny" && !slices.Contains(rules, "default: deny") {
+				rules = append(rules, "default: deny")
+			}
+			if p.RegistryRequired && !slices.Contains(rules, "registry_required") {
+				rules = append(rules, "registry_required")
+			}
+		}
+		if len(rules) == 0 {
+			continue
+		}
+		out = append(out, fmt.Sprintf("asset_policy.%[1]s %[2]s is not enforced on this host: no install watcher "+
+			"admits %[1]ss here, and with asset_policy.%[1]s.runtime_detection.enabled false the agent hooks apply only "+
+			"the asset_policy.%[1]s.denied list, so an unapproved %[1]s runs; set asset_policy.%[1]s.runtime_detection."+
+			"enabled: true so the hooks refuse it when the agent selects it", targetType, strings.Join(rules, " and ")))
+	}
+	return out
 }
 
 func (p AssetTypePolicy) withDefaults(runtime bool) AssetTypePolicy {

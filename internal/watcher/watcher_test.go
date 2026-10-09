@@ -196,6 +196,39 @@ func TestAdmission_BlockedSkill(t *testing.T) {
 	}
 }
 
+// GAP-0964: in mode observe a skill outside the approved catalog is admitted
+// with an asset-policy row that says it would be blocked in mode action.
+func TestAdmission_ObserveRegistryWritesWouldBlockRow(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	runtime := &watcherTestRuntime{}
+	logger.SetRuntimeV8Emitter(runtime)
+	cfg.AssetPolicy.Enabled, cfg.AssetPolicy.Mode = true, config.AssetPolicyModeObserve
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "epa-notes-r1", Reason: "registry:acme-catalog"}}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	skillPath := filepath.Join(skillDir, "epa-two-r1")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	result := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "epa-two-r1", Path: skillPath, Timestamp: time.Now()})
+	if strings.Contains(result.Reason, "approved registry") {
+		t.Fatalf("verdict %q (%s), want the catalog rule not to block in mode observe", result.Verdict, result.Reason)
+	}
+	logs, _ := runtime.snapshot()
+	var seen []string
+	for _, record := range logs {
+		data, err := record.MarshalJSON()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "would_block=true") && strings.Contains(string(data), "source=registry-required") {
+			return
+		}
+		seen = append(seen, record.Action())
+	}
+	t.Fatalf("no would-block asset-policy row for epa-two-r1; records: %v", seen)
+}
+
 // GAP-0581: a copy of a denied skill in a folder with another name, whose
 // SKILL.md still declares the denied name, is refused like the original.
 func TestAdmission_BlockedSkillByDeclaredName(t *testing.T) {

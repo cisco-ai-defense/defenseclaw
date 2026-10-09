@@ -6,11 +6,13 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -74,6 +76,36 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	alice.Config.Enterprise.Profile = managed.ProfileSecureClient
 	if _, ok := health()["policy"]; ok || livePolicyStampPresent() {
 		t.Fatal("the Secure Client integration's /health or decision records carry the effective policy")
+	}
+}
+
+func TestHealthBoundsManyPolicyComponents(t *testing.T) {
+	prev := liveGeneration.Load()
+	t.Cleanup(func() { liveGeneration.Store(prev) })
+	components := make(map[string]string, 2000)
+	for i := 0; i < 2000; i++ {
+		components[fmt.Sprintf("profile:%04d", i)] = strings.Repeat("a", 64)
+	}
+	liveGeneration.Store(&Generation{
+		Config: &config.Config{}, Digest: "sha256:effective", Components: components,
+	})
+	rec := httptest.NewRecorder()
+	(&APIServer{health: NewSidecarHealth()}).handleHealth(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK || rec.Body.Len() > 65536 {
+		t.Fatalf("/health status=%d, size=%d; want bounded response", rec.Code, rec.Body.Len())
+	}
+	var body struct {
+		Policy struct {
+			EffectiveDigest string            `json:"effective_digest"`
+			ComponentCount  int               `json:"component_count"`
+			Components      map[string]string `json:"components"`
+		} `json:"policy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Policy.EffectiveDigest != "sha256:effective" || body.Policy.ComponentCount != len(components) || len(body.Policy.Components) != 0 {
+		t.Fatalf("/health policy = %+v", body.Policy)
 	}
 }
 

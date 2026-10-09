@@ -30,7 +30,10 @@ const maxClaudeProjectMCPBytes = 1 << 20
 // reads ~/.claude.json and the .mcp.json of each project named there,
 // including projects outside the profile, without following reparse points.
 // A record is rewritten only when its servers change; records of users no
-// longer enrolled or whose state is unreadable are removed.
+// longer enrolled are removed. A user whose state is unreadable or malformed
+// gets a record that says so, without servers: an old definition is never
+// presented as the current state, and the gateway fails closed for that
+// user's Claude Code MCP servers (GAP-0829).
 func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
 		return nil
@@ -56,19 +59,17 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 		}
 		keep[strings.ToLower(name)] = true
 		servers, err := windowsClaudeStateServers(home)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) && logf != nil {
+		var data []byte
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			if logf != nil {
 				logf("[hook-enumerator] WARN Claude Code MCP servers for %s: %v", key, err)
 			}
-			if !errors.Is(err, os.ErrNotExist) {
-				// Never present an old definition as the user's current state.
-				if removeErr := os.Remove(filepath.Join(dir, name)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-					return fmt.Errorf("remove stale Claude Code MCP spool record for %s: %w", key, removeErr)
-				}
-				continue
-			}
+			data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
+				User: strings.TrimSpace(target.User), Home: home, Path: filepath.Join(home, ".claude.json"), Reason: err.Error(),
+			})
+		} else {
+			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
 		}
-		data, err := MarshalClaudeMCPSpoolRecord(key, servers)
 		if err != nil {
 			continue
 		}

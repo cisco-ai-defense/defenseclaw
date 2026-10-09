@@ -1173,6 +1173,7 @@ sudo $G enterprise secret remove --name ai-defense-api-key --json
 # CLI-09, Windows: the key file lives in an admin-only folder
 New-Item -ItemType Directory -Path C:\Admin -Force | Out-Null
 icacls C:\Admin /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+icacls C:\Admin /remove:g "*S-1-5-11" "*S-1-5-32-545" /T /C
 $key = Read-Host -AsSecureString -Prompt 'Disposable test API key'
 [IO.File]::WriteAllText('C:\Admin\ai-defense-api-key.txt', (ConvertFrom-SecureString -SecureString $key -AsPlainText))
 & $Cli enterprise secret set --name ai-defense-api-key --from-file C:\Admin\ai-defense-api-key.txt --json

@@ -324,7 +324,14 @@ pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
 ```
 
 `status` reports the state. `verify` also checks every file, permission,
-service and readiness check, and exits `1` when anything fails. Look for:
+service and readiness check, and exits `1` when anything fails. Permissions
+include macOS ACL entries, which `chmod +a` adds without changing the mode
+bits: an entry that lets another account change a DefenseClaw file or folder
+(the binaries, `bin`, the LaunchDaemon plists, the vendor machine-policy
+files), or reach a private one (`runtime`, `etc/secrets`, `lifecycle`,
+`etc/config.yaml`), fails `status` and `verify` with the path, and `repair`
+removes it (`chmod -N`). An `apply` or `verify` daemon that is not loaded fails
+them too; `repair` loads it again. Look for:
 
 | Field | Healthy value |
 | --- | --- |

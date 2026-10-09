@@ -457,7 +457,7 @@ asset_policy:
     },
     "url, command, args_prefix, transport": {
       type: "string",
-      description: "MCP servers only. Match a server by where it points or how it starts, with or without a name. Every field you give must match. command compares the program's base name; args_prefix compares the first arguments exactly. At an agent hook these fields are compared with the server as the calling user's agent configures it (on a managed device the standalone hook reads that configuration as the user), so two users' servers with the same name are told apart.",
+      description: "MCP servers only. Match a server by where it points or how it starts, with or without a name. Every field you give must match. command compares the program's base name; args_prefix compares the first arguments exactly. At an agent hook these fields are compared with the server as the calling user's agent configures it (on a managed device the standalone hook reads that configuration as the user), so two users' servers with the same name are told apart. On a managed device that includes a definition the agent was started with on its command line (claude --mcp-config, which --strict-mcp-config makes the only source, or codex -c mcp_servers.<name>.url=...); when the hook cannot read such a source, a tool call to the server is refused while one of these rules applies, because where it points cannot be checked.",
     },
     "source_path_contains": {
       type: "list",
@@ -503,6 +503,12 @@ approved-catalog rules.
 `runtime_detection.enabled: false` (the default for skills and plugins) an
 agent hook still refuses a skill, plugin command or MCP server on the `denied`
 list; only the default, registry and approval rules are skipped at the hook.
+Those rules then apply only where the install watcher admits the asset
+(per-user installs and managed Windows). A managed Linux or macOS device runs
+no install watcher for skills and plugins, so there a `default: deny` or
+`registry_required` for them blocks nothing until you set
+`runtime_detection.enabled: true`; `ensure`, `status` and `verify` warn with
+`asset_policy_not_enforced`, and the gateway log says so when it starts.
 
 ### Where a denied skill is refused
 
@@ -526,6 +532,12 @@ Skill call, the `$name` selection and the folder read, wherever the skill
 lives. With `runtime_detection.enabled: true`, `mode: action` and a
 `default: deny` or an approved registry, the Skill call and `$name` selection
 of any project skill that is not approved are refused too.
+
+The folder rule covers the `denied` list only. A skill that only a
+`default: deny` or `registry_required` keeps out is refused at the Skill call
+and the `$name` selection, but not when Codex, asked for the skill in plain
+words, reads its `SKILL.md` and follows it. To keep such a skill from running
+in Codex, add it to `asset_policy.skill.denied` or take it off the device.
 
 Take a denied skill off the device to remove it from that index. Where the
 install watcher runs (per-user installs and managed Windows), a config change

@@ -2398,7 +2398,7 @@ func TestWindowsEnterpriseStandaloneConfigPreflightRefusesAWritableRulePack(t *t
 	})
 	err := windowsEnterpriseStandaloneConfigPreflight(configPath)
 	if err == nil || !strings.Contains(err.Error(), "can write to "+rules) ||
-		!strings.Contains(err.Error(), `icacls "`+pack+`" /remove:g *S-1-5-11 /T /C`) ||
+		!strings.Contains(err.Error(), `icacls "`+pack+`" /remove:g "*S-1-5-11" /T /C`) ||
 		!strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("preflight = %v, want the writable rules file and the icacls fix", err)
 	}

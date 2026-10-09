@@ -1389,6 +1389,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
 			return res
 		}
+		w.logAssetPolicyWouldBlock(ctx, evt, targetType, connector, assetDecision)
 	}
 
 	if res, done := w.legacyAllowPathMismatch(ctx, cfg, evt, targetType); done {
@@ -1419,6 +1420,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=%s", targetType, w.allowedAuditReason(out.Reason)))
 		w.releaseAllowListed(evt, out.Reason)
+		if evt.Type == InstallMCP {
+			// Admitted without the scan whose failure blocked it: an allow
+			// rule or scan_on_install false (GAP-0910).
+			w.releaseScanFailureBlock(evt, targetType)
+		}
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 		return res
@@ -2018,6 +2024,26 @@ func unreadableAssetEntry(root string) string {
 // disabled because its scan failed; the next scan that succeeds releases
 // that block and its verdict decides (releaseScanFailureBlock).
 const scanFailureReason = "scanner failure (fail-closed): "
+
+// logAssetPolicyWouldBlock records an asset_policy rule (a default deny,
+// registry_required) that would refuse the asset in mode action and, in mode
+// observe, lets it through: the asset-policy row the hooks write for an MCP
+// server, so the administrator can pilot a skill catalog from the rows too
+// (GAP-0964). Secure Client keeps the rows of main (issue #1092).
+func (w *InstallWatcher) logAssetPolicyWouldBlock(ctx context.Context, evt InstallEvent, targetType, connector string, d config.AssetPolicyDecision) {
+	if w.logger == nil || !d.WouldBlock || w.secureClientActive() {
+		return
+	}
+	_ = w.logger.LogEventCtx(ctx, audit.Event{
+		Action:    string(audit.ActionAssetPolicy),
+		Target:    targetType + ":" + evt.Name,
+		Actor:     "defenseclaw",
+		Connector: connector,
+		Severity:  "INFO",
+		Details: fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=watcher connector=%s would_block=true path=%s reason=%s",
+			d.Action, d.Source, d.RegistryStatus, d.RegistryConfigured, connector, evt.Path, d.Reason),
+	})
+}
 
 // recordScanFailureBlock journals the install block and runtime disable of
 // an asset whose scan failed, for the connector that holds it.
