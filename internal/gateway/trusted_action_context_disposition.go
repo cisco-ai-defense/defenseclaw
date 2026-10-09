@@ -751,7 +751,8 @@ func trustedActionStaticCatEmitsPath(
 	default:
 		return false
 	}
-	if command.Argv[pathIndex] != candidate.Value {
+	if command.Argv[pathIndex] != candidate.Value &&
+		(!trustedActionHomeRewrittenPath(candidate) || command.Argv[pathIndex] != candidate.Resolved) {
 		return false
 	}
 	if len(command.Arguments) != len(command.Argv) {
@@ -769,6 +770,12 @@ func trustedActionStaticCatEmitsPath(
 	default:
 		return false
 	}
+}
+
+func trustedActionHomeRewrittenPath(candidate actionfacts.PathFact) bool {
+	return strings.HasPrefix(candidate.Value, "~/") ||
+		strings.HasPrefix(candidate.Value, "$HOME/") ||
+		strings.HasPrefix(candidate.Value, "${HOME}/")
 }
 
 func trustedActionCommandFeedsExternalUpload(

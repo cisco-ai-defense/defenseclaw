@@ -5851,7 +5851,20 @@ func trustedUnresolvedReadRuleMatches(
 	facts actionfacts.Facts,
 ) map[string]struct{} {
 	matchesByID := make(map[string]struct{})
+	literalTildeOperands := make(map[string]struct{})
+	if facts.Authoritative() {
+		for _, candidate := range facts.Paths {
+			if strings.HasPrefix(candidate.Value, "~/") &&
+				strings.Contains(candidate.Resolved, "/~/") &&
+				!matchesActiveSensitivePath(facts, candidate) {
+				literalTildeOperands[candidate.Value] = struct{}{}
+			}
+		}
+	}
 	collect := func(value string) {
+		if _, literal := literalTildeOperands[value]; literal {
+			return
+		}
 		if !trustedUnresolvedHomePath(value) {
 			return
 		}
