@@ -529,7 +529,7 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	}
 	subject, source := profileRequestSubject(ctx)
 	agent := ""
-	if source != "" && !subject.LookupFailed {
+	if source != "" && subject != nil {
 		if id, ok := profileAgentSource(ctx); ok {
 			agent = strings.TrimSpace(id)
 		}
@@ -784,7 +784,8 @@ func accountGroups(account *osuser.User) ([]string, error) {
 // connector-only assignment matches any other request authenticated for that
 // connector. A failed directory lookup leaves groups and names unknown, so
 // their assignments select default_lookup_failed (GAP-0312). An assignment
-// naming the kernel-verified UID or SID can still select its profile.
+// naming the kernel-verified UID or SID, or a verified agent, can still
+// select its profile.
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	if set.matches == nil {
 		return set.matchUncached(subject, source, connectorName, agent)
@@ -828,9 +829,10 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 	return set.decision(set.defaultProfile, reason, "", source)
 }
 
-// matchWithFailedLookup can use a kernel-verified UID or SID even when
-// directory names and groups are unknown. Preserve assignment order: an
-// earlier assignment that could depend on missing facts still selects the
+// matchWithFailedLookup can use a kernel-verified UID or SID or a
+// verified agent even when directory names and groups are unknown. Preserve
+// assignment order: an earlier assignment that could depend on missing facts
+// still selects the
 // outage default rather than letting a later assignment shadow it.
 func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	fallback := func() profileDecision {
@@ -866,7 +868,7 @@ func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, s
 			}
 			continue
 		}
-		if len(m.Groups) > 0 || len(m.Users) == 0 {
+		if len(m.Groups) > 0 || (len(m.Users) == 0 && len(m.Agents) == 0) {
 			return fallback()
 		}
 		reason, group, ok := assignmentMatches(m, idOnly, &subjectGroups{}, true, connectorName, agent)
