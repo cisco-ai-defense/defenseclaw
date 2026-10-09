@@ -1396,6 +1396,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=%s", targetType, w.allowedAuditReason(out.Reason)))
 		w.releaseAllowListed(evt, out.Reason)
+		if evt.Type == InstallMCP {
+			// Admitted without the scan whose failure blocked it: an allow
+			// rule or scan_on_install false (GAP-0910).
+			w.releaseScanFailureBlock(evt, targetType)
+		}
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 		return res

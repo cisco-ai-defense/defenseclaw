@@ -770,7 +770,11 @@ per-user install:
 
   or admit new MCP servers without a scan with
   `admission.mcp.scan_on_install: false`. There is no setting that lets the
-  scanner connect to these addresses.
+  scanner connect to these addresses. The periodic rescan does not scan such
+  a server either. A server that is already blocked because its scan failed
+  is admitted by the rescan that the config change starts: the
+  `install-allowed` row follows, the block is released and `status` stops
+  warning `asset_not_scanned` for it.
 - A stdio server started with `npx` or `uvx` is scanned only when the
   launcher is installed for all users in a folder that only administrators
   can change, such as Node.js in `C:\Program Files\nodejs` or uv under

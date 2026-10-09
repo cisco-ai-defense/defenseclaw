@@ -110,6 +110,44 @@ func TestRescanAdmitsUnscannedMCPServerWithoutScanWhenScanOnInstallIsOff(t *test
 	}
 }
 
+// GAP-0910: an MCP server the admin pinned in asset_policy.mcp.allowed after
+// its scan failed was scanned again by the rescan (install-scan-error), and
+// stayed blocked and reported as not scanned (asset_not_scanned). The rescan
+// admits it without a scan, releases the block and forgets the issue.
+func TestRescanAdmitsAllowPinnedMCPServerWhoseScanFailed(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Watch.RescanContentGated = true
+	server := config.MCPServerEntry{Name: "w2bnotes", URL: "http://127.0.0.1:28561/mcp", Connector: "codex", Home: "/home/u1"}
+	rows := auditRows(t, logger)
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	failing := &failingScanner{countingScanner{name: "mcp-scanner"}}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return failing }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+	w.AdmitAddedMCPServers([]string{server.Name})
+	w.admitAddedMCPServers(context.Background())
+	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 1 || issues[0].Kind != AdmissionUnscanned {
+		t.Fatalf("issues after the failed scan: %+v", issues)
+	}
+
+	cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: server.Name, URL: server.URL, Reason: "reviewed"}}
+	before, rowsBefore := failing.calls, len(rows())
+	w.runRescanCycle(context.Background())
+	if failing.calls != before {
+		t.Fatalf("the rescan scanned the pinned server %d times", failing.calls-before)
+	}
+	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 0 {
+		t.Fatalf("issues after the pinned server was admitted: %+v", issues)
+	}
+	if entry, err := store.GetActionForConnector("mcp", server.Name, "codex"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
+		t.Fatalf("journal %+v (err %v), want the scan failure block released", entry, err)
+	}
+	newRows := strings.Join(rows()[rowsBefore:], "\n")
+	if strings.Contains(newRows, "install-scan-error") || !strings.Contains(newRows, "type=mcp reason=allow-listed") {
+		t.Fatalf("rescan rows:\n%s\nwant install-allowed reason=allow-listed and no install-scan-error", newRows)
+	}
+}
+
 // GAP-0405: servers added with 'claude mcp add' (local scope) or a project's
 // .mcp.json were never scanned: the gateway read only the user scope and the
 // rescan admitted nothing new. ReadWatchedMCPServers lists every project's
