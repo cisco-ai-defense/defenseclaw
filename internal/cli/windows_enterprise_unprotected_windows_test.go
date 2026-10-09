@@ -359,7 +359,7 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 		}
 		return []daemon.Listener{{Address: "127.0.0.1:18971", PID: gatewayPID}}, nil
 	}
-	custom := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	custom := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
 	applyWindowsEnterpriseInstallerReport(custom, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
 	if len(custom.Errors) != 0 || !custom.Readiness.Gateway || len(custom.APIPortHolders) != 0 {
 		t.Fatalf("healthy custom-port gateway: errors = %+v readiness = %+v holders = %+v",
