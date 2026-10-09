@@ -106,13 +106,16 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	if err != nil || strings.TrimSpace(lock.Client.ConfigSHA256) == "" {
 		return errors.New("ACP client configuration identity is missing from the runtime contract")
 	}
-	for _, item := range []struct{ path, expected, label string }{
-		{clientConfigPath, lock.Client.ConfigSHA256, "client configuration"},
-		{agentPath, lock.Agent.SHA256, "agent"},
+	// Each item names itself: the editor configuration is a file, while the
+	// agent is an executable. Sharing one "executable" template sent an
+	// operator looking for a binary when the settings file had drifted.
+	for _, item := range []struct{ path, expected, subject string }{
+		{clientConfigPath, lock.Client.ConfigSHA256, "client configuration file"},
+		{agentPath, lock.Agent.SHA256, "agent executable"},
 	} {
 		observed, digestErr := fileSHA256(item.path)
 		if digestErr != nil || !strings.EqualFold(observed, item.expected) {
-			return fmt.Errorf("ACP %s executable digest does not match the runtime contract", item.label)
+			return fmt.Errorf("ACP %s digest does not match the runtime contract", item.subject)
 		}
 	}
 	observedGuardDigest, err := fileSHA256(guardPath)
