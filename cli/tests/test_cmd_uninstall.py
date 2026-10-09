@@ -495,24 +495,85 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             self.assertIn(f"'{root / '.defenseclaw-source-root'}'", message)
             self.assertTrue((root / "defenseclaw-gateway.exe").is_file())
 
-    def test_installer_oem_shim_in_unicode_profile_passes_ownership_check(self):
+    def test_installer_oem_shim_in_unicode_profile_is_recognized_by_cli_and_helper(self):
+        """GAP-0751: install.ps1 writes .cmd shims in the OEM code page, where \u00e9 is byte 0x82."""
+        from defenseclaw.commands import windows_uninstall_helper
+
+        # Windows code pages as on an en-US host (OEM 850, ANSI 1252); Linux has only UTF-8.
+        windows_encodings = ["utf-8-sig", "cp850", "cp1252"]
+        for profile in ("dcw-w4t", "dcw-w4\u00e9"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp) / profile
+                root = home / ".local" / "bin"
+                root.mkdir(parents=True)
+                data_dir = home / ".defenseclaw"
+                managed_venv = data_dir / ".venv"
+                cli = managed_venv / "Scripts" / "defenseclaw.exe"
+                shim = root / "defenseclaw.cmd"
+                shim_bytes = f'@echo off\r\n"{cli}" %*\r\n'.encode("cp850")
+                self.assertEqual(b"\x82" in shim_bytes, profile != "dcw-w4t")
+                shim.write_bytes(shim_bytes)
+                gateway = root / "defenseclaw-gateway.exe"
+                gateway.write_bytes(b"MZfixture")
+                plan = cmd_uninstall.UninstallPlan(
+                    platform_name="win32",
+                    install_root=str(root),
+                    managed_venv=str(managed_venv),
+                    binary_targets=(str(shim), str(gateway)),
+                    remove_binaries=True,
+                )
+                helper_plan = {
+                    "install_root": str(root),
+                    "data_dir": str(data_dir),
+                    "managed_venv": str(managed_venv),
+                    "protected_paths": [],
+                    "binary_targets": [str(gateway), str(shim)],
+                    "remove_data_dir": False,
+                }
+                with patch.object(windows_uninstall_helper, "_shim_encodings", return_value=windows_encodings):
+                    cmd_uninstall._validate_windows_binary_ownership(plan)
+                    self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(shim), str(data_dir), "win32"))
+                    _root, _data, targets = windows_uninstall_helper._validate_plan(helper_plan)
+                    self.assertEqual(len(targets), 2)
+                    shim.write_bytes(b'@echo off\r\n"C:\\other\\defenseclaw.exe" %*\r\n')
+                    with self.assertRaisesRegex(ValueError, "unrelated runtime"):
+                        windows_uninstall_helper._validate_plan(helper_plan)
+
+    def test_deferred_helper_failure_reason_reaches_the_cli_error(self):
+        """GAP-0751: the helper runs with no console; its result file says why it stopped."""
+
+        class StoppedHelper:
+            returncode = 1
+
+            def __init__(self, argv, **_kwargs):
+                with open(argv[-1], encoding="utf-8") as stream:
+                    status_path = json.load(stream)["status_path"]
+                with open(status_path, "w", encoding="utf-8") as stream:
+                    json.dump({"status": "failed", "detail": "Windows CLI shim targets an unrelated runtime"}, stream)
+
+            def poll(self):
+                return 1
+
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "dcw-w7é"
-            root = home / "bin"
-            root.mkdir(parents=True)
-            managed_venv = home / ".defenseclaw" / ".venv"
-            cli = managed_venv / "Scripts" / "defenseclaw.exe"
-            shim = root / "defenseclaw.cmd"
-            shim.write_bytes(f'@echo off\r\n"{cli}" %*\r\n'.encode("cp850"))
+            data_dir = Path(tmp) / "home" / ".defenseclaw"
             plan = cmd_uninstall.UninstallPlan(
                 platform_name="win32",
-                install_root=str(root),
-                managed_venv=str(managed_venv),
-                binary_targets=(str(shim),),
-                remove_binaries=True,
+                data_dir=str(data_dir),
+                install_root=str(Path(tmp) / "home" / ".local" / "bin"),
+                managed_venv=str(data_dir / ".venv"),
+                remove_data_dir=True,
             )
-            with patch.object(cmd_uninstall, "_windows_oem_encoding", return_value="cp850"):
-                cmd_uninstall._validate_windows_binary_ownership(plan)
+            with (
+                patch.object(cmd_uninstall.tempfile, "tempdir", tmp),
+                patch.object(cmd_uninstall, "_validate_plan"),
+                patch.object(cmd_uninstall, "_deferred_interpreter_dirs", return_value=[]),
+                patch.object(cmd_uninstall.subprocess, "Popen", StoppedHelper),
+                self.assertRaises(click.ClickException) as raised,
+            ):
+                cmd_uninstall._schedule_deferred_cleanup(plan)
+        message = raised.exception.message
+        self.assertIn("exited before ready (exit 1): Windows CLI shim targets an unrelated runtime", message)
+        self.assertIn("defenseclaw-uninstall-result-", message)
 
     def test_same_named_unrelated_windows_files_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:

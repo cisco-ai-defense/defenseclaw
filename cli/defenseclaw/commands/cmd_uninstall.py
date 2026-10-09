@@ -42,7 +42,6 @@ OpenClaw, never against the other adapters — calling
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import errno
 import glob
 import json
@@ -68,7 +67,7 @@ from defenseclaw import legacy_connector, ux
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
 from defenseclaw.bootstrap import remove_own_api_port_claims
-from defenseclaw.commands import windows_native_uninstall
+from defenseclaw.commands import windows_native_uninstall, windows_uninstall_helper
 from defenseclaw.file_lock import tui_lock_held
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -870,20 +869,28 @@ def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> boo
     if not os.path.isfile(path) or _is_reparse_path(path):
         return False
     if name.lower().endswith(".cmd"):
-        expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
-    elif name.lower() == "defenseclaw":
+        try:
+            return windows_uninstall_helper.shim_runs(path, os.path.join(venv, "Scripts", name[:-4] + ".exe"))
+        except (OSError, ValueError):
+            return False
+    if name.lower() == "defenseclaw":
         # The Git Bash launcher: exec "C:/.../.venv/Scripts/defenseclaw.exe" "$@"
         expected = f'exec "{os.path.join(venv, "Scripts", "defenseclaw.exe")}" "$@"'.replace("\\", "/").lower()
     elif name.lower() == "defenseclaw.exe":
         # The installer's copy of the venv's uv launcher names the venv's
         # python.exe, which it starts (GAP-2237).
-        expected_bytes = os.path.join(venv, "Scripts", "python.exe").lower().encode("utf-8")
+        # The launcher stores that path in UTF-8; decode before lower-casing
+        # so a non-ASCII profile name compares case-insensitively too.
+        expected = os.path.join(venv, "Scripts", "python.exe").lower()
         try:
             with open(path, "rb") as stream:
                 data = stream.read(_WINDOWS_CLI_LAUNCHER_MAX_BYTES + 1)
         except OSError:
             return False
-        return len(data) <= _WINDOWS_CLI_LAUNCHER_MAX_BYTES and expected_bytes in data.lower()
+        return (
+            len(data) <= _WINDOWS_CLI_LAUNCHER_MAX_BYTES
+            and expected in data.decode("utf-8", errors="replace").lower()
+        )
     else:
         return False
     try:
@@ -2083,12 +2090,6 @@ def _windows_developer_removal(files: list[str]) -> str:
     )
 
 
-def _windows_oem_encoding() -> str:
-    if sys.platform != "win32":
-        return "utf-8"  # Unit tests on non-Windows hosts use UTF-8 fixtures.
-    return f"cp{ctypes.WinDLL('kernel32').GetOEMCP()}"
-
-
 def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
     """Require the installer-authored CLI shim before removing paired artifacts."""
     existing = [path for path in plan.binary_targets if os.path.lexists(path)]
@@ -2101,17 +2102,15 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
             raise click.ClickException(f"refusing Windows binary removal: {_windows_developer_removal(developer)}")
         raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
     try:
-        # install.ps1 writes .cmd in the Windows OEM code page used by cmd.exe.
-        # A Unicode profile path can therefore contain bytes invalid in UTF-8.
-        with open(shim, encoding=_windows_oem_encoding(), errors="strict") as stream:
-            contents = stream.read(16_385)
-    except (OSError, UnicodeError) as exc:
+        # The deferred helper repeats this check with the same reader.
+        runs_cli = windows_uninstall_helper.shim_runs(
+            shim, os.path.join(plan.managed_venv, "Scripts", "defenseclaw.exe")
+        )
+    except OSError as exc:
         raise click.ClickException(f"could not verify Windows CLI shim ownership: {exc}") from exc
-    if len(contents) > 16_384:
-        raise click.ClickException("refusing oversized Windows CLI shim")
-    expected_cli = os.path.join(plan.managed_venv, "Scripts", "defenseclaw.exe")
-    expected_invocation = f'"{expected_cli}" %*'.lower()
-    if expected_invocation not in contents.lower():
+    except ValueError:
+        raise click.ClickException("refusing oversized Windows CLI shim") from None
+    if not runs_cli:
         raise click.ClickException("refusing Windows binary removal: CLI shim targets an unrelated runtime")
 
 
@@ -2281,6 +2280,23 @@ def _running_from_managed_venv(plan: UninstallPlan) -> bool:
         return False
 
 
+def _helper_failure_detail(*result_paths: str) -> str:
+    """Return ": <reason> (details: <file>)" from the first failed helper result, else "".
+
+    The helper runs with no console and its stdout and stderr are discarded,
+    so a failed run explains itself only in its result file (GAP-0751).
+    """
+    for path in result_paths:
+        try:
+            with open(path, encoding="utf-8") as stream:
+                result = json.load(stream)
+        except (OSError, ValueError):
+            continue
+        if isinstance(result, dict) and result.get("status") == "failed" and result.get("detail"):
+            return f": {result['detail']} (details: {path})"
+    return ""
+
+
 def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
     """Start the validated standalone helper and wait for its ready signal."""
     _validate_plan(plan)
@@ -2358,7 +2374,10 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
                     )
                 return status_path
             if process.poll() is not None:
-                raise click.ClickException(f"deferred cleanup helper exited before ready (exit {process.returncode})")
+                raise click.ClickException(
+                    f"deferred cleanup helper exited before ready (exit {process.returncode})"
+                    + _helper_failure_detail(status_path, f"{manifest_path}.failed.json")
+                )
             time.sleep(0.05)
         process.terminate()
         raise click.ClickException("deferred cleanup helper did not become ready")
