@@ -205,7 +205,11 @@ func runWindowsEnterprisePowerShell7(
 		return windowsEnterpriseStandaloneRun{}, err
 	}
 	environment := func(temp string) ([]string, error) {
-		return trustedWindowsEnterprisePowerShell7Environment(temp, engine)
+		env, err := trustedWindowsEnterprisePowerShell7Environment(temp, engine)
+		if err == nil && windowsEnterpriseForcedUninstallRequested(ctx) {
+			env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+		}
+		return env, err
 	}
 	stderr := &windowsEnterpriseOutputCapture{}
 	capture, runErr := runWindowsEnterprisePowerShellEngine(
@@ -235,6 +239,30 @@ func runWindowsEnterprisePowerShell7(
 		return run, runErr
 	}
 	return run, nil
+}
+
+// windowsEnterpriseForcedUninstallVariable carries --force (Setup /uninstall
+// FORCE=1) to the standalone installer, which reads it only for Uninstall and
+// clears it. It is not an installer parameter: the parameter set of the
+// installer is the Secure Client installer command line, which must not change
+// (GAP-0920, GAP-1041).
+const windowsEnterpriseForcedUninstallVariable = "DEFENSECLAW_STANDALONE_FORCED_UNINSTALL"
+
+type windowsEnterpriseForcedUninstallKey struct{}
+
+func windowsEnterpriseForcedUninstallRequested(ctx context.Context) bool {
+	forced, _ := ctx.Value(windowsEnterpriseForcedUninstallKey{}).(bool)
+	return forced
+}
+
+// windowsEnterpriseInstallerAction is the -Action value of installer args.
+func windowsEnterpriseInstallerAction(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-Action" {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // windowsEnterpriseStderrCode returns the first stderr line that carries a
@@ -560,6 +588,9 @@ func runWindowsEnterpriseStandaloneInstaller(
 ) (*windowsEnterpriseInstallerReport, windowsEnterpriseStandaloneRun, error) {
 	if !containsString(args, "-Json") {
 		args = append(append([]string{}, args...), "-Json")
+	}
+	if opts != nil && opts.force && windowsEnterpriseInstallerAction(args) == "Uninstall" {
+		ctx = context.WithValue(ctx, windowsEnterpriseForcedUninstallKey{}, true)
 	}
 	migrationRecord := readWindowsEnterpriseMigrationRecord()
 	run, err := windowsEnterpriseStandaloneRunner(ctx, cmd, script, args)

@@ -70,10 +70,6 @@ param(
     # of user runtimes, shared connector configuration, or another scope from
     # a DefenseClaw-like name.
     [switch]$Purge,
-    # Standalone Uninstall only: the last resort when no lifecycle can recover
-    # a pending transaction. It removes the deployment without reading that
-    # transaction (see Invoke-DefenseClawForcedUninstallPreparation).
-    [switch]$Force,
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
@@ -3382,7 +3378,16 @@ try {
         # The launching CLI's protected temp folder, which the purge's stale
         # temp sweep must keep (GAP-1853); TEMP now points at the bootstrap.
         $arguments['LauncherTemp'] = [string]$bootstrapEnvironment.OriginalEnvironment['TEMP']
-        if ($Force) {
+        # Setup /uninstall FORCE=1 (enterprise windows uninstall --force), the
+        # last resort that removes the deployment without reading its pending
+        # transaction (Invoke-DefenseClawForcedUninstallPreparation). The CLI
+        # asks for it in the strict environment it builds for the standalone
+        # engine, not with a parameter: the parameter set above is the command
+        # line of the Secure Client installer and stays unchanged. Cleared here
+        # so no child process inherits it.
+        $forcedUninstallRequest = [Environment]::GetEnvironmentVariable('DEFENSECLAW_STANDALONE_FORCED_UNINSTALL', 'Process')
+        [Environment]::SetEnvironmentVariable('DEFENSECLAW_STANDALONE_FORCED_UNINSTALL', $null, 'Process')
+        if ($Action -ceq 'Uninstall' -and $forcedUninstallRequest -ceq '1') {
             $arguments['Force'] = $true
         }
     }
