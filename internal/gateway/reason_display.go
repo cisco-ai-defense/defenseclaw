@@ -184,6 +184,9 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 		subject = agentAssetPolicySubject(sourceReason)
 	}
 	if subject == "" {
+		subject = agentMCPAdmissionSubject(sourceReason)
+	}
+	if subject == "" {
 		subject = agentJudgeSubject(sourceReason)
 	}
 	if subject == "" {
@@ -353,6 +356,29 @@ var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:
 // of the redacted key=value reason (GAP-0572). Spaces, quotes, controls and
 // format characters still fail the match and stay redacted.
 var agentAssetPolicyNamePattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
+
+// Only the fixed runtime-disable template and known admission verdict kinds
+// may become an agent sentence. Scanner errors and finding titles can contain
+// untrusted text, so the subject names their category without copying them.
+var agentMCPAdmissionPattern = regexp.MustCompile(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
+var agentMCPFindingPattern = regexp.MustCompile(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
+
+func agentMCPAdmissionSubject(reason string) string {
+	m := agentMCPAdmissionPattern.FindStringSubmatch(reason)
+	if m == nil {
+		return ""
+	}
+	var verdict string
+	switch {
+	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && len(m[2]) > len("scanner failure (fail-closed): "):
+		verdict = "scanner failure (fail-closed)"
+	case agentMCPFindingPattern.MatchString(m[2]):
+		verdict = "blocking scan findings"
+	default:
+		return ""
+	}
+	return "MCP server " + m[1] + " is disabled because its install admission rejected it (" + verdict + ")"
+}
 
 // agentAssetPolicySubject words an asset-policy block reason
 // (assetPolicyResponseReason: "ASSET-POLICY reason_code=... asset_name=...")
