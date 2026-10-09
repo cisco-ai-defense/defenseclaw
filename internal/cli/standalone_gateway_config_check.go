@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -35,7 +36,8 @@ import (
 func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string) error {
 	restore := snapshotProcessEnvironment()
 	defer restore()
-	var runtime *config.Config
+	var runtimeConfig *config.Config
+	var compiled *config.ObservabilityV8CompiledConfig
 	loaded, err := loadConfigV8FileWithCredentials(configPath, dataDir, credentialsDir)
 	if err != nil {
 		var secretError *config.V8SecretReferenceError
@@ -54,24 +56,44 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		// checked. Before, a config with an observability token_env
 		// skipped the pack check, and a stale custom_packs pin stopped the
 		// services and failed only after the readiness wait (GAP-0188).
-		if runtime = standaloneGatewayRuntimeCandidate(configPath); runtime == nil {
+		if runtimeConfig = standaloneGatewayRuntimeCandidate(configPath); runtimeConfig == nil {
 			return nil
 		}
-	} else {
-		runtime = loaded.runtime
-		// A jsonl destination the gateway service cannot write stopped the
-		// services, failed the readiness wait and rolled back (GAP-0908).
-		var unsafe *config.V8SemanticError
-		if err := checkJSONLDestinationPaths(loaded.compiled,
-			strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))); errors.As(err, &unsafe) {
-			return fmt.Errorf("the gateway cannot use %s: %s; %s", configPath, unsafe.Summary, unsafe.Action)
+		// The service may resolve environment references that Setup cannot.
+		// Compile once with placeholder environment values so a missing
+		// token cannot bypass the independent JSONL filesystem preflight.
+		raw, readErr := readConfigV8Source(configPath)
+		if readErr != nil {
+			return readErr
 		}
+		secretsDir := credentialsDir
+		if secretsDir == "" {
+			secretsDir = managed.StandaloneSecretsDirForConfig(runtime.GOOS, configPath)
+		}
+		compiled, err = config.ParseCompileObservabilityV8(configPath, raw, config.ObservabilityV8CompileOptions{
+			DefaultDataDir: dataDir,
+			Secrets:        standalonePathPreflightSecrets{credentialsDir: secretsDir},
+		})
+		if err != nil {
+			failure := configV8ValidationFailure(err)
+			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, failure.Path, failure.Reason)
+		}
+	} else {
+		runtimeConfig = loaded.runtime
+		compiled = loaded.compiled
 	}
-	if runtime == nil || !runtime.Guardrail.Enabled {
+	// A jsonl destination the gateway service cannot write stopped the
+	// services, failed the readiness wait and rolled back (GAP-0908).
+	var unsafe *config.V8SemanticError
+	if err := checkJSONLDestinationPaths(compiled,
+		strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))); errors.As(err, &unsafe) {
+		return fmt.Errorf("the gateway cannot use %s: %s; %s", configPath, unsafe.Summary, unsafe.Action)
+	}
+	if runtimeConfig == nil || !runtimeConfig.Guardrail.Enabled {
 		return nil
 	}
 	serviceAccount := strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))
-	for _, pack := range standaloneGatewayRulePackDirs(runtime) {
+	for _, pack := range standaloneGatewayRulePackDirs(runtimeConfig) {
 		// The check runs as an administrator or LocalSystem, who read any
 		// folder, so the gateway service account's own access is checked
 		// first: a pack with an explicit Deny for it loaded here, and the
@@ -87,9 +109,9 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	// The packs as the gateway builds them at start, custom_packs digest pins
 	// included: a pin the gateway refuses kept it from starting, and the
 	// lifecycle waited out its readiness timeout (GAP-0188).
-	if err := gateway.CheckRulePacks(runtime); err != nil {
+	if err := gateway.CheckRulePacks(runtimeConfig); err != nil {
 		hint := ""
-		for _, pack := range standaloneGatewayRulePackDirs(runtime) {
+		for _, pack := range standaloneGatewayRulePackDirs(runtimeConfig) {
 			if hint = rulePackNestedCopyHint(pack.dir, err); hint != "" {
 				break
 			}
@@ -97,6 +119,19 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		return fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %v%s", configPath, err, hint)
 	}
 	return nil
+}
+
+// standalonePathPreflightSecrets lets compilation reach path checks when the
+// service, rather than Setup, provides an environment token. Protected
+// credentials still use the real resolver and cannot be invented here.
+type standalonePathPreflightSecrets struct{ credentialsDir string }
+
+func (standalonePathPreflightSecrets) ResolveObservabilitySecret(string) (string, bool) {
+	return "preflight", true
+}
+
+func (secrets standalonePathPreflightSecrets) ResolveObservabilityCredential(name string) (string, bool) {
+	return config.ResolveObservabilityV8ProtectedCredential(secrets.credentialsDir, name)
 }
 
 // checkJSONLDestinationPaths refuses the first enabled jsonl destination
