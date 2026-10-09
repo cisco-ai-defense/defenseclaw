@@ -106,6 +106,11 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote) |
 | `audit findings` | The distinct scan findings that are current: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions (hook rules, the LLM guardrail) are not tracked here; use `alerts` or `audit export` for them |
 
+On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
+from an elevated administrator prompt. The `enrollment.accounts` field lists
+each account's connectors and their enrolled, pending or failed state.
+`enterprise hooks status` is the Linux and macOS guardian view.
+
 On a standalone host, hook decisions, rejected connector hooks, direct
 inspect-tool calls and refused hook-socket requests carry the verified
 account (`user.id`, `defenseclaw.user.name`); a refused request also names

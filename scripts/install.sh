@@ -1709,8 +1709,13 @@ ensure_path_hint() {
     case ":${CALLER_PATH}:" in *":${BIN_DIR}:"*) return ;; esac
     local rc="${HOME}/.profile"
     case "${SHELL:-}" in */zsh) rc="${HOME}/.zshrc" ;; */bash) rc="${HOME}/.bashrc" ;; esac
+    local quoted_bin="${BIN_DIR//\\/\\\\}" quoted_rc
+    quoted_bin="${quoted_bin//\"/\\\"}"
+    quoted_bin="${quoted_bin//\$/\\\$}"
+    quoted_bin="${quoted_bin//\`/\\\`}"
+    quoted_rc="${rc//\'/\'\\\'\'}"
     printf "\n  Add DefenseClaw to your PATH (then open a new shell):\n"
-    printf "    ${CYAN}echo 'export PATH=\"%s:\$PATH\"' >> %s${NC}\n" "${BIN_DIR}" "${rc}"
+    printf "    ${CYAN}echo 'export PATH=\"%s:\$PATH\"' >> '%s'${NC}\n" "${quoted_bin}" "${quoted_rc}"
 }
 
 main "$@"
