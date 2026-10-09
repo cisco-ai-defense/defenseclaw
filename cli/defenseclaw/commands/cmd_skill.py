@@ -4022,16 +4022,9 @@ def _format_connector_scope_list(connectors: list[str]) -> str:
 
 def _strict_path_within(path: str, root: str) -> bool:
     """Case-safe containment for POSIX and Windows restore/quarantine paths."""
-    try:
-        path_abs = os.path.abspath(path)
-        root_abs = os.path.abspath(root)
-        common = os.path.commonpath((path_abs, root_abs))
-    except (OSError, ValueError):
-        return False
-    return (
-        os.path.normcase(common) == os.path.normcase(root_abs)
-        and os.path.normcase(path_abs) != os.path.normcase(root_abs)
-    )
+    from defenseclaw.enforce.skill_enforcer import SkillEnforcer
+
+    return SkillEnforcer._contained(path, root)
 
 
 def _materialize_legacy_skill_quarantine(
