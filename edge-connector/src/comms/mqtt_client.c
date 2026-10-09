@@ -69,6 +69,7 @@ typedef struct {
     uint64_t     last_activity_tick;  /* for keepalive tracking */
     uint16_t     next_packet_id;
     int          socket_fd;
+    bool         tls_active;  /* true when TLS session is established */
     char         session_id[32];
     uint8_t      recv_buf[MQTT_RECV_BUF_SIZE];
     size_t       recv_len;
@@ -343,6 +344,36 @@ static ssize_t sock_read_timeout(int fd, uint8_t *buf, size_t len, int timeout_m
     return n;
 }
 
+/* === TLS-aware I/O wrappers === */
+
+/*
+ * Write all bytes through TLS or plain TCP depending on mqtt_ctx.tls_active.
+ * Returns 0 on success, -1 on error.
+ */
+static int mqtt_write_all(int fd, const uint8_t *buf, size_t len) {
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+    if (mqtt_ctx.tls_active) {
+        int ret = dclaw_tls_write(buf, len);
+        return (ret == (int)len) ? 0 : -1;
+    }
+#endif
+    return sock_write_all(fd, buf, len);
+}
+
+/*
+ * Read with timeout through TLS or plain TCP depending on mqtt_ctx.tls_active.
+ * Returns bytes read, or -1 on error/timeout.
+ */
+static ssize_t mqtt_read_timeout(int fd, uint8_t *buf, size_t len, int timeout_ms) {
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+    if (mqtt_ctx.tls_active) {
+        int ret = dclaw_tls_read(buf, len, timeout_ms);
+        return (ssize_t)ret;
+    }
+#endif
+    return sock_read_timeout(fd, buf, len, timeout_ms);
+}
+
 /* === MQTT protocol operations === */
 
 /*
@@ -420,7 +451,7 @@ static int mqtt_send_connect(int fd) {
         pos += mqtt_write_utf8_string(pkt + pos, mqtt_pass, pass_len);
     }
 
-    return sock_write_all(fd, pkt, (size_t)pos);
+    return mqtt_write_all(fd, pkt, (size_t)pos);
 }
 
 /*
@@ -429,7 +460,7 @@ static int mqtt_send_connect(int fd) {
  */
 static int mqtt_read_connack(int fd) {
     uint8_t buf[4];
-    ssize_t n = sock_read_timeout(fd, buf, sizeof(buf), 5000);
+    ssize_t n = mqtt_read_timeout(fd, buf, sizeof(buf), 5000);
     if (n < 4) {
         fprintf(stderr, "[DCLAW-MQTT] CONNACK too short or timeout (got %zd bytes)\n", n);
         return -1;
@@ -476,7 +507,7 @@ static int mqtt_send_subscribe(int fd, const char *topic, uint8_t qos,
     pos += mqtt_write_utf8_string(pkt + pos, topic, topic_len);
     pkt[pos++] = qos;
 
-    return sock_write_all(fd, pkt, (size_t)pos);
+    return mqtt_write_all(fd, pkt, (size_t)pos);
 }
 
 /*
@@ -484,7 +515,7 @@ static int mqtt_send_subscribe(int fd, const char *topic, uint8_t qos,
  */
 static int mqtt_read_suback(int fd) {
     uint8_t buf[8];
-    ssize_t n = sock_read_timeout(fd, buf, sizeof(buf), 5000);
+    ssize_t n = mqtt_read_timeout(fd, buf, sizeof(buf), 5000);
     if (n < 5) return -1;
 
     if ((buf[0] & 0xF0) != MQTT_PKT_SUBACK) {
@@ -534,13 +565,19 @@ static int mqtt_subscribe_topics(int fd) {
  */
 static int mqtt_send_pingreq(int fd) {
     uint8_t pkt[2] = { MQTT_PKT_PINGREQ, 0x00 };
-    return sock_write_all(fd, pkt, 2);
+    return mqtt_write_all(fd, pkt, 2);
 }
 
 /*
  * Mark connection as lost. Closes socket and sets state for reconnect.
  */
 static void mqtt_mark_disconnected(void) {
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+    if (mqtt_ctx.tls_active) {
+        dclaw_tls_shutdown();
+        mqtt_ctx.tls_active = false;
+    }
+#endif
     if (mqtt_ctx.socket_fd >= 0) {
         close(mqtt_ctx.socket_fd);
         mqtt_ctx.socket_fd = -1;
@@ -660,7 +697,7 @@ static int mqtt_process_packet(const uint8_t *buf, size_t available) {
                     MQTT_PKT_PUBACK, 0x02,
                     (uint8_t)(pkt_id >> 8), (uint8_t)(pkt_id & 0xFF)
                 };
-                sock_write_all(mqtt_ctx.socket_fd, puback, 4);
+                mqtt_write_all(mqtt_ctx.socket_fd, puback, 4);
             }
         }
 
@@ -735,23 +772,7 @@ int dclaw_mqtt_connect(void) {
         return -1;
     }
 
-#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
-    if (is_tls) {
-        /* TODO(Phase 2): Implement TLS handshake with mbedtls_ssl:
-         *   - TCP connect
-         *   - mbedtls_ssl_handshake with device cert (mTLS)
-         *   - Send MQTT CONNECT over the TLS session
-         *   - Receive CONNACK, extract server timestamp
-         *   - Subscribe to verdict/resp, ota/policy, ota/emergency
-         */
-        fprintf(stderr, "[DCLAW-MQTT] ERROR: TLS MQTT connection (mqtts://) not yet "
-                "implemented. Use mqtt:// URLs for development/testing, or wait "
-                "for Phase 2 TLS support.\n");
-        mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
-        return -1;
-    }
-    /* mqtt:// (plaintext) — fall through to the TCP path below */
-#else
+#if !defined(DCLAW_HAS_MBEDTLS) || !DCLAW_HAS_MBEDTLS
     if (is_tls) {
         fprintf(stderr, "[DCLAW-MQTT] ERROR: mqtts:// requested but mbedTLS not available. "
                 "Refusing to connect over plain TCP. Build with DCLAW_HAS_MBEDTLS=1 "
@@ -777,9 +798,7 @@ int dclaw_mqtt_connect(void) {
     }
 #endif
 
-    /* Plaintext TCP + MQTT 3.1.1 path (used for mqtt:// URLs) */
-
-    /* Step 1: TCP connect */
+    /* Step 1: TCP connect (common to both plaintext and TLS paths) */
     int fd = tcp_connect(host, port);
     if (fd < 0) {
         mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
@@ -792,9 +811,37 @@ int dclaw_mqtt_connect(void) {
         fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
-    /* Step 2: Send MQTT CONNECT */
+    /* Step 1b: TLS handshake over the TCP socket (mqtts:// only) */
+    mqtt_ctx.tls_active = false;
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+    if (is_tls) {
+        if (dclaw_tls_init() != 0) {
+            fprintf(stderr, "[DCLAW-MQTT] TLS engine initialization failed\n");
+            close(fd);
+            mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
+            return -1;
+        }
+        if (dclaw_tls_connect(fd) != 0) {
+            fprintf(stderr, "[DCLAW-MQTT] TLS handshake failed\n");
+            dclaw_tls_shutdown();
+            close(fd);
+            mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
+            return -1;
+        }
+        mqtt_ctx.tls_active = true;
+        fprintf(stderr, "[DCLAW-MQTT] TLS session established\n");
+    }
+#endif
+
+    /* Store socket_fd early — mqtt_write_all/mqtt_read_all need it via
+     * the mqtt_send_connect / mqtt_read_connack / subscribe helpers. */
+    mqtt_ctx.socket_fd = fd;
+
+    /* Step 2: Send MQTT CONNECT (over TLS or plaintext) */
     if (mqtt_send_connect(fd) != 0) {
         fprintf(stderr, "[DCLAW-MQTT] Failed to send CONNECT packet\n");
+        mqtt_ctx.socket_fd = -1;
+        mqtt_mark_disconnected();
         close(fd);
         mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
@@ -803,17 +850,19 @@ int dclaw_mqtt_connect(void) {
     /* Step 3: Read CONNACK */
     if (mqtt_read_connack(fd) != 0) {
         fprintf(stderr, "[DCLAW-MQTT] CONNACK handshake failed\n");
+        mqtt_ctx.socket_fd = -1;
+        mqtt_mark_disconnected();
         close(fd);
         mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
     }
 
     /* Step 4: Subscribe to device topics */
-    mqtt_ctx.socket_fd = fd;  /* needed by subscribe for packet_id tracking */
     if (mqtt_subscribe_topics(fd) != 0) {
         fprintf(stderr, "[DCLAW-MQTT] Subscribe failed\n");
-        close(fd);
         mqtt_ctx.socket_fd = -1;
+        mqtt_mark_disconnected();
+        close(fd);
         mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
     }
@@ -962,7 +1011,7 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
     pos += mqtt_encode_remaining_length(hdr + pos, remaining);
 
     /* Write fixed header */
-    if (sock_write_all(mqtt_ctx.socket_fd, hdr, (size_t)pos) != 0) {
+    if (mqtt_write_all(mqtt_ctx.socket_fd, hdr, (size_t)pos) != 0) {
         mqtt_mark_disconnected();
         return -1;
     }
@@ -971,11 +1020,11 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
     uint8_t topic_hdr[2] = {
         (uint8_t)(topic_len >> 8), (uint8_t)(topic_len & 0xFF)
     };
-    if (sock_write_all(mqtt_ctx.socket_fd, topic_hdr, 2) != 0) {
+    if (mqtt_write_all(mqtt_ctx.socket_fd, topic_hdr, 2) != 0) {
         mqtt_mark_disconnected();
         return -1;
     }
-    if (sock_write_all(mqtt_ctx.socket_fd, (const uint8_t *)topic, topic_len) != 0) {
+    if (mqtt_write_all(mqtt_ctx.socket_fd, (const uint8_t *)topic, topic_len) != 0) {
         mqtt_mark_disconnected();
         return -1;
     }
@@ -985,7 +1034,7 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
         uint8_t pid[2] = {
             (uint8_t)(packet_id >> 8), (uint8_t)(packet_id & 0xFF)
         };
-        if (sock_write_all(mqtt_ctx.socket_fd, pid, 2) != 0) {
+        if (mqtt_write_all(mqtt_ctx.socket_fd, pid, 2) != 0) {
             mqtt_mark_disconnected();
             return -1;
         }
@@ -993,7 +1042,7 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
 
     /* Write payload */
     if (len > 0) {
-        if (sock_write_all(mqtt_ctx.socket_fd, (const uint8_t *)payload, len) != 0) {
+        if (mqtt_write_all(mqtt_ctx.socket_fd, (const uint8_t *)payload, len) != 0) {
             mqtt_mark_disconnected();
             return -1;
         }
@@ -1025,7 +1074,20 @@ int dclaw_mqtt_poll(int timeout_ms) {
             space = MQTT_RECV_BUF_SIZE;
         }
 
-        ssize_t n = read(mqtt_ctx.socket_fd, mqtt_ctx.recv_buf + mqtt_ctx.recv_len, space);
+        ssize_t n;
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+        if (mqtt_ctx.tls_active) {
+            /* TLS records may already be buffered inside mbedTLS even when
+             * poll() fires on the underlying FD. Use a short (0ms) timeout
+             * to avoid blocking the event loop. */
+            int ret = dclaw_tls_read(mqtt_ctx.recv_buf + mqtt_ctx.recv_len, space, 0);
+            n = (ret > 0) ? (ssize_t)ret : (ret == -1 ? -1 : 0);
+        } else
+#endif
+        {
+            n = read(mqtt_ctx.socket_fd, mqtt_ctx.recv_buf + mqtt_ctx.recv_len, space);
+        }
+
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             /* Spurious wakeup, no data */
         } else if (n <= 0) {

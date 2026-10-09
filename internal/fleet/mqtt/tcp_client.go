@@ -9,6 +9,8 @@ package mqtt
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -65,10 +67,6 @@ type TCPClient struct {
 	readerDone   chan struct{}
 }
 
-// errTLSNotSupported is returned when a TLS MQTT scheme is requested but not
-// yet implemented.
-var errTLSNotSupported = fmt.Errorf("TLS MQTT not yet supported. Use mqtt:// or host:port for plaintext")
-
 // stripMQTTScheme removes URI scheme prefixes (tcp://, mqtt://) from a broker
 // address, returning just the host:port portion that net.Dial expects.
 // P0-5 fix: mqtts:// and ssl:// are NOT stripped — callers must check for TLS
@@ -85,6 +83,83 @@ func stripMQTTScheme(addr string) string {
 // isTLSScheme returns true if the address uses a TLS MQTT scheme (mqtts:// or ssl://).
 func isTLSScheme(addr string) bool {
 	return strings.HasPrefix(addr, "mqtts://") || strings.HasPrefix(addr, "ssl://")
+}
+
+// stripTLSScheme removes mqtts:// or ssl:// scheme prefixes and ensures the
+// resulting host:port has a port, defaulting to 8883 (MQTT over TLS standard port).
+func stripTLSScheme(addr string) string {
+	for _, prefix := range []string{"mqtts://", "ssl://"} {
+		if strings.HasPrefix(addr, prefix) {
+			addr = strings.TrimPrefix(addr, prefix)
+			break
+		}
+	}
+	// Ensure a port is present; default to 8883 for MQTT-TLS.
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(addr, "8883")
+	}
+	return addr
+}
+
+// buildTLSConfig constructs a *tls.Config based on environment variables:
+//   - DCLAW_TLS_SKIP_VERIFY=true  → InsecureSkipVerify (dev / self-signed certs)
+//   - DCLAW_TLS_CA_CERT           → path to PEM CA certificate for custom root CAs
+//   - DCLAW_TLS_CLIENT_CERT + DCLAW_TLS_CLIENT_KEY → mTLS client certificate pair
+func buildTLSConfig() (*tls.Config, error) {
+	cfg := &tls.Config{
+		InsecureSkipVerify: false,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	// Allow skipping certificate verification for dev/self-signed certs.
+	if skip := os.Getenv("DCLAW_TLS_SKIP_VERIFY"); skip == "true" || skip == "1" {
+		cfg.InsecureSkipVerify = true
+	}
+
+	// Custom CA certificate.
+	if caPath := os.Getenv("DCLAW_TLS_CA_CERT"); caPath != "" {
+		caCert, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert %s: %w", caPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA cert from %s", caPath)
+		}
+		cfg.RootCAs = pool
+	}
+
+	// mTLS client certificate.
+	certPath := os.Getenv("DCLAW_TLS_CLIENT_CERT")
+	keyPath := os.Getenv("DCLAW_TLS_CLIENT_KEY")
+	if certPath != "" && keyPath != "" {
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert/key (%s, %s): %w", certPath, keyPath, err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return cfg, nil
+}
+
+// dialTLS establishes a TLS connection to addr using the environment-driven TLS
+// configuration. It is used by both Connect() and doConnect().
+func dialTLS(addr string) (net.Conn, error) {
+	tlsCfg, err := buildTLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("build TLS config: %w", err)
+	}
+	conn, err := tls.DialWithDialer(
+		&net.Dialer{Timeout: 5 * time.Second},
+		"tcp",
+		addr,
+		tlsCfg,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("tls dial %s: %w", addr, err)
+	}
+	return conn, nil
 }
 
 // NewTCPClient creates a new minimal MQTT client that connects to the given
@@ -109,11 +184,6 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 		return nil // already connected
 	}
 
-	// P0-5 fix: Reject TLS schemes instead of silently downgrading to plaintext.
-	if isTLSScheme(c.addr) {
-		return fmt.Errorf("%w: broker address %q uses TLS scheme", errTLSNotSupported, c.addr)
-	}
-
 	// DCLAW_REQUIRE_TLS guard: If the operator has set DCLAW_REQUIRE_TLS=true
 	// (or "1"), refuse to connect unless the address uses mqtts:// or ssl://.
 	// This lets operators enforce TLS without code changes.
@@ -123,14 +193,24 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 		}
 	}
 
-	// Strip URI scheme prefixes — net.Dial expects bare host:port.
-	addr := stripMQTTScheme(c.addr)
-
-	// Dial with context deadline if present.
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("tcp dial %s: %w", c.addr, err)
+	var conn net.Conn
+	if isTLSScheme(c.addr) {
+		// TLS connection: strip scheme, default to port 8883, dial with TLS config.
+		addr := stripTLSScheme(c.addr)
+		tlsConn, err := dialTLS(addr)
+		if err != nil {
+			return err
+		}
+		conn = tlsConn
+	} else {
+		// Plaintext connection: strip URI scheme prefixes — net.Dial expects bare host:port.
+		addr := stripMQTTScheme(c.addr)
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		var err error
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return fmt.Errorf("tcp dial %s: %w", c.addr, err)
+		}
 	}
 
 	// P0-4 fix: Read MQTT credentials from environment so authenticated
@@ -549,18 +629,26 @@ func (c *TCPClient) doConnect(ctx context.Context) error {
 		return nil // already connected
 	}
 
-	if isTLSScheme(c.addr) {
-		c.mu.Unlock()
-		return fmt.Errorf("%w: broker address %q uses TLS scheme", errTLSNotSupported, c.addr)
-	}
-
-	addr := stripMQTTScheme(c.addr)
+	useTLS := isTLSScheme(c.addr)
+	rawAddr := c.addr
 	c.mu.Unlock()
 
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return fmt.Errorf("tcp dial %s: %w", c.addr, err)
+	var conn net.Conn
+	if useTLS {
+		addr := stripTLSScheme(rawAddr)
+		tlsConn, err := dialTLS(addr)
+		if err != nil {
+			return err
+		}
+		conn = tlsConn
+	} else {
+		addr := stripMQTTScheme(rawAddr)
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		var err error
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return fmt.Errorf("tcp dial %s: %w", rawAddr, err)
+		}
 	}
 
 	mqttUser := os.Getenv("DCLAW_MQTT_USER")

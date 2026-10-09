@@ -158,7 +158,7 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
 
     /* Feed: tool_hash[0:32] */
     memcpy(msg + msg_len, tool_hash, 32);
-    msg_len += 8;
+    msg_len += 32;
 
     dclaw_hmac_sha256(device_key, key_len, msg, msg_len, hmac_full);
 

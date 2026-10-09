@@ -652,10 +652,17 @@ static bool parse_ipv4(const char *dest, uint8_t octets[4]) {
             return false;
         }
 
-        /* Parse decimal number */
+        /* H-SSRF fix: Detect leading-zero octets and parse as octal.
+         * 0177.0.0.01 = 127.0.0.1 in octal — a well-known SSRF technique. */
+        int base = 10;
+        if (dest[pos] == '0' && isdigit((unsigned char)dest[pos + 1]) && dest[pos + 1] != '.') {
+            base = 8; /* leading zero = octal */
+        }
         values[octet_idx] = 0;
-        while (isdigit((unsigned char)dest[pos])) {
-            values[octet_idx] = values[octet_idx] * 10 + (dest[pos] - '0');
+        while (isdigit((unsigned char)dest[pos]) && dest[pos] != '.') {
+            uint16_t digit = dest[pos] - '0';
+            if (base == 8 && digit >= 8) return false; /* invalid octal digit */
+            values[octet_idx] = values[octet_idx] * base + digit;
             if (values[octet_idx] > 255) {
                 return false; /* Octet overflow */
             }
