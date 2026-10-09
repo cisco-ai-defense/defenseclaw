@@ -110,6 +110,12 @@ type claudeCodeHookResponse struct {
 	SourceReason         string `json:"-"`
 	SuppressNotification bool   `json:"-"`
 	aiDefenseEnforced    bool
+	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
+	// (Cisco AI Defense, LLM judge) took part in the verdict. The
+	// sandbox-unblock lift (liftUnblockedDestinations) refuses to lift
+	// a response flagged this way, since destination rules alone did
+	// not decide the verdict. Never serialized on the wire.
+	laneVerdict bool
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -243,15 +249,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	} else if mode != "action" && rawAction == "block" {
 		action = "allow"
 	}
-	// Claude Code's hook response contract has no alert action. Preserve the
-	// advisory verdict in RawAction for telemetry, but let the agent continue.
-	// Confirm is only representable by Claude's native ask response on
-	// PreToolUse; on every other hook surface it is advisory as well.
-	if rawAction == "alert" {
+	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
 		action = "allow"
 	}
-	if rawAction == "confirm" && (mode != "action" || req.HookEventName != "PreToolUse") {
-		action = "allow"
+	if mode == "action" && rawAction == "confirm" && req.HookEventName != "PreToolUse" {
+		action = "alert"
 	}
 	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	for _, asset := range assetDecisions {
@@ -288,6 +290,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
+	resp.laneVerdict = verdict.laneVerdict
 	return resp
 }
 

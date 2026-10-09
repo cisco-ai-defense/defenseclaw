@@ -157,6 +157,7 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		SourceReason:         resp.SourceReason,
 		SuppressNotification: resp.SuppressNotification,
 		aiDefenseEnforced:    resp.aiDefenseEnforced,
+		laneVerdict:          resp.laneVerdict,
 	}
 }
 
