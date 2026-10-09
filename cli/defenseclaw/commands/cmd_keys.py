@@ -184,6 +184,19 @@ def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> N
     click.echo(f"  {ux.dim('Remove one with: defenseclaw keys remove <ENV_NAME>')}")
 
 
+def _refuse_managed_secret_write(app: AppContext, action: str) -> None:
+    # A per-user dotenv cannot rotate a managed standalone credential.
+    from defenseclaw.enforce.asset_lists import ManagedDeviceError, is_managed_standalone
+
+    if is_managed_standalone(app.cfg):
+        stdin_option = " --from-stdin" if action == "set" else ""
+        raise ManagedDeviceError(
+            "This device uses the managed enterprise secret store. "
+            f"Ask an administrator to run defenseclaw-gateway enterprise secret {action} "
+            f"--name <configured-credential>{stdin_option}."
+        )
+
+
 @keys_cmd.command("set")
 @click.argument("env_name")
 @click.option("--value", "value", default=None, help="Value to store; prompts if omitted.")
@@ -202,6 +215,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     """
     import os
 
+    _refuse_managed_secret_write(app, "set")
     if value_stdin and value is not None:
         raise click.UsageError("--value and --value-stdin are mutually exclusive")
     if value_stdin:
@@ -299,6 +313,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
     """
     import os
 
+    _refuse_managed_secret_write(app, "remove")
     env_name = env_name.strip()
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
@@ -404,6 +419,7 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
     """Interactively prompt for every REQUIRED-but-unset credential."""
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
+    _refuse_managed_secret_write(app, "set")
     statuses = [s for s in classify(app.cfg) if s.missing]
     if not statuses:
         ux.ok("No missing required credentials — you're all set.")
