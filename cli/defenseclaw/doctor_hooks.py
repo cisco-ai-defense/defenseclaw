@@ -1977,6 +1977,8 @@ def _commands_from_hooks(
                 continue
             for hook in nested:
                 command = None
+                if connector == "claudecode":
+                    hook = _claude_launcher_guard_view(hook)
                 if isinstance(hook, dict):
                     command = hook.get("command_windows") if connector == "codex" else None
                     if not isinstance(command, str) or not command.strip():
@@ -2053,6 +2055,44 @@ def _validate_devin_hook_matrix(document: dict[str, Any]) -> tuple[str, int]:
     return commands[0], len(commands)
 
 
+# Per-user Windows Claude Code registers its launcher through cmd.exe so a
+# missing launcher blocks instead of failing open (GAP-1091). Keep this
+# sentence and argv identical to internal/gateway/connector/claudecode_launcher_guard.go.
+_CLAUDE_LAUNCHER_GUARD_WORDS = (
+    "DefenseClaw blocked this: its Claude Code hook launcher is missing. "
+    "Run the DefenseClaw installer again to repair it."
+).split()
+
+
+def _claude_launcher_guard_view(handler: Any) -> Any:
+    """The exec-form handler a generated cmd.exe launcher guard runs, else *handler* unchanged."""
+    if not isinstance(handler, dict):
+        return handler
+    command, args = handler.get("command"), handler.get("args")
+    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return handler
+    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
+    processor = ntpath.join(system_root, "System32", "cmd.exe")
+    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
+        return handler
+    if len(args) < 8 or args[:4] != ["/d", "/c", "if", "exist"] or args[5] != "(" or args[6] != args[4]:
+        return handler
+    end = next((i for i in range(7, len(args) - 1) if args[i] == ")" and args[i + 1] == "else"), -1)
+    if end < 0:
+        return handler
+    launcher, inner = args[4], args[7:end]
+    expected = [
+        "/d", "/c", "if", "exist", launcher, "(", launcher, *inner, ")", "else", "(", "echo",
+        *_CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+    ]
+    if args != expected:
+        return handler
+    view = dict(handler)
+    view["command"] = launcher
+    view["args"] = list(inner)
+    return view
+
+
 def _handler_command_line(handler: dict[str, Any], connector: str, *, windows: bool) -> str:
     command = handler.get("command_windows") if connector == "codex" and windows else handler.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -2066,6 +2106,8 @@ def _handler_command_line(handler: dict[str, Any], connector: str, *, windows: b
 
 
 def _handler_targets_defenseclaw(handler: Any, connector: str) -> bool:
+    if connector == "claudecode":
+        handler = _claude_launcher_guard_view(handler)
     if not isinstance(handler, dict):
         return False
     candidates = []
@@ -2300,6 +2342,7 @@ def _claude_native_handler_identity(
     managed_enterprise: bool,
 ) -> str:
     """Validate Claude's native Windows command form without flattening away its schema."""
+    handler = _claude_launcher_guard_view(handler)
     raw_command = handler.get("command")
     if not isinstance(raw_command, str) or not raw_command.strip():
         raise _InspectionError("malformed", f"Claude Code event {event} has no executable command")

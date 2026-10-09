@@ -1116,6 +1116,9 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return false
 	}
 	if runtime.GOOS == "windows" {
+		if view, ok := claudeCodeExecView(handler).(map[string]interface{}); ok {
+			handler = view
+		}
 		command, _ := handler["command"].(string)
 		expectedCommand := strings.TrimSpace(opts.HookExecutable)
 		if expectedCommand == "" {
@@ -1150,7 +1153,7 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		if executable == "" {
 			executable = defenseclawHookBinary()
 		}
-		return executable, []string{"hook", "--connector", "claudecode"}
+		return claudeCodeWindowsHookInvocation(opts, executable)
 	}
 	command := posixHookCommandWord(hookCommand)
 	if shellHookSecureClientProfile(opts) {
@@ -1506,7 +1509,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			// the exact Claude Code argv below, so another use of that executable is
 			// never removed by command alone. Recording the path lets a later Setup
 			// or Teardown recognize the prior launcher after an upgrade moves it.
-			backup.ManagedHookCommands = []string{hookCommand}
+			backup.ManagedHookCommands = []string{claudeCodeRecordedHookCommand(hookCommand, hookArgs)}
 			backupToSave = backup
 			transformed = append([]byte(nil), out...)
 			if exactBackupSafe {
@@ -2466,7 +2469,7 @@ func isOwnedHook(hookEntry interface{}, hooksDir string) bool {
 }
 
 func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
-	hook, ok := rawHook.(map[string]interface{})
+	hook, ok := claudeCodeExecView(rawHook).(map[string]interface{})
 	if !ok {
 		return false
 	}
@@ -2767,10 +2770,11 @@ func removeOwnedClaudeCodeHooks(
 		return nil, err
 	}
 	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
-		return isOwnedHookHandler(rawHook, hooksDir) ||
-			hookUsesTrackedClaudeCodeCommand(rawHook, managedCommands) ||
-			hookUsesLegacyClaudeCodeNativeCommand(rawHook) ||
-			hookUsesForeignDefenseClawClaudeCodeScript(rawHook)
+		hook := claudeCodeExecView(rawHook)
+		return isOwnedHookHandler(hook, hooksDir) ||
+			hookUsesTrackedClaudeCodeCommand(hook, managedCommands) ||
+			hookUsesLegacyClaudeCodeNativeCommand(hook) ||
+			hookUsesForeignDefenseClawClaudeCodeScript(hook)
 	}), nil
 }
 

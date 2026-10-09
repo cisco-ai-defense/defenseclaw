@@ -2730,11 +2730,17 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 	hooks := settings["hooks"].(map[string]interface{})
 	entries := hooks["PreToolUse"].([]interface{})
 	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	if got := handler["command"]; got != defenseclawHookBinaryOverride {
-		t.Fatalf("command = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
+	// Per-user Setup runs the launcher through cmd.exe so a missing launcher
+	// blocks (GAP-1091); the handler still reads as the exec form it runs.
+	if got := handler["command"]; got != claudeCodeWindowsCommandProcessor() {
+		t.Fatalf("command = %q, want %q", got, claudeCodeWindowsCommandProcessor())
+	}
+	view := claudeCodeExecView(handler).(map[string]interface{})
+	if got := view["command"]; got != defenseclawHookBinaryOverride {
+		t.Fatalf("launcher = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
 	}
 	wantArgs := []interface{}{"hook", "--connector", "claudecode"}
-	if got := handler["args"]; !reflect.DeepEqual(got, wantArgs) {
+	if got := view["args"]; !reflect.DeepEqual(got, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", got, wantArgs)
 	}
 	if _, present := handler["shell"]; present {
