@@ -534,3 +534,38 @@ func semanticV8CauseContains(err error, substring string) bool {
 	}
 	return false
 }
+
+// GAP-1105: the managed status summary names each destination with its
+// effective redaction profile, and it needs no secret value.
+func TestSummarizeObservabilityV8DestinationsReportsEffectiveProfiles(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw
+observability:
+  destinations:
+    - name: remote
+      kind: otlp
+      endpoint: https://otel.example.test
+      headers:
+        Authorization: {env: UNSET_SUMMARY_TOKEN}
+      send:
+        signals: [logs, traces]
+        buckets: ["*"]
+        redaction_profile: strict
+`)
+	summaries, err := SummarizeObservabilityV8Destinations("config.yaml", raw, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]ObservabilityV8DestinationSummary{}
+	for _, summary := range summaries {
+		byName[summary.Name] = summary
+	}
+	remote := byName["remote"]
+	if remote.Kind != ObservabilityV8DestinationOTLP || !remote.Enabled || len(remote.Signals) != 2 ||
+		strings.Join(remote.RedactionProfiles, ",") != "strict" {
+		t.Fatalf("remote summary = %+v, want an enabled otlp destination with logs, traces under strict", remote)
+	}
+	if _, ok := byName[ObservabilityV8LocalDestinationName]; !ok {
+		t.Fatalf("summaries %+v leave out the local-sqlite destination", summaries)
+	}
+}

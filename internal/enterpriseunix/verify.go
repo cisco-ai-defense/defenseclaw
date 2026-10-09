@@ -672,6 +672,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeDeletedEnrolledAccounts()
 	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
+	l.describeDestinations()
 	if record != nil {
 		l.describePerUserGateways(ctx)
 	}

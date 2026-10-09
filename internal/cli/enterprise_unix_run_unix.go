@@ -232,6 +232,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		for _, service := range result.Services {
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
+		enterprisestatus.WriteDestinations(w, result.Destinations)
 	}
 	// A busy status checked nothing else, but still reports the recorded
 	// deployment's version, as the docs say (GAP-2409).
