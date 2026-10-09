@@ -1414,7 +1414,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	defer cancel()
 
 	// An MCP event's Path is its watcher key; the scanner gets the server.
-	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	target, err := w.scanTargetFor(evt)
+	var result *scanner.ScanResult
+	if err == nil {
+		result, err = s.Scan(scanCtx, target)
+	}
 	if err == nil && !w.secureClientActive() {
 		err = scanner.JudgeFailure(result)
 	}
@@ -1422,7 +1426,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if retry, unreadable := w.readableAfterGrant(evt); retry {
 			retryCtx, cancelRetry := context.WithTimeout(ctx, w.scanTimeout(evt))
 			defer cancelRetry()
-			if result, err = s.Scan(retryCtx, w.scanTargetFor(evt)); err == nil {
+			if result, err = s.Scan(retryCtx, target); err == nil {
 				err = scanner.JudgeFailure(result)
 			}
 		} else if unreadable != "" {
@@ -2271,6 +2275,21 @@ func linkedAssetTarget(path string) string {
 		target = filepath.Join(filepath.Dir(path), target)
 	}
 	return filepath.Clean(target)
+}
+
+// linkedAssetScanTarget limits the gateway's read authority to enrolled roots.
+// A link may be resolved for scanning only when its final target stays in one
+// of this asset type's watched roots.
+var errLinkedAssetOutsideRoots = errors.New("linked asset target is outside watched roots")
+
+func (w *InstallWatcher) linkedAssetScanTarget(evt InstallEvent) (string, error) {
+	target := linkedAssetTarget(evt.Path)
+	for _, root := range w.sourceRootsFor(evt.Type) {
+		if watcherPathAtOrBelow(target, root) {
+			return target, nil
+		}
+	}
+	return "", errLinkedAssetOutsideRoots
 }
 
 // removeLinkedAsset takes a skill or plugin that is a symlink or Windows

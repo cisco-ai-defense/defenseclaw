@@ -1221,11 +1221,12 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 		return entry, path
 	}
 	t.Run("link", func(t *testing.T) {
-		target := filepath.Join(t.TempDir(), "linked-high-src")
-		if err := os.MkdirAll(target, 0o700); err != nil {
-			t.Fatal(err)
-		}
+		var target string
 		entry, path := admit(t, func(_ *config.Config, skillDir string) string {
+			target = filepath.Join(skillDir, "linked-high-src")
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			link := filepath.Join(skillDir, "linked-high")
 			if err := os.Symlink(target, link); err != nil {
 				t.Fatal(err)
@@ -1589,7 +1590,7 @@ func (s *targetOnlyScanner) Scan(ctx context.Context, target string) (*scanner.S
 func TestLinkedSkillIsScannedThroughItsTarget(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	cfg.Gateway.Watcher.Skill.TakeAction = true
-	target := filepath.Join(t.TempDir(), "linked-high-src")
+	target := filepath.Join(skillDir, "linked-high-src")
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1622,6 +1623,41 @@ func TestLinkedSkillIsScannedThroughItsTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(target); err != nil {
 		t.Fatalf("the link target was touched: %v", err)
+	}
+}
+
+// A link into another enrolled profile must never make the gateway read that profile.
+func TestLinkedSkillOutsideWatchedRootIsNotScanned(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	target := filepath.Join(t.TempDir(), "private-skill")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(skillDir, "linked-private")
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v %s", err, out)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	scan := &countingScanner{name: "skill-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
+	evt := InstallEvent{Type: InstallSkill, Name: "linked-private", Path: link, Timestamp: time.Now()}
+	if _, err := w.snapshotForEvent(evt); err == nil {
+		t.Fatal("snapshot read a target outside watched roots")
+	}
+	res := w.runAdmission(context.Background(), evt)
+	if scan.calls != 0 || res.Verdict != VerdictBlocked {
+		t.Fatalf("scans=%d verdict=%s reason=%s", scan.calls, res.Verdict, res.Reason)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("outside-root link remained: %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("outside target changed: %v", err)
 	}
 }
 
