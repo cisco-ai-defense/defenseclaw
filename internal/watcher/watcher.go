@@ -2284,7 +2284,8 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	physicalName := w.assetEventName(evt.Path)
 	quarantinePath, quarantineRoots, quarantineRoot := evt.Path, w.sourceRootsFor(evt.Type), w.cfg.QuarantineDir
 	if !w.secureClientActive() {
-		quarantinePath, quarantineRoots, quarantineRoot = addressableQuarantinePaths(evt.Path, quarantineRoots, quarantineRoot)
+		quarantinePath, quarantineRoots = w.resolvedLinkedRoot(quarantinePath, quarantineRoots)
+		quarantinePath, quarantineRoots, quarantineRoot = addressableQuarantinePaths(quarantinePath, quarantineRoots, quarantineRoot)
 	}
 	plan, err := enforce.NewAssetQuarantinePlan(
 		quarantineRoot, quarantineRoots, evt.Type.String(),
@@ -2358,6 +2359,42 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, plan.QuarantinePath)
 	w.forgetMovedAsset(evt)
 	return nil
+}
+
+// resolvedLinkedRoot maps path, below a watched root that is reached through
+// a link (a ~/.claude that points into a dotfiles folder), to the same entry
+// below the root's resolved folder, and adds that folder to roots. The
+// quarantine planner refuses a source with a linked ancestor, so such a
+// skill was scanned and watcher-blocked but never moved, and the agent kept
+// loading it (GAP-1088). A path that is already below a resolved root keeps
+// it (a restore of what was quarantined from there). The resolved folder
+// must be in the home of the account that owns the watched root, so a link
+// cannot have the gateway move another account's files.
+func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string, []string) {
+	for _, root := range roots {
+		resolved, err := filepath.EvalSymlinks(root)
+		if err != nil || sameWatcherPath(resolved, root) {
+			continue
+		}
+		linkOwner, linkOwned := w.ownerOf(root)
+		targetOwner, targetOwned := w.ownerOf(resolved)
+		if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
+			continue
+		}
+		withResolved := append(append([]string(nil), roots...), resolved)
+		if watcherPathAtOrBelow(path, resolved) {
+			return path, withResolved
+		}
+		if !watcherPathAtOrBelow(path, root) {
+			continue
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			continue
+		}
+		return filepath.Join(resolved, rel), withResolved
+	}
+	return path, roots
 }
 
 // forgetMovedAsset drops the rescan baseline of an asset that admission
@@ -2640,6 +2677,7 @@ func (w *InstallWatcher) RestoreQuarantined(
 	restoreRoots := w.sourceRootsFor(InstallType(record.TargetType))
 	quarantineRoot := w.cfg.QuarantineDir
 	if !w.secureClientActive() {
+		restorePath, restoreRoots = w.resolvedLinkedRoot(restorePath, restoreRoots)
 		restorePath, restoreRoots, quarantineRoot = addressableQuarantinePaths(restorePath, restoreRoots, quarantineRoot)
 	}
 	plan := enforce.AssetRestorePlan{
