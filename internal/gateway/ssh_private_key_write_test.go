@@ -146,3 +146,34 @@ func TestWindowsCodexHomeRedirectUsesPowerShellGrammar(t *testing.T) {
 		t.Fatalf("Windows Codex home redirect was not enforceable: %v", FindingStrings(findings))
 	}
 }
+
+func TestWindowsHomeWithSpacesStillEnforcesSSHPath(t *testing.T) {
+	const connector = "windows-home-with-spaces"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	for _, command := range []string{
+		`Add-Content -Path "$HOME\.ssh\authorized_keys" -Value k`,
+		`Add-Content -Path $HOME\.ssh\authorized_keys -Value k`,
+	} {
+		for _, tool := range []string{"powershell", "codex-windows"} {
+			t.Run(tool+"/"+command, func(t *testing.T) {
+				args := []byte(`{"command":` + strconv.Quote(command) + `}`)
+				input := actionfacts.Input{
+					Tool: tool, Args: args, CWD: `C:\Users\Alice Smith\project`,
+					ActiveHome: `C:\Users\Alice Smith`,
+				}
+				if tool == "codex-windows" {
+					input.Tool = "Bash"
+					input.DialectHint = codexWindowsShellDialect("Bash", command)
+				}
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, LegacyText: string(args),
+					Connector: connector, EnforcementCapable: true,
+				})
+				finding := findingWithID(findings, "persistence.ssh_authorized_keys_command")
+				if finding == nil || !finding.contributesToEnforcement() {
+					t.Fatalf("%s home path with spaces was not enforceable: %v", tool, FindingStrings(findings))
+				}
+			})
+		}
+	}
+}
