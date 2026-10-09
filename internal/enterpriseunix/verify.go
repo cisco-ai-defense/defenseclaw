@@ -185,6 +185,12 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.AddError(codeVerify, problem)
 		}
 	}
+	if len(problems) > 0 {
+		// security_complete requires no errors; describe set it before
+		// these were added, so a missing hook binary read complete
+		// (GAP-1217).
+		r.SecurityComplete = false
+	}
 	if record.NoStart {
 		// Nothing runs, so no agent is protected; ensure reported it as a
 		// warning, and status and verify read ok with every service
@@ -351,6 +357,10 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		}
 		got, err := sha256File(env.P(path))
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) && filepath.Dir(path) == env.Layout.BinDir {
+				add("%s", env.missingBinaryProblem(record, path))
+				continue
+			}
 			add("%s: %v", path, err)
 			continue
 		}
@@ -624,6 +634,26 @@ func (e *Env) lifecycleCommand(action string) string {
 		group = "macos"
 	}
 	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
+}
+
+// missingBinaryProblem names a recorded binary that is gone and the command
+// that puts it back. Without the hook binary no agent hook can start, and
+// the agents treat that as a non-blocking error (GAP-1217).
+func (e *Env) missingBinaryProblem(record *Deployment, path string) string {
+	if filepath.Base(path) == binHook {
+		text := path + " is missing, so no agent's DefenseClaw hook can start; Claude Code, Codex and the other agents treat that as a non-blocking error and run tool calls without DefenseClaw"
+		if e.sealedHookValid(record) {
+			return text + ". The hook guardian starts its restore within seconds; to restore it now, run `" + e.lifecycleCommand(ActionRepair) + "`, which puts it back from the copy the lifecycle sealed"
+		}
+		if record.Channel == ChannelPackage {
+			return text + "; " + e.packageReinstallStep(record.ProductVersion)
+		}
+		return text + "; run `" + e.lifecycleCommand(ActionRepair) + " --payload <staged payload directory>`"
+	}
+	if record.Channel == ChannelPackage {
+		return path + " is missing; " + e.packageReinstallStep(record.ProductVersion)
+	}
+	return path + " is missing; run `" + e.lifecycleCommand(ActionRepair) + " --payload <staged payload directory>`"
 }
 
 // codePackageInstallFailed names the failed ensure of the package's own

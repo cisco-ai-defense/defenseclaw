@@ -350,6 +350,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
 			return 0
 		}
+		// The installed binaries are the payload of a repair without one: a
+		// missing hook binary refused it with payload_invalid (GAP-1217).
+		l.restoreTamperedHookBinary(ctx, record)
 		return l.settleInputChanges(ctx, l.apply(ctx, record))
 	case ActionEnsure:
 		if record == nil {
@@ -358,7 +361,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		if env.insideWSL() {
 			r.AddWarning(codeWSL, wslDeploymentWarning)
 		}
+		restored := l.restoreTamperedHookBinary(ctx, record)
 		l.restoreUnchangedConfigMetadata(ctx, record)
+		restored = l.restoreTamperedMachinePolicy(record) || restored
 		noop, reason := l.ensureNoop(ctx, record)
 		// Configuration management that installs the same config.yaml
 		// again while this run checks (two installs seconds apart) replaced
@@ -369,8 +374,14 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			noop, reason = l.ensureNoop(ctx, record)
 		}
 		if noop {
-			r.Noop = true
-			r.NoopReason = reason
+			// A run that put a tampered file back changed the host.
+			r.Noop = !restored
+			if !restored {
+				r.NoopReason = reason
+			}
+			if err := env.sealHookBinary(record); err != nil {
+				r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
+			}
 			if !exists(env.committedConfigPath()) {
 				// A deployment committed before the lifecycle kept the applied
 				// config; the installed file is exactly that config.
@@ -392,11 +403,11 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		}
 		return l.settleInputChanges(ctx, l.apply(ctx, record))
 	case ActionReconcile:
-
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
 			return 0
 		}
+		l.restoreTamperedHookBinary(ctx, record)
 		return l.reconcile(ctx, record)
 	case ActionRotateCredentials:
 		return l.rotateCredentials(ctx, record)
@@ -1524,6 +1535,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	_ = env.clearPending()
+	if err := env.sealHookBinary(newRecord); err != nil {
+		r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
+	}
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
@@ -2338,7 +2352,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
 		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
 	if removePerUser {
+		var cacheAccounts []sessionFactsAccount
+		if l.opts.Purge {
+			cacheAccounts = env.sessionFactsAccounts()
+		}
 		perUserLeft = l.removePerUserRegistrations(ctx)
+		l.purgeSessionFactsCaches(cacheAccounts)
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}

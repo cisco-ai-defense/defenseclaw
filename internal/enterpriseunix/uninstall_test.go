@@ -15,6 +15,7 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -341,6 +342,40 @@ func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
 	}
 	if got := purgedUserChange("erin", &purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
 		t.Fatalf("an account with only uv cache entries: %q", got)
+	}
+}
+
+// GAP-1186: an account enrolled only for machine-policy connectors (Claude
+// Code) has no manifest row, so the per-user purge left the session cache
+// the managed hook wrote in its home. The purge removes the cache and the
+// ~/.defenseclaw it leaves empty, keeps a folder with other files in it,
+// and does not follow a cache that is a symlink.
+func TestUninstallPurgeRemovesTheSessionFactsCache(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	uid := os.Getuid()
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+		`{"accounts":[{"user":"alice","uid":%d,"home":"/home/alice"},{"user":"bob","uid":%d,"home":"/home/bob"},{"user":"carol","uid":%d,"home":"/home/carol"}]}`,
+		uid, uid, uid))
+	writeHostFile(t, h, "/home/alice/.defenseclaw/session-facts.json", "{}")
+	writeHostFile(t, h, "/home/bob/.defenseclaw/session-facts.json", "{}")
+	writeHostFile(t, h, "/home/bob/.defenseclaw/notes.txt", "kept")
+	writeHostFile(t, h, "/home/carol/.defenseclaw/notes.txt", "kept")
+	writeHostFile(t, h, "/srv/elsewhere.json", "{}")
+	if err := os.Symlink(h.env.P("/srv/elsewhere.json"), h.env.P("/home/carol/.defenseclaw/session-facts.json")); err != nil {
+		t.Fatal(err)
+	}
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	if exists(h.env.P("/home/alice/.defenseclaw")) || exists(h.env.P("/home/bob/.defenseclaw/session-facts.json")) ||
+		!exists(h.env.P("/home/bob/.defenseclaw/notes.txt")) || !exists(h.env.P("/srv/elsewhere.json")) {
+		t.Fatalf("purge left the cache, removed other files or followed a symlink; changes %v", done.Changes)
+	}
+	if got := messagesOf(done.Warnings, codePerUserState); !strings.Contains(got, "user carol") {
+		t.Fatalf("the symlinked cache of carol is not reported: %q", got)
 	}
 }
 

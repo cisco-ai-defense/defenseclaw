@@ -128,18 +128,36 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 	if err != nil {
 		return Account{}, err
 	}
-	if _, err := a.env.Runner.Run(ctx, "systemd-sysusers", append([]string{"--inline"}, lines...)...); err != nil {
-		if !errors.Is(err, ErrCommandNotFound) {
-			return Account{}, fmt.Errorf("create service account with systemd-sysusers: %w", err)
+	sysusers, err := a.env.Runner.Run(ctx, "systemd-sysusers", append([]string{"--inline"}, lines...)...)
+	if err != nil && !errors.Is(err, ErrCommandNotFound) {
+		return Account{}, fmt.Errorf("create service account with systemd-sysusers: %w", err)
+	}
+	sysusersSkipped := ""
+	if err == nil {
+		account, ok, err := a.Lookup(ctx, name)
+		if err != nil {
+			return Account{}, err
 		}
-		if _, err := a.env.Runner.Run(ctx, "groupadd", "--system", name); err != nil {
-			return Account{}, fmt.Errorf("create service group: %w", err)
+		if ok {
+			account.Created = true
+			return account, nil
 		}
-		if _, err := a.env.Runner.Run(ctx, "useradd", "--system", "--gid", name,
-			"--home-dir", a.env.Layout.DataDir, "--no-create-home",
-			"--shell", "/usr/sbin/nologin", "--comment", "DefenseClaw gateway", name); err != nil {
-			return Account{}, fmt.Errorf("create service account: %w", err)
+		// systemd-sysusers exits 0 without creating anything when it cannot
+		// ask NSS whether the account exists, for example when nsswitch.conf
+		// lists sss while sssd is stopped or masked ("Failed to check if
+		// group defenseclaw already exists: Connection refused"). groupadd
+		// and useradd read /etc/group and /etc/passwd themselves, so they
+		// create it instead (GAP-1214).
+		sysusersSkipped = truncateUTF8(firstLine(string(sysusers.Stderr)), 300)
+		if sysusersSkipped == "" {
+			sysusersSkipped = "it reported nothing"
 		}
+	}
+	if err := a.createWithShadowTools(ctx, name); err != nil {
+		if sysusersSkipped != "" {
+			return Account{}, fmt.Errorf("systemd-sysusers exited without creating the service account %s (%s; this happens when /etc/nsswitch.conf lists sss while sssd is not running), and %w", name, sysusersSkipped, err)
+		}
+		return Account{}, err
 	}
 	account, ok, err := a.Lookup(ctx, name)
 	if err != nil {
@@ -150,6 +168,32 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 	}
 	account.Created = true
 	return account, nil
+}
+
+// createWithShadowTools creates the service group (unless it exists) and
+// the service account with groupadd and useradd.
+func (a *linuxAccounts) createWithShadowTools(ctx context.Context, name string) error {
+	if _, err := a.env.Runner.Run(ctx, "getent", "group", name); err != nil {
+		if _, err := a.env.Runner.Run(ctx, "groupadd", "--system", name); err != nil {
+			return fmt.Errorf("create service group: %w", err)
+		}
+	}
+	if _, err := a.env.Runner.Run(ctx, "useradd", "--system", "--gid", name,
+		"--home-dir", a.env.Layout.DataDir, "--no-create-home",
+		"--shell", "/usr/sbin/nologin", "--comment", "DefenseClaw gateway", name); err != nil {
+		return fmt.Errorf("create service account: %w", err)
+	}
+	return nil
+}
+
+// firstLine is the first non-empty line of a command's output.
+func firstLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // sysusersLines returns the entries of the embedded sysusers.d document

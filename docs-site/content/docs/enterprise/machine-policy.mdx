@@ -141,7 +141,9 @@ own: it enrolls no user and is not in the runtime descriptor.
 
 On every OS the guardian keeps each enrolled user's DefenseClaw runtime in
 step with the policy, and `verify` reports any drift. On Linux and macOS the
-guardian never writes machine policy itself.
+guardian never writes machine policy itself: when DefenseClaw's Claude Code
+drop-in is edited or deleted it logs a tamper and starts the lifecycle's
+config-apply job, whose `ensure` puts the drop-in back within seconds.
 
 On Windows, the guardian publishes Cursor's `hooks.json`, and the protected
 PowerShell adapter next to it, only while at least one user is enrolled for
