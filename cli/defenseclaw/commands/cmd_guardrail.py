@@ -4730,7 +4730,9 @@ def mode_cmd(
             except OSError:
                 needs_restart.add(c)
     outcome = _apply_to_running_gateway(app, needs_restart=bool(needs_restart), restart=restart, quiet=json_out)
-    unguarded = _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
+    unguarded = (
+        _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
+    )
 
     plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
     if connector_key is None:
