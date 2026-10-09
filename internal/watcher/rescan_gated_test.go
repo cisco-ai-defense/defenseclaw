@@ -375,13 +375,15 @@ func TestScannerVersionChangesAfterBinaryReplacement(t *testing.T) {
 }
 
 // GAP-0627: a skill installed before a denied entry names it is refused by
-// the next rescan cycle, without a content change, and quarantined.
+// the next rescan cycle, without a content change, and quarantined. So is an
+// MCP server a command rule pushed later denies (GAP-1211).
 func TestRescanCycleRefusesInstalledSkillAddedToDeniedList(t *testing.T) {
 	t.Setenv("PATH", "")
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	cfg.Watch.RescanContentGated = true
 	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
-	if err := os.WriteFile(ocPath, []byte(`{"mcp":{"servers":{}}}`), 0o600); err != nil {
+	servers := `{"mcp":{"servers":{"think":{"command":"npx","args":["-y","@modelcontextprotocol/server-sequential-thinking"]}}}}`
+	if err := os.WriteFile(ocPath, []byte(servers), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Claw.ConfigFile = ocPath
@@ -402,9 +404,16 @@ func TestRescanCycleRefusesInstalledSkillAddedToDeniedList(t *testing.T) {
 		t.Fatalf("baseline cycle verdicts = %+v", verdicts)
 	}
 	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "epa-notes"}}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{
+		Command: "npx", ArgsPrefix: []string{"-y", "@modelcontextprotocol/server-sequential-thinking"},
+	}}
 	w.runRescanCycle(ctx)
-	if len(verdicts) != 1 || verdicts[0].Verdict != VerdictBlocked || verdicts[0].Event.Name != "epa-notes" {
-		t.Fatalf("verdicts after the deny = %+v, want epa-notes blocked", verdicts)
+	blocked := map[string]bool{}
+	for _, v := range verdicts {
+		blocked[string(v.Event.Type)+":"+v.Event.Name] = v.Verdict == VerdictBlocked
+	}
+	if len(verdicts) != 2 || !blocked["skill:epa-notes"] || !blocked["mcp:think"] {
+		t.Fatalf("verdicts after the deny = %+v, want epa-notes and think blocked", verdicts)
 	}
 	if _, err := os.Lstat(skillPath); !os.IsNotExist(err) {
 		t.Fatalf("denied skill still installed: %v", err)

@@ -541,11 +541,32 @@ in Codex, add it to `asset_policy.skill.denied` or take it off the device.
 
 Take a denied skill off the device to remove it from that index. Where the
 install watcher runs (per-user installs and managed Windows), a config change
-that adds a `denied` entry makes it check the installed skills and plugins at
-once: one the entry names is refused and quarantined, with an
-`install-rejected` audit row, without waiting for its files to change. On other
+that adds a `denied` entry makes it check the installed skills, plugins and
+MCP servers at once: one the entry names is refused (a skill or plugin is
+quarantined), with an `install-rejected` audit row, without waiting for its
+files to change. An MCP server is matched on its definition too, so a
+`command` or `url` rule added later rejects a server that was already
+installed; the hooks refuse its tool calls from the moment the config
+applies. On other
 managed devices remove it with your device management tool; the hooks refuse
 it in the meantime.
+
+A Claude Code plugin is refused at the hook as well. Claude Code runs a plugin
+installed from a local marketplace folder (`claude plugin marketplace add
+<folder>`) from that folder, not from its copy under
+`~/.claude/plugins/cache`, and DefenseClaw never changes a marketplace folder,
+which other users may share. When `asset_policy.plugin` denies a plugin, or
+admission blocked it, the cache copy is quarantined as usual and the Claude
+Code hook refuses the plugin's skills and commands (`/<plugin>:<skill>`), its
+agents (`<plugin>:<agent>`) and its MCP tools
+(`mcp__plugin_<plugin>_<server>__<tool>`). The hook sees the plugin name only,
+so a denied rule written as `plugin@marketplace` refuses that plugin from any
+marketplace.
+
+The MCP servers a Claude Code plugin bundles are admitted with their plugin:
+they get no admission row or MCP inventory entry of their own. The hooks hold
+their tool calls to `asset_policy.mcp` all the same, under the name
+`plugin:<plugin>:<server>` and by their `command`, `args_prefix` or `url`.
 
 ### Tool lists
 

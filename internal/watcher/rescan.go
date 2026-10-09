@@ -177,9 +177,18 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		if denyListsChanged && w.deniedByAssetList(evt) {
 			// An installed asset the new lists deny is refused now, as one
 			// that appears after the change would be, without waiting for
-			// its content to change (GAP-0627).
+			// its content to change (GAP-0627). An MCP server too: a
+			// command rule pushed after the server was added left it with
+			// no rejection row while a new server was refused (GAP-1211).
+			if evt.Type == InstallMCP && !w.claimMCP(evt.Path) {
+				count(evt, rescanSkipped)
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "[rescan] %s %s is on the denied list; running install admission\n", evt.Type, evt.Name)
 			w.notifyAdmission(w.runAdmission(ctx, evt))
+			if evt.Type == InstallMCP {
+				w.releaseMCP(evt.Path)
+			}
 			count(evt, rescanScanned)
 			continue
 		}
@@ -226,17 +235,19 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
 }
 
-// denyListsChanged reports whether asset_policy.skill.denied or
-// plugin.denied differ from the lists the previous cycle applied; the first
-// cycle counts as a change, so a deny added while the gateway was stopped
-// applies at start. A Secure Client host keeps the cycle of main (issue
-// #1092).
+// denyListsChanged reports whether asset_policy.skill.denied,
+// plugin.denied or mcp.denied differ from the lists the previous cycle
+// applied; the first cycle counts as a change, so a deny added while the
+// gateway was stopped applies at start. A Secure Client host keeps the
+// cycle of main (issue #1092).
 func (w *InstallWatcher) denyListsChanged() bool {
 	cfg := w.liveConfig()
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return false
 	}
-	raw, err := json.Marshal([][]config.AssetPolicyRule{cfg.AssetPolicy.Skill.Denied, cfg.AssetPolicy.Plugin.Denied})
+	raw, err := json.Marshal([][]config.AssetPolicyRule{
+		cfg.AssetPolicy.Skill.Denied, cfg.AssetPolicy.Plugin.Denied, cfg.AssetPolicy.MCP.Denied,
+	})
 	if err != nil {
 		return false
 	}
@@ -262,25 +273,30 @@ func (w *InstallWatcher) allowListsChanged() bool {
 	return changed
 }
 
-// deniedByAssetList reports an installed skill or plugin on a denied list.
-// MCP servers are refused at the hook (asset_policy_runtime.go).
+// deniedByAssetList reports an installed skill, plugin or MCP server on a
+// denied list, an MCP server matched on its definition as admission does.
+// The hook refuses the server tool calls either way (asset_policy_runtime.go).
 func (w *InstallWatcher) deniedByAssetList(evt InstallEvent) bool {
 	switch {
 	case evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path):
 		return false
 	case evt.Type == InstallPlugin && (w.isManagedArtifact(evt.Path) || w.isOwnPlugin(evt.Path)):
 		return false
-	case evt.Type != InstallSkill && evt.Type != InstallPlugin:
+	case evt.Type != InstallSkill && evt.Type != InstallPlugin && evt.Type != InstallMCP:
 		return false
 	}
 	cfg := w.liveConfig()
 	if cfg == nil {
 		return false
 	}
-	verdict, _ := cfg.AssetListDecision(config.AssetPolicyInput{
+	if _, foreign := w.foreignLink(evt); foreign {
+		// Admission refuses it without reading its SKILL.md (GAP-1188).
+		return false
+	}
+	verdict, _ := cfg.AssetListDecision(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 		TargetType: string(evt.Type), Name: evt.Name, DeclaredNames: declaredAssetNames(cfg, evt),
 		Connector: w.eventConnector(evt), SourcePath: evt.Path,
-	})
+	}))
 	return verdict == config.AssetListDeny
 }
 
