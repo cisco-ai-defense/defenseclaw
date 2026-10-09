@@ -1359,6 +1359,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := l.settleStateModes(account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if err := l.removeACLs(ctx, planFiles(p), p.intended); err != nil {
+		return failAndRollback(codeApply, err)
+	}
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(codeApply, err)

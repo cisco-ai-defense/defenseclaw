@@ -320,7 +320,8 @@ func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, str
 	// Not part of the check after activation: a guardian or gateway writing
 	// its state at that moment is not drift.
 	account := Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}
-	return append(problems, l.env.stateModeProblems(account)...)
+	problems = append(problems, l.env.stateModeProblems(account)...)
+	return append(problems, l.env.aclProblems(ctx, record)...)
 }
 
 // verifyDeployment is verifyInstalled; with inputsChanged the checks of

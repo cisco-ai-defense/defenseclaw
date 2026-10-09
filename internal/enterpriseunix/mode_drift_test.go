@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -265,4 +266,41 @@ func TestARolledBackRunLeavesThePrivateFoldersClosed(t *testing.T) {
 	if data, secrets := h.mode(h.env.Layout.DataDir), h.mode(h.env.Layout.SecretsDir); data != 0o700 || secrets != 0o750 {
 		t.Fatalf("after the rolled-back repair runtime is %04o and secrets %04o", data, secrets)
 	}
+}
+
+// macOS grants an ACL entry without changing the owner or the mode bits, so
+// write entries for a standard user on the hook binary, bin/, the gateway
+// LaunchDaemon plist and the Claude Code drop-in left status, verify and
+// repair green and the entries in place (GAP-0946). status names each path
+// and repair removes those entries; a deny entry elsewhere stays.
+func TestRepairRemovesMacOSACLEntriesThatLetOtherAccountsChangeTheDeployment(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	l := h.env.Layout
+	plist := "/Library/LaunchDaemons/" + labelGateway + ".plist"
+	dropIn := "/Library/Application Support/ClaudeCode/managed-settings.d/" + enterprisepolicy.DefenseClawDropInName
+	writable := map[string]string{
+		filepath.Join(l.BinDir, binHook): "user:dcm-w4h2 allow write,append",
+		plist:                            "user:dcm-w4h2 allow write,append",
+		dropIn:                           "user:dcm-w4h2 allow write,append",
+		l.BinDir:                         "user:dcm-w4h2 allow add_file,delete_child",
+	}
+	denyOnly := h.env.P(l.ConfigDir)
+	h.runner.acls = map[string][]string{denyOnly: {"group:everyone deny delete"}}
+	for canonical, entry := range writable {
+		h.runner.acls[h.env.P(canonical)] = []string{"group:everyone deny delete", entry}
+	}
+	status := h.run(Options{Action: ActionStatus})
+	requireError(t, status, codeVerify)
+	got := messagesOf(status.Errors, codeVerify)
+	for canonical := range writable {
+		if !strings.Contains(got, canonical) || !strings.Contains(got, " repair`") {
+			t.Errorf("status does not name %s and the repair: %s", canonical, got)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if len(h.runner.acls) != 1 || h.runner.acls[denyOnly] == nil {
+		t.Fatalf("after repair the ACL entries are %v, want only the deny entry on %s", h.runner.acls, l.ConfigDir)
+	}
+	requireOK(t, h.run(Options{Action: ActionStatus}))
 }

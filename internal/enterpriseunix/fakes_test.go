@@ -269,6 +269,9 @@ type fakeRunner struct {
 	ps       string // what ps -axo pid=,uid=,comm= prints (macOS)
 	// replies answer a command by filepath.Base(name) and its joined args.
 	replies map[string]fakeReply
+	// acls are the macOS ACL entries of rooted paths, as ls -le prints them;
+	// chmod -h -N removes them.
+	acls map[string][]string
 }
 
 type fakeReply struct {
@@ -299,6 +302,22 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	switch name {
 	case "ps":
 		return CommandResult{Stdout: []byte(r.ps)}, nil
+	case "ls":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		var out strings.Builder
+		for _, path := range args[2:] {
+			fmt.Fprintf(&out, "-rw-r--r--+ 1 root  wheel  0 Oct  9 04:09 %s\n", path)
+			for index, entry := range r.acls[path] {
+				fmt.Fprintf(&out, " %d: %s\n", index, entry)
+			}
+		}
+		return CommandResult{Stdout: []byte(out.String())}, nil
+	case "chmod":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.acls, args[len(args)-1])
+		return CommandResult{}, nil
 	case "dpkg", "rpm":
 		return CommandResult{ExitCode: 1}, errors.New("not owned")
 	case "restorecon":

@@ -9,8 +9,6 @@ package managed
 import (
 	"fmt"
 	"os/exec"
-	"strconv"
-	"strings"
 )
 
 // validateTrustedPathACL rejects effective macOS ACL entries that grant
@@ -25,29 +23,13 @@ func validateTrustedPathACL(path string) error {
 	if err != nil {
 		return fmt.Errorf("inspect macOS ACL for %s: %w", path, err)
 	}
-	for _, line := range strings.Split(string(output), "\n") {
-		normalized := strings.ToLower(strings.TrimSpace(line))
-		colon := strings.IndexByte(normalized, ':')
-		if colon <= 0 {
-			continue
-		}
-		if _, err := strconv.ParseUint(normalized[:colon], 10, 32); err != nil {
-			continue
-		}
-		allowIndex := strings.Index(normalized, " allow ")
-		if allowIndex < 0 {
-			continue
-		}
-		fields := strings.Fields(normalized[allowIndex+len(" allow "):])
-		if len(fields) == 0 {
-			return fmt.Errorf("cannot parse macOS allow ACL on %s", path)
-		}
-		for _, permission := range strings.Split(fields[0], ",") {
-			switch permission {
-			case "write", "add_file", "append", "add_subdirectory", "delete", "delete_child",
-				"writeattr", "writeextattr", "writesecurity", "chown":
-				return fmt.Errorf("%s has write-capable macOS ACL entry", path)
-			}
+	entries, err := ParseDarwinACLListing(string(output), []string{path})
+	if err != nil {
+		return fmt.Errorf("inspect macOS ACL: %w", err)
+	}
+	for _, entry := range entries[path] {
+		if entry.GrantsWrite() {
+			return fmt.Errorf("%s has write-capable macOS ACL entry", path)
 		}
 	}
 	return nil
