@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -1990,6 +1991,15 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	}
 	// Codex shows its structured denial, not stderr, so the denial names
 	// the reason too instead of the generic failed-closed text.
+	// GAP-1242: the refusal is reported to the gateway's refusal pipe, which
+	// writes the audit row; the denial does not change.
+	var reports []refusalpipe.Report
+	restoreSend := sendUnenrolledRefusal
+	sendUnenrolledRefusal = func(_ context.Context, report refusalpipe.Report) error {
+		reports = append(reports, report)
+		return nil
+	}
+	t.Cleanup(func() { sendUnenrolledRefusal = restoreSend })
 	out.Reset()
 	errb.Reset()
 	code = Run(context.Background(), Options{
@@ -2002,7 +2012,7 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 		ManagedEnterprise:        true,
 		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
 		ExplainUnenrolledAccount: true,
-		Stdin:                    strings.NewReader("{}"),
+		Stdin:                    strings.NewReader(`{"tool_name":"shell","tool_input":{"command":"echo marker"}}`),
 		Stdout:                   &out,
 		Stderr:                   &errb,
 		HTTPClient:               &http.Client{Transport: rt},
@@ -2010,6 +2020,11 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if code != 0 || !strings.Contains(out.String(), `"permissionDecision":"deny"`) ||
 		!strings.Contains(out.String(), "this account is not enrolled") || strings.Contains(out.String(), failedClosed) {
 		t.Fatalf("codex denial: code = %d stdout = %q, want a deny that names the enrollment", code, out.String())
+	}
+	if len(reports) != 1 || reports[0] != (refusalpipe.Report{
+		Connector: "codex", Reason: "enterprise_managed_sid_unregistered", Event: "PreToolUse", Tool: "shell",
+	}) {
+		t.Fatalf("refusal reports = %+v, want one codex PreToolUse shell refusal", reports)
 	}
 	// Hermes has no fail-closed contract: the same refusal allows, so the
 	// hook must not claim to block.

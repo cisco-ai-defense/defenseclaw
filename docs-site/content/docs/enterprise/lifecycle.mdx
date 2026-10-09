@@ -471,6 +471,10 @@ it restarts.
   authorization ledger protects that user, so they stop working on the
   guardian's next pass after the removal. They never reach management
   routes, other connectors, or another user's identity.
+  An account that is cut off and still runs an agent is refused, and on
+  Windows each refused call is audited with reason
+  `enterprise_managed_sid_unregistered` (see
+  [Review the audit log](/docs/enterprise/windows#review-the-audit-log)).
 - **Rotate the per-user credentials** on Linux and macOS when a user's
   credentials may have been copied to another account or host. See
   [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials).

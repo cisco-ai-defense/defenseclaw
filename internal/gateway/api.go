@@ -1207,6 +1207,13 @@ func (a *APIServer) Run(ctx context.Context) error {
 		apiDetails["hook_socket_error"] = hookErr.Error()
 	}
 
+	// The Windows standalone hook reports the calls it refuses for an
+	// unenrolled account here (GAP-1242); a no-op on every other profile.
+	// It stops with this run of the API server.
+	refusalCtx, stopRefusals := context.WithCancel(ctx)
+	defer stopRefusals()
+	go a.serveUnenrolledRefusals(refusalCtx)
+
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
 		apiDetails["hook_socket"] = hookLn.Addr().String()

@@ -493,6 +493,15 @@ yet; it takes the permissions of its folder, so write it to a folder only
 administrators can read. Treat it as sensitive: it can hold prompt and tool
 content.
 
+A call refused because the account is excluded or not enrolled yet is in the
+export too: a `hook_decision` row and a `connector-hook` row with action
+`block`, the account's SID and name, the connector and event, and reason
+`enterprise_managed_sid_unregistered` (or
+`enterprise_managed_enrollment_pending`). The gateway takes the account from
+the Windows token of the refused process, not from anything the call sends.
+Repeated refusals of one account and agent are written as one row a minute;
+the `connector-hook` row names the tool and the number of attempts.
+
 ## Review AI Discovery
 
 With `ai_discovery.enabled: true` in the deployment config, the gateway
