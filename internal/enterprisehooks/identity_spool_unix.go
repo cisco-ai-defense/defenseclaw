@@ -51,10 +51,10 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // and status and verify warned identity_records_stale about it 30 minutes
 // later (GAP-1113, GAP-1103). A directory account's record stays until it is
 // older than IdentitySpoolMaxAge, when the gateway ignores it anyway, unless
-// the pass also resolved a directory account: while the domain controller is
-// unreachable the enumerator drops the AD accounts whose home owner does not
-// resolve, and deleting their records would take their UPN and directory
-// facts until the next pass (GAP-0145). A failed pass removes nothing young.
+// the pass resolved an account in that same directory. An outage can remove
+// accounts from one directory's enumeration while another still answers;
+// removing those records would lose their UPN facts (GAP-0145, GAP-1228).
+// A failed pass removes nothing young.
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
 		return nil
@@ -72,7 +72,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	}
 	keep := map[string]bool{}
 	var passErr error
-	directoryAnswered := false
+	answeredDirectories := map[string]bool{}
 	for _, account := range accounts {
 		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
 			continue
@@ -101,7 +101,11 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				}
 			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
-			directoryAnswered = directoryAnswered || err == nil && identitySpoolDirectoryRecord(record)
+			if err == nil && identitySpoolDirectoryRecord(record) {
+				if key := identitySpoolDirectoryKey(record); key != "" {
+					answeredDirectories[key] = true
+				}
+			}
 		} else if record.Key != "" {
 			// Keep a previous verified UPN through a transient lookup
 			// failure. For a newly enrolled account, still provide its
@@ -128,7 +132,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			continue
 		}
 		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge &&
-			(passErr != nil || !identitySpoolRecordLeft(dir, entry, directoryAnswered)) {
+			(passErr != nil || !identitySpoolRecordLeft(dir, entry, answeredDirectories)) {
 			continue
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
@@ -136,18 +140,36 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	return passErr
 }
 
-// identitySpoolRecordLeft reports whether entry, the young record of an
-// account a successful pass did not list, belongs to an account that left:
-// a local account, or a directory account while the directory answers (a
-// listed directory account resolved in the pass). An unreadable record goes
-// too. Any other file (a temporary one) waits for IdentitySpoolMaxAge.
-func identitySpoolRecordLeft(dir string, entry os.DirEntry, directoryAnswered bool) bool {
+// identitySpoolRecordLeft reports whether a young unlisted record can be
+// removed. Directory records leave only after their own directory answered;
+// a record without a usable directory key stays until it ages out.
+func identitySpoolRecordLeft(dir string, entry os.DirEntry, answeredDirectories map[string]bool) bool {
 	key, ok := strings.CutSuffix(entry.Name(), ".json")
 	if !ok || !entry.Type().IsRegular() || !validIdentitySpoolKey(key) {
 		return false
 	}
 	record, err := ReadIdentitySpoolRecord(dir, key, nil)
-	return err != nil || directoryAnswered || !identitySpoolDirectoryRecord(record)
+	if err != nil || !identitySpoolDirectoryRecord(record) {
+		return true
+	}
+	directory := identitySpoolDirectoryKey(record)
+	return directory != "" && answeredDirectories[directory]
+}
+
+// identitySpoolDirectoryKey uses the SSSD domain that actually held the uid
+// when available. The prefixes keep SSSD and other directory namespaces
+// separate; an unknown domain cannot justify deleting another record.
+func identitySpoolDirectoryKey(record IdentitySpoolRecord) string {
+	switch {
+	case record.SSSDDomain != "":
+		return "sssd:" + strings.ToLower(record.SSSDDomain)
+	case record.Facts.Domain != "":
+		return "domain:" + strings.ToLower(record.Facts.Domain)
+	case record.Facts.Realm != "":
+		return "realm:" + strings.ToLower(record.Facts.Realm)
+	default:
+		return ""
+	}
 }
 
 // identitySpoolDirectoryRecord reports whether record is a directory
