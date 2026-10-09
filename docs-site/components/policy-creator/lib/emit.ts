@@ -75,6 +75,7 @@ export function emit(policy: Policy): EmittedFile[] {
     scanner_overrides: policy.scanner_overrides,
     first_party_allow_list: policy.first_party_allow_list,
     guardrail: {
+      ...(policy.guardrail.mode ? { mode: policy.guardrail.mode } : {}),
       block_threshold: policy.guardrail.block_threshold,
       alert_threshold: policy.guardrail.alert_threshold,
       cisco_trust_level: policy.guardrail.cisco_trust_level,

@@ -454,6 +454,10 @@ function StepSinks({ answers, update }: StepProps) {
         title="Where should events go?"
         subtitle="Wire webhook destinations. Local audit settings are planning notes; policy activation does not apply them."
       />
+      <p className="mb-3 text-xs text-fd-muted-foreground">
+        Splunk HEC uses a separate observability destination. Configure it with{' '}
+        <a href="/docs/observability/splunk" className="underline">setup splunk</a> after installing this policy.
+      </p>
       <div className="space-y-2">
         {SINK_CARDS.map((card) => (
           <SinkRow
