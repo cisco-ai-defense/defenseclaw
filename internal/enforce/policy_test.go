@@ -1,6 +1,7 @@
 package enforce
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -124,4 +125,23 @@ func TestPolicyEngineJournalDisable(t *testing.T) {
 		}
 	})
 
+}
+
+// GAP-0992: a command-pinned rule must resolve the connector's MCP server
+// before the runtime tool-call reader decides whether to block it.
+func TestMCPRuntimeBlockReadsCommandPins(t *testing.T) {
+	cfg := config.DefaultConfig()
+	path := filepath.Join(t.TempDir(), "openclaw.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"demo":{"command":"npx","args":["-y","approved"]}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.ConfigFile = path
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{
+		Name: "demo", Command: "npx", ArgsPrefix: []string{"-y", "approved"},
+	}}
+	pe := NewPolicyEngine(nil).WithConfig(func() *config.Config { return cfg })
+	blocked, err := pe.IsMCPBlockedForConnector("demo", "openclaw")
+	if err != nil || !blocked {
+		t.Fatalf("command-pinned runtime deny = %v, %v; want blocked", blocked, err)
+	}
 }
