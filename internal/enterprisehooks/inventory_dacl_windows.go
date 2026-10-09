@@ -256,7 +256,11 @@ func inventoryDACLEnrolledByHome(manifest Manifest) map[string]inventoryDACLEnro
 // "Access is denied" and never scanned a skill there (GAP-0913). A folder
 // on an enrolled connector's managed hook path is left out, as is one whose
 // DACL is already the guardian's exact protected DACL: the guardian resets
-// a grant there (GAP-1210). Nothing is granted through a link.
+// a grant there (GAP-1210). The Amp and OpenCode plugin folders are the
+// exception: at the guardian's exact DACL, on their hook path or not, they
+// get the one read grant that DACL admits there
+// (ensureGatewayPluginRootReadACEPinned, GAP-0958). Nothing is granted
+// through a link.
 func inventoryDACLComponentGrants(home, ownHome string, enrolled inventoryDACLEnrolledHome) []inventoryDACLGrant {
 	if strings.TrimSpace(ownHome) == "" || len(enrolled.connectors) == 0 {
 		return nil
@@ -289,12 +293,23 @@ func inventoryDACLComponentGrants(home, ownHome string, enrolled inventoryDACLEn
 			continue
 		}
 		key := strings.ToLower(rel)
-		if _, dup := seen[key]; dup || inventoryDACLOnManagedPath(dir, managed) {
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		pluginRoot := windowsGatewayReadablePluginRoot(dir)
+		onManagedPath := inventoryDACLOnManagedPath(dir, managed)
+		if onManagedPath && !pluginRoot {
 			continue
 		}
 		seen[key] = struct{}{}
 		grants = append(grants, inventoryDACLGrant{dir: rel, ensure: func(_ string, sid *windows.SID) (inventoryDACLResult, error) {
 			if target != nil && inventoryDACLGuardianProtected(filepath.Join(home, rel), target) {
+				if pluginRoot {
+					return ensureGatewayPluginRootReadACEPinned(home, rel, sid, target)
+				}
+				return inventoryDACLSkippedMissing, nil
+			}
+			if onManagedPath {
 				return inventoryDACLSkippedMissing, nil
 			}
 			return ensureInventoryACEPinned(home, rel, sid, inventoryReadACE)

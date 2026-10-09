@@ -88,7 +88,7 @@ func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy
 	if drift.UsersReadMissing {
 		parts = append(parts, "the "+windowsPrincipalLabel("S-1-5-32-545")+" read and execute entry is missing, so standard users cannot read the machine policy summary")
 	}
-	fix := `icacls "` + dir + `" /setowner *S-1-5-32-544 and icacls "` + dir + `" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX`
+	fix := `icacls "` + dir + `" /setowner *S-1-5-32-544 and icacls "` + dir + `" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"`
 	if len(removals) != 0 {
 		fix += " /remove:g " + strings.Join(removals, " ")
 	}

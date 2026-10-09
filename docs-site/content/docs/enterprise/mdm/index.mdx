@@ -162,8 +162,10 @@ Rules that apply to every method:
   by group or others (a sticky parent such as `/tmp` is accepted). On Windows
   the file must be owned by SYSTEM, Administrators or TrustedInstaller and
   grant no one else write, delete or permission rights. The wrappers refuse
-  anything else with `mdm_untrusted_input`; Setup run directly refuses it with
-  its own error and exit `1603`.
+  anything else with `mdm_untrusted_input`; the standalone Setup run directly
+  refuses it with `invalid_arguments` and exit `1639`. On Windows both name the
+  account that can change the file and the `icacls` commands that fix its
+  folder.
 - **Absolute local paths only.** Setup also refuses relative paths, paths with
   environment variables such as `%TEMP%`, and network paths (the standalone
   Setup exits `1639`).
@@ -243,11 +245,15 @@ sudo ./defenseclaw-enterprise.sh \
 
 On Windows, in PowerShell 7 as SYSTEM. The staging folder must be writable
 only by SYSTEM and Administrators, or the wrapper and Setup refuse the config.
-On Windows client editions a new folder under `C:\` inherits write access for
-authenticated users, so restrict it first:
+On Windows client editions a new folder under `C:\` can hold write access for
+Authenticated Users, and read access for Users, as entries of its own, which
+`/inheritance:r` does not remove. Restrict the folder and remove those entries
+by name; `icacls C:\Staging /T` then lists only `NT AUTHORITY\SYSTEM` and
+`BUILTIN\Administrators`, for the folder and each file in it:
 
 ```powershell
 icacls C:\Staging /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+icacls C:\Staging /remove:g "*S-1-5-11" "*S-1-5-32-545" /T /C
 $pin = '<SHA-256 of the Setup from checksums.txt>'
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -NonInteractive -File .\Invoke-DefenseClawEnterprise.ps1 `
   -SetupPath C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe `

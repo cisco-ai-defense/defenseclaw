@@ -200,7 +200,7 @@ locked staging folder below; give it its own folder:
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
 icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
-icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C | Out-Null
+icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
 Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
 icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
@@ -262,7 +262,7 @@ only SYSTEM and Administrators can write:
 $Stage = 'C:\ProgramData\DefenseClaw-Staging'
 New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 icacls $Stage /setowner '*S-1-5-32-544' /T /C | Out-Null
-icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
 if ((Get-Acl $Stage).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') {
     throw "$Stage is not owned by Administrators"
 }
