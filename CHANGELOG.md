@@ -55,7 +55,7 @@ says otherwise. Per-user installs never connect to Tetragon.
     the controls loaded and the session denied. An agent's own update (for
     example Claude Code updating itself mid-session) loads a new controls
     policy, and the already-running session is only monitored until it
-    restarts; the restarted session is denied. A follow-up keeps the old
+    restarts; the restarted session is denied. A planned follow-up keeps the old
     controls policy loaded while the sessions it anchors are alive. At most
     eight running agent sessions are anchored in one monitor controls policy,
     because every extra
