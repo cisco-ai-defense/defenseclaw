@@ -21,6 +21,12 @@ func resolveDefaultPluginScanner(binaryPath string) string {
 	if binaryPath != "defenseclaw" && binaryPath != "defenseclaw.exe" {
 		return binaryPath
 	}
+	// A standalone managed host scans only with its scanner runtime: the
+	// defenseclaw.exe beside its gateway is the managed CLI, which refuses
+	// `plugin scan` as an asset_policy change (GAP-0975).
+	if managedScannerRuntimeHost() {
+		return binaryPath
+	}
 
 	gatewayPath, err := pluginScannerExecutable()
 	if err != nil || !filepath.IsAbs(gatewayPath) ||

@@ -5,7 +5,10 @@
 package scanner
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -199,5 +202,24 @@ func TestScannerAWSConfiguredEndpointsIgnored(t *testing.T) {
 			vars["AWS_PROFILE"] != "credential-profile" {
 			t.Fatalf("%s AWS endpoint settings are not pinned", name)
 		}
+	}
+}
+
+// GAP-0975: on a standalone managed Windows host whose scanner runtime was
+// not ready, a plugin scan ran the managed CLI beside the gateway and failed
+// with its "asset_policy.plugin is set in the admin config" refusal. It now
+// fails as runtime-not-ready without running anything, while an explicit
+// scanner path still runs as configured.
+func TestScanOnManagedHostWithoutRuntimeRunsNothing(t *testing.T) {
+	restore := managedScannerRuntimeHost
+	managedScannerRuntimeHost = func() bool { return true }
+	t.Cleanup(func() { managedScannerRuntimeHost = restore })
+
+	result, err := NewPluginScanner("").Scan(context.Background(), t.TempDir())
+	if result != nil || !errors.Is(err, ErrScannerRuntimeUnavailable) || strings.Contains(err.Error(), "asset_policy") {
+		t.Fatalf("plugin scan without the managed runtime = %v, %v; want the runtime-not-ready error", result, err)
+	}
+	if err := scannerRuntimeUnavailable("plugin-scanner", filepath.Join(t.TempDir(), "scanner.exe"), "", "defenseclaw", "defenseclaw.exe"); err != nil {
+		t.Fatalf("an explicit scanner path was refused: %v", err)
 	}
 }

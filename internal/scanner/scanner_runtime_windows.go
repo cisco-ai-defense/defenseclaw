@@ -38,6 +38,17 @@ var scannerRuntimeProblem = func() error {
 	return err
 }
 
+// managedScannerRuntimeHost reports whether this process is a standalone
+// managed Windows service, whose environment pins the deployment mode and
+// the standalone profile. Its scans run only the scanner runtime, which may
+// not be installed yet (scannerRuntimeProblem is nil until its folder
+// exists). Secure Client services have no runtime and no standalone pin.
+// Tests replace it.
+var managedScannerRuntimeHost = func() bool {
+	return managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv))
+}
+
 var errNoScannerRuntime = errors.New("this host has no scanner runtime")
 
 func installedScannerRuntime() (string, error) {

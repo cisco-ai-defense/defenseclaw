@@ -395,6 +395,9 @@ func (s *SkillScanner) policyArg() (string, func(), error) {
 }
 
 func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
+	if err := scannerRuntimeUnavailable(s.Name(), s.Config.Binary, "skill-scanner", "skill-scanner.exe"); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	exitCode := 0
 	var scanErr error

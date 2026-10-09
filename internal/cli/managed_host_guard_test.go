@@ -100,6 +100,7 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	}{
 		{configCmd, "set", []string{"guardrail.mode", "observe"}, "admin config"},
 		{root, "skill", []string{"block", "dc-x"}, "asset_policy.skill"},
+		{root, "plugin", []string{"scan", "--json", `C:\p`}, "defenseclaw scan plugin <path>"},
 	} {
 		child, _, err := tc.parent.Find([]string{tc.name})
 		if err != nil || child == tc.parent {

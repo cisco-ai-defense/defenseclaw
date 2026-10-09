@@ -96,6 +96,16 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	for _, kind := range []string{"skill", "mcp", "plugin", "tool"} {
 		kind := kind
 		addManagedWindowsAnswer(root, kind, func(args []string) error {
+			if len(args) > 0 && args[0] == "scan" && kind != "tool" {
+				// A scan changes no policy; the refusal said asset_policy
+				// was set in the admin config (GAP-0975).
+				target := "<path>"
+				if kind == "mcp" {
+					target = "<url>"
+				}
+				return withExitCode(fmt.Errorf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
+					"which runs the gateway's %s scanner", kind, kind, target, kind), 3)
+			}
 			if len(args) == 0 || (args[0] != "block" && args[0] != "allow" && args[0] != "unblock") {
 				return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane)", kind), 3)
 			}

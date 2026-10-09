@@ -89,7 +89,7 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	// blind for the first full interval after startup.
 	w.runRescanCycle(ctx)
 
-	timer := time.NewTimer(interval)
+	timer := time.NewTimer(w.nextRescanDelay(interval))
 	defer timer.Stop()
 
 	for {
@@ -98,11 +98,35 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 			w.runRescanCycle(ctx)
-			timer.Reset(interval)
+			timer.Reset(w.nextRescanDelay(interval))
 		case <-w.rescanNow:
 			w.runRescanCycle(ctx)
+			if delay := w.nextRescanDelay(interval); delay < interval {
+				timer.Reset(delay)
+			}
 		}
 	}
+}
+
+// scannerRuntimeRetry is the first wait before the rescan cycle after one
+// whose scans found the managed scanner runtime not ready; a var for tests.
+var scannerRuntimeRetry = 2 * time.Minute
+
+// nextRescanDelay is the wait before the next rescan cycle: interval, or a
+// short retry when a scan of the cycle that just ended found the managed
+// scanner runtime not ready. Setup prepares that runtime after it starts the
+// gateway, so every skill and plugin the startup cycle found was left
+// unscanned for a whole interval (60 minutes by default; GAP-0975). The
+// retry doubles on each such cycle in a row, up to interval, so a runtime
+// that stays broken is not checked every two minutes.
+func (w *InstallWatcher) nextRescanDelay(interval time.Duration) time.Duration {
+	if !w.runtimeNotReady.Swap(false) {
+		w.runtimeRetries = 0
+		return interval
+	}
+	delay := scannerRuntimeRetry << min(w.runtimeRetries, 6)
+	w.runtimeRetries++
+	return min(delay, interval)
 }
 
 // rescanOutcome reports whether a single target was actually scanned during a
@@ -1019,6 +1043,9 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] scan %s: %v\n", evt.Path, err)
+		if errors.Is(err, scanner.ErrScannerRuntimeUnavailable) {
+			w.runtimeNotReady.Store(true)
+		}
 		w.auditRescanFailure(evt, s.Name(), err)
 		return nil, ""
 	}

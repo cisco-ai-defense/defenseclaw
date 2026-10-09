@@ -294,6 +294,9 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 var runMCPScannerCommand = processutil.RunTree
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
+	if err := scannerRuntimeUnavailable(s.Name(), s.Config.Binary, "defenseclaw", "defenseclaw.exe"); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	exitCode := 0
 	var scanErr error

@@ -14,3 +14,7 @@ func resolveScannerRuntime(binary string, _ ...string) string {
 
 // scannerRuntimeProblem is nil: no other OS has a managed scanner runtime.
 var scannerRuntimeProblem = func() error { return nil }
+
+// managedScannerRuntimeHost is false: no other OS has a managed scanner
+// runtime. Tests replace it.
+var managedScannerRuntimeHost = func() bool { return false }

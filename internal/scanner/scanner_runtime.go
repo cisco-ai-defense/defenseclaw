@@ -6,9 +6,11 @@ package scanner
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -26,15 +28,42 @@ func usesScannerRuntime(binary string) bool {
 	return base == scannerRuntimeName || base == scannerRuntimeName+".exe"
 }
 
-// scannerNotFound is the error of a scanner binary that does not exist. On
-// a host with a managed scanner runtime it says why that runtime was not
-// used: a scan never falls back to a PATH lookup there, and the bare name it
-// reported before (skill-scanner not found at "skill-scanner") hid the cause
-// (GAP-0686). hint is the generic remedy.
-func scannerNotFound(name, binary, hint string) error {
-	if problem := scannerRuntimeProblem(); problem != nil && !usesScannerRuntime(binary) {
-		return fmt.Errorf("scanner: %s: the managed scanner runtime cannot be run (%v); run the DefenseClaw Setup with /repair", name, problem)
+// ErrScannerRuntimeUnavailable is the error of a scan on a standalone
+// managed Windows host whose scanner runtime cannot be run, for example while
+// Setup is still preparing it: Setup starts the gateway first, and its
+// startup rescan scans every installed skill and plugin at once. The rescan
+// loop retries such scans soon rather than an interval later (GAP-0975).
+var ErrScannerRuntimeUnavailable = errors.New("the managed scanner runtime is not ready")
+
+// scannerRuntimeUnavailable is the error of a scan whose scanner command is
+// still a bare default (one of defaults) on a host with a managed scanner
+// runtime: resolveScannerRuntime keeps the default when the runtime cannot
+// be run, and there neither a PATH lookup nor the defenseclaw.exe beside the
+// gateway is a scanner. That defenseclaw.exe is the managed CLI, so a plugin
+// scan ran it and failed with its refusal "asset_policy.plugin is set in the
+// admin config" (GAP-0975). It is nil on every other host and for an
+// explicit scanner path, which stays authoritative.
+func scannerRuntimeUnavailable(name, binary string, defaults ...string) error {
+	if !slices.ContainsFunc(defaults, func(d string) bool { return strings.EqualFold(strings.TrimSpace(binary), d) }) {
+		return nil
 	}
+	problem := scannerRuntimeProblem()
+	if problem == nil && !managedScannerRuntimeHost() {
+		return nil
+	}
+	reason := "it is not installed yet"
+	if problem != nil {
+		reason = problem.Error()
+	}
+	return fmt.Errorf("scanner: %s: %w (%s); scans run again once Setup has prepared it, "+
+		"and DefenseClawSetup-Enterprise-Standalone-x64.exe /repair prepares it again", name, ErrScannerRuntimeUnavailable, reason)
+}
+
+// scannerNotFound is the error of a scanner binary that does not exist.
+// hint is the generic remedy. A default scanner command on a host with a
+// managed scanner runtime never gets here: scannerRuntimeUnavailable stops
+// that scan first and says why the runtime was not used (GAP-0686).
+func scannerNotFound(name, binary, hint string) error {
 	return fmt.Errorf("scanner: %s not found at %q — %s", name, binary, hint)
 }
 
