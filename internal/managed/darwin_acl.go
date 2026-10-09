@@ -91,6 +91,25 @@ func (e DarwinACLEntry) DeniesDirectoryAccess(requireList bool) bool {
 	return false
 }
 
+// DeniesFileRead reports a deny entry that prevents an agent from reading a
+// published policy file. Inherited-only entries do not affect this file.
+func (e DarwinACLEntry) DeniesFileRead() bool {
+	if e.Allow {
+		return false
+	}
+	for _, right := range e.Rights {
+		if right == "only_inherit" {
+			return false
+		}
+	}
+	for _, right := range e.Rights {
+		if right == "read" {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseDarwinACLListing reads what `/bin/ls -lde -- <paths>` printed: the
 // ACL entries of each listed path, by the path as it was passed. ls prints a
 // line per path that ends with the path, followed by one indented
