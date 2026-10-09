@@ -5,6 +5,8 @@ package connector
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -100,5 +102,33 @@ func TestCodexOwnedEditRecognizesCommentedTableHeader(t *testing.T) {
 	}
 	if cfg["otel"].(map[string]interface{})["environment"] != "new" {
 		t.Fatalf("otel = %#v", cfg["otel"])
+	}
+}
+
+func TestCodexBOMReaders(t *testing.T) {
+	raw := append([]byte{0xef, 0xbb, 0xbf}, []byte("# user comment\n[hooks]\ncommand = \"defenseclaw-hook\"\n[mcp_servers.demo]\ncommand = \"demo\"\n")...)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		read func() error
+	}{
+		{"shared parser", func() error { var doc map[string]interface{}; return ParseCodexTOML(raw, &doc) }},
+		{"hook registration", func() error {
+			found, err := configFileReferencesHook(path, []string{"defenseclaw-hook"})
+			if err == nil && !found {
+				t.Error("hook registration was not found")
+			}
+			return err
+		}},
+		{"machine requirements", func() error { _, err := parseWindowsCodexRequirements(raw); return err }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.read(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

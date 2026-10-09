@@ -240,7 +240,7 @@ func renderCodex(opts Options, admin []byte, policy config.ResolvedConnectorPoli
 	}
 	adminCfg := map[string]any{}
 	if len(bytes.TrimSpace(admin)) > 0 {
-		if err := toml.Unmarshal(admin, &adminCfg); err != nil {
+		if err := connector.ParseCodexTOML(admin, &adminCfg); err != nil {
 			return nil, nil, fmt.Errorf("parse administrator Codex requirements: %w", err)
 		}
 	}
@@ -410,7 +410,7 @@ func inspectCodex(opts Options, raw []byte, policy config.ResolvedConnectorPolic
 	cfg := map[string]any{}
 	raw = bytes.TrimPrefix(raw, utf8BOM)
 	if len(bytes.TrimSpace(raw)) > 0 {
-		if err := toml.Unmarshal(raw, &cfg); err != nil {
+		if err := connector.ParseCodexTOML(raw, &cfg); err != nil {
 			return fmt.Errorf("parse Codex requirements: %w", err)
 		}
 	}
@@ -486,7 +486,7 @@ func inspectCodexHigherSources(opts Options, policy config.ResolvedConnectorPoli
 	}
 	for name, raw := range sources {
 		cfg := map[string]any{}
-		if err := toml.Unmarshal(raw, &cfg); err != nil {
+		if err := connector.ParseCodexTOML(raw, &cfg); err != nil {
 			state.conflict("%s is not valid TOML: %v", name, err)
 			continue
 		}
@@ -652,7 +652,7 @@ func codexParseError(path string, current []byte, err error) error {
 		return err
 	}
 	cfg := map[string]any{}
-	if fileErr := toml.Unmarshal(bytes.TrimPrefix(current, utf8BOM), &cfg); errors.As(fileErr, &decode) {
+	if fileErr := connector.ParseCodexTOML(current, &cfg); errors.As(fileErr, &decode) {
 		row, column := decode.Position()
 		return fmt.Errorf("%s does not parse as TOML at line %d, column %d (%v); DefenseClaw does not rewrite administrator lines, so fix that line, then rerun", path, row, column, fileErr)
 	}

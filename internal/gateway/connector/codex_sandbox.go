@@ -273,7 +273,7 @@ func verifyCodexSandboxPolicy(requirements, managedConfig []byte, rt resolvedSan
 	}
 
 	managed := map[string]interface{}{}
-	if err := toml.Unmarshal(managedConfig, &managed); err != nil {
+	if err := parseCodexTOML(managedConfig, &managed); err != nil {
 		return fmt.Errorf("verify Codex sandbox managed config: %w", err)
 	}
 	if managed["check_for_update_on_startup"] != false {
