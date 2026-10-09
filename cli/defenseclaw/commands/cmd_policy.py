@@ -55,17 +55,30 @@ def _rego_dir() -> str:
 
 
 def _default_rego_dir(app: AppContext) -> str:
-    """The Rego directory the gateway loads: <policy_dir>/rego when it exists.
+    """The Rego directory the gateway loads: <policy_dir>/rego.
 
-    Falls back to the bundled copy (a fresh install before init). The bundled
-    directory lives inside the package and is replaced on upgrade, so it is
-    the wrong place to point users at for their own tests (GAP-1459).
+    The bundled copy stands in only before init (no config.yaml yet). The
+    bundled directory lives inside the package and is replaced on upgrade, so
+    it is the wrong place to point users at for their own tests (GAP-1459),
+    and after init it must not hide a policy directory that is gone, which
+    defenseclaw-gateway policy validate reports (GAP-0889). Secure Client
+    keeps the fallback of main (issue #1092).
     """
-    policy_dir = getattr(getattr(app, "cfg", None), "policy_dir", "") or ""
+    cfg = getattr(app, "cfg", None)
+    policy_dir = getattr(cfg, "policy_dir", "") or ""
     user_rego = os.path.join(policy_dir, "rego") if policy_dir else ""
     if user_rego and os.path.isdir(user_rego):
         return user_rego
+    if user_rego and _initialized(cfg) and not asset_lists.is_secure_client(cfg):
+        return user_rego
     return _rego_dir()
+
+
+def _initialized(cfg) -> bool:
+    """True once init has written config.yaml for this data directory."""
+    from defenseclaw.config import config_path_for_data_dir
+
+    return config_path_for_data_dir(getattr(cfg, "data_dir", None)).is_file()
 
 
 def _ensure_policies_dir(app: AppContext) -> str:
@@ -1006,6 +1019,21 @@ def validate(app: AppContext, rego_dir: str | None) -> None:
     rd = rego_dir or _default_rego_dir(app)
     if asset_lists.is_secure_client(app.cfg) and not _validate_legacy_data(rd):
         raise SystemExit(1)
+    if not os.path.isdir(rd):
+        # As in defenseclaw-gateway policy validate: a policy directory
+        # without rego/ is config-only mode, a missing one fails (GAP-0889).
+        policy_dir = getattr(app.cfg, "policy_dir", "") or ""
+        if rego_dir or not policy_dir or not os.path.isdir(policy_dir):
+            ux.err(f"FAIL: read rego directory {rd}: no such directory")
+            if not rego_dir:
+                ux.subhead(
+                    f"The policy directory {policy_dir or rd} is gone; restore it or run 'defenseclaw init'.",
+                    indent="  ",
+                )
+            raise SystemExit(1)
+        click.echo(f"No Rego directory at {rd}: the admission policy is compiled from config.yaml alone.")
+        ux.ok("All validations passed.")
+        return
     if not _try_rego_compile(rd, app.cfg):
         raise SystemExit(1)
 
