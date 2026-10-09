@@ -27,6 +27,15 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 	if command.Use != "teardown-managed-hooks" {
 		t.Fatalf("Use = %q", command.Use)
 	}
+	// Flags whose scope is limited to specific teardown actions. If any of
+	// these were exposed on rollback/status by accident, the PowerShell
+	// teardown module could pass a receipt-scoped argument during rollback
+	// and silently apply cleanup semantics against a rolled-back journal.
+	scopedFlags := map[string]map[string]bool{
+		"purge-contract-locks":     {"finalize": true},
+		"contract-cleanup-receipt": {"prepare": true, "finalize": true},
+		"contract-cleanup-scope":   {"prepare": true, "finalize": true},
+	}
 	var actions []string
 	for _, child := range command.Commands() {
 		if !child.Hidden {
@@ -34,6 +43,15 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		}
 		if child.Flags().Lookup("json") == nil {
 			t.Fatalf("%s action is missing --json", child.Name())
+		}
+		for flag, allowed := range scopedFlags {
+			present := child.Flags().Lookup(flag) != nil
+			if allowed[child.Name()] && !present {
+				t.Fatalf("%s action is missing --%s", child.Name(), flag)
+			}
+			if !allowed[child.Name()] && present {
+				t.Fatalf("%s action unexpectedly accepts --%s", child.Name(), flag)
+			}
 		}
 		actions = append(actions, child.Name())
 	}
@@ -105,6 +123,34 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 	}
 	if !targets[2].Deferred {
 		t.Fatal("deferred manifest authorization was not preserved in teardown identity")
+	}
+}
+
+func TestWindowsManagedHooksTeardownTargetsAcceptEntraIDForAllConnectors(t *testing.T) {
+	const entraSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	home := filepath.Clean(`C:\Users\entra-user`)
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{SID: entraSID, UserHome: home, Connector: "claudecode", AgentVersion: "2.1.152"},
+		{SID: entraSID, UserHome: home, Connector: "codex", AgentVersion: "0.131.0"},
+		{SID: entraSID, UserHome: home, Connector: "cursor", AgentVersion: "1.7.0"},
+	}}
+
+	targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 3 || len(claude) != 1 || claude[0] != entraSID ||
+		len(codex) != 1 || codex[0].SID != entraSID ||
+		len(cursor) != 1 || cursor[0].SID != entraSID {
+		t.Fatalf(
+			"Microsoft Entra ID teardown targets = all:%+v claude:%v codex:%+v cursor:%+v",
+			targets, claude, codex, cursor,
+		)
+	}
+	wantDataDir := filepath.Join(home, ".defenseclaw")
+	if !sameWindowsEnterprisePathCLI(codex[0].DataDir, wantDataDir) ||
+		!sameWindowsEnterprisePathCLI(cursor[0].DataDir, wantDataDir) {
+		t.Fatalf("Microsoft Entra ID teardown data dirs = codex:%q cursor:%q, want %q", codex[0].DataDir, cursor[0].DataDir, wantDataDir)
 	}
 }
 
@@ -540,6 +586,155 @@ func TestValidateWindowsManagedHooksTeardownEnrollmentDistinguishesNoStart(t *te
 		true,
 	); err == nil {
 		t.Fatal("activated deployment with an emptied Codex registry was accepted")
+	}
+}
+
+// AVC's dry-run of the v11 kit failed uninstall with
+// "managed-hook teardown journal is missing codex_targets" on a
+// single-user test VM where the activated deployment had zero eligible
+// codex users. Root cause was append([]T(nil), src...) returning nil
+// when src is an empty non-nil slice, which then marshals as JSON
+// `null` and used to trip the reader's presence check on retry. This
+// test locks the writer fix in place: the enrollment helper must
+// return empty-non-nil slices for every connector target list, so the
+// journal always serializes as `[]` (never `null`) even for connectors
+// with zero eligible users at install time.
+func TestWindowsManagedHooksTeardownExpectedEnrollmentEmptyTargetsAreNonNil(t *testing.T) {
+	for _, state := range []string{
+		windowsManagedHooksNeverActivated,
+		"activated",
+	} {
+		state := state
+		t.Run(state, func(t *testing.T) {
+			claude, codexActive, codex, cursor :=
+				windowsManagedHooksTeardownExpectedEnrollment(
+					state,
+					[]string{},
+					[]connector.WindowsCodexManagedRuntimeTarget{},
+					[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+				)
+			if claude == nil {
+				t.Error("claude target SIDs slice is nil for empty input")
+			}
+			if codex == nil {
+				t.Error("codex targets slice is nil for empty input")
+			}
+			if cursor == nil {
+				t.Error("cursor targets slice is nil for empty input")
+			}
+			if codexActive {
+				t.Error("codex policy active is true when zero codex targets")
+			}
+			// Round-trip through JSON to prove the wire representation
+			// is `[]` and never `null`, so a peer reader that rejects
+			// null on these fields continues to accept our output.
+			body, err := json.Marshal(windowsManagedHooksTeardownJournal{
+				ClaudeTargetSIDs: claude,
+				CodexTargets:     codex,
+				CursorTargets:    cursor,
+			})
+			if err != nil {
+				t.Fatalf("marshal empty enrollment: %v", err)
+			}
+			for _, key := range []string{
+				`"claude_target_sids":[]`,
+				`"codex_targets":[]`,
+				`"cursor_targets":[]`,
+			} {
+				if !strings.Contains(string(body), key) {
+					t.Errorf("marshal(%s): expected %s in %s", state, key, string(body))
+				}
+			}
+			for _, key := range []string{
+				`"claude_target_sids":null`,
+				`"codex_targets":null`,
+				`"cursor_targets":null`,
+			} {
+				if strings.Contains(string(body), key) {
+					t.Errorf("marshal(%s): unexpected null field %s", state, key)
+				}
+			}
+		})
+	}
+}
+
+// Backward-compat: a pre-fix journal on disk from an older Setup EXE
+// may have "codex_targets": null (or cursor_targets/claude_target_sids
+// null) because the buggy writer emitted null for empty target lists.
+// parseWindowsManagedHooksTeardownJournalBody must accept those without
+// throwing "managed-hook teardown journal is missing codex_targets" so
+// AVC (and every downstream operator) can uninstall a box that was
+// installed with the buggy writer. Trust-critical identity fields
+// (manifest_sha256, activation_state, deployment_generation_id) stay
+// presence-required; validateWindowsManagedHooksTeardownJournal below
+// still binds every target list to the recomputed activation identity.
+//
+// Tested against the ACL-independent JSON layer so the CI runner's
+// non-Admin user identity does not trip
+// managed.ValidateTrustedFilePath's owner walk. The production entry
+// point readWindowsManagedHooksTeardownJournal still enforces owner
+// trust (SYSTEM/Admins/TrustedInstaller) before reaching this parse
+// step.
+func TestParseWindowsManagedHooksTeardownJournalBodyAcceptsNullConnectorArrays(t *testing.T) {
+	body := []byte(`{
+  "schema_version": 6,
+  "phase": "prepared",
+  "manifest_path": "C:\\ProgramData\\DefenseClaw\\hook-guardian\\targets.yaml",
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "manifest_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "activation_state": "activated",
+  "deployment_generation_id": "cccccccccccccccccccccccccccccccc",
+  "hook_binary": "C:\\Program Files\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+  "gateway_addr": "127.0.0.1:18970",
+  "gateway_service_name": "DefenseClawGateway",
+  "targets": [],
+  "claude_target_sids": null,
+  "claude": {},
+  "codex_policy_active": false,
+  "codex_targets": null,
+  "cursor_targets": null,
+  "cursor": {},
+  "selector_targets": null
+}
+`)
+	journal, err := parseWindowsManagedHooksTeardownJournalBody(body)
+	if err != nil {
+		t.Fatalf("parse journal with null connector arrays: %v", err)
+	}
+	if len(journal.CodexTargets) != 0 || len(journal.CursorTargets) != 0 ||
+		len(journal.ClaudeTargetSIDs) != 0 {
+		t.Errorf("expected empty target lists, got %#v / %#v / %#v",
+			journal.CodexTargets, journal.CursorTargets, journal.ClaudeTargetSIDs)
+	}
+	if journal.ManifestSHA256 != strings.Repeat("a", 64) ||
+		journal.ActivationState != "activated" ||
+		journal.DeploymentGenerationID != strings.Repeat("c", 32) {
+		t.Errorf("trust-critical identity fields did not decode: %+v", journal)
+	}
+	// Missing trust-critical field still rejects.
+	withoutManifestSHA := strings.Replace(
+		string(body),
+		`"manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",`,
+		`"manifest_sha256": null,`,
+		1,
+	)
+	if _, err := parseWindowsManagedHooksTeardownJournalBody(
+		[]byte(withoutManifestSHA),
+	); err == nil || !strings.Contains(err.Error(), "missing manifest_sha256") {
+		t.Errorf("expected missing-manifest_sha256 rejection, got %v", err)
+	}
+	// Unknown property still fails closed (DisallowUnknownFields).
+	withForeignKey := strings.Replace(
+		string(body),
+		`"selector_targets": null`,
+		`"selector_targets": null,
+  "attacker_planted_key": "evil"`,
+		1,
+	)
+	if _, err := parseWindowsManagedHooksTeardownJournalBody(
+		[]byte(withForeignKey),
+	); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("expected unknown-field rejection, got %v", err)
 	}
 }
 

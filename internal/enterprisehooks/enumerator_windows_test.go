@@ -28,13 +28,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the shape spec 005
-// REQ-11 requires: an S-1-5-21-… SID with at least 5 sub-authorities
-// (21, A, B, C, RID) is accepted; anything else is refused. The
-// boundary case (`S-1-5-21-A-B-C`, 4 sub-authorities — the bare
-// domain SID without a trailing RID) MUST be rejected: enumerating a
-// bare domain as an interactive user would emit garbage manifest
-// rows. See CR spec-005:PRRT_kwDORuAK-s6atyfL.
+// TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the supported local,
+// domain, and Microsoft Entra ID user SID shapes. Classification does
+// not depend on administrator privileges.
 func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -43,6 +39,7 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	}{
 		{"typical local user (5 sub-auths)", "S-1-5-21-1000-2000-3000-1001", true},
 		{"domain user with high RID (5 sub-auths)", "S-1-5-21-1234567890-987654321-1111111111-4321", true},
+		{"Microsoft Entra ID user (5 sub-auths)", "S-1-12-1-1111111111-2222222222-3333333333-4000000000", true},
 		// Exact 5-sub-authority boundary — smallest legal user SID.
 		{"minimum accepted (exactly 5 sub-auths)", "S-1-5-21-0-0-0-500", true},
 		// The bare domain SID (`S-1-5-21-A-B-C`) has 4 sub-auths and
@@ -50,6 +47,7 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 		// `< 4` check missed.
 		{"bare domain SID (4 sub-auths)", "S-1-5-21-1000-2000-3000", false},
 		{"NT AUTHORITY too short (1 sub-auth)", "S-1-5-21", false},
+		{"truncated Microsoft Entra ID SID", "S-1-12-1-1111111111-2222222222-3333333333", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -969,6 +967,78 @@ func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *t
 		}
 		if got, _ := windowsProfileEnrollmentDecision(profile, []string{"bob"}, nil, failing); got != windowsEnrollmentExcluded {
 			t.Fatalf("a directory-name exclusion must still apply during a lookup failure, got %d", got)
+		}
+	})
+}
+
+// TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift pins the
+// repair-on-drift contract: a healthy parent is never rewritten, a drifted
+// parent is restored to the AdminDirectory contract, and the caller only
+// proceeds once the repaired object actually validates.
+func TestEnsureWindowsTargetsManifestParentProtectedRepairsDrift(t *testing.T) {
+	t.Run("healthy parent is not rewritten", func(t *testing.T) {
+		dir := prepareWindowsTargetsManifestTestDirectory(t)
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error {
+			t.Fatal("healthy parent triggered an ACL write")
+			return nil
+		}
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
+			t.Fatalf("healthy parent: %v", err)
+		}
+	})
+
+	t.Run("drifted parent is restored", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
+			t.Fatalf("repair drifted parent: %v", err)
+		}
+		if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+			t.Fatalf("repaired parent still invalid: %v", err)
+		}
+	})
+
+	t.Run("repair failure reports the drift cause", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error {
+			return errors.New("injected parent ACL failure")
+		}
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		err := ensureWindowsTargetsManifestParentProtected(dir)
+		if err == nil {
+			t.Fatal("repair failure: err = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "injected parent ACL failure") {
+			t.Fatalf("repair failure lost the write error: %v", err)
+		}
+		if !strings.Contains(err.Error(), "noncanonical") &&
+			!strings.Contains(err.Error(), "not protected") {
+			t.Fatalf("repair failure lost the drift cause: %v", err)
+		}
+	})
+
+	t.Run("silent no-op repair still fails validation", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := validateWindowsTargetsManifestObject(dir, true); err == nil {
+			t.Skip("temp directory already satisfies the AdminDirectory contract")
+		}
+		originalProtect := windowsTargetsManifestProtect
+		windowsTargetsManifestProtect = func(string, bool) error { return nil }
+		t.Cleanup(func() { windowsTargetsManifestProtect = originalProtect })
+		err := ensureWindowsTargetsManifestParentProtected(dir)
+		if err == nil {
+			t.Fatal("no-op repair: err = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "still unprotected") {
+			t.Fatalf("no-op repair: err = %v, want a still-unprotected verdict", err)
 		}
 	})
 }

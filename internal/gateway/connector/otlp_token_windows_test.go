@@ -146,7 +146,7 @@ func TestOTLPPathTokenWindowsRejectsUnsupportedWriteAllowACETypes(t *testing.T) 
 				t.Fatalf("get ACE: %v", err)
 			}
 			ace.Header.AceType = tc.typeID
-			if err := hookAPIRejectUntrustedWindowsWriteACEs("token", acl, false, true); err == nil ||
+			if err := hookAPIRejectUntrustedWindowsWriteACEs("token", acl, false, true, false); err == nil ||
 				!strings.Contains(err.Error(), "unsupported Windows allow ACE type") {
 				t.Fatalf("write-capable ACE type 0x%x error = %v", tc.typeID, err)
 			}

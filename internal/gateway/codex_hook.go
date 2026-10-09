@@ -142,10 +142,15 @@ type codexHookResponse struct {
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHook can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
-	RedactionEnabled *bool  `json:"-"`
-	SourceReason     string `json:"-"`
+	RedactionEnabled     *bool  `json:"-"`
+	SourceReason         string `json:"-"`
+	SuppressNotification bool   `json:"-"`
+	aiDefenseEnforced    bool
 	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
-	// took part in the verdict. Never serialized.
+	// (Cisco AI Defense, LLM judge) took part in the verdict.
+	// liftUnblockedDestinations refuses to lift a response flagged this
+	// way, so destination rules alone cannot convert a lane block into
+	// an allow. Never serialized on the wire.
 	laneVerdict bool
 }
 
@@ -305,15 +310,19 @@ func (a *APIServer) evaluateCodexHookForProfile(
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
+	action := rawAction
+	wouldBlock := rawAction == "block" && mode != "action"
+	if mode != "action" && rawAction == "block" {
+		action = "allow"
+	}
+	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
+		action = "allow"
+	}
+	if mode == "action" && rawAction == "confirm" {
+		action = "alert"
+	}
 	caps := profile.Capabilities
-	action, wouldBlock := mapHookActionForProfile(
-		rawAction,
-		mode,
-		req.HookEventName,
-		caps,
-		profile,
-		req.Payload,
-	)
+	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	assetContextEligible := false
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -347,17 +356,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			assetContextEligible = true
 		}
 	}
-	// Emit per-rule findings FIRST so the notification + audit
-	// rows produced below can carry the resulting evaluation_id
+	// Emit per-rule findings first so the notification + audit
+	// rows produced during finalization can carry the resulting evaluation_id
 	// and top rule_ids — keeping the SIEM pivot key identical
 	// across canonical logs, OS notification, and the
 	// HTTP response body.
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
-	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
-			sinkPolicyFor(ctx, verdict.RedactionEnabled))
-	}
 	resp := codexResponseFor(
 		req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
 		sinkPolicyFor(ctx, verdict.RedactionEnabled),
@@ -372,6 +377,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
+	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
+	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	return resp
 }
 
@@ -977,6 +984,13 @@ func mergeCodexToolResultVerdicts(
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled
 		merged.RedactionEnabled = &enabled
 	}
+	// A segmented result is AID-enforced only when an AID-originated block
+	// survives as the merged effective block. In particular, a cloud block
+	// clamped out of trusted source must not lend provenance to a separate
+	// local-policy block in the untrusted segment.
+	merged.aiDefenseBlock = normalizeCodexAction(merged.Action) == "block" &&
+		(source.aiDefenseBlock && normalizeCodexAction(source.Action) == "block" ||
+			untrusted.aiDefenseBlock && normalizeCodexAction(untrusted.Action) == "block")
 	return &merged
 }
 

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 	"golang.org/x/sys/unix"
 )
@@ -73,7 +74,22 @@ func auditDBPlatformSidecarNeedsHardening(*os.File) (bool, error) { return true,
 
 func auditDBPlatformHardeningNeedsCapabilityReopen() bool { return false }
 
-func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool) error {
+// validateAuditDBPlatformTrust judges the ownership + permission posture of an
+// audit-DB path element.
+//
+// The fourth parameter (strict) toggles the AIFW-34262 advisory downgrade for
+// ancestor permission verdicts. When strict is false, the caller is walking
+// an ANCESTOR (not the leaf) — a permission-shaped 0o022 verdict on a path
+// under managed.PlatformInstallerOwnedPath (e.g. /opt/cisco, /Library/Logs/Cisco)
+// is downgraded to a managed_trust_ancestor_advisory warning and swallowed.
+// That mirrors the softening that internal/managed/trust_unix.go already does
+// for the config and data_dir ancestors; without it, /opt/cisco at 0775
+// (group-writable, root-owned) trips this check and fails-closed at gateway
+// startup even though PR #884 softened the parallel managed-package walker.
+// When strict is true (leaf), every verdict stays fatal. Structural failures
+// (untrusted owner, ownership lookup failure) also stay fatal in either mode.
+// managed.TrustStrictAncestorsEnv=1 forces every verdict fatal.
+func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, strict bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return errors.New("audit: database path ownership is unavailable")
@@ -90,7 +106,10 @@ func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool)
 		if directory {
 			kind = "directory"
 		}
-		return fmt.Errorf("audit: database %s is group- or other-writable", kind)
+		verdict := managed.NewTrustVerdict("audit: database %s is group- or other-writable", kind)
+		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		label := fmt.Sprintf("audit store database %s", kind)
+		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}
 	return nil
 }

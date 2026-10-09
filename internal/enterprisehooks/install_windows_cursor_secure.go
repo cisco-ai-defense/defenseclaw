@@ -112,11 +112,18 @@ func installWindowsCursorManagedResult(
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write Cursor managed runtime: %w", err))
 			}
-			lockEntry = connector.NewHookContractLockEntry(
+			lockEntry, err = connector.NewHookContractLockEntryForMode(
 				target.setup,
 				target.conn,
 				version.Current().BinaryVersion,
+				true,
 			)
+			if err != nil {
+				return fail(fmt.Errorf(
+					"enterprise hooks: build Cursor managed hook contract: %w",
+					err,
+				))
+			}
 			lockEntry.HookFailMode = "closed"
 			lockEntry.HookScriptDigests = nil
 			lockEntry.Locations = connector.ConnectorLocations{
@@ -391,6 +398,9 @@ func verifyWindowsCursorUserRuntime(
 	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
 	if err != nil {
 		return err
+	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf("enterprise hooks: Cursor managed hook contract gateway binding: %w", err)
 	}
 	if lock.Connector != "cursor" ||
 		len(lock.Locations.HookConfigPaths) != 1 ||

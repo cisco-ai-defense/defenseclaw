@@ -10,6 +10,17 @@ import (
 	"testing"
 )
 
+func TestCanonicalWindowsClaudeTargetSIDsAcceptsEntraID(t *testing.T) {
+	const entraSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	targets, err := canonicalWindowsClaudeTargetSIDs([]string{entraSID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0] != entraSID {
+		t.Fatalf("Claude Code targets = %v, want %s", targets, entraSID)
+	}
+}
+
 // A Codex-only deployment tears down an empty Claude target set, and this gate
 // runs before the transaction opens.
 func TestValidateWindowsClaudeManagedPolicyTeardownOptionsAcceptsNoTargets(t *testing.T) {

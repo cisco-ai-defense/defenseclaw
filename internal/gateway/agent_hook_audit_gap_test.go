@@ -103,14 +103,14 @@ func TestHookVerdictKeepsItsAuditRowWhenCorrelationFails(t *testing.T) {
 	resp := agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action"}
 	unavailable := agentHookRequest{ConnectorName: "codex", HookEventName: "SubagentStart", SessionID: "s-1",
 		SuppressCorrelationEmit: true, CorrelationUnavailable: true}
-	if !api.finalizeAgentHook(context.Background(), "codex", unavailable, resp, nil, []byte(`{}`), time.Millisecond, false, nil) {
+	if !api.finalizeAgentHook(context.Background(), "codex", unavailable, resp, nil, []byte(`{}`), time.Millisecond, false, nil).AuditPersisted {
 		t.Fatal("the audit row of a verdict whose correlation failed was not persisted")
 	}
 	if n := rows(); n != 1 {
 		t.Fatalf("connector-hook rows = %d, want 1", n)
 	}
 	replay := agentHookRequest{ConnectorName: "codex", HookEventName: "SubagentStart", SessionID: "s-1", SuppressCorrelationEmit: true}
-	if api.finalizeAgentHook(context.Background(), "codex", replay, resp, nil, []byte(`{}`), time.Millisecond, false, nil) {
+	if api.finalizeAgentHook(context.Background(), "codex", replay, resp, nil, []byte(`{}`), time.Millisecond, false, nil).AuditPersisted {
 		t.Fatal("an exact replay was audited again")
 	}
 	if n := rows(); n != 1 {

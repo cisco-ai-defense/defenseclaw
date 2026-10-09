@@ -15,6 +15,8 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -127,6 +129,29 @@ func (failure OptionalFailure) DestinationKind() config.ObservabilityV8Destinati
 func (failure OptionalFailure) RouteName() string         { return failure.routeName }
 func (failure OptionalFailure) RouteIndex() int           { return failure.routeIndex }
 func (failure OptionalFailure) Code() OptionalFailureCode { return failure.code }
+
+// NewManagedOptionalFailureOutcomeForTest builds the outcome shape this pipeline
+// produces when a record's managed AI Defense projection cannot be built: the
+// record was never queued for that destination, no optional work was scheduled,
+// and Emit nevertheless returns a nil error because the managed route is an
+// optional projection.
+//
+// Exported purely so callers in other packages can test their handling of that
+// shape. Every field of LocalLogOutcome and OptionalFailure is deliberately
+// unexported, so this is the only way to reproduce it outside this package, and
+// a caller that treats a nil error as proof of managed delivery has no way to
+// notice the difference without it.
+func NewManagedOptionalFailureOutcomeForTest(code OptionalFailureCode) LocalLogOutcome {
+	return LocalLogOutcome{
+		admission:   router.AdmissionDrop,
+		managedOnly: true,
+		optionalFailure: []OptionalFailure{{
+			destinationName: config.ObservabilityV8ManagedAIDDestinationName,
+			destinationKind: config.ObservabilityV8DestinationOTLP,
+			code:            code,
+		}},
+	}
+}
 
 // ProjectedDeliveryIdentity is the complete bounded, non-content identity
 // retained beside one optional projection. It is derived only from the
@@ -436,14 +461,21 @@ func (pipeline *LocalLogPipeline) process(
 		return LocalLogOutcome{}, &Error{code: ErrorLocalProjection}
 	}
 	if err := pipeline.appender.AppendContext(ctx, record.Clone(), localProjection); err != nil {
+		// A raw `err` value here may wrap BeginTx / commit / health strings
+		// that leak backend state past the pipeline's bounded projection.
+		// Emit the fixed classification only; the wrapped cause stays inside
+		// `boundedPipelineError` where the pipeline redacts it.
+		fmt.Fprintf(os.Stderr,
+			"[obs-pipeline] appender.AppendContext failed bucket=%s event=%s signal=%s connector=%s error=%s\n",
+			record.Bucket(), record.EventName(), record.Signal(), record.Connector(), ErrorLocalWrite)
 		writeErr := boundedPipelineError(ErrorLocalWrite, err)
 		if !exportOnWriteFailure || writeErr.contextCause != nil {
 			return LocalLogOutcome{}, writeErr
 		}
-		// The local store failed (disk full, read-only): still hand back the
-		// remote projections of this gateway's own record with the error, so
-		// the caller can export them and the decision and the outage stay
-		// visible remotely (GAP-1536). Imported records stay SQLite-first.
+		// GAP-1536: a local-store failure (disk full, read-only) should
+		// still return remote projections for this gateway's own record so
+		// the decision and the outage stay visible remotely. Imported
+		// records stay SQLite-first and skip this path.
 		pipeline.projectOptional(&outcome, record, optional, sinkPolicy, originDestination)
 		return outcome, writeErr
 	}
@@ -527,17 +559,11 @@ func (pipeline *LocalLogPipeline) resolveProjectionProfile(
 	if pipeline == nil {
 		return v8redaction.Profile{}, false
 	}
-	profileName := configured
-	switch policy {
-	case legacyredaction.SinkPolicyDefault:
-	case legacyredaction.SinkPolicyRaw:
-		profileName = v8redaction.ProfileNone
-	case legacyredaction.SinkPolicyRedact:
-		profileName = v8redaction.ProfileSensitive
-	default:
+	profile, ok := pipeline.catalog.Resolve(configured)
+	if !ok {
 		return v8redaction.Profile{}, false
 	}
-	return pipeline.catalog.Resolve(profileName)
+	return v8redaction.ResolveSinkPolicyProfile(profile, policy)
 }
 
 func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
@@ -565,7 +591,9 @@ func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
 	if !ok {
 		return &Error{code: ErrorFailureRecord}
 	}
-	localProfile, ok := pipeline.catalog.Resolve(profileName)
+	localProfile, ok := pipeline.resolveProjectionProfile(
+		profileName, legacyredaction.SinkPolicyFromContext(ctx),
+	)
 	if !ok {
 		return &Error{code: ErrorFailureRecord}
 	}

@@ -180,11 +180,43 @@ for name in "${PAYLOAD_FILES[@]}"; do
 done
 
 SETUP="${OUT_DIR}/DefenseClawSetup-Enterprise-Standalone-x64.exe"
-echo "==> building ${SETUP##*/}"
+SETUP_UNSIGNED="${STAGE_DIR}/DefenseClawSetup-Enterprise-Standalone-x64.unsigned.exe"
+echo "==> building ${SETUP##*/} (outer EXE, no trailer yet)"
 ( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
     go build -trimpath -buildvcs=false \
     -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT}" \
-    -o "${SETUP}" ./cmd/defenseclaw-enterprise-setup )
+    -o "${SETUP_UNSIGNED}" ./cmd/defenseclaw-enterprise-setup )
+
+# Spec 003: the payload is no longer carried via //go:embed. Append the
+# [archive][manifest][footer] trailer to the just-built outer EXE so
+# runtime loadEmbeddedEnterprisePayload can read it off the tail of the
+# running image. windows-avc-assembler runs on the host (so we unset
+# GOOS/GOARCH), and -Flavor Standalone selects the shorter MDM
+# inventory + "standalone[-unsigned]" distribution tag. The AVC
+# Enterprise path is unaffected.
+echo "==> appending ${FLAVOR} payload trailer -> ${SETUP##*/}"
+ASSEMBLER_UNSIGNED_FLAG=()
+if [ "${FLAVOR}" = "standalone-unsigned" ]; then
+    ASSEMBLER_UNSIGNED_FLAG=(-AllowUnsigned)
+else
+    # Signed-flavor needs -SigningType / -ExpectedSignerSha256; the two
+    # existing standalone paths (--payload-dir / --sign-command) stage
+    # already-signed inputs that the AVC assembler would re-verify,
+    # which this standalone pipeline is not configured to do. The
+    # trailer-only path remains valid for the hash-pinned MDM build —
+    # a signed-standalone CI matrix is a follow-up.
+    die "signed standalone pipeline is not yet wired to windows-avc-assembler (flavor=${FLAVOR})"
+fi
+( unset GOOS GOARCH GOFLAGS CGO_ENABLED; cd "${REPO_ROOT}" && \
+    go run ./cmd/windows-avc-assembler \
+        -PayloadDir "${PAYLOAD_ONLY}" \
+        -SetupExeUnsigned "${SETUP_UNSIGNED}" \
+        -SourceCommit "${SOURCE_COMMIT}" \
+        -Version "${VERSION}" \
+        -Out "${OUT_DIR}" \
+        -Flavor Standalone \
+        "${ASSEMBLER_UNSIGNED_FLAG[@]}" )
+
 if [ -n "${SIGN_COMMAND}" ]; then
     echo "==> signing ${SETUP##*/}"
     "${SIGN_COMMAND}" "${SETUP}" || die "signing ${SETUP##*/} failed"

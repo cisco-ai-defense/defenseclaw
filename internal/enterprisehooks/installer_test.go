@@ -1862,6 +1862,14 @@ func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T
 // profile keeps refusing every change.
 func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *testing.T) {
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	// On Windows, strictManagedRuntime (opts.ManagedEnterprise) requires
+	// WindowsGatewayServiceNameEnv to be set so NewHookContractLockEntryForMode
+	// can bind the entry to a non-empty managed gateway identity. Set a
+	// stable test-only value so the drift validation this test exercises
+	// is the error the assertions check — without it, the Windows strict
+	// path fails earlier with "managed gateway service name '' is invalid"
+	// before `validateHookContract` can reach the drift comparison.
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
 	conn := connector.NewClaudeCodeConnector()
 	dataDir := t.TempDir()
 	installed := connector.SetupOpts{DataDir: dataDir, AgentVersion: "2.1.154"}

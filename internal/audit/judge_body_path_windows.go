@@ -11,6 +11,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -81,7 +82,22 @@ func validateJudgeBodyPlatformTrust(path string, _ os.FileInfo, directory, prote
 		return fmt.Errorf("judge_body: inspect Windows owner: %w", err)
 	}
 	if !judgeBodyWindowsTrustedPrincipal(owner) {
-		return fmt.Errorf("judge_body: Windows owner %s is not trusted", judgeBodyWindowsSID(owner))
+		// AIFW-34262 ancestor-advisory (matches audit_db_path_windows.go): a
+		// permission-shaped verdict on a path under
+		// managed.PlatformInstallerOwnedPath is downgraded to a
+		// managed_trust_ancestor_advisory warning when protectChildren=false
+		// (ancestor of the judge-body store). Leaves and non-installer-
+		// owned paths stay fatal; managed.TrustStrictAncestorsEnv=1 forces
+		// fatality.
+		verdict := managed.NewTrustVerdict(
+			"judge_body: Windows owner %s is not trusted", judgeBodyWindowsSID(owner),
+		)
+		advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+		if err := managed.RelaxAncestorTrustVerdict(
+			advisory, path, "judge body owner", verdict,
+		); err != nil {
+			return err
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -263,10 +279,25 @@ func rejectUntrustedJudgeBodyWindowsWriteACEs(path string, dacl *windows.ACL, di
 			continue
 		}
 		if !judgeBodyWindowsTrustedPrincipal(sid) {
-			return fmt.Errorf(
+			// AIFW-34262 ancestor-advisory (matches
+			// audit_db_path_windows.go): a foreign-principal ACE on a path
+			// under managed.PlatformInstallerOwnedPath is permission-shaped.
+			// When protectChildren=false (ancestor of the judge-body store)
+			// the verdict is downgraded to a managed_trust_ancestor_advisory
+			// warning. Leaves and non-installer-owned paths stay fatal;
+			// managed.TrustStrictAncestorsEnv=1 restores fatality. Structural
+			// failures (unsupported ACE type at line ~270, API errors)
+			// remain fatal via the earlier returns above.
+			verdict := managed.NewTrustVerdict(
 				"judge_body: untrusted Windows principal %s has access mask 0x%x that can expose or modify judge-body storage on %s",
 				judgeBodyWindowsSID(sid), uint32(ace.Mask), path,
 			)
+			advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+			if err := managed.RelaxAncestorTrustVerdict(
+				advisory, path, "judge body DACL", verdict,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

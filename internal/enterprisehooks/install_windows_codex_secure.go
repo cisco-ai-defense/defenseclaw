@@ -458,6 +458,9 @@ func verifyWindowsCodexUserRuntime(
 		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
 		return errors.New("enterprise hooks: Codex managed hook contract does not identify only machine requirements")
 	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf("enterprise hooks: Codex managed gateway binding: %w", err)
+	}
 	return nil
 }
 

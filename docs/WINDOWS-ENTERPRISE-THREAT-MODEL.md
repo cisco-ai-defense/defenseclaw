@@ -322,6 +322,11 @@ authority.
 7. `-NoStart` deliberately commits a disabled, stopped deployment. Only a
    complete later `Repair` without `-NoStart` may activate it; raw service
    starts are not an activation API. Failure rolls back and returns non-zero.
+8. A standalone Setup with no policy inputs uses the same disabled-state
+   boundary with protected placeholder config and an empty manifest. Protected
+   metadata records the pending state. Only `Repair` with both authenticated
+   policy files may prepare target runtimes, activate services, and clear it;
+   Upgrade and partial Repair fail before transaction mutation.
 
 ### Credential request (Secure Client profile)
 
@@ -463,7 +468,7 @@ authority.
 | ID | Threat / attack path | Required control | Required evidence |
 |---|---|---|---|
 | W-01 | Standard user calls SCM stop, pause, user-control, config, failure, SDDL, or delete | Protected service DACL with only query/interrogate rights for `BU`; protected service registry configuration on every exact production service of the profile | Exact non-admin `sc.exe` probes return access denied for `DefenseClawGateway`, `DefenseClawSensorHelper`, `DefenseClawHookGuardian`, `DefenseClawHookEnumerator` and, in the Secure Client profile, `DefenseClawCMIDBroker`, which remain unchanged/running |
-| W-02 | User replaces an executable, script, config, manifest, metadata, or ledger | Fixed local NTFS roots; no reparse points; trusted owner and ancestor chain; protected DACLs; content hashes/signatures | Write/delete/rename/ACL probes fail; verify catches byte or ACL drift |
+| W-02 | User replaces an executable, script, config, manifest, metadata, or ledger | Fixed local NTFS roots; no reparse points; trusted owner and protected DACL on every managed path itself; content hashes/signatures. The **ancestor** chain above the managed roots is advisory since AIFW-34262 — those directories belong to the Cisco Secure Client installer (AVC), which re-ACLs them on its own schedule, so an untrusted grant there emits a `managed_trust_ancestor_advisory` warning instead of failing a load, install, or rollback; `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1` restores the fatal verdict. Every walk — the managed validators and the gateway connector's own hook API token path walk — scopes that downgrade by `managed.PlatformInstallerOwnedPath`, so only ancestors inside the Cisco tree are advisory and a world-writable temp or home ancestor stays fatal. Ancestors outside the Cisco tree keep the pre-AIFW-34262 behaviour exactly: the narrower replacement mask (so stock `BUILTIN\Users` create-child grants on `C:\` and `C:\ProgramData` still pass) with fatal verdicts. An allow ACE whose layout the walk cannot decode (object, callback, or compound) is a structural failure rather than a permission verdict and is never downgraded, at any position. The **state root** is the one managed path inside that shared tree, so AVC can overwrite the canonical DACL we stamp on it: the installer retries the stamp (`Set-DefenseClawSharedPathAcl`) and the post-hardening assertion re-stamps once and re-reads (`-SelfHealKind`) before judging. Foreign access there is advisory, but a state root that still lacks the SYSTEM/Administrators/gateway rights the product needs **after** that repair is fatal — the relaxation covers others having access, never DefenseClaw lacking it | Write/delete/rename/ACL probes fail; verify catches byte or ACL drift; ancestor advisory and strict-pin tests in `internal/managed` and `internal/gateway/connector`; `managed_acl_self_heal` warnings in the install log |
 | W-03 | Elevated CLI executes a user-planted PowerShell or installer/module, or gives elevated PowerShell a shared user-writable temp/cache/home root | Resolve the system PowerShell by OS API; ignore `PATH` and poisoned known-folder environment variables; trust-check installer and adjacent module before execution; atomically create a 128-bit-random child under Windows Temp with a protected System/Administrators-only owner/DACL and pin `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `HOME`, `HOMEDRIVE`, and `HOMEPATH` to that exact one-shot child | Poisoned `PATH`, `SystemRoot`, known-folder env, working directory, installer, module, shared-temp-parent, protected-temp-child, PowerShell module-cache location, and cleanup tests |
 | W-04 | User downgrades enterprise mode through user config or environment | SCM-owned environment pins `managed_enterprise`; protected config must agree; runtime PATCH cannot change it | Config conflict and untrusted-config tests; service registry DACL test |
 | W-05 | Compromised gateway edits policy or authorization | Restricted virtual service SID; separate runtime/log ACLs; config and authorization read-only; guardian log and manifest inaccessible | Effective-token/privilege and ACL matrix; gateway-write attempts fail |
@@ -570,6 +575,9 @@ authority.
   complete fresh drain interval before any service becomes startable.
 - `-NoStart` is a staged-disabled state, not permission to call SCM directly.
   Activation is a complete lifecycle transaction with a fresh guardian gate.
+- A deferred-config deployment is likewise staged-disabled. Direct policy
+  file-drop is not activation; only a complete Repair can clear its protected
+  pending marker and make the four services startable.
 - Target-owned managed reads are bounded independently of a prior metadata
   check. Managed helper downgrade preservation is disabled so an attacker
   cannot pin arbitrary bytes with a synthetic newer schema marker. The
@@ -665,16 +673,14 @@ authority.
    disabled manifest row remains disabled across enumerator cycles. Three
    residual sub-risks follow from this posture:
 
-   a. **Local-admin user creation → auto-enrollment.** A local admin
-      who can create an interactive user (`S-1-5-21-…`) on the target
-      machine and give it a discoverable supported CLI, or rely on an
-      eligible machine-scoped connector installation, causes that user to be
+   a. **Interactive-user creation → auto-enrollment.** Creating a local or
+      domain user (`S-1-5-21-…`) or provisioning a Microsoft Entra ID user
+      profile (`S-1-12-1-…`) on the target machine causes that user to be
       enrolled on the next enumerator tick. macOS's `launchd`-driven
-      `render-targets.sh` operates under
-      the same posture; this is the accepted cost of parity. The exact
-      SID membership check (row W-28 above) still fail-closes on an
-      unregistered SID between enumerator ticks, and the guardian
-      authorization ledger records every enrollment for audit.
+      `render-targets.sh` operates under the same posture; this is the accepted
+      cost of parity. The exact SID membership check (row W-28 above) still
+      fail-closes on an unregistered SID between enumerator ticks, and the
+      guardian authorization ledger records every enrollment for audit.
 
    b. **Unprivileged self-enrollment via user-writable `package.json`,
       or admin-driven all-user enrollment via a machine-scoped install.**

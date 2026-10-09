@@ -141,18 +141,13 @@ type EnumerateOptions struct {
 // Filter chain (each step drops the profile with a logf line if opts.Logger is set):
 //
 //  1. SID must be a syntactically-valid Windows SID string.
-//  2. SID must be an interactive-user SID: `S-1-5-21-…` (NT
-//     AUTHORITY, SECURITY_NT_NON_UNIQUE base RID) with at least 5
-//     sub-authorities so the SID names a specific user (the trailing
-//     RID), not the bare domain (`S-1-5-21-A-B-C` has 4 sub-auths
-//     and is rejected). Refuses well-known SIDs (Everyone S-1-1-0,
-//     Anonymous S-1-5-7, SYSTEM S-1-5-18, Authenticated Users
-//     S-1-5-11, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by
-//     construction. Belt-and-braces on top of the CLI-input filter
-//     at spec 005 REQ-15. The standalone profile applies
-//     winpath.IsInteractiveUserSID, which also admits Microsoft Entra
-//     ID users (`S-1-12-1-a-b-c-d`); the Secure Client profile keeps
-//     the S-1-5-21 filter exactly.
+//  2. SID must be an interactive-user SID: either `S-1-5-21-…` (local
+//     or domain user) or `S-1-12-1-…` (Microsoft Entra ID user).
+//     Refuses well-known SIDs (Everyone S-1-1-0, Anonymous S-1-5-7,
+//     SYSTEM S-1-5-18, Authenticated Users S-1-5-11, BUILTIN
+//     S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by construction.
+//     Belt-and-braces on top of the CLI-input filter at spec 005
+//     REQ-15.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
@@ -373,7 +368,7 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate hook guardian manifest parent ancestry: %w", err)
 	}
-	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate protected hook guardian manifest parent: %w", err)
 	}
 
@@ -442,7 +437,7 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate hook guardian manifest parent ancestry: %w", err)
 	}
-	if err := validateWindowsTargetsManifestObject(dir, true); err != nil {
+	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate protected hook guardian manifest parent: %w", err)
 	}
 	// A destination can appear between the initial absence check and staging.
@@ -461,6 +456,37 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 		return true, fmt.Errorf("enterprise hooks: validate published hook guardian manifest %s: %w", path, err)
 	}
 	return true, nil
+}
+
+// ensureWindowsTargetsManifestParentProtected is deliberately repair-on-drift,
+// not stamp-on-every-tick. AVC may replace the DefenseClaw-owned parent ACL
+// after installation; the LocalSystem enumerator can restore the exact
+// AdminDirectory contract after first proving the ancestry and object shape.
+// The no-op manifest path therefore remains a true no-write operation.
+func ensureWindowsTargetsManifestParentProtected(path string) error {
+	driftErr := validateWindowsTargetsManifestObject(path, true)
+	if driftErr == nil {
+		return nil
+	}
+
+	if err := windowsTargetsManifestProtect(path, true); err != nil {
+		return fmt.Errorf(
+			"repair protected hook guardian manifest parent: %w",
+			errors.Join(driftErr, err),
+		)
+	}
+
+	// Repair is never taken on trust: the caller previously reached staging only
+	// behind a passing validation, so reconfirm the contract and surface the
+	// original drift when the object still does not satisfy it.
+	if err := validateWindowsTargetsManifestObject(path, true); err != nil {
+		return fmt.Errorf(
+			"repaired hook guardian manifest parent is still unprotected: %w",
+			errors.Join(err, driftErr),
+		)
+	}
+
+	return nil
 }
 
 // marshalTargetsManifest serialises the manifest to YAML with
@@ -860,13 +886,21 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standa
 			logfSafely(logf, name, fmt.Sprintf("not a syntactically-valid SID: %v", err))
 			continue
 		}
-		if standalone {
-			if !winpath.IsInteractiveUserSID(sid.String(), winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
-				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-... or Entra ID S-1-12-1-...); refusing well-known / machine-scoped principals")
-				continue
+		if !sidIsInteractiveUser(sid) {
+			if standalone {
+				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-… or S-1-12-1-…); refusing well-known / machine-scoped principals")
+			} else {
+				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
 			}
-		} else if !sidIsInteractiveUser(sid) {
-			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
+			continue
+		}
+		// The Secure Client profile keeps its historical filter: Microsoft
+		// Entra ID principals (S-1-12-1-…) are refused with the pre-
+		// standalone reason text so DART forensics stay stable. The
+		// standalone profile admits them (handled in sidIsInteractiveUser
+		// above).
+		if !standalone && sidIsEntraIDUser(sid) {
+			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…)")
 			continue
 		}
 		home, err := windowsProfileImagePathReader(name)
@@ -1013,22 +1047,19 @@ func expandProfileImagePathSystemDrive(profile string) (string, error) {
 	return expanded, nil
 }
 
-// sidIsInteractiveUser reports whether `sid` is an interactive local
-// or domain user SID — i.e. lives under NT AUTHORITY (identifier
-// authority 5) with SubAuthority[0] == SECURITY_NT_NON_UNIQUE (21)
-// and at least 5 sub-authorities so the SID names a specific user
-// (the trailing RID), not the bare domain. A user SID has the shape
-// `S-1-5-21-A-B-C-RID` (five sub-authorities: 21, A, B, C, RID). The
-// bare domain SID without the RID (`S-1-5-21-A-B-C`) has four
-// sub-authorities and MUST be rejected — enumerating a bare domain
-// as an interactive user would emit garbage manifest rows. See
-// CR spec-005:PRRT_kwDORuAK-s6atyfL.
+// sidIsInteractiveUser reports whether `sid` is an interactive local,
+// domain, or Microsoft Entra ID user SID. Local and domain users have
+// the shape `S-1-5-21-A-B-C-RID`; the bare domain SID without the RID
+// (`S-1-5-21-A-B-C`) is rejected. Entra ID users have the canonical
+// shape `S-1-12-1-A-B-C-D`, where A-D encode the account identifier.
+// Classification depends only on SID shape, not administrator group
+// membership or token elevation.
 //
 // Every well-known / machine-scoped principal (SYSTEM S-1-5-18,
 // Authenticated Users S-1-5-11, Everyone S-1-1-0, Anonymous
 // S-1-5-7, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, LocalService
 // S-1-5-19, NetworkService S-1-5-20, IIS_IUSRS S-1-5-17, etc.) fails
-// the SubAuthority[0] == 21 check.
+// both accepted authority-and-shape checks.
 //
 // Matches spec 005 REQ-11 and — together with the CLI-input
 // validator at spec 005 REQ-15 — provides belt-and-braces coverage.
@@ -1039,14 +1070,31 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
-	if sid.IdentifierAuthority().Value != [6]byte{0, 0, 0, 0, 0, 5} {
+	authority := sid.IdentifierAuthority().Value
+	switch authority {
+	case [6]byte{0, 0, 0, 0, 0, 5}:
+		const securityNTNonUnique uint32 = 21
+		return sid.SubAuthorityCount() >= 5 && sid.SubAuthority(0) == securityNTNonUnique
+	case [6]byte{0, 0, 0, 0, 0, 12}:
+		const entraIDUserSubAuthority uint32 = 1
+		return sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == entraIDUserSubAuthority
+	default:
 		return false
 	}
-	const securityNTNonUnique uint32 = 21
-	if sid.SubAuthorityCount() < 5 {
+}
+
+// sidIsEntraIDUser reports whether `sid` carries the Microsoft Entra ID
+// user shape `S-1-12-1-A-B-C-D`. The Secure Client profile refuses this
+// shape; the standalone profile admits it.
+func sidIsEntraIDUser(sid *windows.SID) bool {
+	if sid == nil {
 		return false
 	}
-	return sid.SubAuthority(0) == securityNTNonUnique
+	if sid.IdentifierAuthority().Value != ([6]byte{0, 0, 0, 0, 0, 12}) {
+		return false
+	}
+	const entraIDUserSubAuthority uint32 = 1
+	return sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == entraIDUserSubAuthority
 }
 
 // effectiveWindowsHookConnectors returns the connector names for

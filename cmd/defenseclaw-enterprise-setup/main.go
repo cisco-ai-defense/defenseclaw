@@ -10,7 +10,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,10 +22,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
-//go:embed payload/*
-var embeddedPayload embed.FS
+// The signed inner payload used to be embedded at compile time via
+// //go:embed payload/*. The Windows AVC handoff moved to a runtime
+// trailer append so AVC's Windows CI no longer needs Go: DefenseClaw
+// prebuilds the outer EXE (this binary) with NO payload, then a
+// native Windows DefenseClawAssembler.exe appends the AVC-signed
+// payload to the tail as a deterministic trailer.
+// loadEmbeddedEnterprisePayload below reads the trailer off the
+// running EXE at startup and hands the same fs.FS shape
+// ("payload/manifest.json" + "payload/<name>") the existing
+// loadEnterprisePayload validator consumes — so nothing downstream
+// of the loader had to change.
 
 const (
 	enterpriseSetupArtifactName     = "DefenseClawSetup-Enterprise-x64.exe"
@@ -120,12 +130,10 @@ type enterpriseSetupOptions struct {
 	CoreHardeningCertification    bool
 	AttestAgentApplicationControl bool
 	AttestClaudeEffectivePolicy   bool
-	// DeferredConfig turns on the UCB-friendly late-config install
-	// path from spec 003 (docs/specs/003-windows-deferred-config/):
-	// --config and --manifest become optional at install time; the
-	// installer provisions the canonical drop-point directories with
-	// ACLs but writes no file bodies; the daemon + guardian fsnotify-
-	// wait for UCB to atomically drop them later.
+	// DeferredConfig stages a protected installed deployment with all
+	// managed services disabled. A later Repair supplying both authenticated
+	// config and manifest files performs target preparation and activation;
+	// directly dropping files or starting services is not supported.
 	DeferredConfig bool
 	// Mode / Connector are the macOS-parity QA shorthand: when both are
 	// supplied (and --config / --manifest are empty) the installed
@@ -168,6 +176,12 @@ type enterprisePayload struct {
 	Files    map[string]enterprisePayloadManifestFile
 	// Required is the flavor's exact file inventory.
 	Required []string
+	// PayloadFS is the fs.FS the platform-specific stage step opens
+	// per-file readers against. Before spec 003 this was a package-
+	// level embed.FS held in `embeddedPayload`; the trailer refactor
+	// carries the FS alongside the validated manifest so the loader
+	// stays the single boundary that decides what's trusted.
+	PayloadFS fs.FS
 }
 
 // Standalone reports whether the payload is the standalone flavor.
@@ -191,20 +205,28 @@ func main() {
 // standalone payload. Replaceable in tests.
 var enterpriseSetupStandaloneFlavor = embeddedEnterpriseSetupStandalone
 
-// embeddedEnterpriseSetupStandalone reads only the embedded manifest's
+// embeddedEnterpriseSetupStandalone reads only the trailer manifest's
 // distribution flavor, before any argument is parsed, so the Secure Client
 // Setup keeps its own action set, usage text and error messages. Anything
 // other than a readable standalone manifest is the Secure Client Setup;
 // executeEnterpriseSetup validates the whole payload before anything runs.
+//
+// Spec 003: the payload is no longer carried via //go:embed; it is
+// appended at assemble time as a deterministic trailer and read off
+// the running EXE here.
 func embeddedEnterpriseSetupStandalone() bool {
-	body, err := fs.ReadFile(embeddedPayload, "payload/manifest.json")
+	exePath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	result, err := setuppayload.ReadFile(exePath)
 	if err != nil {
 		return false
 	}
 	var manifest struct {
 		DistributionFlavor string `json:"distribution_flavor"`
 	}
-	if json.Unmarshal(body, &manifest) != nil {
+	if json.Unmarshal(result.Manifest, &manifest) != nil {
 		return false
 	}
 	return isStandaloneFlavor(manifest.DistributionFlavor)
@@ -375,23 +397,26 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 			}
 		}
 	}
-	if opts.Action == "install" && !opts.DeferredConfig && !modeSupplied &&
-		(strings.TrimSpace(opts.Config) == "" || strings.TrimSpace(opts.Manifest) == "") {
-		// --deferred-config bypasses the config/manifest requirement:
-		// the installer will provision the drop-point directories
-		// with ACLs but write no file bodies; UCB atomically writes
-		// the bodies later, and the daemon + guardian fsnotify-wait
-		// pick them up. Spec 003 REQ-02 / REQ-03.
-		// --mode + --connector also bypass it: install-enterprise.ps1
-		// renders config.yaml + targets.yaml into the bootstrap
-		// staging directory before invoking the lifecycle.
-		return opts, false, errors.New("install requires both --config and --manifest (or --mode/--connector, or --deferred-config)")
+	configSupplied := strings.TrimSpace(opts.Config) != ""
+	manifestSupplied := strings.TrimSpace(opts.Manifest) != ""
+	if opts.Action == "install" && !modeSupplied {
+		if configSupplied != manifestSupplied {
+			return opts, false, errors.New("install requires config and manifest together")
+		}
+		if opts.DeferredConfig && (configSupplied || manifestSupplied) {
+			return opts, false, errors.New("--deferred-config cannot be combined with --config or --manifest")
+		}
+		if !configSupplied && !manifestSupplied {
+			// A standalone /install with no policy inputs is the supported
+			// first half of the late-configuration lifecycle. It stages a
+			// protected, disabled deployment; a later /repair with BOTH
+			// authenticated files performs target preparation and activation.
+			opts.DeferredConfig = true
+		}
 	}
 	if opts.DeferredConfig && opts.Action != "install" {
-		// Spec 003 --deferred-config is meaningful only at initial
-		// install. Upgrade/repair use the config/manifest already on
-		// disk; deferring them would leave the deployment offline.
-		// CR spec-003:PRRT_kwDORuAK-s6alkr4.
+		// The flag marks only the initial staged install. Its protected
+		// metadata later selects the special complete-Repair activation path.
 		return opts, false, errors.New("--deferred-config is valid only with install")
 	}
 	if opts.NoStart && !enterpriseSetupMutation(opts.Action, standalone) {
@@ -431,7 +456,8 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 	}
 	boolNames := map[string]string{
 		"nostart": "no-start", "purge": "purge", "json": "json",
-		"allowunsigned": "allow-unsigned", "corehardeningcertification": "core-hardening-certification",
+		"deferredconfig": "deferred-config",
+		"allowunsigned":  "allow-unsigned", "corehardeningcertification": "core-hardening-certification",
 		"attestagentapplicationcontrol": "attest-agent-application-control",
 		"attestclaudeeffectivepolicy":   "attest-claude-effective-policy",
 	}
@@ -496,8 +522,43 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 	return normalized, false, nil
 }
 
+// loadEmbeddedEnterprisePayload reads the setuppayload trailer off the
+// tail of the running EXE, hands an in-memory fs.FS (the same shape
+// the old //go:embed produced — "payload/manifest.json" +
+// "payload/<name>") to loadEnterprisePayload, and returns the
+// validated result.
+//
+// Failure modes are surfaced as they were before the refactor:
+//   - No trailer at all → "enterprise payload missing; assemble with
+//     DefenseClawAssembler.exe" so the operator sees an actionable
+//     diagnostic instead of a low-level IO error.
+//   - Trailer present but corrupt (CRC / hash mismatch) → the
+//     setuppayload package's ErrTrailerCorrupt is passed through.
+//   - Manifest content wrong shape → the existing loadEnterprisePayload
+//     validator surfaces the same errors it always did (unknown file,
+//     size mismatch, invalid SHA-256, wrong flavor).
 func loadEmbeddedEnterprisePayload() (enterprisePayload, error) {
-	return loadEnterprisePayload(embeddedPayload)
+	// os.Executable resolves the running binary's path even when
+	// invoked via a relative name, a symlink, or from a directory that
+	// is not $PWD. On a runtime install (`DefenseClawSetup-Enterprise-x64.exe /install`)
+	// this resolves to the signed outer EXE the trailer was appended
+	// to. Under `go test` it resolves to the test binary, which has
+	// no trailer — the trailer-missing test in main_test.go pins
+	// that failure mode.
+	exePath, err := os.Executable()
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("resolve running EXE for trailer read: %w", err)
+	}
+	result, err := setuppayload.ReadFile(exePath)
+	if err != nil {
+		if errors.Is(err, setuppayload.ErrTrailerMissing) {
+			return enterprisePayload{}, errors.New(
+				"enterprise payload missing; assemble with DefenseClawAssembler.exe",
+			)
+		}
+		return enterprisePayload{}, fmt.Errorf("read enterprise payload trailer: %w", err)
+	}
+	return loadEnterprisePayload(result.AsPayloadFS())
 }
 
 func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
@@ -573,7 +634,7 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest is missing required file %s", name)
 		}
 	}
-	return enterprisePayload{Manifest: manifest, Files: files, Required: requiredFiles}, nil
+	return enterprisePayload{Manifest: manifest, Files: files, Required: requiredFiles, PayloadFS: payloadFS}, nil
 }
 
 // splitStandaloneLifecycleJSON separates the lifecycle's JSON result from
@@ -628,7 +689,7 @@ func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
 	actions := enterpriseSetupActions(standalone)
 	sort.Strings(actions)
 	fmt.Fprintf(output, "%s --action <%s> [options]\n", enterpriseSetupArtifactName, strings.Join(actions, "|"))
-	fmt.Fprintln(output, "Install requires --config <config.yaml> and --manifest <targets.yaml>.")
+	fmt.Fprintln(output, "Install takes --config <config.yaml> and --manifest <targets.yaml> together; with neither, it stages a disabled deployment that a later Repair with both files activates.")
 	if standalone {
 		fmt.Fprintln(output, "Ensure (standalone Setup) converges the host: install, upgrade, repair, or no-op.")
 	}
