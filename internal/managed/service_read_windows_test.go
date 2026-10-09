@@ -65,6 +65,16 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	if err := ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account); err != nil {
 		t.Fatalf("rule pack readable by Users: %v", err)
 	}
+	// GAP-1112: icacls /inheritance:r /T on the pack folder left each file
+	// an empty protected DACL; the remedy must reach files, which a grant
+	// with /T does not.
+	setDACL("D:P", tree[1])
+	err = ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
+	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", tree[1])
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+tree[1]) ||
+		!strings.Contains(err.Error(), `icacls "`+root+`\*" /reset /T /C`) {
+		t.Fatalf("pack file with an empty DACL: %v", err)
+	}
 	// A locked staging folder above a readable pack: traverse and read
 	// control (RC,X) are not enough, the gateway lists the parent too.
 	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20020;;;BU)", parent)

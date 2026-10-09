@@ -21,6 +21,8 @@
 # machine state that names this scope's hook executable and the public
 # policy summary go. GAP-0938: a standalone uninstall drops the Codex ACL
 # preimage of a requirements.toml the managed-hook teardown already removed.
+# GAP-1145: a purge removes, and re-permissions, a tree that holds names
+# Win32 path normalization changes (a skill quarantined as 'tdot.').
 # Runs in a disposable scratch directory; no service or machine root is
 # touched.
 
@@ -76,6 +78,51 @@ $failures = & $module {
         }
         if (@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles (Microsoft.PowerShell.Management\Join-Path $Scratch 'absent')).Count -ne 0) {
             $failures.Add('an absent ClaudeCode folder was reported')
+        }
+
+        # GAP-1145 (standalone runs PowerShell 7)
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $exactTree = Microsoft.PowerShell.Management\Join-Path $Scratch 'exact-names'
+            foreach ($name in @('tdot.', 'tsp ')) {
+                $leaf = [IO.Path]::Combine($exactTree, 'quarantine', $name)
+                [void][IO.Directory]::CreateDirectory('\\?\' + $leaf)
+                [IO.File]::WriteAllText('\\?\' + [IO.Path]::Combine($leaf, 'SKILL.md'), 'x')
+            }
+            $dotted = [IO.Path]::Combine($exactTree, 'quarantine', 'tdot.')
+            if ((Get-DefenseClawExactItemPath -Path $dotted) -cne ('\\?\' + $dotted) -or
+                (Get-DefenseClawExactItemPath -Path $exactTree) -cne $exactTree) {
+                $failures.Add('the exact path of a trailing-dot name is not its extended-length form')
+            }
+            foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $exactTree -Recurse -Force)) {
+                $kind = if ($item.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }
+                try {
+                    Set-DefenseClawPathAcl `
+                        -Path (Get-DefenseClawExactItemPath -Path $item.FullName) `
+                        -Kind $kind `
+                        -GatewayServiceSID $script:AdministratorsSID
+                }
+                catch {
+                    $failures.Add("preserved-state ACL rewrite failed on $($item.FullName): $($_.Exception.Message)")
+                }
+            }
+            $originalSafeRoot = ${function:script:Assert-DefenseClawSafeRoot}
+            try {
+                ${function:script:Assert-DefenseClawSafeRoot} = {
+                    param([string]$Path, [string]$Label, [string]$RequiredBase)
+                    return [IO.Path]::GetFullPath($Path)
+                }
+                Remove-DefenseClawManagedTree -Path $exactTree -RequiredBase $Scratch -Label 'exact-name tree'
+            }
+            catch {
+                $failures.Add("a tree with exact names was not removed: $($_.Exception.Message)")
+            }
+            finally {
+                ${function:script:Assert-DefenseClawSafeRoot} = $originalSafeRoot
+            }
+            if ([IO.Directory]::Exists('\\?\' + $exactTree)) {
+                $failures.Add('a tree with exact names survived its removal')
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath ('\\?\' + $exactTree) -Recurse -Force
+            }
         }
 
         # GAP-1734. The ACL check and the guarded tree removal need a real

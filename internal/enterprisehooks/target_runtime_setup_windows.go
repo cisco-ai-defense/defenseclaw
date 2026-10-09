@@ -789,11 +789,35 @@ func inspectWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) error 
 		return fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	}
 	defer windows.CloseHandle(final)
+	// The data folder of a per-user 1.0 install carries the same private
+	// DACL as a managed one, so the DACL checks below took it over and the
+	// first install enrolled the account (GAP-1047); what it holds tells it
+	// apart.
+	if leftover := windowsPerUserInstallLeftover(target.data); leftover != "" {
+		return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %s holds %s, which a per-user DefenseClaw install leaves", target.data, leftover)
+	}
 	err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
 	if err == nil || windowsManagedRuntimePurgeKeptAdoptable(final, target) || windowsManagedRuntimeAccountCreatedBaseline(final, target) {
 		return nil
 	}
 	return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+}
+
+// windowsPerUserInstallLeftovers are the entries a per-user DefenseClaw
+// install keeps in %USERPROFILE%\.defenseclaw (its config, audit database,
+// Python environment and installer state) and the managed runtime never
+// writes there.
+var windowsPerUserInstallLeftovers = []string{"config.yaml", "audit.db", ".venv", "installer"}
+
+// windowsPerUserInstallLeftover names the first per-user install entry in
+// dataDir, or "".
+func windowsPerUserInstallLeftover(dataDir string) string {
+	for _, name := range windowsPerUserInstallLeftovers {
+		if _, err := os.Lstat(filepath.Join(dataDir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
 }
 
 // windowsManagedRuntimePurgeKeptAdoptable reports the folder shape

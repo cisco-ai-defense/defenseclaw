@@ -236,6 +236,10 @@ type codexMachineRequirementsLayout struct {
 	samePath      func(left, right string) bool
 	groups        []codexHookGroup
 	handler       func(codexHookGroup) map[string]interface{}
+	// owned, when set, recognizes a DefenseClaw group of any release that
+	// is not the exact one, so reconcile replaces it instead of adding the
+	// exact group next to it.
+	owned func(raw interface{}) bool
 }
 
 // windowsCodexBoundManagedHookCommand is the standalone command of one
@@ -275,7 +279,7 @@ func windowsCodexMachineHandler(command string, timeout int) map[string]interfac
 }
 
 func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) codexMachineRequirementsLayout {
-	return codexMachineRequirementsLayout{
+	layout := codexMachineRequirementsLayout{
 		managedDirKey: "windows_managed_dir",
 		managedDir:    opts.ManagedDir,
 		samePath:      sameWindowsCodexMachinePath,
@@ -284,6 +288,46 @@ func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) code
 			return windowsCodexMachineHandler(windowsCodexManagedHookCommandFor(opts, group.eventType), group.timeout)
 		},
 	}
+	if strings.TrimSpace(opts.HookContractID) != "" {
+		// Standalone only; Secure Client keeps its exact-group merge.
+		layout.owned = func(raw interface{}) bool { return windowsCodexOwnedHookGroup(raw, opts.HookBinary) }
+	}
+	return layout
+}
+
+// windowsCodexOwnedHookGroup reports whether raw is a DefenseClaw managed
+// group of any release: one command handler whose command (and
+// command_windows) is the system PowerShell -EncodedCommand line that runs
+// hookBinary as the managed Codex hook. An upgrade from 1.0.0 kept the
+// 1.0.0 group (its Start-Process form) next to the current one, so every
+// Codex event ran, was audited and was judged twice (GAP-1025).
+func windowsCodexOwnedHookGroup(raw interface{}, hookBinary string) bool {
+	group, ok := raw.(map[string]interface{})
+	if !ok || len(group) == 0 || len(group) > 2 {
+		return false
+	}
+	if _, hasMatcher := group["matcher"]; len(group) == 2 && !hasMatcher {
+		return false
+	}
+	handlers, ok := group["hooks"].([]interface{})
+	if !ok || len(handlers) != 1 {
+		return false
+	}
+	handler, ok := handlers[0].(map[string]interface{})
+	if !ok || handler["type"] != "command" {
+		return false
+	}
+	command, _ := handler["command"].(string)
+	if windows, _ := handler["command_windows"].(string); windows != command {
+		return false
+	}
+	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+	if !strings.HasPrefix(command, prefix) {
+		return false
+	}
+	script, ok := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
+	return ok && strings.Contains(script, powershellQuoteLiteral(hookBinary)) &&
+		strings.Contains(script, "codex") && strings.Contains(script, "--enterprise-managed")
 }
 
 func (l codexMachineRequirementsLayout) expectedGroup(group codexHookGroup) map[string]interface{} {
@@ -401,16 +445,22 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 			}
 		}
 		found := false
+		kept := groups[:0:0]
 		for _, candidate := range groups {
 			if l.groupMatches(candidate, expected) {
+				if found && l.owned != nil {
+					continue
+				}
 				found = true
-				break
+			} else if l.owned != nil && l.owned(candidate) {
+				continue
 			}
+			kept = append(kept, candidate)
 		}
 		if !found {
-			groups = append(groups, l.expectedGroup(expected))
+			kept = append(kept, l.expectedGroup(expected))
 		}
-		hooks[expected.eventType] = groups
+		hooks[expected.eventType] = kept
 	}
 	cfg["hooks"] = hooks
 	return nil

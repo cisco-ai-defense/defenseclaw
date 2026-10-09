@@ -82,9 +82,15 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		if serviceHasAccess(path, sids, serviceTreeAccess) {
 			return nil
 		}
+		// A grant with /T does not reach a file whose permissions do not
+		// inherit (an (OI)(CI) entry does not apply to a file), so the old
+		// remedy left a pack that icacls /inheritance:r /T had emptied
+		// unreadable and Setup refused it again (GAP-1112): grant the pack
+		// folder, then let everything in it inherit again.
 		return fmt.Errorf(
-			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute, for example: icacls \"%s\" /grant \"%s:(OI)(CI)RX\" /T",
-			label, root, serviceAccount, path, root, serviceAccount)
+			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute on the folder and let everything in it inherit that, "+
+				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)RX\" and then icacls \"%s\\*\" /reset /T /C",
+			label, root, serviceAccount, path, root, serviceAccount, root)
 	})
 }
 

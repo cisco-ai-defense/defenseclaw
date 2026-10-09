@@ -1596,6 +1596,38 @@ func TestWindowsGroupAssignmentRetryOnFirstHook(t *testing.T) {
 	}
 }
 
+// GAP-1144: a local group deleted and recreated under the same name gets a
+// new SID; the set kept the deleted one, so the recreated group selected
+// nobody until the gateway restarted. A resolved name is looked up again
+// once a minute and the first hook after that follows the new SID.
+func TestWindowsGroupAssignmentFollowsARecreatedGroup(t *testing.T) {
+	var current atomic.Value
+	current.Store("S-1-5-21-860-1-2-1117")
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`w5-contractors`}}},
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "default", assignments: assignments, matches: newProfileMatchCache(),
+		profiles: map[string]config.DerivedGuardrailProfile{"default": {}, "strict": {}},
+		groupSIDs: newProfileGroupSIDs(assignments, func(string) (string, error) {
+			return current.Load().(string), nil
+		}, time.Second),
+	}
+	subject := &profileSubject{UserID: "S-1-5-21-860-1-2-1001", IDKind: useridentity.KindWindowsSID,
+		Groups: []string{"S-1-5-21-860-1-2-1119"}}
+	if got := set.match(subject, profileSubjectVerified, "codex", ""); got.Name != "default" {
+		t.Fatalf("member of the recreated group before the re-check selected %+v, want default", got)
+	}
+	current.Store("S-1-5-21-860-1-2-1119")
+	set.groupSIDs.nextCheck.Store(0)
+	set.groupSIDs.mu.Lock()
+	set.groupSIDs.entries[foldKey(`w5-contractors`)].checkAt = time.Time{}
+	set.groupSIDs.mu.Unlock()
+	if got := set.match(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchGroup {
+		t.Fatalf("member of the recreated group after the re-check selected %+v, want strict group profile", got)
+	}
+}
+
 // GAP-0860: stalled SID-to-name lookups left the caller groups bare SIDs, so
 // a standalone Windows assignment that names the group missed. Assignment
 // group names resolve to SIDs once per profile set and match the SIDs of the

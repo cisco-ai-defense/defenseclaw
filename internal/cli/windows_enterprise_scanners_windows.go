@@ -136,6 +136,15 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 		if len(result.Errors) != 0 || opts == nil {
 			return
 		}
+		if opts.jsonOutput {
+			// A JSON run keeps the progress for the lifecycle log, as it keeps
+			// the enumerator lines: on stderr an Intune platform script was
+			// reported Failed and run again, and each run was a /repair that
+			// stopped the services (GAP-1069).
+			previous := windowsScannerProgress
+			windowsScannerProgress = &windowsScannerDiagnostics{opts: opts}
+			defer func() { windowsScannerProgress = previous }()
+		}
 		source := ""
 		if installer := strings.TrimSpace(opts.resolvedInstaller); installer != "" {
 			candidate := filepath.Join(filepath.Dir(installer), managed.StandaloneWindowsScannerRuntimeName)
@@ -403,13 +412,37 @@ func windowsScannerRuntimePrepareFailed(err error) string {
 		"run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem to prepare it"
 }
 
-// windowsScannerProgress receives a scanner runtime step progress lines
-// (stderr: the JSON result stays alone on stdout), and the heartbeat paces
-// the still-running lines. Seams for tests.
+// windowsScannerProgress receives a scanner runtime step progress lines:
+// standard output for a person, the lifecycle log's diagnostics in a JSON
+// run (whose standard output is the result alone), and never standard
+// error, which an MDM such as Intune reads as a failed script (GAP-1069).
+// The heartbeat paces the still-running lines. Seams for tests.
 var (
-	windowsScannerProgress  io.Writer = os.Stderr
+	windowsScannerProgress  io.Writer = os.Stdout
 	windowsScannerHeartbeat           = time.Minute
 )
+
+// windowsScannerDiagnostics keeps each progress line in the run's
+// diagnostics, which the lifecycle log records.
+type windowsScannerDiagnostics struct {
+	opts    *windowsEnterpriseLifecycleOptions
+	pending []byte
+}
+
+func (d *windowsScannerDiagnostics) Write(p []byte) (int, error) {
+	d.pending = append(d.pending, p...)
+	for {
+		index := bytes.IndexByte(d.pending, '\n')
+		if index < 0 {
+			return len(p), nil
+		}
+		if line := strings.TrimSpace(string(d.pending[:index])); line != "" &&
+			len(d.opts.diagnostics) < windowsEnterpriseEnsureDiagnosticsLimit {
+			d.opts.diagnostics = append(d.opts.diagnostics, line)
+		}
+		d.pending = d.pending[index+1:]
+	}
+}
 
 // runWindowsScannerRuntime runs one scanner runtime step with a bounded wait.
 // Its own messages and a line every heartbeat go to windowsScannerProgress as

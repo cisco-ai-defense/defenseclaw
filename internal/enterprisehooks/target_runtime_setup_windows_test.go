@@ -487,6 +487,31 @@ func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testin
 	assertWindowsTargetOwnedCanonicalDirectory(t, hookDir, target)
 }
 
+// GAP-1047: the data folder of a per-user 1.0 install has the canonical
+// private DACL, so the first-install preflight passed it and Setup enrolled
+// the account; what it holds (config.yaml) tells it apart, in seconds and
+// before anything changes.
+func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, target)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, filepath.Join(dataDir, "hooks"), target); err != nil {
+		t.Fatal(err)
+	}
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	if err := PreflightWindowsManagedRuntimeRoots(manifest); err != nil {
+		t.Fatalf("preflight refused a canonical managed folder: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("gateway: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := PreflightWindowsManagedRuntimeRoots(manifest)
+	if err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") ||
+		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
+		t.Fatalf("preflight = %v, want the per-user install folder refused", err)
+	}
+}
+
 // GAP-0416: the refused hook of an unenrolled account creates its own
 // %USERPROFILE%\.defenseclaw. A fresh standalone install takes that folder
 // over instead of failing for every account; Secure Client keeps refusing.

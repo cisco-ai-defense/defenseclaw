@@ -201,15 +201,22 @@ $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
 icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
 icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction SilentlyContinue
-Copy-Item -Recurse .\my-pack "$Packs\my-pack"
+if (Test-Path -LiteralPath "$Packs\my-pack") {
+    icacls "$Packs\my-pack" /reset /T /C | Out-Null
+    Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction Stop
+}
+Copy-Item -LiteralPath .\my-pack -Destination $Packs -Recurse -ErrorAction Stop
 icacls "$Packs\my-pack" /setowner '*S-1-5-32-544' /T /C | Out-Null
 ```
 
 The snippet is safe to run again, for example after you fix a permission:
-it replaces the pack folder instead of copying into it. Copying a folder
-onto one that exists nests a copy (`my-pack\my-pack`), which Setup refuses,
-naming the nested folder.
+it replaces the pack folder instead of copying into it, and every file of
+the new copy inherits the permissions of `$Packs`. Do not add `/T` to the
+`/inheritance:r /grant:r` line: on a file an `(OI)(CI)` grant does not
+apply, so `/T` leaves every file in an existing pack with no permissions at
+all. The `/reset` line repairs such a pack before it is removed. Copying a
+folder onto one that exists nests a copy (`my-pack\my-pack`), which Setup
+refuses, naming the nested folder.
 
 Then name the pack in the config and select it:
 
@@ -1140,12 +1147,15 @@ Get-Content $Result
 
 `LastTaskResult` is Setup's exit code. For `/uninstall`, replace
 `/ensure CONFIG=$Stage\config.yaml` with `/uninstall`. The loop prints
-Setup's progress from the log as it runs. After the services are back,
+what Setup writes to standard error as it runs, the diagnostics of a run
+that fails. After the services are back,
 Setup prepares the scanner runtime: it unpacks a new one and checks every
 file of an installed one. That takes from seconds to a few minutes, longer on
 a disk that has not been read since the computer was cloned, and at most 15
-minutes. Setup prints `[scanners]` lines meanwhile, with the time elapsed and
-the bound.
+minutes. Setup reports `[scanners]` lines meanwhile, with the time elapsed and
+the bound: on standard output without `JSON=1`, and in the run's lifecycle log
+entry (`diagnostics`) with `JSON=1`. A successful run writes nothing to
+standard error, which an MDM such as Intune reads as a failed script.
 At the bound it stops the prepare and Setup fails (`1603`) with a
 `scanner_runtime_unavailable` error that says `timed out after 15m0s` and
 names `/repair`: DefenseClaw is installed and its services run, but every

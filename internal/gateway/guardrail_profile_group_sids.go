@@ -29,8 +29,11 @@ import (
 // configuration generation (a reload builds a new set), and the decision
 // compares the SIDs of the caller token only. A name that does not resolve
 // selects nobody; explain, status and doctor name it, and requests retry it
-// at most once a minute without waiting for the answer. The SID-to-name
-// lookups stay, for display and telemetry only.
+// at most once a minute without waiting for the answer. A name that resolved
+// is looked up again once a minute too: a local group deleted and recreated
+// under the same name gets a new SID, and the set kept the deleted one, so
+// the recreated group selected nobody until the gateway restarted
+// (GAP-1144). The SID-to-name lookups stay, for display and telemetry only.
 
 const (
 	// profileGroupSIDWait bounds how long building a profile set waits for
@@ -39,6 +42,9 @@ const (
 	// profileGroupSIDRetryInterval spaces the retries of a name that did not
 	// resolve.
 	profileGroupSIDRetryInterval = time.Minute
+	// profileGroupSIDRecheckInterval spaces the lookups of a name that has
+	// resolved, so a deleted or recreated group is followed.
+	profileGroupSIDRecheckInterval = time.Minute
 	// A hook waits briefly for a due retry, so a recovered directory can
 	// select the assignment on that hook without waiting indefinitely on LSA.
 	profileGroupSIDRetryWait = 200 * time.Millisecond
@@ -111,6 +117,9 @@ type profileGroupSIDs struct {
 	// apart from those after.
 	unresolved atomic.Int64
 	generation atomic.Uint64
+	// nextCheck is when (UnixNano) the next re-check of resolved names is
+	// due, so a request skips the lock until then.
+	nextCheck atomic.Int64
 }
 
 type profileGroupSIDEntry struct {
@@ -120,6 +129,10 @@ type profileGroupSIDEntry struct {
 	call           *profileGroupSIDLookupCall
 	nextTry        time.Time
 	retryWaitUntil time.Time
+	// checkAt is when a resolved name is looked up again; lostSID is the
+	// SID a name had before the group was deleted.
+	checkAt time.Time
+	lostSID string
 }
 
 // newProfileGroupSIDs resolves the group names of assignments, waiting at most
@@ -145,6 +158,7 @@ func newProfileGroupSIDs(assignments []config.ProfileAssignment, lookup func(str
 		}
 	}
 	s.unresolved.Store(int64(len(s.entries)))
+	s.nextCheck.Store(now.Add(profileGroupSIDRecheckInterval).UnixNano())
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	for _, entry := range s.entries {
@@ -172,17 +186,31 @@ func profileGroupNeedsSID(group string) bool {
 // share a short wait for an in-flight retry before matching and memoising a
 // decision; a stalled LSA call never holds the request indefinitely.
 func (s *profileGroupSIDs) refresh(now time.Time, wait bool) {
-	if s == nil || s.unresolved.Load() == 0 {
+	if s == nil {
+		return
+	}
+	recheck := now.UnixNano() >= s.nextCheck.Load()
+	if s.unresolved.Load() == 0 && !recheck {
 		return
 	}
 	s.mu.Lock()
 	s.absorbLocked(now)
+	if recheck {
+		s.nextCheck.Store(now.Add(profileGroupSIDRecheckInterval).UnixNano())
+	}
 	var pending []*profileGroupSIDLookupCall
 	var waitUntil time.Time
 	for _, entry := range s.entries {
 		if entry.sid == "" && entry.call == nil && !now.Before(entry.nextTry) {
 			entry.call = startProfileGroupSIDLookup(s.lookup, entry.name)
 			entry.nextTry = now.Add(profileGroupSIDRetryInterval)
+			if entry.call != nil {
+				entry.retryWaitUntil = now.Add(profileGroupSIDRetryWait)
+			}
+		}
+		if recheck && entry.sid != "" && entry.call == nil && !now.Before(entry.checkAt) {
+			entry.call = startProfileGroupSIDLookup(s.lookup, entry.name)
+			entry.checkAt = now.Add(profileGroupSIDRecheckInterval)
 			if entry.call != nil {
 				entry.retryWaitUntil = now.Add(profileGroupSIDRetryWait)
 			}
@@ -230,9 +258,28 @@ func (s *profileGroupSIDs) absorbLocked(now time.Time) {
 		default:
 			continue
 		}
-		entry.sid, entry.err, entry.call = entry.call.sid, entry.call.err, nil
-		entry.retryWaitUntil = time.Time{}
+		sid, err := entry.call.sid, entry.call.err
+		entry.call, entry.retryWaitUntil = nil, time.Time{}
 		if entry.sid != "" {
+			// A re-check of a name that resolved: follow a recreated group's
+			// new SID, and drop the SID of a deleted one. A failed lookup
+			// keeps the SID.
+			switch {
+			case sid != "" && sid != entry.sid:
+				entry.sid, entry.err = sid, nil
+				s.generation.Add(1)
+			case errors.Is(err, errProfileGroupUnknown):
+				entry.lostSID, entry.sid, entry.err = entry.sid, "", err
+				entry.nextTry = now.Add(profileGroupSIDRetryInterval)
+				s.unresolved.Add(1)
+				s.generation.Add(1)
+			}
+			continue
+		}
+		entry.sid, entry.err = sid, err
+		if entry.sid != "" {
+			entry.lostSID = ""
+			entry.checkAt = now.Add(profileGroupSIDRecheckInterval)
 			s.unresolved.Add(-1)
 			s.generation.Add(1)
 		} else {
@@ -272,6 +319,11 @@ func (s *profileGroupSIDs) warnings(assignments []config.ProfileAssignment) []st
 		for _, group := range assignment.Match.Groups {
 			name := norm.NFC.String(strings.TrimSpace(group))
 			entry, ok := s.entries[foldKey(name)]
+			if ok && entry.sid == "" && entry.lostSID != "" && errors.Is(entry.err, errProfileGroupUnknown) {
+				out = append(out, fmt.Sprintf("assignment %d: group %q no longer exists (its SID %s was deleted), so it selects nobody; "+
+					"DefenseClaw looks the name up again every minute and follows a group recreated under it", i+1, strings.TrimSpace(group), entry.lostSID))
+				continue
+			}
 			if !ok || entry.sid != "" || errors.Is(entry.err, errProfileGroupUnknown) {
 				continue
 			}

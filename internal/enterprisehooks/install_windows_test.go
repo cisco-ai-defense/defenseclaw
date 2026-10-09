@@ -2145,6 +2145,46 @@ func TestInstallWindowsClaudeRejectsInvalidReverseOrphanManagedState(t *testing.
 	}
 }
 
+// GAP-1108: DefenseClaw's own drop-in, edited or deleted outside DefenseClaw,
+// is put back byte for byte from its ownership record (the guardian does
+// this, and Setup /repair before its snapshot), and the install path then
+// accepts it again; a drop-in that matches its record is left alone.
+func TestWindowsClaudeManagedPolicyDriftIsPutBack(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(fixture.policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || restored {
+		t.Fatalf("untouched drop-in: restored=%v err=%v, want nothing to do", restored, err)
+	}
+	edited := bytes.Replace(original, []byte("defenseclaw-hook.exe"), []byte("defenseclaw-hook-edited.exe"), 1)
+	if bytes.Equal(edited, original) {
+		t.Fatal("fixture policy names no hook executable to edit")
+	}
+	for _, change := range []func() error{
+		func() error { return os.WriteFile(fixture.policyPath, edited, 0o600) },
+		func() error { return os.Remove(fixture.policyPath) },
+	} {
+		if err := change(); err != nil {
+			t.Fatal(err)
+		}
+		if restored, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || !restored {
+			t.Fatalf("changed drop-in: restored=%v err=%v, want it put back", restored, err)
+		}
+		if got, err := os.ReadFile(fixture.policyPath); err != nil || !bytes.Equal(got, original) {
+			t.Fatalf("restored drop-in differs from the one DefenseClaw wrote (err=%v)", err)
+		}
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install after the restore: %v", err)
+	}
+}
+
 func TestInstallWindowsClaudeRefusesAdministratorPolicyEdit(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)

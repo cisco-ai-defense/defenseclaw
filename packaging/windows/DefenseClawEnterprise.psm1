@@ -10887,6 +10887,17 @@ function Restore-DefenseClawTransaction {
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
             -DeferAutomaticStart
+        if ((Test-DefenseClawStandaloneProfile) -and
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ManagedIPCDirectory)) {
+            # A standalone uninstall removes the managed IPC directory once its
+            # services are gone. When it fails after that, the restored
+            # deployment needs the directory back, or the rollback failed
+            # "managed path is missing: ...\ipc" and left every service
+            # stopped with the transaction pending (GAP-1145).
+            Initialize-DefenseClawManagedIPCDirectory `
+                -Layout $Layout `
+                -GatewayServiceName ([string]$snapshot.gateway_service)
+        }
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName ([string]$snapshot.gateway_service)
     }
     # The fixed 32-byte correlation key is intentionally excluded from the
@@ -20120,6 +20131,29 @@ function Assert-DefenseClawManagedTreeNoReparse {
     }
 }
 
+function Get-DefenseClawExactItemPath {
+    <#
+        The path that names an enumerated file or folder exactly. Win32 path
+        normalization drops a trailing dot from every name and a trailing
+        space from the last one, so the ordinary path of a skill folder the
+        guardian quarantined under its exact name 'tdot.' named a folder
+        that does not exist, and Setup /uninstall stopped with "managed path
+        is missing" (GAP-1145). The extended-length form (\\?\) is not
+        normalized. Every other path is returned unchanged.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if ($Path.StartsWith('\\?\')) {
+        return $Path
+    }
+    foreach ($segment in $Path.Split('\')) {
+        if ($segment -cne '.' -and $segment -cne '..' -and
+            ($segment.EndsWith('.') -or $segment.EndsWith(' '))) {
+            return '\\?\' + $Path
+        }
+    }
+    return $Path
+}
+
 # The standalone credential store, <StateRoot>\secrets, is written by
 # `defenseclaw-gateway enterprise secret set`. The gateway's credential reader
 # walks every ancestor of a credential and reads its owner and DACL, so the
@@ -20238,7 +20272,7 @@ function Set-DefenseClawPreservedStateAcls {
         }
         $kind = if ($item.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }
         Set-DefenseClawPathAcl `
-            -Path $item.FullName `
+            -Path (Get-DefenseClawExactItemPath -Path $item.FullName) `
             -Kind $kind `
             -GatewayServiceSID $GatewayServiceSID
     }
@@ -20377,7 +20411,16 @@ function Remove-DefenseClawManagedTree {
         return
     }
     Assert-DefenseClawManagedTreeNoReparse -Root $safe
-    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $safe -Recurse -Force
+    # A tree that holds a name normalization changes (GAP-1145) is removed
+    # through its extended-length path, which keeps every name exact.
+    $target = $safe
+    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $safe -Recurse -Force)) {
+        if ((Get-DefenseClawExactItemPath -Path $item.FullName) -cne [string]$item.FullName) {
+            $target = '\\?\' + $safe
+            break
+        }
+    }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $target -Recurse -Force
 }
 
 function Get-DefenseClawFileIdentity {

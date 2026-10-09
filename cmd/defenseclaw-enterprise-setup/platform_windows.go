@@ -139,10 +139,10 @@ func executeEnterpriseSetup(
 	var output []byte
 	var runErr error
 	if opts.Standalone {
-		// The lifecycle reports progress on stderr while it runs (a first
-		// scanner runtime prepare takes minutes); pass it on at once, so an
-		// MDM log or a scheduled task that keeps stderr shows it instead of
-		// minutes of silence (GAP-0642). stdout is the result.
+		// Pass the lifecycle's stderr (diagnostics of a failing run) on at
+		// once. Its scanner runtime progress goes to stdout for a person and
+		// to the lifecycle log in a JSON run, never to stderr, which an MDM
+		// reads as a failed script (GAP-0642, GAP-1069). stdout is the result.
 		var captured bytes.Buffer
 		child.Stdout = &captured
 		child.Stderr = lifecycleProgress{stderr}
