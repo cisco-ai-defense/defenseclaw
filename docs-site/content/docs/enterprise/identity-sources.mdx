@@ -208,9 +208,14 @@ decides the domain of an SSSD account from its uid, not from its name:
   that has no UPN for 2 minutes, then asks again. The gateway trusts a
   guardian record for an hour by the wall clock; the guardian rewrites the
   records every 15 minutes, and within about a minute after the clock is
-  stepped (an NTP correction, a resume from suspend). While the newest record
-  looks older than 30 minutes or is dated in the future, `status` and `verify`
-  warn `identity_records_stale`.
+  stepped (an NTP correction, a resume from suspend). It removes the record of
+  an account it no longer publishes (excluded, left the manifest, or deleted)
+  after its next pass; while the directory does not answer it keeps a domain
+  account's record for up to an hour. While the oldest record of an account it
+  still publishes looks older than 30 minutes, or any record is dated in the
+  future, `status` and `verify` warn `identity_records_stale` and name that
+  account's uid: the directory lookup for it keeps failing (the guardian's log
+  says why), the guardian is not running, or the clock was stepped.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with
