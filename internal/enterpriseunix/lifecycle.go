@@ -253,16 +253,11 @@ func (l *lifecycle) run(ctx context.Context) int {
 	// Before the lock, which another run can hold for the readiness timeout.
 	env.closePrivateDirs(ctx)
 
-	// A run on a host with no DefenseClaw tree creates the lifecycle folder
-	// (and /opt/cisco/defenseclaw above it) for its lock. A run that commits
-	// nothing, a refused first install, takes them away again (GAP-0542).
-	created := env.missingDirs(env.Layout.LifecycleDir)
+	// Keep the lock inode for the lifetime of the host. A waiter may have
+	// opened it before this run, even if this run commits no deployment.
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
 		return 0
-	}
-	if len(created) > 0 {
-		defer env.removeUncommittedDirs(created)
 	}
 	lock, err := env.acquireLock(ctx)
 	if err != nil {
@@ -274,19 +269,6 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return 0
 	}
 	defer lock.release()
-	if l.opts.Action == ActionUninstall {
-		// An uninstall leaves no lifecycle directory holding only its lock
-		// (a rerun, or the package preremove after an uninstall, found
-		// nothing installed and would otherwise recreate it). A kept
-		// deployment record or retained state keeps the directory.
-		defer func() {
-			dir := env.P(env.Layout.LifecycleDir)
-			if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
-				_ = os.Remove(filepath.Join(dir, lockFileName))
-				_ = os.Remove(dir)
-			}
-		}()
-	}
 
 	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {
 		// The previous deployment's files are only in the kept snapshot;
@@ -419,33 +401,55 @@ func (l *lifecycle) run(ctx context.Context) int {
 	return 0
 }
 
-// missingDirs lists dir and its missing ancestors (canonical paths), deepest
-// first.
-func (e *Env) missingDirs(dir string) []string {
-	var missing []string
-	for dir = filepath.Clean(dir); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
-		if _, err := os.Lstat(e.P(dir)); !errors.Is(err, os.ErrNotExist) {
-			break
-		}
-		missing = append(missing, dir)
+// removeLifecycleStateKeepingLock clears transaction state without replacing
+// the lock inode. Waiters can have the file open before this run acquired it.
+func (e *Env) removeLifecycleStateKeepingLock() error {
+	dir := e.P(e.Layout.LifecycleDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
 	}
-	return missing
+	for _, entry := range entries {
+		if entry.Name() == lockFileName {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// removeUncommittedDirs removes the lock and the directories this run
-// created for it, when the run committed no deployment and left nothing
-// else there.
-func (e *Env) removeUncommittedDirs(created []string) {
-	if exists(e.deploymentPath()) {
-		return
+// removeInstallRootKeepingLock preserves the lock when macOS stores its
+// lifecycle directory inside the install root.
+func (e *Env) removeInstallRootKeepingLock() error {
+	if filepath.Dir(e.Layout.LifecycleDir) != e.Layout.InstallRoot {
+		return os.RemoveAll(e.P(e.Layout.InstallRoot))
 	}
-	dir := e.P(e.Layout.LifecycleDir)
-	if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
-		_ = os.Remove(filepath.Join(dir, lockFileName))
+	root := e.P(e.Layout.InstallRoot)
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	for _, path := range created {
-		_ = removeDirIfEmpty(e.P(path))
+	if err != nil {
+		return err
 	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", root)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(e.Layout.LifecycleDir) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pauseApplyTrigger stops the Linux apply path unit while a protected-state
@@ -2462,13 +2466,16 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// an ensure that restores the deployment.
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
 	if removeState {
-		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir, env.Layout.LifecycleDir} {
+		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir} {
 			if err := os.RemoveAll(env.P(dir)); err != nil {
 				errs = append(errs, err)
 			}
 		}
+		if err := env.removeLifecycleStateKeepingLock(); err != nil {
+			errs = append(errs, err)
+		}
 		if !packageManaged {
-			if err := os.RemoveAll(env.P(env.Layout.InstallRoot)); err != nil {
+			if err := env.removeInstallRootKeepingLock(); err != nil {
 				errs = append(errs, err)
 			}
 		}

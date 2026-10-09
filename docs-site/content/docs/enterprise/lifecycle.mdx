@@ -555,7 +555,9 @@ included. The Secure Client profile keeps its machine state unless you purge.
 
 On Linux and macOS, the default uninstall removes the deployment and its
 machine state: the config, credentials, gateway and guardian state, logs,
-lifecycle state and the service account. Each user keeps `~/.defenseclaw`
+lifecycle state and the service account. The root-owned `lifecycle.lock` stays
+in its lifecycle directory so waiting runs keep using the same lock. Each
+user keeps `~/.defenseclaw`
 and the per-user binaries; `--purge` removes those too. Add `--keep-state`
 to keep the machine state for a reinstall instead.
 
@@ -572,8 +574,9 @@ to keep the machine state for a reinstall instead.
   `defenseclaw` account, also when the package install itself failed and
   rolled back (then the rejected `config.yaml` goes too). `apt purge` also deletes what a failed uninstall
   left of `/etc/defenseclaw`, `/var/lib/defenseclaw`,
-  `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise`,
-  and `/var/log/defenseclaw`. Each user keeps `~/.defenseclaw` and the
+  `/var/lib/defenseclaw-hook-guardian`, and `/var/log/defenseclaw`;
+  it clears the lifecycle directory except for `lifecycle.lock`. Each user
+  keeps `~/.defenseclaw` and the
   per-user binaries: by then the gateway that removes them as each user is
   gone. To remove those too, run
   `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
@@ -673,7 +676,7 @@ sessions started before the deployment was activated, with the
    | Linux | `systemctl list-unit-files 'defenseclaw*'` | No units |
    | Linux | `dpkg -s defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise` | Not installed |
    | macOS | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` | No receipt |
-   | macOS | `ls /opt/cisco/defenseclaw` | No such directory |
+   | macOS | `ls /opt/cisco/defenseclaw/lifecycle` | Only `lifecycle.lock` |
    | Windows | `Test-Path 'HKLM:\SOFTWARE\Cisco\DefenseClaw\Enterprise'` | `False` |
    | Windows | `Get-Service DefenseClaw*` | No services |
 

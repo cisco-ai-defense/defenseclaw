@@ -5,7 +5,7 @@
 # defenseclaw-enterprise package: the preremove uninstall already removed the
 # administrator config, protected credentials, state and the service
 # account; a deb purge also removes what a failed or skipped uninstall left
-# of the machine directories. Each enrolled account's ~/.defenseclaw and
+# of the machine directories, except for the persistent lifecycle lock. Each enrolled account's ~/.defenseclaw and
 # per-user binaries stay, since the gateway that removes them as each account
 # is gone by now. Run `enterprise linux uninstall --purge` before the package
 # removal to remove those too.
@@ -25,7 +25,10 @@ case "${1:-}" in
 esac
 if [ "${1:-}" = purge ]; then
     rm -rf /etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian \
-        /var/lib/defenseclaw-enterprise /var/log/defenseclaw
+        /var/log/defenseclaw
+    # Keep lifecycle.lock at its original inode: a waiting lifecycle run can
+    # already have it open when the package removal finishes.
+    find /var/lib/defenseclaw-enterprise -mindepth 1 -maxdepth 1 ! -name lifecycle.lock -exec rm -rf -- {} + 2>/dev/null || true
 fi
 # deb passes "remove"/"purge", rpm passes 0 when the package is erased (and 1
 # on upgrade). Drop the now-empty install directories the package does not
