@@ -57,12 +57,20 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 		out.Write(rootBytes)
 		rootWritten = true
 	}
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") {
+	var syntax tomlEditSyntax
+	skipNotifyDepth := 0
+	for _, line := range lines {
+		inMultiline, inArray := syntax.multiline != 0, syntax.arrayDepth != 0
+		visible := syntax.visible(line)
+		trimmed := strings.TrimSpace(visible)
+		if skipNotifyDepth > 0 {
+			skipNotifyDepth += strings.Count(line, "[") - strings.Count(line, "]")
+			continue
+		}
+		rawTrimmed := strings.TrimSpace(line)
+		if !inMultiline && !inArray && strings.HasPrefix(rawTrimmed, "[") {
 			writeRoot()
-			name := strings.TrimLeft(strings.TrimRight(trimmed, "]"), "[")
+			name := strings.TrimLeft(strings.TrimRight(rawTrimmed, "]"), "[")
 			section = strings.SplitN(name, ".", 2)[0]
 		}
 		if section == "hooks" || section == "otel" {
@@ -73,15 +81,7 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 			if section == "" && (key == "notify" || key == "openai_base_url" && desired[key] == nil) {
 				if key == "notify" {
 					writeRoot()
-				}
-				// A top-level notify array may span lines. Its closing bracket
-				// belongs to the same value, not to the next user key.
-				if key == "notify" && strings.Count(line, "[") > strings.Count(line, "]") {
-					depth := strings.Count(line, "[") - strings.Count(line, "]")
-					for depth > 0 && i+1 < len(lines) {
-						i++
-						depth += strings.Count(lines[i], "[") - strings.Count(lines[i], "]")
-					}
+					skipNotifyDepth = strings.Count(line, "[") - strings.Count(line, "]")
 				}
 				continue
 			}
@@ -97,12 +97,76 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 	writeRoot()
 	if len(sectionBytes) != 0 {
 		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
-			out.WriteString("\n")
+			out.WriteByte('\n')
 		}
 		out.Write(sectionBytes)
 	}
 	result := strings.ReplaceAll(out.String(), "\n", newline)
 	return append(bom, []byte(result)...), nil
+}
+
+// tomlEditSyntax masks strings and comments so the line editor only sees TOML
+// structure. Array depth lets a replaced notify value span multiple lines.
+type tomlEditSyntax struct {
+	multiline  byte
+	arrayDepth int
+}
+
+func (s *tomlEditSyntax) visible(line string) string {
+	out := []byte(strings.Repeat(" ", len(line)))
+	for i := 0; i < len(line); {
+		if s.multiline != 0 {
+			if s.multiline == '"' && line[i] == '\\' && i+1 < len(line) {
+				i += 2
+				continue
+			}
+			if line[i] == s.multiline {
+				j := i
+				for j < len(line) && line[j] == s.multiline {
+					j++
+				}
+				if j-i >= 3 {
+					s.multiline = 0
+				}
+				i = j
+				continue
+			}
+			i++
+			continue
+		}
+		if line[i] == '#' {
+			break
+		}
+		if line[i] == '"' || line[i] == '\'' {
+			quote := line[i]
+			if i+2 < len(line) && line[i+1] == quote && line[i+2] == quote {
+				s.multiline = quote
+				i += 3
+				continue
+			}
+			i++
+			for i < len(line) {
+				if quote == '"' && line[i] == '\\' && i+1 < len(line) {
+					i += 2
+				} else if line[i] == quote {
+					i++
+					break
+				} else {
+					i++
+				}
+			}
+			continue
+		}
+		out[i] = line[i]
+		switch line[i] {
+		case '[':
+			s.arrayDepth++
+		case ']':
+			s.arrayDepth--
+		}
+		i++
+	}
+	return string(out)
 }
 
 func parseCodexTOML(raw []byte, target interface{}) error {

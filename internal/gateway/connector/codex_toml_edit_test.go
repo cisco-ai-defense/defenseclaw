@@ -54,3 +54,21 @@ func TestCodexOwnedEditAppendsAfterMissingFinalNewline(t *testing.T) {
 		t.Fatalf("rendered config = %#v", cfg)
 	}
 }
+
+func TestCodexOwnedEditPreservesMultilineInstructions(t *testing.T) {
+	before := []byte("developer_instructions = \"\"\"Keep this example:\nnotify = [\\\"personal\\\"]\n\"\"\"\nmodel = \"gpt-5\"\n")
+	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := parseCodexTOML(after, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["developer_instructions"] != "Keep this example:\nnotify = [\"personal\"]\n" {
+		t.Fatalf("instructions changed: %q", cfg["developer_instructions"])
+	}
+	if got, ok := cfg["notify"].([]interface{}); !ok || len(got) != 1 || got[0] != "owned" {
+		t.Fatalf("root notify = %#v", cfg["notify"])
+	}
+}
