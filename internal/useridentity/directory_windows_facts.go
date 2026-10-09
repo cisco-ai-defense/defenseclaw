@@ -115,7 +115,7 @@ func resolveWindowsDirectoryFacts(
 	}
 	upn, provider := identityStoreUPN(r, sid)
 	switch {
-	case strings.HasPrefix(sid, entraUserSIDPrefix) || (strings.EqualFold(provider, entraProviderName) && !ok):
+	case strings.HasPrefix(sid, entraUserSIDPrefix):
 		// An Entra ID account (S-1-12-1-...) has no domain account; its UPN
 		// is in the identity store.
 		facts.Directory = DirectoryEntraID
