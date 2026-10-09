@@ -20083,6 +20083,33 @@ function Assert-DefenseClawManagedInstallTree {
     }
 }
 
+function Assert-DefenseClawStandaloneUninstallInstallTree {
+    <#
+        Standalone uninstall's install-tree check. A file or folder that
+        DefenseClaw did not install under InstallRoot (for example an
+        administrator's renamed copy of a DefenseClaw program) still stops the
+        uninstall before it changes anything; the refusal now says so and how
+        to go on (GAP-1190). FORCE=1 is not offered: its state-absent removal
+        refuses an item whose security descriptor DefenseClaw did not set,
+        after it has stopped the services. Secure Client keeps the plain check.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    try {
+        Assert-DefenseClawManagedInstallTree -Layout $Layout
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message -notlike 'refusing to remove unexpected * from managed install root: *') {
+            throw
+        }
+        $installRoot = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
+        throw (
+            $message + '. The uninstall stopped before it changed anything. DefenseClaw did not install that ' +
+            'item: move it out of ' + $installRoot + ', then run the uninstall again'
+        )
+    }
+}
+
 function Assert-DefenseClawManagedTreeNoReparse {
     param([Parameter(Mandatory)][string]$Root)
     Assert-DefenseClawNoReparsePath -Path $Root
@@ -24940,7 +24967,12 @@ function Invoke-DefenseClawUninstallLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -SelfUninstallCallerPID $SelfUninstallCallerPID
-    Assert-DefenseClawManagedInstallTree -Layout $Layout
+    if (Test-DefenseClawStandaloneProfile) {
+        Assert-DefenseClawStandaloneUninstallInstallTree -Layout $Layout
+    }
+    else {
+        Assert-DefenseClawManagedInstallTree -Layout $Layout
+    }
     Assert-DefenseClawRecordedArtifactHashes `
         -Metadata $metadata `
         -Layout $Layout `
