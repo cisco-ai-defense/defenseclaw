@@ -1267,7 +1267,7 @@ def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_pat
     wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
     functions = "\n".join(
         _shell_function(wrapper, name)
-        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_binaries_damaged", "dc_main")
+        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_main")
     )
     log = tmp_path / "calls.log"
     gateway = tmp_path / "defenseclaw-gateway"
@@ -1277,7 +1277,7 @@ case "$2" in secret) cat >/dev/null; echo secret-busy >&2; exit {secret_rc} ;; e
 echo '{{"ok":true}}'
 """, encoding="utf-8")
     gateway.chmod(0o755)
-    # dc_main repairs a package whose required binaries are missing or empty.
+    # This test isolates credential ordering from binary integrity checks.
     for sibling in ("defenseclaw-hook", "defenseclaw-sensor-helper"):
         (tmp_path / sibling).write_text("#!/bin/sh\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text("x: 1\n", encoding="utf-8")
@@ -1290,6 +1290,7 @@ dc_parse_args() {{ DC_ACTION=ensure DC_CONFIG_STDIN=0 DC_CONFIG_FILE='{tmp_path}
 dc_platform() {{ echo "$DC_SCRIPT_OS"; }}
 dc_layout() {{ DC_GATEWAY='{gateway}' DC_OS_GROUP={group}; }}
 dc_validate_args() {{ :; }}
+dc_binaries_damaged() {{ return 1; }}
 id() {{ echo 0; }}
 mktemp() {{ command mktemp -d '{tmp_path}/stage.XXXXXX'; }}
 dc_cleanup() {{ :; }}
