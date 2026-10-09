@@ -338,6 +338,10 @@ type Options struct {
 	// standalone gateway, a service account, cannot read in this user's
 	// home. It is sent by standalone managed hooks only.
 	AssetFacts func(connector string, payload []byte) string
+
+	// refusal is the HookRefusalHeader value of a call that only reports a
+	// refusal the hook made (reportOversizedRefusal).
+	refusal string
 }
 
 // Run executes the hook described by opts and returns the process exit code.
@@ -418,7 +422,7 @@ func Run(ctx context.Context, opts Options) int {
 		overflow = true
 	}
 	if overflow {
-		return handleOversized(opts, sp, failMode)
+		return handleOversized(opts, sp, failMode, payload)
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
 		event, bindingErr := validateCodexInvocationBinding(
@@ -853,6 +857,9 @@ func sendHookRequest(
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	if opts.refusal != "" {
+		req.Header.Set(HookRefusalHeader, opts.refusal)
+	}
 	if v := strings.TrimSpace(opts.TraceParent); v != "" && validTraceparent(v) {
 		req.Header.Set("traceparent", v)
 	}
@@ -1226,14 +1233,25 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 	return emitHookResult(opts, sp, sp.openAllow)
 }
 
-// handleOversized mirrors the per-connector oversized-payload branch.
-func handleOversized(opts Options, sp spec, failMode string) int {
+// handleOversized mirrors the per-connector oversized-payload branch. prefix
+// is the start of the payload the hook read before it stopped at its cap.
+func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
 	if !sp.failOpenOnly && failMode == "closed" && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, "stdin body exceeded cap", "transport")
 	}
 	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
 	closes := !sp.failOpenOnly && failMode == "closed"
 	if closes && managedPlainFailClosed(opts, sp) {
+		fields := payloadPrefixFields(prefix)
+		if strings.TrimSpace(opts.Event) == "" {
+			// Claude Code binds no event: without it the refusal was a raw
+			// stderr line about a "request" (GAP-0965).
+			opts.Event = fields["hook_event_name"]
+			if opts.Event == "" {
+				opts.Event = fields["event"]
+			}
+		}
+		reportOversizedRefusal(opts, sp, fields)
 		return failManagedStandaloneClosed(opts, sp, sp.oversizedClosed, "oversized", "stdin body exceeded cap")
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
@@ -1886,13 +1904,18 @@ func hookEventSubject(event string) string {
 }
 
 // resolveManagedStandaloneFailureEvent names the event of a managed
-// standalone invocation that fails before its payload is read. The Claude
+// standalone invocation (Unix, or the Windows standalone binary,
+// managedPlainFailClosed) that fails before its payload is read. The Claude
 // Code, Cursor and Devin commands do not bind their event, so it comes from
 // the payload, as in failForeignHookBlocked; the Codex, Copilot and
-// Antigravity commands bind it out of band. Other invocations are left
-// untouched, so their stdin is never read here.
+// Antigravity commands bind it out of band. Without it a Windows Cursor hook
+// whose gateway service was stopped answered {} (Cursor's response for an
+// event it cannot name), and Cursor ran the tool call (GAP-1032). Other
+// invocations, Secure Client included, are left untouched, so their stdin is
+// never read here.
 func resolveManagedStandaloneFailureEvent(opts *Options, sp spec) {
-	if opts == nil || !opts.ManagedEnterprise || !opts.ManagedStandalone || strings.TrimSpace(opts.Event) != "" {
+	if opts == nil || !opts.ManagedEnterprise || strings.TrimSpace(opts.Event) != "" ||
+		(!opts.ManagedStandalone && !opts.ExplainUnenrolledAccount) {
 		return
 	}
 	switch sp.connector {
