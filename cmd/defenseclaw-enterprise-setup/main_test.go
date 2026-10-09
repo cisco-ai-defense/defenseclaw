@@ -344,7 +344,7 @@ func TestRunEnterpriseSetupHelpMatchesEmbeddedFlavor(t *testing.T) {
 	var secureClient bytes.Buffer
 	writeEnterpriseSetupUsage(&secureClient)
 	if want := enterpriseSetupArtifactName + " --action <install|reconcile|repair|status|uninstall|upgrade|verify> [options]\n" +
-		"Install requires --config <config.yaml> and --manifest <targets.yaml>.\n" +
+		"Install takes --config <config.yaml> and --manifest <targets.yaml> together; with neither, it stages a disabled deployment that a later Repair with both files activates.\n" +
 		"Production paths and service names are fixed by the enterprise lifecycle.\n"; secureClient.String() != want {
 		t.Fatalf("Secure Client usage = %q", secureClient.String())
 	}
