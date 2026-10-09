@@ -78,9 +78,12 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 				}
 				err := loadErr
 				if err == nil {
-					err = removeEnrolledQuarantinedSource(latest, request, enterprisehooks.RemoveEnrolledUserAsset)
+					err = removeEnrolledRequestedAsset(latest, request, enterprisehooks.RemoveEnrolledUserAsset)
 				}
 				outcome := "removed"
+				if request.Kind == enforce.QuarantineRequestRemoveLink {
+					outcome = "removed the link; the folder it pointed to was not changed"
+				}
 				switch {
 				case errors.Is(err, enforce.ErrQuarantineRemovalDeferred):
 					outcome = "deferred: " + err.Error()
@@ -93,7 +96,7 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 			if time.Since(lastDeferred) >= enterpriseHookQuarantineDeferredPoll {
 				lastDeferred = time.Now()
 				channel.ServeDeferred(func(request enforce.QuarantineRemovalRequest) error {
-					err := removeEnrolledQuarantinedSource(current, request, enterprisehooks.RemoveEnrolledUserAssetInSession)
+					err := removeEnrolledRequestedAsset(current, request, enterprisehooks.RemoveEnrolledUserAssetInSession)
 					switch {
 					case err == nil:
 						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: removed now that the user is signed in\n", request.TargetType, request.SourcePath)
@@ -122,17 +125,25 @@ func enterpriseHookQuarantineCurrentConfig(startup *config.Config) (*config.Conf
 	return latest, nil
 }
 
-// removeEnrolledQuarantinedSource checks a request against the enrolled
-// users' watched folders and the quarantine store, then removes the source as
-// the user who owns it, with remove. A signed-out user Windows gives no S4U
-// logon for defers the removal to the next sign-in.
-func removeEnrolledQuarantinedSource(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
+// removeEnrolledRequestedAsset checks a request against the enrolled users'
+// watched folders, and for a quarantined source against the quarantine
+// store, then removes the source, or the link a link removal names (never
+// what it points to, GAP-1188), as the user who owns that watched folder,
+// with remove. A signed-out user Windows gives no S4U logon for defers the
+// removal to the next sign-in.
+func removeEnrolledRequestedAsset(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
 	roots := enrolledWatchRootsForGuardian(current)
 	dirs := make([]string, 0, len(roots))
 	for _, root := range roots {
 		dirs = append(dirs, root.Dir)
 	}
-	source, rootDir, err := enforce.VerifyQuarantineRemoval(request, dirs, current.QuarantineDir)
+	var source, rootDir string
+	var err error
+	if request.Kind == enforce.QuarantineRequestRemoveLink {
+		source, rootDir, err = enforce.VerifyLinkRemoval(request, dirs)
+	} else {
+		source, rootDir, err = enforce.VerifyQuarantineRemoval(request, dirs, current.QuarantineDir)
+	}
 	if err != nil {
 		return err
 	}

@@ -3809,8 +3809,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 			enforce.SetQuarantineSourceRemover(channel.Remover(guardianQuarantineRemovalTimeout))
 			if runtime.GOOS == "windows" {
 				// It also gives the service read access to a folder moved
-				// in with an access list of its own (GAP-0825).
+				// in with an access list of its own (GAP-0825), and removes
+				// a skill or plugin link the service may not delete
+				// (GAP-1188).
 				enforce.SetAssetReadGranter(channel.ReadGranter(guardianReadGrantTimeout))
+				enforce.SetLinkedAssetRemover(channel.LinkRemover(guardianQuarantineRemovalTimeout))
 			}
 			if src.Skill != watcherDirsFromConfig {
 				skillDirs = set.skillDirs

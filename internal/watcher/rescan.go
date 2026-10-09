@@ -289,6 +289,10 @@ func (w *InstallWatcher) deniedByAssetList(evt InstallEvent) bool {
 	if cfg == nil {
 		return false
 	}
+	if _, foreign := w.foreignLink(evt); foreign {
+		// Admission refuses it without reading its SKILL.md (GAP-1188).
+		return false
+	}
 	verdict, _ := cfg.AssetListDecision(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 		TargetType: string(evt.Type), Name: evt.Name, DeclaredNames: declaredAssetNames(cfg, evt),
 		Connector: w.eventConnector(evt), SourcePath: evt.Path,

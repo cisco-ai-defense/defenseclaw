@@ -1694,6 +1694,48 @@ func TestLinkedSkillOutsideWatchedRootIsNotScanned(t *testing.T) {
 	}
 }
 
+// GAP-1188: on a computer that watches several accounts, a link one user
+// plants into another user's watched skills folder is refused without being
+// read: no scan, the link (never its target) is removed, and the row names
+// the planter.
+func TestLinkedSkillIntoAnotherAccountIsRefusedUnread(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	nina, omar := t.TempDir(), t.TempDir()
+	ninaSkills, omarSkills := filepath.Join(nina, ".claude", "skills"), filepath.Join(omar, ".claude", "skills")
+	target := filepath.Join(ninaSkills, "usm-high")
+	for _, dir := range []string{target, omarSkills} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("---\nname: usm-high\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(omarSkills, "usm-peek3")
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v %s", err, out)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{ninaSkills, omarSkills}, nil, store, logger, nil, nil)
+	w.SetAssetOwners([]AssetOwner{{Home: nina, Name: "nina"}, {Home: omar, Name: "omar"}})
+	scan := &countingScanner{name: "skill-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "usm-peek3", Path: link, Timestamp: time.Now()})
+	if scan.calls != 0 || res.Verdict != VerdictBlocked || !strings.Contains(res.Reason, "omar") {
+		t.Fatalf("scans=%d verdict=%s reason=%s, want an unread refusal naming the planter", scan.calls, res.Verdict, res.Reason)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("link into another account remained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "SKILL.md")); err != nil {
+		t.Fatalf("the other account's skill changed: %v", err)
+	}
+}
+
 // GAP-0551: on a managed computer the hook guardian removes a quarantined
 // original after admission, so admission wrote a rescan baseline while the
 // folder was still there; the same skill copied back to that path later was

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -583,6 +584,15 @@ func RemoveLinkedAsset(sourceRoots []string, targetType, path string) (string, e
 	}
 	target, _ := os.Readlink(source)
 	if err := os.Remove(source); err != nil {
+		// A managed Windows gateway may read but not delete in a user's
+		// folder: the hook guardian removes the link as that user (GAP-1188).
+		if remove := linkedAssetRemover.Load(); remove != nil && errors.Is(err, fs.ErrPermission) {
+			delegated := (*remove)(targetType, source)
+			if delegated == nil {
+				return target, nil
+			}
+			return target, fmt.Errorf("enforce: remove link %s: %w; hook guardian: %w", source, err, delegated)
+		}
 		return target, fmt.Errorf("enforce: remove link %s: %w", source, err)
 	}
 	return target, nil
