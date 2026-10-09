@@ -645,6 +645,14 @@ A running gateway can reload an edited config just before the lifecycle rejects 
 
 **What reduces it:** Change the config and upgrade through the lifecycle, and monitor `config_rejected` and `policy.applied` ([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
 
+#### A damaged hook binary until the guardian restores it
+
+A crash or power loss while the package manager unpacks an upgrade can leave `defenseclaw-hook` empty, and agents run an empty file as a script that allows every tool call. A binary that was removed, made non-executable, given to another owner or replaced has the same effect. For the few seconds until the hook guardian notices it, agents run tool calls without DefenseClaw.
+
+**Where:** Linux and macOS; on Windows the guardian restores a missing, empty or different `defenseclaw-hook.exe` the same way.
+
+**What reduces it:** The guardian checks the hook binary every 5 seconds and has the lifecycle put the recorded binary back from the copy it sealed, and `status` and `verify` name the state until then. The package's own install run refuses an empty binary, so MDM detection reinstalls the package. A hook command that fails closed on its own, with no window, is planned for a later release.
+
 #### Application control must allow DefenseClaw files
 
 Agents load DefenseClaw's hook binary and, for OpenCode, the managed plugin `<install root>/share/opencode/defenseclaw.js`. Application control that refuses one of them takes DefenseClaw out of that agent's sessions. OpenCode skips a plugin it cannot read and runs tool calls without DefenseClaw, and `status` and `verify` stay green because they cannot see inside the session.

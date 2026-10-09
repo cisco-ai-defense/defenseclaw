@@ -80,12 +80,17 @@ script mode; `defenseclaw setup <connector>` or `defenseclaw-gateway restart`
 renders the scripts and re-points the hooks after a home move).
 
 On a managed Linux or macOS host the hook is the administrator-owned
-`defenseclaw-hook` binary. When it goes missing, `enterprise linux status`
-(or `macos`) and `verify` fail with the path and `security_complete: false`,
-and the hook guardian starts the lifecycle's config-apply job within seconds,
-which puts the binary back from the copy the lifecycle sealed when it
-committed the deployment (checked against its recorded SHA-256 before it is
-made executable). `enterprise linux repair` does the same at once.
+`defenseclaw-hook` binary. When it is missing, empty (agents run an empty
+file as a script that allows every call), not executable, not owned by root
+or not the binary the deployment installed (hash mismatch),
+`enterprise linux status` (or `macos`) and `verify` fail with the path, the
+state and `security_complete: false`, and the hook guardian starts the
+lifecycle's config-apply job within seconds, which puts the binary back from
+the copy the lifecycle sealed when it committed the deployment (checked
+against its recorded SHA-256 before it is made executable, then renamed into
+place as root with mode 0755). `enterprise linux repair` does the same at
+once. On Windows the standalone guardian puts a missing, empty or different
+`defenseclaw-hook.exe` back from its protected copy within seconds.
 
 The final row is intentional and important. Hook fail mode governs delivery,
 authentication, parsing, and response availability. It does not fabricate a

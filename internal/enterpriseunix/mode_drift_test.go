@@ -143,8 +143,9 @@ func TestVerifyReportsInstalledModeDriftAndRepairNamesTheRemedy(t *testing.T) {
 // A hook binary replaced after the macOS package install (root copied
 // /usr/bin/true over it) was recorded as the deployment by repair and by
 // ensure --from-package, so verify turned green while agents ran without
-// enforcement. Any run but the package's own install refuses it until the
-// package is reinstalled (GAP-0522).
+// enforcement. Repair puts the recorded binary back from the sealed copy
+// (GAP-0680); without that copy, any run but the package's own install
+// refuses it until the package is reinstalled (GAP-0522).
 func TestRepairRefusesAPackageBinaryReplacedAfterInstall(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	bin := h.env.P(h.env.Layout.BinDir)
@@ -159,7 +160,21 @@ func TestRepairRefusesAPackageBinaryReplacedAfterInstall(t *testing.T) {
 	}
 	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true, Reason: "package"}))
 	hook := filepath.Join(bin, binHook)
+	want, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(hook, []byte("replaced\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if got, _ := os.ReadFile(hook); string(got) != string(want) {
+		t.Fatalf("repair did not put the recorded hook binary back: %q", got)
+	}
+	if err := os.WriteFile(hook, []byte("replaced\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(h.env.sealedHookPath()); err != nil {
 		t.Fatal(err)
 	}
 	for _, opts := range []Options{{Action: ActionRepair}, {Action: ActionEnsure, FromPackage: true}} {

@@ -8,15 +8,16 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
 
-// GAP-0935: the guardian keeps a copy of the recorded hook binary and puts a
-// missing (quarantined) binary back from it; a copy of another release is
-// never restored.
-func TestKeepWindowsManagedFileCopyRestoresAMissingHookBinary(t *testing.T) {
+// GAP-0935, GAP-0680: the guardian keeps a copy of the recorded hook binary
+// and puts a missing (quarantined), empty or different binary back from it;
+// a copy of another release is never restored.
+func TestKeepWindowsManagedFileCopyRestoresADamagedHookBinary(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
 	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")
@@ -30,23 +31,35 @@ func TestKeepWindowsManagedFileCopyRestoresAMissingHookBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored, err := keepWindowsManagedFileCopy(target, copyPath, want); err != nil || restored {
-		t.Fatalf("keep copy: restored %t, %v", restored, err)
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+		t.Fatalf("keep copy: restored %q, %v", damage, err)
+	}
+	for _, c := range []struct {
+		name, state string
+		damage      func() error
+	}{
+		{"missing", "missing", func() error { return os.Remove(target) }},
+		{"empty", "empty", func() error { return os.WriteFile(target, nil, 0o600) }},
+		{"hash mismatch", "hash mismatch", func() error { return os.WriteFile(target, []byte("other"), 0o600) }},
+	} {
+		if err := c.damage(); err != nil {
+			t.Fatal(err)
+		}
+		if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || !strings.Contains(damage, c.state) {
+			t.Fatalf("%s: restored %q, %v", c.name, damage, err)
+		}
+		if body, err := os.ReadFile(target); err != nil || string(body) != "hook release" {
+			t.Fatalf("%s: restored %q, %v", c.name, body, err)
+		}
+	}
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+		t.Fatalf("healthy binary: restored %q, %v", damage, err)
 	}
 	if err := os.Remove(target); err != nil {
 		t.Fatal(err)
 	}
-	if restored, err := keepWindowsManagedFileCopy(target, copyPath, want); err != nil || !restored {
-		t.Fatalf("restore: restored %t, %v", restored, err)
-	}
-	if body, err := os.ReadFile(target); err != nil || string(body) != "hook release" {
-		t.Fatalf("restored %q, %v", body, err)
-	}
-	if err := os.Remove(target); err != nil {
-		t.Fatal(err)
-	}
-	if restored, err := keepWindowsManagedFileCopy(target, copyPath, "0000"); err == nil || restored {
-		t.Fatalf("a copy of another release was restored: %t, %v", restored, err)
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, "0000", true); err == nil || damage != "" {
+		t.Fatalf("a copy of another release was restored: %q, %v", damage, err)
 	}
 }
 

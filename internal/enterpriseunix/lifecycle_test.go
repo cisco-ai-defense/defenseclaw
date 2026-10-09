@@ -1655,3 +1655,72 @@ func TestMissingHookBinaryIsPutBackFromTheSealedCopy(t *testing.T) {
 		t.Fatalf("a sealed copy that is not the recorded binary was used or not reported: %v", repair.Warnings)
 	}
 }
+
+// GAP-0680: a hook binary left empty by a crash during the package unpack
+// (which agents run through sh as an empty script that allows every call),
+// one that is not executable or not owned by root, and one that is not the
+// recorded binary went unrepaired, and verify read most of them as fine.
+// Each counts as missing now: verify and status name the state and the
+// restore, the guardian check finds it, and ensure (the job the guardian
+// starts) puts the recorded binary back. A package that replaced the
+// gateway with the hook is an upgrade, and the package's own run refuses an
+// empty hook instead of pairing the newer package with the older one.
+func TestDamagedHookBinaryIsPutBackFromTheSealedCopy(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	hook := filepath.Join(h.env.Layout.BinDir, binHook)
+	path := h.env.P(hook)
+	want := h.read(hook)
+	for _, c := range []struct {
+		state  string
+		damage func() error
+	}{
+		{"is empty (0 bytes)", func() error { return os.Truncate(path, 0) }},
+		{"is not executable (mode 0000)", func() error { return os.Chmod(path, 0) }},
+		{"is not executable (mode 0644)", func() error { return os.Chmod(path, 0o644) }},
+		{"is not owned by root (uid 1000)", func() error { h.owners[path] = [2]int{1000, 1000}; return nil }},
+		{"is not the binary the deployment installed (hash mismatch: sha256 ", func() error {
+			return os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}},
+	} {
+		if err := c.damage(); err != nil {
+			t.Fatal(err)
+		}
+		for _, action := range []string{ActionVerify, ActionStatus} {
+			r := h.run(Options{Action: action})
+			got := messagesOf(r.Errors, codeVerify)
+			if !strings.Contains(got, hook+" "+c.state) || !strings.Contains(got, "`"+h.env.lifecycleCommand(ActionRepair)+"`") || r.SecurityComplete {
+				t.Fatalf("%s: %s security_complete=%v errors %q", c.state, action, r.SecurityComplete, got)
+			}
+		}
+		if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{hook}) {
+			t.Fatalf("%s: the guardian check found %v", c.state, got)
+		}
+		requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o755 || h.read(hook) != want || h.owners[path] != [2]int{0, 0} {
+			t.Fatalf("%s: ensure did not put the hook binary back: %v %v %v", c.state, info, err, h.owners[path])
+		}
+		requireOK(t, h.run(Options{Action: ActionVerify}))
+		if got := h.env.TamperedFiles(); len(got) != 0 {
+			t.Fatalf("%s: the restored binary still counts as tampered: %v", c.state, got)
+		}
+	}
+	newer := h.payload("1.1.0")
+	for _, name := range []string{binGateway, binHook} {
+		if err := h.env.copyFileAtomic(filepath.Join(newer, name), h.env.P(filepath.Join(h.env.Layout.BinDir, name)), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := h.env.TamperedFiles(); len(got) != 0 {
+		t.Fatalf("a package upgrade counts as tampered: %v", got)
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
+	requireError(t, r, codePayload)
+	if got := messagesOf(r.Errors, codePayload); !strings.Contains(got, "is empty (0 bytes)") || h.read(hook) != "" {
+		t.Fatalf("the package run paired the newer package with the older hook or named no cause: %q", got)
+	}
+}

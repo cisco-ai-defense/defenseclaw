@@ -29,18 +29,19 @@ import (
 )
 
 // What the hook guardian finds changed between lifecycle runs, and the
-// lifecycle puts back without a transaction (GAP-1178, GAP-1217): a missing
-// hook binary (an antivirus quarantine), which every agent treats as a
-// non-blocking hook error and so runs tool calls without DefenseClaw, and a
-// DefenseClaw machine-policy drop-in that was edited or deleted. The
-// guardian runs sandboxed and cannot write the install root or the
-// lifecycle state on Linux, so it only notices them (TamperedFiles) and
+// lifecycle puts back without a transaction (GAP-1178, GAP-1217, GAP-0680):
+// a damaged hook binary (missing after an antivirus quarantine, empty after
+// a crash during the package unpack, not executable, not owned by root, or
+// not the recorded binary), with which every agent runs tool calls without
+// DefenseClaw, and a DefenseClaw machine-policy drop-in that was edited or
+// deleted. The guardian runs sandboxed and cannot write the install root or
+// the lifecycle state on Linux, so it only notices them (TamperedFiles) and
 // starts the config-apply job (RequestTamperRestore). That job's ensure
 // restores them under the lifecycle lock before it checks for changes: the
 // hook binary from the copy the lifecycle sealed when it committed the
 // deployment, and the machine policy from the applied config.
 
-// codeHookBinaryNotRestored warns that a missing hook binary could not be
+// codeHookBinaryNotRestored warns that a damaged hook binary could not be
 // put back from the sealed copy.
 const codeHookBinaryNotRestored = "hook_binary_not_restored"
 
@@ -81,6 +82,86 @@ func (e *Env) sealHookBinary(record *Deployment) error {
 	return e.copyFileAtomic(e.P(e.installedHookPath()), e.sealedHookPath(), 0o600, rootOwner())
 }
 
+// The states of an installed hook binary that the lifecycle puts back from
+// the sealed copy. A missing or non-executable binary cannot start, which
+// Claude Code, Codex and most other agents treat as a non-blocking error;
+// the agents start the hook through sh, which runs an empty file as an
+// empty script that exits 0; and a binary another account owns, or one that
+// is not the recorded binary, is not the hook DefenseClaw installed.
+const (
+	hookBinaryMissing       = "missing"
+	hookBinaryNotRegular    = "not a regular file"
+	hookBinaryEmpty         = "empty"
+	hookBinaryNotExecutable = "not executable"
+	hookBinaryNotRootOwned  = "not owned by root"
+	hookBinaryHashMismatch  = "hash mismatch"
+)
+
+// hookBinaryDamage is why the installed hook binary is not the recorded
+// binary every account can run.
+type hookBinaryDamage struct {
+	state  string
+	detail string
+}
+
+// String reads after "<path> is".
+func (d *hookBinaryDamage) String() string {
+	switch {
+	case d.state == hookBinaryHashMismatch:
+		return "not the binary the deployment installed (hash mismatch: " + d.detail + ")"
+	case d.detail == "":
+		return d.state
+	}
+	return d.state + " (" + d.detail + ")"
+}
+
+// inspectHookBinary reports why the installed hook binary is not the
+// recorded binary, or nil when it is or the record names none. A hash
+// mismatch counts only while the gateway binary is still the recorded one
+// and no transaction is pending: a package upgrade replaces the gateway
+// with the hook and an interrupted transaction leaves the files of two
+// deployments, which verify names, and an older sealed copy must not be put
+// back over a newer package's hook.
+func (e *Env) inspectHookBinary(record *Deployment) *hookBinaryDamage {
+	if record == nil || record.Files[e.installedHookPath()] == "" {
+		return nil
+	}
+	path := e.P(e.installedHookPath())
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return &hookBinaryDamage{state: hookBinaryMissing}
+	case err != nil || info.IsDir():
+		return nil // verify names it
+	case !info.Mode().IsRegular():
+		return &hookBinaryDamage{state: hookBinaryNotRegular}
+	case info.Size() == 0:
+		return &hookBinaryDamage{state: hookBinaryEmpty, detail: "0 bytes"}
+	case info.Mode().Perm()&0o111 != 0o111:
+		return &hookBinaryDamage{state: hookBinaryNotExecutable, detail: fmt.Sprintf("mode %04o", info.Mode().Perm())}
+	}
+	if uid, _, err := e.OwnerOf(path); err == nil && uid != 0 {
+		return &hookBinaryDamage{state: hookBinaryNotRootOwned, detail: fmt.Sprintf("uid %d", uid)}
+	}
+	want := record.Files[e.installedHookPath()]
+	got, err := sha256File(path)
+	if err != nil || got == want || !e.gatewayIsRecorded(record) {
+		return nil
+	}
+	if pending, err := e.loadPending(); err != nil || pending != nil {
+		return nil
+	}
+	return &hookBinaryDamage{state: hookBinaryHashMismatch, detail: "sha256 " + got + ", the deployment recorded " + want}
+}
+
+// gatewayIsRecorded reports whether the installed gateway binary is the one
+// the deployment recorded, that is no package replaced it since.
+func (e *Env) gatewayIsRecorded(record *Deployment) bool {
+	gateway := filepath.Join(e.Layout.BinDir, binGateway)
+	got, err := sha256File(e.P(gateway))
+	return err == nil && record.Files[gateway] != "" && got == record.Files[gateway]
+}
+
 // sealedHookValid reports whether the sealed copy is the recorded binary.
 func (e *Env) sealedHookValid(record *Deployment) bool {
 	want := ""
@@ -92,19 +173,17 @@ func (e *Env) sealedHookValid(record *Deployment) bool {
 }
 
 // restoreHookBinary puts the recorded hook binary back from the sealed copy
-// when it is missing. The copy is written without execute permission, its
-// SHA-256 is checked against the deployment record through the open file,
-// and only then is it made executable and renamed into place, so bytes that
-// are not the recorded binary never become runnable.
-func (e *Env) restoreHookBinary(record *Deployment) (bool, error) {
-	if record == nil {
+// when inspectHookBinary found it damaged, replacing what is there. The
+// copy is written without execute permission, its SHA-256 is checked
+// against the deployment record through the open file, and only then is it
+// made executable (0755, root) and renamed into place, so bytes that are
+// not the recorded binary never become runnable.
+func (e *Env) restoreHookBinary(record *Deployment, damage *hookBinaryDamage) (bool, error) {
+	if record == nil || damage == nil {
 		return false, nil
 	}
 	want := record.Files[e.installedHookPath()]
 	path := e.P(e.installedHookPath())
-	if _, err := os.Lstat(path); want == "" || !errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
 	in, err := os.OpenFile(e.sealedHookPath(), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, errors.New("the lifecycle keeps no copy of it")
@@ -172,7 +251,15 @@ func (e *Env) restoreHookBinary(record *Deployment) (bool, error) {
 // root, so SELinux-confined agents can still run it.
 func (l *lifecycle) restoreTamperedHookBinary(ctx context.Context, record *Deployment) bool {
 	env := l.env
-	restored, err := env.restoreHookBinary(record)
+	damage := env.inspectHookBinary(record)
+	if damage != nil && l.opts.Reason == "package" && !env.gatewayIsRecorded(record) {
+		// The package's own install run applies the binaries it placed. One
+		// it left damaged fails the payload check, so the package manager or
+		// MDM installs it again, instead of the run recording the newer
+		// package with the older hook binary.
+		damage = nil
+	}
+	restored, err := env.restoreHookBinary(record, damage)
 	path := env.installedHookPath()
 	if restored && env.GOOS == "linux" {
 		if _, err := env.Runner.Run(ctx, "restorecon", env.P(path)); err != nil && !errors.Is(err, ErrCommandNotFound) {
@@ -185,10 +272,10 @@ func (l *lifecycle) restoreTamperedHookBinary(ctx context.Context, record *Deplo
 		if record.Channel != ChannelPackage {
 			next = "rerun with --payload <staged payload directory>"
 		}
-		l.result.AddWarning(codeHookBinaryNotRestored, fmt.Sprintf("%s is missing and was not put back: %v; %s", path, err, next))
+		l.result.AddWarning(codeHookBinaryNotRestored, fmt.Sprintf("%s is %s and was not put back: %v; %s", path, damage, err, next))
 	case restored:
 		l.result.Changes = append(l.result.Changes, fmt.Sprintf(
-			"restored the missing %s from the copy the lifecycle sealed when it committed the deployment (sha256 %s)", path, record.Files[path]))
+			"restored %s, which was %s, from the copy the lifecycle sealed when it committed the deployment (sha256 %s)", path, damage, record.Files[path]))
 	}
 	return restored
 }
@@ -248,16 +335,14 @@ func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
 }
 
 // TamperedFiles lists what the hook guardian finds changed since the last
-// lifecycle run that ensure puts back: a missing hook binary, and a
+// lifecycle run that ensure puts back: a damaged hook binary, and a
 // DefenseClaw machine-policy drop-in whose bytes are not the ones the
 // lifecycle published.
 func (e *Env) TamperedFiles() []string {
 	e.fillDefaults()
 	var out []string
-	if _, err := os.Lstat(e.P(e.installedHookPath())); errors.Is(err, os.ErrNotExist) {
-		if record, err := e.loadDeployment(); err == nil && record != nil && record.Files[e.installedHookPath()] != "" {
-			out = append(out, e.installedHookPath())
-		}
+	if record, err := e.loadDeployment(); err == nil && e.inspectHookBinary(record) != nil {
+		out = append(out, e.installedHookPath())
 	}
 	manager, ok := e.MachinePolicy.(*policyManager)
 	if !ok {
