@@ -8,10 +8,13 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	osuser "os/user"
 	"runtime"
+	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -67,11 +70,45 @@ var profileGroupQualifiedName = func(ctx context.Context, name string) string {
 		return qualified
 	}
 	for _, domain := range observedGroupDomains.list() {
-		if _, err := resolver.LookupGroup(name + "@" + domain); err == nil {
-			return name + "@" + domain
+		if listed := unixidentity.GroupSpelling(resolver, name+"@"+domain); listed != "" {
+			return listed
 		}
 	}
 	return ""
+}
+
+// bareGroupsProbeAccounts bounds the directory accounts one probe looks up.
+const bareGroupsProbeAccounts = 3
+
+// bareGroupsDirectorySilent reports whether the directory answers for none
+// of the directory accounts the guardian's identity records name (standalone
+// enterprise), up to three, looked up by uid. An SSSD that is offline with a
+// cold cache answers "no such group" for a group that exists and "no such
+// user" for those accounts alike, and a bare group name has no domain whose
+// Domain Users group could be asked, so this is what tells a bare name the
+// host does not know from a deleted one (GAP-1090). Without such a record (a
+// per-user install, no directory account enrolled yet) it cannot tell and
+// reports false, as it does when the check runs out of time.
+var bareGroupsDirectorySilent = func(ctx context.Context) bool {
+	records := enterprisehooks.ReadIdentitySpoolRecords(currentIdentitySpoolDir(), validateManagedGuardianAuthorization, 64)
+	resolver := unixidentity.Default(ctx)
+	asked := 0
+	for _, record := range records {
+		uid, err := strconv.Atoi(record.Key)
+		if err != nil || uid <= 0 || record.Facts.Directory == "" || record.Facts.Directory == useridentity.DirectoryLocal {
+			continue
+		}
+		if _, err := resolver.LookupUID(uid); err == nil {
+			return false
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if asked++; asked == bareGroupsProbeAccounts {
+			break
+		}
+	}
+	return asked > 0
 }
 
 // accountGroupIDs lists an OS account's group ids: os/user's listing, which
@@ -79,4 +116,46 @@ var profileGroupQualifiedName = func(ctx context.Context, name string) string {
 // buffer (an account in more groups, GAP-0201).
 var accountGroupIDs = func(account *osuser.User) ([]string, error) {
 	return unixidentity.AccountGroupIDs(context.Background(), account)
+}
+
+// profileUserEntryUnmatched returns the check that says why a DOMAIN\user
+// users entry selects nobody (GAP-1095): it names an account the host
+// resolves the way profile-explain does, but the domain written is neither
+// the account's verified NetBIOS account domain nor its DNS domain, which an
+// entry must name; or getent passwd finds no account by it, in a domain the
+// host answers for (its Domain Users group resolves) or in none. The check
+// answers "" when the entry selects its account or a lookup fails. It takes
+// the lookups when it is made, since the background pass can outlive its
+// caller.
+func profileUserEntryUnmatched() func(context.Context, string) string {
+	lookupAccount, lookupFacts, groupExists := profileExplainAccount, profileExplainDirectoryFacts, profileGroupExists
+	return func(ctx context.Context, entry string) string {
+		domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
+		if !qualified || domain == "" || domain == "." || account == "" || ctx.Err() != nil {
+			return ""
+		}
+		id, _, err := lookupAccount(entry)
+		if unixidentity.IsNotFound(err) {
+			if known, probeErr := groupExists(ctx, domain+`\domain users`); probeErr != nil {
+				return ""
+			} else if known {
+				return "names no account this host knows (getent passwd finds none)"
+			}
+			return fmt.Sprintf("names %s, a domain this host does not answer for (another prefix than its NetBIOS or DNS "+
+				"name, or the directory is unavailable)", domain)
+		}
+		if err != nil || id == "" {
+			return ""
+		}
+		facts, err := lookupFacts(id)
+		if err != nil || facts.ResolvedAt.IsZero() ||
+			useridentity.EqualFold(domain, facts.AccountDomain) || useridentity.EqualFold(domain, facts.Domain) {
+			return ""
+		}
+		confirmed := firstNonEmpty(facts.AccountDomain, facts.Domain)
+		if confirmed == "" {
+			return fmt.Sprintf("names uid %s, but this host confirms no domain for that account", id)
+		}
+		return fmt.Sprintf("names uid %s, but this host confirms that account's domain as %s, not %s", id, confirmed, domain)
+	}
 }

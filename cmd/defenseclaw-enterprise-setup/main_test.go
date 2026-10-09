@@ -555,7 +555,8 @@ func TestStandaloneSetupFailureUsesTheLifecycleResultShape(t *testing.T) {
 
 // GAP-0509: a run Setup stopped at TIMEOUTSECONDS can leave a transaction
 // pending with the services stopped; its result says so and names the
-// LocalSystem /ensure that recovers it.
+// LocalSystem /ensure that recovers it, with the longest limit: leaving
+// TIMEOUTSECONDS out keeps the default the run hit (GAP-1063).
 func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
 	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
 	var stdout, stderr bytes.Buffer
@@ -570,8 +571,8 @@ func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.ExitCode != enterpriseFailureExitCode ||
 		len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_timeout" ||
-		!strings.Contains(result.Errors[0].Message, `as LocalSystem with /ensure CONFIG=C:\stage\config.yaml JSON=1`) ||
-		!strings.Contains(result.Errors[0].Message, "TIMEOUTSECONDS=60") {
+		!strings.Contains(result.Errors[0].Message, `as LocalSystem with /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`) ||
+		!strings.Contains(result.Errors[0].Message, "TIMEOUTSECONDS=60") || strings.Contains(result.Errors[0].Message, "leaving TIMEOUTSECONDS out") {
 		t.Fatalf("timeout result = %s (%v)", stdout.String(), err)
 	}
 }

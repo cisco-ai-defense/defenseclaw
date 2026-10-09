@@ -14,6 +14,7 @@ package unixidentity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -223,7 +224,7 @@ func (r *NSSResolver) lookupGroupKey(key string) (Group, error) {
 
 // LookupGroup resolves a group by name.
 func (r *NSSResolver) LookupGroup(name string) (Group, error) {
-	if err := validName(name); err != nil {
+	if err := validGroupName(name); err != nil {
 		return Group{}, err
 	}
 	group, err := r.lookupGroupKey(name)
@@ -247,6 +248,22 @@ type GroupNameMismatchError struct {
 
 func (e *GroupNameMismatchError) Error() string {
 	return fmt.Sprintf("unixidentity: getent group %s answered for %q", e.Key, e.Answered.Name)
+}
+
+// GroupSpelling returns the name the host lists the group name under: name
+// itself, the canonical spelling of an answer that differs from it in case
+// only (SSSD answers "Domain Users@corp.example.com" with "domain
+// users@corp.example.com"), or "" when the host does not know it by that name.
+func GroupSpelling(r Resolver, name string) string {
+	group, err := r.LookupGroup(name)
+	var respelled *GroupNameMismatchError
+	switch {
+	case err == nil:
+		return group.Name
+	case errors.As(err, &respelled) && strings.EqualFold(respelled.Answered.Name, name):
+		return respelled.Answered.Name
+	}
+	return ""
 }
 
 // LookupGroupID resolves a group by gid.

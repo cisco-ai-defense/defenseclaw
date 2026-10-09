@@ -208,9 +208,14 @@ decides the domain of an SSSD account from its uid, not from its name:
   that has no UPN for 2 minutes, then asks again. The gateway trusts a
   guardian record for an hour by the wall clock; the guardian rewrites the
   records every 15 minutes, and within about a minute after the clock is
-  stepped (an NTP correction, a resume from suspend). While the newest record
-  looks older than 30 minutes or is dated in the future, `status` and `verify`
-  warn `identity_records_stale`.
+  stepped (an NTP correction, a resume from suspend). It removes the record of
+  an account it no longer publishes (excluded, left the manifest, or deleted)
+  after its next pass; while the directory does not answer it keeps a domain
+  account's record for up to an hour. While the oldest record of an account it
+  still publishes looks older than 30 minutes, or any record is dated in the
+  future, `status` and `verify` warn `identity_records_stale` and name that
+  account's uid: the directory lookup for it keeps failing (the guardian's log
+  says why), the guardian is not running, or the clock was stepped.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with
@@ -386,6 +391,20 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
   take seconds. The first request waits up to two seconds, then the default
   profile applies for 15 seconds until the lookup is retried.
+- **A bound Mac whose domain controller does not answer.** Open Directory
+  still answers at once, but lists an Active Directory account without its
+  domain groups (its primary group, Domain Users, only as a number), and after
+  the domain controller is back it can keep listing the account that way for
+  15 minutes or more. On standalone enterprise the gateway treats an Active
+  Directory account whose primary group has no name as a failed lookup: it
+  keeps the facts it cached for up to an hour, `status` and `verify` warn
+  `directory_lookups_failing`, and `profile-explain` gives the reason. Without
+  cached facts the account gets the default profile with
+  `default_lookup_failed`, so keep `default_profile` strict where a group
+  profile blocks. Once the domain controller answers,
+  `sudo dscacheutil -flushcache; sudo dsmemberutil flushcache` makes the Mac
+  list the domain groups again at once; DefenseClaw does not flush the caches
+  itself.
 - **Some facts need the enterprise profile.** The UPN on
   Linux, the group list on Windows and the bound-Mac facts on macOS are read
   with privilege by the root guardian or enumerator, which a per-user install

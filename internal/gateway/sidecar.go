@@ -57,6 +57,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
@@ -151,6 +152,10 @@ type Sidecar struct {
 	// shutdown from republishing capabilities for the retiring owned runtime.
 	observabilityV8ConsumersDetached bool
 	observabilityV8Run               bool
+	// observabilityV8ShutdownLosses keeps what the closed runtime dropped or
+	// left unsent, for the shutdown warning (GAP-1096).
+	observabilityV8ShutdownLosses      []observabilityruntime.ShutdownLoss
+	observabilityV8ShutdownLossesNoted bool
 	// bootConfigSourceName and bootConfigSource are the config.yaml bytes
 	// the observability runtime was bootstrapped from, the source the
 	// gateway runs (GAP-0264).
@@ -972,6 +977,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.beginObservabilityV8Run(); err != nil {
 		return err
 	}
+	s.carryObservabilityV8ShutdownDrops()
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
@@ -983,7 +989,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		// instead of returning an "Error:" that reads as a startup failure
 		// (GAP-2166).
 		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil && !shutdownFlushWarned {
-			fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+			fmt.Fprint(os.Stderr, s.observabilityV8ShutdownFlushWarning())
 		}
 	}()
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -1416,7 +1422,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.closeOwnedObservabilityV8Runtime(); err != nil {
 		// Runtime.Close contract: the stores stay open until the deferred close
 		// above retries with a fresh context.
-		fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+		fmt.Fprint(os.Stderr, s.observabilityV8ShutdownFlushWarning())
 		shutdownFlushWarned = true
 	} else {
 		s.logger.Close()
@@ -2550,7 +2556,21 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	// service's first report applies an edit at once.
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
 		!reflect.DeepEqual(oldCfg.ApplicationProtection, newCfg.ApplicationProtection) ||
-		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode)
+		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode) ||
+		!slices.Equal(discoveryExcludeUsers(oldCfg), discoveryExcludeUsers(newCfg))
+}
+
+// discoveryExcludeUsers is the enterprise.enrollment.exclude_users list the
+// standalone profile's AI Discovery scan leaves out. The scan reads it when
+// it starts, so a hot apply that changes it rebuilds the scan: an excluded
+// account otherwise kept the components the gateway could still see (a
+// Copilot CLI package folder it may list) and sent their removal only after
+// a restart (GAP-1024).
+func discoveryExcludeUsers(cfg *config.Config) []string {
+	if !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	return cfg.Enterprise.Enrollment.ExcludeUsers
 }
 
 func notifierChanged(oldCfg, newCfg *config.Config) bool {

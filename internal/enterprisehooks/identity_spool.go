@@ -53,7 +53,11 @@ const maxIdentitySpoolRecordBytes = 256 << 10
 
 // UPN sources recorded in IdentitySpoolRecord.UPNSource.
 const (
-	UPNSourceInfoPipe      = "infopipe"
+	UPNSourceInfoPipe = "infopipe"
+	// UPNSourceInfoPipeKept is a UPN an earlier pass read from InfoPipe,
+	// kept because the latest InfoPipe answer for the same account listed no
+	// userPrincipalName (KeepVerifiedInfoPipeUPN).
+	UPNSourceInfoPipeKept  = "infopipe_kept"
 	UPNSourceDerived       = "derived"
 	UPNSourceIdentityStore = "identity_store"
 	UPNSourceTranslateName = "translate_name"
@@ -100,18 +104,19 @@ const identitySpoolClockSlack = time.Minute
 // written under a slow clock did once it was corrected, and the accounts
 // assigned by UPN fell to the default profile until the guardian's next
 // interval (GAP-0921). oldest is the time of the oldest record, zero for
-// none.
-func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest time.Time, stale bool) {
+// none, and key its uid or SID.
+func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest time.Time, key string, stale bool) {
 	if dir == "" {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	future := false
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name, ok := strings.CutSuffix(entry.Name(), ".json")
+		if entry.IsDir() || !ok {
 			continue
 		}
 		info, err := entry.Info()
@@ -120,13 +125,13 @@ func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest 
 		}
 		written := info.ModTime()
 		if oldest.IsZero() || written.Before(oldest) {
-			oldest = written
+			oldest, key = written, name
 		}
 		if written.Sub(now) > identitySpoolClockSlack {
 			future = true
 		}
 	}
-	return oldest, !oldest.IsZero() && (future || now.Sub(oldest) > fresh)
+	return oldest, key, !oldest.IsZero() && (future || now.Sub(oldest) > fresh)
 }
 
 // IdentitySpoolDir is the spool directory for a guardian authorization
@@ -215,6 +220,54 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 		record.Facts.Domain = previous.Facts.Domain
 	}
 	return record
+}
+
+// KeepVerifiedInfoPipeUPN carries the UPN an earlier pass read from SSSD
+// InfoPipe into a fresh record whose InfoPipe answer listed no
+// userPrincipalName. An answer without the attribute is not a verified
+// change: it is what InfoPipe says once the [ifp] user_attributes of
+// sssd.conf lose userPrincipalName (a hand edit, or a repair that rewrites
+// the file). Rewriting the record as derived sent every account a users
+// assignment selects by UPN to the default profile within one guardian pass
+// (GAP-1114). It keeps the UPN only for the same account in the same SSSD
+// domain, and marks it infopipe_kept so status and verify can say why.
+func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoolRecord, bool) {
+	if record.Facts.UPN != "" || previous.Facts.UPN == "" ||
+		(previous.UPNSource != UPNSourceInfoPipe && previous.UPNSource != UPNSourceInfoPipeKept) ||
+		!strings.EqualFold(record.Key, previous.Key) || record.User == "" || !strings.EqualFold(record.User, previous.User) ||
+		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) {
+		return record, false
+	}
+	record.Facts.UPN = previous.Facts.UPN
+	record.Facts.Principal = previous.Facts.UPN
+	record.Facts.Source = previous.Facts.Source
+	record.UPNSource = UPNSourceInfoPipeKept
+	return record, true
+}
+
+// ReadIdentitySpoolRecords reads at most limit records of dir, in file name
+// order, skipping any that do not parse or that trust refuses.
+func ReadIdentitySpoolRecords(dir string, trust func(path, label string) error, limit int) []IdentitySpoolRecord {
+	if dir == "" || limit <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var records []IdentitySpoolRecord
+	for _, entry := range entries {
+		key, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || entry.IsDir() || !validIdentitySpoolKey(key) {
+			continue
+		}
+		if record, err := ReadIdentitySpoolRecord(dir, key, trust); err == nil {
+			if records = append(records, record); len(records) == limit {
+				break
+			}
+		}
+	}
+	return records
 }
 
 // MarshalIdentitySpoolRecord serializes a record.

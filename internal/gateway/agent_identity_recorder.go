@@ -482,8 +482,10 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		// Past every row anyway; the bound keeps offset+limit from overflowing.
 		offset = min(n, 1<<30)
 	}
+	user := strings.TrimSpace(q.Get("user"))
 	filter := inventory.AgentIdentityFilter{
-		User:      strings.TrimSpace(q.Get("user")),
+		User:      user,
+		UserIDs:   adminViewAccountIDs(user),
 		Connector: strings.ToLower(strings.TrimSpace(q.Get("connector"))),
 	}
 	// Write the buffered rows first, so one count of sessions serves the
@@ -691,8 +693,26 @@ func hostAccountNamer() func(id string) string {
 	}
 }
 
+// adminViewAccountIDs resolves the --user filter of the agent identity and
+// IDE plugin views. A qualified name (DOMAIN\name, .\name, user@domain)
+// names the account the OS resolves it to, as profile-explain resolves it,
+// so the views select that account by its uid or SID, not every account that
+// shares its bare name: the domain and the local twin of one name, or the
+// SSSD account whose rows carry the bare name (GAP-0366, GAP-1080). A bare
+// name, an id, or a name that resolves to no account gives none.
+var adminViewAccountIDs = func(user string) []string {
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	id, _, err := profileExplainAccount(strings.TrimSpace(user))
+	if err != nil || id == "" {
+		return nil
+	}
+	return []string{id}
+}
+
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if user := filter.User; user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
+	if user := filter.User; user != "" && !useridentity.NewAccountFilter(user, filter.UserIDs...).Matches(rec.UserID, rec.UserName) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

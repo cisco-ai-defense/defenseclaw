@@ -224,7 +224,8 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 	if set != nil && runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 		return perUserWindowsGroupWarnings(set.assignments)
 	}
-	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, directoryCacheHealth, wait)
+	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent, profileUserEntryUnmatched(),
+		directoryCacheHealth, wait)
 }
 
 // Per-user Windows has no trusted group facts; these assignments cannot match.
@@ -242,7 +243,8 @@ func perUserWindowsGroupWarnings(assignments []config.ProfileAssignment) []strin
 // the directory cache health taken from the caller. A pass can outlive the
 // caller, so it uses these and never reads the package hooks tests replace.
 func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Context, string) (bool, error), qualify func(context.Context, string) string,
-	health func() identityCacheHealth, wait time.Duration) []string {
+	silent func(context.Context) bool, unmatchedUser func(context.Context, string) string, health func() identityCacheHealth,
+	wait time.Duration) []string {
 	if set == nil {
 		return nil
 	}
@@ -258,8 +260,10 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 		check.running = done
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
-			warnings := unknownAssignmentGroups(ctx, set.assignments, exists, qualify)
+			warnings := unknownAssignmentGroups(ctx, set.assignments, exists, qualify, silent)
+			warnings = append(warnings, unmatchedUserEntries(ctx, set.assignments, unmatchedUser)...)
 			cancel()
+			warnings = append(warnings, spoolUPNAssignmentWarnings(set.assignments, time.Now())...)
 			failing := health().Failing > 0
 			if failing {
 				warnings = nil
@@ -304,7 +308,8 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 	for _, warning := range set.unknownConnectorWarnings() {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 	}
-	exists, qualify, health := profileGroupExists, profileGroupQualifiedName, directoryCacheHealth
+	exists, qualify, silent, unmatchedUser, health := profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent,
+		profileUserEntryUnmatched(), directoryCacheHealth
 	go func() {
 		if runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 			for _, warning := range perUserWindowsGroupWarnings(set.assignments) {
@@ -312,7 +317,7 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 			}
 			return
 		}
-		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, health, profileGroupCheckBudget+time.Second) {
+		for _, warning := range set.unknownGroupWarningsWith(exists, qualify, silent, unmatchedUser, health, profileGroupCheckBudget+time.Second) {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 		}
 	}()
@@ -327,13 +332,17 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 // absent short name, which the warning then suggests (GAP-0332), or, outside
 // Windows, the short form a qualified name now resolves to, which account
 // group lists carry instead, so the assignment selects nobody (GAP-0916).
+// directorySilent, when set, reports that the directory does not answer at
+// all, which is how a bare name the host does not know is told from a deleted
+// one: a bare name has no domain whose Domain Users group could be asked
+// (GAP-1090).
 func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error),
-	qualify func(context.Context, string) string) []string {
-	return unknownAssignmentGroupsForOS(ctx, assignments, exists, qualify, runtime.GOOS)
+	qualify func(context.Context, string) string, directorySilent func(context.Context) bool) []string {
+	return unknownAssignmentGroupsForOS(ctx, assignments, exists, qualify, directorySilent, runtime.GOOS)
 }
 
 func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error),
-	qualify func(context.Context, string) string, platform string) []string {
+	qualify func(context.Context, string) string, directorySilent func(context.Context) bool, platform string) []string {
 	type unknownGroup struct {
 		assignment    int
 		group, domain string
@@ -388,7 +397,8 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 	// One note per such domain, naming its assignments and groups (GAP-0255,
 	// GAP-0928).
 	quietGroups := map[string][]string{}
-	var quietDomains []string
+	var quietDomains, quietBare []string
+	bareSilent, bareAsked := false, false
 	for _, u := range unknown {
 		domainKey := foldKey(u.domain)
 		if platform != "windows" && u.domain != "" && !answered[domainKey] {
@@ -413,7 +423,24 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 				continue
 			}
 		}
+		if platform != "windows" && u.domain == "" && directorySilent != nil {
+			if !bareAsked {
+				bareSilent, bareAsked = directorySilent(ctx), true
+			}
+			if bareSilent {
+				quietBare = append(quietBare, fmt.Sprintf("assignment %d: group %q", u.assignment, u.group))
+				continue
+			}
+		}
 		warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", u.assignment, u.group))
+	}
+	if len(quietBare) > 0 {
+		if len(quietBare) > profileQuietGroupsNamed {
+			quietBare = append(quietBare[:profileQuietGroupsNamed:profileQuietGroupsNamed], fmt.Sprintf("%d more", len(quietBare)-profileQuietGroupsNamed))
+		}
+		warnings = append(warnings, fmt.Sprintf("could not check the groups %s: the directory does not answer for the directory "+
+			"accounts this host knows, so a group it does not know now is not reported as renamed or deleted; %s",
+			strings.Join(quietBare, ", "), directoryDownHint(platform)))
 	}
 	for _, domain := range quietDomains {
 		named := quietGroups[foldKey(domain)]
@@ -421,14 +448,64 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 			named = append(named[:profileQuietGroupsNamed:profileQuietGroupsNamed], fmt.Sprintf("%d more", len(named)-profileQuietGroupsNamed))
 		}
 		warnings = append(warnings, fmt.Sprintf("could not confirm group names written for %s by this spelling (%s): renamed or "+
-			"deleted in the directory, another domain prefix, or the lookup is unavailable, so these may select nobody; check the "+
-			"qualified name with getent group", domain, strings.Join(named, ", ")))
+			"deleted in the directory, another domain prefix, or the lookup is unavailable, so these may select nobody; %s",
+			domain, strings.Join(named, ", "), groupNameCheckHint(platform)))
 	}
 	if skippedLimit {
 		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: only the first %d distinct groups were checked; later assignment groups were not checked", profileGroupCheckMax))
 	}
 	if skippedDeadline {
 		warnings = append(warnings, "group warning check incomplete: the directory check timed out; later assignment groups were not checked")
+	}
+	return warnings
+}
+
+// groupNameCheckHint names the command that shows how this host spells a
+// group: getent on Linux. macOS has no getent: an account's groups are listed
+// by id -Gn, as DOMAIN\name for an Active Directory group of a bound Mac,
+// and one group by dseditgroup (GAP-1107).
+func groupNameCheckHint(platform string) string {
+	if platform == "darwin" {
+		return `check the exact name with id -Gn <user> (an Active Directory group reads DOMAIN\name) or dseditgroup -o read <group>; ` +
+			`after a domain controller outage, sudo dscacheutil -flushcache; sudo dsmemberutil flushcache refreshes Open Directory`
+	}
+	return "check the qualified name with getent group"
+}
+
+// directoryDownHint says what to check while the directory does not answer.
+func directoryDownHint(platform string) string {
+	if platform == "darwin" {
+		return "check the directory binding of this Mac (dsconfigad -show) and the domain controller; the groups are checked again once it answers"
+	}
+	return "check SSSD (sssctl domain-status <domain>) and its server; the groups are checked again once it answers"
+}
+
+// unmatchedUserEntries warns for each DOMAIN\user users entry that names an
+// account the host resolves but selects nobody, because the host does not
+// confirm the domain written for that account (unmatched says why, "" when
+// the entry selects it or names no account): its users get the next
+// assignment or the default profile, and nothing else showed it (GAP-1095).
+func unmatchedUserEntries(ctx context.Context, assignments []config.ProfileAssignment, unmatched func(context.Context, string) string) []string {
+	if unmatched == nil {
+		return nil
+	}
+	var warnings []string
+	checked := 0
+	for i, assignment := range assignments {
+		for _, entry := range assignment.Match.Users {
+			entry = strings.TrimSpace(entry)
+			if !strings.Contains(entry, `\`) || strings.HasPrefix(entry, `.\`) {
+				continue
+			}
+			if checked >= profileGroupCheckMax || ctx.Err() != nil {
+				return warnings
+			}
+			checked++
+			if why := unmatched(ctx, norm.NFC.String(entry)); why != "" {
+				warnings = append(warnings, fmt.Sprintf("assignment %d: users entry %q %s, so it selects nobody; write the "+
+					"domain this host confirms, or the uid", i+1, entry, why))
+			}
+		}
 	}
 	return warnings
 }

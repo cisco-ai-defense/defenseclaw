@@ -94,7 +94,8 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		compiled = loaded.compiled
 	}
 	// A jsonl destination the gateway service cannot write stopped the
-	// services, failed the readiness wait and rolled back (GAP-0908).
+	// services, failed the readiness wait and rolled back (GAP-0908,
+	// GAP-1118).
 	var unsafe *config.V8SemanticError
 	if err := checkJSONLDestinationPaths(compiled,
 		strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))); errors.As(err, &unsafe) {
@@ -155,25 +156,57 @@ func (secrets standalonePathPreflightSecrets) ResolveObservabilityCredential(nam
 
 // checkJSONLDestinationPaths refuses the first enabled jsonl destination
 // whose path local.JSONLPathProblem rejects, naming the destination, the
-// path and the rule (config validate, Windows Setup). allowedWriters may
-// also write its folder (Windows).
-func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, allowedWriters ...string) error {
+// path and the rule (config validate, Windows Setup). gatewayAccount, the
+// Windows gateway service account Setup checks for, may also write the
+// folder, and must be able to: a folder only administrators can write
+// passed Setup, which runs as one, and the gateway then did not start
+// (GAP-1118).
+func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, gatewayAccount string) error {
 	if compiled == nil || compiled.Plan == nil {
 		return nil
+	}
+	var allowedWriters []string
+	if gatewayAccount != "" {
+		allowedWriters = []string{gatewayAccount}
 	}
 	for _, destination := range compiled.Plan.Destinations() {
 		if destination.Kind != config.ObservabilityV8DestinationJSONL || !destination.Enabled || destination.Generated {
 			continue
 		}
-		if problem := local.JSONLPathProblem(destination.Transport.Path, allowedWriters...); problem != "" {
+		path := destination.Transport.Path
+		if problem := local.JSONLPathProblem(path, allowedWriters...); problem != "" {
 			return &config.V8SemanticError{
 				Path:    "$.observability.destinations",
-				Summary: fmt.Sprintf("destination %q writes %s, which %s", destination.Name, destination.Transport.Path, problem),
+				Summary: fmt.Sprintf("destination %q writes %s, which %s", destination.Name, path, problem),
 				Action:  "point it at a file only its owner can read and write (or a missing file, which the gateway creates) in a folder only its owner (an administrator or the gateway account) can write",
+			}
+		}
+		if gatewayAccount == "" {
+			continue
+		}
+		if err := standaloneServiceCanWriteFile(path, gatewayAccount); err != nil {
+			folder := filepath.Dir(filepath.Clean(path))
+			return &config.V8SemanticError{
+				Path:    "$.observability.destinations",
+				Summary: fmt.Sprintf("destination %q writes %s, but %v", destination.Name, path, err),
+				Action: fmt.Sprintf("grant that account Modify on the folder, for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\", "+
+					"or point the destination at a folder it can write", folder, gatewayAccount),
 			}
 		}
 	}
 	return nil
+}
+
+// standaloneServiceCanWriteFile checks that the gateway service account can
+// write a jsonl destination file (a no-op off Windows). Before a first
+// install the account does not exist yet; the gateway reports it at start.
+// A seam for tests.
+var standaloneServiceCanWriteFile = func(path, serviceAccount string) error {
+	err := managed.ValidateServiceCanWriteFile(path, serviceAccount)
+	if managed.IsServiceAccountUnresolved(err) {
+		return nil
+	}
+	return err
 }
 
 // standaloneGatewayRuntimeCandidate decodes configPath as the gateway does,

@@ -1055,3 +1055,62 @@ func TestRuntimeDispatchConcurrentStressPreservesExactlyOnceLocalAndFanout(t *te
 
 var _ DestinationAdapterFactory = runtimeAdapterFactoryFunc(nil)
 var _ delivery.Adapter = (*runtimeRecordingAdapter)(nil)
+
+// GAP-1096: records still queued when the shutdown flush deadline passes are
+// counted per destination signal, and the next runtime reports them as dropped.
+func TestRuntimeCloseCountsAbandonedRecordsForTheNextRuntime(t *testing.T) {
+	blockedPlan := func(dependencies runtimeTestDependencies) *config.ObservabilityV8Plan {
+		return runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+			func(source *config.ObservabilityV8Source) {
+				source.Destinations = []config.ObservabilityV8DestinationSource{
+					runtimeConsoleDestination("blocked", "none", 8),
+				}
+			},
+		)
+	}
+	factoryFor := func(adapter delivery.Adapter) DestinationAdapterFactory {
+		return runtimeAdapterFactoryFunc(func(
+			context.Context, config.ObservabilityV8EffectiveDestination, telemetry.V8ResourceContext,
+		) (delivery.Adapter, DestinationAdapterCleanup, error) {
+			return adapter, func(context.Context) error { return nil }, nil
+		})
+	}
+	dependencies := newRuntimeTestDependencies(t)
+	unreachable := newRuntimeRecordingAdapter(8)
+	unreachable.release = make(chan struct{}) // never answers until cancelled
+	runtime := runtimeWithAdapterFactory(t, dependencies, blockedPlan(dependencies), factoryFor(unreachable), nil)
+	for index := 0; index < 3; index++ {
+		builder := runtimeContentRecordBuilder(fmt.Sprintf("runtime-shutdown-%d", index), "queued")
+		if _, err := runtime.Emit(t.Context(), diagnosticMetadata(t), builder); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-unreachable.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the destination never received a delivery attempt")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	_ = runtime.Close(ctx)
+	cancel()
+	losses := runtime.ShutdownLosses()
+	if len(losses) != 1 || losses[0].Destination != "blocked" || losses[0].Signal != observability.SignalLogs ||
+		losses[0].Records != 3 {
+		t.Fatalf("shutdown losses = %+v, want blocked logs 3", losses)
+	}
+
+	nextDependencies := newRuntimeTestDependencies(t)
+	next := runtimeWithAdapterFactory(
+		t, nextDependencies, blockedPlan(nextDependencies), factoryFor(newRuntimeRecordingAdapter(8)), nil,
+	)
+	if applied, err := next.CarryShutdownLosses(t.Context(), losses); err != nil || len(applied) != 1 {
+		t.Fatalf("carry applied=%+v err=%v", applied, err)
+	}
+	snapshot, err := next.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped := destinationHealthByName(t, snapshot, "blocked").Counters.Dropped; dropped != 3 {
+		t.Fatalf("next runtime dropped = %d, want the 3 records the last shutdown abandoned", dropped)
+	}
+}

@@ -23,6 +23,16 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def test_enrollment_docs_use_windows_status_for_managed_accounts() -> None:
+    enrollment = (ROOT / "docs-site/content/docs/enterprise/enrollment.mdx").read_text()
+    operations = (ROOT / "docs-site/content/docs/enterprise/operations.mdx").read_text()
+    sections = (enrollment.split("## Supported agent versions", 1)[1],
+                operations.split("## Review activity from the CLI", 1)[1])
+    for section in sections:
+        assert "enterprise windows status --profile standalone --json" in section
+        assert "enrollment.accounts" in section
+
 # Checked-in source fixtures and published documentation share one release
 # identity so native repair/upgrade comparisons remain monotonic.
 CURRENT_RELEASE = "1.0.0"
@@ -1044,3 +1054,11 @@ def test_provider_docs_explain_legacy_overlay_migration() -> None:
     assert "migration" in section and "request_overrides" in section
     assert "live input" in section and "0.8.x" in section
     assert "next `setup provider add` or `remove`" not in section
+
+
+def test_mdm_claude_windows_guide_uses_audit_export() -> None:
+    guide = (ROOT / "docs-site/content/docs/enterprise/mdm/index.mdx").read_text()
+    section = guide.split("### Claude Code on Windows", 1)[1].split("\n## ", 1)[0]
+    assert "audit export --connector claudecode" in section
+    assert "ATTESTCLAUDEEFFECTIVEPOLICY=1" in section
+    assert "enterprise policy verify --live" not in section

@@ -2,6 +2,13 @@ version: 2
 
 project_name: defenseclaw
 
+# The Linux package's preinstall refuses a downgrade before any file is
+# replaced: it compares the deployed release with this build's version, which
+# is stamped into the copy nfpm packages (packaging/linux/preinstall.sh).
+before:
+  hooks:
+    - sh -c 'mkdir -p build/packaging/linux && sed "s|@DC_PKG_VERSION@|{{ .Version }}|" packaging/linux/preinstall.sh >build/packaging/linux/preinstall.sh'
+
 builds:
   - id: defenseclaw
     main: ./cmd/defenseclaw
@@ -299,7 +306,7 @@ nfpms:
       - src: NOTICE
         dst: /usr/share/doc/defenseclaw-enterprise/NOTICE
     scripts:
-      preinstall: packaging/linux/preinstall.sh
+      preinstall: build/packaging/linux/preinstall.sh
       postinstall: packaging/linux/postinstall.sh
       preremove: packaging/linux/preremove.sh
       postremove: packaging/linux/postremove.sh

@@ -44,12 +44,20 @@ func TestEnterpriseProfileExplainReadsTheManagedGateway(t *testing.T) {
 	}
 }
 
+// GAP-1081: the bare name the rows carry lists them although NSS knows the
+// account only by its qualified name; a name that lists nothing and names
+// no account is refused with the spellings --user takes.
 func TestEnterpriseAgentIdentitiesRejectsUnknownAccount(t *testing.T) {
 	previous := enterpriseIdentityViewGet
 	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
 	enterpriseIdentityViewGet = func(path string, out any) (string, error) {
-		if strings.HasPrefix(path, "/api/v1/guardrail/profiles/resolve?") {
+		switch {
+		case strings.HasPrefix(path, "/api/v1/guardrail/profiles/resolve?"):
 			return "", json.Unmarshal([]byte(`{"lookup_error":"no account named \"nosuchuser99\" on this host; check the current spelling with getent passwd or use the account uid","subject":{"user_id":""}}`), out)
+		case path == "/api/v1/agents/identities?user=dcad-o4u1":
+			return "", json.Unmarshal([]byte(`{"identities":[{"agent_id":"agt-0123456789abcdef","user_name":"dcad-o4u1"}],"total":1}`), out)
+		case strings.HasPrefix(path, "/api/v1/agents/identities?"):
+			return "", json.Unmarshal([]byte(`{"identities":[],"total":0}`), out)
 		}
 		t.Fatalf("unexpected request: %s", path)
 		return "", nil
@@ -61,8 +69,16 @@ func TestEnterpriseAgentIdentitiesRejectsUnknownAccount(t *testing.T) {
 	cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[1])
 	cmd.SetArgs([]string{"--user", "nosuchuser99"})
 	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "no account named") || commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
+	if err == nil || !strings.Contains(err.Error(), "no account named") || !strings.Contains(err.Error(), "--user takes") ||
+		commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) {
 		t.Fatalf("agent identities error = %v", err)
+	}
+	cmd = newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[1])
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--user", "dcad-o4u1"})
+	if err := cmd.Execute(); err != nil || !strings.Contains(out.String(), "agt-0123456789abcdef") {
+		t.Fatalf("agent identities --user <bare name> = %v:\n%s", err, out.String())
 	}
 }
 

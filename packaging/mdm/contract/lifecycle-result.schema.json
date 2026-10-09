@@ -95,6 +95,7 @@
         "judge_model": { "type": "string" }
       }
     },
+    "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
@@ -123,7 +124,7 @@
       "then": {
         "properties": {
           "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
-          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false
         }
       },
       "else": {
@@ -160,6 +161,19 @@
         "higher_precedence": { "type": "array", "items": { "type": "string" } },
         "conflicts": { "type": "array", "items": { "type": "string" } },
         "live_verified_at": { "type": "string" }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "enabled", "signals", "redaction_profiles"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "preset": { "type": "string" },
+        "signals": { "type": "array", "items": { "enum": ["logs", "traces", "metrics"] } },
+        "redaction_profiles": { "type": "array", "items": { "type": "string" }, "description": "Distinct effective profiles of the destination's send routes; empty when it sends only metrics." }
       }
     },
     "portHolder": {

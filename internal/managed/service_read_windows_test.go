@@ -77,4 +77,14 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	if err := ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account); err != nil {
 		t.Fatalf("parent readable by Users: %v", err)
 	}
+	// GAP-1118: a jsonl destination needs the service to create files in
+	// its folder; Read & execute is not enough.
+	sink := filepath.Join(root, "sink.jsonl")
+	if err := ValidateServiceCanWriteFile(sink, account); err == nil || !strings.Contains(err.Error(), "cannot create files in "+root) {
+		t.Fatalf("folder the service can only read: %v", err)
+	}
+	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", root)
+	if err := ValidateServiceCanWriteFile(sink, account); err != nil {
+		t.Fatalf("folder the service may modify: %v", err)
+	}
 }

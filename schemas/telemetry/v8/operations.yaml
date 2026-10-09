@@ -5007,6 +5007,14 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.user.principal
     requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.identity.source
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
 - id: body.identity.observed
   type: body_group
   brief: Low-rate end-user identity observation, once per user per cache TTL; carries group counts, never group names.

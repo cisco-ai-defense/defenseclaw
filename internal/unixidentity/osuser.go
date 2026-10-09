@@ -91,7 +91,7 @@ func (r *OSUserResolver) LookupUID(uid int) (Account, error) {
 
 // LookupGroup resolves by name.
 func (r *OSUserResolver) LookupGroup(name string) (Group, error) {
-	if err := validName(name); err != nil {
+	if err := validGroupName(name); err != nil {
 		return Group{}, err
 	}
 	g, err := user.LookupGroup(name)

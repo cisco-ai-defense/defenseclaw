@@ -457,6 +457,45 @@ func TestSSSDAccountDomainLookupFailure(t *testing.T) {
 	}
 }
 
+// GAP-1095: a domain whose first DNS label is longer than 15 characters
+// (Entra Domain Services) gets the flat name its controllers announce
+// (adcli info), once SSSD holds the account's SID under it; the label is
+// still never taken.
+func TestSSSDAccountDomainTakesTheAnnouncedFlatName(t *testing.T) {
+	dir := t.TempDir()
+	oldNSS, oldPasswd, oldRealms, oldTool := nsswitchPath, localPasswdPath, hostRealms, adcliTool
+	t.Cleanup(func() {
+		nsswitchPath, localPasswdPath, hostRealms, adcliTool = oldNSS, oldPasswd, oldRealms, oldTool
+		adcliShortNames.byDomain = nil
+	})
+	nsswitchPath, localPasswdPath = filepath.Join(dir, "nsswitch.conf"), filepath.Join(dir, "passwd")
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const domain, flat, sid = "corp-entra-ds-01.example.com", "CORPENTRADS01", "S-1-5-21-4-5-6-1107"
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: domain, Name: strings.ToUpper(domain), ClientSoftware: "sssd", ServerSoftware: "active-directory"}}, nil
+	}
+	adcliTool = func() (string, error) { return "/usr/sbin/adcli", nil }
+	startFakeSSSD(t, map[string]string{
+		"uid:80001": sid, "sid:" + sid: "80001",
+		`name:` + domain + `\alice`: sid, `name:` + flat + `\alice`: sid,
+	})
+	const account = "alice:*:80001:80001::/home/alice:/bin/bash\n"
+	f := &fakeRun{results: map[string]commandResult{
+		"passwd 80001":        {stdout: []byte(account)},
+		"-s sss passwd 80001": {stdout: []byte(account)},
+		"info " + domain:      {stdout: []byte("[domain]\ndomain-name = " + domain + "\ndomain-short = " + flat + "\n")},
+	}}
+	facts, err := newFakeNSS(f).DirectoryFactsWithoutGroupsForUID(80001, time.Now())
+	if err != nil || facts.AccountDomain != flat || facts.Domain != domain {
+		t.Fatalf("facts = %+v, err = %v; want the account domain %s", facts, err, flat)
+	}
+}
+
 func TestSSSDAccountKeepsGroupFromAnotherNSSService(t *testing.T) {
 	dir := t.TempDir()
 	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath

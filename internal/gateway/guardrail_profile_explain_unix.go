@@ -7,8 +7,8 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -40,8 +40,31 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 		if account, err = resolver.LookupUID(uid); err != nil {
 			return "", "", err
 		}
+	} else if twins := sameNameProfileAccounts(ctx, resolver, name, account); len(twins) > 0 {
+		// A bare name a local and a directory account share names both:
+		// explaining the one NSS answers first hid the other (GAP-1087).
+		return "", "", ambiguousAccount(name, append([]unixidentity.Account{account}, twins...))
 	}
 	return strconv.Itoa(account.UID), sanitizeLLMEventUser(account.Name), nil
+}
+
+// sameNameProfileAccounts lists the other accounts a bare name typed for an
+// administrator view also names (unixidentity.SameNameAccounts); none for a
+// qualified name or a uid.
+var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver, name string, account unixidentity.Account) []unixidentity.Account {
+	if strings.ContainsAny(name, `@\`) || strings.Trim(name, "0123456789") == "" {
+		return nil
+	}
+	return unixidentity.SameNameAccounts(ctx, r, account)
+}
+
+// ambiguousAccount is the refusal of a bare name that names accounts.
+func ambiguousAccount(name string, accounts []unixidentity.Account) error {
+	refs := make([]useridentity.AccountRef, 0, len(accounts))
+	for _, account := range accounts {
+		refs = append(refs, useridentity.AccountRef{ID: strconv.Itoa(account.UID), Name: account.Name})
+	}
+	return &useridentity.AmbiguousAccountError{Name: name, Accounts: refs}
 }
 
 // profileExplainUnresolved resolves an account the platform resolver cannot
@@ -50,7 +73,7 @@ var profileExplainQualifiedName = func(ctx context.Context, name string) string 
 	return unixidentity.QualifiedUserName(ctx, unixidentity.Default(ctx), name)
 }
 
-func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
+func profileExplainUnresolved(name string, lookupErr error) (profileSubject, error) {
 	if local, err := lookupLocalProfileSubject(name); err == nil {
 		return local, nil
 	}
@@ -59,10 +82,7 @@ func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
-	if qualified := profileExplainQualifiedName(ctx, name); qualified != "" {
-		return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; getent passwd knows %q: use that spelling or its uid", name, qualified)
-	}
-	return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; check the current spelling with getent passwd or use the account uid", name)
+	return profileSubject{UserName: name}, unixidentity.AccountLookupError(name, profileExplainQualifiedName(ctx, name), lookupErr)
 }
 
 // profileExplainDirectoryFacts resolves the facts a verified request from

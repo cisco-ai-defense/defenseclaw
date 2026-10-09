@@ -177,8 +177,12 @@ func TestWindowsScannerRuntimeIsAdmittedByThePayloadTrustPolicy(t *testing.T) {
 		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.0")
 		applyWindowsStandaloneScannerRuntime(result, opts)
 		_, statErr := os.Lstat(filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName))
-		if !errors.Is(statErr, os.ErrNotExist) || !strings.Contains(fmt.Sprint(result.Warnings), "not admitted by the standalone payload trust policy") {
-			t.Fatalf("trust mode %s: installed=%v, warnings %+v", opts.trustMode, statErr == nil, result.Warnings)
+		// GAP-1063: the run fails, naming the repair, instead of ok=true
+		// with a warning while every install stays blocked.
+		if !errors.Is(statErr, os.ErrNotExist) || len(result.Errors) != 1 || result.Errors[0].Code != "scanner_runtime_unavailable" ||
+			!strings.Contains(result.Errors[0].Message, "not admitted by the standalone payload trust policy") ||
+			!strings.Contains(result.Errors[0].Message, "/repair JSON=1 as LocalSystem") {
+			t.Fatalf("trust mode %s: installed=%v, errors %+v", opts.trustMode, statErr == nil, result.Errors)
 		}
 	}
 	pinned := &windowsEnterpriseLifecycleOptions{trustMode: windowsEnterpriseTrustHashPinned,
