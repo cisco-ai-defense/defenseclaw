@@ -18,7 +18,10 @@ package inventory
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -326,6 +329,70 @@ func TestManagedDiscoveryHomeDirsAddToTheProfileList(t *testing.T) {
 	}
 	if owner, ok := svc.homeOwnerForPath(filepath.Join(bob.Home, ".vscode", "extensions")); !ok || owner.UserName != "bob" {
 		t.Fatalf("owner of a folder in bob's profile = %+v, %t", owner, ok)
+	}
+}
+
+// makeDiscoveryDirLink makes link a directory junction to target on Windows
+// (what a standard user can create without a privilege) and a symbolic link
+// elsewhere.
+func makeDiscoveryDirLink(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Skipf("junction creation unavailable: %v: %s", err, output)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+}
+
+// A standard user who makes their .codex a junction to another enrolled
+// account's .codex gets no record of that account's Codex config or MCP
+// servers, and a home_dirs folder that is a junction is not scanned
+// (GAP-1097).
+func TestManagedDiscoveryRefusesProfileJunctions(t *testing.T) {
+	root := t.TempDir()
+	owner := discoveryHomeOwner{Home: filepath.Join(root, "o4w1"), UserID: "S-1-5-21-1-2-3-1001", UserName: "o4w1"}
+	planter := discoveryHomeOwner{Home: filepath.Join(root, "o4wd"), UserID: "S-1-5-21-1-2-3-1002", UserName: "o4wd"}
+	codex := filepath.Join(owner.Home, ".codex")
+	elsewhere := filepath.Join(root, "elsewhere")
+	for _, dir := range []string{codex, planter.Home, filepath.Join(elsewhere, ".codex")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{codex, filepath.Join(elsewhere, ".codex")} {
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[mcp_servers.private]\ncommand = \"x\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeDiscoveryDirLink(t, codex, filepath.Join(planter.Home, ".codex"))
+	extra := filepath.Join(root, "shared")
+	makeDiscoveryDirLink(t, elsewhere, extra)
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return []discoveryHomeOwner{owner, planter} }
+	svc := &ContinuousDiscoveryService{
+		catalog: []AISignature{{ID: "codex", Name: "Codex", SupportedConnector: "codex",
+			ConfigPaths: []string{"~/.codex/config.toml"}, MCPPaths: []string{"~/.codex/config.toml"}}},
+		opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+			Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+			HomeDirs: []string{extra},
+		}),
+	}
+	svc.refreshPlatformHomes()
+	if homes := svc.homesToScan(); len(homes) != 2 || homes[0] != owner.Home || homes[1] != planter.Home {
+		t.Fatalf("homes = %v, want the two profiles without the linked home_dirs folder", homes)
+	}
+	signals := append(svc.detectConfigPaths(), svc.detectMCPPaths()...)
+	if len(signals) != 2 {
+		t.Fatalf("signals = %+v, want the owner's Codex config and MCP signals only", signals)
+	}
+	for _, sig := range signals {
+		if sig.UserID != owner.UserID {
+			t.Fatalf("signal %s/%s attributed to %q, want only %q", sig.Detector, sig.Category, sig.UserName, owner.UserName)
+		}
 	}
 }
 

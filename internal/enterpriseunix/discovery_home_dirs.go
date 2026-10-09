@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"gopkg.in/yaml.v3"
 )
@@ -39,6 +40,11 @@ func (l *lifecycle) describeDiscoveryHomeDirs() {
 		AIDiscovery struct {
 			HomeDirs []string `yaml:"home_dirs"`
 		} `yaml:"ai_discovery"`
+		Enterprise struct {
+			Enrollment struct {
+				Mode string `yaml:"mode"`
+			} `yaml:"enrollment"`
+		} `yaml:"enterprise"`
 	}
 	if yaml.Unmarshal(raw, &doc) != nil || len(doc.AIDiscovery.HomeDirs) == 0 {
 		return
@@ -50,6 +56,15 @@ func (l *lifecycle) describeDiscoveryHomeDirs() {
 	enrolled := map[string]bool{}
 	for _, target := range manifest.Targets {
 		if home := strings.TrimSpace(target.UserHome); home != "" && (target.Enabled == nil || *target.Enabled) {
+			enrolled[filepath.Clean(home)] = true
+		}
+	}
+	// The guardian also scans every account the enumerator found eligible
+	// (outside manifest enrollment): a deployment whose agents are all on
+	// machine policy has no targets, and its enrolled homes were all named
+	// as not enrolled (GAP-1092).
+	if !strings.EqualFold(strings.TrimSpace(doc.Enterprise.Enrollment.Mode), config.EnterpriseEnrollmentManifest) {
+		for _, home := range env.canonicalAccountHomes(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)) {
 			enrolled[filepath.Clean(home)] = true
 		}
 	}

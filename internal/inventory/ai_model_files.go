@@ -897,7 +897,7 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 			return
 		}
 		path = filepath.Clean(path)
-		if s.macOSTCCSkipped(path) || s.modelLinkPrivacySkipped(path) {
+		if s.macOSTCCSkipped(path) || s.modelLinkPrivacySkipped(path) || s.profileLinkRefused(path) {
 			return
 		}
 		resolved, err := filepath.EvalSymlinks(path)

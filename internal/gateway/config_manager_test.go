@@ -1102,6 +1102,16 @@ func TestAIDiscoveryRestartPredicateIncludesLiveManagedModeTransitions(t *testin
 			}
 		})
 	}
+	// A hot exclude_users apply on the standalone profile rebuilds the scan,
+	// so the excluded account leaves discovery at the next scan (GAP-1024).
+	oldCfg := config.DefaultConfig()
+	oldCfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	oldCfg.Enterprise.Profile = managed.ProfileStandalone
+	newCfg := *oldCfg
+	newCfg.Enterprise.Enrollment.ExcludeUsers = []string{"dcw-qv"}
+	if !aiDiscoveryNeedsRestart(oldCfg, &newCfg) {
+		t.Fatal("an exclude_users change did not restart AI discovery")
+	}
 }
 
 func TestEventRouterConfigurationAccessorsAreConcurrentSafe(t *testing.T) {

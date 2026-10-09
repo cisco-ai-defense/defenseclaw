@@ -18,7 +18,7 @@ gateway's service account is not the person running the AI agent.
 | --- | --- |
 | `user.id` | POSIX effective uid or Windows token SID. |
 | `defenseclaw.user.id_kind` | `posix_uid` or `windows_sid`, set only when the identifier came from the corresponding trusted OS source. |
-| `defenseclaw.user.name` | OS account name from the same lookup as `user.id`, without its domain: `alice` for the SSSD account `alice@corp.example.com` or for `CORP\alice`. The qualified form is the principal. Every record of the account carries the same spelling, in every sink: hook decisions, lifecycle, model and tool records, scans, sandbox rows, AI discovery and IDE inventory. It is never mixed with a fallback identity. A name in any script is kept (for example `dcad-eoé`). Under the Secure Client integration a name with a non-ASCII character is left out and `user.id` names the account. |
+| `defenseclaw.user.name` | OS account name from the same lookup as `user.id`, without its domain: `alice` for the SSSD account `alice@corp.example.com` or for `CORP\alice`. The qualified form is the principal. Every record of the account carries the same spelling, in every sink: hook decisions, lifecycle, model and tool records, scans, sandbox rows, AI discovery and IDE inventory. A local account and a directory account with the same bare name differ by `user.id` and by `defenseclaw.user.directory` and `defenseclaw.user.domain`, which every one of those records carries, `strict` included. It is never mixed with a fallback identity. A name in any script is kept (for example `dcad-eoé`). Under the Secure Client integration a name with a non-ASCII character is left out and `user.id` names the account. |
 | `defenseclaw.user.email` | Optional connector-account email. Collection is off by default. |
 | `defenseclaw.user.principal` | Directory principal of the account: a UPN, a Kerberos principal or `DOMAIN\user`, for example `alice@CORP.EXAMPLE.COM`. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.user.domain` | Directory domain or Kerberos realm of the principal. |
@@ -104,7 +104,7 @@ The `ide.plugin.*` records and the `identity.observed` record carry the same
 | `hook.decision`, `guardrail.evaluation`, `tool.activity` and the agent, model, tool and guardrail spans | The account (`user.id`, `defenseclaw.user.id_kind`, `defenseclaw.user.name`), the directory, session and agent identity attributes, and the guardrail profile on decisions and evaluations |
 | `identity.observed` | Once per user per identity cache lifetime (15 minutes): the directory, source and assurance, and the group count |
 | `ai_component.*` and the endpoint inventory | The owning user's principal, domain, directory, assurance and agent identity |
-| `ide.plugin.discovered`, `changed` and `removed` | One IDE plugin and its enabled state, for the user who owns it |
+| `ide.plugin.discovered`, `changed` and `removed` | One IDE plugin and its enabled state, for the user who owns it, with that user's principal, domain, directory, identity source and assurance |
 
 Join records by `user.id` only after checking
 `defenseclaw.user.id_kind`. Do not join a POSIX uid to a Windows SID or assume
@@ -145,7 +145,9 @@ an enrolled profile). An address never goes on a record without a user or on
 another account's record. A connector file that cannot be used, because its
 path goes through a link out of the profile (on Windows, any link or
 junction) or the reader may not open it, gives no address and a named `include_user_email` warning in the
-hook guardian's log (Linux, macOS) or the hook enumerator's log (Windows). A
+hook guardian's log (Linux, macOS) or, on Windows, in
+`C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log` as a
+`[hook-enumerator]` line that names the account's SID. A
 per-user gateway does not attach these addresses to its AI discovery rows.
 Cursor hook payloads can report an address independently.
 
@@ -213,10 +215,12 @@ a path field of its own, in the record and in the `rule_pack_dir` column of
 command line, tool argument or prompt that names the home directory keeps it
 under `sensitive`, which detects email addresses but not an account name inside
 a path; `content` and `strict` replace or remove that text. Every redaction
-profile preserves `defenseclaw.user.name`, however, and an IDE plugin record
-can put the qualified account name `alice@corp.example.com` there. Redacting
-paths and free text therefore does not hide that directory name. If a
-destination must not receive the directory account name, do not send it
+profile preserves `defenseclaw.user.name`, however. Except under the Secure
+Client integration, which keeps account names as the system reports them, that
+is the bare account name (`alice`) on every record, IDE plugin records
+included; the qualified form `alice@corp.example.com` is only the principal,
+which `strict` removes.
+If a destination must not receive even the bare account name, do not send it
 user-attributed telemetry; keep that route on a trusted destination or
 disable the export. See [Redaction](/docs/observability/redaction).
 

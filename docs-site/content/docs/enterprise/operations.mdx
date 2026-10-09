@@ -469,7 +469,8 @@ from enrollment as described in
 | MDM wrapper log | `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` |
 | Event log | The `DefenseClaw` event log, source **DefenseClaw Lifecycle** (table below). Only SYSTEM and Administrators can write it. A legacy copy of each event goes to the Application log, source **DefenseClaw Enterprise**, where any account can write under any source name; see [Windows](/docs/enterprise/windows#verify-the-install) |
 | Gateway log | `C:\ProgramData\Cisco\DefenseClaw\logs\gateway\gateway.log` |
-| Guardian log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log` |
+| Guardian and enumerator log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log`. The hook enumerator writes here too, each line prefixed `[hook-enumerator]`; its warnings about one account (an `include_user_email` warning, for example) name the account's SID |
+| Sensor helper log | `C:\ProgramData\Cisco\DefenseClaw\logs\sensor-helper\sensor-helper.log` |
 
 Standard users can read the files in `%WINDIR%\Logs\DefenseClaw`. Only SYSTEM
 and Administrators can write them. The lifecycle writes these logs and events
