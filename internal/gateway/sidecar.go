@@ -3774,7 +3774,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// A folder that appeared since the previous watcher (a user made
 		// ~/.claude/skills, or a user was enrolled) holds what was added
 		// meanwhile: admit it at startup (GAP-0571).
-		w.AdmitNewRootsAtStartup(s.newEnrolledWatchRoots(append(append([]string(nil), skillDirs...), pluginDirs...)))
+		w.AdmitNewRootsAtStartup(s.newEnrolledWatchRoots(enrolled.readable(append(append([]string(nil), skillDirs...), pluginDirs...))))
 	}
 	w.SetConfigSource(s.currentConfig)
 	w.SetRulePackSource(installScanRulePack)

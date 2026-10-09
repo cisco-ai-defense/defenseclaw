@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -146,6 +147,8 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 
 	granted, skipped, failed := 0, 0, 0
 	guardianOwned := inventoryDACLGuardianOwnedByHome(manifest)
+	enrolled := inventoryDACLEnrolledByHome(manifest)
+	ownHome, _ := os.UserHomeDir()
 	seenHome := map[string]struct{}{}
 	for _, target := range manifest.Targets {
 		home := filepath.Clean(strings.TrimSpace(target.UserHome))
@@ -162,6 +165,7 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 		// keeps the grants it always made.
 		grants := inventoryDACLAgentGrants(home, guardianOwned[key], ideInventory)
 		if ideInventory {
+			grants = append(grants, inventoryDACLComponentGrants(home, ownHome, enrolled[key])...)
 			grants = append(grants, inventoryDACLIDEGrants(home, guardianOwned[key])...)
 		}
 		for _, g := range grants {
@@ -210,6 +214,145 @@ func inventoryDACLGuardianOwnedByHome(manifest Manifest) map[string]map[string]s
 		}
 	}
 	return owned
+}
+
+// inventoryDACLEnrolledHome is what one profile is enrolled for: its
+// account and the connectors of its enabled rows.
+type inventoryDACLEnrolledHome struct {
+	sid        string
+	connectors []string
+}
+
+// inventoryDACLEnrolledByHome returns, per lowercased home, the account and
+// the connectors of that home's enabled manifest rows.
+func inventoryDACLEnrolledByHome(manifest Manifest) map[string]inventoryDACLEnrolledHome {
+	out := map[string]inventoryDACLEnrolledHome{}
+	for _, target := range manifest.Targets {
+		if target.Enabled != nil && !*target.Enabled {
+			continue
+		}
+		key := strings.ToLower(filepath.Clean(strings.TrimSpace(target.UserHome)))
+		name := strings.ToLower(strings.TrimSpace(target.Connector))
+		if key == "" || key == "." || name == "" {
+			continue
+		}
+		home := out[key]
+		if home.sid == "" {
+			home.sid = strings.TrimSpace(target.SID)
+		}
+		home.connectors = append(home.connectors, name)
+		out[key] = home
+	}
+	return out
+}
+
+// inventoryDACLComponentGrants lists the skill and plugin folders the managed
+// gateway's watcher watches for the connectors enrolled in home: the same
+// list (connector.ComponentDirsForHome), with the inherited read ACE, so a
+// skill added later is readable too. The dotdir grants above miss most of
+// them: ~\.copilot, ~\.config\opencode\skills, ~\.config\amp\skills,
+// ~\.config\agents\skills and Hermes' bundled plugins sit below a folder on
+// a managed hook path or outside the granted dotdirs, so the watcher logged
+// "Access is denied" and never scanned a skill there (GAP-0913). A folder
+// on an enrolled connector's managed hook path is left out, as is one whose
+// DACL is already the guardian's exact protected DACL: the guardian resets
+// a grant there (GAP-1210). Nothing is granted through a link.
+func inventoryDACLComponentGrants(home, ownHome string, enrolled inventoryDACLEnrolledHome) []inventoryDACLGrant {
+	if strings.TrimSpace(ownHome) == "" || len(enrolled.connectors) == 0 {
+		return nil
+	}
+	reg := connector.NewDefaultRegistry()
+	var managed []string
+	var dirs []string
+	// Connector paths resolve through a process-wide home override; hold it
+	// at this process profile so no other user resolution interleaves.
+	_ = connector.WithUserHomeDir(ownHome, func() error {
+		for _, name := range enrolled.connectors {
+			if conn, ok := reg.Get(name); ok {
+				skills, plugins := connector.ComponentDirsForHome(conn, ownHome, home)
+				dirs = append(append(dirs, skills...), plugins...)
+			}
+		}
+		return nil
+	})
+	for _, name := range enrolled.connectors {
+		if conn, ok := reg.Get(name); ok {
+			managed = append(managed, inventoryDACLManagedHookPaths(conn, home)...)
+		}
+	}
+	target, _ := windows.StringToSid(enrolled.sid)
+	seen := map[string]struct{}{}
+	var grants []inventoryDACLGrant
+	for _, dir := range dirs {
+		rel, err := filepath.Rel(home, dir)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) || filepath.IsAbs(rel) {
+			continue
+		}
+		key := strings.ToLower(rel)
+		if _, dup := seen[key]; dup || inventoryDACLOnManagedPath(dir, managed) {
+			continue
+		}
+		seen[key] = struct{}{}
+		grants = append(grants, inventoryDACLGrant{dir: rel, ensure: func(_ string, sid *windows.SID) (inventoryDACLResult, error) {
+			if target != nil && inventoryDACLGuardianProtected(filepath.Join(home, rel), target) {
+				return inventoryDACLSkippedMissing, nil
+			}
+			return ensureInventoryACEPinned(home, rel, sid, inventoryReadACE)
+		}})
+	}
+	return grants
+}
+
+// inventoryDACLManagedHookPaths lists the files and folders the guardian
+// keeps at their exact protected DACL for conn in home: its hook config and
+// managed footprint.
+func inventoryDACLManagedHookPaths(conn connector.Connector, home string) []string {
+	var paths []string
+	_ = connector.WithUserHomeDir(home, func() error {
+		setup := connector.SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), ManagedEnterprise: true}
+		paths = connector.HookConfigPathsForConnector(conn, setup)
+		if provider, ok := conn.(connector.AgentPathProvider); ok {
+			footprint := provider.AgentPaths(setup)
+			for _, group := range [][]string{footprint.PatchedFiles, footprint.GeneratedFiles, footprint.GeneratedExecutables, footprint.CreatedDirs} {
+				paths = append(paths, group...)
+			}
+		}
+		return nil
+	})
+	return paths
+}
+
+// inventoryDACLOnManagedPath reports whether dir is one of the managed paths
+// or a folder on the way to one.
+func inventoryDACLOnManagedPath(dir string, managed []string) bool {
+	for _, path := range managed {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, `..\`) && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+// inventoryDACLGuardianProtected reports whether path carries the guardian's
+// exact protected DACL for target.
+func inventoryDACLGuardianProtected(path string, target *windows.SID) bool {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return false
+	}
+	return validateWindowsUserPathProtectionACL(path, sd, dacl, target, true) == nil
 }
 
 // inventoryDACLGrant is one path of a profile, relative to it, and how it is
@@ -451,21 +594,9 @@ func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult,
 	return ensureInventoryACE(path, sid, inventoryListACE)
 }
 
-// ensureInventoryAttributesACE permits Lstat on an intermediate folder,
-// without a list or content right and without inheritance.
-func ensureInventoryAttributesACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
-	return ensureInventoryACE(path, sid, inventoryAttributesACE)
-}
-
 // inventorySelfMask lets the service read one folder's own listing or one
 // file's content, as Go's os.Open asks (GENERIC_READ), and nothing below.
 const inventorySelfMask = windows.FILE_GENERIC_READ
-
-// ensureInventorySelfACE grants `sid` inventorySelfMask on the folder or
-// regular file `path` alone (the IDE inventory's narrow grants).
-func ensureInventorySelfACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
-	return ensureInventoryACE(path, sid, inventorySelfACE)
-}
 
 func ensureInventoryACE(path string, sid *windows.SID, kind inventoryACE) (inventoryDACLResult, error) {
 	fi, err := os.Stat(path)
@@ -637,63 +768,6 @@ func revokeInventoryLegacyReadACEPinned(home, rel string, sid *windows.SID) (inv
 	}
 	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION,
 		nil, nil, narrowed, nil); err != nil {
-		return inventoryDACLSkippedMissing, fmt.Errorf("set narrow IDE DACL: %w", err)
-	}
-	return inventoryDACLGranted, nil
-}
-
-// revokeInventoryLegacyReadACE removes the service SID's former explicit tree
-// grant. Windows then drops its inherited copies from descendants. An explicit
-// deny for the service SID is left untouched rather than revoked.
-func revokeInventoryLegacyReadACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
-	fi, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return inventoryDACLSkippedMissing, nil
-	}
-	if err != nil {
-		return inventoryDACLSkippedMissing, err
-	}
-	if !fi.IsDir() {
-		return inventoryDACLSkippedMissing, nil
-	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return inventoryDACLSkippedMissing, err
-	}
-	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return inventoryDACLSkippedMissing, err
-	}
-	existing, _, err := sd.DACL()
-	if err != nil || existing == nil {
-		return inventoryDACLSkippedMissing, fmt.Errorf("inspect legacy IDE DACL: %v", err)
-	}
-	if !daclContainsInventoryReadACE(existing, sid) {
-		return inventoryDACLSkippedMissing, nil
-	}
-	for i := uint16(0); i < existing.AceCount; i++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(existing, uint32(i), &ace); err != nil {
-			return inventoryDACLSkippedMissing, err
-		}
-		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE &&
-			(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(sid) {
-			return inventoryDACLSkippedMissing, errors.New("service SID has an explicit deny on legacy IDE path")
-		}
-	}
-	entry := windows.EXPLICIT_ACCESS{
-		AccessMode: windows.REVOKE_ACCESS,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER,
-			TrusteeValue: windows.TrusteeValueFromSID(sid),
-		},
-	}
-	narrowed, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, existing)
-	if err != nil {
-		return inventoryDACLSkippedMissing, fmt.Errorf("remove legacy IDE grant: %w", err)
-	}
-	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION, nil, nil, narrowed, nil); err != nil {
 		return inventoryDACLSkippedMissing, fmt.Errorf("set narrow IDE DACL: %w", err)
 	}
 	return inventoryDACLGranted, nil

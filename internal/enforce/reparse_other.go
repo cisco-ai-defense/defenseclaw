@@ -15,3 +15,7 @@ import (
 func fileInfoIsLinkOrReparse(info fs.FileInfo) bool {
 	return info.Mode()&os.ModeSymlink != 0
 }
+
+// existingPathIsLinkFree is a Windows shortcut for validateExistingAncestors;
+// elsewhere that walk decides.
+func existingPathIsLinkFree(string) bool { return false }

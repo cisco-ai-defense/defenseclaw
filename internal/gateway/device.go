@@ -73,6 +73,7 @@ func loadOrCreateIdentityAt(target, dataDir string) (*DeviceIdentity, error) {
 		// mint provenance for one here: doing so would bless a key that this
 		// process did not create. Doctor reports that state as legacy until an
 		// operator performs an explicit continuity-aware recovery.
+		narrowDeviceIdentityACL(target, dataDir)
 		return parseIdentity(data)
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("gateway: read device key: %w", err)

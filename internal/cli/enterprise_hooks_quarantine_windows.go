@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -126,7 +127,7 @@ func enterpriseHookQuarantineCurrentConfig(startup *config.Config) (*config.Conf
 // the user who owns it, with remove. A signed-out user Windows gives no S4U
 // logon for defers the removal to the next sign-in.
 func removeEnrolledQuarantinedSource(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
-	roots := gateway.EnrolledWatchRoots(current)
+	roots := enrolledWatchRootsForGuardian(current)
 	dirs := make([]string, 0, len(roots))
 	for _, root := range roots {
 		dirs = append(dirs, root.Dir)
@@ -152,7 +153,7 @@ func removeEnrolledQuarantinedSource(current *config.Config, request enforce.Qua
 // users' watched folders and has grant give the gateway service read access
 // to the folder as the user who owns that watched folder (GAP-0825).
 func grantEnrolledAssetRead(current *config.Config, request enforce.QuarantineRemovalRequest, grant func(sid, home, path string) error) error {
-	roots := gateway.EnrolledWatchRoots(current)
+	roots := enrolledWatchRootsForGuardian(current)
 	dirs := make([]string, 0, len(roots))
 	for _, root := range roots {
 		dirs = append(dirs, root.Dir)
@@ -167,4 +168,23 @@ func grantEnrolledAssetRead(current *config.Config, request enforce.QuarantineRe
 		}
 	}
 	return fmt.Errorf("no enrolled user owns %s", rootDir)
+}
+
+// enrolledWatchRootsForGuardian resolves the enrolled watch roots while no
+// other goroutine of the guardian resolves connector paths for a user
+// (connector.WithUserHomeDir): those overrides are process-wide, and one in
+// the middle of the resolution dropped an Amp skills root, so the removal of
+// a quarantined Amp skill was refused as outside the watched folders
+// (GAP-0913).
+func enrolledWatchRootsForGuardian(current *config.Config) []gateway.EnrolledWatchRoot {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return gateway.EnrolledWatchRoots(current)
+	}
+	var roots []gateway.EnrolledWatchRoot
+	_ = connector.WithUserHomeDir(home, func() error {
+		roots = gateway.EnrolledWatchRoots(current)
+		return nil
+	})
+	return roots
 }

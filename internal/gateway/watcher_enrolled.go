@@ -35,7 +35,8 @@ var enrolledWatchPollInterval = 30 * time.Second
 // Its own home is the service profile, which holds no skill or plugin, so
 // its install watcher watches every enrolled user's connector folders, the
 // set a per-user gateway watches for its user (GAP-0132). The enumerator
-// grants the gateway service read access to those folders; on Linux and
+// grants the gateway service read access to those folders
+// (connector.ComponentDirsForHome, GAP-0913); on Linux and
 // macOS the service account has no such access, and the Secure Client
 // profile is never standalone.
 func watcherUsesEnrolledUserDirs(cfg *config.Config) bool {
@@ -64,6 +65,22 @@ type enrolledWatchSet struct {
 	live *enrolledMCPServers
 	// owners names the account of each enrolled home (GAP-0575).
 	owners []watcher.AssetOwner
+	// denied holds, lowercased, the watched folders the gateway could not
+	// stat. They stay watched, but are in dirsKey, so the poll restarts the
+	// watcher once the enumerator grants access, and readable leaves them
+	// out, so that watcher admits what they hold (GAP-0913).
+	denied map[string]bool
+}
+
+// readable returns dirs without the folders the gateway could not stat.
+func (e enrolledWatchSet) readable(dirs []string) []string {
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if !e.denied[strings.ToLower(dir)] {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // enrolledMCPServers is the MCP server list a running watcher reads.
@@ -94,6 +111,9 @@ func (e enrolledWatchSet) dirsKey() string {
 	}
 	for _, dir := range e.pluginDirs {
 		parts = append(parts, "p:"+strings.ToLower(dir))
+	}
+	for dir := range e.denied {
+		parts = append(parts, "d:"+dir)
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\n")
@@ -141,7 +161,7 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 }
 
 func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry, wcfg config.GatewayWatcherConfig, serviceHome string, stat func(string) (os.FileInfo, error)) enrolledWatchSet {
-	set := enrolledWatchSet{roots: map[string]string{}, live: &enrolledMCPServers{}}
+	set := enrolledWatchSet{roots: map[string]string{}, live: &enrolledMCPServers{}, denied: map[string]bool{}}
 	defer func() { set.live.set(set.mcp) }()
 	if cfg == nil || reg == nil || strings.TrimSpace(serviceHome) == "" {
 		return set
@@ -193,17 +213,9 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !ok {
 			continue
 		}
-		componentScanner, ok := conn.(connector.ComponentScanner)
-		if !ok || !componentScanner.SupportsComponentScanning() {
-			continue
-		}
-		components := componentScanner.ComponentTargets("")
+		skillDirs, pluginDirs := connector.ComponentDirsForHome(conn, serviceHome, target.home)
 		add := func(dirs []string, seen map[string]bool, out *[]string) {
-			for _, dir := range dirs {
-				userDir, ok := rebaseUnderHome(dir, serviceHome, target.home)
-				if !ok {
-					continue
-				}
+			for _, userDir := range dirs {
 				key := strings.ToLower(userDir)
 				if seen[key] {
 					continue
@@ -214,6 +226,7 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 				}
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[watcher] cannot stat enrolled directory %s: %v\n", userDir, err)
+					set.denied[key] = true
 				}
 				seen[key] = true
 				*out = append(*out, userDir)
@@ -223,10 +236,10 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 			}
 		}
 		if wcfg.Skill.Enabled {
-			add(components["skill"], seenSkill, &set.skillDirs)
+			add(skillDirs, seenSkill, &set.skillDirs)
 		}
 		if wcfg.Plugin.Enabled {
-			add(components["plugin"], seenPlugin, &set.pluginDirs)
+			add(pluginDirs, seenPlugin, &set.pluginDirs)
 		}
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
@@ -286,7 +299,7 @@ func EnrolledWatchRoots(cfg *config.Config) []EnrolledWatchRoot {
 				home = strings.TrimSpace(target.Result.UserHome)
 			}
 			if target.OK && strings.TrimSpace(target.SID) != "" && filepath.IsAbs(home) {
-				if _, ok := rebaseUnderHome(dir, home, home); ok {
+				if _, ok := connector.RebaseUnderHome(dir, home, home); ok {
 					roots = append(roots, EnrolledWatchRoot{Dir: dir, Home: filepath.Clean(home), SID: strings.TrimSpace(target.SID)})
 					break
 				}
@@ -310,19 +323,6 @@ func enrolledRootPrecedence(connectorName string) int {
 	default:
 		return 3
 	}
-}
-
-// rebaseUnderHome moves path from below fromHome to the same place below
-// toHome. Paths outside fromHome are not a user's and are refused.
-func rebaseUnderHome(path, fromHome, toHome string) (string, bool) {
-	if !filepath.IsAbs(path) || !filepath.IsAbs(fromHome) {
-		return "", false
-	}
-	rel, err := filepath.Rel(filepath.Clean(fromHome), filepath.Clean(path))
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", false
-	}
-	return filepath.Join(toHome, rel), true
 }
 
 // pollEnrolledWatchSet re-reads the enrolled watch set until ctx ends. A

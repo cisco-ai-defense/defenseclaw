@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -25,8 +26,9 @@ import (
 // removal trust check there expects the exact protected DACL, so the extra
 // ACEs made it refuse to remove the registrations (GAP-1765). The service
 // SIDs are derived from the names, so this works after the services are
-// deleted. The IDE plugin inventory's folders and files are revoked on
-// every profile, whatever the profile granted. A missing path is skipped;
+// deleted. The IDE plugin inventory's folders and files, and every
+// connector skill and plugin folder (GAP-0913), are revoked on every
+// profile, whatever the profile granted. A missing path is skipped;
 // per-path failures are returned.
 func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 	names := []string{productionGatewayServiceName}
@@ -58,6 +60,7 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 		for _, ide := range inventoryDACLIDEGrants(home, nil) {
 			homeDirs = append(homeDirs, ide.dir)
 		}
+		homeDirs = append(homeDirs, inventoryDACLComponentDirs(home)...)
 		for _, dir := range homeDirs {
 			if err := revokeInventoryACEs(filepath.Join(home, dir), sids); err != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", filepath.Join(home, dir), err))
@@ -134,4 +137,29 @@ func daclHasACEFor(dacl *windows.ACL, sids []*windows.SID) bool {
 		}
 	}
 	return false
+}
+
+// inventoryDACLComponentDirs lists, relative to home, the skill and plugin
+// folders of every connector, the folders inventoryDACLComponentGrants can
+// grant.
+func inventoryDACLComponentDirs(home string) []string {
+	ownHome, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	reg := connector.NewDefaultRegistry()
+	var out []string
+	for _, name := range reg.Names() {
+		conn, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		skills, plugins := connector.ComponentDirsForHome(conn, ownHome, home)
+		for _, dir := range append(skills, plugins...) {
+			if rel, err := filepath.Rel(home, dir); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+				out = append(out, rel)
+			}
+		}
+	}
+	return out
 }
