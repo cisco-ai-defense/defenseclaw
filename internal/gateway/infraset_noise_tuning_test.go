@@ -158,9 +158,6 @@ func TestBuiltInProfilesRetainDestructiveEvidenceWithoutUniversalBlocking(t *tes
 				})
 				matched := findingWithID(findings, test.ruleID)
 				if matched == nil {
-					if test.ruleID == "CMD-CHMOD-WORLD" && profile != "strict" {
-						return
-					}
 					t.Fatalf("%s finding missing: %+v", test.ruleID, findings)
 				}
 				if matched.contributesToEnforcement() {

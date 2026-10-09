@@ -253,7 +253,7 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     sudoOrRootPrivilegeDiscoveryPrerequisite,
 		suppressFallback: sudoOrRootPrivilegeDiscoverySafeNegative,
 	},
-	"CMD-CHMOD-WORLD": detectionOnlyReconImpactOwnerWithAliases(
+	"CMD-CHMOD-WORLD": alertOnlyReconImpactOwnerWithAliases(
 		actionfacts.OperationPermissionChange,
 		accessControlMutationDisposition,
 		"CMD-CHOWN-ROOT",
@@ -385,13 +385,13 @@ func reconImpactOwnerWithAliases(
 	return owner
 }
 
-func detectionOnlyReconImpactOwnerWithAliases(
+func alertOnlyReconImpactOwnerWithAliases(
 	operation actionfacts.OperationKind,
 	disposition reconImpactDisposition,
 	aliases ...string,
 ) semanticOwner {
 	owner := reconImpactOwnerWithAliases(operation, disposition, aliases...)
-	owner.detectionOnly = true
+	owner.alertOnly = true
 	return owner
 }
 
@@ -748,8 +748,12 @@ func accessControlMutationDisposition(
 					},
 				), true
 			}
-			return publicReadWrite &&
-				commandOwnsProtectedSecurityPath(facts, command.ID), true
+			return publicReadWrite && commandOwnsPath(
+				facts, command.ID, actionfacts.PathAccessMetadata,
+				func(candidate actionfacts.PathFact) bool {
+					return !isDefiniteFixturePath(facts, candidate)
+				},
+			), true
 		}
 		if len(mode) < 3 || len(mode) > 4 {
 			return false, false
@@ -775,6 +779,14 @@ func accessControlMutationDisposition(
 					return privateSecurityMaterial(facts, candidate)
 				},
 			)
+		}
+		if parsed&0002 != 0 {
+			return commandOwnsPath(
+				facts, command.ID, actionfacts.PathAccessMetadata,
+				func(candidate actionfacts.PathFact) bool {
+					return !isDefiniteFixturePath(facts, candidate)
+				},
+			), true
 		}
 		return dangerous && commandOwnsProtectedSecurityPath(facts, command.ID), true
 	case "chown":
