@@ -965,6 +965,12 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		strings.Contains(got[0], "SSSD") || !strings.Contains(got[0], `assignment 1: group "dc-rename-me@dclab.test"`) {
 		t.Fatalf("warnings = %q while the directory does not answer, want one note naming the groups", got)
 	}
+	// macOS has no getent: its note names the macOS commands (GAP-1107).
+	silent := func(context.Context, string) (bool, error) { return false, nil }
+	if got := unknownAssignmentGroupsForOS(context.Background(), assignments, silent, nil, "darwin"); len(got) != 1 ||
+		strings.Contains(got[0], "getent") || !strings.Contains(got[0], "id -Gn") {
+		t.Fatalf("macOS note = %q, want the macOS commands", got)
+	}
 	profileGroupExists = func(_ context.Context, name string) (bool, error) { return name == "domain users@dclab.test", nil }
 	set = &guardrailProfileSet{assignments: assignments}
 	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 4 {

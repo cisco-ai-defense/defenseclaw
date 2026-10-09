@@ -413,8 +413,8 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 			named = append(named[:profileQuietGroupsNamed:profileQuietGroupsNamed], fmt.Sprintf("%d more", len(named)-profileQuietGroupsNamed))
 		}
 		warnings = append(warnings, fmt.Sprintf("could not confirm group names written for %s by this spelling (%s): renamed or "+
-			"deleted in the directory, another domain prefix, or the lookup is unavailable, so these may select nobody; check the "+
-			"qualified name with getent group", domain, strings.Join(named, ", ")))
+			"deleted in the directory, another domain prefix, or the lookup is unavailable, so these may select nobody; %s",
+			domain, strings.Join(named, ", "), groupNameCheckHint(platform)))
 	}
 	if skippedLimit {
 		warnings = append(warnings, fmt.Sprintf("group warning check incomplete: only the first %d distinct groups were checked; later assignment groups were not checked", profileGroupCheckMax))
@@ -423,6 +423,17 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 		warnings = append(warnings, "group warning check incomplete: the directory check timed out; later assignment groups were not checked")
 	}
 	return warnings
+}
+
+// groupNameCheckHint names the command that shows how this host spells a
+// group: getent on Linux. macOS has no getent: an account's groups are listed
+// by id -Gn, as DOMAIN\name for an Active Directory group of a bound Mac,
+// and one group by dseditgroup (GAP-1107).
+func groupNameCheckHint(platform string) string {
+	if platform == "darwin" {
+		return `check the exact name with id -Gn <user> (an Active Directory group reads DOMAIN\name) or dseditgroup -o read <group>`
+	}
+	return "check the qualified name with getent group"
 }
 
 // directoryAnswers reports whether the host knows the Domain Users group of
