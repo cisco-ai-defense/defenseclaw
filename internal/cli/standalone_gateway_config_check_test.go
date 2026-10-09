@@ -199,7 +199,7 @@ func TestStandaloneGatewayConfigCheckRefusesJSONLDirectoryWithMissingToken(t *te
 		"      token_env: DC_TEST_UNSET_HEC_TOKEN\n" +
 		"    - name: local-copy\n      kind: jsonl\n      path: " + destination + "\n"
 	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
-	if err == nil || !strings.Contains(err.Error(), destination) || !strings.Contains(err.Error(), "regular file") {
+	if err == nil || !strings.Contains(err.Error(), destination) || !strings.Contains(err.Error(), "which is a directory") {
 		t.Fatalf("JSONL directory with unresolved service token = %v, want path refusal", err)
 	}
 }
