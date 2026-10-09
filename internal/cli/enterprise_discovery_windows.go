@@ -12,7 +12,14 @@
 
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+)
 
 func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsDiscoveryCommand())
@@ -69,4 +76,19 @@ deployment does not run the skill or MCP scanners.`,
 	addWindowsDiscoveryUserFlag(cmd, &user)
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print every record as JSON")
 	return cmd
+}
+
+// platformDiscoveryAccountIDs resolves a qualified --user (DOMAIN\name,
+// .\name, COMPUTER\name, a UPN) to the SID the LSA names it, as
+// profile-explain and policy show do.
+func platformDiscoveryAccountIDs(user string) []string {
+	user = strings.TrimSpace(user)
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	sid, _, err := gateway.LookupWindowsAccount(user)
+	if err != nil || sid == "" {
+		return nil
+	}
+	return []string{sid}
 }

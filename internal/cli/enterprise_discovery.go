@@ -316,9 +316,13 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	// Secure Client keeps the exact account name or SID match and its
 	// message (issue #1092).
 	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	account := useridentity.NewAccountFilter(user)
+	if user != "" && !secureClient {
+		account = useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+	}
 	for _, signal := range usage.Signals {
 		name := signal.UserName
-		matches := useridentity.AccountFilterMatches(user, signal.UserID, name)
+		matches := account.Matches(signal.UserID, name)
 		if secureClient {
 			matches = strings.EqualFold(user, name) || strings.EqualFold(user, signal.UserID)
 		}
@@ -362,6 +366,11 @@ func addWindowsDiscoveryUserFlag(cmd *cobra.Command, user *string) {
 	_ = cmd.Flags().SetAnnotation("user", secureClientUsageAnnotation, []string{"list one account's signals (account name or SID)"})
 }
 
+// enterpriseDiscoveryAccountIDs resolves a qualified --user (DOMAIN\name,
+// .\name, user@domain) to the id of the account the OS names so;
+// replaceable in tests.
+var enterpriseDiscoveryAccountIDs = platformDiscoveryAccountIDs
+
 // windowsDiscoveryAccountNotFound says why --user selected nothing: the
 // scan is off, found nothing yet, or found other accounts only (GAP-0079).
 func windowsDiscoveryAccountNotFound(user string, usage enterpriseGatewayAIUsage) string {
@@ -392,6 +401,11 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 		return err
 	}
 	report := enterpriseDiscoveryReport{Spool: dir, Accounts: []enterpriseDiscoveryAccount{}}
+	// The view matches --user as agent-identities and ide-plugins do: the
+	// bare name the records carry, user@domain as id prints it, DOMAIN\name
+	// and the uid all name the account (GAP-1081).
+	account := useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
+	scanned := 0
 	for _, entry := range entries {
 		uid, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || uid == "" || strings.Trim(uid, "0123456789") != "" {
@@ -402,7 +416,8 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 			report.Errors = append(report.Errors, fmt.Sprintf("uid %s: %v", uid, err))
 			continue
 		}
-		if user != "" && user != record.User && user != strconv.Itoa(record.UID) {
+		scanned++
+		if !account.Matches(strconv.Itoa(record.UID), record.User) {
 			continue
 		}
 		accountUID := record.UID
@@ -413,7 +428,9 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 	}
 	sort.Slice(report.Accounts, func(i, j int) bool { return *report.Accounts[i].UID < *report.Accounts[j].UID })
 	if user != "" && len(report.Accounts) == 0 && len(report.Errors) == 0 {
-		return fmt.Errorf("no AI Discovery record for account %q in %s; the account is not enrolled or has not been scanned yet", user, dir)
+		return fmt.Errorf("no AI Discovery record for account %q in %s (%d account(s) scanned); name the account as its bare "+
+			"name, user@domain as id prints it, DOMAIN\\name or its uid. If that is the account, it is not enrolled or has not "+
+			"been scanned yet", user, dir, scanned)
 	}
 	return writeEnterpriseDiscoveryReport(w, report, user, asJSON,
 		fmt.Sprintf("AI Discovery inventory from the hook guardian's per-user scans (%s)", dir))

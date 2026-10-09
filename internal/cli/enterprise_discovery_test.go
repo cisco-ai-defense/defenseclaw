@@ -96,7 +96,29 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 		t.Fatalf("--json --user 502 = %s (%v)", asJSON.String(), err)
 	}
 
-	if err := writeEnterpriseDiscovery(&bytes.Buffer{}, dir, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery record for account "nobody"`) {
+	// GAP-1081: an SSSD account recorded as id prints it is selected by the
+	// bare name the records and boards carry, in any case, and by
+	// DOMAIN\name as NSS resolves it; a name that selects nothing lists the
+	// spellings --user takes instead of saying the account is not enrolled.
+	sssd := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: 94403992, User: "dcad-o4u1@dclab.test", UpdatedAt: scanned,
+		Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: []inventory.AISignal{{Name: "Continue", Category: "editor_extension"}}}}
+	data, _ := json.Marshal(sssd)
+	if err := os.WriteFile(filepath.Join(dir, "94403992.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousIDs := enterpriseDiscoveryAccountIDs
+	t.Cleanup(func() { enterpriseDiscoveryAccountIDs = previousIDs })
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\dcad-o4u1`: {"94403992"}}[user]
+	}
+	for _, spelling := range []string{"dcad-o4u1", "DCAD-O4U1@DCLAB.TEST", `DCLAB\dcad-o4u1`, "94403992"} {
+		var picked bytes.Buffer
+		if err := writeEnterpriseDiscovery(&picked, dir, spelling, false); err != nil || !strings.Contains(picked.String(), "dcad-o4u1@dclab.test (uid 94403992)") {
+			t.Fatalf("--user %s = %v:\n%s", spelling, err, picked.String())
+		}
+	}
+	if err := writeEnterpriseDiscovery(&bytes.Buffer{}, dir, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery record for account "nobody"`) ||
+		!strings.Contains(err.Error(), "user@domain as id prints it") {
 		t.Fatalf("an unknown account = %v", err)
 	}
 	var empty bytes.Buffer

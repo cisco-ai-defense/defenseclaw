@@ -12,6 +12,33 @@
 
 package cli
 
+import (
+	"context"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+)
+
 // pinEnterpriseDiscoveryEnv points root's discovery view at the standalone
 // deployment's config, as the policy commands do (GAP-1144).
 func pinEnterpriseDiscoveryEnv() error { return pinStandaloneManagedEnv() }
+
+// platformDiscoveryAccountIDs resolves a qualified --user to its uid the way
+// profile-explain and policy show do: NSS, taking an answer in another
+// spelling only when it is the same account (unixidentity.LookupAccountSpelling).
+func platformDiscoveryAccountIDs(user string) []string {
+	user = strings.TrimSpace(user)
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	account, err := unixidentity.LookupAccountSpelling(unixidentity.Default(ctx), user, unixidentity.DirectoryFactsFunc(ctx))
+	if err != nil {
+		return nil
+	}
+	return []string{strconv.Itoa(account.UID)}
+}
