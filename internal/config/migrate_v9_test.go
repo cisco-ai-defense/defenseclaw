@@ -84,14 +84,15 @@ func TestMigrateV9RetriesUnreadableCustomScannerPolicy(t *testing.T) {
 	}
 }
 
-// The installer's rollback copy covers the data home only. A data.json and
-// audit.db that policy_dir and data_dir place elsewhere keep their v8 state, so
-// restoring config.yaml.v8.bak leaves a 1.0 gateway its policy data.
+// The installer snapshots only config.yaml when DEFENSECLAW_CONFIG is outside
+// the data home. Its neighboring policy and audit files must keep their v8
+// state so restoring config.yaml leaves rollback enforcement intact.
 func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	home, elsewhere := t.TempDir(), t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)
-	configPath := filepath.Join(home, "config.yaml")
+	configPath := filepath.Join(elsewhere, "config.yaml")
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
 	source := "config_version: 8\ndata_dir: " + elsewhere + "\npolicy_dir: " + filepath.Join(elsewhere, "policies") +
 		"\nobservability: {}\n"
 	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
@@ -257,6 +258,7 @@ func TestMigrateV9RefusesFailedRulePackSeed(t *testing.T) {
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
 	configPath := filepath.Join(dir, "config.yaml")
 	source := "config_version: 8\ndata_dir: " + dir + "\n" + `# keep this comment
 update_check: false

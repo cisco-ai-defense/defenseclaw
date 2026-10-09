@@ -805,9 +805,9 @@ func freeSiblingPath(path string) string {
 }
 
 // leftOutsideRollbackCopy reports whether the migration must leave path as it is. The
-// installer saves a rollback copy of the data home only (the directory holding
-// config.yaml, and DEFENSECLAW_HOME), so a failed upgrade or `defenseclaw
-// rollback` puts config.yaml back but not a data.json, Rego module,
+// installer saves a rollback copy of DEFENSECLAW_HOME, plus only the config
+// file when DEFENSECLAW_CONFIG points outside that home. A failed upgrade
+// or `defenseclaw rollback` puts config.yaml back but not a data.json, Rego module,
 // custom-providers.json or audit.db that policy_dir, data_dir or
 // observability.local.path place elsewhere. Those stay as they are (their
 // content is already in config.yaml, and a 1.0 gateway still finds them) and a
@@ -818,17 +818,12 @@ func (m *v9Migrator) leftOutsideRollbackCopy(path string) bool {
 	if path == "" || m.in.Managed {
 		return false
 	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		for _, home := range []string{filepath.Dir(m.configPath), DefaultDataPath()} {
-			resolvedHome, homeErr := filepath.EvalSymlinks(home)
-			if homeErr != nil {
-				continue
-			}
-			rel, relErr := filepath.Rel(resolvedHome, resolvedPath)
-			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return false
-			}
+	resolvedPath, pathErr := filepath.EvalSymlinks(path)
+	resolvedHome, homeErr := filepath.EvalSymlinks(DefaultDataPath())
+	if pathErr == nil && homeErr == nil {
+		rel, relErr := filepath.Rel(resolvedHome, resolvedPath)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
 		}
 	}
 	m.note("%s is outside the data home, so the upgrade's rollback copy does not cover it; it was left as it is", path)
