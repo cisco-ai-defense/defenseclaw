@@ -10022,6 +10022,17 @@ function Restore-DefenseClawTransaction {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
+    # The Enumerator service is set alongside Guardian and quiesced in the
+    # same per-name loop below. Prove it is owned (or absent) BEFORE any
+    # Stop/Set-StartMode runs so a foreign same-name service cannot slip
+    # through the rollback-time mutation window.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName `
+        -GuardianServiceName ([string]$snapshot.guardian_service)
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $enumeratorServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Enumerator
     if (-not [string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
         Assert-DefenseClawCMIDBrokerServiceOrAbsent `
             -Name $Layout.BrokerServiceName `
@@ -10495,6 +10506,18 @@ function Start-DefenseClawTransactionServices {
         -Services $Services `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    # Resolve the enumerator service name once up front so the ownership
+    # assertion below and the enumerator block further down share one
+    # authoritative identity.
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    # Prove enumerator ownership (or absence) BEFORE the quiesce loop
+    # touches it. A foreign same-name service must not slip through the
+    # recovery/transaction-start mutation window.
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $enumeratorServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Enumerator
     # Reassert disabled and stopped before activation so a queued SCM failure
     # action cannot race recovery. Running+disabled is a valid pre-repair
     # snapshot, so services that must run are temporarily demand-started,
@@ -10637,7 +10660,8 @@ function Start-DefenseClawTransactionServices {
     #   1. Temporarily set demand-start (mode 3).
     #   2. Start-Service.
     #   3. Set disabled (mode 4) — SCM allows this while running.
-    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
+    # $enumeratorServiceName was resolved and ownership-asserted at
+    # function entry; reuse it here.
     $enumeratorState = $states[$enumeratorServiceName]
     $enumeratorService = Get-DefenseClawServiceChecked `
         -Name $enumeratorServiceName
@@ -13264,6 +13288,14 @@ function Recover-DefenseClawQuiescingIntent {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
+    # Enumerator ownership MUST be proven before the quiesce loop touches
+    # the service; a foreign same-name service must not slip through the
+    # recovery-time mutation window.
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $enumeratorServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath `
+        -ExpectedManifestPath $Layout.ManifestPath `
+        -Enumerator
     if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
         Assert-DefenseClawCMIDBrokerServiceOrAbsent `
             -Name $Layout.BrokerServiceName `
