@@ -64,12 +64,27 @@ dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags)
     if (sess->cap_count < DCLAW_SESSION_HISTORY_DEPTH) sess->cap_count++;
     sess->last_activity = hal_tick_ms();
 
-    /* Check all sequence rules */
+    /* Check compiled-in sequence rules */
     dclaw_action_t worst = DCLAW_ACTION_ALLOW;
     for (size_t i = 0; i < sequence_rules_count; i++) {
         if (match_sequence(sess, &sequence_rules[i])) {
             if (sequence_rules[i].action > worst) {
                 worst = (dclaw_action_t)sequence_rules[i].action;
+            }
+        }
+    }
+
+    /* H-5 fix: Also check OTA-pushed runtime sequence rules.
+     * These may differ from compiled-in rules after a policy OTA.
+     * The rt_policy struct uses an anonymous struct with the same layout
+     * as dclaw_sequence_rule_t, so we cast for match_sequence(). */
+    dclaw_state_t *st = dclaw_get_state();
+    dclaw_policy_table_t *rt = &st->rt_policy;
+    for (size_t i = 0; i < rt->sequence_rules_count; i++) {
+        const dclaw_sequence_rule_t *rule = (const dclaw_sequence_rule_t *)&rt->sequence_rules[i];
+        if (match_sequence(sess, rule)) {
+            if (rule->action > worst) {
+                worst = (dclaw_action_t)rule->action;
             }
         }
     }

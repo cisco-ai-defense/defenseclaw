@@ -456,13 +456,23 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	binary.BigEndian.PutUint64(hmacBytes, hb.AuditHeadHMAC)
 	dev.LastAuditHMAC = hmacBytes
 
-	// Persist updated state
+	// Persist updated state. For lockdown transitions, retry once on failure
+	// to ensure the security-critical status survives gateway restart (H-2 fix).
 	if fm.store != nil {
 		if err := fm.store.SaveDevice(dev); err != nil {
 			log.Printf("[fleet] store error: %v", err)
-			// M-10: Increment metric counter so store errors are observable.
 			if fm.onStoreError != nil {
 				fm.onStoreError()
+			}
+			// H-2 fix: Retry once for security-critical status transitions.
+			// If lockdown is lost due to store failure, a compromised device
+			// escapes lockdown after gateway restart.
+			if dev.Status == StatusLockdown || dev.Status == StatusDegraded {
+				time.Sleep(50 * time.Millisecond)
+				if retryErr := fm.store.SaveDevice(dev); retryErr != nil {
+					log.Printf("[fleet] CRITICAL: failed to persist %s status for device %d after retry: %v",
+						dev.Status, dev.DeviceID, retryErr)
+				}
 			}
 		}
 	}
