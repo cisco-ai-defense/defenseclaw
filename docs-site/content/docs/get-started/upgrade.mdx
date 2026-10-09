@@ -312,6 +312,7 @@ installs the policy.
 | `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
 | `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
 | `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |
+| `Could not copy <file> (...)` then `Could not save the current install; nothing was changed` (Windows) | The installer could not make the rollback copy of a file in `~/.defenseclaw`, such as the `audit.db` a failed 0.8.x Setup left. The message gives Windows' reason and any DefenseClaw program still running. Stop that program (`Stop-Process -Id <PID>`), or give your account access to the file (`icacls <file>` shows who has it), then run the installer again. Nothing was changed. |
 
 ## Renamed and removed connectors
 
