@@ -517,9 +517,11 @@ does not run the skill or MCP scanners. The `discovery` view names each
 skill and MCP server per user. Your observability destinations get the
 `ai_component.discovered`, `changed` and `removed` records with the user
 (`user.id`, `defenseclaw.user.name`) but without the skill or MCP server
-name: the per-entry `ai_component.observed` records stay in the local
-inventory, so read the names with `discovery --user <account> --json`. The
-one exception is the connector address: with `ai_discovery.include_user_email`
+name. Discovery does not emit per-entry `ai_component.observed` records;
+read the full inventory with `discovery --user <account> --json`. Skill and
+MCP names can still reach destinations through hook decision and asset-policy
+audit rows when assets are used, scanned, admitted or rejected. With
+`ai_discovery.include_user_email`
 on, one `ai_component.observed` record per account and connector carries the
 account's Claude Code or Codex address, without entry names. See
 [AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)

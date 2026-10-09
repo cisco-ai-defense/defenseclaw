@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 DOCS = Path(__file__).resolve().parents[1] / "content/docs/enterprise"
+DOC_ROOT = DOCS.parent
 
 
 class IdentityGuideExamplesTest(unittest.TestCase):
@@ -26,6 +27,19 @@ class IdentityGuideExamplesTest(unittest.TestCase):
             "enterprise macos profile-explain",
             text,
         )
+
+    def test_discovery_pages_distinguish_inventory_from_destination_audits(self):
+        pages = [DOCS / f"{system}.mdx" for system in ("windows", "macos", "linux")]
+        pages.append(DOC_ROOT / "ai-discovery.mdx")
+        for page in pages:
+            with self.subTest(page=page.name):
+                text = page.read_text()
+                self.assertTrue(
+                    re.search(r"does not emit\s+per-entry `ai_component\.observed`", text), page.name
+                )
+                self.assertTrue(
+                    re.search(r"hook\s+decision and asset-policy", text), page.name
+                )
 
 
 if __name__ == "__main__":
