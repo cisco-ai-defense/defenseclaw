@@ -140,8 +140,13 @@ For a local-group profile assignment, upload
 `packaging/mdm/intune/linux/sync-local-group.sh` as a **second** root platform
 script. Edit `GROUP_NAME` and the complete `MEMBERS` array first; the script
 creates the local group if needed and updates its supplementary members only
-when they differ. A Linux Intune enrollment does not import Entra group
-membership into the OS, so maintain this local list from your identity source.
+when they differ. It refuses pre-existing groups unless a root administrator has
+reviewed and claimed them by writing their numeric GID to
+`/var/lib/defenseclaw-intune/local-groups/<group-name>` (root-only directory and
+file). Use a dedicated group; claiming a system or privileged group would let the
+script replace its entire supplementary member list.
+
+A Linux Intune enrollment does not import Entra group membership into the OS, so maintain this local list from your identity source.
 Changing it affects `profile-explain` after the host's directory cache refresh;
 live hooks may keep the previous profile for up to 15 minutes.
 

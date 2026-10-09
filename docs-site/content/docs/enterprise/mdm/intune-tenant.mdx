@@ -201,6 +201,8 @@ and keeps its behavior as it was.
 For that Linux pattern, edit and upload
 `packaging/mdm/intune/linux/sync-local-group.sh` as a separate root platform
 script. Its `MEMBERS` setting is the complete local group membership list;
+the script refuses an existing group it did not create or a root administrator
+did not explicitly claim (see the [Linux setup](/docs/enterprise/mdm/intune-linux)).
 Intune enrollment alone does not synchronize Entra group membership to Linux.
 | macOS, enrolled with Company Portal | Local accounts; with Platform SSO, local accounts linked to Entra users | Directory `local`; with Platform SSO and standalone enterprise, `entra_id` and the UPN for a registered account (observed live) | macOS groups only: Platform SSO gives no Entra groups (observed live; [Entra on macOS](/docs/enterprise/identity-entra-id#4-macos-platform-sso)) |
 
