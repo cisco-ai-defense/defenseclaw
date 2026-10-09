@@ -73,6 +73,13 @@ f.commands.exists(c,
     in c.operations)
 ```
 
+A command whose program DefenseClaw doesn't model, such as `hostname` or
+most third-party tools, has a known argv but no known meaning for its
+operands, so its paths and operations are unknown. A rule that reads only
+`c.program`, `c.argv` and `c.argv_complete` (inside `exists()` or `in`)
+still matches it and can block. A rule that also needs its paths or
+operations doesn't match it.
+
 </Tab>
 
 <Tab value="Path">

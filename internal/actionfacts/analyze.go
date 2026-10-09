@@ -219,10 +219,26 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			if rewrite, ok := rewriteTrustedPOSIXHomeTilde(command, home); ok {
 				if resolved := parse(rewrite.source); resolved.status == StatusComplete {
 					parsed = resolved
-					homeTildeOperands = rewrite.tildeOperands
+					// A Windows drive home (GAP-0912) keeps its rewritten
+					// spelling: the POSIX parse cannot resolve a drive path,
+					// so its path facts have no Resolved for the respell.
+					if strings.HasPrefix(home, "/") {
+						homeTildeOperands = rewrite.tildeOperands
+					}
 					for _, rewritten := range resolved.commands {
 						homeRewrittenCommands[rewritten.ID] = struct{}{}
 					}
+				}
+			}
+		}
+		if parsed.status == StatusPartial &&
+			(dialect == DialectPowerShell || dialect == DialectCMD) {
+			// The same for $HOME, ~ and %USERPROFILE% under a Windows
+			// ActiveHome (GAP-0912).
+			home, _ := normalizeActiveHome(input.ActiveHome)
+			if rewrite, ok := rewriteTrustedWindowsShellHome(command, home, dialect); ok {
+				if resolved := parse(rewrite); resolved.status == StatusComplete {
+					parsed = resolved
 				}
 			}
 		}

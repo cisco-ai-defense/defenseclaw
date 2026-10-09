@@ -67,17 +67,47 @@ var shellStateBuiltins = map[string]bool{
 // arguments, operations and wrappers only where more of them can only keep
 // a match, and never reads effect (semantic.Program.StaticArgvSubsetSafe).
 func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, partialArgv bool, ok bool) {
+	return staticCommandSubset(input, facts, false)
+}
+
+// UnmodeledProgramArgvReduction returns a complete argv-only view of a
+// partial POSIX action whose uncertainty includes a program with no modeled
+// operand grammar, such as `hostname` or `terraform plan`. ActionFacts cannot
+// say what such a program's operands mean, so the action stays partial, and
+// a custom CEL rule about the program and its argv never ran: its regex
+// pattern was used instead (GAP-0912). facts must be Analyze(input).
+//
+// The view keeps the commands StaticCommandSubsetReduction would keep, each
+// reduced as its partial-argv commands are: only static argv words, effect
+// execute, and no operations, wrappers, paths, network facts or data flows. A
+// command whose every word is static keeps ArgvComplete, since its argv is
+// exactly what runs. A caller may count a match on the view only for an
+// expression that is semantic.Program.StaticArgvSubsetSafe; a non-match
+// proves nothing.
+func UnmodeledProgramArgvReduction(input Input, facts Facts) (Facts, bool) {
+	view, _, ok := staticCommandSubset(input, facts, true)
+	return view, ok
+}
+
+// staticCommandSubset is StaticCommandSubsetReduction, or with unmodeled
+// set, UnmodeledProgramArgvReduction.
+func staticCommandSubset(input Input, facts Facts, unmodeled bool) (view Facts, partialArgv bool, ok bool) {
 	defer func() {
 		if recover() != nil {
 			view, partialArgv, ok = Facts{}, false, false
 		}
 	}()
+	required := IssueDynamicWord
+	if unmodeled {
+		required = IssueUnknownOperandGrammar
+	}
 	if facts.Parse.Status != StatusPartial || facts.Parse.Dialect != DialectPOSIX ||
-		len(facts.Commands) == 0 || !containsIssue(facts.Parse.Issues, IssueDynamicWord) {
+		len(facts.Commands) == 0 || !containsIssue(facts.Parse.Issues, required) {
 		return Facts{}, false, false
 	}
 	for _, issue := range facts.Parse.Issues {
-		if issue != IssueDynamicWord && issue != IssueUnsupportedConstruct {
+		if issue != IssueDynamicWord && issue != IssueUnsupportedConstruct &&
+			(!unmodeled || issue != IssueUnknownOperandGrammar) {
 			return Facts{}, false, false
 		}
 	}
@@ -126,7 +156,13 @@ func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, partial
 		// an && or || list member is judged as if it runs.
 		command.ControlFlowUncertain = false
 		command.ControlFlowOperator = ControlFlowOperatorNone
-		if static {
+		if static && unmodeled {
+			// The argv is exact; what the operands mean is not known.
+			command.ArgvComplete = true
+			command.Effect = EffectExecute
+			command.Operations = nil
+			command.Wrappers = nil
+		} else if static {
 			kept[command.ID] = true
 			command.ArgvComplete = true
 		} else {
@@ -150,6 +186,17 @@ func StaticCommandSubsetReduction(input Input, facts Facts) (view Facts, partial
 	}
 	if len(commands) == 0 {
 		return Facts{}, false, false
+	}
+	if unmodeled {
+		// Nothing but the commands: any other fact may rest on an operand
+		// grammar ActionFacts does not have.
+		return Facts{
+			Tool:       facts.Tool,
+			CWD:        facts.CWD,
+			ActiveHome: facts.ActiveHome,
+			Parse:      ParseResult{Status: StatusComplete, Dialect: facts.Parse.Dialect},
+			Commands:   commands,
+		}, true, true
 	}
 
 	view = facts
