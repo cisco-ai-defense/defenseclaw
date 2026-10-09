@@ -103,6 +103,12 @@ DefenseClaw manages marked hooks and OTLP environment entries in
 and adapters live in `%USERPROFILE%\.defenseclaw\hooks`. See the
 [Windows path reference](/docs/get-started/windows/paths-troubleshooting#filesystem-reference).
 
+Each hook entry runs the launcher through the system `cmd.exe`
+(`cmd.exe /d /c if exist "<launcher>" (...) else (...)`). If the launcher is
+missing, for example after an antivirus quarantine, Claude Code blocks the
+prompt or tool call with one sentence that says to run the DefenseClaw
+installer again, instead of letting it run unchecked.
+
   </Tab>
   <Tab value="macOS/Linux">
 
