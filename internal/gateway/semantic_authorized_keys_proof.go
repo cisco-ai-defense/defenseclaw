@@ -428,6 +428,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			continue
 		}
 		target := candidate.Resolved
+		// A POSIX shell running on Windows can leave a relative path
+		// unresolved because ActionFacts does not reinterpret the Windows CWD
+		// as a POSIX root. The owned, literal redirect still names a local
+		// file relative to that CWD.
+		if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
+			candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+			candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
+			!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
+			!strings.HasPrefix(candidate.Value, "~") &&
+			integrityCommandOwnsStaticRedirect(command, candidate) {
+			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
+		}
 		if !filepath.IsAbs(target) {
 			continue
 		}
