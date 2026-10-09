@@ -43,6 +43,12 @@ func applyTrustedActionContextDisposition(
 	enforcementFacts := facts.EnforcementProjection()
 	for index := range adjusted {
 		finding := adjusted[index]
+		if finding.RuleID == "CMD-WIN-REG-PERSIST" && finding.Severity == "HIGH" &&
+			finding.contributesToEnforcement() {
+			finding.enforcement = findingEnforcementAlertOnly
+			adjusted[index] = finding
+			continue
+		}
 
 		if canonicalTrustedRuleID(finding.RuleID) ==
 			"PRIVILEGE.CONTAINER_RUNTIME_SOCKET_ACCESS" {
