@@ -425,6 +425,18 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", "MEDIUM"))
 
 
+class TestPolicyActivateNamesLevelChanges(PolicyCommandTestBase):
+    def test_activate_default_names_the_block_level_it_clears(self):
+        # A hand-set block_at HIGH is cleared by the default preset (pack
+        # level CRITICAL); the output names the key, both levels and the way back (GAP-1020).
+        self.app.cfg.guardrail.block_at = "HIGH"
+        result = self.invoke(["activate", "default", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.guardrail.block_at, "")
+        self.assertIn("guardrail.block_at: HIGH -> CRITICAL", result.output)
+        self.assertIn("defenseclaw guardrail block-at HIGH", result.output)
+
+
 class TestPolicyLifecycle(PolicyCommandTestBase):
     def test_create_show_activate_delete(self):
         # Create

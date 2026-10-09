@@ -335,7 +335,9 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
 
 def _ps1_function(name: str) -> str:
     text = _text()
-    start = text.index(f"function {name} ")
+    match = re.search(rf"^function {re.escape(name)}[ (]", text, re.M)
+    assert match is not None, name
+    start = match.start()
     return text[start : text.index("\n}\n", start) + 3]
 
 
@@ -561,6 +563,36 @@ Restore-BinDir '{slot}'
     assert bin_dir.is_dir() is (existed == "bin")
     if existed == "bin":
         assert list(bin_dir.iterdir()) == []
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_file_robocopy_refuses_is_copied_or_named_with_a_next_step(tmp_path: Path) -> None:
+    # GAP-1048: robocopy exit 8 on the audit.db a failed 0.8.10 Setup left
+    # stopped the upgrade with no cause and no next step.
+    source = tmp_path / "data" / "audit.db"
+    source.parent.mkdir()
+    source.write_text("db", encoding="utf-8")
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Invoke-Robocopy([string[]]$Arguments) {{
+    [pscustomobject]@{{ Code = 8; Error = 'ERROR 5 (0x00000005) Copying NTFS Security to Destination File Access is denied.' }}
+}}
+{_ps1_function("Copy-Kept")}
+Copy-Kept '{source}' '{slot}'
+try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_.Exception.Message }}
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (slot / "audit.db").read_text(encoding="utf-8") == "db"
+    assert "ERROR 5" in completed.stdout and "then run the installer again" in completed.stdout, completed.stdout
 
 
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:

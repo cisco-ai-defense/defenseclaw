@@ -208,6 +208,17 @@ func TestBuildGenerationRejectsACorruptModuleOnlyWhenStrict(t *testing.T) {
 	if err != nil || g.opaError == "" {
 		t.Fatalf("boot build with a corrupt module: err=%v opaError=%q, want the fallback with its reason", err, g.opaError)
 	}
+	// The fallback generation was applied: /health names the module as
+	// opa_unavailable, so a client can tell it from a rejected change (GAP-1033).
+	previous := liveGeneration.Load()
+	previousErr, _ := liveReloadError.Load().(string)
+	liveGeneration.Store(g)
+	clearGenerationBuildError()
+	defer func() { liveGeneration.Store(previous); liveReloadError.Store(previousErr) }()
+	if h, ok := CurrentPolicyHealth(); !ok || !strings.Contains(h.OPAUnavailable, "bad.rego") ||
+		h.LastReloadError != "opa: "+h.OPAUnavailable {
+		t.Fatalf("health = %+v, want opa_unavailable naming bad.rego", h)
+	}
 }
 
 // GAP-0088: guardrail.rules.protections composed onto a custom pack pinned by

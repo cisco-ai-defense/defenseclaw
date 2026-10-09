@@ -9719,6 +9719,18 @@ def _local_policy_digest(cfg) -> dict | None:
     return local_policy_digest(cfg)
 
 
+def _policy_dir_remediation(cfg, error: str) -> str:
+    """The next step for a policy_dir the gateway cannot read, or ""."""
+    policy_dir = str(getattr(cfg, "policy_dir", "") or "")
+    if "read rego directory" not in error or not policy_dir or os.path.isabs(policy_dir):
+        return ""
+    # The gateway reads policy_dir as written: "~/x" names no folder (GAP-1033).
+    return (
+        f"policy_dir must be an absolute path ({policy_dir} is read as written, ~ is not expanded): "
+        f"defenseclaw config set policy_dir {os.path.abspath(os.path.expanduser(policy_dir))}"
+    )
+
+
 def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> None:
     """The effective policy the gateway applied: its generation and digest.
 
@@ -9749,7 +9761,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     generation = policy.get("generation")
     config_generation = int(policy.get("config_generation") or 0)
     applied = f"generation {generation}, digest {_short_policy_digest(digest)}"
-    reload_error = str(policy.get("last_reload_error") or "").strip()
+    from defenseclaw.gateway import policy_reload_rejection
+
+    reload_error = policy_reload_rejection(policy)
     if reload_error:
         from defenseclaw.config_writer import pack_pin_repair
 
@@ -9773,12 +9787,30 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             r=r,
             check_id="doctor.policy.reload",
             reason_code="policy-reload-rejected",
-            remediation=(
+            remediation=_policy_dir_remediation(cfg, reload_error) or (
                 "Fix the change the error names in config.yaml or the policy asset; "
                 "the gateway applies it once it builds"
             ),
         )
         return
+    opa_unavailable = str(policy.get("opa_unavailable") or "").strip()
+    if opa_unavailable:
+        # The generation was built and applied without the Rego modules, not
+        # rejected: the config-driven admission and levels apply (GAP-1033).
+        from defenseclaw.paths import bundled_rego_dir
+
+        rego_dir = os.path.join(str(getattr(cfg, "policy_dir", "") or ""), "rego")
+        _emit(
+            "warn",
+            "Policy modules",
+            f"{applied} applies admission and the guardrail levels from config.yaml: the Rego modules "
+            f"did not load ({opa_unavailable})",
+            r=r,
+            check_id="doctor.policy.rego-unavailable",
+            reason_code="policy-rego-unavailable",
+            remediation=_policy_dir_remediation(cfg, opa_unavailable)
+            or f"Copy this release's admission.rego and guardrail.rego from {bundled_rego_dir()} into {rego_dir}",
+        )
     local = _local_policy_digest(cfg)
     if local is None:
         _emit(

@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -897,6 +898,50 @@ func TestMigrateV8InMemory(t *testing.T) {
 	}
 }
 
+// TestMigrateV8InMemoryReadsTheUnexpandedPolicyDir: 0.8.x wrote the policy
+// data of a "~/team-policies" policy_dir under <home>/~/team-policies, so the
+// strict levels it activated there carry forward, and the v9 file names the
+// expanded folder the 1.0 gateway can read (GAP-1031).
+func TestMigrateV8InMemoryReadsTheUnexpandedPolicyDir(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for folder, rank := range map[string]string{"team-policies": "4", filepath.Join("~", "team-policies"): "2"} {
+		dataJSON := filepath.Join(home, folder, "rego", "data.json")
+		if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": `+rank+`}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(home, "team-policies", "rego", "data.json"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("config_version: 8\ndata_dir: " + filepath.Join(home, ".defenseclaw") +
+		"\npolicy_dir: ~/team-policies\nobservability: {}\n")
+	migrated, err := MigrateV8InMemory(filepath.Join(home, ".defenseclaw", "config.yaml"), source, nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory: %v", err)
+	}
+	var got struct {
+		PolicyDir string `yaml:"policy_dir"`
+		Guardrail struct {
+			BlockAt string `yaml:"block_at"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(migrated, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Guardrail.BlockAt != "MEDIUM" || got.PolicyDir != filepath.Join(home, "team-policies") {
+		t.Fatalf("block_at %q, policy_dir %q; want MEDIUM from the unexpanded folder and the expanded folder:\n%s",
+			got.Guardrail.BlockAt, got.PolicyDir, migrated)
+	}
+}
+
 // TestMigrateV9InlineKeyGoesToTheRuntimeDataDir: the inline VirusTotal key
 // goes to the .env of the data_dir the runtime uses, and that data_dir's
 // signature packs are listed: a "~/..." data_dir is under the home directory,
@@ -1188,6 +1233,34 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 	cfg.Enterprise.Profile = "standalone"
 	if got := cfg.ResolveRulePackDir(RulePackRef{Name: "strict"}); got != shipped {
 		t.Fatalf("strict resolves to %q, want the shipped %s while policy_dir has none", got, shipped)
+	}
+}
+
+// TestMigrateV9LeavesTheShippedFirstPartyListUnpinned: the first-party list
+// every 0.8.x data.json shipped (also after `policy activate strict`) is not an
+// operator's choice, so it is not written to config.yaml: the 1.0 built-in
+// list applies and `policy list` still finds the activated preset (GAP-0971).
+func TestMigrateV9LeavesTheShippedFirstPartyListUnpinned(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	dataJSON := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(dataJSON, []byte(`{"first_party_allow_list": [
+	  {"target_type": "plugin", "target_name": "defenseclaw", "source_path_contains": [".openclaw/extensions/defenseclaw",
+	    ".zeptoclaw/extensions/defenseclaw", ".claude/extensions/defenseclaw", ".codex/extensions/defenseclaw"]},
+	  {"target_type": "skill", "target_name": "codeguard", "source_path_contains": [".openclaw/workspace/skills/codeguard",
+	    ".openclaw/skills/codeguard", ".zeptoclaw/skills/codeguard", ".claude/skills/codeguard", ".codex/skills/codeguard"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: filepath.Join(dir, "config.yaml"), DataJSONPath: dataJSON, DryRun: true,
+		Source: []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n"),
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if strings.Contains(string(result.Migrated), "first_party_allow_list") {
+		t.Fatalf("the 0.8.x shipped first-party list was pinned:\n%s", result.Migrated)
 	}
 }
 

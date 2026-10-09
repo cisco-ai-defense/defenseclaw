@@ -308,8 +308,47 @@ function Copy-Kept([string]$Source, [string]$DestinationDir) {
     $item = Get-Item -LiteralPath $Source -Force
     $copy = if ($item.PSIsContainer) { @($Source, (Join-Path $DestinationDir $item.Name), "/E") } else { @($item.DirectoryName, $DestinationDir, $item.Name) }
     $options = @("/COPY:DATS", "/DCOPY:DAT", "/IS", "/IT", "/R:2", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-    $rc = Invoke-Native (Join-Path $env:SystemRoot "System32\robocopy.exe") ($copy + $options) -Quiet
-    if ($rc -ge 8) { throw "Could not copy $Source (robocopy exit $rc)" }
+    $result = Invoke-Robocopy ($copy + $options)
+    if ($result.Code -lt 8) { return }
+    $why = if ($result.Error) { $result.Error } else { "robocopy exit $($result.Code)" }
+    if (-not $item.PSIsContainer) {
+        # robocopy refused one file, as it did for an audit.db a failed 0.8.10
+        # Setup left (GAP-1048): copy its bytes, then its access list where
+        # Windows allows it; otherwise the copy keeps the rollback folder's
+        # private permissions.
+        $target = Join-Path $DestinationDir $item.Name
+        try {
+            [IO.File]::Copy($Source, $target, $true)
+            try {
+                $from = New-Object IO.FileInfo $Source
+                $to = New-Object IO.FileInfo $target
+                $acl = if ($from.PSObject.Methods["GetAccessControl"]) { $from.GetAccessControl("Access") } else { [IO.FileSystemAclExtensions]::GetAccessControl($from, "Access") }
+                if ($to.PSObject.Methods["SetAccessControl"]) { $to.SetAccessControl($acl) } else { [IO.FileSystemAclExtensions]::SetAccessControl($to, $acl) }
+            } catch { }
+            return
+        } catch { if (-not $result.Error) { $why = $_.Exception.GetBaseException().Message } }
+    }
+    # Name what may hold it: a gateway or hook a failed Setup left running.
+    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "defenseclaw*" } | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" })
+    $held = if ($running.Count) { "; DefenseClaw programs still running: $($running -join ', ') (stop them with Stop-Process -Id <PID>)" } else { "" }
+    throw "Could not copy $Source ($why)$held. Check that this account can read it and that no program has it open (icacls `"$Source`"), then run the installer again"
+}
+
+function Invoke-Robocopy([string[]]$Arguments) {
+    # robocopy says why a file failed only in its output: keep the first
+    # error line and the reason on the line after it.
+    $ErrorActionPreference = "Continue"
+    $lines = @(& (Join-Path $env:SystemRoot "System32\robocopy.exe") @Arguments 2>&1 | ForEach-Object { "$_".Trim() })
+    $code = $LASTEXITCODE
+    $detail = ""
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "(ERROR \d+ \(0x[0-9A-Fa-f]+\).*)$") {
+            $detail = $Matches[1]
+            if ($i + 1 -lt $lines.Count -and $lines[$i + 1]) { $detail += " $($lines[$i + 1])" }
+            break
+        }
+    }
+    return [pscustomobject]@{ Code = $code; Error = $detail }
 }
 
 function Invoke-Quietly([scriptblock]$Action) {

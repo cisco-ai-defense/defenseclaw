@@ -143,6 +143,16 @@ or plugin by scan severity, the first-party allow list, and the LLM proxy's
 guardrail thresholds. In v9 that is `admission:` and the `guardrail`
 thresholds, and `data.json` is no longer read.
 
+The migration reads `<policy_dir>/rego/data.json`. A `policy_dir` written as
+`~/team-policies` becomes the absolute folder (`/home/you/team-policies`),
+because 1.0 reads `policy_dir` as written. 0.8.x did not expand the `~` either:
+`policy activate` wrote its `data.json` to a folder literally named `~` in your
+home directory (`/home/you/~/team-policies/rego/data.json`), and the 0.8.x
+gateway enforced that file. When that file is the newer of the two, the
+migration reads it, so the policy you activated (strict, for example, with
+block level MEDIUM) carries over, and `migration-v9.json` notes which file it
+read.
+
 ```json title="policies/rego/data.json (v8, excerpt)"
 {
   "actions": {
@@ -208,7 +218,9 @@ admission:
   `allow_list_bypass_scan`, also when it left the key out, because 0.8.x
   bypassed the scan only for an explicit `true`).
 - `first_party_allow_list` is written for a type only when it differs from the
-  built-in list.
+  built-in list and from the list DefenseClaw 0.x shipped. The shipped list was
+  never your choice, so the 1.0 built-in list replaces it, as on a fresh
+  install, and `policy list` still marks the policy you activated.
 - A `first_party_allow_list` entry without `source_path_contains` matched any
   path in v8, and skipped the scan only where `allow_list_bypass_scan` was on.
   A v9 first-party entry needs a path, so where the bypass applies to its type
