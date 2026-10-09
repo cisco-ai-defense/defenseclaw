@@ -191,14 +191,6 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
      * scanners or the daemon itself), not from IPC callers.  Override
      * SYSTEM scope on inbound requests to UNKNOWN so external callers
      * cannot bypass scope-specific content scanning rules. */
-    if (req->content_scope == DCLAW_CONTENT_SCOPE_SYSTEM &&
-        req->direction == DCLAW_DIRECTION_REQUEST) {
-        /* Cast away const — we already make a mutable copy below (trusted_req),
-         * but this override must happen before the emergency check.  Use a
-         * local mutable pointer for this single field. */
-        ((dclaw_tool_request_t *)req)->content_scope = DCLAW_CONTENT_SCOPE_UNKNOWN;
-    }
-
     /* P1-6 fix: Check global emergency BLOCK_ALL / LOCKDOWN flag at the TOP
      * of evaluation. When active, ALL requests are immediately blocked
      * regardless of policy, cache, or cloud verdicts. The flag is set by
@@ -262,6 +254,12 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     dclaw_tool_request_t trusted_req;
     memcpy(&trusted_req, req, sizeof(dclaw_tool_request_t));
     trusted_req.cap_flags = trusted_cap_flags;
+    /* CRT-1 fix: Apply SYSTEM scope override on the mutable copy (not via
+     * const-cast on the original). This avoids undefined behavior. */
+    if (trusted_req.content_scope == DCLAW_CONTENT_SCOPE_SYSTEM &&
+        trusted_req.direction == DCLAW_DIRECTION_REQUEST) {
+        trusted_req.content_scope = DCLAW_CONTENT_SCOPE_UNKNOWN;
+    }
     req = &trusted_req;
 
     /* Step 2: Rate limit check */
