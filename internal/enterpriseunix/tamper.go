@@ -167,11 +167,18 @@ func (e *Env) restoreHookBinary(record *Deployment) (bool, error) {
 }
 
 // restoreTamperedHookBinary runs restoreHookBinary for a lifecycle action
-// and reports what it did. It reports whether it restored the binary.
-func (l *lifecycle) restoreTamperedHookBinary(record *Deployment) bool {
+// and reports what it did. It reports whether it restored the binary. On
+// Linux the new file is relabeled as a transaction relabels the install
+// root, so SELinux-confined agents can still run it.
+func (l *lifecycle) restoreTamperedHookBinary(ctx context.Context, record *Deployment) bool {
 	env := l.env
 	restored, err := env.restoreHookBinary(record)
 	path := env.installedHookPath()
+	if restored && env.GOOS == "linux" {
+		if _, err := env.Runner.Run(ctx, "restorecon", env.P(path)); err != nil && !errors.Is(err, ErrCommandNotFound) {
+			l.result.AddWarning("selinux_relabel", err.Error())
+		}
+	}
 	switch {
 	case err != nil:
 		next := env.packageReinstallStep(record.ProductVersion)
