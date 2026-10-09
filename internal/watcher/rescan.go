@@ -988,6 +988,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return rescanSkipped
 	}
 
+	if reason == "content-changed" && !w.secureClientActive() {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint)
+	}
+
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
 
 	// Drift, fingerprint change, or recovery: run the scanner exactly once
@@ -1114,6 +1118,44 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 	}
 	if _, err := os.Lstat(evt.Path); err == nil {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
+	}
+	return rescanScanned
+}
+
+// readmitChanged runs install admission for a target whose content changed
+// since its baseline: an installed skill, plugin or MCP server edited to
+// carry HIGH or CRITICAL content is blocked, quarantined and disabled as a
+// new install would be. The rescan used to scan it and emit drift only, so
+// the rejected verdict was never acted on and the agents kept loading it
+// (GAP-1086). The drift alerts stay. A scan that failed or was cut off
+// leaves the old baseline (F-3188), so the next cycle admits it again.
+// Secure Client keeps main's rescan (issue #1092).
+func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[rescan] %s %s changed; running install admission\n", evt.Type, evt.Name)
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	if res.ScanID != "" {
+		if current, err := w.loadScanResult(res.ScanID); err == nil {
+			deltas = append(deltas, w.findingDrift(baseline, current)...)
+		}
+	}
+	if len(deltas) > 0 {
+		w.emitDriftAlerts(evt, deltas)
+	}
+	switch {
+	case res.Interrupted:
+		w.markInterruptedAdmission(evt, snap, fingerprint)
+	case res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt):
+	default:
+		if _, err := os.Lstat(evt.Path); err == nil {
+			scanID := res.ScanID
+			if scanID == "" {
+				// Decided before a scan (a list match): keep the last
+				// scan as the finding baseline for the new content.
+				scanID = baseline.ScanID
+			}
+			w.persistSnapshot(evt, snap, scanID, w.admissionFingerprint(res, fingerprint))
+		}
 	}
 	return rescanScanned
 }

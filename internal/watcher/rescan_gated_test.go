@@ -516,3 +516,45 @@ func TestRescanRetriesSoonWhileScannerRuntimeNotReady(t *testing.T) {
 		t.Fatalf("next rescan after a ready cycle in %s, want the interval", got)
 	}
 }
+
+// GAP-1086: an installed skill edited to carry CRITICAL content is admitted
+// again by the rescan that sees the change, so it is rejected and
+// quarantined as a new install would be.
+func TestRescanCycleAdmitsChangedInstalledSkill(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Watch.RescanContentGated = true
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
+	if err := os.WriteFile(ocPath, []byte(`{"mcp":{"servers":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.ConfigFile = ocPath
+	skill := filepath.Join(skillDir, "usm-notes")
+	if err := os.MkdirAll(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: usm-notes\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &countingScanner{name: "skill-scanner"}
+	var verdicts []AdmissionResult
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) { verdicts = append(verdicts, r) })
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+	ctx := context.Background()
+	w.runRescanCycle(ctx)
+	if len(verdicts) != 0 {
+		t.Fatalf("baseline cycle verdicts = %+v", verdicts)
+	}
+	fake.findings = []scanner.Finding{{ID: "f1", RuleID: "SKILL-001", Severity: scanner.SeverityCritical, Title: "critical finding"}}
+	if err := os.WriteFile(filepath.Join(skill, "helper.py"), []byte("# edited\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.runRescanCycle(ctx)
+	if len(verdicts) != 1 || verdicts[0].Verdict != VerdictRejected {
+		t.Fatalf("verdicts after the edit = %+v, want the skill rejected", verdicts)
+	}
+	if _, err := os.Lstat(skill); !os.IsNotExist(err) {
+		t.Fatalf("edited CRITICAL skill still installed: %v", err)
+	}
+}
