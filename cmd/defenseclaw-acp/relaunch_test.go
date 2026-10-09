@@ -58,7 +58,9 @@ func TestSessionEndedGuardServesTheNextThread(t *testing.T) {
 		_ = out.Close()
 	}()
 	answers := bufio.NewScanner(outReader)
-	for id, want := range map[int]string{1: `"message":"profile moved"`, 2: `"sessionId":"relaunched"`} {
+	// In order: thread 1 gets the reason, thread 2 the relaunched guard.
+	for id, want := range []string{`"message":"profile moved"`, `"sessionId":"relaunched"`} {
+		id++
 		if _, err := fmt.Fprintf(editorWriter, `{"jsonrpc":"2.0","id":%d,"method":"session/new","params":{}}`+"\n", id); err != nil {
 			t.Fatal(err)
 		}
