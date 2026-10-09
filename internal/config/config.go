@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -37,6 +38,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// viperLoadMu guards the process-wide Viper store for the entire config load.
+// A reload and a candidate validation can otherwise exchange defaults and keys.
+var viperLoadMu sync.Mutex
 
 // ReportConfigLoadError is wired by the unified v8 runtime to emit a generated
 // platform-health signal when legacy/recovery config decoding fails.
@@ -2715,6 +2720,9 @@ func loadConfigSourceChecked(
 	enforceManagedTrust bool,
 	checkPolicyInputs bool,
 ) (*Config, error) {
+	viperLoadMu.Lock()
+	defer viperLoadMu.Unlock()
+
 	// viper holds a process-global keystore. Without resetting it, a
 	// previous load (e.g. from another binary path or test case) leaves
 	// stale keys behind. Reset gives us a clean slate per load;
