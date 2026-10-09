@@ -367,6 +367,14 @@ func preserveRuleEdits(current, custom, legacy *yaml.Node) {
 	for i := 0; i+1 < len(legacy.Content); i += 2 {
 		keys[legacy.Content[i].Value] = true
 	}
+	// A changed 0.8.x regex cannot inherit the new semantic expression:
+	// that expression can enforce independently of the operator's pattern.
+	customPattern, customHasPattern := yamlField(custom, "pattern")
+	legacyPattern, legacyHasPattern := yamlField(legacy, "pattern")
+	_, customHasExpression := yamlField(custom, "expression")
+	if !yamlValuesEqual(customPattern, customHasPattern, legacyPattern, legacyHasPattern) && !customHasExpression {
+		removeYAMLField(current, "expression")
+	}
 	for key := range keys {
 		if key == "id" {
 			continue
