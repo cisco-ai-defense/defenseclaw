@@ -43,7 +43,7 @@ var (
 // applyWindowsEnterpriseAPIPortHolders reports api_port_held when the
 // gateway service runs but its API is not ready and processes other than the
 // gateway listen where the API binds.
-func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions, report *windowsEnterpriseInstallerReport) {
 	inspection := result.Action == "status" || result.Action == "verify"
 	gatewayRunning := strings.TrimSpace(report.GatewayService) != "" && report.GatewayServiceState == "running"
 	// A lifecycle run (a first install, for example) whose gateway never
@@ -61,8 +61,24 @@ func applyWindowsEnterpriseAPIPortHolders(result *enterprisestatus.Result, repor
 	if lifecycleFailed && windowsEnterpriseInstallerRefusedModule(report) {
 		return
 	}
-	address := fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
-	listeners, err := windowsEnterpriseAPIListeners("127.0.0.1", config.DefaultGatewayAPIPort)
+	// The installed config is authoritative for the hook and gateway port.
+	// If it cannot be read, a listener on the default port is not evidence
+	// that it holds the gateway's configured port.
+	portPath := ""
+	if !report.Installed && opts != nil {
+		portPath = strings.TrimSpace(opts.configPath)
+	}
+	port, err := windowsEnterpriseConfigAPIPort(portPath)
+	if err != nil && !report.Installed && portPath == "" {
+		// A failed first install may have removed its staged config. With no
+		// supplied config it used the default, so retain port-holder advice.
+		port, err = config.DefaultGatewayAPIPort, nil
+	}
+	if err != nil || port <= 0 {
+		return
+	}
+	address := fmt.Sprintf("127.0.0.1:%d", port)
+	listeners, err := windowsEnterpriseAPIListeners("127.0.0.1", port)
 	if err != nil || len(listeners) == 0 {
 		return
 	}

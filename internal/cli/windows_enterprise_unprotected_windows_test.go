@@ -264,9 +264,12 @@ func TestWindowsStandaloneInspectionNamesAPendingTransaction(t *testing.T) {
 func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
 	previousListeners, previousPID, previousIdentity, previousFailure := windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure
+	previousPort := windowsEnterpriseConfigAPIPort
 	t.Cleanup(func() {
 		windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure = previousListeners, previousPID, previousIdentity, previousFailure
+		windowsEnterpriseConfigAPIPort = previousPort
 	})
+	windowsEnterpriseConfigAPIPort = func(string) (int, error) { return 18970, nil }
 	windowsEnterpriseGatewayStartFailure = func() (string, string) { return "", "" }
 	loopback, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -347,6 +350,23 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 	if len(served.Errors) != 0 || !served.Readiness.Gateway {
 		t.Fatalf("a ready gateway on its own port: errors = %+v readiness = %+v", served.Errors, served.Readiness)
 	}
+	// A foreign listener on the default port does not hold a gateway whose
+	// installed config uses another port.
+	windowsEnterpriseConfigAPIPort = func(string) (int, error) { return 18971, nil }
+	windowsEnterpriseAPIListeners = func(_ string, port int) ([]daemon.Listener, error) {
+		if port != 18971 {
+			return []daemon.Listener{{Address: "127.0.0.1:18970", PID: hiddenPID}}, nil
+		}
+		return []daemon.Listener{{Address: "127.0.0.1:18971", PID: gatewayPID}}, nil
+	}
+	custom := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(custom, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
+	if len(custom.Errors) != 0 || !custom.Readiness.Gateway || len(custom.APIPortHolders) != 0 {
+		t.Fatalf("healthy custom-port gateway: errors = %+v readiness = %+v holders = %+v",
+			custom.Errors, custom.Readiness, custom.APIPortHolders)
+	}
+	windowsEnterpriseConfigAPIPort = func(string) (int, error) { return 18970, nil }
+	windowsEnterpriseAPIListeners = allListeners
 
 	// A lifecycle that failed before it read the deployment (a CLI from
 	// another build, GAP-1658) names no gateway service: the installed

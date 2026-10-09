@@ -866,7 +866,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseDiscoveryHomeDirs(result)
 	}
 	applyWindowsEnterpriseGatewayStartFailure(result, report)
-	applyWindowsEnterpriseAPIPortHolders(result, report)
+	applyWindowsEnterpriseAPIPortHolders(result, opts, report)
 	messages := append([]string{}, report.Errors...)
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
 		messages = append(messages, report.Error)
