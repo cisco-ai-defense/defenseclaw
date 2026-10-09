@@ -194,6 +194,9 @@ func jsonlFolderProblem(folder string, info os.FileInfo, _ []string) string {
 	if info.Mode().Perm()&0o022 != 0 {
 		return "is in " + folder + ", a folder its group or other users can write"
 	}
+	if info.Mode().Perm()&0o300 != 0o300 {
+		return "is in " + folder + ", a folder its owner cannot traverse or write"
+	}
 	return ""
 }
 
