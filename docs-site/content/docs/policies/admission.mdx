@@ -563,6 +563,11 @@ agents (`<plugin>:<agent>`) and its MCP tools
 so a denied rule written as `plugin@marketplace` refuses that plugin from any
 marketplace.
 
+The MCP servers a Claude Code plugin bundles are admitted with their plugin:
+they get no admission row or MCP inventory entry of their own. The hooks hold
+their tool calls to `asset_policy.mcp` all the same, under the name
+`plugin:<plugin>:<server>` and by their `command`, `args_prefix` or `url`.
+
 ### Tool lists
 
 `asset_policy.tool.denied` and `asset_policy.tool.allowed` hold rules with a

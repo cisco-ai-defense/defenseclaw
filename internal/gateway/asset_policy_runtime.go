@@ -87,10 +87,29 @@ const (
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
 	if decision, refused := a.claudeStateUnreadableDecision(ctx, req.HookEventName, probe); refused {
 		return decision, true
 	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
+}
+
+// claudeCodePluginMCPServerName is the configured name of an MCP server a
+// Claude Code plugin bundles, plugin:<plugin>:<server>, for a tool call that
+// spells it plugin_<plugin>_<server>, so asset_policy.mcp rules written for
+// it match whatever asset_policy.enabled says (GAP-1191). Other servers keep
+// their name. Secure Client keeps main (issue #1092).
+func (a *APIServer) claudeCodePluginMCPServerName(ctx context.Context, probe mcpRuntimeProbe) string {
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" ||
+		!strings.HasPrefix(probe.ServerName, "plugin_") {
+		return probe.ServerName
+	}
+	if entry, ok := a.lookupCallerMCPServer(ctx, cfg, "claudecode", probe.WorkspaceDir, probe.ServerName); ok &&
+		strings.HasPrefix(entry.Name, "plugin:") {
+		return entry.Name
+	}
+	return probe.ServerName
 }
 
 // claudeStateUnreadableDecision refuses a Claude Code MCP tool call of an

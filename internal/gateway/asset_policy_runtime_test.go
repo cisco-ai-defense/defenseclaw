@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -896,6 +897,43 @@ func TestCodexHyphenatedMCPServerMatchesItsConfiguredName(t *testing.T) {
 	})
 	if !matched || decision.Action != "block" || decision.TargetName != "usm-think-cx" {
 		t.Fatalf("command-denied usm-think-cx from hook facts: matched=%v decision=%+v, want a block", matched, decision)
+	}
+}
+
+// GAP-1191: an MCP server a Claude Code plugin bundles is held to the
+// asset_policy.mcp rules at the hook, by its definition and by its name
+// plugin:<plugin>:<server>; shipping a denied server in a plugin no longer
+// sidesteps the rule.
+func TestClaudeCodePluginMCPServerMatchesMCPRules(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "mkt", "plugins", "usm-kit")
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "plugins"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry := `{"version":2,"plugins":{"usm-kit@usm-mkt":[{"scope":"user","installPath":` + strconv.Quote(root) + `}]}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), []byte(registry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servers := `{"mcpServers":{"kit-time":{"command":"uvx","args":["mcp-server-time"]}}}`
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(servers), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	call := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__plugin_usm-kit_kit-time__get_current_time", CWD: home}
+	for _, rule := range []config.AssetPolicyRule{
+		{Command: "uvx", ArgsPrefix: []string{"mcp-server-time"}},
+		{Name: "plugin:usm-kit:kit-time"},
+	} {
+		cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{rule}
+		decision, matched := api.claudeCodeMCPAssetDecision(ctx, call)
+		if !matched || decision.Action != "block" || decision.TargetName != "plugin:usm-kit:kit-time" {
+			t.Fatalf("rule %+v: matched=%v decision=%+v, want the plugin server refused", rule, matched, decision)
+		}
 	}
 }
 
