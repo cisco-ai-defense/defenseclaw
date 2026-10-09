@@ -1466,7 +1466,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
 		!strings.Contains(commandText, "base64") && !symlinkWrite {
-		return appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts)
+		return appendTrustedCMDPrivateKeyReadFinding(
+			appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
+			generation, request, input,
+		)
 	}
 	for _, finding := range findings {
 		if finding.RuleID == "persistence.ssh_authorized_keys_command" &&
@@ -1516,7 +1519,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			}))
 		}
 	}
-	return appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts)
+	return appendTrustedCMDPrivateKeyReadFinding(
+		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
+		generation, request, input,
+	)
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(

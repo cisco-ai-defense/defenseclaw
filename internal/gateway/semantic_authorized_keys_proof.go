@@ -79,6 +79,50 @@ func trustedCMDAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return trustedWindowsHomeOperand(body[index+1:], input.ActiveHome, "authorized_keys")
 }
 
+func trustedCMDPrivateKeyRead(input actionfacts.Input) bool {
+	body, ok := trustedCMDBody(input)
+	if !ok || !strings.HasPrefix(strings.ToLower(body), "type ") {
+		return false
+	}
+	operand := strings.TrimSpace(body[len("type "):])
+	for _, key := range []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
+		if trustedWindowsHomeOperand(operand, input.ActiveHome, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendTrustedCMDPrivateKeyReadFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	input actionfacts.Input,
+) []RuleFinding {
+	if !trustedCMDPrivateKeyRead(input) {
+		return findings
+	}
+	for _, finding := range findings {
+		if finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY" {
+			return findings
+		}
+	}
+	_, rule, ok := trustedActionCatalogRule(generation, "PATH-SSH-KEY")
+	if !ok {
+		return findings
+	}
+	enforcement := findingEnforcementDetectionOnly
+	if request.EnforcementCapable {
+		enforcement = findingEnforcementAllowed
+	}
+	return append(findings, adjustConfidence(input.Tool, RuleFinding{
+		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
+		Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
+		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+		enforcement: enforcement,
+	}))
+}
+
 func trustedNamedOutFileAuthorizedKeysWrite(input actionfacts.Input) bool {
 	if input.DialectHint != actionfacts.DialectPowerShell || len(input.Command) > 64<<10 {
 		return false

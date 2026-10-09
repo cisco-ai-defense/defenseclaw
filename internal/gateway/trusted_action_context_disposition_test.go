@@ -2889,7 +2889,7 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 		wantSeverity string
 	}{
 		{
-			name:   "SSH read is advisory",
+			name:   "SSH content read is enforceable",
 			ruleID: "PATH-SSH-KEY",
 			facts: actionfacts.Analyze(actionfacts.Input{
 				Tool:       "exec",
@@ -2897,7 +2897,18 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				CWD:        "/workspace",
 				ActiveHome: "/home/alice",
 			}),
-			wantSeverity: "MEDIUM",
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
+		},
+		{
+			name:   "base64 encoding active SSH private key is enforceable",
+			ruleID: "PATH-SSH-KEY",
+			facts: actionfacts.Analyze(actionfacts.Input{
+				Tool: "exec", Argv: []string{"base64", "/home/alice/.ssh/id_rsa"},
+				CWD: "/workspace", ActiveHome: "/home/alice",
+			}),
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
 		},
 		{
 			name:   "environment read is advisory",
@@ -3046,7 +3057,8 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				CWD:        "/workspace",
 				ActiveHome: "/home/alice",
 			}),
-			wantSeverity: "MEDIUM",
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
 		},
 		{
 			name:   "multiple cat operands do not prove producer stdout",
@@ -3058,7 +3070,8 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				CWD:        "/workspace",
 				ActiveHome: "/home/alice",
 			}),
-			wantSeverity: "MEDIUM",
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
 		},
 		{
 			name:   "expanding cat operand after option terminator is not proven",
@@ -3090,7 +3103,8 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				CWD:        "/workspace",
 				ActiveHome: "/home/alice",
 			}),
-			wantSeverity: "MEDIUM",
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
 		},
 		{
 			name:   "sensitive stdin does not prove producer stdout",
@@ -3114,7 +3128,8 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				CWD:        "/workspace",
 				ActiveHome: "/home/alice",
 			}),
-			wantSeverity: "MEDIUM",
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
 		},
 		{
 			name:   "preview pipeline upload is advisory",
@@ -3126,7 +3141,8 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				CWD:        "/workspace",
 				ActiveHome: "/home/alice",
 			}),
-			wantSeverity: "MEDIUM",
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
 		},
 		{
 			name:   "expanding cat operand does not prove producer stdout",
@@ -3158,7 +3174,8 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				CWD:        "/workspace",
 				ActiveHome: "/home/alice",
 			}),
-			wantSeverity: "MEDIUM",
+			wantEnforce:  true,
+			wantSeverity: "CRITICAL",
 		},
 		{
 			name:   "same-command environment read and egress is enforceable",
@@ -3308,6 +3325,19 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				t.Fatalf("severity = %q, want %q", got[0].Severity, test.wantSeverity)
 			}
 		})
+	}
+	const connector = "credential-path-windows-command"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	command := `cmd /c type %USERPROFILE%\.ssh\id_rsa`
+	args := []byte(`{"command":"cmd /c type %USERPROFILE%\\.ssh\\id_rsa"}`)
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: "C:/Users/alice/project",
+			ActiveHome: "C:/Users/alice", DialectHint: actionfacts.DialectPowerShell},
+		LegacyText: command, Connector: connector, EnforcementCapable: true,
+	})
+	if finding := findingWithID(findings, "PATH-SSH-KEY"); finding == nil ||
+		finding.Severity != "CRITICAL" || !finding.contributesToEnforcement() {
+		t.Fatalf("cmd private-key read = %v, want CRITICAL block", FindingStrings(findings))
 	}
 }
 
