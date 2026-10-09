@@ -12,3 +12,7 @@ func ValidateServiceCanReadTree(_, _, _ string) error { return nil }
 // IsServiceAccountUnresolved is false off Windows: there is no account to
 // resolve.
 func IsServiceAccountUnresolved(error) bool { return false }
+
+// ValidateServiceCanWriteFile is a Windows preflight check, like
+// ValidateServiceCanReadTree.
+func ValidateServiceCanWriteFile(_, _ string) error { return nil }

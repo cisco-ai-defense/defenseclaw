@@ -117,6 +117,34 @@ func TestStandaloneGatewayConfigCheckAsksTheServiceAccount(t *testing.T) {
 	}
 }
 
+// GAP-1118: a jsonl destination in a folder the gateway service account
+// cannot write is refused before anything changes, naming the folder and the
+// grant it needs; Setup runs as an administrator, who can write it, and the
+// gateway then did not start and the install rolled back.
+func TestStandaloneGatewayConfigCheckRefusesAJSONLFolderTheServiceCannotWrite(t *testing.T) {
+	folder := t.TempDir()
+	sink := filepath.Join(folder, "sink.jsonl")
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + sink + "'\n"
+	const account = `NT SERVICE\DefenseClawGateway`
+	t.Setenv(managed.WindowsServiceAccountEnv, account)
+	restore := standaloneServiceCanWriteFile
+	t.Cleanup(func() { standaloneServiceCanWriteFile = restore })
+	var asked []string
+	standaloneServiceCanWriteFile = func(path, serviceAccount string) error {
+		asked = append(asked, path+"|"+serviceAccount)
+		return errors.New("the gateway service account " + serviceAccount + " cannot create files in " + filepath.Dir(path))
+	}
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `destination "local-copy"`) || !strings.Contains(err.Error(), "cannot create files in "+folder) ||
+		!strings.Contains(err.Error(), `icacls "`+folder+`" /grant "`+account+`:(OI)(CI)M"`) {
+		t.Fatalf("jsonl folder the service cannot write = %v", err)
+	}
+	if len(asked) != 1 || asked[0] != sink+"|"+account {
+		t.Fatalf("service write check calls = %q", asked)
+	}
+}
+
 // GAP-0039: a connector that inherits the selected custom pack is not the key
 // a refusal names, and a custom_packs entry nothing selects is not loaded.
 func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {

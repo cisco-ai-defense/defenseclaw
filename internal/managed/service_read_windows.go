@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"unsafe"
 
@@ -55,17 +56,9 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 	if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil && user.User.Sid.Equals(serviceSID) {
 		return nil
 	}
-	allServices, err := windows.StringToSid(allServicesSID)
+	sids, err := serviceTokenSIDs(serviceSID)
 	if err != nil {
 		return err
-	}
-	sids := []*windows.SID{serviceSID, allServices}
-	for _, kind := range serviceReadTokenSIDs {
-		sid, err := windows.CreateWellKnownSid(kind)
-		if err != nil {
-			return err
-		}
-		sids = append(sids, sid)
 	}
 	for _, parent := range serviceReadParents(root) {
 		if !serviceHasAccess(parent, sids, serviceParentAccess) {
@@ -93,6 +86,61 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute, for example: icacls \"%s\" /grant \"%s:(OI)(CI)RX\" /T",
 			label, root, serviceAccount, path, root, serviceAccount)
 	})
+}
+
+// ValidateServiceCanWriteFile reports a file the gateway NT SERVICE virtual
+// account could not write: a folder it cannot create files in, list or read
+// the permissions of, or an existing file it cannot append to. Setup runs
+// its preflight as LocalSystem or an administrator, who write everywhere, so
+// a kind: jsonl destination in a folder only administrators can write
+// passed it; the gateway then could not open the file and did not start,
+// and the install failed after the readiness wait and rolled back
+// (GAP-1118). A folder that does not exist yet is created by the gateway
+// and is not checked.
+func ValidateServiceCanWriteFile(path, serviceAccount string) error {
+	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		return &serviceAccountUnresolvedError{err: err}
+	}
+	if serviceSID == nil {
+		return nil
+	}
+	if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil && user.User.Sid.Equals(serviceSID) {
+		return nil
+	}
+	folder := filepath.Dir(filepath.Clean(path))
+	if info, err := os.Lstat(folder); err != nil || !info.IsDir() {
+		return nil
+	}
+	sids, err := serviceTokenSIDs(serviceSID)
+	if err != nil {
+		return err
+	}
+	if !serviceHasAccess(folder, sids, serviceFolderWriteAccess) {
+		return fmt.Errorf("the gateway service account %s cannot create files in %s", serviceAccount, folder)
+	}
+	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && !serviceHasAccess(path, sids, serviceFileAppendAccess) {
+		return fmt.Errorf("the gateway service account %s cannot write %s", serviceAccount, path)
+	}
+	return nil
+}
+
+// serviceTokenSIDs is serviceSID with the groups every NT SERVICE virtual
+// account token carries.
+func serviceTokenSIDs(serviceSID *windows.SID) ([]*windows.SID, error) {
+	allServices, err := windows.StringToSid(allServicesSID)
+	if err != nil {
+		return nil, err
+	}
+	sids := []*windows.SID{serviceSID, allServices}
+	for _, kind := range serviceReadTokenSIDs {
+		sid, err := windows.CreateWellKnownSid(kind)
+		if err != nil {
+			return nil, err
+		}
+		sids = append(sids, sid)
+	}
+	return sids, nil
 }
 
 // serviceAccountUnresolvedError is a service account whose SID could not be
@@ -128,6 +176,14 @@ const (
 	// serviceParentAccess adds READ_CONTROL: the gateway reads each parent's
 	// security descriptor.
 	serviceParentAccess = serviceTreeAccess | windows.READ_CONTROL
+	// serviceFolderWriteAccess is what a jsonl destination needs on its
+	// folder: create its file and the rotated copies (FILE_ADD_FILE), list
+	// them to prune, and read the attributes and permissions the gateway
+	// checks before every open.
+	serviceFolderWriteAccess = serviceTreeAccess | windows.ACCESS_MASK(0x0002|0x0080) | windows.READ_CONTROL
+	// serviceFileAppendAccess is what the gateway opens an existing
+	// destination file with (FILE_APPEND_DATA).
+	serviceFileAppendAccess = windows.ACCESS_MASK(0x0004|0x0080) | windows.READ_CONTROL
 )
 
 // serviceFileGenericMapping maps generic rights to file rights.
