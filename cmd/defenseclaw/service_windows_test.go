@@ -604,14 +604,16 @@ func TestDeferredWindowsConfigurationRequiresRepairForActivation(t *testing.T) {
 	) {
 		t.Fatal("Repair clears deferred activation authority before live validation")
 	}
-	readiness := strings.LastIndex(installLike, "-RequireReadiness")
 	clearMarker := strings.Index(
 		installLike,
 		"$newMetadata.deferred_config_pending = $false",
 	)
-	commit := strings.Index(installLike, "Complete-DefenseClawTransaction `")
-	if readiness < 0 || clearMarker < 0 || commit < 0 ||
-		readiness > clearMarker || clearMarker > commit {
+	if clearMarker < 0 {
+		t.Fatal("deferred activation marker clear is missing")
+	}
+	readiness := strings.LastIndex(installLike[:clearMarker], "-RequireReadiness")
+	commit := strings.Index(installLike[clearMarker:], "Complete-DefenseClawTransaction `")
+	if readiness < 0 || commit < 0 {
 		t.Fatal("deferred activation marker is not cleared only after readiness and before transaction commit")
 	}
 }
