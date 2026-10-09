@@ -222,6 +222,21 @@ try {
             }
             Test-Accepted 'tree after the uninstall sweep' $busy
 
+            # GAP-1190: a file DefenseClaw did not install (an administrator's
+            # renamed copy of the hook) stops the standalone uninstall before
+            # it changes anything, and the refusal names the file and the step.
+            $renamed = New-TestLayout 'renamed'
+            $away = [IO.Path]::Combine($renamed.BinDirectory, 'defenseclaw-hook.exe.away')
+            [IO.File]::WriteAllText($away, 'renamed hook')
+            Test-Refused 'uninstall with a renamed hook copy' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $renamed
+            } ('unexpected file from managed install root: .*\\defenseclaw-hook\.exe\.away\. ' +
+                'The uninstall stopped before it changed anything\..* move it out of .*DefenseClaw, ' +
+                'then run the uninstall again$')
+            if (-not [IO.File]::Exists($away)) {
+                $failures.Add('the refused uninstall removed the renamed copy')
+            }
+
             $sibling = New-TestLayout 'sibling'
             [void](New-Plugin $sibling)
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($sibling.InstallRoot, 'share', 'policies'))
