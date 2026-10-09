@@ -1629,6 +1629,12 @@ func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
 	if resp.WouldBlock {
 		t.Fatal("terminal runtime detection disabled should not report would_block")
 	}
+
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "rogue"}}
+	resp = api.evaluateCodexHook(context.Background(), req)
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("explicit terminal MCP deny: action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
 }
 
 // TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock pins the
