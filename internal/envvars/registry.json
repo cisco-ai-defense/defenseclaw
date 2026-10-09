@@ -6830,6 +6830,30 @@
       "since": "1.0.0"
     },
     {
+      "name": "DEFENSECLAW_EXPLICIT_CODEX_SETUP",
+      "category": "hook_internal",
+      "purpose": "Set by the Python CLI to the absolute Codex home while a Codex setup restarts the gateway, so that gateway binds Codex to the home the user just chose instead of the root recorded in the managed backup (GAP-1106). The gateway uses it only when it names the Codex home the gateway itself resolves.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Sets it to the Codex home while it restarts the gateway after a Codex setup"
+        },
+        {
+          "location": "internal/gateway/connector/config_root_pin.go",
+          "description": "Skips the recorded Codex root pin when it names the current Codex home"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_SCAN_RECORDED_BY_CALLER",
       "category": "hook_internal",
       "purpose": "Set to 1 by the gateway when it runs a defenseclaw plugin scan child whose result it records itself, so the CLI child does not write a second scan row and scan-finding alert (GAP-2482).",
