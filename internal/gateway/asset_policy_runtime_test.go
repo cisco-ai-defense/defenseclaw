@@ -1021,6 +1021,53 @@ func TestPinnedSkillAllowOverridesGlobalDenyAtHook(t *testing.T) {
 	}
 }
 
+// GAP-0968: on managed Linux and macOS the gateway, a service account,
+// cannot read the user's 0700 home. A user skill on the denied list typed
+// as /name is still refused, at the folder the hook reported or, when it
+// reported none, by name; a custom command keeps the runtime-disable lookup.
+func TestClaudeSlashSkillDeniedWhereGatewayCannotReadHome(t *testing.T) {
+	home := t.TempDir()
+	skill := filepath.Join(home, ".claude", "skills", "dcmain-marker")
+	if err := os.MkdirAll(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: dcmain-marker\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claude := filepath.Join(home, ".claude")
+	if err := os.Chmod(claude, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(claude, 0o700) })
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Mode = "action"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	enableSkillRuntimeDetection(cfg)
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "dcmain-marker"}}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	header := http.Header{}
+	header.Set(assetfacts.Header, assetfacts.Encode(assetfacts.Facts{SkillDirs: []string{skill}}))
+	slash := func(ctx context.Context, name string) []runtimeAssetDecision {
+		return api.claudeCodeSlashCommandAssetDecisions(ctx, claudeCodeHookRequest{
+			HookEventName: "UserPromptExpansion", SessionID: "s-0968-" + name, Prompt: "/" + name,
+			ExpansionType: "slash_command", CommandName: name, CommandSource: "userSettings", CWD: home,
+		})
+	}
+	for label, ctx := range map[string]context.Context{"reported": withClaimedAssetFacts(peer, header), "unreported": peer} {
+		if got := slash(ctx, "dcmain-marker"); len(got) != 1 || got[0].decision.Action != "block" {
+			t.Fatalf("%s /dcmain-marker = %+v, want the denied skill refused", label, got)
+		}
+	}
+	if got := slash(peer, "ordinary-command"); len(got) != 0 {
+		t.Fatalf("custom command = %+v, want the runtime-disable lookup only", got)
+	}
+}
+
 // GAP-1101: a skill admission blocked and disabled under its folder name
 // (usm-crit2) is refused when Codex selects it by the name its SKILL.md
 // declares (usm-crit) and when a tool reads its folder.

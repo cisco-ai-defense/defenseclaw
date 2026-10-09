@@ -37,6 +37,11 @@ func TestHookAssetFactsReportWhatTheGatewayCannotRead(t *testing.T) {
 	if !ok || len(facts.Skills) != 1 || facts.Skills[0].Folder != "epa-alias" || facts.Skills[0].Declared != "epa-deny" {
 		t.Fatalf("skill facts = %+v (ok=%v)", facts, ok)
 	}
+	// GAP-0968: a skill typed as /name reports its folder too.
+	facts, _ = assetfacts.Decode(hookAssetFacts("claudecode", []byte(`{"prompt":"/epa-alias go"}`)))
+	if len(facts.SkillDirs) != 1 || facts.SkillDirs[0] != skill {
+		t.Fatalf("slash skill dirs = %+v, want %s", facts.SkillDirs, skill)
+	}
 
 	state := `{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28561/mcp"}}}`
 	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {

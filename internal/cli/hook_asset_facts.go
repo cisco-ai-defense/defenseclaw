@@ -24,10 +24,10 @@ import (
 
 // hookAssetFacts is the assetfacts.Header value of a standalone managed
 // hook: the names the skill folders this event names or reaches into declare
-// in their SKILL.md, the folders a skill selected by name exists in, and the
-// definition of the MCP server a tool call names, read as the user
-// (GAP-0570, GAP-0576, GAP-1212). The gateway, a service account,
-// may not read this home.
+// in their SKILL.md, the folders a skill selected by name (or typed as a
+// Claude Code /name) exists in, and the definition of the MCP server a tool
+// call names, read as the user (GAP-0570, GAP-0576, GAP-1212, GAP-0968).
+// The gateway, a service account, may not read this home.
 func hookAssetFacts(connector string, payload []byte) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	if connector != "claudecode" && connector != "codex" {
@@ -51,7 +51,7 @@ func hookAssetFacts(connector string, payload []byte) string {
 			facts.Skills = append(facts.Skills, assetfacts.Skill{Folder: folder, Declared: declared})
 		}
 	}
-	if name := hookInvokedSkillName(event.ToolName, event.ToolInput, event.Prompt); name != "" {
+	if name := hookInvokedSkillName(connector, event.ToolName, event.ToolInput, event.Prompt); name != "" {
 		for _, root := range assetfacts.SkillRoots(connector, home, event.CWD) {
 			dir := filepath.Join(root, name)
 			addSkill(name, dir)
@@ -122,14 +122,18 @@ func hookCommandLineMCPServer(connector, cwd, server string) (config.MCPServerEn
 	}
 }
 
-// hookInvokedSkillName is the skill a Claude Code Skill call or a Codex
-// "$name" prompt selects, when it is a plain folder name.
-func hookInvokedSkillName(toolName string, toolInput map[string]any, prompt string) string {
+// hookInvokedSkillName is the skill a Claude Code Skill call or /name
+// prompt, or a Codex "$name" prompt, selects, when it is a plain folder name.
+func hookInvokedSkillName(connector, toolName string, toolInput map[string]any, prompt string) string {
 	name := ""
-	if strings.EqualFold(strings.TrimSpace(toolName), "Skill") {
+	fields := strings.Fields(prompt)
+	switch {
+	case strings.EqualFold(strings.TrimSpace(toolName), "Skill"):
 		name, _ = toolInput["skill"].(string)
-	} else if fields := strings.Fields(prompt); len(fields) > 0 && strings.HasPrefix(fields[0], "$") {
+	case len(fields) > 0 && strings.HasPrefix(fields[0], "$"):
 		name = strings.TrimPrefix(fields[0], "$")
+	case len(fields) > 0 && connector == "claudecode" && strings.HasPrefix(fields[0], "/"):
+		name = strings.TrimPrefix(fields[0], "/")
 	}
 	name = strings.TrimSpace(name)
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\:`) {
