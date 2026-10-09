@@ -371,12 +371,12 @@ func TestEncodeVerdictResponse(t *testing.T) {
 		Reason:    6, // Cloud block
 		Flags:     0,
 		ServerTS:  1700000000,
-		HMACTag:   [4]byte{0xDE, 0xAD, 0xBE, 0xEF},
+		HMACTag:   [16]byte{0xDE, 0xAD, 0xBE, 0xEF},
 	}
 
 	data := EncodeVerdictResponse(resp)
-	if len(data) != 16 {
-		t.Fatalf("response length = %d, want 16", len(data))
+	if len(data) != 28 {
+		t.Fatalf("response length = %d, want 28", len(data))
 	}
 
 	if binary.BigEndian.Uint16(data[0:2]) != 0x0102 {
@@ -490,8 +490,8 @@ func TestBridgeVerdictRequestRouting(t *testing.T) {
 	if published[0].Topic != expectedTopic {
 		t.Errorf("response topic = %q, want %q", published[0].Topic, expectedTopic)
 	}
-	if len(published[0].Payload) != 16 {
-		t.Errorf("response payload length = %d, want 16", len(published[0].Payload))
+	if len(published[0].Payload) != 28 {
+		t.Errorf("response payload length = %d, want 28", len(published[0].Payload))
 	}
 
 	// Verify response content
@@ -603,6 +603,7 @@ func TestBridgeMultipleHeartbeats(t *testing.T) {
 	})
 
 	bridge := NewBridge(mc, fm, cache)
+	bridge.SetHeartbeatRateLimit(0) // disable for rapid test
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)

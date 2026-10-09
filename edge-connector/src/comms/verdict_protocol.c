@@ -31,8 +31,8 @@ extern int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
 
 /*
  * Verdict HMAC computation.
- * When DCLAW_HAS_MBEDTLS=1: HMAC-SHA256 via mbedtls_md, truncated to 4 bytes.
- * Otherwise: built-in HMAC-SHA256 (no external library), truncated to 4 bytes.
+ * When DCLAW_HAS_MBEDTLS=1: HMAC-SHA256 via mbedtls_md, truncated to 16 bytes.
+ * Otherwise: built-in HMAC-SHA256 (no external library), truncated to 16 bytes.
  */
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
 
@@ -47,9 +47,9 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
                                  uint8_t reason, uint8_t flags,
                                  uint32_t server_ts,
                                  const uint8_t *tool_hash,
-                                 uint8_t *out_4bytes) {
+                                 uint8_t *out_16bytes) {
     /*
-     * NEW-6 fix: HMAC-SHA256 truncated to 4 bytes, covering ALL verdict fields.
+     * BLK-1 fix: HMAC-SHA256 truncated to 16 bytes, covering ALL verdict fields.
      * Input: HMAC-SHA256(device_key, session_id || request_id || action ||
      *        severity || ttl || reason || flags || server_ts || tool_hash[0:8])
      */
@@ -99,8 +99,8 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
 
-    /* Truncate to 4 bytes */
-    memcpy(out_4bytes, hmac_full, 4);
+    /* BLK-1: Truncate to 16 bytes (was 4) */
+    memcpy(out_16bytes, hmac_full, 16);
 }
 
 #else /* Built-in HMAC-SHA256 — no external library required */
@@ -114,9 +114,9 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
                                  uint8_t reason, uint8_t flags,
                                  uint32_t server_ts,
                                  const uint8_t *tool_hash,
-                                 uint8_t *out_4bytes) {
+                                 uint8_t *out_16bytes) {
     /*
-     * NEW-6 fix: HMAC-SHA256 truncated to 4 bytes, covering ALL verdict fields.
+     * BLK-1 fix: HMAC-SHA256 truncated to 16 bytes, covering ALL verdict fields.
      * Input: HMAC-SHA256(device_key, session_id || request_id || action ||
      *        severity || ttl || reason || flags || server_ts || tool_hash[0:8])
      * Matches the mbedTLS path semantics exactly.
@@ -162,8 +162,8 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
 
     dclaw_hmac_sha256(device_key, key_len, msg, msg_len, hmac_full);
 
-    /* Truncate to 4 bytes */
-    memcpy(out_4bytes, hmac_full, 4);
+    /* BLK-1: Truncate to 16 bytes (was 4) */
+    memcpy(out_16bytes, hmac_full, 16);
 }
 
 #endif /* DCLAW_HAS_MBEDTLS */
@@ -259,10 +259,23 @@ static const uint8_t *get_device_key(size_t *out_key_len) {
         }
 
         if (!loaded) {
+#if DCLAW_DEV_MODE
             /* Fallback: 32-byte zero key (Comment 32 fix).
-             * Must match the Go side (bridge.go) which uses make([]byte, 32). */
+             * Must match the Go side (bridge.go) which uses make([]byte, 32).
+             * Only permitted in dev mode (DCLAW_DEV_MODE=ON). */
+            fprintf(stderr, "[DCLAW] WARNING: No device key found, using zero key (dev mode only).\n");
             memset(s_device_key, 0, sizeof(s_device_key));
             s_device_key_len = 32;
+#else
+            /* CRT-3 fix: In production mode (DCLAW_DEV_MODE=OFF), refuse to
+             * fall back to a zero key. A zero key is a well-known constant that
+             * any attacker can use to forge HMAC signatures. Return an empty
+             * key so that verdict responses are rejected at the HMAC check. */
+            fprintf(stderr, "[DCLAW] ERROR: No device key provisioned and DCLAW_DEV_MODE=OFF. "
+                    "Set DCLAW_DEVICE_KEY or provision /etc/defenseclaw/device.key.\n");
+            memset(s_device_key, 0, sizeof(s_device_key));
+            s_device_key_len = 0;
+#endif
         }
 
         /* Check that the loaded key is not all zeros */
@@ -305,6 +318,17 @@ void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len) {
  * The previous logic only checked condition (a), so resolved slots were
  * never reused — once all DCLAW_PENDING_SLOTS were resolved the system
  * could not send any new verdict requests. */
+void dclaw_verdict_mark_timeout(uint16_t request_id) {
+    dclaw_state_t *s = dclaw_get_state();
+    for (int i = 0; i < DCLAW_PENDING_SLOTS; i++) {
+        if (s->pending[i].request_id == request_id) {
+            s->pending[i].request_id = 0;
+            s->pending[i].resolved = false;
+            return;
+        }
+    }
+}
+
 int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash) {
     dclaw_state_t *s = dclaw_get_state();
 
@@ -325,15 +349,15 @@ int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash
 /* Process a received verdict response */
 int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
                                   const uint8_t *pending_tool_hash) {
-    if (resp_len != 16) return -1;
+    if (resp_len != 28) return -1;
 
     dclaw_state_t *s = dclaw_get_state();
 
-    /* Decode the 16-byte response */
+    /* Decode the 28-byte response (BLK-1: HMAC extended to 16 bytes) */
     uint16_t request_id, ttl;
     uint8_t action, severity, reason, flags;
     uint32_t server_ts;
-    uint8_t received_hmac[4];
+    uint8_t received_hmac[16];
 
     int rc = dclaw_cbor_decode_verdict_response(resp_buf, resp_len,
                                                 &request_id, &action, &severity,
@@ -358,7 +382,7 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
 
     /* REQ-27: Verify HMAC tag BEFORE marking as resolved (Comment 23 fix).
      * If HMAC fails, the slot stays pending so a valid retry can still succeed. */
-    uint8_t expected_hmac[4];
+    uint8_t expected_hmac[16];
     size_t key_len;
     const uint8_t *device_key = get_device_key(&key_len);
     const char *session_id = dclaw_mqtt_get_session_id();
@@ -379,7 +403,7 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
                          reason, flags, server_ts,
                          pending_tool_hash, expected_hmac);
 
-    if (!ct_compare(received_hmac, expected_hmac, 4)) {
+    if (!ct_compare(received_hmac, expected_hmac, 16)) {
         /* REQ-29: HMAC verification failed — leave slot pending for valid retry */
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8)),
@@ -443,19 +467,18 @@ bool dclaw_verdict_is_key_provisioned(void) {
 }
 
 /* Compute HMAC for outbound use (e.g., for testing/verification).
- * NEW-6 fix: Now accepts all verdict response fields to match the
- * full-coverage HMAC computation. */
+ * BLK-1: Output extended to 16 bytes (was 4). */
 void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t action,
                                          uint8_t severity, uint16_t ttl,
                                          uint8_t reason, uint8_t flags,
                                          uint32_t server_ts,
                                          const uint8_t *tool_hash,
-                                         uint8_t *out_hmac_4bytes) {
+                                         uint8_t *out_hmac_16bytes) {
     size_t key_len;
     const uint8_t *device_key = get_device_key(&key_len);
     const char *session_id = dclaw_mqtt_get_session_id();
     compute_verdict_hmac(device_key, key_len, session_id,
                          request_id, action, severity, ttl,
                          reason, flags, server_ts,
-                         tool_hash, out_hmac_4bytes);
+                         tool_hash, out_hmac_16bytes);
 }

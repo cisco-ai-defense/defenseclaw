@@ -143,20 +143,20 @@ typedef struct {
     uint64_t timestamp;     /* 8 */
     uint16_t target_hash;   /* 2 */
     uint16_t session_id;    /* 2 */
-    uint8_t  hmac[4];       /* 4 (truncated HMAC-SHA256) */
+    uint8_t  hmac[16];      /* 16 (BLK-1: truncated HMAC-SHA256, was 4) */
     uint8_t  action;        /* 1 */
     uint8_t  reason;        /* 1 */
-    uint8_t  _pad[6];       /* 6 (align to 24 for uint64_t) */
-} dclaw_audit_entry_t;      /* 24 bytes, naturally aligned */
+    uint8_t  _pad[2];       /* 2 (align to 32 for uint64_t) */
+} dclaw_audit_entry_t;      /* 32 bytes, naturally aligned */
 
-_Static_assert(sizeof(dclaw_audit_entry_t) == 24, "audit entry must be 24 bytes");
+_Static_assert(sizeof(dclaw_audit_entry_t) == 32, "audit entry must be 32 bytes");
 
 typedef struct {
     dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER_SIZE];
     uint8_t  count;
     uint64_t last_flush_tick;
     uint32_t total_flash_writes;
-    uint8_t  prev_hmac[4];       /* HMAC of last entry written (for chaining across flushes) */
+    uint8_t  prev_hmac[16];      /* BLK-1: HMAC of last entry written (for chaining across flushes) */
 } dclaw_audit_writer_t;
 
 /* === Session Correlator === */
@@ -232,7 +232,7 @@ typedef struct {
 
 typedef struct {
     uint16_t baseline_blocks_per_min;
-    uint16_t canary_blocks[10];
+    uint32_t canary_blocks[10];  /* H-12: widened from uint16_t to prevent silent overflow */
     uint8_t  canary_minute;
     uint8_t  spike_streak;
     bool     canary_active;
@@ -247,6 +247,7 @@ typedef struct {
     bool     replay_requested;
     bool     initialized;
     bool     block_all_active;  /* P1-6: global BLOCK_ALL / LOCKDOWN flag */
+    uint32_t lockdown_timestamp; /* CRT-5: Unix epoch when lockdown was activated (0 = not set) */
 } dclaw_emergency_state_t;
 
 /* === Runtime Policy Tables === */

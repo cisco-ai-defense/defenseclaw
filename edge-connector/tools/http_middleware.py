@@ -146,7 +146,7 @@ class EdgeConnectorMiddleware:
             verdict = self._connector.evaluate(
                 tool_name=tool_name,
                 arguments=arguments,
-                content=raw_body.decode("utf-8", errors="replace")[:512],
+                content=raw_body.decode("utf-8", errors="replace")[:4096],
             )
             if verdict.blocked:
                 logger.warning(
@@ -233,7 +233,7 @@ def flask_edge_connector(
         verdict = ec.evaluate(
             tool_name=tool_name,
             arguments=arguments,
-            content=json.dumps(body, default=str)[:512],
+            content=json.dumps(body, default=str)[:4096],
         )
         if verdict.blocked:
             logger.warning(

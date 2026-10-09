@@ -45,6 +45,13 @@ func NewHMACSigner(key []byte) (*HMACSigner, error) {
 func NewHMACSignerFromEnv() (*HMACSigner, error) {
 	keyHex := os.Getenv("DCLAW_OTA_KEY")
 	if keyHex == "" {
+		// CRT-3 fix: In production mode (DCLAW_PRODUCTION=true), refuse to
+		// fall back to a zero key. A zero key is well-known and lets anyone
+		// forge valid HMAC signatures for OTA policy updates.
+		prod := os.Getenv("DCLAW_PRODUCTION")
+		if prod == "true" || prod == "1" {
+			return nil, errors.New("DCLAW_OTA_KEY not set and DCLAW_PRODUCTION=true — zero-key fallback is disabled in production")
+		}
 		// Development fallback — all-zero key, matching C-side ota_receiver.c
 		// get_ota_ca_key() which memsets to zero when DCLAW_OTA_KEY is unset.
 		devKey := make([]byte, 32)

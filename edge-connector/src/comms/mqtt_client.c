@@ -102,11 +102,29 @@ typedef struct {
 static mqtt_pending_entry_t pending_ring[MQTT_PENDING_RING_SIZE];
 static uint8_t pending_ring_next = 0;
 
+/* H-9 fix: Counter for evicted pending requests (observable via diagnostics). */
+static uint32_t pending_evicted_count = 0;
+
+/* H-9 fix: Forward declaration for speculative slot cleanup on eviction.
+ * Implemented in verdict_protocol.c — marks the speculative verdict slot for
+ * the given request_id as timed out so the caller does not block indefinitely. */
+extern void dclaw_verdict_mark_timeout(uint16_t request_id);
+
+uint32_t dclaw_mqtt_pending_evicted_count(void) {
+    return pending_evicted_count;
+}
+
 void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash) {
     mqtt_pending_entry_t *slot = &pending_ring[pending_ring_next];
     if (slot->occupied) {
-        fprintf(stderr, "[DCLAW] WARNING: pending verdict slot %d evicted (ring full)\n",
-                pending_ring_next);
+        /* H-9 fix: When evicting a pending slot, also clean up the speculative
+         * verdict slot so the caller gets a timeout instead of blocking forever
+         * waiting for a response that will never be correlated. */
+        fprintf(stderr, "[DCLAW] WARNING: pending verdict slot %d evicted (ring full) — "
+                "marking request_id=%u as timed out\n",
+                pending_ring_next, slot->request_id);
+        dclaw_verdict_mark_timeout(slot->request_id);
+        pending_evicted_count++;
     }
     slot->request_id = request_id;
     memcpy(slot->tool_hash, tool_hash, 32);

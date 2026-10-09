@@ -33,6 +33,14 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
 
+	// M-11: Limit concurrent connections and WAL size for resource-constrained
+	// environments (edge devices, single-writer pattern).
+	db.SetMaxOpenConns(2)
+	if _, err := db.Exec("PRAGMA journal_size_limit=8388608"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set WAL size limit: %w", err)
+	}
+
 	if err := createTable(db); err != nil {
 		db.Close()
 		return nil, err
@@ -115,6 +123,18 @@ func createTable(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create device_keys table: %w", err)
+	}
+
+	// M-12: Decommission tombstones — persist decommissioned device IDs so
+	// that re-registration can detect previously decommissioned devices even
+	// after a gateway restart.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS decommissioned_devices (
+			device_id INTEGER PRIMARY KEY
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create decommissioned_devices table: %w", err)
 	}
 
 	return nil
@@ -265,6 +285,43 @@ func (s *SQLiteStore) DeleteDeviceKey(deviceID uint64) error {
 	_, err := s.db.Exec("DELETE FROM device_keys WHERE device_id = ?", deviceID)
 	if err != nil {
 		return fmt.Errorf("delete device key %d: %w", deviceID, err)
+	}
+	return nil
+}
+
+// SaveDecommissioned records a device ID as decommissioned (M-12).
+func (s *SQLiteStore) SaveDecommissioned(deviceID uint64) error {
+	_, err := s.db.Exec(
+		"INSERT OR IGNORE INTO decommissioned_devices (device_id) VALUES (?)", deviceID)
+	if err != nil {
+		return fmt.Errorf("save decommissioned %d: %w", deviceID, err)
+	}
+	return nil
+}
+
+// LoadDecommissioned returns all decommissioned device IDs (M-12).
+func (s *SQLiteStore) LoadDecommissioned() ([]uint64, error) {
+	rows, err := s.db.Query("SELECT device_id FROM decommissioned_devices")
+	if err != nil {
+		return nil, fmt.Errorf("load decommissioned: %w", err)
+	}
+	defer rows.Close()
+	var ids []uint64
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan decommissioned: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// DeleteDecommissioned removes a device from the tombstone table on re-registration (M-12).
+func (s *SQLiteStore) DeleteDecommissioned(deviceID uint64) error {
+	_, err := s.db.Exec("DELETE FROM decommissioned_devices WHERE device_id = ?", deviceID)
+	if err != nil {
+		return fmt.Errorf("delete decommissioned %d: %w", deviceID, err)
 	}
 	return nil
 }

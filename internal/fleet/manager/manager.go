@@ -110,6 +110,13 @@ type DeviceStore interface {
 }
 
 // FleetManager is the core fleet management service.
+//
+// TODO(M-9): The mu RWMutex currently protects the entire devices map for all
+// operations.  ProcessHeartbeat holds the write lock for the full duration of
+// heartbeat processing (parsing, delta computation, anomaly checks, store
+// persistence).  This is a bottleneck at scale.  Refactor to per-device or
+// sharded locks so heartbeat processing for device A does not block device B.
+// This is tracked as a "Should Fix" item from the security review.
 type FleetManager struct {
 	mu                sync.RWMutex
 	devices           map[uint64]*Device
@@ -128,6 +135,9 @@ type FleetManager struct {
 	// P2-19 fix: Status transition hook so metrics gauges update correctly
 	// when a device moves between states (e.g., online → lockdown).
 	onStatusChange func(oldStatus, newStatus DeviceStatus)
+
+	// M-10: Counter for store errors so they are observable via metrics.
+	onStoreError func()
 }
 
 // New creates a new FleetManager instance.
@@ -177,6 +187,11 @@ func (fm *FleetManager) SetMetricsHooks(onRegistered, onOffline, onHeartbeat fun
 	fm.onDeviceRegistered = onRegistered
 	fm.onDeviceOffline = onOffline
 	fm.onHeartbeat = onHeartbeat
+}
+
+// SetStoreErrorHook configures a callback for store write failures (M-10).
+func (fm *FleetManager) SetStoreErrorHook(hook func()) {
+	fm.onStoreError = hook
 }
 
 // SetStatusChangeHook configures a callback for device status transitions.
@@ -445,6 +460,10 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	if fm.store != nil {
 		if err := fm.store.SaveDevice(dev); err != nil {
 			log.Printf("[fleet] store error: %v", err)
+			// M-10: Increment metric counter so store errors are observable.
+			if fm.onStoreError != nil {
+				fm.onStoreError()
+			}
 		}
 	}
 }

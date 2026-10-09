@@ -281,10 +281,9 @@ int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
                                        uint8_t *severity, uint16_t *ttl,
                                        uint8_t *reason, uint8_t *flags,
                                        uint32_t *server_ts, uint8_t *hmac_tag) {
-    if (len < 16) return -1;
+    if (len < 28) return -1;
 
-    /* Fixed binary format, not CBOR — matching proposal §7.2 wire format:
-     * [request_id:2][action:1][severity:1][ttl:2][reason:1][flags:1][server_ts:4][hmac:4] */
+    /* Fixed binary format: [request_id:2][action:1][severity:1][ttl:2][reason:1][flags:1][server_ts:4][hmac:16] */
     *request_id = ((uint16_t)buf[0] << 8) | buf[1];
     *action = buf[2];
     *severity = buf[3];
@@ -293,7 +292,7 @@ int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
     *flags = buf[7];
     *server_ts = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
                  ((uint32_t)buf[10] << 8) | buf[11];
-    memcpy(hmac_tag, buf + 12, 4);
+    memcpy(hmac_tag, buf + 12, 16);
 
     return 0;
 }

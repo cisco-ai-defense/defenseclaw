@@ -115,6 +115,19 @@ static int compare_hash(const uint8_t *a, const uint8_t *b) {
     return memcmp(a, b, 32);
 }
 
+/* M-6: Constant-time comparison for the final equality check in
+ * deny-list lookups.  The binary search uses compare_hash (memcmp)
+ * for ordering, but the final match must be constant-time to avoid
+ * timing side-channels that could reveal which hashes are on the
+ * deny list. */
+static bool ct_hash_equal(const uint8_t *a, const uint8_t *b) {
+    volatile uint8_t diff = 0;
+    for (int i = 0; i < 32; i++) {
+        diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+}
+
 /*
  * dclaw_policy_tables_init — populate runtime tables from compiled-in defaults.
  * Called once during dclaw_init(). After OTA, dclaw_policy_reload_from_flash()
@@ -168,21 +181,64 @@ dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash) {
     dclaw_state_t *s = dclaw_get_state();
     dclaw_policy_table_t *rt = &s->rt_policy;
 
-    /* Binary search over sorted deny_hashes table (runtime copy) */
+    /* Binary search over sorted deny_hashes table (runtime copy).
+     * The binary search uses memcmp for ordering; the final equality
+     * check uses constant-time comparison (M-6). */
     int lo = 0, hi = (int)rt->deny_hashes_count - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
         int cmp = compare_hash(tool_hash, rt->deny_hashes[mid]);
-        if (cmp == 0) return DCLAW_ACTION_BLOCK;
+        if (cmp == 0) {
+            /* Final match: use constant-time comparison to avoid
+             * leaking which hash matched via timing. */
+            if (ct_hash_equal(tool_hash, rt->deny_hashes[mid]))
+                return DCLAW_ACTION_BLOCK;
+            /* Should not happen (memcmp==0 implies equality), but
+             * fall through to ALLOW if ct disagrees. */
+            return DCLAW_ACTION_ALLOW;
+        }
         if (cmp < 0) hi = mid - 1;
         else lo = mid + 1;
     }
     return DCLAW_ACTION_ALLOW;
 }
 
-dclaw_action_t dclaw_policy_check_destination(const char *host) {
+/*
+ * H-11 fix: Extract hostname from a destination string that may be a full URL.
+ * If dest contains "://", skip past the scheme and extract the hostname portion
+ * (up to the next '/', ':', or end of string). Otherwise return dest as-is.
+ * The extracted hostname is written into out_buf (NUL-terminated).
+ * Returns a pointer to the hostname (either out_buf or dest itself).
+ */
+static const char *extract_hostname(const char *dest, char *out_buf, size_t buf_size) {
+    const char *scheme_end = strstr(dest, "://");
+    if (!scheme_end) {
+        return dest; /* No scheme — dest is already a hostname */
+    }
+    const char *host_start = scheme_end + 3; /* skip "://" */
+    const char *host_end = host_start;
+    while (*host_end != '\0' && *host_end != '/' && *host_end != ':') {
+        host_end++;
+    }
+    size_t host_len = (size_t)(host_end - host_start);
+    if (host_len == 0) {
+        return dest; /* Malformed URL — fall through with original string */
+    }
+    if (host_len >= buf_size) {
+        host_len = buf_size - 1;
+    }
+    memcpy(out_buf, host_start, host_len);
+    out_buf[host_len] = '\0';
+    return out_buf;
+}
+
+dclaw_action_t dclaw_policy_check_destination(const char *dest) {
     dclaw_state_t *s = dclaw_get_state();
     dclaw_policy_table_t *rt = &s->rt_policy;
+
+    /* H-11 fix: Extract hostname from URL if dest contains "://" */
+    char host_buf[DCLAW_RT_MAX_DEST_LEN];
+    const char *host = extract_hostname(dest, host_buf, sizeof(host_buf));
 
     /* Linear scan over destination allowlist (runtime copy, small ≤256 entries) */
     for (size_t i = 0; i < rt->dest_allowlist_count; i++) {

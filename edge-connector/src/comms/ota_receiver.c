@@ -264,6 +264,21 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                                            : HAL_FLASH_POLICY_A_OFFSET;
 
     if (hal_flash_write(target_offset, blob, blob_len) != 0) {
+        /* H-10 fix: Flash write failed — do NOT proceed to switch partition.
+         * A partial write would leave the inactive partition corrupt, and
+         * switching to it would brick the device's policy engine. */
+        fprintf(stderr, "[DCLAW] ERROR: Flash write failed for policy blob (%u bytes at offset 0x%x) — "
+                "aborting OTA apply, partition NOT switched\n",
+                blob_len, target_offset);
+        return -3;
+    }
+
+    /* H-10 fix: Sync flash to ensure all written bytes are durable before
+     * switching partitions. Without this, a power loss between the write and
+     * the partition switch could leave the new partition with incomplete data. */
+    if (hal_flash_sync() != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: hal_flash_sync() failed after policy write — "
+                "aborting OTA apply, partition NOT switched\n");
         return -3;
     }
 
@@ -330,8 +345,9 @@ void dclaw_canary_tick(void) {
 
         /* Check spike: blocks in previous minute vs baseline */
         uint8_t prev_min = (current_min > 0) ? current_min - 1 : 0;
-        uint16_t rate = s->canary.canary_blocks[prev_min];
-        uint16_t threshold = s->canary.baseline_blocks_per_min * DCLAW_CANARY_SPIKE_MULT;
+        /* H-12: widened from uint16_t to match canary_blocks[10] type */
+        uint32_t rate = s->canary.canary_blocks[prev_min];
+        uint32_t threshold = (uint32_t)s->canary.baseline_blocks_per_min * DCLAW_CANARY_SPIKE_MULT;
 
         if (rate > threshold && s->canary.baseline_blocks_per_min > 0) {
             s->canary.spike_streak++;
@@ -426,8 +442,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
             return -2;
         }
 
-        /* REQ-31: Jump attack detection — reject delta > 1000 */
-        if (seq - s->emergency.last_seen_seq > 1000) {
+        /* REQ-31: Jump attack detection — reject delta > 100 (M-7: reduced
+         * from 1000 to shrink the window for sequence gap attacks) */
+        if (seq - s->emergency.last_seen_seq > 100) {
             return -3;
         }
     }
@@ -439,6 +456,8 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
          * returns BLOCK for ALL requests until cleared or daemon restart. */
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
+        /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
+        s->emergency.lockdown_timestamp = (uint32_t)(hal_tick_ms() / 1000);
         break;
 
     case 0x02: /* REVOKE_HASH / REVOKE_SESSIONS */
@@ -465,6 +484,8 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
          * all requests. The flag persists until cleared or daemon restart. */
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
+        /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
+        s->emergency.lockdown_timestamp = (uint32_t)(hal_tick_ms() / 1000);
         break;
 
     case 0x05: /* RELEASE_LOCKDOWN */
@@ -479,6 +500,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
          *   3. Normal policy evaluation resumes on next tool call
          *   4. Verdict cache is flushed to force re-evaluation */
         s->emergency.block_all_active = false;
+        s->emergency.lockdown_timestamp = 0;
         dclaw_cache_flush_all();
         break;
 
@@ -690,21 +712,67 @@ bool dclaw_emergency_has_gap(uint32_t cloud_current_seq) {
     return false;
 }
 
+/* CRT-5 fix: Lockdown timeout check — called periodically from the event loop.
+ * If block_all_active is true and the lockdown has been active for more than
+ * 24 hours, automatically clear it with a warning. This prevents a device from
+ * being permanently bricked if MQTT connectivity is lost and the operator cannot
+ * send a RELEASE_LOCKDOWN command. */
+#define DCLAW_LOCKDOWN_TIMEOUT_SEC (24 * 60 * 60) /* 24 hours */
+
+void dclaw_lockdown_timeout_check(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    if (!s->emergency.block_all_active) return;
+    if (s->emergency.lockdown_timestamp == 0) return;
+
+    uint32_t now_sec = (uint32_t)(hal_tick_ms() / 1000);
+    if (now_sec < s->emergency.lockdown_timestamp) return; /* tick wraparound guard */
+
+    uint32_t elapsed = now_sec - s->emergency.lockdown_timestamp;
+    if (elapsed >= DCLAW_LOCKDOWN_TIMEOUT_SEC) {
+        fprintf(stderr, "[DCLAW] WARNING: Lockdown auto-cleared after 24 hours (elapsed=%u sec). "
+                "Normal policy evaluation resumed. Investigate the original lockdown cause.\n",
+                elapsed);
+        s->emergency.block_all_active = false;
+        s->emergency.lockdown_timestamp = 0;
+        dclaw_cache_flush_all();
+        dclaw_emergency_persist();
+        dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_CLOUD_BLOCK, 0xFFFE, 0);
+    }
+}
+
+/* CRT-5 fix: Release lockdown via local IPC command.
+ * Called from main.c when the IPC handler receives a "release_lockdown" command.
+ * Returns 0 on success, -1 if lockdown was not active. */
+int dclaw_ipc_release_lockdown(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    if (!s->emergency.block_all_active) {
+        return -1; /* not in lockdown */
+    }
+    fprintf(stderr, "[DCLAW] Lockdown released via local IPC command.\n");
+    s->emergency.block_all_active = false;
+    s->emergency.lockdown_timestamp = 0;
+    dclaw_cache_flush_all();
+    dclaw_emergency_persist();
+    dclaw_audit_write(DCLAW_ACTION_WARN, DCLAW_REASON_CLOUD_BLOCK, 0xFFFD, 0);
+    return 0;
+}
+
 /* === P1-09 fix: Persist emergency state to flash === */
 
 /*
- * Emergency state is stored in the first 8 bytes of the config partition
+ * Emergency state is stored in the first 12 bytes of the config partition
  * (HAL_FLASH_CONFIG_OFFSET). Layout:
- *   [0..1] magic marker (0xDC, 0xE9) — "DC Emergency 9"
- *   [2]    block_all_active (0x00 or 0x01)
- *   [3]    reserved (0x00)
- *   [4..7] last_seen_seq  (big-endian uint32)
+ *   [0..1]  magic marker (0xDC, 0xE9) — "DC Emergency 9"
+ *   [2]     block_all_active (0x00 or 0x01)
+ *   [3]     reserved (0x00)
+ *   [4..7]  last_seen_seq  (big-endian uint32)
+ *   [8..11] lockdown_timestamp (big-endian uint32, CRT-5)
  *
  * The 2-byte magic ensures we don't misinterpret stale/uninitialized flash
  * (which reads as all-zeros or all-0xFF) as a valid emergency state.
  */
 #define EMERGENCY_FLASH_OFFSET  HAL_FLASH_CONFIG_OFFSET
-#define EMERGENCY_FLASH_SIZE    8
+#define EMERGENCY_FLASH_SIZE    12
 #define EMERGENCY_MAGIC_0       0xDC
 #define EMERGENCY_MAGIC_1       0xE9
 
@@ -720,6 +788,11 @@ void dclaw_emergency_persist(void) {
     buf[5] = (uint8_t)(s->emergency.last_seen_seq >> 16);
     buf[6] = (uint8_t)(s->emergency.last_seen_seq >> 8);
     buf[7] = (uint8_t)(s->emergency.last_seen_seq);
+    /* CRT-5: Persist lockdown timestamp */
+    buf[8]  = (uint8_t)(s->emergency.lockdown_timestamp >> 24);
+    buf[9]  = (uint8_t)(s->emergency.lockdown_timestamp >> 16);
+    buf[10] = (uint8_t)(s->emergency.lockdown_timestamp >> 8);
+    buf[11] = (uint8_t)(s->emergency.lockdown_timestamp);
 
     if (hal_flash_write(EMERGENCY_FLASH_OFFSET, buf, EMERGENCY_FLASH_SIZE) != 0) {
         fprintf(stderr, "[DCLAW] WARNING: Failed to persist emergency state to flash.\n");
@@ -742,6 +815,9 @@ void dclaw_emergency_load_from_flash(void) {
     s->emergency.block_all_active = (buf[2] == 0x01);
     s->emergency.last_seen_seq = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
                                  ((uint32_t)buf[6] << 8) | (uint32_t)buf[7];
+    /* CRT-5: Restore lockdown timestamp */
+    s->emergency.lockdown_timestamp = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
+                                      ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
     s->emergency.initialized = true;
 
     if (s->emergency.block_all_active) {

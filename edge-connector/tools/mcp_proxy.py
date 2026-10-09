@@ -186,6 +186,18 @@ class _HttpUpstream:
     """Proxy to a remote MCP server over HTTP (simple POST-based)."""
 
     def __init__(self, url: str):
+        # H-6 fix: In production mode, require HTTPS for upstream URLs.
+        # Reject plaintext http:// URLs to prevent credential/data leakage.
+        is_production = os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes")
+        if is_production and url and url.startswith("http://"):
+            raise ValueError(
+                f"H-6: DCLAW_PRODUCTION is set but upstream URL uses plaintext HTTP: {url}. "
+                f"Use https:// for production upstream connections."
+            )
+        if is_production and url and not url.startswith("https://"):
+            logger.warning(
+                "H-6: DCLAW_PRODUCTION is set and upstream URL scheme is not https: %s", url
+            )
         self._url = url
         self._session: Any = None  # aiohttp.ClientSession
 
@@ -399,7 +411,15 @@ class MCPProxy:
             await self._upstream.send(msg)
 
     async def _forward(self, msg: Dict) -> Dict:
-        """Forward a message to the upstream and return its response."""
+        """Forward a message to the upstream and return its response.
+
+        TODO(M-13): Validate the upstream response before returning it to the
+        client.  Currently the response is forwarded as-is, which means a
+        compromised or buggy upstream MCP server could inject arbitrary
+        JSON-RPC fields (e.g., fake tool results, manipulated resource data).
+        Add schema validation or at minimum verify the response has the
+        expected JSON-RPC structure and matching id.
+        """
         try:
             return await self._upstream.send(msg)
         except Exception as exc:

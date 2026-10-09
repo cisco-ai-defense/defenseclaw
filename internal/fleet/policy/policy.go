@@ -91,6 +91,13 @@ func ParseHeader(data []byte) (*PolicyHeader, error) {
 }
 
 // Service manages policy compilation, signing, and distribution to edge devices.
+//
+// M-8: Design note — a single OTA signing key (DCLAW_OTA_KEY) is used for
+// both policy blob signatures and emergency broadcast signatures.  This is
+// intentional for Phase 1 simplicity: the fleet manager is the sole issuer
+// of both message types, so a single symmetric HMAC key is sufficient.
+// Phase 2 may introduce separate Ed25519 key pairs for non-repudiation and
+// per-message-type key isolation.
 type Service struct {
 	store  PolicyStore
 	signer Signer

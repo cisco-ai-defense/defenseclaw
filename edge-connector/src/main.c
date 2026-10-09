@@ -9,7 +9,7 @@
 #include <stdlib.h>
 
 #ifndef DCLAW_IPC_SOCKET_PATH_DEFAULT
-#define DCLAW_IPC_SOCKET_PATH_DEFAULT "/tmp/defenseclaw.sock"
+#define DCLAW_IPC_SOCKET_PATH_DEFAULT "/run/defenseclaw/defenseclaw.sock"
 #endif
 
 #define DCLAW_MAX_IPC_CLIENTS 8
@@ -28,6 +28,10 @@ extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
                                     dclaw_tool_request_t *out);
 extern int  dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer);
 extern dclaw_state_t *dclaw_get_state(void);
+#if DCLAW_MQTT_ENABLED
+extern int  dclaw_ipc_release_lockdown(void);
+extern void dclaw_lockdown_timeout_check(void);
+#endif
 
 static volatile bool g_running = true;
 
@@ -228,7 +232,20 @@ int main(void) {
                 size_t msg_len = (size_t)(nl - base);
                 *nl = '\0';
 
+                /* CRT-5 fix: Handle special IPC commands before JSON-RPC parsing.
+                 * "release_lockdown" clears the emergency lockdown state locally
+                 * without requiring MQTT connectivity. */
+#if DCLAW_MQTT_ENABLED
+                if (msg_len == 16 && memcmp(base, "release_lockdown", 16) == 0) {
+                    int rc = dclaw_ipc_release_lockdown();
+                    const char *ok_resp = "{\"jsonrpc\":\"2.0\",\"result\":{\"released\":true},\"id\":null}\n";
+                    const char *no_resp = "{\"jsonrpc\":\"2.0\",\"result\":{\"released\":false,\"reason\":\"not in lockdown\"},\"id\":null}\n";
+                    const char *resp = (rc == 0) ? ok_resp : no_resp;
+                    if (write(client_fds[i], resp, strlen(resp)) < 0) { /* best-effort */ }
+                } else
+#endif
                 /* Parse JSON-RPC request and evaluate */
+                {
                 dclaw_tool_request_t req;
                 if (msg_len > 0 && dclaw_ipc_parse_request(base, msg_len, &req) == 0) {
                     dclaw_verdict_t verdict = dclaw_evaluate(&req);
@@ -241,6 +258,7 @@ int main(void) {
                     if (write(client_fds[i], err, strlen(err)) < 0) {
                         /* Best-effort error response — ignore write failure */
                     }
+                }
                 }
 
                 size_t consumed = msg_len + 1;
@@ -265,6 +283,8 @@ int main(void) {
         dclaw_mqtt_send_heartbeat();
         dclaw_mqtt_reconnect();
         dclaw_canary_tick();
+        /* CRT-5 fix: Check if lockdown has exceeded 24-hour timeout */
+        dclaw_lockdown_timeout_check();
 #endif
 
         /* Flush audit on idle periods (no client activity) */

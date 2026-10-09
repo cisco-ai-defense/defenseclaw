@@ -187,6 +187,18 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
 
     g_state.eval_count++;
 
+    /* M-4: SYSTEM scope should only be set internally (e.g., by content
+     * scanners or the daemon itself), not from IPC callers.  Override
+     * SYSTEM scope on inbound requests to UNKNOWN so external callers
+     * cannot bypass scope-specific content scanning rules. */
+    if (req->content_scope == DCLAW_CONTENT_SCOPE_SYSTEM &&
+        req->direction == DCLAW_DIRECTION_REQUEST) {
+        /* Cast away const — we already make a mutable copy below (trusted_req),
+         * but this override must happen before the emergency check.  Use a
+         * local mutable pointer for this single field. */
+        ((dclaw_tool_request_t *)req)->content_scope = DCLAW_CONTENT_SCOPE_UNKNOWN;
+    }
+
     /* P1-6 fix: Check global emergency BLOCK_ALL / LOCKDOWN flag at the TOP
      * of evaluation. When active, ALL requests are immediately blocked
      * regardless of policy, cache, or cloud verdicts. The flag is set by
@@ -339,7 +351,9 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     /* Step 8: No local decision — need cloud escalation */
 #if DCLAW_MQTT_ENABLED
     {
-        uint16_t request_id = g_state.next_request_id++;
+        /* CRT-4 fix: Skip 0 on wrap — 0 is the sentinel for "unused slot" */
+        if (++g_state.next_request_id == 0) g_state.next_request_id = 1;
+        uint16_t request_id = g_state.next_request_id;
         /* Store the tool hash so the HMAC verifier can look it up on response */
         dclaw_mqtt_pending_store(request_id, req->tool_hash);
         dclaw_verdict_register_pending(request_id, req->tool_hash);

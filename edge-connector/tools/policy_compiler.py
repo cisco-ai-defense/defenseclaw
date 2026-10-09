@@ -18,6 +18,7 @@ Implements REQ-41 through REQ-44.
 
 import argparse
 import hashlib
+import re
 import struct
 import sys
 import os
@@ -81,6 +82,25 @@ CONTENT_CATEGORY_MAP = {
     "injection": 5,
     "command": 6,
 }
+
+# CRT-2 fix: Hostname-safe pattern for destination allowlist entries.
+# Only alphanumeric, dot, hyphen, and wildcard star are allowed.
+HOSTNAME_SAFE_RE = re.compile(r'^[a-zA-Z0-9.*\-]+$')
+
+
+def validate_destination(dest: str) -> str:
+    """CRT-2 fix: Validate destination string against hostname-safe pattern.
+    Raises ValueError if the destination contains unsafe characters."""
+    if not HOSTNAME_SAFE_RE.match(dest):
+        raise ValueError(
+            f"Destination '{dest}' contains unsafe characters. "
+            f"Only [a-zA-Z0-9.*-] are allowed.")
+    return dest
+
+
+def escape_c_string(s: str) -> str:
+    """CRT-2 fix: Escape quotes and backslashes in C string literals."""
+    return s.replace('\\', '\\\\').replace('"', '\\"')
 
 
 # ── Aho-Corasick DFA builder ──────────────────────────────────────────────
@@ -246,11 +266,22 @@ def parse_policy(yaml_path: Path) -> dict:
     return policy
 
 
+def _validate_no_null_bytes(value: str, context: str) -> None:
+    """H-8 fix: Reject strings containing null bytes that could truncate C strings."""
+    if '\x00' in value:
+        raise ValueError(
+            f"H-8: Null byte found in {context}: {value!r}. "
+            f"Null bytes in policy strings can truncate C agent buffers."
+        )
+
+
 def extract_severity_rules(policy: dict) -> list:
     """Extract severity→action rules from skill_actions section."""
     rules = []
     skill_actions = policy.get("skill_actions", {})
     for severity_name, actions in skill_actions.items():
+        # H-8 fix: Validate no null bytes in string keys
+        _validate_no_null_bytes(severity_name, "severity name")
         sev_val = SEVERITY_MAP.get(severity_name)
         if sev_val is None:
             continue
@@ -271,11 +302,22 @@ def extract_sequence_rules(policy: dict) -> list:
     rules = []
     iot_ext = policy.get("iot_extensions", {})
     sequences = iot_ext.get("capability_sequences", [])
+    # H-8 fix: Validate sequence list is non-empty
+    if not isinstance(sequences, list):
+        raise ValueError("H-8: capability_sequences must be a list")
     for entry in sequences:
         seq = entry.get("sequence", [])
+        # H-8 fix: Sequence length must be > 0
+        if not seq or len(seq) == 0:
+            raise ValueError(
+                "H-8: capability_sequences entry has empty sequence. "
+                "Empty sequences would match everything, weakening the C agent."
+            )
         action = ACTION_MAP.get(entry.get("action", "block"), 1)
         cap_bytes = []
         for cap_name in seq:
+            # H-8 fix: Validate no null bytes in capability names
+            _validate_no_null_bytes(str(cap_name), "capability name")
             cap_val = CAP_MAP.get(cap_name)
             if cap_val is None:
                 print(f"WARNING: unknown capability '{cap_name}', skipping rule",
@@ -291,17 +333,29 @@ def extract_sequence_rules(policy: dict) -> list:
 def extract_dest_allowlist(policy: dict) -> list:
     """Extract destination allowlist from iot_extensions."""
     iot_ext = policy.get("iot_extensions", {})
-    return iot_ext.get("destination_allowlist", [])
+    dest_list = iot_ext.get("destination_allowlist", [])
+    # H-8 fix: Validate no null bytes in destination strings
+    for dest in dest_list:
+        _validate_no_null_bytes(str(dest), "destination allowlist entry")
+    return dest_list
 
 
 def extract_rate_limits(policy: dict) -> dict:
     """Extract rate limits from iot_extensions."""
     iot_ext = policy.get("iot_extensions", {})
-    return iot_ext.get("rate_limits", {
+    rate_limits = iot_ext.get("rate_limits", {
         "tool_calls_per_minute": 60,
         "network_requests_per_minute": 30,
         "actuations_per_minute": 10,
     })
+    # H-8 fix: Validate all rate limits are > 0 to prevent disabling rate limiting
+    for key, value in rate_limits.items():
+        if isinstance(value, (int, float)) and value <= 0:
+            raise ValueError(
+                f"H-8: Rate limit '{key}' must be > 0, got {value}. "
+                f"Zero or negative rate limits would disable rate limiting on the C agent."
+            )
+    return rate_limits
 
 
 def extract_escalation_modes(policy: dict) -> list:
@@ -478,7 +532,8 @@ def generate_c_header(policy: dict, version: int) -> str:
     lines.append('DCLAW_UNUSED')
     lines.append('static const char *dest_allowlist[] = {')
     for dest in dest_allowlist:
-        lines.append(f'    "{dest}",')
+        validate_destination(dest)  # CRT-2: reject unsafe chars
+        lines.append(f'    "{escape_c_string(dest)}",')
     lines.append('};')
     lines.append(f'DCLAW_UNUSED static const size_t dest_allowlist_count = {len(dest_allowlist)};')
     lines.append('')
@@ -682,6 +737,14 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
         sections_bitmask |= 0x04
     payload.append(sections_bitmask)
 
+    # H-5 fix: Validate rule counts fit in uint8 before appending
+    if len(severity_rules) > 255:
+        raise ValueError(f"Too many severity rules: {len(severity_rules)} (max 255)")
+    if len(sequence_rules) > 255:
+        raise ValueError(f"Too many sequence rules: {len(sequence_rules)} (max 255)")
+    if len(dest_allowlist) > 255:
+        raise ValueError(f"Too many destination allowlist entries: {len(dest_allowlist)} (max 255)")
+
     # Severity rules
     payload.append(len(severity_rules))
     for sev, act in severity_rules:
@@ -696,6 +759,7 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     # Destination allowlist
     payload.append(len(dest_allowlist))
     for dest in dest_allowlist:
+        validate_destination(dest)  # CRT-2: reject unsafe chars
         encoded = dest.encode('ascii')[:67]  # max 64 + 3 overhead
         payload.append(len(encoded))
         payload.extend(encoded)
@@ -741,6 +805,30 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
         except ImportError:
             print("WARNING: PyNaCl not installed. Using dev stub signature.",
                   file=sys.stderr)
+            # H-4 fix: In production mode, refuse to silently fall back to
+            # the dev stub signature. Check DCLAW_PRODUCTION or DCLAW_DEV_MODE.
+            if os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes"):
+                raise RuntimeError(
+                    "PyNaCl is required for signing in production mode "
+                    "(DCLAW_PRODUCTION is set). Install with: pip install pynacl"
+                )
+            if os.environ.get("DCLAW_DEV_MODE", "").upper() == "OFF":
+                raise RuntimeError(
+                    "PyNaCl is required for signing when DCLAW_DEV_MODE=OFF. "
+                    "Install with: pip install pynacl"
+                )
+
+    # H-4 fix: Also check production env vars when no key_path is provided.
+    if os.environ.get("DCLAW_PRODUCTION", "").lower() in ("1", "true", "yes"):
+        raise RuntimeError(
+            "Signing key is required in production mode (DCLAW_PRODUCTION is set). "
+            "Provide --signing-key with a valid Ed25519 key."
+        )
+    if os.environ.get("DCLAW_DEV_MODE", "").upper() == "OFF":
+        raise RuntimeError(
+            "Signing key is required when DCLAW_DEV_MODE=OFF. "
+            "Provide --signing-key with a valid Ed25519 key."
+        )
 
     # Dev stub: 64 bytes = 0xED marker + SHA-256(blob) (32 bytes) + zero padding (31 bytes).
     # The Go policy service (policy.go) detects this stub by checking:

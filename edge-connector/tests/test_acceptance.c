@@ -240,7 +240,7 @@ static void test_ac12(void) {
     /* Binary size checked via `size` command in CI.
      * RAM verified via linker map analysis.
      * Here we verify struct sizes are as expected. */
-    assert(sizeof(dclaw_audit_entry_t) == 24);
+    assert(sizeof(dclaw_audit_entry_t) == 32);
 #if DCLAW_PROFILE_EDGE
     assert(sizeof(dclaw_state_t) < 40 * 1024); /* EDGE profile: global state < 40KB */
     printf("  AC-12 PASS: dclaw_state_t = %zu bytes (< 40KB, EDGE profile)\n", sizeof(dclaw_state_t));

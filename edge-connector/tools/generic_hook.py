@@ -20,7 +20,7 @@ Usage:
 
 Environment variables:
     DCLAW_LIB_PATH    Path to libdclaw_core.so (default: /usr/local/lib/libdclaw_core.so)
-    DCLAW_SOCKET_PATH Path to Unix socket (default: /tmp/defenseclaw.sock)
+    DCLAW_SOCKET_PATH Path to Unix socket (default: /run/defenseclaw/defenseclaw.sock)
     DCLAW_FAIL_OPEN   Set to "1" to allow tool calls when the engine is unavailable
     DCLAW_LOG_PATH    Audit log file (default: ~/edge-connector.log)
 """
@@ -322,6 +322,8 @@ class _SocketBackend:
                 if not chunk:
                     break
                 data += chunk
+                if len(data) > 65536:
+                    raise RuntimeError("IPC response too large")
         finally:
             sock.close()
 
@@ -364,8 +366,12 @@ class EdgeConnector:
             "DCLAW_LIB_PATH", "/usr/local/lib/libdclaw_core.so"
         )
         self._socket_path = socket_path or os.environ.get(
-            "DCLAW_SOCKET_PATH", "/tmp/defenseclaw.sock"
+            "DCLAW_SOCKET_PATH", "/run/defenseclaw/defenseclaw.sock"
         )
+        # M-15: Intentionally using "is not None" (not truthiness) here so
+        # that fail_open=False explicitly disables fail-open mode, whereas
+        # fail_open=None falls through to the env var check.  This is correct
+        # behavior: bool(False) is falsy but the caller explicitly chose it.
         if fail_open is not None:
             self._fail_open = fail_open
         else:
@@ -471,17 +477,17 @@ class EdgeConnector:
                         pass
                     self._last_policy_version = -1
 
-                # Read current policy_version from the device info struct.
-                # dclaw_get_state() returns a pointer whose first field
-                # contains the dclaw_device_info_t (starts at offset 0).
-                # Layout: tenant_id(u16, +0) + fleet_id(u16, +2) +
-                #         device_id(u32, +4) + policy_version(u16, +8).
+                # H-7 fix: Read current policy_version from the device info struct
+                # using the _DclawDeviceInfo ctypes struct definition instead of
+                # raw pointer arithmetic. This avoids unsafe manual offset calculation
+                # and is resilient to struct layout changes.
                 state_ptr = lib.dclaw_get_state()
                 if state_ptr:
-                    pv = ctypes.cast(
-                        state_ptr + 8,
-                        ctypes.POINTER(ctypes.c_uint16),
-                    ).contents.value
+                    info_ptr = ctypes.cast(
+                        state_ptr,
+                        ctypes.POINTER(_DclawDeviceInfo),
+                    )
+                    pv = info_ptr.contents.policy_version
                     if self._last_policy_version >= 0 and pv != self._last_policy_version:
                         logger.info(
                             "EdgeConnector: flash policy version changed (%d -> %d) — reloading",

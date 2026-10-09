@@ -184,8 +184,9 @@ func (c *TCPClient) Subscribe(ctx context.Context, topicFilter string, qos byte,
 	return nil
 }
 
-// Publish sends a PUBLISH packet (QoS 0 or 1). For QoS 1 it assigns a packet
-// ID but does not currently wait for PUBACK (fire-and-forget).
+// Publish sends a PUBLISH packet (QoS 0 or 1). For QoS 1 it waits for PUBACK
+// from the broker with a 5-second timeout to ensure delivery of critical messages
+// like emergency commands and policy OTAs.
 func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload []byte) error {
 	c.mu.Lock()
 	if c.conn == nil {
@@ -209,7 +210,71 @@ func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload
 		return fmt.Errorf("send PUBLISH to %s: %w", topic, err)
 	}
 
+	// H-13 fix: For QoS 1, wait for PUBACK from the broker to confirm delivery.
+	// This is critical for emergency commands and policy OTAs where fire-and-forget
+	// could silently lose messages.
+	if qos >= 1 {
+		if err := c.waitForPUBACK(conn, pid, 5*time.Second); err != nil {
+			return fmt.Errorf("PUBACK for packet %d on %s: %w", pid, topic, err)
+		}
+	}
+
 	return nil
+}
+
+// waitForPUBACK reads from the connection looking for a PUBACK matching the
+// given packet ID. Times out after the specified duration. Non-PUBACK packets
+// received during the wait are silently discarded (they will be handled by the
+// readLoop if still relevant).
+func (c *TCPClient) waitForPUBACK(conn net.Conn, packetID uint16, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d)", packetID)
+		}
+
+		conn.SetReadDeadline(time.Now().Add(remaining))
+
+		// Read the fixed header byte
+		hdr := make([]byte, 1)
+		if _, err := io.ReadFull(conn, hdr); err != nil {
+			conn.SetReadDeadline(time.Time{})
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d)", packetID)
+			}
+			return fmt.Errorf("read error waiting for PUBACK: %w", err)
+		}
+
+		// Read remaining length
+		rl, err := readRemainingLength(conn)
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			return fmt.Errorf("read remaining length: %w", err)
+		}
+
+		// Read the body
+		body := make([]byte, rl)
+		if rl > 0 {
+			if _, err := io.ReadFull(conn, body); err != nil {
+				conn.SetReadDeadline(time.Time{})
+				return fmt.Errorf("read PUBACK body: %w", err)
+			}
+		}
+
+		conn.SetReadDeadline(time.Time{})
+
+		pktType := hdr[0] & 0xF0
+		if pktType == 0x40 && len(body) >= 2 { // PUBACK = 0x40
+			ackID := binary.BigEndian.Uint16(body[0:2])
+			if ackID == packetID {
+				return nil // Got matching PUBACK
+			}
+			// PUBACK for a different packet ID — keep waiting
+			log.Printf("[mqtt] received PUBACK for packet %d while waiting for %d", ackID, packetID)
+		}
+		// Non-PUBACK packet — discard and keep waiting for our PUBACK
+	}
 }
 
 // Disconnect sends an MQTT DISCONNECT packet and closes the TCP connection.

@@ -247,7 +247,31 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		if a.bridge != nil {
 			a.bridge.ClearDecommissioned(dev.DeviceID)
 		}
-		writeJSON(w, http.StatusOK, dev)
+
+		// M-17: On re-registration of a previously decommissioned device,
+		// regenerate the device key instead of reusing the old one.  The old
+		// key may have been compromised or leaked, so a fresh key is safer.
+		var deviceKeyHex string
+		if a.keyStore != nil {
+			deviceKey := make([]byte, 32)
+			if _, err := rand.Read(deviceKey); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "failed to generate device key: " + err.Error(),
+				})
+				return
+			}
+			if err := a.keyStore.SaveDeviceKey(dev.DeviceID, deviceKey); err != nil {
+				log.Printf("[fleet-api] failed to regenerate key on re-registration for %d: %v", dev.DeviceID, err)
+			} else {
+				deviceKeyHex = hex.EncodeToString(deviceKey)
+			}
+		}
+
+		resp := map[string]any{
+			"device":     dev,
+			"device_key": deviceKeyHex,
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	if err != nil {

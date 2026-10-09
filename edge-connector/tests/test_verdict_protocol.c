@@ -20,7 +20,7 @@ extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
 
 static void build_valid_response(uint16_t request_id, uint8_t action,
                                  const uint8_t *tool_hash, uint8_t *buf) {
-    /* Build 16-byte wire format response */
+    /* Build 28-byte wire format response (12 header + 16 HMAC) */
     uint8_t severity = 0;
     uint16_t ttl = 60;
     uint8_t reason = DCLAW_REASON_CLOUD_BLOCK;
@@ -51,10 +51,10 @@ static void test_valid_verdict_accepted(void) {
 
     dclaw_verdict_register_pending(rid, tool_hash);
 
-    uint8_t resp[16];
+    uint8_t resp[28];
     build_valid_response(rid, DCLAW_ACTION_ALLOW, tool_hash, resp);
 
-    int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
+    int rc = dclaw_verdict_handle_response(resp, 28, tool_hash);
     assert(rc == 0);
     (void)rc;
     printf("  PASS: valid verdict response accepted\n");
@@ -72,13 +72,13 @@ static void test_duplicate_discarded(void) {
     uint8_t tool_hash[32];
     memset(tool_hash, 0xAA, 32);
 
-    uint8_t resp[16];
+    uint8_t resp[28];
     build_valid_response(1, DCLAW_ACTION_ALLOW, tool_hash, resp);
 
     /* Second response for same request_id should be rejected.
      * After Comment 24 fix, resolved slots have request_id cleared to 0
      * for reuse, so a duplicate is treated as "unknown request_id" (-1). */
-    int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
+    int rc = dclaw_verdict_handle_response(resp, 28, tool_hash);
     assert(rc == -1);
     (void)rc;
     printf("  PASS: duplicate verdict response rejected (slot reclaimed)\n");
@@ -91,13 +91,13 @@ static void test_invalid_hmac_rejected(void) {
 
     dclaw_verdict_register_pending(rid, tool_hash);
 
-    uint8_t resp[16];
+    uint8_t resp[28];
     build_valid_response(rid, DCLAW_ACTION_ALLOW, tool_hash, resp);
     /* Corrupt HMAC */
     resp[12] ^= 0xFF;
     resp[13] ^= 0xFF;
 
-    int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
+    int rc = dclaw_verdict_handle_response(resp, 28, tool_hash);
     assert(rc == -1);
     (void)rc;
     printf("  PASS: invalid HMAC tag rejected\n");
@@ -107,10 +107,10 @@ static void test_unknown_request_id_rejected(void) {
     uint8_t tool_hash[32];
     memset(tool_hash, 0xCC, 32);
 
-    uint8_t resp[16];
+    uint8_t resp[28];
     build_valid_response(999, DCLAW_ACTION_ALLOW, tool_hash, resp);
 
-    int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
+    int rc = dclaw_verdict_handle_response(resp, 28, tool_hash);
     assert(rc == -1);
     (void)rc;
     printf("  PASS: unknown request_id rejected\n");

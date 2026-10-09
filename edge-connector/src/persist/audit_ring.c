@@ -76,6 +76,11 @@ static int audit_ring_restore_header(uint16_t *out_head, uint8_t *out_last_hmac)
  * DCLAW_AUDIT_KEY environment variable (hex-encoded 32 bytes), or falls
  * back to a hardcoded dev key with a warning.
  *
+ * M-18: The audit key is sourced from the DCLAW_AUDIT_KEY env var, which is
+ * the standard approach for secret injection in containerized / systemd
+ * deployments (e.g., EnvironmentFile=/etc/defenseclaw/edge-connector.env).
+ * The key is never written to disk by the daemon itself.
+ *
  * The chain integrity is maintained by including the previous HMAC tag in
  * the HMAC message (not as the key).
  */

@@ -59,7 +59,7 @@ def _run(cmd: list[str], *, check: bool = True, **kwargs) -> subprocess.Complete
 def _ssh_cmd(target: str, user: str, remote_cmd: str) -> list[str]:
     """Build an SSH command list with common options."""
     return [
-        "ssh", "-o", "StrictHostKeyChecking=accept-new",
+        "ssh", "-o", "StrictHostKeyChecking=yes",
         f"{user}@{target}", remote_cmd,
     ]
 
@@ -244,7 +244,7 @@ def _install_systemd_unit(target: str, user: str) -> bool:
     # Copy the unit file to the remote device
     remote_unit = "/etc/systemd/system/edge-connector.service"
     result = subprocess.run(
-        ["scp", "-o", "StrictHostKeyChecking=accept-new",
+        ["scp", "-o", "StrictHostKeyChecking=yes",
          str(service_file), f"{user}@{target}:/tmp/edge-connector.service"],
         capture_output=True, text=True,
     )

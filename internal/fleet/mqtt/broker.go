@@ -196,8 +196,8 @@ type VerdictRequest struct {
 	Findings     uint8
 }
 
-// VerdictResponse is the 16-byte binary response sent back to the device.
-// Wire layout matches proposal section 7.2:
+// VerdictResponse is the 28-byte binary response sent back to the device.
+// Wire layout matches proposal section 7.2 (BLK-1: HMAC extended to 16 bytes):
 //
 //	[0:2]   request_id  uint16
 //	[2]     action      uint8
@@ -206,7 +206,7 @@ type VerdictRequest struct {
 //	[6]     reason      uint8
 //	[7]     flags       uint8
 //	[8:12]  server_ts   uint32
-//	[12:16] hmac_tag    [4]byte
+//	[12:28] hmac_tag    [16]byte
 type VerdictResponse struct {
 	RequestID uint16
 	Action    uint8
@@ -215,12 +215,12 @@ type VerdictResponse struct {
 	Reason    uint8
 	Flags     uint8
 	ServerTS  uint32
-	HMACTag   [4]byte
+	HMACTag   [16]byte
 }
 
-// EncodeVerdictResponse serializes a VerdictResponse into its 16-byte wire format.
+// EncodeVerdictResponse serializes a VerdictResponse into its 28-byte wire format.
 func EncodeVerdictResponse(resp *VerdictResponse) []byte {
-	buf := make([]byte, 16)
+	buf := make([]byte, 28)
 	binary.BigEndian.PutUint16(buf[0:2], resp.RequestID)
 	buf[2] = resp.Action
 	buf[3] = resp.Severity
@@ -228,7 +228,7 @@ func EncodeVerdictResponse(resp *VerdictResponse) []byte {
 	buf[6] = resp.Reason
 	buf[7] = resp.Flags
 	binary.BigEndian.PutUint32(buf[8:12], resp.ServerTS)
-	copy(buf[12:16], resp.HMACTag[:])
+	copy(buf[12:28], resp.HMACTag[:])
 	return buf
 }
 
@@ -389,6 +389,8 @@ func decodeCBORBytes(data []byte) ([]byte, int, error) {
 }
 
 // decodeCBORText decodes a CBOR text string (major type 3).
+// M-16: String lengths are capped at 1024 bytes to prevent oversized
+// payloads from consuming excessive memory in the fleet manager.
 func decodeCBORText(data []byte) (string, int, error) {
 	if len(data) == 0 {
 		return "", 0, fmt.Errorf("empty data for CBOR text")
@@ -403,6 +405,10 @@ func decodeCBORText(data []byte) (string, int, error) {
 	length, hdrLen, err := decodeCBORAdditional(data, additional)
 	if err != nil {
 		return "", 0, err
+	}
+
+	if length > 1024 {
+		return "", 0, fmt.Errorf("CBOR text string too long: %d bytes (max 1024)", length)
 	}
 
 	end := hdrLen + int(length)

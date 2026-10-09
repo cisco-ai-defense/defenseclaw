@@ -59,6 +59,10 @@ func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
 		} else {
 			log.Printf("[mqtt-bridge] WARNING: DCLAW_DEVICE_KEY is set but invalid (want 64 hex chars / 32 bytes), falling back to zero key")
 		}
+	} else if isProductionMode() {
+		// CRT-3 fix: In production mode, refuse to use a zero key as fallback.
+		log.Printf("[mqtt-bridge] ERROR: No DCLAW_DEVICE_KEY set in production mode — zero-key fallback disabled")
+		fallback = nil
 	}
 	return &storeBackedKeyProvider{store: store, fallbackKey: fallback}
 }
@@ -116,7 +120,21 @@ func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
 		}
 		log.Printf("[mqtt-bridge] WARNING: DCLAW_DEVICE_KEY is set but invalid (want 64 hex chars / 32 bytes), falling back to zero key")
 	}
+	// CRT-3 fix: In production mode (DCLAW_PRODUCTION=true), refuse to use
+	// a zero key. A zero key is a well-known constant that any attacker can
+	// use to forge HMAC signatures. Return nil so HMAC checks fail closed.
+	if isProductionMode() {
+		log.Printf("[mqtt-bridge] ERROR: No DCLAW_DEVICE_KEY set in production mode — HMAC verification will reject all messages")
+		return &envDeviceKeyProvider{key: nil}
+	}
 	return &envDeviceKeyProvider{key: make([]byte, 32)}
+}
+
+// isProductionMode returns true when the env var DCLAW_PRODUCTION is set to
+// "true" or "1". Used by CRT-3 to refuse zero-key fallbacks.
+func isProductionMode() bool {
+	v := os.Getenv("DCLAW_PRODUCTION")
+	return v == "true" || v == "1"
 }
 
 func (p *envDeviceKeyProvider) KeyForDevice(_ uint64) []byte {
@@ -152,12 +170,35 @@ type Bridge struct {
 	// Metrics hooks (set externally to avoid circular imports)
 	onBlock func()
 
+	// H-3 fix: Per-device rate limiter for heartbeat/verdict processing.
+	// Tracks the last heartbeat time per device; drops messages faster than minInterval.
+	heartbeatMinInterval time.Duration
+	lastHeartbeat        map[uint64]time.Time
+	lastHeartbeatMu      sync.Mutex
+
+	// CRT-1 fix: Per-device verdict request rate limiter to prevent cache
+	// probing and DoS. Allows up to verdictRateLimit requests per second
+	// per device; excess requests are dropped with a warning.
+	verdictRateMu  sync.Mutex
+	verdictRateMap map[uint64]*verdictRateEntry
+
 	// Stats for observability
 	mu                  sync.RWMutex
 	heartbeatsProcessed uint64
 	verdictsProcessed   uint64
 	decodeErrors        uint64
+	rateLimitDrops      uint64
 }
+
+// verdictRateEntry tracks per-device verdict request rate for CRT-1.
+type verdictRateEntry struct {
+	count    int
+	windowAt time.Time
+}
+
+// verdictRateLimit is the maximum number of verdict requests per device
+// per second. Exceeding this drops the request with a warning log.
+const verdictRateLimit = 20
 
 // SetOnBlock configures a callback that fires when a verdict request
 // results in a BLOCK action.  Used by WireMetrics to increment the
@@ -184,15 +225,22 @@ type BridgeConfig struct {
 // NewBridge creates a new MQTT bridge.
 func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache) *Bridge {
 	return &Bridge{
-		client:         client,
-		fleet:          fleet,
-		cache:          cache,
-		keyProvider:    newEnvDeviceKeyProvider(),
-		logger:         log.Default(),
-		stopped:        make(chan struct{}),
-		decommissioned: make(map[uint64]struct{}),
+		client:               client,
+		fleet:                fleet,
+		cache:                cache,
+		keyProvider:          newEnvDeviceKeyProvider(),
+		logger:               log.Default(),
+		stopped:              make(chan struct{}),
+		decommissioned:       make(map[uint64]struct{}),
+		heartbeatMinInterval: time.Second, // H-3: 1 heartbeat/sec default
+		lastHeartbeat:        make(map[uint64]time.Time),
+		verdictRateMap:       make(map[uint64]*verdictRateEntry),
 	}
 }
+
+// SetHeartbeatRateLimit configures the minimum interval between heartbeats from the same device.
+// Zero disables rate limiting (useful for tests).
+func (b *Bridge) SetHeartbeatRateLimit(d time.Duration) { b.heartbeatMinInterval = d }
 
 // MarkDecommissioned adds a device ID to the decommissioned set.
 // NEW-5 fix: MQTT messages from decommissioned devices are rejected.
@@ -314,6 +362,28 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		b.incErrors()
 		return
 	}
+
+	// H-3 fix: Per-device rate limiting — drop heartbeats faster than minInterval.
+	// 0 = disabled (tests), negative treated as 1s default.
+	now := time.Now()
+	b.lastHeartbeatMu.Lock()
+	minInterval := b.heartbeatMinInterval
+	if minInterval < 0 {
+		minInterval = time.Second
+	}
+	if minInterval > 0 {
+		if last, ok := b.lastHeartbeat[fullID]; ok && now.Sub(last) < minInterval {
+			b.lastHeartbeatMu.Unlock()
+			b.logger.Printf("[mqtt-bridge] WARNING: rate-limited heartbeat from device %d (interval=%v)",
+				parts.DeviceID, now.Sub(last))
+			b.mu.Lock()
+			b.rateLimitDrops++
+			b.mu.Unlock()
+			return
+		}
+	}
+	b.lastHeartbeat[fullID] = now
+	b.lastHeartbeatMu.Unlock()
 
 	if parts.Suffix != "heartbeat" {
 		b.logger.Printf("[mqtt-bridge] unexpected suffix %q for heartbeat handler", parts.Suffix)
@@ -489,12 +559,54 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
-	// Reject verdict requests from unregistered devices.
-	if _, registered := b.fleet.GetDevice(fullID); !registered {
+	// CRT-1 fix: Reject verdict requests from unregistered devices and
+	// check device status before evaluating. Also fetch the device record
+	// for the H-1 lockdown check below.
+	dev, registered := b.fleet.GetDevice(fullID)
+	if !registered {
 		b.logger.Printf("[mqtt-bridge] rejected verdict request from unregistered device %d (tenant=%d fleet=%d)",
 			parts.DeviceID, parts.TenantID, parts.FleetID)
 		b.incErrors()
 		return
+	}
+
+	// H-1 fix: If the device is in lockdown, return BLOCK immediately
+	// without evaluating through the pipeline. Lockdown devices must not
+	// be able to obtain ALLOW verdicts.
+	if dev.Status == manager.StatusLockdown {
+		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
+			parts.DeviceID)
+		b.sendLockdownBlockResponse(parts)
+		b.incErrors()
+		return
+	}
+
+	// CRT-1 fix: Per-device rate limiting to prevent cache probing and DoS.
+	// Allow up to verdictRateLimit requests per device per 1-second window.
+	{
+		now := time.Now()
+		b.verdictRateMu.Lock()
+		entry, ok := b.verdictRateMap[fullID]
+		if !ok {
+			entry = &verdictRateEntry{windowAt: now}
+			b.verdictRateMap[fullID] = entry
+		}
+		if now.Sub(entry.windowAt) >= time.Second {
+			entry.count = 0
+			entry.windowAt = now
+		}
+		entry.count++
+		overLimit := entry.count > verdictRateLimit
+		b.verdictRateMu.Unlock()
+
+		if overLimit {
+			b.logger.Printf("[mqtt-bridge] WARNING: verdict request rate-limited for device %d (%d req/s exceeds limit %d)",
+				parts.DeviceID, entry.count, verdictRateLimit)
+			b.mu.Lock()
+			b.rateLimitDrops++
+			b.mu.Unlock()
+			return
+		}
 	}
 
 	vr, err := DecodeVerdictRequest(msg.Payload)
@@ -502,6 +614,48 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)
 		b.incErrors()
 		return
+	}
+
+	// H-2 fix: Verify HMAC on verdict requests to prevent a malicious device from
+	// probing another device's verdict cache by publishing to its topic. The verdict
+	// request CBOR does not carry a device_id field, so we verify identity via HMAC
+	// over the topic + payload — the same mechanism as heartbeats/registrations.
+	// A device without the per-device key cannot forge a valid HMAC.
+	if b.keyProvider != nil {
+		vrFullID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+		vrDeviceKey := b.keyProvider.KeyForDevice(vrFullID)
+		if vrDeviceKey == nil {
+			b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — key lookup returned nil for device %d (fail closed)", parts.DeviceID)
+			b.incErrors()
+			return
+		}
+		if checker, ok := b.keyProvider.(DeviceKeyChecker); ok {
+			hasKey, err := checker.HasDeviceKey(vrFullID)
+			if err != nil {
+				b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — key store error for device %d: %v (fail closed)", parts.DeviceID, err)
+				b.incErrors()
+				return
+			}
+			if hasKey {
+				// Keyed device: HMAC must be appended as last 32 bytes of payload
+				if len(msg.Payload) < 32 {
+					b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — keyed device %d sent unsigned verdict request (too short)", parts.DeviceID)
+					b.incErrors()
+					return
+				}
+				payloadBody := msg.Payload[:len(msg.Payload)-32]
+				payloadHMAC := msg.Payload[len(msg.Payload)-32:]
+				mac := hmac.New(sha256.New, vrDeviceKey)
+				mac.Write([]byte(msg.Topic))
+				mac.Write(payloadBody)
+				expected := mac.Sum(nil)
+				if !hmac.Equal(expected, payloadHMAC) {
+					b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — HMAC verification failed for device %d (possible cache probing)", parts.DeviceID)
+					b.incErrors()
+					return
+				}
+			}
+		}
 	}
 
 	// Evaluate via the verdict cache (cache hit or pipeline execution)
@@ -564,6 +718,41 @@ func (b *Bridge) incErrors() {
 	b.mu.Unlock()
 }
 
+// sendLockdownBlockResponse sends a BLOCK verdict response to a device that
+// is in lockdown status. H-1 fix: lockdown devices must receive BLOCK for
+// every verdict request without going through the evaluation pipeline.
+func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts) {
+	resp := &VerdictResponse{
+		RequestID: 0, // unknown — we haven't decoded the payload
+		Action:    uint8(verdict.ActionBlock),
+		Severity:  0,
+		TTL:       0,
+		ServerTS:  uint32(time.Now().Unix()),
+	}
+
+	sessionID := fmt.Sprintf("%d", parts.DeviceID)
+	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+	deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
+	var emptyHash [32]byte
+	resp.HMACTag = computeVerdictHMACFull(deviceKey, sessionID,
+		resp.RequestID, resp.Action, resp.Severity, resp.TTL,
+		resp.Reason, resp.Flags, resp.ServerTS, emptyHash)
+
+	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
+		parts.TenantID, parts.FleetID, parts.DeviceID)
+	payload := EncodeVerdictResponse(resp)
+
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pubCancel()
+	if err := b.client.Publish(pubCtx, respTopic, 1, payload); err != nil {
+		b.logger.Printf("[mqtt-bridge] publish lockdown BLOCK to %s: %v", respTopic, err)
+	}
+
+	if b.onBlock != nil {
+		b.onBlock()
+	}
+}
+
 // verifyMessageHMAC validates the HMAC-SHA256 tag on a signed or unsigned
 // heartbeat/registration message. Returns nil when verification succeeds
 // (or the message is an acceptable unsigned legacy message). Returns an
@@ -615,11 +804,11 @@ func (b *Bridge) verifyMessageHMAC(msg Message, parts *TopicParts, hw *Heartbeat
 	return nil
 }
 
-// computeVerdictHMACFull computes the 4-byte HMAC tag covering all verdict
-// response fields plus the tool hash. This is the NEW-6 full-coverage HMAC.
+// computeVerdictHMACFull computes the 16-byte HMAC tag covering all verdict
+// response fields plus the tool hash. BLK-1: extended from 4 to 16 bytes.
 func computeVerdictHMACFull(deviceKey []byte, sessionID string,
 	requestID uint16, action, severity uint8, ttl uint16,
-	reason, flags uint8, serverTS uint32, toolHash [32]byte) [4]byte {
+	reason, flags uint8, serverTS uint32, toolHash [32]byte) [16]byte {
 
 	mac := hmac.New(sha256.New, deviceKey)
 
@@ -657,7 +846,7 @@ func computeVerdictHMACFull(deviceKey []byte, sessionID string,
 	mac.Write(toolHash[:8])
 
 	full := mac.Sum(nil)
-	var tag [4]byte
-	copy(tag[:], full[:4])
+	var tag [16]byte
+	copy(tag[:], full[:16])
 	return tag
 }
