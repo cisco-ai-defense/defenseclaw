@@ -39,4 +39,10 @@ func TestManagedScannerRuntimeRejectionStopsPathFallback(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "admission failed") {
 		t.Fatalf("Scan() = %+v, %v; want managed runtime refusal before PATH fallback", result, err)
 	}
+	// GAP-0975: a plugin scan must not run the managed CLI beside the
+	// gateway, and the error lets the rescan loop retry soon.
+	if result, err := NewPluginScanner("").Scan(context.Background(), t.TempDir()); result != nil ||
+		!errors.Is(err, ErrScannerRuntimeUnavailable) || strings.Contains(err.Error(), "asset_policy") {
+		t.Fatalf("plugin Scan() = %+v, %v; want the runtime-not-ready error", result, err)
+	}
 }

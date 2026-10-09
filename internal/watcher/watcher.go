@@ -230,6 +230,11 @@ type InstallWatcher struct {
 
 	// rescanNow asks the rescan loop for a cycle before its interval ends.
 	rescanNow chan struct{}
+	// runtimeNotReady says a scan of this rescan cycle found the managed
+	// scanner runtime not ready; runtimeRetries counts the cycles in a row
+	// that did (nextRescanDelay, GAP-0975).
+	runtimeNotReady atomic.Bool
+	runtimeRetries  int
 
 	// addedMCP names the MCP servers AdmitAddedMCPServers queued; admitMCPNow
 	// wakes the loop that admits them outside the rescan cycle (GAP-0254).
