@@ -375,6 +375,8 @@ jobs:
             goarch: arm64
           - goos: darwin
             goarch: arm64
+          - goos: windows
+            goarch: amd64
     steps:
       - if: ${{ needs.changes.outputs.go == 'false' }}
         run: echo "No Go change in this pull request; the cross build is skipped."
