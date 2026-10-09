@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -854,7 +855,8 @@ func TestCodexHyphenatedMCPServerMatchesItsConfiguredName(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	toml := "[mcp_servers.acme-notes]\nurl = \"http://127.0.0.1:28581/mcp\"\n\n[mcp_servers.wiki-rogue]\nurl = \"http://127.0.0.1:28583/mcp\"\n"
+	toml := "[mcp_servers.acme-notes]\nurl = \"http://127.0.0.1:28581/mcp\"\n\n[mcp_servers.wiki-rogue]\nurl = \"http://127.0.0.1:28583/mcp\"\n" +
+		"\n[mcp_servers.usm-think-cx]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-sequential-thinking\"]\n"
 	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(toml), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -874,6 +876,26 @@ func TestCodexHyphenatedMCPServerMatchesItsConfiguredName(t *testing.T) {
 	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "wiki-rogue"}}
 	if decision, matched := call("mcp__wiki_rogue__count_words"); !matched || decision.Action != "block" || decision.TargetName != "wiki-rogue" {
 		t.Fatalf("denied wiki-rogue: matched=%v decision=%+v, want an admin-deny block", matched, decision)
+	}
+	// GAP-1211/GAP-1215: a command rule pushed after the server was added
+	// refuses its next call, read from the home (Windows) or, where the
+	// service cannot read the home (macOS), from the facts the hook sends.
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{
+		Command: "npx", ArgsPrefix: []string{"-y", "@modelcontextprotocol/server-sequential-thinking"}, Connector: "codex",
+	}}
+	if decision, matched := call("mcp__usm_think_cx__sequentialthinking"); !matched || decision.Action != "block" || decision.TargetName != "usm-think-cx" {
+		t.Fatalf("command-denied usm-think-cx: matched=%v decision=%+v, want a block", matched, decision)
+	}
+	header := http.Header{}
+	header.Set(assetfacts.Header, assetfacts.Encode(assetfacts.Facts{MCP: &assetfacts.MCPServer{
+		Name: "usm-think-cx", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-sequential-thinking"},
+	}}))
+	unreadable := withClaimedAssetFacts(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: t.TempDir()}), header)
+	decision, matched := api.codexMCPAssetDecision(unreadable, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "mcp__usm_think_cx__sequentialthinking", CWD: home,
+	})
+	if !matched || decision.Action != "block" || decision.TargetName != "usm-think-cx" {
+		t.Fatalf("command-denied usm-think-cx from hook facts: matched=%v decision=%+v, want a block", matched, decision)
 	}
 }
 

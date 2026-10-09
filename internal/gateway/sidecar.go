@@ -2184,9 +2184,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
-		// Installed skills and plugins affected by a list change are
-		// readmitted now, without waiting for content drift (GAP-0627,
-		// GAP-0993), and an MCP server a new allow pin or scan_on_install
+		// Installed skills, plugins and MCP servers affected by a list
+		// change are readmitted now, without waiting for content drift
+		// (GAP-0627, GAP-0993, GAP-1211), and an MCP server a new allow pin or scan_on_install
 		// false admits without a scan is admitted now, not at the next
 		// interval (GAP-0910).
 		if w := s.installWatcher.Load(); w != nil {
@@ -2367,14 +2367,15 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 }
 
 // assetAdmissionListsChanged reports a reload that changes skill or plugin
-// allow/deny lists outside Secure Client, whose watcher keeps main's cycle
-// (issue #1092).
+// allow/deny lists or the MCP denied list outside Secure Client, whose
+// watcher keeps main's cycle (issue #1092).
 func assetAdmissionListsChanged(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
 		return false
 	}
 	return !reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Denied, newCfg.AssetPolicy.Skill.Denied) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.MCP.Denied, newCfg.AssetPolicy.MCP.Denied) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Allowed, newCfg.AssetPolicy.Skill.Allowed) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Allowed, newCfg.AssetPolicy.Plugin.Allowed)
 }
