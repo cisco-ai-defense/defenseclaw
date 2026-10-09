@@ -6,12 +6,15 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -51,6 +54,59 @@ func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 	w.runRescanCycle(context.Background())
 	if len(admitted) != 1 {
 		t.Fatalf("the next cycle admitted the server again: %#v", admitted)
+	}
+}
+
+// auditRows records the audit rows logger emits; rows() returns them as JSON.
+func auditRows(t *testing.T, logger *audit.Logger) (rows func() []string) {
+	t.Helper()
+	runtime := &watcherTestRuntime{}
+	logger.SetRuntimeV8Emitter(runtime)
+	return func() []string {
+		logs, _ := runtime.snapshot()
+		out := make([]string, 0, len(logs))
+		for _, record := range logs {
+			raw, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, string(raw))
+		}
+		return out
+	}
+}
+
+// GAP-0424: with admission.mcp.scan_on_install false the rescan scanned a
+// server whose baseline had no scan (its loopback scan had failed), every
+// cycle, and no admission row was ever written for it. The rescan admits it
+// without a scan, once.
+func TestRescanAdmitsUnscannedMCPServerWithoutScanWhenScanOnInstallIsOff(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	off := false
+	cfg.Admission.MCP.ScanOnInstall = &off
+	cfg.Watch.RescanContentGated = true
+	server := config.MCPServerEntry{Name: "epa-noscan", URL: "http://127.0.0.1:28571/mcp", Connector: "claudecode", Home: "/home/u1"}
+	var admitted []AdmissionResult
+	rows := auditRows(t, logger)
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	scans := &countingScanner{name: "mcp-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(server), Connector: server.Connector}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.persistSnapshot(evt, snap, "", w.cachedFingerprint(evt, nil))
+
+	w.runRescanCycle(context.Background())
+	w.runRescanCycle(context.Background())
+	if scans.calls != 0 || len(admitted) != 1 || admitted[0].Verdict != VerdictAllowed {
+		t.Fatalf("%d scans, admitted %+v; want one admission without a scan", scans.calls, admitted)
+	}
+	if got := strings.Join(rows(), "\n"); !strings.Contains(got, "type=mcp reason=scan-disabled") {
+		t.Fatalf("audit rows:\n%s\nwant install-allowed reason=scan-disabled", got)
 	}
 }
 
@@ -139,18 +195,24 @@ func (s *heldScanner) Scan(ctx context.Context, target string) (*scanner.ScanRes
 
 // GAP-0254: a server added while the first rescan cycle after an upgrade is
 // still scanning is admitted at once: discovery waited for the whole cycle
-// (about 19 minutes on a managed host), and admission waited for the scan of
-// any other server the cycle was running.
+// (about 19 minutes on a managed host), and admission waited for the scan the
+// cycle was running.
 func TestMCPServerAddedDuringFirstCycleIsAdmittedAtOnce(t *testing.T) {
 	t.Setenv("PATH", "")
-	cfg, store, logger, _ := setupTestEnv(t)
+	cfg, store, logger, skillDir := setupTestEnv(t)
 	off := false
 	cfg.Admission.MCP.ScanOnInstall = &off
 	cfg.Watch.RescanContentGated = true
+	if err := os.MkdirAll(filepath.Join(skillDir, "slow"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "slow", "SKILL.md"), []byte("# slow\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var mu sync.Mutex
-	servers := []config.MCPServerEntry{{Name: "slow", URL: "https://slow.example.test/mcp", Connector: "codex", Home: "/home/u1"}}
+	servers := []config.MCPServerEntry{{Name: "present", URL: "https://present.example.test/mcp", Connector: "codex", Home: "/home/u1"}}
 	var admitted []string
-	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) {
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) {
 		mu.Lock()
 		admitted = append(admitted, r.Event.Name)
 		mu.Unlock()
@@ -167,7 +229,7 @@ func TestMCPServerAddedDuringFirstCycleIsAdmittedAtOnce(t *testing.T) {
 	select {
 	case <-slow.started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the first cycle never scanned the existing server")
+		t.Fatal("the first cycle never scanned the existing skill")
 	}
 	mu.Lock()
 	servers = append(servers, config.MCPServerEntry{Name: "added", URL: "https://added.example.test/mcp", Connector: "codex", Home: "/home/u2"})
@@ -187,13 +249,13 @@ func TestMCPServerAddedDuringFirstCycleIsAdmittedAtOnce(t *testing.T) {
 	got := append([]string(nil), admitted...)
 	mu.Unlock()
 	if len(got) != 1 || got[0] != "added" {
-		t.Fatalf("admitted %v while the cycle scanned slow, want [added]", got)
+		t.Fatalf("admitted %v while the cycle scanned a skill, want [added]", got)
 	}
 	close(slow.release)
 	<-cycle
 	w.runRescanCycle(context.Background())
 	if len(admitted) != 1 {
-		t.Fatalf("admitted %v, want added once and slow only baselined", admitted)
+		t.Fatalf("admitted %v, want added once and present only baselined", admitted)
 	}
 }
 
