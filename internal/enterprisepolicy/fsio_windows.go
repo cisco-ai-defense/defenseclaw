@@ -954,13 +954,16 @@ type WindowsPublicDirDrift struct {
 	// Extra maps each other principal (BUILTIN\Users included) that holds
 	// more than read and execute to all the access it holds.
 	Extra map[string]uint32
+	// Denied maps principals with explicit deny ACEs on the directory.
+	// An allow entry cannot restore access that an applicable deny removes.
+	Denied map[string]uint32
 	// UsersReadMissing reports that BUILTIN\Users cannot read and execute.
 	UsersReadMissing bool
 }
 
 // Drifted reports any difference.
 func (d WindowsPublicDirDrift) Drifted() bool {
-	return d.Owner != "" || len(d.Extra) != 0 || d.UsersReadMissing
+	return d.Owner != "" || len(d.Extra) != 0 || len(d.Denied) != 0 || d.UsersReadMissing
 }
 
 // InspectWindowsPublicDir reads dir's owner and access list without
@@ -969,7 +972,7 @@ func (d WindowsPublicDirDrift) Drifted() bool {
 // both when a standard user can write the folder and when Users cannot read
 // it, while status and verify said ok (GAP-0927, GAP-0929).
 func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
-	drift := WindowsPublicDirDrift{Extra: map[string]uint32{}}
+	drift := WindowsPublicDirDrift{Extra: map[string]uint32{}, Denied: map[string]uint32{}}
 	handle, err := openDirNoFollow(dir, windows.READ_CONTROL)
 	if err != nil {
 		return drift, err
@@ -999,10 +1002,17 @@ func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
 			if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
 				return drift, fmt.Errorf("inspect %s: %w", dir, err)
 			}
-			if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
 				continue
 			}
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+				drift.Denied[sid.String()] |= uint32(ace.Mask)
+				continue
+			}
+			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+				continue
+			}
 			switch {
 			case sid.IsWellKnown(windows.WinLocalSystemSid), sid.IsWellKnown(windows.WinBuiltinAdministratorsSid), sid.String() == trustedInstallerSIDStr:
 			case sid.IsWellKnown(windows.WinBuiltinUsersSid):
