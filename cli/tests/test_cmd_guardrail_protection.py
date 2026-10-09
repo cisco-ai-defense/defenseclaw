@@ -165,13 +165,11 @@ def test_rule_and_suppress_wrappers(env) -> None:
 
 def test_rule_severity_default_restores_profile_config_and_digest(env, monkeypatch) -> None:
     app, _root, _writes = env
-    app.cfg.guardrail.profiles = {
-        "everyone-default": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig()})
-    }
+    app.cfg.guardrail.profiles = {"everyone-default": GuardrailProfile()}
     path = config_path_for_data_dir(app.cfg.data_dir)
     original = (
         b"config_version: 9\nguardrail:\n  profiles:\n    everyone-default:\n"
-        b"      connectors:\n        codex: {}\n"
+        b"      mode: action\n      block_at: HIGH\n"
     )
     path.write_bytes(original)
     before_digest = hashlib.sha256(original).hexdigest()

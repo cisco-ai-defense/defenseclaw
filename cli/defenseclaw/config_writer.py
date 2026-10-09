@@ -154,8 +154,8 @@ class Change:
     path: str
     value: Any = None
     unset: bool = False
-    # For a rule override removal, discard empty severity_overrides and rules
-    # maps too. Stop at rules: an empty connector entry still means enabled.
+    # For a rule override removal, discard empty parent maps up to this path.
+    # Global connector entries stop at rules: an empty entry means enabled.
     prune_empty_to: str = ""
 
 
@@ -943,7 +943,8 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             if before is _MISSING:
                 continue
             if change.prune_empty_to:
-                while len(parts) > 1 and parts[-1] != change.prune_empty_to:
+                stop = parse_path(change.prune_empty_to)
+                while len(parts) > 1 and parts != stop:
                     parent = _lookup(document, parts[:-1])
                     if not isinstance(parent, dict) or len(parent) != 1 or parts[-1] not in parent:
                         break
