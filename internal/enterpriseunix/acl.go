@@ -15,7 +15,9 @@ package enterpriseunix
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -33,36 +35,48 @@ import (
 // verify name every entry that lets another account change a file or folder
 // the deployment installs, and every transaction (repair, ensure, the
 // package postinstall ensure --from-package) removes them with chmod -N
-// before it writes anything. Linux needs no twin: a named POSIX ACL entry
+// before it writes anything. A recursive read entry for a group of standard
+// users on the install root let every user read runtime/device.key,
+// runtime/.env and the lifecycle record while status and verify stayed green
+// (GAP-0950): on a private path (one whose mode gives other accounts no
+// access: the gateway data, the guardian records, the credentials, the
+// lifecycle state, config.yaml) any allow entry is reported and removed, and
+// every entry of those folders is checked. Linux needs no twin: a named POSIX ACL entry
 // shows in the group mode bits (the ACL mask), which the mode checks compare
 // and chmod resets.
 
 // aclListBatch bounds the paths of one ls call.
 const aclListBatch = 200
 
-// aclTarget is a rooted path whose macOS ACL the deployment checks.
+// aclTarget is a rooted path whose macOS ACL the deployment checks. On a
+// private one any allow entry is wrong; elsewhere an entry that grants write.
 type aclTarget struct {
-	path string
+	path    string
+	private bool
 }
 
-// aclFinding is a path with the ACL entries that are wrong for it.
+// aclFinding is a path with the ACL entries that are wrong for it; write is
+// set when one of them grants write.
 type aclFinding struct {
 	path    string // canonical
 	rooted  string
 	entries []string
+	write   bool
 }
 
 // aclTargets are the folders of the deployment, the files it installs
 // (binaries, LaunchDaemon plists, config.yaml, the runtime descriptor) and
 // the vendor machine-policy files and folders of the connectors whose hooks
-// it publishes there. files are canonical paths.
+// it publishes there, every entry of the private folders and the files next
+// to config.yaml. files are canonical paths.
 func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	if e.GOOS != "darwin" {
 		return nil
 	}
 	seen := map[string]bool{}
 	var targets []aclTarget
-	add := func(rooted string) {
+	// private is nil to take it from the current mode.
+	add := func(rooted string, private *bool) {
 		if seen[rooted] {
 			return
 		}
@@ -71,18 +85,40 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			return
 		}
 		seen[rooted] = true
-		targets = append(targets, aclTarget{path: rooted})
+		closed := info.Mode().Perm()&0o007 == 0
+		if private != nil {
+			closed = *private
+		}
+		targets = append(targets, aclTarget{path: rooted, private: closed})
 	}
+	yes := true
 	for _, dir := range e.managedDirs(Account{}, false) {
 		if !dir.External {
-			add(e.P(dir.Path))
+			closed := dir.Mode&0o007 == 0
+			add(e.P(dir.Path), &closed)
 		}
 	}
 	for _, file := range files {
-		add(e.P(file))
+		add(e.P(file), nil)
 	}
 	for _, path := range e.machinePolicyACLPaths(connectors) {
-		add(path)
+		add(path, nil)
+	}
+	for _, dir := range []string{e.Layout.DataDir, filepath.Dir(e.Layout.ManifestPath), e.Layout.GuardianAuthDir, e.Layout.SecretsDir, e.Layout.LifecycleDir} {
+		root := e.P(dir)
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || writerTemporary(d.Name()) {
+				return nil
+			}
+			add(path, &yes)
+			if d.IsDir() && path != root && strings.Count(strings.TrimPrefix(path, root), string(filepath.Separator)) >= maxStateDepth {
+				return fs.SkipDir
+			}
+			return nil
+		})
+	}
+	for _, file := range e.configStateFiles(Account{}) {
+		add(e.P(file.path), &yes)
 	}
 	return targets
 }
@@ -107,7 +143,8 @@ func (e *Env) machinePolicyACLPaths(connectors []string) []string {
 }
 
 // aclFindings lists the targets with ACL entries that let another account
-// change them. A path that went away before ls read it is skipped.
+// change them, or reach them when they are private. A path that went away
+// before ls read it is skipped.
 func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFinding, error) {
 	var findings []aclFinding
 	var failure error
@@ -128,14 +165,15 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 			continue
 		}
 		for _, target := range batch {
-			var wrong []string
+			finding := aclFinding{path: e.canonical(target.path), rooted: target.path}
 			for _, entry := range listed[target.path] {
-				if entry.GrantsWrite() {
-					wrong = append(wrong, entry.Text)
+				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) {
+					finding.entries = append(finding.entries, entry.Text)
+					finding.write = finding.write || entry.GrantsWrite()
 				}
 			}
-			if len(wrong) > 0 {
-				findings = append(findings, aclFinding{path: e.canonical(target.path), rooted: target.path, entries: wrong})
+			if len(finding.entries) > 0 {
+				findings = append(findings, finding)
 			}
 		}
 	}
@@ -157,10 +195,23 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	if err != nil && e.Geteuid() == 0 {
 		problems = append(problems, fmt.Sprintf("the macOS ACLs of the deployment could not be read (%v), so entries that let other accounts change it are not checked", err))
 	}
-	if len(findings) > 0 {
+	var write, read []aclFinding
+	for _, finding := range findings {
+		if finding.write {
+			write = append(write, finding)
+		} else {
+			read = append(read, finding)
+		}
+	}
+	if len(write) > 0 {
 		problems = append(problems, fmt.Sprintf(
 			"macOS ACL entries let other accounts change DefenseClaw files and folders that root and every agent rely on, although their owner and mode bits do not: %s; run `%s` to remove them (it runs chmod -N on each path)",
-			describeACLFindings(findings), e.lifecycleCommand(ActionRepair)))
+			describeACLFindings(write), e.lifecycleCommand(ActionRepair)))
+	}
+	if len(read) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"macOS ACL entries let other accounts read private DefenseClaw files and folders (the device key, credentials, audit store and lifecycle state) that their owner and mode bits keep from them: %s; run `%s` to remove them (it runs chmod -N on each path)",
+			describeACLFindings(read), e.lifecycleCommand(ActionRepair)))
 	}
 	return problems
 }
@@ -186,7 +237,7 @@ func describeACLFindings(findings []aclFinding) string {
 }
 
 // removeACLs removes the macOS ACL of every target with an entry that lets
-// another account change it. chmod -h never follows a link put in place of a
+// another account change it, or reach it when it is private. chmod -h never follows a link put in place of a
 // path after it was listed.
 func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) error {
 	env := l.env
@@ -203,7 +254,7 @@ func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) 
 		removed = append(removed, finding.path)
 	}
 	if len(removed) > 0 {
-		l.noteChange("removed the macOS ACL entries that let other accounts change %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))
+		l.noteChange("removed the macOS ACL entries that let other accounts change or read %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))
 	}
 	return nil
 }

@@ -304,3 +304,48 @@ func TestRepairRemovesMacOSACLEntriesThatLetOtherAccountsChangeTheDeployment(t *
 	}
 	requireOK(t, h.run(Options{Action: ActionStatus}))
 }
+
+// A recursive read entry for a group of standard users on the install root
+// (chmod -R +a "group:staff allow read,..." /opt/cisco/defenseclaw) let every
+// user read runtime/device.key, runtime/.env and the lifecycle record while
+// status, verify and repair stayed green (GAP-0950). status names the
+// private paths and repair removes their entries; on a file every user may
+// read anyway, such as the hook binary, a read entry is harmless and stays.
+func TestRepairRemovesMacOSACLReadEntriesOnPrivatePaths(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	l := h.env.Layout
+	account := h.accounts.accounts[l.ServiceUser]
+	secrets := []string{filepath.Join(l.DataDir, "device.key"), filepath.Join(l.DataDir, ".env"), filepath.Join(l.LifecycleDir, deploymentFileName)}
+	for _, canonical := range secrets[:2] {
+		if err := os.WriteFile(h.env.P(canonical), []byte("state\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h.owners[h.env.P(canonical)] = [2]int{account.UID, account.GID}
+	}
+	h.runner.acls = map[string][]string{}
+	_ = filepath.WalkDir(h.env.P(l.InstallRoot), func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type()&fs.ModeSymlink == 0 {
+			h.runner.acls[path] = []string{"group:staff allow read,readattr,readextattr,list,search"}
+		}
+		return err
+	})
+	status := h.run(Options{Action: ActionStatus})
+	requireError(t, status, codeVerify)
+	got := messagesOf(status.Errors, codeVerify)
+	for _, canonical := range secrets {
+		if !strings.Contains(got, canonical) || !strings.Contains(got, " repair`") {
+			t.Errorf("status does not name %s and the repair: %s", canonical, got)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	for _, canonical := range append(secrets, l.DataDir, l.LifecycleDir, l.SecretsDir) {
+		if entries := h.runner.acls[h.env.P(canonical)]; entries != nil {
+			t.Errorf("after repair %s keeps the ACL entries %v", canonical, entries)
+		}
+	}
+	if h.runner.acls[h.env.P(filepath.Join(l.BinDir, binHook))] == nil {
+		t.Errorf("repair removed the read entry of the hook binary, which every user may read")
+	}
+	requireOK(t, h.run(Options{Action: ActionStatus}))
+}
