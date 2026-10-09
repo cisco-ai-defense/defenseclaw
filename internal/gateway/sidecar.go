@@ -4014,7 +4014,8 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		authorization.FailureCount != 0 ||
 		authorization.SuccessCount > authorization.TargetCount ||
 		authorization.PendingCount != authorization.TargetCount-authorization.SuccessCount ||
-		authorization.SuccessCount != len(authorization.ProtectedTargets) {
+		len(authorization.ProtectedTargets) < authorization.SuccessCount ||
+		len(authorization.ProtectedTargets) > authorization.TargetCount {
 		return false, fmt.Sprintf(
 			"hook guardian authorization is incomplete (%d/%d targets succeeded, %d pending, %d failed)",
 			authorization.SuccessCount,
@@ -4022,6 +4023,11 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 			authorization.PendingCount,
 			authorization.FailureCount,
 		)
+	}
+	if len(authorization.ProtectedTargets) != authorization.SuccessCount {
+		if err := validateManagedGuardianRepairCoverage(dataDir, authorization); err != nil {
+			return false, err.Error()
+		}
 	}
 	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
 	targets := make(map[string]struct{}, len(authorization.ProtectedTargets))

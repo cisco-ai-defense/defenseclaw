@@ -440,6 +440,12 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	} else if !verifiedSID.Equals(targetSID) {
 		return lock, fmt.Errorf("enterprise hooks: target profile SID changed before verification")
 	}
+	// Machine policy has already been verified by the caller. Inspect every
+	// profile-relative prefix before classifying an absent user runtime as
+	// repairable; owner, ACL, and reparse-point failures remain hard errors.
+	if err := validateWindowsUserPathPrefix(home, dataDir, targetSID, false); err != nil {
+		return lock, windowsUserRuntimeMissingRepair(err)
+	}
 	requiredRuntime := []string{
 		filepath.Join(dataDir, "hooks", ".hookcfg"),
 		filepath.Join(dataDir, "hooks", ".hookcfg.lock"),
@@ -450,11 +456,11 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	}
 	for _, path := range requiredRuntime {
 		if err := validateWindowsUserPathElement(path, targetSID, false, false, true); err != nil {
-			return lock, fmt.Errorf("enterprise hooks: required managed runtime verification failed for %s: %w", path, err)
+			return lock, windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: required managed runtime verification failed for %s: %w", path, err))
 		}
 		info, err := os.Lstat(path)
 		if err != nil {
-			return lock, fmt.Errorf("enterprise hooks: inspect required managed runtime %s: %w", path, err)
+			return lock, windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: inspect required managed runtime %s: %w", path, err))
 		}
 		if info.Size() > windowsEnterpriseUserFileMaxBytes {
 			return lock, fmt.Errorf(
@@ -465,10 +471,10 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		}
 	}
 	if err := validateWindowsUserPathElement(dataDir, targetSID, true, true, true); err != nil {
-		return lock, fmt.Errorf("enterprise hooks: managed data directory verification failed: %w", err)
+		return lock, windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: managed data directory verification failed: %w", err))
 	}
 	if err := validateWindowsUserPathElement(filepath.Join(dataDir, "hooks"), targetSID, true, true, true); err != nil {
-		return lock, fmt.Errorf("enterprise hooks: managed hook directory verification failed: %w", err)
+		return lock, windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: managed hook directory verification failed: %w", err))
 	}
 	tokenBody, err := connector.ReadManagedHookRuntimeFile(
 		filepath.Join(dataDir, "hooks", ".hook-claudecode.token"),
@@ -476,29 +482,28 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		windowsEnterpriseTokenMaxBytes,
 	)
 	if err != nil {
-		return lock, fmt.Errorf("enterprise hooks: read per-user connector-scoped token: %w", err)
+		return lock, windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: read per-user connector-scoped token: %w", err))
 	}
 	if subtle.ConstantTimeCompare(
 		[]byte(strings.TrimSpace(string(tokenBody))),
 		[]byte(setup.HookAPIToken),
 	) != 1 {
-		return lock, fmt.Errorf("enterprise hooks: per-user connector-scoped token does not match the protected service token")
+		return lock, windowsUserRuntimeRepairRequired(fmt.Errorf("enterprise hooks: per-user connector-scoped token does not match the protected service token"))
 	}
 	if err := connector.ValidateManagedNativeHookRuntime(
 		dataDir,
 		setup.APIAddr,
 		conn.Name(),
 	); err != nil {
-		return lock, fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err)
+		return lock, windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err))
 	}
 	if err := connector.VerifyManagedSharedHookScriptDigests(
 		dataDir,
 		targetSID.String(),
 	); err != nil {
-		return lock, fmt.Errorf(
-			"enterprise hooks: managed Claude shared hook runtime is invalid: %w",
-			err,
-		)
+		return lock, windowsUserRuntimeMissingRepair(fmt.Errorf(
+			"enterprise hooks: managed Claude shared hook runtime is invalid: %w", err,
+		))
 	}
 	lock, err = connector.LoadHookContractLockEntryForMode(
 		dataDir,
@@ -506,10 +511,9 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		true,
 	)
 	if err != nil {
-		return lock, fmt.Errorf(
-			"enterprise hooks: load managed Claude Code hook contract: %w",
-			err,
-		)
+		return lock, windowsUserRuntimeMissingRepair(fmt.Errorf(
+			"enterprise hooks: load managed Claude Code hook contract: %w", err,
+		))
 	}
 	if lock.Connector != conn.Name() || len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], policyPath) {
@@ -532,7 +536,7 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 	}
 	current.Locations.HookConfigPaths = []string{policyPath}
 	if connector.HookContractLockDrifted(lock, current) {
-		return lock, fmt.Errorf("enterprise hooks: managed Claude hook contract drift detected")
+		return lock, windowsUserRuntimeRepairRequired(fmt.Errorf("enterprise hooks: managed Claude hook contract drift detected"))
 	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return lock, fmt.Errorf(

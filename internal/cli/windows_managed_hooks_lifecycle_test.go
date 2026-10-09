@@ -684,6 +684,23 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		t.Fatalf("pending targets = %+v", pendingTargets)
 	}
 
+	// Repair-pending has a retained runtime, so teardown must capture its
+	// selector rather than use the never-enrolled absence exception.
+	repairHistory := pending
+	repairHistory.Pending = false
+	repairHistory.OK = true
+	repairAuthorization := authorization
+	repairAuthorization.ProtectedTargets = []enterpriseHookReconcileRow{active, repairHistory}
+	repairActivation := activation
+	repairActivation.ProtectedTargets = repairAuthorization.ProtectedTargets
+	neverEnrolled, err := validateWindowsManagedHooksGuardianActivation(repairActivation, repairAuthorization, state, ctx, manifestSHA256)
+	if err != nil || len(neverEnrolled) != 0 {
+		t.Fatalf("repair-pending incorrectly treated as selector-absent: %v %v", neverEnrolled, err)
+	}
+	if !windowsManagedHooksTeardownSelectorExpected(ctx.targets[1], neverEnrolled, windowsManagedHooksActivated) {
+		t.Fatal("repair-pending selector must be captured")
+	}
+
 	unauthorized := ctx
 	unauthorized.targets = append([]windowsManagedHooksTeardownTarget(nil), ctx.targets...)
 	unauthorized.targets[1].Deferred = false

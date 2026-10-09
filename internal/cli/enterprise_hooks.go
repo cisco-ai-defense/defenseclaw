@@ -530,12 +530,18 @@ func enterpriseHookVerifyOrRepairTarget(
 	if err == nil {
 		return result, false, nil
 	}
+	verificationErr := err
 	available, err := enterpriseHookReconcileSessionAvailable(target)
 	if err != nil {
-		return enterprisehooks.InstallResult{}, false, err
+		return enterprisehooks.InstallResult{}, false, errors.Join(verificationErr, err)
 	}
 	if !available {
-		return enterprisehooks.InstallResult{}, false, errEnterpriseHookRepairAwaitsSignIn
+		if !enterprisehooks.IsWindowsUserRuntimeRepairRequired(verificationErr) {
+			return enterprisehooks.InstallResult{}, false, verificationErr
+		}
+		return enterprisehooks.InstallResult{}, false, errors.Join(
+			errEnterpriseHookRepairAwaitsSignIn, verificationErr,
+		)
 	}
 	result, err = enterpriseHookReconcileInstaller(ctx, opts)
 	return result, err == nil, err
@@ -848,7 +854,14 @@ func compareEnterpriseHookGuardianRecords(
 		issues = append(issues, fmt.Sprintf("guardian activation records manifest SHA-256 %s, expected %s", activation.ManifestSHA256, expected))
 	}
 	if state.OK && authorization.OK {
-		protectedRows := enterpriseHookProtectedReconcileRows(state.Results)
+		protectedRows, historyErr := enterpriseHookProtectedRowsWithHistory(state.Results, authorization.ProtectedTargets)
+		if historyErr != nil {
+			issues = append(issues, historyErr.Error())
+		}
+		if _, err := enterpriseHookProtectedRowsWithHistory(state.Results, activation.ProtectedTargets); err != nil {
+			issues = append(issues, fmt.Sprintf("protected activation enrollment history is invalid: %v", err))
+		}
+		issues = append(issues, compareEnterpriseHookProtectedTargetSets(authorization.ProtectedTargets, activation.ProtectedTargets, "activation enrollment history")...)
 		issues = append(
 			issues,
 			compareEnterpriseHookProtectedTargetSets(protectedRows, authorization.ProtectedTargets, "authorization")...,
@@ -885,6 +898,50 @@ func enterpriseHookProtectedReconcileRows(rows []enterpriseHookReconcileRow) []e
 		}
 	}
 	return protected
+}
+
+// Retain authenticated prior enrollment for repair-pending rows while current
+// successes continue to count only verified rows. The existing v1 format keeps
+// rollback preimages readable by the prior binary.
+func enterpriseHookProtectedRowsWithHistory(current, retained []enterpriseHookReconcileRow) ([]enterpriseHookReconcileRow, error) {
+	pendingKeys := make(map[string]bool)
+	successes, pending := 0, 0
+	project := func(rows []enterpriseHookReconcileRow) []guardianstate.CoverageTarget {
+		out := make([]guardianstate.CoverageTarget, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, guardianstate.CoverageTarget{Key: enterpriseHookProtectedTargetKey(row), Home: row.UserHome, OK: row.OK, Pending: row.Pending, Error: row.Error, HasResult: row.Result != nil})
+		}
+		return out
+	}
+	for _, row := range current {
+		if row.OK {
+			successes++
+		}
+		if row.Pending {
+			pending++
+			pendingKeys[enterpriseHookProtectedTargetKey(row)] = true
+		}
+	}
+	hasHistory := false
+	for _, row := range retained {
+		if pendingKeys[enterpriseHookProtectedTargetKey(row)] {
+			hasHistory = true
+		}
+	}
+	expected := enterpriseHookProtectedReconcileRows(current)
+	if !hasHistory {
+		return expected, nil
+	}
+	repairPending, err := guardianstate.ValidateCoverage(project(current), project(retained), successes, pending)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range retained {
+		if repairPending[enterpriseHookProtectedTargetKey(row)] {
+			expected = append(expected, row)
+		}
+	}
+	return expected, nil
 }
 
 // compareEnterpriseHookProtectedTargetSets diffs the reconcile-time target
@@ -1540,10 +1597,18 @@ func enterpriseHookVerifyDispositionIssues(
 			wantTargets,
 		))
 	}
+	expectedProtected, historyErr := enterpriseHookProtectedRowsWithHistory(run.Rows, authorization.ProtectedTargets)
+	if historyErr != nil {
+		issues = append(issues, historyErr.Error())
+	}
+	if _, err := enterpriseHookProtectedRowsWithHistory(run.Rows, activation.ProtectedTargets); err != nil {
+		issues = append(issues, fmt.Sprintf("protected activation enrollment history is invalid: %v", err))
+	}
+	issues = append(issues, compareEnterpriseHookProtectedTargetSets(authorization.ProtectedTargets, activation.ProtectedTargets, "activation enrollment history")...)
 	issues = append(
 		issues,
 		compareEnterpriseHookProtectedTargetSets(
-			protected,
+			expectedProtected,
 			authorization.ProtectedTargets,
 			"authorization",
 		)...,
@@ -1551,7 +1616,7 @@ func enterpriseHookVerifyDispositionIssues(
 	issues = append(
 		issues,
 		compareEnterpriseHookProtectedTargetSets(
-			protected,
+			expectedProtected,
 			activation.ProtectedTargets,
 			"activation",
 		)...,
@@ -1720,12 +1785,16 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			}
 		}
 		var deferredPending bool
+		repairDiagnostic := err
 		deferredPending, err = enterpriseHookDeferredPendingAfterSessionError(
 			target,
 			previousProtection.PreviouslyProtected,
 			err,
 		)
 		if deferredPending {
+			if previousProtection.PreviouslyProtected {
+				fmt.Fprintf(os.Stderr, "[hook-guardian] repair pending for %s: %v\n", enterpriseHookTargetLabel(row), repairDiagnostic)
+			}
 			row.Pending = true
 			pending++
 			// A previously protected owner keeps its staged machine policy and
@@ -3043,7 +3112,7 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 			merged[key] = row
 			continue
 		}
-		if prior, ok := previousByKey[key]; ok {
+		if prior, ok := previousByKey[key]; ok && sameEnterpriseHookPath(prior.UserHome, row.UserHome) {
 			merged[key] = prior
 		}
 	}

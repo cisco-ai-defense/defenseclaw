@@ -279,10 +279,10 @@ func verifyWindowsCursorManagedResult(
 	}
 	hooksPath := cursorPaths.Hooks
 	adapterPath := cursorPaths.Adapter
-	if err := verifyWindowsCursorUserRuntime(target, hooksPath, adapterPath); err != nil {
+	if err := verifyWindowsCursorMachineTarget(target); err != nil {
 		return InstallResult{}, err
 	}
-	if err := verifyWindowsCursorMachineTarget(target); err != nil {
+	if err := verifyWindowsCursorUserRuntime(target, hooksPath, adapterPath); err != nil {
 		return InstallResult{}, err
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
@@ -368,18 +368,18 @@ func verifyWindowsCursorUserRuntime(
 	adapterPath string,
 ) error {
 	if err := verifyWindowsUserRuntime(windowsCursorRuntimePaths(target.dataDir), target.sid); err != nil {
-		return err
+		return windowsUserRuntimeMissingRepair(err)
 	}
 	if err := connector.ValidateManagedNativeHookRuntime(
 		target.dataDir,
 		target.setup.APIAddr,
 		"cursor",
 	); err != nil {
-		return fmt.Errorf("enterprise hooks: Cursor managed runtime is invalid: %w", err)
+		return windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: Cursor managed runtime is invalid: %w", err))
 	}
 	tokenPath, err := connector.HookTokenFilePath(filepath.Join(target.dataDir, "hooks"), "cursor")
 	if err != nil {
-		return err
+		return windowsUserRuntimeMissingRepair(err)
 	}
 	tokenBody, err := connector.ReadManagedHookRuntimeFile(
 		tokenPath,
@@ -387,17 +387,17 @@ func verifyWindowsCursorUserRuntime(
 		windowsEnterpriseTokenMaxBytes,
 	)
 	if err != nil {
-		return err
+		return windowsUserRuntimeMissingRepair(err)
 	}
 	if subtle.ConstantTimeCompare(
 		[]byte(strings.TrimSpace(string(tokenBody))),
 		[]byte(target.setup.HookAPIToken),
 	) != 1 {
-		return errors.New("enterprise hooks: Cursor connector-scoped token does not match the protected service token")
+		return windowsUserRuntimeRepairRequired(errors.New("enterprise hooks: Cursor connector-scoped token does not match the protected service token"))
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
 	if err != nil {
-		return err
+		return windowsUserRuntimeMissingRepair(err)
 	}
 	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
 		return fmt.Errorf("enterprise hooks: Cursor managed hook contract gateway binding: %w", err)

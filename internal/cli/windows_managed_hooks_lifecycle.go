@@ -1160,13 +1160,23 @@ func validateWindowsManagedHooksGuardianActivation(
 	); err != nil {
 		return nil, err
 	}
+	protected, historyErr := enterpriseHookProtectedRowsWithHistory(state.Results, authorization.ProtectedTargets)
+	if historyErr != nil {
+		return nil, historyErr
+	}
+	if _, err := enterpriseHookProtectedRowsWithHistory(state.Results, activation.ProtectedTargets); err != nil {
+		return nil, fmt.Errorf("protected activation enrollment history is invalid: %w", err)
+	}
+	if issues := compareEnterpriseHookProtectedTargetSets(authorization.ProtectedTargets, activation.ProtectedTargets, "activation enrollment history"); len(issues) != 0 {
+		return nil, errors.New(strings.Join(issues, "; "))
+	}
 	activationIssues := compareEnterpriseHookProtectedTargetSets(
-		active,
+		protected,
 		activation.ProtectedTargets,
 		"activation",
 	)
 	authorizationIssues := compareEnterpriseHookProtectedTargetSets(
-		active,
+		protected,
 		authorization.ProtectedTargets,
 		"authorization",
 	)
@@ -1178,12 +1188,12 @@ func validateWindowsManagedHooksGuardianActivation(
 		activation.SuccessCount != len(active) ||
 		activation.PendingCount != len(pendingTargets) ||
 		activation.TargetCount != len(ctx.targets) ||
-		len(activation.ProtectedTargets) != len(active) ||
+		len(activation.ProtectedTargets) != len(protected) ||
 		!authorization.OK || authorization.FailureCount != 0 ||
 		authorization.SuccessCount != len(active) ||
 		authorization.PendingCount != len(pendingTargets) ||
 		authorization.TargetCount != len(ctx.targets) ||
-		len(authorization.ProtectedTargets) != len(active) ||
+		len(authorization.ProtectedTargets) != len(protected) ||
 		!state.OK || state.FailureCount != 0 ||
 		state.SuccessCount != len(active) || state.PendingCount != len(pendingTargets) ||
 		state.TargetCount != len(ctx.targets) ||
@@ -1199,6 +1209,20 @@ func validateWindowsManagedHooksGuardianActivation(
 			"protected Guardian activation does not exactly bind the legacy deployment manifest and authorization",
 		)
 	}
+	// Teardown's PendingTargets means never enrolled, whose selector must be
+	// absent. A repair-pending target retains its old selector and must use
+	// the normal capture/remove/rollback path, not the absence exception.
+	retained := make(map[string]bool, len(authorization.ProtectedTargets))
+	for _, row := range authorization.ProtectedTargets {
+		retained[strings.ToLower(row.Connector)+"\x00"+strings.ToUpper(row.SID)] = true
+	}
+	neverEnrolled := pendingTargets[:0]
+	for _, target := range pendingTargets {
+		if !retained[strings.ToLower(target.Connector)+"\x00"+strings.ToUpper(target.SID)] {
+			neverEnrolled = append(neverEnrolled, target)
+		}
+	}
+	pendingTargets = neverEnrolled
 	sort.Slice(pendingTargets, func(i, j int) bool {
 		if pendingTargets[i].Connector == pendingTargets[j].Connector {
 			return pendingTargets[i].SID < pendingTargets[j].SID

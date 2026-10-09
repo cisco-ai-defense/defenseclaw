@@ -1928,6 +1928,31 @@ func TestVerifyWindowsClaudeIsReadOnlyAndDoesNotImpersonate(t *testing.T) {
 	}
 }
 
+func TestVerifyWindowsClaudeMissingDataDirIsRepairableOnlyAfterMachineChecks(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(fixture.home, ".defenseclaw")); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotWindowsTestTree(t, filepath.Dir(fixture.home))
+	_, err := Verify(context.Background(), opts)
+	if !IsWindowsUserRuntimeRepairRequired(err) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing runtime error = %v, want repairable missing data directory", err)
+	}
+	if after := snapshotWindowsTestTree(t, filepath.Dir(fixture.home)); after != before {
+		t.Fatal("missing-runtime verification mutated the deployment")
+	}
+	machineFailure := errors.New("higher-priority machine policy is incompatible")
+	windowsClaudeHigherPolicyCheck = func() error { return machineFailure }
+	_, err = Verify(context.Background(), opts)
+	if !errors.Is(err, machineFailure) || IsWindowsUserRuntimeRepairRequired(err) {
+		t.Fatalf("machine error = %v, want hard machine failure before pending repair", err)
+	}
+}
+
 func TestVerifyWindowsClaudeRejectsAndInstallRepairsTamperedSharedHook(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
