@@ -783,3 +783,13 @@ func TestRulePackCheckOrderNamesTheSelectedPack(t *testing.T) {
 		t.Fatalf("order = %v, want %s", got, want)
 	}
 }
+
+// TestValidateCandidateRejectsManagedJudgeInlineKey keeps role-specific LLM
+// credentials out of a standalone managed v9 config before a writer commits it.
+func TestValidateCandidateRejectsManagedJudgeInlineKey(t *testing.T) {
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  judge:\n    llm:\n      api_key: inline-test-key\nobservability: {}\n")
+	err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw)
+	if err == nil || !strings.Contains(err.Error(), "guardrail.judge.llm.api_key") {
+		t.Fatalf("ValidateCandidate() error = %v, want guardrail.judge.llm.api_key refusal", err)
+	}
+}

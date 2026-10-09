@@ -743,6 +743,11 @@ func standaloneInlineSecrets(cfg *Config) []string {
 	var inline []string
 	for _, field := range []struct{ key, value string }{
 		{"llm.api_key", cfg.LLM.APIKey},
+		{"guardrail.llm.api_key", cfg.Guardrail.LLM.APIKey},
+		{"guardrail.judge.llm.api_key", cfg.Guardrail.Judge.LLM.APIKey},
+		{"scanners.mcp_scanner.llm.api_key", cfg.Scanners.MCPScanner.LLM.APIKey},
+		{"scanners.skill_scanner.llm.api_key", cfg.Scanners.SkillScanner.LLM.APIKey},
+		{"scanners.plugin_llm.api_key", cfg.Scanners.PluginScannerLLM.APIKey},
 		{"cisco_ai_defense.api_key", cfg.CiscoAIDefense.APIKey},
 		{"gateway.token", cfg.Gateway.Token},
 	} {
