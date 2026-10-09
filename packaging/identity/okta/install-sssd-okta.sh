@@ -181,6 +181,19 @@ validate_args() {
   fi
 }
 
+# A local group with this name would also match sshd Match Group and gain
+# password authentication. Check files directly; getent may return the Okta
+# group through SSSD and cannot tell it apart from a local name collision.
+check_local_allow_group() {
+  [[ -r /etc/group ]] || fail 3 "cannot read /etc/group to check --allow-group"
+  local group rest
+  while IFS=: read -r group rest; do
+    if [[ $group == "$ALLOW_GROUP" ]]; then
+      fail 3 "--allow-group $ALLOW_GROUP is a local group in /etc/group; choose an Okta group name that is not local"
+    fi
+  done < /etc/group
+}
+
 # fetch_password fills PASSWORD from a file, the environment or a prompt.
 fetch_password() {
   if [[ -n $PW_FILE ]]; then
@@ -596,6 +609,7 @@ main() {
   umask 077
   parse_args "$@"
   validate_args
+  [[ -n $RENDER_ONLY ]] || check_local_allow_group
   ((DRY_RUN)) && log "Dry run: nothing will be changed."
   WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/okta-kit.XXXXXX")
   chmod 700 "$WORK"
