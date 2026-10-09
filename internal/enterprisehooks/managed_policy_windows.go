@@ -908,7 +908,7 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 			err,
 		)
 	}
-	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock, target.gatewayServiceName); err != nil {
 		return fmt.Errorf("enterprise hooks: managed Claude gateway binding: %w", err)
 	}
 	if lock.Connector != "claudecode" || len(lock.Locations.HookConfigPaths) != 1 ||
@@ -988,7 +988,7 @@ func validateWindowsClaudeManagedRuntimeVersion(target windowsClaudeManagedPolic
 			err,
 		)
 	}
-	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock, target.gatewayServiceName); err != nil {
 		return fmt.Errorf("enterprise hooks: managed Claude gateway binding: %w", err)
 	}
 	if lock.Connector != "claudecode" || len(lock.Locations.HookConfigPaths) != 1 ||

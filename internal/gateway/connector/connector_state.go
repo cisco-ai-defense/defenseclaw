@@ -1149,14 +1149,31 @@ func NewHookContractLockEntryForMode(
 
 // ValidateWindowsManagedHookContractGatewayServiceBinding proves that a
 // protected managed hook-contract entry belongs to the exact gateway service
-// scope selected by the authenticated installer environment. This is a
-// post-publication verification check: setup's preflight drift check
-// deliberately does not call it so a legacy entry without the binding remains
-// repairable by an authenticated Install/Repair operation.
+// scope selected by the authenticated installer environment OR the policy-
+// resolved service name supplied by the caller. This is a post-publication
+// verification check: setup's preflight drift check deliberately does not
+// call it so a legacy entry without the binding remains repairable by an
+// authenticated Install/Repair operation.
+//
+// When `expectedOverride` is non-empty it takes precedence over
+// `WindowsGatewayServiceNameEnv`; runtime processes (Claude policy /
+// enforcement loops) resolve the expected name from the protected policy and
+// pass it here so a worker without the installer environment can still prove
+// the binding matches the active policy.
 func ValidateWindowsManagedHookContractGatewayServiceBinding(
 	entry HookContractLockEntry,
+	expectedOverride ...string,
 ) error {
-	expected := strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+	expected := ""
+	for _, candidate := range expectedOverride {
+		if value := strings.TrimSpace(candidate); value != "" {
+			expected = value
+			break
+		}
+	}
+	if expected == "" {
+		expected = strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+	}
 	if err := ValidateWindowsManagedGatewayServiceName(expected); err != nil {
 		return fmt.Errorf("current managed gateway service identity: %w", err)
 	}
