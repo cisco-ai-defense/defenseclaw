@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -62,7 +63,11 @@ func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
 	if qualified := profileExplainQualifiedName(ctx, name); qualified != "" {
 		return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; getent passwd knows %q: use that spelling or its uid", name, qualified)
 	}
-	return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; check the current spelling with getent passwd or use the account uid", name)
+	check := "getent passwd"
+	if runtime.GOOS == "darwin" {
+		check = "id or dscl /Search -read /Users/<name>" // macOS has no getent (GAP-1107)
+	}
+	return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; check the current spelling with %s or use the account uid", name, check)
 }
 
 // profileExplainDirectoryFacts resolves the facts a verified request from

@@ -39,6 +39,30 @@ func TestQualifiedUserNameUsesSpellingNSSKnows(t *testing.T) {
 	}
 }
 
+// TestSpacedGroupNameIsLookedUp: Active Directory names its default group
+// "domain users@dclab.test". A group name with a space was refused before
+// getent ran, so the assignment check never heard "no such group" for the
+// bare "domain users" or "Domain Users" and warned about neither (GAP-1111);
+// the hint names the spelling the host lists, whatever the case written.
+func TestSpacedGroupNameIsLookedUp(t *testing.T) {
+	previous := hostRealms
+	hostRealms = func(context.Context) ([]Realm, error) {
+		return []Realm{{Domain: "dclab.test", NetBIOS: "DCLAB"}}, nil
+	}
+	t.Cleanup(func() { hostRealms = previous })
+	const line = "domain users@dclab.test:*:2027364327:\n"
+	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
+		"group domain users@dclab.test": {stdout: []byte(line)},
+		"group Domain Users@dclab.test": {stdout: []byte(line)},
+	}})
+	if _, err := r.LookupGroup("domain users"); !IsNotFound(err) {
+		t.Fatalf("bare spaced group = %v, want ErrNotFound", err)
+	}
+	if got := QualifiedGroupName(context.Background(), r, "Domain Users"); got != "domain users@dclab.test" {
+		t.Fatalf("qualified spelling = %q", got)
+	}
+}
+
 // TestDirectoryFactsFailAsAWholeNotInPart: a getent that timed out for the
 // groups, or for the directory service that owns the account, used to
 // leave facts without groups (or taking the account for a local one) that

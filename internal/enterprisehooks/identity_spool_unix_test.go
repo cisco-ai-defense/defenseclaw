@@ -116,6 +116,26 @@ func TestIdentitySpoolKeepsTheLastKnownUPN(t *testing.T) {
 	}
 }
 
+// TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt: InfoPipe
+// answering without userPrincipalName (the [ifp] user_attributes lost it) is
+// not a verified change, so the record keeps the UPN it verified before, for
+// the same account in the same SSSD domain only (GAP-1114).
+func TestIdentitySpoolKeepsAnInfoPipeUPNThroughAnAnswerWithoutIt(t *testing.T) {
+	previous := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceInfoPipe,
+		Facts: useridentity.DirectoryFacts{UPN: "w4a2.alt@alt.dclab.test", Principal: "w4a2.alt@alt.dclab.test", Source: useridentity.SourceSSSDInfoPipe}}
+	derived := IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", SSSDDomain: "dclab.test", UPNSource: UPNSourceDerived,
+		Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@DCLAB.TEST", Source: useridentity.SourceSSSD}}
+	got, kept := KeepVerifiedInfoPipeUPN(derived, previous)
+	if !kept || got.Facts.UPN != "w4a2.alt@alt.dclab.test" || got.Facts.Principal != got.Facts.UPN || got.UPNSource != UPNSourceInfoPipeKept {
+		t.Fatalf("record = %+v, want the verified UPN kept", got)
+	}
+	moved := derived
+	moved.SSSDDomain = "other.test"
+	if got, kept := KeepVerifiedInfoPipeUPN(moved, previous); kept || got.Facts.UPN != "" {
+		t.Fatalf("an account InfoPipe holds in another domain kept the UPN: %+v", got)
+	}
+}
+
 // A lookup failure must reach the guardian so its next pass uses the short
 // retry interval rather than treating partial directory facts as refreshed.
 func TestIdentitySpoolReportsFailedAccount(t *testing.T) {

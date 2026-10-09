@@ -894,7 +894,7 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		}
 		return false, nil
 	}
-	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, "linux")
+	got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, nil, "linux")
 	if len(got) != 2 || !strings.HasPrefix(got[0], `assignment 1: group "dc-rename-me@dclab.test" is not known`) ||
 		!strings.HasPrefix(got[1], `assignment 2: group "DC-RENAME-ME@dclab.test" is not known`) {
 		t.Fatalf("warnings = %q, want the renamed group in assignments 1 and 2 only", got)
@@ -909,7 +909,7 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		return ""
 	}
 	short := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-ml-short"}}}}
-	if got := unknownAssignmentGroupsForOS(context.Background(), short, exists, qualify, "linux"); len(got) != 1 ||
+	if got := unknownAssignmentGroupsForOS(context.Background(), short, exists, qualify, nil, "linux"); len(got) != 1 ||
 		!strings.Contains(got[0], `the host knows it as "dc-ml-short@dclab.test"`) {
 		t.Fatalf("short-name warnings = %q, want the qualified name", got)
 	}
@@ -922,7 +922,7 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		return ""
 	}
 	qualified := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}}}
-	if got := unknownAssignmentGroupsForOS(context.Background(), qualified, exists, switched, "linux"); len(got) != 1 ||
+	if got := unknownAssignmentGroupsForOS(context.Background(), qualified, exists, switched, nil, "linux"); len(got) != 1 ||
 		!strings.Contains(got[0], `assignment 1: group "dc-ml-team@dclab.test" is listed by this host as "dc-ml-team"`) ||
 		!strings.Contains(got[0], "use_fully_qualified_names = False") {
 		t.Fatalf("qualified-to-short warnings = %q, want the short spelling named", got)
@@ -981,6 +981,21 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		strings.Contains(got[0], "SSSD") || !strings.Contains(got[0], `assignment 1: group "dc-rename-me@dclab.test"`) {
 		t.Fatalf("warnings = %q while the directory does not answer, want one note naming the groups", got)
 	}
+	// GAP-1090: a bare name has no domain to probe. While the directory
+	// answers for none of the accounts it holds, a bare name the host does
+	// not know gets one note, not a renamed-or-deleted warning.
+	bare := []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-okta-ml", "dc-okta-dev"}}}}
+	down := func(context.Context) bool { return true }
+	if got := unknownAssignmentGroupsForOS(context.Background(), bare, func(context.Context, string) (bool, error) { return false, nil },
+		nil, down, "linux"); len(got) != 1 || !strings.HasPrefix(got[0], "could not check the groups") || strings.Contains(got[0], "renamed or deleted in") {
+		t.Fatalf("warnings = %q while the directory does not answer, want one could-not-check note", got)
+	}
+	// macOS has no getent: its note names the macOS commands (GAP-1107).
+	silent := func(context.Context, string) (bool, error) { return false, nil }
+	if got := unknownAssignmentGroupsForOS(context.Background(), assignments, silent, nil, nil, "darwin"); len(got) != 1 ||
+		strings.Contains(got[0], "getent") || !strings.Contains(got[0], "id -Gn") {
+		t.Fatalf("macOS note = %q, want the macOS commands", got)
+	}
 	profileGroupExists = func(_ context.Context, name string) (bool, error) { return name == "domain users@dclab.test", nil }
 	set = &guardrailProfileSet{assignments: assignments}
 	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 4 {
@@ -997,7 +1012,7 @@ func TestWindowsUnknownAssignmentChecksQualifiedNamesAndOldSIDs(t *testing.T) {
 		looked = append(looked, name)
 		return name == `CORP\active-team`, nil
 	}
-	warnings := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, "windows")
+	warnings := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, nil, nil, "windows")
 	if len(warnings) != 2 || !strings.Contains(warnings[0], "renamed-team") ||
 		!strings.Contains(warnings[1], "S-1-5-21-1-2-3-1104") || len(looked) != 3 {
 		t.Fatalf("warnings=%q lookups=%q", warnings, looked)
@@ -1015,7 +1030,7 @@ func TestUnknownAssignmentGroupsReportsIncompleteCheck(t *testing.T) {
 		checked++
 		return true, nil
 	}
-	warnings := unknownAssignmentGroups(context.Background(), assignments, exists, nil)
+	warnings := unknownAssignmentGroups(context.Background(), assignments, exists, nil, nil)
 	if checked != profileGroupCheckMax || len(warnings) != 1 || !strings.Contains(warnings[0], "not checked") {
 		t.Fatalf("checked = %d, warnings = %q; want a warning that later groups were not checked", checked, warnings)
 	}
@@ -1028,7 +1043,7 @@ func TestUnknownAssignmentGroupsNormalizeUnicode(t *testing.T) {
 	exists := func(_ context.Context, name string) (bool, error) {
 		return name == "dc-caf\u00e9", nil
 	}
-	if warnings := unknownAssignmentGroups(context.Background(), assignments, exists, nil); len(warnings) != 0 {
+	if warnings := unknownAssignmentGroups(context.Background(), assignments, exists, nil, nil); len(warnings) != 0 {
 		t.Fatalf("a matching NFD group was reported unknown: %q", warnings)
 	}
 }

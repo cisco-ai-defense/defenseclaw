@@ -755,7 +755,9 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		}
 		check := "Check SSSD or the domain controller"
 		if l.env.GOOS == "darwin" {
-			check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller"
+			check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller; once it answers, " +
+				"sudo dscacheutil -flushcache; sudo dsmemberutil flushcache makes Open Directory list the domain groups again " +
+				"(it can keep answering without them for 15 minutes or more)"
 		}
 		l.result.AddWarning(codeDirectoryLookups, message+". "+check+"; `"+
 			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")

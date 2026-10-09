@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -486,5 +487,51 @@ func TestProcessOwnerProfileSubjectKeepsConnectorWithoutIdentityLookup(t *testin
 	}
 	if got := set.matchUncached(&subject, profileSubjectProcessOwner, "openclaw", ""); got.Match != profileMatchConnector {
 		t.Fatalf("optional lookup selected %+v", got)
+	}
+}
+
+// TestUPNAssignmentWarnsWhenInfoPipeReportsNoUPN: a users entry written as a
+// UPN matches only through the UPN the guardian reads from InfoPipe. When
+// InfoPipe stops reporting userPrincipalName the entry selects nobody, so the
+// assignment warnings name the entry and the likely cause; a kept UPN still
+// matches but is reported (GAP-1114).
+func TestUPNAssignmentWarnsWhenInfoPipeReportsNoUPN(t *testing.T) {
+	now := time.Now()
+	assignments := []config.ProfileAssignment{{Profile: "w4-strict", Match: config.ProfileMatch{Users: []string{"w4a2.alt@alt.dclab.test"}}}}
+	record := enterprisehooks.IdentitySpoolRecord{Key: "94403999", User: "dcad-w4a2@dclab.test", UpdatedAt: now,
+		UPNSource: enterprisehooks.UPNSourceDerived, Facts: useridentity.DirectoryFacts{Principal: "dcad-w4a2@dclab.test"}}
+	got := upnAssignmentWarnings(assignments, []enterprisehooks.IdentitySpoolRecord{record}, now)
+	if len(got) != 1 || !strings.Contains(got[0], `assignment 1: user "w4a2.alt@alt.dclab.test"`) || !strings.Contains(got[0], "userPrincipalName") {
+		t.Fatalf("warnings = %q, want the unmatched UPN entry and the InfoPipe cause", got)
+	}
+	record.UPNSource, record.Facts.UPN = enterprisehooks.UPNSourceInfoPipeKept, "w4a2.alt@alt.dclab.test"
+	got = upnAssignmentWarnings(assignments, []enterprisehooks.IdentitySpoolRecord{record}, now)
+	if len(got) != 1 || !strings.Contains(got[0], "keeps the UPN") || strings.Contains(got[0], "match no account") {
+		t.Fatalf("warnings = %q, want only the kept-UPN note", got)
+	}
+	record.UPNSource = enterprisehooks.UPNSourceInfoPipe
+	if got = upnAssignmentWarnings(assignments, []enterprisehooks.IdentitySpoolRecord{record}, now); len(got) != 0 {
+		t.Fatalf("warnings = %q with InfoPipe reporting the UPN, want none", got)
+	}
+}
+
+// TestOpenDirectoryGroupsUnavailableIsALookupFailure: with the domain
+// controller down a bound Mac lists an Active Directory account without its
+// domain groups, its primary group only as a number. That is a failed lookup,
+// whose reason names the flush, not facts that send the user to the default
+// profile without a warning (GAP-1106).
+func TestOpenDirectoryGroupsUnavailableIsALookupFailure(t *testing.T) {
+	ad := enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}}
+	unnamed := func(string) bool { return false }
+	err := openDirectoryGroupsUnavailable(ad, "2027364327", unnamed)
+	if err == nil || !strings.Contains(err.Error(), "dsmemberutil flushcache") {
+		t.Fatalf("err = %v, want a lookup failure naming the flush", err)
+	}
+	if err := openDirectoryGroupsUnavailable(ad, "2027364327", func(string) bool { return true }); err != nil {
+		t.Fatalf("named primary group: %v", err)
+	}
+	local := enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}}
+	if err := openDirectoryGroupsUnavailable(local, "20", unnamed); err != nil {
+		t.Fatalf("local account: %v", err)
 	}
 }

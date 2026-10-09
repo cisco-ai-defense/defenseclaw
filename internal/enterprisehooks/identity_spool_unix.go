@@ -93,6 +93,13 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
+			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
+				var kept bool
+				if record, kept = KeepVerifiedInfoPipeUPN(record, previous); kept && previous.UPNSource != UPNSourceInfoPipeKept && logf != nil {
+					logf("[hook-guardian] identity facts for uid %d: SSSD InfoPipe answered without userPrincipalName; keeping the UPN "+
+						"it reported before. Check that user_attributes in the [ifp] section of sssd.conf lists +userPrincipalName", account.UID)
+				}
+			}
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
 			directoryAnswered = directoryAnswered || err == nil && identitySpoolDirectoryRecord(record)
 		} else if record.Key != "" {
