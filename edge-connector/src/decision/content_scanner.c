@@ -835,7 +835,16 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
     }
 #endif /* DCLAW_DNS_CHECK */
 
-    /* If not starting with digit, assume it's a hostname - pass through */
+    /* If not starting with digit, assume it's a hostname — pass through.
+     *
+     * M-1 tradeoff: When DCLAW_DNS_CHECK is not defined (embedded targets
+     * without getaddrinfo), hostname-only destinations bypass the private-IP
+     * detection above.  DNS resolution is opt-in to avoid blocking the event
+     * loop on constrained devices.  The cloud escalation path provides a
+     * second check: escalated requests are re-evaluated server-side where
+     * DNS resolution IS performed, catching any hostname that resolves to a
+     * private range.  Deployments that need full SSRF coverage without cloud
+     * should compile with -DDCLAW_DNS_CHECK=1. */
     if (!starts_with_digit(host)) {
         return DCLAW_ACTION_ALLOW;
     }

@@ -175,7 +175,7 @@ type Bridge struct {
 	// NEW-5 fix: decommissioned tracks device IDs that have been decommissioned.
 	// MQTT messages from these devices are explicitly rejected with a log message.
 	// M-6 fix: Entries now carry a timestamp so the cleanup goroutine can evict
-	// stale decommission records after 24 hours to prevent unbounded map growth.
+	// stale decommission records after 7 days to prevent unbounded map growth.
 	decommissioned   map[uint64]time.Time
 	decommissionedMu sync.RWMutex
 
@@ -256,7 +256,7 @@ func (b *Bridge) SetHeartbeatRateLimit(d time.Duration) { b.heartbeatMinInterval
 
 // MarkDecommissioned adds a device ID to the decommissioned set with a timestamp.
 // NEW-5 fix: MQTT messages from decommissioned devices are rejected.
-// M-6 fix: Records the decommission time for cleanup after 24 hours.
+// M-6 fix: Records the decommission time for cleanup after 7 days.
 func (b *Bridge) MarkDecommissioned(fullDeviceID uint64) {
 	b.decommissionedMu.Lock()
 	b.decommissioned[fullDeviceID] = time.Now()
@@ -355,8 +355,8 @@ func (b *Bridge) Start(ctx context.Context) error {
 				}
 				b.verdictRateMu.Unlock()
 
-				// M-6 fix: Clean decommissioned entries older than 24 hours
-				// to prevent unbounded map growth from accumulated decomissions.
+				// M-6 fix: Clean decommissioned entries older than 7 days
+				// to prevent unbounded map growth from accumulated decommissions.
 				decommCutoff := time.Now().Add(-7 * 24 * time.Hour)
 				b.decommissionedMu.Lock()
 				for id, ts := range b.decommissioned {
@@ -679,18 +679,12 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
-	vr, err := DecodeVerdictRequest(msg.Payload)
-	if err != nil {
-		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)
-		b.incErrors()
-		return
-	}
+	// H-4 fix: Authenticate BEFORE decoding. For keyed devices, split the
+	// payload into CBOR body (first N-32 bytes) and HMAC (last 32 bytes),
+	// verify HMAC, then decode. For unkeyed devices, the full payload is CBOR.
+	payloadBody := msg.Payload
+	isKeyed := false
 
-	// H-2 fix: Verify HMAC on verdict requests to prevent a malicious device from
-	// probing another device's verdict cache by publishing to its topic. The verdict
-	// request CBOR does not carry a device_id field, so we verify identity via HMAC
-	// over the topic + payload — the same mechanism as heartbeats/registrations.
-	// A device without the per-device key cannot forge a valid HMAC.
 	if b.keyProvider != nil {
 		vrFullID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 		vrDeviceKey := b.keyProvider.KeyForDevice(vrFullID)
@@ -700,37 +694,42 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 			return
 		}
 		if checker, ok := b.keyProvider.(DeviceKeyChecker); ok {
-			hasKey, err := checker.HasDeviceKey(vrFullID)
-			if err != nil {
-				b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — key store error for device %d: %v (fail closed)", parts.DeviceID, err)
+			hasKey, checkErr := checker.HasDeviceKey(vrFullID)
+			if checkErr != nil {
+				b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — key store error for device %d: %v (fail closed)", parts.DeviceID, checkErr)
 				b.incErrors()
 				return
 			}
 			if hasKey {
-				// Keyed device: HMAC must be appended as last 32 bytes of payload
-				if len(msg.Payload) < 32 {
-					b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — keyed device %d sent unsigned verdict request (too short)", parts.DeviceID)
+				isKeyed = true
+				if len(msg.Payload) < 64 {
+					b.logger.Printf("[mqtt-bridge] verdict request from keyed device %d too short for HMAC (%d bytes)", parts.DeviceID, len(msg.Payload))
 					b.incErrors()
 					return
 				}
-				payloadBody := msg.Payload[:len(msg.Payload)-32]
+				payloadBody = msg.Payload[:len(msg.Payload)-32]
 				payloadHMAC := msg.Payload[len(msg.Payload)-32:]
 				mac := hmac.New(sha256.New, vrDeviceKey)
 				mac.Write([]byte(msg.Topic))
 				mac.Write(payloadBody)
 				expected := mac.Sum(nil)
 				if !hmac.Equal(expected, payloadHMAC) {
-					b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — HMAC verification failed for device %d (possible cache probing)", parts.DeviceID)
+					b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — HMAC verification failed for device %d", parts.DeviceID)
 					b.incErrors()
 					return
 				}
 			} else {
-				// M-8 fix: Log when processing verdict requests from unkeyed devices.
-				// CRT-1 rate limiting is already applied above, but the absence of a
-				// per-device key means HMAC cannot authenticate the sender.
-				b.logger.Printf("[mqtt-bridge] WARNING: processing verdict request from unkeyed device %d (no per-device key provisioned)", parts.DeviceID)
+				b.logger.Printf("[mqtt-bridge] WARNING: processing verdict request from unkeyed device %d", parts.DeviceID)
 			}
 		}
+	}
+	_ = isKeyed
+
+	vr, err := DecodeVerdictRequest(payloadBody)
+	if err != nil {
+		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)
+		b.incErrors()
+		return
 	}
 
 	// Evaluate via the verdict cache (cache hit or pipeline execution)

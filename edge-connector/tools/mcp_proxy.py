@@ -144,10 +144,41 @@ def _encode(msg: Dict) -> bytes:
 # Upstream transports
 # ---------------------------------------------------------------------------
 
+_SHELL_METACHARACTERS = set(";|&$`\\!#~*?<>(){}[]'\"\n")
+
+
 class _StdioUpstream:
     """Manage a child process that speaks MCP over stdio."""
 
     def __init__(self, command: List[str]):
+        # M-8 fix: Validate the command path before spawning.
+        # The command comes from the DCLAW_MCP_UPSTREAM env var, which an
+        # attacker with env-write access could set to an arbitrary binary.
+        # Verify the executable exists, is a file, and is executable.
+        # Reject paths containing shell metacharacters to prevent injection.
+        if not command:
+            raise ValueError("M-8: upstream command is empty")
+        cmd_path = command[0]
+        if _SHELL_METACHARACTERS.intersection(cmd_path):
+            raise ValueError(
+                f"M-8: upstream command path contains shell metacharacters: {cmd_path!r}"
+            )
+        # Resolve via PATH for bare command names (e.g. "python3")
+        import shutil
+        resolved = shutil.which(cmd_path)
+        if resolved is None:
+            raise FileNotFoundError(
+                f"M-8: upstream command not found: {cmd_path!r}"
+            )
+        if not os.path.isfile(resolved):
+            raise ValueError(
+                f"M-8: upstream command is not a file: {resolved!r}"
+            )
+        if not os.access(resolved, os.X_OK):
+            raise PermissionError(
+                f"M-8: upstream command is not executable: {resolved!r}"
+            )
+
         self._command = command
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._read_lock = asyncio.Lock()

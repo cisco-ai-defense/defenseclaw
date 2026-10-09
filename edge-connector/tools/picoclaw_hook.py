@@ -33,6 +33,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+# M-4 note: This hook communicates with the Edge Connector engine via FFI
+# (ctypes in-process call) or local loopback IPC (127.0.0.1).  All
+# connections are localhost-only, so TLS is unnecessary — the threat model
+# assumes the local device is not network-hostile to itself.  Network-facing
+# transports (MQTT to fleet, cloud escalation) use TLS separately.
 LIBDCLAW_PATH = os.environ.get(
     "DCLAW_LIB_PATH",
     str(Path.home() / "edge-connector" / "build" / "libdclaw_core.so")

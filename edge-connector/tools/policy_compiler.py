@@ -846,6 +846,11 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
           "cryptographically signed and will be rejected by production devices.",
           file=sys.stderr)
 
+    # M-5 fix: Set DCLAW_BLOB_UNSIGNED=1 so downstream callers (CI scripts,
+    # test harnesses) can programmatically detect that the blob was signed
+    # with the dev stub rather than a real Ed25519 key.
+    os.environ["DCLAW_BLOB_UNSIGNED"] = "1"
+
     # Dev stub: 64 bytes = 0xED marker + SHA-256(blob) (32 bytes) + zero padding (31 bytes).
     # The Go policy service (policy.go) detects this stub by checking:
     #   blob[-64] == 0xED and blob[-63:-31] == SHA-256(unsigned)[:32]

@@ -113,10 +113,11 @@ type DeviceStore interface {
 //
 // TODO(M-9): The mu RWMutex currently protects the entire devices map for all
 // operations.  ProcessHeartbeat holds the write lock for the full duration of
-// heartbeat processing (parsing, delta computation, anomaly checks, store
-// persistence).  This is a bottleneck at scale.  Refactor to per-device or
-// sharded locks so heartbeat processing for device A does not block device B.
-// This is tracked as a "Should Fix" item from the security review.
+// heartbeat processing (parsing, delta computation, anomaly checks, AND store
+// persistence).  H-5 fix reverted the H-6 lock-narrowing because the manual
+// Unlock pattern left the mutex held on panics.  This is a bottleneck at
+// scale.  Phase 2: refactor to per-device or sharded locks so heartbeat
+// processing for device A does not block device B (tracked as "Should Fix").
 type FleetManager struct {
 	mu                sync.RWMutex
 	devices           map[uint64]*Device
@@ -280,14 +281,17 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
 	fm.mu.Lock()
-	// H-6 fix: Lock is released manually before store persistence (see below).
-	// Do NOT use defer fm.mu.Unlock() here — the lock is released explicitly
-	// before the SaveDevice call to narrow the critical section.
+	// H-5 fix: Use defer to guarantee the mutex is released even if a panic
+	// occurs during heartbeat processing. The previous manual-unlock pattern
+	// (H-6 narrowing) left the mutex held on any panic between Lock and Unlock,
+	// deadlocking all subsequent fleet operations. Correctness (no deadlock on
+	// panic) is more important than the lock-narrowing performance optimization
+	// in Phase 1. Persistence (SaveDevice) now runs inside the lock.
+	defer fm.mu.Unlock()
 
 	dev, exists := fm.devices[fullID]
 	if !exists {
 		if !fm.AutoRegister {
-			fm.mu.Unlock()
 			return
 		}
 		// Auto-register the unknown device using heartbeat fields.
@@ -349,7 +353,6 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		// Exact same uptime with no reboot — replay. Drop it.
 		log.Printf("[fleet] replay detected for device %d: uptime %d == last %d, dropping",
 			deviceID, hb.UptimeSec, dev.LastUptime)
-		fm.mu.Unlock()
 		return
 	}
 	dev.LastUptime = hb.UptimeSec
@@ -460,21 +463,13 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	binary.BigEndian.PutUint64(hmacBytes, hb.AuditHeadHMAC)
 	dev.LastAuditHMAC = hmacBytes
 
-	// H-6 fix: Narrow global lock scope — copy the device data needed for
-	// persistence, release the lock, THEN persist. This allows other heartbeats
-	// to proceed while SQLite writes (which can be slow).
-	var devCopyForStore *Device
+	// H-5 fix: Persist inside the lock (reverts H-6 narrowing). A panic
+	// between the old manual Unlock and SaveDevice would leave state
+	// unsaved. The global lock is a Phase 2 optimization target (M-9).
+	// For lockdown transitions, retry once on failure to ensure the
+	// security-critical status survives gateway restart (H-2 fix).
 	if fm.store != nil {
-		cp := *dev
-		devCopyForStore = &cp
-	}
-	fm.mu.Unlock()
-
-	// Persist updated state outside the lock. For lockdown transitions, retry
-	// once on failure to ensure the security-critical status survives gateway
-	// restart (H-2 fix).
-	if devCopyForStore != nil {
-		if err := fm.store.SaveDevice(devCopyForStore); err != nil {
+		if err := fm.store.SaveDevice(dev); err != nil {
 			log.Printf("[fleet] store error: %v", err)
 			if fm.onStoreError != nil {
 				fm.onStoreError()
@@ -482,11 +477,11 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			// H-2 fix: Retry once for security-critical status transitions.
 			// If lockdown is lost due to store failure, a compromised device
 			// escapes lockdown after gateway restart.
-			if devCopyForStore.Status == StatusLockdown || devCopyForStore.Status == StatusDegraded {
+			if dev.Status == StatusLockdown || dev.Status == StatusDegraded {
 				time.Sleep(50 * time.Millisecond)
-				if retryErr := fm.store.SaveDevice(devCopyForStore); retryErr != nil {
+				if retryErr := fm.store.SaveDevice(dev); retryErr != nil {
 					log.Printf("[fleet] CRITICAL: failed to persist %s status for device %d after retry: %v",
-						devCopyForStore.Status, devCopyForStore.DeviceID, retryErr)
+						dev.Status, dev.DeviceID, retryErr)
 				}
 			}
 		}

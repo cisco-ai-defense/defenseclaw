@@ -322,7 +322,7 @@ class _SocketBackend:
                 if not chunk:
                     break
                 data += chunk
-                if len(data) > 65536:
+                if len(data) >= 65536:
                     raise RuntimeError("IPC response too large")
         finally:
             sock.close()

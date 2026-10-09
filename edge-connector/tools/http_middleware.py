@@ -172,6 +172,33 @@ class EdgeConnectorMiddleware:
                     "body": resp_body,
                 })
                 return
+        elif not self._connector._fail_open:
+            # M-9 fix: When tool_name extraction fails and fail_open is False,
+            # block the request instead of silently allowing it.  An attacker
+            # could craft a request body that defeats name extraction to bypass
+            # the policy check.
+            logger.warning(
+                "HTTP middleware: tool_name extraction failed for %s %s — blocking (fail_closed)",
+                method, path,
+            )
+            resp_body = json.dumps({
+                "error": "EdgeConnector: tool name could not be extracted",
+                "reason": "EXTRACTION_FAILED",
+            }).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"x-defenseclaw-action", b"block"],
+                    [b"x-defenseclaw-reason", b"EXTRACTION_FAILED"],
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": resp_body,
+            })
+            return
 
         # Replay the body for the downstream app
         body_sent = False
@@ -229,6 +256,21 @@ def flask_edge_connector(
 
         tool_name, arguments = _extract_tool_info(body)
         if not tool_name:
+            # M-9 fix: When tool_name extraction fails and fail_open is False,
+            # block instead of silently allowing.
+            if not ec._fail_open:
+                logger.warning(
+                    "Flask middleware: tool_name extraction failed for %s — blocking (fail_closed)",
+                    request.path,
+                )
+                resp = jsonify({
+                    "error": "EdgeConnector: tool name could not be extracted",
+                    "reason": "EXTRACTION_FAILED",
+                })
+                resp.status_code = 403
+                resp.headers["X-DefenseClaw-Action"] = "block"
+                resp.headers["X-DefenseClaw-Reason"] = "EXTRACTION_FAILED"
+                return resp
             return None
 
         verdict = ec.evaluate(

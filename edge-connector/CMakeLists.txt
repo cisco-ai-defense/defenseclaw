@@ -37,6 +37,9 @@ elseif(DCLAW_PROFILE STREQUAL "STANDARD")
     set(DCLAW_BROKER_FALLBACK_LIST_SIZE 3)
     set(DCLAW_MAX_SESSIONS 16)
     set(DCLAW_ESCALATION_PAYLOAD_MAX 1024)
+    # BLOCKER fix: Production profiles default DEV_MODE OFF.
+    # MINIMAL keeps ON for development/test convenience.
+    set(DCLAW_DEV_MODE OFF)
 elseif(DCLAW_PROFILE STREQUAL "EDGE")
     set(DCLAW_AUDIT_RING_SIZE 1024)
     set(DCLAW_VERDICT_CACHE_SIZE 256)
@@ -51,6 +54,8 @@ elseif(DCLAW_PROFILE STREQUAL "EDGE")
     set(DCLAW_BROKER_FALLBACK_LIST_SIZE 3)
     set(DCLAW_MAX_SESSIONS 64)
     set(DCLAW_ESCALATION_PAYLOAD_MAX 2048)
+    # BLOCKER fix: Production profiles default DEV_MODE OFF.
+    set(DCLAW_DEV_MODE OFF)
 endif()
 
 # P2-18 fix: Dev mode flag — controls audit key enforcement behavior.

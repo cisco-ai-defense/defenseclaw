@@ -88,14 +88,22 @@ foreach(_tgt IN LISTS DCLAW_TEST_TARGETS)
     target_compile_options(${_tgt} PRIVATE -UNDEBUG)
 endforeach()
 
-# Set default flash path for tests that don't already have ENVIRONMENT set.
-# Tests with explicit flash paths (ota_emergency, acceptance) keep their own.
+# Set default flash path and test audit key for all tests.
+# Tests with explicit flash paths (ota_emergency, acceptance) keep their own
+# flash path but get the audit key appended.
+# BLOCKER fix: STANDARD/EDGE profiles have DEV_MODE=OFF, so tests need a valid
+# DCLAW_AUDIT_KEY (64 hex chars = 32 bytes) to initialise the audit ring.
+set(_test_audit_key "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 get_property(_all_tests DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS _all_tests)
     get_test_property(${_test} ENVIRONMENT _env)
     if(NOT _env)
         set_tests_properties(${_test} PROPERTIES
-            ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-${_test}.bin")
+            ENVIRONMENT "DCLAW_FLASH_PATH=${CMAKE_CURRENT_BINARY_DIR}/flash-${_test}.bin;DCLAW_AUDIT_KEY=${_test_audit_key}")
+    else()
+        # Append audit key to existing ENVIRONMENT list
+        set_tests_properties(${_test} PROPERTIES
+            ENVIRONMENT "${_env};DCLAW_AUDIT_KEY=${_test_audit_key}")
     endif()
 endforeach()
 

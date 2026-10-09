@@ -166,7 +166,13 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                     /* M-11 fix: Unescape JSON string escapes in the content buffer.
                      * Without this, escaped quotes (\") and backslashes (\\) are
                      * passed through literally, causing content inspection to miss
-                     * patterns that span escape boundaries. */
+                     * patterns that span escape boundaries.
+                     *
+                     * M-2 fix: Also decode \uXXXX sequences so that Unicode-escaped
+                     * keywords (e.g. password
+                     * = "password") are normalized before content scanning.  Without
+                     * this, an attacker can evade the keyword scanner by encoding
+                     * sensitive strings as \uXXXX sequences. */
                     {
                         char *r = out->content_buf;
                         char *w = out->content_buf;
@@ -177,6 +183,29 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                             } else if (r[0] == '\\' && r[1] == '\\') {
                                 *w++ = '\\';
                                 r += 2;
+                            } else if (r[0] == '\\' && r[1] == 'u' &&
+                                       r[2] != '\0' && r[3] != '\0' &&
+                                       r[4] != '\0' && r[5] != '\0') {
+                                /* Decode \uXXXX: parse 4 hex digits, emit UTF-8 */
+                                int hi = hex_to_byte(r[2], r[3]);
+                                int lo = hex_to_byte(r[4], r[5]);
+                                if (hi >= 0 && lo >= 0) {
+                                    uint16_t cp = (uint16_t)((hi << 8) | lo);
+                                    if (cp < 0x80) {
+                                        *w++ = (char)cp;
+                                    } else if (cp < 0x800) {
+                                        *w++ = (char)(0xC0 | (cp >> 6));
+                                        *w++ = (char)(0x80 | (cp & 0x3F));
+                                    } else {
+                                        *w++ = (char)(0xE0 | (cp >> 12));
+                                        *w++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                        *w++ = (char)(0x80 | (cp & 0x3F));
+                                    }
+                                    r += 6;
+                                } else {
+                                    /* Invalid hex digits — copy literally */
+                                    *w++ = *r++;
+                                }
                             } else {
                                 *w++ = *r++;
                             }

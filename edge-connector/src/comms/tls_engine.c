@@ -108,13 +108,10 @@ int dclaw_tls_init(void) {
 
     mbedtls_ssl_conf_rng(&tls_conf, mbedtls_ctr_drbg_random, &tls_drbg);
 
-    /* CRT-1 fix: Default to VERIFY_REQUIRED. In dev mode only, allow
-     * VERIFY_OPTIONAL when no CA cert is provided. */
-#if DCLAW_DEV_MODE
-    mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
-#else
+    /* CRT-1 fix: Always default to VERIFY_REQUIRED regardless of profile.
+     * The only way to downgrade is the explicit DCLAW_TLS_INSECURE=1 env
+     * var combined with no CA cert — see the fallback check below. */
     mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-#endif
 
     /* CRT-3 fix: Enforce TLS 1.2 minimum to prevent downgrade attacks
      * (BEAST, POODLE, Lucky13 on TLS 1.0/1.1). */
@@ -144,9 +141,23 @@ int dclaw_tls_init(void) {
             goto fail;
         }
         mbedtls_ssl_conf_ca_chain(&tls_conf, &tls_ca_cert, NULL);
-        /* CA loaded — enforce server verification */
-        mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         fprintf(stderr, "[DCLAW-TLS] CA certificate loaded from %s\n", ca_path);
+    } else {
+        /* CRT-1 fix: No CA cert provided. Only downgrade to VERIFY_OPTIONAL
+         * when the operator explicitly sets DCLAW_TLS_INSECURE=1. This is a
+         * deliberate opt-in for development/lab environments. Without this
+         * env var, refuse to connect without a CA cert. */
+        const char *insecure = getenv("DCLAW_TLS_INSECURE");
+        if (insecure && strcmp(insecure, "1") == 0) {
+            fprintf(stderr, "[DCLAW-TLS] WARNING: No CA cert and DCLAW_TLS_INSECURE=1 — "
+                    "downgrading to VERIFY_OPTIONAL. DO NOT USE IN PRODUCTION.\n");
+            mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+        } else {
+            fprintf(stderr, "[DCLAW-TLS] ERROR: No CA cert (DCLAW_CA_CERT_PATH unset) "
+                    "and DCLAW_TLS_INSECURE is not 1 — refusing to connect without "
+                    "server verification.\n");
+            goto fail;
+        }
     }
 
     /* 5. Load device certificate + key for mTLS (if both paths are set) */

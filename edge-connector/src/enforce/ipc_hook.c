@@ -1,4 +1,5 @@
 #include "defenseclaw.h"
+#include "config.h"
 #include "platform.h"
 #include <string.h>
 #include <stdio.h>
@@ -28,18 +29,22 @@ int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer) {
 
     /* M-3 fix: If hal_get_peer_cred is not available on this platform
      * (returns -1, e.g., macOS without LOCAL_PEERCRED), only allow the
-     * connection in dev mode (DCLAW_DEV_MODE=ON). In production mode,
-     * refuse the connection to prevent unauthenticated IPC access. */
+     * connection in dev mode.
+     * H-1 fix: Use compile-time #if DCLAW_DEV_MODE instead of runtime
+     * getenv("DCLAW_DEV_MODE"). The runtime check allowed an attacker to
+     * bypass IPC peer authentication by setting an environment variable
+     * before launching the connector. The compile-time guard is baked into
+     * the binary and cannot be overridden at runtime. */
     if (hal_get_peer_cred(client_fd, &uid, &gid, &pid) != 0) {
-        const char *dev_mode = getenv("DCLAW_DEV_MODE");
-        if (dev_mode && (strcmp(dev_mode, "ON") == 0 || strcmp(dev_mode, "1") == 0)) {
-            fprintf(stderr, "[DCLAW] WARN: peer credential check unavailable on this "
-                    "platform; allowing connection (DCLAW_DEV_MODE=ON)\n");
-            return 0;
-        }
+#if DCLAW_DEV_MODE
+        fprintf(stderr, "[DCLAW] WARN: peer credential check unavailable on this "
+                "platform; allowing connection (DCLAW_DEV_MODE=ON at compile time)\n");
+        return 0;
+#else
         fprintf(stderr, "[DCLAW] ERROR: peer credential check unavailable on this "
-                "platform and DCLAW_DEV_MODE is not ON — rejecting IPC connection\n");
+                "platform and DCLAW_DEV_MODE is OFF — rejecting IPC connection\n");
         return -1;
+#endif
     }
 
     if (uid != peer->expected_uid) {
