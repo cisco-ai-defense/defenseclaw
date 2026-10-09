@@ -133,6 +133,6 @@ type PolicyHealth struct {
 	LastReloadError          string `json:"last_reload_error,omitempty"`
 	// PendingRestart lists the changed config keys that apply only after a
 	// gateway restart.
-	PendingRestart []string          `json:"pending_restart,omitempty"`
-	Components     map[string]string `json:"components,omitempty"`
+	PendingRestart []string `json:"pending_restart,omitempty"`
+	ComponentCount int      `json:"component_count"`
 }

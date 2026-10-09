@@ -595,7 +595,9 @@ dc_install_package() {
             version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$file" 2>/dev/null || true)
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
             dc_require_product_version "$(dc_package_release_version "$version")"
-            installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
+            # An interrupted upgrade can leave multiple installed versions.
+            # Use the newest one for the repair decision and result metadata.
+            installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}\n' "$DC_LINUX_PACKAGE" 2>/dev/null | sort -V | tail -n 1 || true)
             if [ "$installed" = "$version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
