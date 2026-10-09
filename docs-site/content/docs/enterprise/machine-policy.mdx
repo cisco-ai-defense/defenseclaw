@@ -211,7 +211,10 @@ it. OpenCode itself can still start without it: see
 
 - **Its own entries only.**
   - Claude Code and Copilot: DefenseClaw owns the whole
-    `90-defenseclaw.json` drop-in.
+    `90-defenseclaw.json` drop-in, whatever it holds once DefenseClaw has
+    written it. An edit inside it (a hook path or binary name changed) is
+    put back by the next `ensure` or `repair`, and uninstall removes the
+    file. Put your own settings in another drop-in.
   - Codex: DefenseClaw owns two marked blocks in `requirements.toml`, plus
     single marked lines inside your own tables (for example
     `hooks = true # defenseclaw-managed` in an existing `[features]`
@@ -223,9 +226,9 @@ it. OpenCode itself can still start without it: see
     `plugin` list and keeps your other entries.
 - **Ownership records and preimages** in the `machine-policy` directory
   under the lifecycle directory (`/var/lib/defenseclaw-enterprise` on
-  Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS). Uninstall removes
-  exactly what DefenseClaw added, keeps edits you made later, and does not
-  bring back content you deleted.
+  Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS). In the files you
+  share with DefenseClaw, uninstall removes exactly what DefenseClaw added,
+  keeps edits you made later, and does not bring back content you deleted.
 - **Root-owned files that users can read** (`0644`). Copilot ignores a
   policy file that is not root-owned or that group or others can write.
 - **Removal of policy it no longer publishes.** When you remove a

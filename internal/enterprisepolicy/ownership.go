@@ -136,6 +136,26 @@ func deleteRecord(opts Options, connector string) error {
 	return nil
 }
 
+// reservedDropIn reports whether the record names a drop-in whose file
+// name DefenseClaw reserves for itself: 90-defenseclaw.json for the Claude
+// Code hooks and the Copilot policy. Once the record says DefenseClaw
+// published it, the file is DefenseClaw's whatever bytes it holds. A copy
+// someone edited (hook paths pointed at another folder or binary name) is
+// tamper that the next publish repairs, never the administrator's preimage,
+// and removal deletes it. Ownership is never read from the shape of the hook
+// commands inside, which an edit can change: an edited copy recorded as
+// administrator content was restored by uninstall --purge, so every Claude
+// Code call ran a missing hook (GAP-1099). Administrator settings belong in
+// another drop-in, which DefenseClaw never touches.
+func reservedDropIn(connector string) bool {
+	return connector == ConnectorClaudeCode || connector == ConnectorCopilot
+}
+
+// publishedByRecord reports whether record says DefenseClaw published path.
+func publishedByRecord(record *ownershipRecord, path string) bool {
+	return record != nil && record.Path == path && record.PostimageSHA256 != ""
+}
+
 // stripFunc removes DefenseClaw-owned content from one vendor file. It
 // returns the administrator's remaining bytes and whether any DefenseClaw
 // content was found. With nothing owned it must return current unchanged,
@@ -242,8 +262,11 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		if record.PostimageSHA256 != "" && exists && !ownedWasPresent {
 			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
 		}
-		if err := record.capturePreimage(current, exists, strip); err != nil {
-			return false, err
+		// A reserved drop-in keeps the preimage of its first publish.
+		if !reservedDropIn(connector) || !publishedByRecord(record, path) {
+			if err := record.capturePreimage(current, exists, strip); err != nil {
+				return false, err
+			}
 		}
 	}
 	record.CreatedDirs = appendUnique(record.CreatedDirs, alsoCreated...)
@@ -393,7 +416,8 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	case !exists:
 	case record == nil && wholeFile:
 		state.detail("left %s in place: DefenseClaw has no record of writing it", path)
-	case record != nil && record.Path == path && sha256Hex(current) == record.PostimageSHA256:
+	case record != nil && record.Path == path && sha256Hex(current) == record.PostimageSHA256,
+		reservedDropIn(connector) && publishedByRecord(record, path):
 		var admin []byte
 		if record.PreimageExisted {
 			// Records written before preimages were stripped can hold
@@ -406,7 +430,11 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 			if err := removePolicyFile(opts, path); err != nil {
 				return err
 			}
-			state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
+			if sha256Hex(current) != record.PostimageSHA256 {
+				state.detail("removed %s, DefenseClaw's drop-in (it was changed after DefenseClaw wrote it)", path)
+			} else {
+				state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
+			}
 		} else {
 			if _, err := writePolicyFile(opts, path, admin); err != nil {
 				return err
