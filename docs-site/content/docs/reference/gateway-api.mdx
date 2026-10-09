@@ -567,7 +567,10 @@ Rows are most recently seen first. `user_name` is the account as the host
 names its uid or SID now. A row whose uid another account holds now (the
 account was removed and the uid reused, or renamed) keeps the name it was
 recorded with and has `"retired": true`; the account that holds the uid has
-agent identities of its own. The gateway writes new rows to
+agent identities of its own. On a managed host, so does a row of a deleted
+account, whose uid or SID no account holds now, once the hook guardian keeps
+no identity record for it; the guardian keeps the records of enrolled
+accounts while the directory cannot be reached. The gateway writes new rows to
 `inventory.db` in a batch every 30 seconds, and the route writes the rows it
 has not written yet before it lists them, so a new agent shows at once.
 While the gateway cannot write `inventory.db` (a read-only file or a full

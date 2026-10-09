@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -436,9 +438,10 @@ type agentIdentityRow struct {
 	inventory.AgentIdentityRecord
 	InstallHint string `json:"install_hint,omitempty"`
 	// Retired marks the identity of an account that no longer holds its
-	// uid: the account was removed and the uid handed to another account,
-	// or renamed. The row keeps the name it was recorded with, and the
-	// uid's account now has agent identities of its own (GAP-0947).
+	// uid or SID: the account was renamed, or removed and the uid handed to
+	// another account, which has agent identities of its own (GAP-0947),
+	// or removed and its uid or SID left to no account on a managed host
+	// (GAP-1222). The row keeps the name it was recorded with.
 	Retired bool `json:"retired,omitempty"`
 }
 
@@ -484,9 +487,10 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	}
 	user := strings.TrimSpace(q.Get("user"))
 	filter := inventory.AgentIdentityFilter{
-		User:      user,
-		UserIDs:   adminViewAccountIDs(user),
-		Connector: strings.ToLower(strings.TrimSpace(q.Get("connector"))),
+		User:           user,
+		UserIDs:        adminViewAccountIDs(user),
+		RemovedAccount: adminViewRemovedAccount(user),
+		Connector:      strings.ToLower(strings.TrimSpace(q.Get("connector"))),
 	}
 	// Write the buffered rows first, so one count of sessions serves the
 	// listing. A failed write leaves them buffered and merged below.
@@ -644,21 +648,39 @@ func mergeAgentIdentityRows(
 // or SID now, the way a new hook call would record it, so a row an older
 // build stored with another spelling (a bare SSSD name, DOMAIN\user) reads
 // like the rest (GAP-0103). A row whose account no longer resolves keeps its
-// name, and so does a row of an account whose uid another account holds now,
-// which is marked retired instead of being listed under that account
-// (GAP-0947).
+// name, and is retired when the account was removed (GAP-1222); so does a row
+// of an account whose uid another account holds now, which is retired instead
+// of being listed under that account (GAP-0947).
 func nameAgentIdentityRows(rows []agentIdentityRow) {
 	name := hostAccountNamer()
 	for i := range rows {
 		holder := name(rows[i].UserID)
 		switch {
 		case holder == "":
+			rows[i].Retired = agentIdentityAccountRemoved(rows[i].UserID)
 		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder):
 			rows[i].Retired = true
 		default:
 			rows[i].UserName = holder
 		}
 	}
+}
+
+// agentIdentityAccountRemoved reports whether the account of id, a uid or
+// SID no account holds now, was removed: the guardian of the managed host
+// keeps no identity record for it. The guardian drops an account's record
+// once the account has left the enrollment, a directory account's only after
+// a pass in which the directory answered (GAP-1113, GAP-1103), and keeps the
+// records of enrolled accounts while the directory is away, so an outage
+// retires no one. A gateway without a guardian retires none: a per-user
+// gateway lists its own account.
+func agentIdentityAccountRemoved(id string) bool {
+	dir := currentIdentitySpoolDir()
+	if dir == "" || useridentity.KindForID(id) == "" {
+		return false
+	}
+	_, err := enterprisehooks.ReadIdentitySpoolRecord(dir, id, validateManagedGuardianAuthorization)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // agentIdentityHeldByAnother reports whether rec was derived for another
@@ -711,8 +733,24 @@ var adminViewAccountIDs = func(user string) []string {
 	return []string{id}
 }
 
+// adminViewRemovedAccount is the RemovedAccount of an agent identity
+// listing for user: a deleted account's rows keep its last name and its uid
+// or SID, so its qualified name still lists the ones recorded with the bare
+// name (GAP-1221). An id is a removed account's when no account holds it now
+// and the domain user names could have held it (adminViewDomainCouldHold).
+// A bare name or an id needs none.
+func adminViewRemovedAccount(user string) func(id string) bool {
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	name := hostAccountNamer()
+	return func(id string) bool {
+		return useridentity.KindForID(id) != "" && name(id) == "" && adminViewDomainCouldHold(user, id)
+	}
+}
+
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if user := filter.User; user != "" && !useridentity.NewAccountFilter(user, filter.UserIDs...).Matches(rec.UserID, rec.UserName) {
+	if filter.User != "" && !filter.Account().Matches(rec.UserID, rec.UserName) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

@@ -181,7 +181,10 @@ never applies to it. Renaming the account starts new agent IDs too. The
 removed account's agent identities stay listed under its name, with
 `"retired": true`, and inventory records of its installs carry no agent ID.
 A Windows SID is never reused, so a renamed Windows account keeps its agent
-IDs.
+IDs. On a managed Linux, macOS or Windows host, a deleted account's agent
+identities are retired the same way once the hook guardian has dropped the
+account from its enrollment, and an account created again under the same
+name gets agent IDs of its own.
 Two users who reuse the same session ID get different `ais-` IDs and different
 agents: the main agent's ID is made from the user's `agt-`, the connector and
 the session ID, so `gen_ai.agent.id` and the lineage IDs below differ too. A
@@ -509,6 +512,9 @@ PowerShell prompt (or as LocalSystem from an MDM script):
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows agent-identities
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows ide-plugins --user alice
 ```
+
+After an account is deleted, `agent-identities --user` still finds its agent
+identities by the name they are listed under, by its uid or by its SID.
 
 `profile-explain` also lists every configured profile with its digest under
 `profiles`, in place of `profile list` and `profile show`. For fleet-wide
