@@ -147,6 +147,14 @@ def test_checker_upgrade_gate_options(tmp_path: Path) -> None:
         "--allow-warning", "lifecycle_test_fault", "--allow-warning", "rolled_back",
     )
     assert result.returncode == 0, result.stderr
+    # On Linux the package hold keeps the apply trigger stopped while the
+    # postinstall writes the result of the drill (GAP-0268).
+    held = dict(drill, services=[*drill["services"], {"name": "defenseclaw-enterprise-apply.path", "kind": "path",
+                                                       "state": "inactive/dead", "required": True}])
+    drill_args = ("--expect-error", "lifecycle_test_fault", "--allow-warning", "lifecycle_test_fault",
+                  "--allow-warning", "rolled_back", "--ready")
+    assert "required service defenseclaw-enterprise-apply.path" in _check(tmp_path, held, *drill_args).stderr
+    assert _check(tmp_path, held, *drill_args, "--held-service", "defenseclaw-enterprise-apply.path").returncode == 0
     failed_rollback = dict(
         drill,
         errors=[*drill["errors"], {"code": "rollback_failed", "message": "gateway did not restart"}],

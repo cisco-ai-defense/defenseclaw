@@ -162,6 +162,8 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
             if document["readiness"][key] is not True:
                 problems.append(f"readiness.{key} is false")
         for service in document["services"]:
+            if service["name"] in args.held_service:
+                continue
             if service["required"] and not healthy_service_state(str(service["state"])):
                 problems.append(f"required service {service['name']} is {service['state']!r}")
     if (args.complete or args.coverage_complete) and document["coverage_complete"] is not True:
@@ -250,6 +252,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--version", default="", help="required installed_version")
     parser.add_argument("--product-version", default="", help="required product_version")
     parser.add_argument("--ready", action="store_true", help="require every readiness check and required service")
+    parser.add_argument(
+        "--held-service",
+        action="append",
+        default=[],
+        metavar="UNIT",
+        help="a required service the package scripts keep stopped while they write this result "
+        "(--ready does not check it; the lane checks it afterwards)",
+    )
     parser.add_argument("--coverage-complete", action="store_true", help="require coverage_complete")
     security = parser.add_mutually_exclusive_group()
     security.add_argument("--complete", action="store_true", help="require coverage_complete and security_complete")
