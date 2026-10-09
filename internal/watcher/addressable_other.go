@@ -8,3 +8,6 @@ package watcher
 
 // addressablePath is path: only Windows drops trailing dots and spaces.
 func addressablePath(path string) string { return path }
+
+// addressableQuarantinePaths leaves non-Windows paths unchanged.
+func addressableQuarantinePaths(path string, roots []string) (string, []string) { return path, roots }

@@ -2075,9 +2075,13 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	// source basename.  Keep those identities separate so a valid manifest name
 	// cannot weaken the path check or prevent an otherwise valid quarantine.
 	physicalName := filepath.Base(filepath.Clean(evt.Path))
+	quarantinePath, quarantineRoots := evt.Path, w.sourceRootsFor(evt.Type)
+	if !w.secureClientActive() {
+		quarantinePath, quarantineRoots = addressableQuarantinePaths(evt.Path, quarantineRoots)
+	}
 	plan, err := enforce.NewAssetQuarantinePlan(
-		w.cfg.QuarantineDir, w.sourceRootsFor(evt.Type), evt.Type.String(),
-		physicalName, connector, evt.Path,
+		w.cfg.QuarantineDir, quarantineRoots, evt.Type.String(),
+		physicalName, connector, quarantinePath,
 	)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)

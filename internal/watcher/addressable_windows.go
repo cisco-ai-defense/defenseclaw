@@ -33,3 +33,25 @@ func addressablePath(path string) string {
 	}
 	return path
 }
+
+// addressableQuarantinePaths gives the planner matching extended source and
+// root spellings, so containment checks still bind a trailing-dot asset.
+func addressableQuarantinePaths(path string, roots []string) (string, []string) {
+	source := addressablePath(path)
+	if source == path {
+		return path, roots
+	}
+	extendedRoots := make([]string, len(roots))
+	for i, root := range roots {
+		if strings.HasPrefix(root, `\\?\`) {
+			extendedRoots[i] = root
+		} else if volume := filepath.VolumeName(root); len(volume) == 2 && strings.HasSuffix(volume, ":") {
+			extendedRoots[i] = `\\?\` + root
+		} else if strings.HasPrefix(root, `\\`) {
+			extendedRoots[i] = `\\?\UNC\` + strings.TrimPrefix(root, `\\`)
+		} else {
+			extendedRoots[i] = root
+		}
+	}
+	return source, extendedRoots
+}

@@ -134,7 +134,7 @@ const perSourceQuarantineDir = "per-source"
 // same way, and the same source and content always get the same slot.
 func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
 	typeDir, _ := quarantineTypeDir(plan.TargetType)
-	key := filepath.Clean(plan.SourcePath)
+	key := cleanQuarantineSourcePath(plan.SourcePath)
 	if runtime.GOOS == "windows" {
 		key = strings.ToLower(key)
 	}
@@ -333,11 +333,15 @@ func AssetContentHash(path string) (string, error) {
 	if pathInput == "" {
 		return "", fmt.Errorf("enforce: invalid asset path")
 	}
-	path, err := filepath.Abs(pathInput)
-	if err != nil {
-		return "", fmt.Errorf("enforce: invalid asset path")
+	path = pathInput
+	if !extendedTrailingDotPath(path) {
+		var err error
+		path, err = filepath.Abs(pathInput)
+		if err != nil {
+			return "", fmt.Errorf("enforce: invalid asset path")
+		}
+		path = filepath.Clean(path)
 	}
-	path = filepath.Clean(path)
 	info, err := safeAssetInfo(path)
 	if err != nil {
 		return "", err
@@ -460,12 +464,26 @@ func safePathSegment(value string) bool {
 		!strings.ContainsAny(value, "/\\\x00")
 }
 
+// Win32's filepath.Clean drops the final dot even on an extended path. The
+// watcher supplies this spelling only for an existing trailing-dot asset;
+// preserving it keeps the checked source identical to the opened source.
+func extendedTrailingDotPath(path string) bool {
+	return runtime.GOOS == "windows" && strings.HasPrefix(path, `\\?\`) && strings.HasSuffix(path, ".")
+}
+
+func cleanQuarantineSourcePath(path string) string {
+	if extendedTrailingDotPath(path) {
+		return path
+	}
+	return filepath.Clean(path)
+}
+
 func pathWithinRoots(path string, roots []string, allowEqual bool) (string, string, error) {
 	pathInput := strings.TrimSpace(path)
 	if pathInput == "" || !filepath.IsAbs(pathInput) {
 		return "", "", fmt.Errorf("path is not absolute")
 	}
-	path = filepath.Clean(pathInput)
+	path = cleanQuarantineSourcePath(pathInput)
 	for _, root := range roots {
 		rootInput := strings.TrimSpace(root)
 		if rootInput == "" {
