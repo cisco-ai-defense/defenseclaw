@@ -54,7 +54,8 @@ import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
 import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
-import { BLOCK_CARDS } from '../components/policy-creator/quick-start/questions.js';
+import { BLOCK_CARDS, SINK_CARDS, defaultAnswers } from '../components/policy-creator/quick-start/questions.js';
+import { applyAnswers } from '../components/policy-creator/quick-start/apply.js';
 import {
   BOUNDED_CHAINS,
   HIGH_ASSURANCE_PACKS,
@@ -518,6 +519,21 @@ test('share: encode → decode preserves the policy verbatim', async () => {
   if (result.ok) {
     assert.deepEqual(result.policy, original);
   }
+});
+
+test('quick start hard block exports action mode for activation', () => {
+  const answers = defaultAnswers();
+  answers.response = 'block';
+  const policy = applyAnswers(answers);
+  const exported = yaml.load(emit(policy).find((f) => f.path.endsWith('.yaml'))!.contents) as {
+    guardrail: { mode: string; block_threshold: number };
+  };
+  assert.equal(exported.guardrail.mode, 'action');
+  assert.equal(exported.guardrail.block_threshold, 2);
+});
+
+test('quick start does not present Splunk HEC as a generic webhook', () => {
+  assert.equal(SINK_CARDS.some((card) => card.id === 'splunk' && card.type === 'generic'), false);
 });
 
 // ── share: failure modes ────────────────────────────────────────────
@@ -1436,7 +1452,7 @@ test('json-highlight: punctuation chars get the punctuation kind', () => {
 
 const FIXTURE = [
   { sectionId: 'firewall', label: 'Allowed domains', group: 'Firewall', keywords: ['domain', 'allowlist'] },
-  { sectionId: 'webhooks', label: 'Splunk HEC sink', group: 'Webhooks', keywords: ['splunk', 'token'] },
+  { sectionId: 'webhooks', label: 'Webhook signing secret', group: 'Webhooks', keywords: ['hmac', 'env var'] },
   { sectionId: 'guardrail', label: 'HILT', group: 'Guardrail', keywords: ['human in the loop', 'hilt severity'] },
 ];
 
@@ -1446,14 +1462,14 @@ test('cmdk-filter: empty / whitespace-only query returns the input unmodified', 
 });
 
 test('cmdk-filter: substring match in label hits the right entry', () => {
-  const out = filterIndex(FIXTURE, 'splunk');
+  const out = filterIndex(FIXTURE, 'webhook');
   assert.equal(out.length, 1);
   assert.equal(out[0].sectionId, 'webhooks');
 });
 
 test('cmdk-filter: token AND across label and keyword matches', () => {
-  // "token" is a keyword, "splunk" is in the label — both must match.
-  const out = filterIndex(FIXTURE, 'splunk token');
+  // "env" is a keyword, "webhook" is in the label — both must match.
+  const out = filterIndex(FIXTURE, 'webhook env');
   assert.equal(out.length, 1);
   assert.equal(out[0].sectionId, 'webhooks');
 });

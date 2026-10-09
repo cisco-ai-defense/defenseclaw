@@ -14,3 +14,6 @@ func resolveScannerRuntime(binary string, _ ...string) string {
 
 // scannerRuntimeProblem is nil: no other OS has a managed scanner runtime.
 var scannerRuntimeProblem = func() error { return nil }
+
+// Other platforms have no managed scanner runtime to preflight.
+func scannerRuntimePreflight(_ string, _ ...string) error { return nil }

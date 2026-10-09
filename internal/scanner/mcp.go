@@ -325,6 +325,9 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 	}
 
+	if err := scannerRuntimePreflight(s.Config.Binary, "defenseclaw", "defenseclaw.exe"); err != nil {
+		return nil, err
+	}
 	args, argsErr := s.commandArgs(target)
 	if argsErr != nil {
 		return nil, argsErr

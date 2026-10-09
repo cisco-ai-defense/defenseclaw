@@ -169,11 +169,26 @@ type MigrationRecord struct {
 	// Notes are behaviour changes the operator should know about (for
 	// example block_at now applies on every path).
 	Notes []string `json:"notes,omitempty"`
-	// Pending is true until the v9 config commit succeeds. A retry can
-	// finish a record left pending by an interruption after the commit.
+	// AuditCleanup identifies only the copied operator rows. It lets a retry
+	// finish cleanup after config commit without deleting later decisions.
+	AuditCleanup *MigrationAuditCleanup `json:"audit_cleanup,omitempty"`
+	// Pending is true until the v9 config and audit cleanup commit.
 	Pending bool `json:"pending,omitempty"`
 	// Acknowledged is set by `defenseclaw config migrate --ack`.
 	Acknowledged bool `json:"acknowledged,omitempty"`
+}
+
+// MigrationAuditCleanup is the post-commit cleanup plan. Fingerprints avoid
+// persisting raw audit reasons or action state in the migration record.
+type MigrationAuditCleanup struct {
+	Path    string                     `json:"path"`
+	Skipped bool                       `json:"skipped,omitempty"`
+	Rows    []MigrationAuditCleanupRow `json:"rows,omitempty"`
+}
+
+type MigrationAuditCleanupRow struct {
+	ID          string `json:"id"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // MigrationMove is one value moved from a v8 source to a v9 key.
@@ -248,13 +263,12 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 		result.Record.FromVersion = ConfigVersionV9
 		if record, ok := readMigrationRecord(abs); ok && record.Pending &&
 			strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source)) {
-			record.Pending = false
 			if !in.DryRun && !in.InMemory {
-				recordPath := MigrationRecordPath(abs)
-				if err := writeMigrationRecord(recordPath, record); err != nil {
+				if err := finishPendingV9(ctx, abs, source, record); err != nil {
 					return result, err
 				}
-				result.Written = append(result.Written, recordPath)
+				result.Written = append(result.Written, MigrationRecordPath(abs))
+				record.Pending = false
 			}
 			result.Record = record
 		}
@@ -278,6 +292,42 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	result.Written = written
 	result.Record = m.record
 	return result, err
+}
+
+// finishPendingV9 resumes the part after config commit under the config lock.
+// A missing cleanup snapshot cannot prove which operator rows were copied,
+// so it remains pending for an operator to resolve.
+func finishPendingV9(ctx context.Context, configPath string, source []byte, record MigrationRecord) error {
+	txn, err := cfgtxn.Begin(ctx, configPath, 0)
+	if err != nil {
+		return err
+	}
+	defer txn.Close()
+	current, _, exists, err := txn.Read()
+	if err != nil {
+		return err
+	}
+	if !exists || !bytes.Equal(current, source) {
+		return errors.New("config: config.yaml changed while finishing the config_version 9 migration; run it again")
+	}
+	latest, ok := readMigrationRecord(configPath)
+	if !ok || !latest.Pending || latest.SourceSHA256 != record.SourceSHA256 ||
+		latest.ResultSHA256 != record.ResultSHA256 {
+		return errors.New("config: pending migration record changed while finishing config_version 9; run it again")
+	}
+	if latest.ActionsRowsMoved > 0 && latest.AuditCleanup == nil {
+		return errors.New("config: pending migration record lacks an audit cleanup snapshot; operator review is required")
+	}
+	if cleanup := latest.AuditCleanup; cleanup != nil && !cleanup.Skipped {
+		if len(cleanup.Rows) != latest.ActionsRowsMoved {
+			return errors.New("config: pending migration record has an incomplete audit cleanup snapshot; operator review is required")
+		}
+		if err := resumeV9ActionCleanup(ctx, *cleanup); err != nil {
+			return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
+		}
+	}
+	latest.Pending = false
+	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
 }
 
 // NeedsMigrationV9 reports whether raw is a config_version 8 document.
@@ -665,12 +715,26 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return written, fmt.Errorf("config: read %s: %w", recordPath, err)
 	}
+	auditCleanup := false
+	if len(m.rows) > 0 {
+		outside := m.leftOutsideRollbackCopy(m.in.AuditDBPath)
+		m.record.AuditCleanup = &MigrationAuditCleanup{
+			Path: m.in.AuditDBPath, Skipped: outside,
+		}
+		if !outside {
+			auditCleanup = true
+			for _, row := range m.rows {
+				m.record.AuditCleanup.Rows = append(m.record.AuditCleanup.Rows,
+					MigrationAuditCleanupRow{ID: row.id, Fingerprint: v9ActionRowFingerprint(row)})
+			}
+		}
+	}
 	m.record.Pending = true
 	if err := writeMigrationRecord(recordPath, m.record); err != nil {
 		return written, err
 	}
 	written = append(written, recordPath)
-	if _, err := txn.Commit(migrated, mode, m.record.Actor, "config_version 9 migration"); err != nil {
+	if _, err := txn.Commit(current, migrated, exists, mode, m.record.Actor, "config_version 9 migration"); err != nil {
 		return written, err
 	}
 	written = append(written, m.configPath)
@@ -705,7 +769,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
-	if len(m.rows) > 0 && !m.leftOutsideRollbackCopy(m.in.AuditDBPath) {
+	if auditCleanup {
 		if err := clearV9ActionRowsDB(auditDB, m.rows); err != nil {
 			return written, fmt.Errorf("config: clean up migrated audit.db rows: %w", err)
 		}
@@ -754,9 +818,17 @@ func (m *v9Migrator) leftOutsideRollbackCopy(path string) bool {
 	if path == "" || m.in.Managed {
 		return false
 	}
-	for _, home := range []string{filepath.Dir(m.configPath), DefaultDataPath()} {
-		if rel, err := filepath.Rel(home, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return false
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		for _, home := range []string{filepath.Dir(m.configPath), DefaultDataPath()} {
+			resolvedHome, homeErr := filepath.EvalSymlinks(home)
+			if homeErr != nil {
+				continue
+			}
+			rel, relErr := filepath.Rel(resolvedHome, resolvedPath)
+			if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return false
+			}
 		}
 	}
 	m.note("%s is outside the data home, so the upgrade's rollback copy does not cover it; it was left as it is", path)

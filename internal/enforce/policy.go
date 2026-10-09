@@ -87,9 +87,9 @@ func (e *PolicyEngine) IsBlockedForConnector(targetType, name, connector string)
 	return verdict == config.AssetListDeny, nil
 }
 
-// IsMCPBlockedForConnector checks the server name and its configured endpoint.
+// IsMCPBlockedForConnector checks the server name and its configured definition.
 // A CLI block by URL is stored under that URL, while a tool hook supplies the
-// server name. Resolve the endpoint for the active connector before deciding.
+// server name. Resolve pinned URL, command, arguments and transport facts first.
 func (e *PolicyEngine) IsMCPBlockedForConnector(server, connector string) (bool, error) {
 	if e.legacyOperatorRows() {
 		return e.IsBlockedForConnector("mcp", server, connector)
@@ -100,17 +100,18 @@ func (e *PolicyEngine) IsMCPBlockedForConnector(server, connector string) (bool,
 	}
 	in := config.AssetPolicyInput{TargetType: "mcp", Name: server, Connector: connector}
 	// Most calls have name-only rules. Avoid reading connector registries
-	// unless some rule needs an endpoint to match.
-	needsEndpoint := false
+	// unless a rule pins facts from the server definition.
+	needsDefinition := false
 	for _, rules := range [][]config.AssetPolicyRule{cfg.AssetPolicy.MCP.Denied, cfg.AssetPolicy.MCP.Allowed} {
 		for _, rule := range rules {
-			if rule.URL != "" || strings.HasPrefix(rule.Name, "https://") || strings.HasPrefix(rule.Name, "http://") {
-				needsEndpoint = true
+			if rule.URL != "" || rule.Command != "" || len(rule.ArgsPrefix) > 0 || rule.Transport != "" ||
+				strings.HasPrefix(rule.Name, "https://") || strings.HasPrefix(rule.Name, "http://") {
+				needsDefinition = true
 				break
 			}
 		}
 	}
-	if !needsEndpoint {
+	if !needsDefinition {
 		verdict, _ := cfg.AssetListDecision(in)
 		return verdict == config.AssetListDeny, nil
 	}

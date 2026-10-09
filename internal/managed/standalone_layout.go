@@ -51,7 +51,7 @@ type StandaloneLayout struct {
 	SecretsDir      string // AI Defense / judge credentials
 	ManifestPath    string // guardian target manifest (enumerator output)
 	DescriptorPath  string // public, non-secret runtime descriptor for hooks
-	LifecycleDir    string // transaction state, snapshots, preimages, lock
+	LifecycleDir    string // transaction state, snapshots, preimages, persistent lock
 
 	// Service-owned runtime state.
 	DataDir         string // gateway state (audit DB, runtime tokens)

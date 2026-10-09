@@ -212,6 +212,29 @@ class KeysCheckTests(unittest.TestCase):
 
 
 class KeysSetTests(unittest.TestCase):
+    def test_managed_standalone_refuses_local_key_write_but_secure_client_keeps_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            app.cfg.deployment_mode = "managed_enterprise"
+            runner = CliRunner()
+            with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}):
+                refused = runner.invoke(
+                    keys_cmd, ["set", "DEFENSECLAW_TEST_KEY", "--value", "test-only-value"], obj=app,
+                )
+            self.assertEqual(refused.exit_code, 3, msg=refused.output)
+            self.assertIn("enterprise secret set", refused.output)
+            self.assertFalse(os.path.exists(os.path.join(tmp, ".env")))
+            with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}):
+                for args in (["remove", "DEFENSECLAW_TEST_KEY", "--yes"], ["fill-missing", "--yes"]):
+                    refused = runner.invoke(keys_cmd, args, obj=app)
+                    self.assertEqual(refused.exit_code, 3, msg=refused.output)
+            with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}):
+                allowed = runner.invoke(
+                    keys_cmd, ["set", "DEFENSECLAW_TEST_KEY", "--value", "test-only-value"], obj=app,
+                )
+            self.assertEqual(allowed.exit_code, 0, msg=allowed.output)
+            self.assertTrue(os.path.isfile(os.path.join(tmp, ".env")))
+
     def test_set_writes_value_to_dotenv(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)

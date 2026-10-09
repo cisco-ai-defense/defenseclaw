@@ -152,6 +152,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	// target, so compute them at most once per kind per cycle.
 	fpCache := make(map[string]string)
 	denyListsChanged := w.denyListsChanged()
+	allowListsChanged := w.allowListsChanged()
 
 	var (
 		countMu          sync.Mutex
@@ -178,6 +179,15 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			// that appears after the change would be, without waiting for
 			// its content to change (GAP-0627).
 			fmt.Fprintf(os.Stderr, "[rescan] %s %s is on the denied list; running install admission\n", evt.Type, evt.Name)
+			w.notifyAdmission(w.runAdmission(ctx, evt))
+			count(evt, rescanScanned)
+			continue
+		}
+		if allowListsChanged && (evt.Type == InstallSkill || evt.Type == InstallPlugin) &&
+			!w.deniedByAssetList(evt) && !w.isManagedArtifact(evt.Path) {
+			// A removed allow can turn an unchanged HIGH asset into a
+			// rejection. Reapply admission; content gating alone cannot see it.
+			fmt.Fprintf(os.Stderr, "[rescan] %s %s allow rules changed; running install admission\n", evt.Type, evt.Name)
 			w.notifyAdmission(w.runAdmission(ctx, evt))
 			count(evt, rescanScanned)
 			continue
@@ -232,6 +242,23 @@ func (w *InstallWatcher) denyListsChanged() bool {
 	}
 	changed := string(raw) != w.lastDenyLists
 	w.lastDenyLists = string(raw)
+	return changed
+}
+
+// allowListsChanged reports a changed allow list after this watcher's first
+// cycle. Rechecking admission lets removals revoke an earlier allow without
+// waiting for an asset's content or scanner settings to change.
+func (w *InstallWatcher) allowListsChanged() bool {
+	cfg := w.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	raw, err := json.Marshal([][]config.AssetPolicyRule{cfg.AssetPolicy.Skill.Allowed, cfg.AssetPolicy.Plugin.Allowed})
+	if err != nil {
+		return false
+	}
+	changed := w.lastAllowLists != "" && string(raw) != w.lastAllowLists
+	w.lastAllowLists = string(raw)
 	return changed
 }
 
@@ -417,7 +444,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				for _, skill := range synced {
 					targets = append(targets, InstallEvent{
 						Type:      InstallSkill,
-						Name:      filepath.Base(skill),
+						Name:      w.assetEventName(skill),
 						Path:      skill,
 						Timestamp: time.Now().UTC(),
 					})
@@ -810,6 +837,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	if errors.Is(err, os.ErrNotExist) {
 		return rescanSkipped
 	}
+	if errors.Is(err, errLinkedAssetOutsideRoots) {
+		w.notifyAdmission(w.runAdmission(ctx, evt))
+		return rescanScanned
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] snapshot %s: %v\n", evt.Path, err)
 		return rescanSkipped
@@ -1079,7 +1110,11 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	scanCtx, cancel := context.WithTimeout(ctx, w.scanTimeout(evt))
 	defer cancel()
 
-	result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
+	target, err := w.scanTargetFor(evt)
+	var result *scanner.ScanResult
+	if err == nil {
+		result, err = s.Scan(scanCtx, target)
+	}
 	if err == nil && !w.secureClientActive() {
 		// A scan without its judge is incomplete: it never becomes the
 		// baseline, so the next cycle scans again (GAP-0376).
@@ -1692,9 +1727,13 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 	case InstallMCP:
 		return w.snapshotMCPServer(evt)
 	default:
-		path := addressablePath(evt.Path)
+		path := w.addressableAssetPath(evt.Path)
 		if w.admitsLinkedAsset(evt.Path) {
-			path = linkedAssetTarget(evt.Path)
+			var err error
+			path, err = w.linkedAssetScanTarget(evt)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
@@ -1763,21 +1802,21 @@ func (w *InstallWatcher) lookupMCPServer(evt InstallEvent) (*config.MCPServerEnt
 	return nil, os.ErrNotExist
 }
 
-func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
+func (w *InstallWatcher) scanTargetFor(evt InstallEvent) (string, error) {
 	if evt.Type != InstallMCP {
 		if w.admitsLinkedAsset(evt.Path) {
-			return linkedAssetTarget(evt.Path)
+			return w.linkedAssetScanTarget(evt)
 		}
-		return addressablePath(evt.Path)
+		return w.addressableAssetPath(evt.Path), nil
 	}
 	entry, err := w.lookupMCPServer(evt)
 	if err != nil {
-		return evt.Name
+		return evt.Name, nil
 	}
 	if entry.URL != "" {
-		return entry.URL
+		return entry.URL, nil
 	}
-	return entry.Name
+	return entry.Name, nil
 }
 
 // emitRescanResult fans a watcher rescan result through the

@@ -3742,6 +3742,21 @@ class Config:
                 " — run 'defenseclaw migrate' first."
             )
         existing = _existing_document_for_save(path, current)
+        # Lists are replaced as a unit by the modeled delta. If another
+        # process changed registry sources after this Config was loaded, a
+        # whole-list save would silently discard that process's source.
+        from dataclasses import asdict
+
+        from defenseclaw.config_writer import ConfigConflictError
+
+        baseline_sources = baseline.get("registries", {}).get("sources", [])
+        edited_sources = dataclass_data.get("registries", {}).get("sources", [])
+        if edited_sources != baseline_sources:
+            disk_sources = asdict(_merge_registries(existing.get("registries")))["sources"]
+            if disk_sources != baseline_sources:
+                raise ConfigConflictError(
+                    "registries.sources changed since it was loaded; reload config.yaml and retry"
+                )
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)

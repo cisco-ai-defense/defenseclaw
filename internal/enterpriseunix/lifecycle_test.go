@@ -785,7 +785,7 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 		exists(h.env.P("/etc/systemd/system/"+unitGateway)) || exists(h.env.deploymentPath()) {
 		t.Fatal("uninstall left deployment files behind")
 	}
-	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir, l.LogDir, l.VendorPolicyDir} {
+	for _, dir := range []string{l.ConfigDir, l.DataDir, l.InstallRoot, l.GuardianAuthDir, l.LogDir, l.VendorPolicyDir} {
 		if exists(h.env.P(dir)) {
 			t.Fatalf("uninstall left %s", dir)
 		}
@@ -808,10 +808,9 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	if !again.Noop || again.NoopReason != "not_installed" || hasWarning(again, codeLeftovers) {
 		t.Fatalf("second uninstall should be a clean no-op: %+v", again)
 	}
-	// The rerun (the package preremove after an uninstall, say) leaves no
-	// lifecycle directory holding only its lock.
-	if exists(h.env.P(l.LifecycleDir)) {
-		t.Fatal("a no-op uninstall left the lifecycle directory behind")
+	// A no-op uninstall keeps the same lock inode for other waiting runs.
+	if !exists(h.env.P(filepath.Join(l.LifecycleDir, lockFileName))) {
+		t.Fatal("a no-op uninstall removed the lifecycle lock")
 	}
 
 	// --keep-state keeps all of it, and the account.
@@ -835,7 +834,7 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 		!strings.Contains(summary, "kept the service account") || strings.Contains(summary, "kept: each enrolled account") {
 		t.Fatalf("purge summary:\n%s", summary)
 	}
-	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir} {
+	for _, dir := range []string{l.ConfigDir, l.DataDir, l.InstallRoot, l.GuardianAuthDir} {
 		if exists(h.env.P(dir)) {
 			t.Fatalf("purge left %s", dir)
 		}
@@ -850,6 +849,46 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	}
 	if r := h.run(Options{Action: ActionUninstall, Purge: true, KeepState: true}); r.ExitCode == 0 {
 		t.Fatal("--keep-state with --purge must be refused")
+	}
+}
+
+// The lock pathname must survive cleanup. A waiter can have the old inode
+// open before a failed first install or uninstall finishes; replacing it lets
+// another run take a second exclusive flock.
+func TestLifecycleLockInodeSurvivesCleanup(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			bad := h.payload("1.0.0")
+			if err := os.Remove(filepath.Join(bad, binSensorHelper)); err != nil {
+				t.Fatal(err)
+			}
+			requireError(t, h.run(Options{Action: ActionEnsure, PayloadDir: bad}), codePayload)
+			path := h.env.P(filepath.Join(h.env.Layout.LifecycleDir, lockFileName))
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("failed install removed lifecycle lock: %v", err)
+			}
+			held, err := h.env.acquireLock(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := h.env.acquireLock(t.Context()); !errors.Is(err, errLockBusy) {
+				held.release()
+				t.Fatalf("second lock while first is held: %v", err)
+			}
+			held.release()
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			after, err := os.Stat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("uninstall replaced lifecycle lock inode: before=%v after=%v err=%v", before, after, err)
+			}
+			entries, err := os.ReadDir(h.env.P(h.env.Layout.LifecycleDir))
+			if err != nil || len(entries) != 1 || entries[0].Name() != lockFileName {
+				t.Fatalf("uninstall left more than its lifecycle lock: %v, %v", entries, err)
+			}
+		})
 	}
 }
 
@@ -1512,18 +1551,18 @@ func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
 	}
 }
 
-// A refused first install left /opt/cisco/defenseclaw/lifecycle/lifecycle.lock
-// (and the service account) behind, and after ensure --no-start status and
-// verify read ok while nothing ran (GAP-0542).
-func TestRefusedFirstInstallLeavesNothingAndNoStartIsUnhealthy(t *testing.T) {
+// A refused first install leaves only its persistent lock; the service
+// account is still removed. No-start remains unhealthy (GAP-0542).
+func TestRefusedFirstInstallKeepsOnlyLockAndNoStartIsUnhealthy(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	bad := h.payload("1.0.0")
 	if err := os.Remove(filepath.Join(bad, binSensorHelper)); err != nil {
 		t.Fatal(err)
 	}
 	requireError(t, h.run(Options{Action: ActionEnsure, PayloadDir: bad}), codePayload)
-	if exists(h.env.P("/opt/cisco")) {
-		t.Fatal("the refused install left /opt/cisco behind")
+	entries, err := os.ReadDir(h.env.P(h.env.Layout.InstallRoot))
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(h.env.Layout.LifecycleDir) {
+		t.Fatalf("refused install left more than its lifecycle lock: %v, %v", entries, err)
 	}
 	if _, ok, _ := h.accounts.Lookup(t.Context(), h.env.Layout.ServiceUser); ok {
 		t.Fatal("the refused install left the service account behind")

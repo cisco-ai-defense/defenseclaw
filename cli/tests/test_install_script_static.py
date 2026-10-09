@@ -1285,6 +1285,49 @@ def test_a_restore_that_stopped_part_way_keeps_the_restored_data(tmp_path: Path)
     assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "0.8.4\n"
 
 
+def test_interrupted_venv_restore_keeps_the_previous_cli(tmp_path: Path) -> None:
+    # The old venv has already left the snapshot, but VENV_BACK was never
+    # written. A retry must leave it live instead of moving it aside again.
+    home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = home / "previous.new"
+    for path in (snap / "bin", snap / "data", snap / "venv", home / ".venv", bin_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    (snap / "venv" / "version").write_text("old", encoding="utf-8")
+    (home / ".venv" / "version").write_text("failed", encoding="utf-8")
+    (snap / "data" / "config.yaml").write_text("old", encoding="utf-8")
+    (home / "config.yaml").write_text("failed", encoding="utf-8")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + 'info() { :; }\nwarn() { :; }\nerr() { :; }\nrestart_old() { :; }\n'
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" SNAP="{snap}" VENV="{home}/.venv" '
+        + f'INSTALLER_DIR="{home}/installer" APP_PATH="" VERSION=1.0.1 PREV_VERSION=1.0.0\n'
+        + 'mv() {\n'
+        + '  if [[ "${STOP_AFTER_VENV_MOVE:-}" == 1 && "$1" == "${SNAP}/venv" ]]; then\n'
+        + '    command mv "$@"; exit 99\n'
+        + '  fi\n'
+        + '  command mv "$@"\n'
+        + '}\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + "restore_snapshot\n",
+        encoding="utf-8",
+    )
+
+    first = _run([str(script)], tmp_path, STOP_AFTER_VENV_MOVE="1")
+    assert first.returncode == 99, first
+    assert (home / ".venv" / "version").read_text(encoding="utf-8") == "old"
+    assert not (snap / "VENV_BACK").exists()
+
+    second = _run([str(script)], tmp_path)
+    assert second.returncode == 0, second
+    assert (home / ".venv" / "version").exists()
+    assert (home / ".venv" / "version").read_text(encoding="utf-8") == "old"
+    assert (home / "config.yaml").read_text(encoding="utf-8") == "old"
+    assert not snap.exists()
+
+
 def test_the_cli_says_an_install_is_running_during_the_swap(tmp_path: Path) -> None:
     # GAP-0391: while the swap moved the venv, a second `defenseclaw rollback`
     # (or any command after a killed run) failed with "command not found".

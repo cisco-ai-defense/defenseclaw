@@ -1254,11 +1254,12 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 		return entry, path
 	}
 	t.Run("link", func(t *testing.T) {
-		target := filepath.Join(t.TempDir(), "linked-high-src")
-		if err := os.MkdirAll(target, 0o700); err != nil {
-			t.Fatal(err)
-		}
+		var target string
 		entry, path := admit(t, func(_ *config.Config, skillDir string) string {
+			target = filepath.Join(skillDir, "linked-high-src")
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			link := filepath.Join(skillDir, "linked-high")
 			if err := os.Symlink(target, link); err != nil {
 				t.Fatal(err)
@@ -1622,7 +1623,7 @@ func (s *targetOnlyScanner) Scan(ctx context.Context, target string) (*scanner.S
 func TestLinkedSkillIsScannedThroughItsTarget(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	cfg.Gateway.Watcher.Skill.TakeAction = true
-	target := filepath.Join(t.TempDir(), "linked-high-src")
+	target := filepath.Join(skillDir, "linked-high-src")
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1655,6 +1656,41 @@ func TestLinkedSkillIsScannedThroughItsTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(target); err != nil {
 		t.Fatalf("the link target was touched: %v", err)
+	}
+}
+
+// A link into another enrolled profile must never make the gateway read that profile.
+func TestLinkedSkillOutsideWatchedRootIsNotScanned(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	target := filepath.Join(t.TempDir(), "private-skill")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(skillDir, "linked-private")
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v %s", err, out)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	scan := &countingScanner{name: "skill-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
+	evt := InstallEvent{Type: InstallSkill, Name: "linked-private", Path: link, Timestamp: time.Now()}
+	if _, err := w.snapshotForEvent(evt); err == nil {
+		t.Fatal("snapshot read a target outside watched roots")
+	}
+	res := w.runAdmission(context.Background(), evt)
+	if scan.calls != 0 || res.Verdict != VerdictBlocked {
+		t.Fatalf("scans=%d verdict=%s reason=%s", scan.calls, res.Verdict, res.Reason)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("outside-root link remained: %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("outside target changed: %v", err)
 	}
 }
 
@@ -1805,5 +1841,43 @@ func TestAllowRuleReleasesABlockedSkill(t *testing.T) {
 	}
 	if entry != nil && (entry.Actions.Runtime != "" || entry.Actions.Install != "") {
 		t.Fatalf("journal %+v, want the allow rule to clear the runtime disable and install block", entry.Actions)
+	}
+}
+
+// An allow rule pinned to one profile cannot release a same-named skill blocked in another.
+func TestAllowRuleDoesNotReleaseAnotherPath(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	other := filepath.Join(t.TempDir(), "other-skills")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(skillDir, "shared")
+	b := filepath.Join(other, "shared")
+	for _, path := range []string{a, b} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# shared\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for field, value := range map[string]string{"runtime": "disable", "install": "block"} {
+		if err := store.SetActionFieldForConnector("skill", "shared", "claudecode", field, value, "blocked"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetSourcePathForConnector("skill", "shared", "claudecode", b); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "shared", SourcePathContains: []string{a}}}
+	w := New(cfg, []string{skillDir, other}, nil, store, logger, nil, nil)
+	w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "shared", Path: a, Connector: "claudecode", Timestamp: time.Now()})
+	entry, err := store.GetActionForConnector("skill", "shared", "claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Actions.Runtime != "disable" || entry.Actions.Install != "block" {
+		t.Fatalf("another profile's block was cleared: %+v", entry)
 	}
 }

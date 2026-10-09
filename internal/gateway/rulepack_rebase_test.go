@@ -35,8 +35,13 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// CMD-RM-RF keeps the shipped 0.8.x regex: an edited regex is the rule's
+	// sole condition after the rebase (GAP-1004), so only an unedited copy
+	// inherits the 1.0 expression.
+	const rmRF08 = `'(?i)\brm\s+(?:-[a-zA-Z]*\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\b(?:\s+\S+)*\s+/` +
+		`(?:$|["''\s,}\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|["''\s,}\]]))'`
 	commands := "version: 1\ncategory: command\nrules:\n" +
-		"  - id: CMD-RM-RF\n    pattern: '\\brm\\s+-rf\\s+/'\n    title: \"Recursive delete\"\n    severity: CRITICAL\n    confidence: 0.9\n    tags: [destructive]\n" +
+		"  - id: CMD-RM-RF\n    pattern: " + rmRF08 + "\n    title: \"Recursive delete\"\n    severity: CRITICAL\n    confidence: 0.9\n    tags: [destructive]\n" +
 		"  - id: CMD-ACME-MARKER\n    pattern: acme-marker-7f3c\n    title: \"Acme marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [execution]\n" +
 		"  - id: CMD-ACME-SPACED\n    pattern: 'acme\\s+spaced'\n    title: \"Acme spaced\"\n    severity: HIGH\n    confidence: 0.9\n    tags: [execution]\n"
 	if err := os.WriteFile(filepath.Join(old, "rules", "commands.yaml"), []byte(commands), 0o644); err != nil {

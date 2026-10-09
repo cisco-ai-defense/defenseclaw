@@ -301,7 +301,7 @@ func SkillFolderRefs(input any, home, cwd string) []FolderRef {
 	seen := map[string]bool{}
 	var refs []FolderRef
 	for _, value := range values {
-		for _, token := range strings.FieldsFunc(value, isCommandSeparator) {
+		for _, token := range commandPathTokens(value) {
 			ref, ok := skillFolderRef(token, home, cwd)
 			if !ok || seen[ref.Dir] {
 				continue
@@ -343,6 +343,49 @@ func isCommandSeparator(r rune) bool {
 	return false
 }
 
+// commandPathTokens preserves spaces inside shell quotes and escaped spaces
+// while keeping command operators separate from candidate paths.
+func commandPathTokens(value string) []string {
+	var tokens []string
+	var current strings.Builder
+	var quote rune
+	flush := func() {
+		if current.Len() > 0 {
+			tokens = append(tokens, current.String())
+			current.Reset()
+		}
+	}
+	chars := []rune(value)
+	for i := 0; i < len(chars); i++ {
+		ch := chars[i]
+		if ch == 0x5c && quote != 0x27 && i+1 < len(chars) {
+			next := chars[i+1]
+			if next == 0x20 || next == 0x09 || next == 0x22 || next == 0x27 {
+				current.WriteRune(next)
+				i++
+				continue
+			}
+		}
+		if ch == 0x22 || ch == 0x27 {
+			if quote == 0 {
+				quote = ch
+				continue
+			}
+			if quote == ch {
+				quote = 0
+				continue
+			}
+		}
+		if quote == 0 && isCommandSeparator(ch) {
+			flush()
+			continue
+		}
+		current.WriteRune(ch)
+	}
+	flush()
+	return tokens
+}
+
 func skillFolderRef(token, home, cwd string) (FolderRef, bool) {
 	if !strings.ContainsAny(token, "/\\") {
 		return FolderRef{}, false
@@ -354,7 +397,14 @@ func skillFolderRef(token, home, cwd string) (FolderRef, bool) {
 			break
 		}
 	}
-	parts := strings.Split(path, "/")
+	// Resolve the entire path before selecting a skills/<name> pair. A
+	// parent segment after the first pair can otherwise name another skill.
+	dir := filepath.FromSlash(path)
+	if !filepath.IsAbs(dir) && strings.TrimSpace(cwd) != "" {
+		dir = filepath.Join(cwd, dir)
+	}
+	dir = filepath.Clean(dir)
+	parts := strings.Split(filepath.ToSlash(dir), "/")
 	for i := 0; i+1 < len(parts); i++ {
 		if !strings.EqualFold(parts[i], "skills") {
 			continue
@@ -363,11 +413,8 @@ func skillFolderRef(token, home, cwd string) (FolderRef, bool) {
 		if name == "" || strings.HasPrefix(name, ".") || strings.EqualFold(name, "SKILL.md") || strings.ContainsAny(name, "*?[]{}$") {
 			continue
 		}
-		dir := filepath.FromSlash(strings.Join(parts[:i+2], "/"))
-		if !filepath.IsAbs(dir) && strings.TrimSpace(cwd) != "" {
-			dir = filepath.Join(cwd, dir)
-		}
-		return FolderRef{Dir: filepath.Clean(dir), Name: name}, true
+		skillDir := filepath.FromSlash(strings.Join(parts[:i+2], "/"))
+		return FolderRef{Dir: skillDir, Name: name}, true
 	}
 	return FolderRef{}, false
 }

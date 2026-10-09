@@ -1379,3 +1379,31 @@ func TestTrustedToolCallDynamicEvalAlerts(t *testing.T) {
 		}
 	}
 }
+
+func TestDisabledComposedCategoryDoesNotRestoreDefaults(t *testing.T) {
+	base, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.RuleFiles = []*guardrail.RulesFileYAML{{
+		Version: 1, Category: "command",
+		Rules: []guardrail.RuleDefYAML{{ID: "CMD-MARKER", Pattern: "operator-marker", Title: "Marker", Severity: "HIGH", Confidence: 0.9, Tags: []string{"test"}}},
+	}}
+	composed, err := guardrail.Compose(base, nil, guardrail.Customization{Disable: []string{"CMD-MARKER"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	categories, _, _, err := mergeRulePackCategories(composed, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, category := range categories {
+		if category.Name == "command" {
+			if len(category.Rules) != 0 {
+				t.Fatalf("disabled command category restored %d default rules", len(category.Rules))
+			}
+			return
+		}
+	}
+	t.Fatal("command category missing")
+}

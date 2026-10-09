@@ -54,3 +54,22 @@ func TestSkillFolderRefsKeepsDistinctPathsWithSameName(t *testing.T) {
 		t.Fatalf("distinct skill paths were not preserved: %#v", refs)
 	}
 }
+
+func TestSkillFolderRefsPreservesQuotedPathWithSpaces(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "Alice Smith")
+	dir := filepath.Join(home, ".codex", "skills", "blocked")
+	refs := SkillFolderRefs("cat '"+filepath.Join(dir, "SKILL.md")+"'", home, home)
+	if len(refs) != 1 || refs[0].Dir != dir || refs[0].Name != "blocked" {
+		t.Fatalf("quoted skill path was not preserved: %#v", refs)
+	}
+}
+
+func TestSkillFolderRefsResolvesParentBeforeSelectingSkill(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "skills", "denied")
+	input := filepath.Join(home, ".claude", "skills") + "/benign/../denied/SKILL.md"
+	refs := SkillFolderRefs(input, home, home)
+	if len(refs) != 1 || refs[0].Dir != dir || refs[0].Name != "denied" {
+		t.Fatalf("skill path selected before normalization: %#v", refs)
+	}
+}

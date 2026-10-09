@@ -417,8 +417,9 @@ If macOS denies deleting the `_defenseclaw` account (it can, from a remote
 shell), the uninstall still completes: the result carries a `service_account`
 warning with the two `dscl` commands that delete the account by hand.
 
-A pkg has no uninstaller, so the lifecycle removes the binaries itself. For
-a pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`,
+A pkg has no uninstaller, so the lifecycle removes the binaries itself.
+The root-owned `/opt/cisco/defenseclaw/lifecycle/lifecycle.lock` remains so
+waiting lifecycle runs keep using the same lock. For a pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`,
 so the pkg receipt is gone afterward.
 
 launchd keeps a record for each removed label. After uninstall,

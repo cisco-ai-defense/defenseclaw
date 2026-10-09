@@ -52,14 +52,9 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			}
 			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, location, failure.Reason)
 		}
-		// The rule packs do not depend on the secret, so they are still
-		// checked. Before, a config with an observability token_env
-		// skipped the pack check, and a stale custom_packs pin stopped the
-		// services and failed only after the readiness wait (GAP-0188).
-		if runtimeConfig = standaloneGatewayRuntimeCandidate(configPath); runtimeConfig == nil {
-			return nil
-		}
 		// The service may resolve environment references that Setup cannot.
+		// Continue both observability and runtime validation with the missing
+		// token tolerated; unrelated semantic errors must still be refused.
 		// Compile once with placeholder environment values so a missing
 		// token cannot bypass the independent JSONL filesystem preflight.
 		raw, readErr := readConfigV8Source(configPath)
@@ -74,6 +69,22 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			DefaultDataDir: dataDir,
 			Secrets:        standalonePathPreflightSecrets{credentialsDir: secretsDir},
 		})
+		if err != nil {
+			failure := configV8ValidationFailure(err)
+			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, failure.Path, failure.Reason)
+		}
+		runtimeConfig, err = config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, raw)
+		if err == nil {
+			compiled.Plan, err = config.WithObservabilityV8ManagedAIDDestination(
+				compiled.Plan, config.ObservabilityV8ManagedAIDOptionsFromConfig(runtimeConfig, raw))
+		}
+		if err == nil {
+			var document *config.V8YAMLDocument
+			document, err = config.ParseV8YAML(configPath, raw)
+			if err == nil {
+				err = validateRuntimeV8ConnectorRoster(document, runtimeConfig)
+			}
+		}
 		if err != nil {
 			failure := configV8ValidationFailure(err)
 			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, failure.Path, failure.Reason)

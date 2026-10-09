@@ -231,3 +231,17 @@ func TestStandaloneGatewayConfigCheckRefusesJSONLDirectoryWithMissingToken(t *te
 		t.Fatalf("JSONL directory with unresolved service token = %v, want path refusal", err)
 	}
 }
+
+// An unresolved service token cannot hide an unrelated runtime semantic error.
+func TestStandaloneGatewayConfigCheckRejectsUnknownProfileWithMissingToken(t *testing.T) {
+	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")
+	body := strings.Replace(standaloneGatewayCheckConfig, "config_version: 8", "config_version: 9", 1)
+	body = strings.Replace(body, "  rule_pack_dir: \"\"\n", "  rule_pack: default\n", 1)
+	body = strings.Replace(body, "  mode: observe\n", "  mode: observe\n  default_profile: missing\n", 1)
+	body += "observability:\n  destinations:\n    - name: hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://splunk.example.test\n      token_env: DC_TEST_UNSET_HEC_TOKEN\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "guardrail.default_profile") || !strings.Contains(err.Error(), "unknown profile") {
+		t.Fatalf("unknown profile with unresolved token = %v, want profile refusal", err)
+	}
+}

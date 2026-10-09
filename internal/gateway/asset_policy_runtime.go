@@ -293,7 +293,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		return config.AssetPolicyDecision{}, false
 	}
 	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor("mcp")
-	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
+	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands && cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
 	if !runtimeDetection.Enabled && cfg.SecureClientIntegration() {
@@ -596,14 +596,14 @@ func (a *APIServer) evaluateNativeRuntimeSkillSelection(
 // API (GAP-0566). Secure Client keeps the runtime_detection gate of main for
 // every rule (issue #1092).
 func runtimeAssetPolicyApplies(cfg *config.Config, detection config.AssetRuntimeDetection, surface string, in config.AssetPolicyInput) bool {
-	if surface == "terminal" && !detection.TerminalCommands {
+	if cfg == nil {
 		return false
 	}
-	if detection.Enabled {
+	if cfg.SecureClientIntegration() {
+		return detection.Enabled && (surface != "terminal" || detection.TerminalCommands)
+	}
+	if detection.Enabled && (surface != "terminal" || detection.TerminalCommands) {
 		return true
-	}
-	if cfg == nil || cfg.SecureClientIntegration() {
-		return false
 	}
 	verdict, _ := cfg.AssetListDecision(in)
 	return verdict == config.AssetListDeny

@@ -712,7 +712,11 @@ the preset files in your policy folder.
 printf '%s\n' "$VT_KEY" | defenseclaw keys set VIRUSTOTAL_API_KEY --value-stdin
 ```
 
-See [Keys](/docs/reference/keys) for the registry, resolution order, and requirement states.
+On a managed standalone device, `keys set`, `keys remove`, and `keys
+fill-missing` refuse with exit `3`; use `defenseclaw-gateway enterprise secret
+set --name <configured-credential> --from-stdin` as an administrator to rotate
+a credential. See [Keys](/docs/reference/keys) for the registry, resolution
+order, and requirement states.
 
 ## Multi-connector
 

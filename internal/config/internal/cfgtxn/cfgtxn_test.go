@@ -33,7 +33,7 @@ func TestCommitRestoresGenerationAfterPostRenameFailure(t *testing.T) {
 	}
 	defer txn.Close()
 	first := []byte("config_version: 9\n")
-	if _, err := txn.Commit(first, 0o600, "first", "init"); err != nil {
+	if _, err := txn.Commit(nil, first, false, 0o600, "first", "init"); err != nil {
 		t.Fatal(err)
 	}
 	generationBefore, err := os.ReadFile(GenerationPath(path))
@@ -48,7 +48,7 @@ func TestCommitRestoresGenerationAfterPostRenameFailure(t *testing.T) {
 		}
 		return failedSync
 	}
-	if _, err := txn.Commit([]byte("config_version: 9\n# rejected\n"), 0o600, "rejected", "edit"); !errors.Is(err, failedSync) {
+	if _, err := txn.Commit(first, []byte("config_version: 9\n# rejected\n"), true, 0o600, "rejected", "edit"); !errors.Is(err, failedSync) {
 		t.Fatalf("Commit error = %v, want directory fsync failure", err)
 	}
 	configAfter, err := os.ReadFile(path)
@@ -94,7 +94,7 @@ func TestCommitDoesNotReplaceConfigWhenPreviousReadFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := txn.Commit([]byte("candidate"), 0o600, "test", "regression"); err == nil {
+	if _, err := txn.Commit([]byte("original"), []byte("candidate"), true, 0o600, "test", "regression"); err == nil {
 		t.Fatal("commit succeeded despite failed previous read")
 	}
 	info, err := os.Lstat(path)
@@ -103,5 +103,36 @@ func TestCommitDoesNotReplaceConfigWhenPreviousReadFails(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("commit replaced unreadable config path with %s", info.Mode())
+	}
+}
+
+func TestCommitRejectsHandEditAfterCandidateRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := []byte("config_version: 9\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := Begin(context.Background(), path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer txn.Close()
+	read, mode, exists, err := txn.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handEdit := []byte("config_version: 9\n# operator edit\n")
+	if err := os.WriteFile(path, handEdit, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := txn.Commit(read, []byte("config_version: 9\n# candidate\n"), exists, mode, "cli:test", "edit"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Commit error = %v, want conflict", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, handEdit) {
+		t.Fatalf("hand edit changed: %q, %v", got, err)
+	}
+	if _, err := os.Stat(GenerationPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("generation advanced after conflict: %v", err)
 	}
 }

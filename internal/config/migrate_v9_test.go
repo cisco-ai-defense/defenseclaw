@@ -165,6 +165,36 @@ func TestMigrateV9LeavesPolicyDataOutsideTheRollbackCopy(t *testing.T) {
 	}
 }
 
+// A policy_dir symlink within the data home can point at files the installer's
+// rollback snapshot cannot restore.
+func TestMigrateV9KeepsSymlinkedPolicyDataOutsideRollbackCopy(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	home, external := t.TempDir(), t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	policyDir := filepath.Join(home, "policies")
+	if err := os.Symlink(external, policyDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	dataJSON := filepath.Join(policyDir, "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions":{"HIGH":{"install":"block"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + home + "\npolicy_dir: " + policyDir + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dataJSON); err != nil {
+		t.Fatalf("external data.json must survive rollback: %v", err)
+	}
+}
+
 // A 0.8.x config with rule_pack_dir: "" (the 0.8.10 default: the embedded
 // packs) on a home without the default pack folder upgrades to a config whose
 // default pack exists: the migration writes the shipped pack, and a folder
@@ -1496,6 +1526,52 @@ func TestMigrateV9RecordFailureCanRetry(t *testing.T) {
 	}
 	if record, ok := readMigrationRecord(configPath); !ok || record.Pending {
 		t.Fatalf("pending record was not finished: %+v", record)
+	}
+}
+
+// An interruption after config commit can leave a pending record and the
+// original operator row. A retry must finish clearing the migrated row.
+func TestMigrateV9RetryClearsPendingAuditRows(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath, auditDB := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", auditDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO actions VALUES ('1', 'skill', 'restored-skill', '', '{"install":"block"}', 'operator', 'now', '')`
+	if _, err := db.Exec(insert); err != nil {
+		t.Fatal(err)
+	}
+	in := MigrateV9Input{ConfigPath: configPath, AuditDBPath: auditDB}
+	if _, err := MigrateV9(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.ActionsRowsMoved != 1 {
+		t.Fatalf("missing migrated row record: %+v", record)
+	}
+	if _, err := db.Exec(insert); err != nil {
+		t.Fatal(err)
+	}
+	record.Pending = true
+	if err := writeMigrationRecord(MigrationRecordPath(configPath), record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM actions WHERE id = '1'").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("pending migrated row remains: count=%d err=%v", count, err)
 	}
 }
 

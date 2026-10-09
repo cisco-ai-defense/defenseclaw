@@ -269,7 +269,8 @@ func RulePackCheckOrder(dirs map[string]string) []string {
 }
 
 // EffectiveRulesForConnector returns the guardrail.rules layers that apply
-// to the connector, broadest first: guardrail.rules, the connector's
+// to the connector, broadest first: guardrail.rules, automatic protection
+// (when enabled for a connector without manual setup), the connector's
 // guardrail.connectors entry, then on a profile-derived configuration the
 // profile's rules and its connectors entry. Empty layers are left out.
 func (c *Config) EffectiveRulesForConnector(connector string) []GuardrailRulesConfig {
@@ -284,6 +285,12 @@ func (c *Config) EffectiveRulesForConnector(connector string) []GuardrailRulesCo
 		}
 	}
 	add(&g.Rules)
+	if c.ApplicationProtection.Enabled && !c.manualConnectorConfigured(connector) && strings.TrimSpace(connector) != "" {
+		add(c.ApplicationProtection.Guardrail.Rules)
+		if pc, ok := c.ApplicationProtection.connectorOverride(connector); ok {
+			add(pc.Guardrail.Rules)
+		}
+	}
 	if strings.TrimSpace(connector) != "" {
 		if pc, ok := g.connectorOverride(connector); ok {
 			add(pc.Rules)

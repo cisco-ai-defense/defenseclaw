@@ -58,6 +58,19 @@ export function GuardrailSection({
 
   return (
     <div className="space-y-4">
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium text-fd-muted-foreground">Guardrail mode</span>
+        <SegmentedControl
+          name="guardrail_mode"
+          size="sm"
+          value={policy.guardrail.mode ?? 'observe'}
+          options={[
+            { value: 'observe', label: 'observe' },
+            { value: 'action', label: 'action' },
+          ]}
+          onChange={(v) => setG({ mode: v })}
+        />
+      </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <ThresholdPicker
           label="Block threshold (severity rank)"
@@ -99,7 +112,7 @@ export function GuardrailSection({
           hint="When enabled, the gateway pauses on findings ≥ min_severity until a human responds."
           checked={policy.guardrail.hilt.enabled}
           onChange={(v) =>
-            setG({ hilt: { ...policy.guardrail.hilt, enabled: v } })
+            setG({ mode: v ? 'action' : policy.guardrail.mode, hilt: { ...policy.guardrail.hilt, enabled: v } })
           }
         />
         <div className="flex items-center gap-2">

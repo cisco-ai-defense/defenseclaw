@@ -266,8 +266,16 @@ func TestWindowsEnterpriseEnsureKeepsAHandEditedConfig(t *testing.T) {
 // it, and wrote its bytes back on rollback.
 func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t *testing.T) {
 	const broken = "an administrator edit left this line instead of YAML\n"
-	const next = "config_version: 9\nguardrail:\n  mode: action\n"
+	next := strings.Replace(
+		strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`+"\n", "", 1)
 	host, opts := newHotConfigHost(t, broken, next)
+	originalLayout, originalSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource = originalLayout, originalSource
+	})
+	windowsEnterpriseStandaloneLayoutForPreflight = windowsEnterpriseHotConfigLayout
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
 	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
 	result := runHotConfigEnsure(t, host, opts, stub)
 	got, _ := os.ReadFile(host.configPath)
@@ -275,6 +283,46 @@ func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t 
 	if len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" || string(got) != next || string(kept) != broken ||
 		!strings.Contains(strings.Join(result.Changes, "\n"), "did not parse") {
 		t.Fatalf("installer runs %q, config.yaml %q, rejected-config.yaml %q, changes %q", stub.calls, got, kept, result.Changes)
+	}
+}
+
+// GAP-0994: a replacement whose YAML parses but whose rule-pack pin is
+// invalid must never become the transaction rollback snapshot.
+func TestWindowsEnterpriseRepairRefusesInvalidSuppliedConfigBeforeSnapshot(t *testing.T) {
+	const broken = "invalid: [\n"
+	pack := t.TempDir()
+	if err := os.WriteFile(filepath.Join(pack, "suppressions.yaml"),
+		[]byte("version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := strings.Replace(
+		strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`,
+		"  rule_pack: acme\n  custom_packs:\n    acme:\n      path: "+strconv.Quote(pack)+
+			"\n      digest: sha256:"+strings.Repeat("0", 64), 1)
+	host, opts := newHotConfigHost(t, broken, candidate)
+	originalLayout, originalSource, originalTrust, originalRead := windowsEnterpriseStandaloneLayoutForPreflight,
+		windowsEnterpriseStandaloneConfigSource, windowsEnterpriseStandaloneRulePackTrust, standaloneServiceCanReadTree
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight = originalLayout
+		windowsEnterpriseStandaloneConfigSource = originalSource
+		windowsEnterpriseStandaloneRulePackTrust = originalTrust
+		standaloneServiceCanReadTree = originalRead
+	})
+	windowsEnterpriseStandaloneLayoutForPreflight = windowsEnterpriseHotConfigLayout
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+	windowsEnterpriseStandaloneRulePackTrust = func(string, string, string) error { return nil }
+	standaloneServiceCanReadTree = func(string, string, string) error { return nil }
+
+	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") || kept != "" {
+		t.Fatalf("repair preflight = (%q, %v), want the bad pin refused before copying", kept, err)
+	}
+	if got, readErr := os.ReadFile(host.configPath); readErr != nil || string(got) != broken {
+		t.Fatalf("installed config = %q, %v, want original bytes", got, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(filepath.Dir(host.configPath), "rejected-config.yaml")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("rejected-config.yaml created before validation: %v", statErr)
 	}
 }
 

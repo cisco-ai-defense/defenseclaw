@@ -1406,11 +1406,25 @@ restore_snapshot() {
     fi
     if [[ ! -f "${SNAP}/VENV_BACK" ]]; then
         moved=true
-        if [[ -d "${VENV}" ]]; then
-            { [[ "${kept}" == true ]] && mv "${VENV}" "${failed}/venv"; } || rm -rf "${VENV}" || moved=false
+        # Record that the snapshot contains an old venv before moving either
+        # side. If the final marker cannot be written (or the process stops),
+        # the missing snapshot venv then means the live one is already restored.
+        if [[ -d "${SNAP}/venv" ]]; then
+            : > "${SNAP}/VENV_RESTORING" 2>/dev/null || moved=false
         fi
-        if [[ "${moved}" == true && -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}" || moved=false; fi
-        if [[ "${moved}" == true ]]; then : > "${SNAP}/VENV_BACK" 2>/dev/null || true; else restored=false; fi
+        if [[ "${moved}" == true && -f "${SNAP}/VENV_RESTORING" && ! -d "${SNAP}/venv" ]]; then
+            [[ -d "${VENV}" ]] || moved=false
+        elif [[ "${moved}" == true ]]; then
+            if [[ -d "${VENV}" ]]; then
+                { [[ "${kept}" == true ]] && mv "${VENV}" "${failed}/venv"; } || rm -rf "${VENV}" || moved=false
+            fi
+            if [[ "${moved}" == true && -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}" || moved=false; fi
+        fi
+        if [[ "${moved}" == true ]]; then
+            : > "${SNAP}/VENV_BACK" 2>/dev/null || restored=false
+        else
+            restored=false
+        fi
     fi
     for binary in ${MANAGED_BINARIES}; do
         if [[ -f "${SNAP}/bin/${binary}" ]]; then

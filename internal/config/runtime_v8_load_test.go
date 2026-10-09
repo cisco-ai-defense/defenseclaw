@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -19,6 +20,45 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"gopkg.in/yaml.v3"
 )
+
+func TestConcurrentRuntimeLoadsKeepEachSource(t *testing.T) {
+	sources := []struct {
+		raw  []byte
+		mode string
+		port int
+	}{
+		{[]byte("config_version: 9\nguardrail: {mode: action}\ngateway: {port: 18765}\nobservability: {}\n"), "action", 18765},
+		{[]byte("config_version: 9\nguardrail: {mode: observe}\ngateway: {port: 19876}\nobservability: {}\n"), "observe", 19876},
+	}
+	start := make(chan struct{})
+	errs := make(chan error, len(sources))
+	var workers sync.WaitGroup
+	for _, source := range sources {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 20 {
+				cfg, err := LoadRuntimeV8CandidateFromBytes("config.yaml", source.raw)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if cfg.Guardrail.Mode != source.mode || cfg.Gateway.Port != source.port {
+					errs <- fmt.Errorf("loaded mode=%q port=%d, want mode=%q port=%d",
+						cfg.Guardrail.Mode, cfg.Gateway.Port, source.mode, source.port)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
 
 func TestRuntimeV8LoadersPreserveEmptyConnectorPolicyEntries(t *testing.T) {
 	raw := []byte(`config_version: 8

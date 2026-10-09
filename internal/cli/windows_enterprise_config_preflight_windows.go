@@ -37,9 +37,9 @@ var windowsEnterpriseStandaloneConfigSource = func(path string) error {
 	return fmt.Errorf("refusing untrusted config: %w", err)
 }
 
-// windowsEnterpriseStandaloneConfigPreflight refuses a standalone install or
-// ensure whose config the gateway service could not load, before anything
-// changes. The compile runs with the pins the gateway service
+// windowsEnterpriseStandaloneConfigPreflight refuses a standalone install,
+// upgrade, ensure, or repair with a supplied config the gateway could not load
+// before anything changes. The compile runs with the pins the gateway service
 // starts with. A host whose trusted layout cannot be resolved is left to the
 // lifecycle's own checks.
 func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {

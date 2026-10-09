@@ -405,6 +405,12 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		Timestamp:  start,
 		TargetType: InferTargetType(s.Name()),
 	}
+
+	if err := scannerRuntimePreflight(s.Config.Binary, "skill-scanner", "skill-scanner.exe"); err != nil {
+		result.ScanError = err.Error()
+		result.ExitCode = -1
+		return result, err
+	}
 	if s.Config.UseLLM {
 		if j, ok := s.judge(); ok {
 			result.JudgeModel = j.model

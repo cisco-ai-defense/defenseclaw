@@ -116,7 +116,8 @@ type admissionState struct {
 	assets map[string]admissionStateEntry
 	issues map[string]AdmissionIssue
 	// retry is when each unfinished admission runs again, and its delay.
-	retry map[string]admissionRetry
+	retry       map[string]admissionRetry
+	addressable func(string) string
 }
 
 type admissionRetry struct {
@@ -126,13 +127,13 @@ type admissionRetry struct {
 
 // newAdmissionState starts from the issues an earlier watcher left; they
 // are due at once.
-func newAdmissionState(dataDir string) *admissionState {
+func newAdmissionState(dataDir string, addressable func(string) string) *admissionState {
 	if dataDir == "" {
 		return nil
 	}
 	s := &admissionState{
 		path: filepath.Join(dataDir, AdmissionStateFile), assets: map[string]admissionStateEntry{},
-		issues: map[string]AdmissionIssue{}, retry: map[string]admissionRetry{},
+		issues: map[string]AdmissionIssue{}, retry: map[string]admissionRetry{}, addressable: addressable,
 	}
 	issues, _ := ReadAdmissionIssues(dataDir)
 	for _, issue := range issues {
@@ -193,7 +194,7 @@ func (s *admissionState) dueIssues(now time.Time, kinds ...string) []AdmissionIs
 		if issue.Type == string(InstallMCP) || !slices.Contains(kinds, issue.Kind) || now.Before(retry.due) {
 			continue
 		}
-		if _, err := os.Lstat(addressablePath(path)); err != nil {
+		if _, err := os.Lstat(s.addressable(path)); err != nil {
 			delete(s.issues, path)
 			delete(s.retry, path)
 			changed = true

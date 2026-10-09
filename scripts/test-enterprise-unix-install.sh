@@ -132,7 +132,7 @@ if [ "$platform" = linux ]; then
     config_dir=/etc/defenseclaw
     data_dir=/var/lib/defenseclaw
     lifecycle_dir=/var/lib/defenseclaw-enterprise
-    purged_dirs=(/etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian /var/lib/defenseclaw-enterprise /var/log/defenseclaw /opt/defenseclaw /usr/share/doc/defenseclaw-enterprise)
+    purged_dirs=(/etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian /var/log/defenseclaw /opt/defenseclaw /usr/share/doc/defenseclaw-enterprise)
     policy_dirs=(/etc/claude-code /etc/codex)
     services=(defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket defenseclaw-gateway.service
         defenseclaw-hook-guardian.service defenseclaw-hook-enumerator.service defenseclaw-sensor-helper.service)
@@ -143,7 +143,7 @@ else
     config_dir=$install_root/etc
     data_dir=$install_root/runtime
     lifecycle_dir=$install_root/lifecycle
-    purged_dirs=("$install_root" /Library/Logs/Cisco/DefenseClaw)
+    purged_dirs=("$install_root/bin" "$install_root/etc" "$install_root/runtime" "$install_root/share" /Library/Logs/Cisco/DefenseClaw)
     policy_dirs=("/Library/Application Support/ClaudeCode" /private/etc/codex)
     services=(com.cisco.defenseclaw.gateway com.cisco.defenseclaw.hook-guardian
         com.cisco.defenseclaw.hook-enumerator com.cisco.defenseclaw.sensor-helper)
@@ -636,6 +636,11 @@ esac
 for dir in "${purged_dirs[@]}"; do
     [ ! -e "$dir" ] || die "$dir remains after purge"
 done
+[ -f "$lifecycle_dir/lifecycle.lock" ] || die "the persistent lifecycle lock is missing after purge"
+[ "$(find "$lifecycle_dir" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || die "lifecycle state remains after purge"
+if [ "$platform" = darwin ]; then
+    [ "$(find "$install_root" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || die "install files remain after purge"
+fi
 [ "$kind" != deb ] || ! dpkg-query -W "$linux_package_name" >/dev/null 2>&1 || die "dpkg still knows $linux_package_name after purge"
 services_gone
 

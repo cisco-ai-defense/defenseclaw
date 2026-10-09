@@ -89,7 +89,7 @@ func TestUninstallAfterAFailedPackageInstallRemovesItsLeftovers(t *testing.T) {
 	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
 		`{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"gateway.api_port must be 18970"}]}`)
 	requireOK(t, h.run(Options{Action: ActionUninstall}))
-	for _, path := range []string{h.env.Layout.ConfigDir, h.env.Layout.DataDir, h.env.Layout.LogDir, h.env.Layout.GuardianAuthDir, h.env.Layout.LifecycleDir, dropin} {
+	for _, path := range []string{h.env.Layout.ConfigDir, h.env.Layout.DataDir, h.env.Layout.LogDir, h.env.Layout.GuardianAuthDir, dropin} {
 		if exists(h.env.P(path)) {
 			t.Errorf("the uninstall after a failed package install left %s", path)
 		}
@@ -122,8 +122,8 @@ func TestMacOSUninstallAfterAFailedFirstPackageInstallRemovesItsLeftovers(t *tes
 		`{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"gateway.api_port 18971 must be 18970"}]}`)
 	r := h.run(Options{Action: ActionUninstall})
 	requireOK(t, r)
-	if r.Noop || exists(h.env.P(h.env.Layout.InstallRoot)) {
-		t.Fatalf("the uninstall after a failed first pkg install left %s (noop=%v)", h.env.Layout.InstallRoot, r.Noop)
+	if r.Noop || exists(h.env.P(h.env.Layout.BinDir)) {
+		t.Fatalf("the uninstall after a failed first pkg install left binaries (noop=%v)", r.Noop)
 	}
 }
 

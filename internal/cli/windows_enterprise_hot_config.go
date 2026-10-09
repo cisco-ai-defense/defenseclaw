@@ -416,6 +416,11 @@ func installWindowsEnterpriseSuppliedConfigOverUnparseable(configPath string) (s
 	if !windowsEnterpriseConfigParses(next) {
 		return "", fmt.Errorf("the installed %s does not parse, and neither does the supplied config %s: its root must be a YAML mapping", layout.ConfigPath, supplied)
 	}
+	// This file becomes the transaction snapshot. Check it with the same
+	// service pins and rule-pack compiler before replacing the broken file.
+	if err := windowsEnterpriseStandaloneConfigPreflight(supplied); err != nil {
+		return "", err
+	}
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil {
 		return "", nil
