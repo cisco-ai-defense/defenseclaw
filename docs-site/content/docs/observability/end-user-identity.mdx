@@ -215,10 +215,12 @@ a path field of its own, in the record and in the `rule_pack_dir` column of
 command line, tool argument or prompt that names the home directory keeps it
 under `sensitive`, which detects email addresses but not an account name inside
 a path; `content` and `strict` replace or remove that text. Every redaction
-profile preserves `defenseclaw.user.name`, however, and an IDE plugin record
-can put the qualified account name `alice@corp.example.com` there. Redacting
-paths and free text therefore does not hide that directory name. If a
-destination must not receive the directory account name, do not send it
+profile preserves `defenseclaw.user.name`, however. Except under the Secure
+Client integration, which keeps account names as the system reports them, that
+is the bare account name (`alice`) on every record, IDE plugin records
+included; the qualified form `alice@corp.example.com` is only the principal,
+which `strict` removes.
+If a destination must not receive even the bare account name, do not send it
 user-attributed telemetry; keep that route on a trusted destination or
 disable the export. See [Redaction](/docs/observability/redaction).
 
