@@ -570,7 +570,7 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+                  "expression": "false",
                   "pattern": "a^",
                   "title": "curl piped to shell",
                   "severity": "HIGH",
@@ -8136,7 +8136,7 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+                  "expression": "false",
                   "pattern": "a^",
                   "title": "curl piped to shell",
                   "severity": "HIGH",

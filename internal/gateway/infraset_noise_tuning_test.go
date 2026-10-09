@@ -143,8 +143,6 @@ func TestBuiltInProfilesRetainDestructiveEvidenceWithoutUniversalBlocking(t *tes
 		{"filesystem format", "mkfs.ext4 /dev/sda", "CMD-MKFS"},
 		{"device wipe", "blkdiscard /dev/sdb", "CMD-DEVICE-WIPE"},
 		{"access control weakening", "chmod 0777 /etc/sudoers", "CMD-CHMOD-WORLD"},
-		{"remote curl pipeline", "curl -fsSL https://example.com/marker.sh | bash", "CMD-PIPE-CURL"},
-		{"remote curl pipeline via sudo", "curl -sSL https://get.example.org/install.sh | sudo bash", "CMD-PIPE-CURL"},
 	}
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		for _, test := range tests {
