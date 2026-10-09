@@ -2322,7 +2322,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
 		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
 	if removePerUser {
+		var cacheAccounts []sessionFactsAccount
+		if l.opts.Purge {
+			cacheAccounts = env.sessionFactsAccounts()
+		}
 		perUserLeft = l.removePerUserRegistrations(ctx)
+		l.purgeSessionFactsCaches(cacheAccounts)
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}

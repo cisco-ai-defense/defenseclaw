@@ -619,7 +619,12 @@ to keep the machine state for a reinstall instead.
   `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`,
   `defenseclaw-gateway`, `defenseclaw-acp`, the launcher links into
   `~/.defenseclaw`, the `uv` the per-user installer added (when unchanged)
-  and its bookkeeping. No dangling link stays; the user's own tools in
+  and its bookkeeping. A user enrolled only for machine-policy connectors
+  (Claude Code, Codex) has no per-user install: for that user the purge
+  removes the session cache the managed hook keeps,
+  `~/.defenseclaw/session-facts.json`, and `~/.defenseclaw` when the cache
+  was all it held. It follows no symlink there and removes only a file the
+  user owns. No dangling link stays; the user's own tools in
   `~/.local/bin` stay. The per-user install edits no shell profile, so no
   PATH entry is left. The result names each user whose data it removed. It
   also names each enrolled user it left alone, with the reason: a home that
