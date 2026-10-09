@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -156,11 +157,16 @@ func TestWindowsCodexShellGrammarKeepsEnforcement(t *testing.T) {
 func TestWindowsHomeWithSpacesStillEnforcesSSHPath(t *testing.T) {
 	const connector = "windows-home-with-spaces"
 	installToolCallCorpusProfileConnector(t, connector, "default")
-	for _, command := range []string{
-		`Add-Content -Path "$HOME\.ssh\authorized_keys" -Value k`,
-		`Add-Content -Path $HOME\.ssh\authorized_keys -Value k`,
+	for _, test := range []struct{ tools, command string }{
+		{"powershell codex-windows", `Add-Content -Path "$HOME\.ssh\authorized_keys" -Value k`},
+		{"powershell codex-windows", `Add-Content -Path $HOME\.ssh\authorized_keys -Value k`},
+		// GAP-1252: the Claude Code Bash tool with a double-quoted literal
+		// path, of this account or of another account.
+		{"Bash", `powershell -NoProfile -Command "Add-Content -Path \"C:\Users\Alice Smith\.ssh\authorized_keys\" -Value k"`},
+		{"Bash", `powershell -NoProfile -Command Add-Content -Path "C:\Users\bob\.ssh\authorized_keys" -Value k`},
 	} {
-		for _, tool := range []string{"powershell", "codex-windows"} {
+		command := test.command
+		for _, tool := range strings.Fields(test.tools) {
 			t.Run(tool+"/"+command, func(t *testing.T) {
 				args := []byte(`{"command":` + strconv.Quote(command) + `}`)
 				input := actionfacts.Input{
@@ -177,7 +183,7 @@ func TestWindowsHomeWithSpacesStillEnforcesSSHPath(t *testing.T) {
 				})
 				finding := findingWithID(findings, "persistence.ssh_authorized_keys_command")
 				if finding == nil || !finding.contributesToEnforcement() {
-					t.Fatalf("%s home path with spaces was not enforceable: %v", tool, FindingStrings(findings))
+					t.Fatalf("%s %q was not enforceable: %v", tool, command, FindingStrings(findings))
 				}
 			})
 		}

@@ -289,6 +289,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 		"uid:80007": emea + "-1107", `name:emea.corp.example.com\gail`: emea + "-1107", `name:corp.example.com\gail`: emea + "-1107", "sid:" + emea + "-1107": "80007",
 		`name:ldap.corp.example.com\alice`: ldapChild + "-1109", "uid:80009": ldapChild + "-1109", "sid:" + ldapChild + "-1109": "80009",
 		"uid:80008": corp + "-1108", `name:corp.example.com\hank`: corp + "-1108", "sid:" + corp + "-1108": "90008",
+		"uid:80011": emea + "-1111", `name:emea.corp.example.com\ken`: emea + "-1111", "sid:" + emea + "-1111": "80011",
 		"gid:5000": corp + "-513", "gid:5300": other + "-1201", `name:CORP\alice`: corp + "-1101",
 	})
 	line := func(name string, uid int) commandResult {
@@ -303,7 +304,7 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 		"group 5100 80003":                   {stdout: []byte("ldap-devs:*:5100:\ncarol:*:80003:\n")},
 	}}
 	accounts := map[int]string{80001: "alice", 80002: "bob", 80003: "carol", 80004: "frank", 80005: "erin@corp.example.com",
-		80006: "dave", 80007: "gail@emea.corp.example.com", 80008: "hank", 80009: "alice@ldap.corp.example.com", 80010: `CORP\ivan`}
+		80006: "dave", 80007: "gail@emea.corp.example.com", 80008: "hank", 80009: "alice@ldap.corp.example.com", 80010: `CORP\ivan`, 80011: "ken"}
 	for uid, name := range accounts {
 		f.results["passwd "+strconv.Itoa(uid)] = line(name, uid)
 		f.results["-s sss passwd "+strconv.Itoa(uid)] = line(name, uid)
@@ -315,19 +316,36 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	f.results["-s sss passwd carol@corp.example.com"] = line("carol", 90003)
 	r := newFakeNSS(f)
 	ad := useridentity.DirectoryActiveDirectory
-	for uid, want := range map[int]useridentity.DirectoryFacts{
-		80001: {Directory: ad, Domain: "corp.example.com", Realm: "CORP.EXAMPLE.COM", Principal: "alice@corp.example.com", AccountDomain: "CORP"},
-		80002: {}, 80003: {}, 80004: {}, 80005: {}, 80006: {}, 80008: {}, 80009: {}, 80010: {},
-		80007: {Directory: ad, Domain: "emea.corp.example.com", Realm: "EMEA.CORP.EXAMPLE.COM", Principal: "gail@emea.corp.example.com"},
-	} {
-		facts, err := r.DirectoryFactsWithoutGroupsForUID(uid, time.Now())
-		want.Source = useridentity.SourceSSSD
-		got := useridentity.DirectoryFacts{Source: facts.Source, Directory: facts.Directory, Domain: facts.Domain,
-			Realm: facts.Realm, Principal: facts.Principal, AccountDomain: facts.AccountDomain}
-		if err != nil || !reflect.DeepEqual(got, want) {
-			t.Errorf("uid %d (%s) = %+v, %v; want %+v", uid, accounts[uid], got, err, want)
+	checkFacts := func(want map[int]useridentity.DirectoryFacts) {
+		t.Helper()
+		for uid, want := range want {
+			facts, err := r.DirectoryFactsWithoutGroupsForUID(uid, time.Now())
+			want.Source = useridentity.SourceSSSD
+			got := useridentity.DirectoryFacts{Source: facts.Source, Directory: facts.Directory, Domain: facts.Domain,
+				Realm: facts.Realm, Principal: facts.Principal, AccountDomain: facts.AccountDomain}
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("uid %d (%s) = %+v, %v; want %+v (trusted children %q)", uid, accounts[uid], got, err, want,
+					useridentity.TrustedADChildDomains())
+			}
 		}
 	}
+	// The child-domain accounts gail and ken get nothing while their domain
+	// is not listed, though SSSD holds their SIDs and the parent-domain name
+	// lookup of gail answers her SID (GAP-1255).
+	checkFacts(map[int]useridentity.DirectoryFacts{
+		80001: {Directory: ad, Domain: "corp.example.com", Realm: "CORP.EXAMPLE.COM", Principal: "alice@corp.example.com", AccountDomain: "CORP"},
+		80002: {}, 80003: {}, 80004: {}, 80005: {}, 80006: {}, 80007: {}, 80008: {}, 80009: {}, 80010: {}, 80011: {},
+	})
+	// Listed, emea takes the realm of its own name and the directory type of
+	// the joined parent; the LDAP domain below the joined one stays untrusted.
+	t.Cleanup(func() { useridentity.SetTrustedADChildDomains(nil) })
+	useridentity.SetTrustedADChildDomains([]string{"EMEA.corp.example.com."})
+	emeaFacts := func(name string) useridentity.DirectoryFacts {
+		return useridentity.DirectoryFacts{Directory: ad, Domain: "emea.corp.example.com", Realm: "EMEA.CORP.EXAMPLE.COM",
+			Principal: name + "@emea.corp.example.com"}
+	}
+	checkFacts(map[int]useridentity.DirectoryFacts{80007: emeaFacts("gail"), 80011: emeaFacts("ken"), 80009: {}})
+	useridentity.SetTrustedADChildDomains(nil)
 	for uid, want := range map[int][]string{80001: {"domain users", "trusted-admins", "docker", "staff", "alice"}, 80003: {"ldap-devs", "carol"}} {
 		if facts, err := r.DirectoryFactsForUID(uid, time.Now()); err != nil || !reflect.DeepEqual(facts.Groups, want) {
 			t.Errorf("uid %d groups = %q, %v; want %q", uid, facts.Groups, err, want)
@@ -338,7 +356,8 @@ func TestSSSDAccountTakesTheRealmOfItsSID(t *testing.T) {
 	// does a name that carries another domain.
 	for _, tc := range []struct {
 		name, domain, realm string
-	}{{"bob", "corp.example.com", "CORP.EXAMPLE.COM"}, {"bob", "ldaplab", ""}, {"erin@example.org", "corp.example.com", ""}, {"alice@ldap.corp.example.com", "ldap.corp.example.com", ""}} {
+	}{{"bob", "corp.example.com", "CORP.EXAMPLE.COM"}, {"bob", "ldaplab", ""}, {"erin@example.org", "corp.example.com", ""},
+		{"alice@ldap.corp.example.com", "ldap.corp.example.com", ""}, {"bob", "emea.corp.example.com", ""}} {
 		var facts useridentity.DirectoryFacts
 		if err := ApplyHeldSSSDDomain(context.Background(), &facts, tc.name, tc.domain, ""); err != nil || facts.Realm != tc.realm {
 			t.Errorf("ApplyHeldSSSDDomain(%s in %s) = %+v, %v; want realm %q", tc.name, tc.domain, facts, err, tc.realm)

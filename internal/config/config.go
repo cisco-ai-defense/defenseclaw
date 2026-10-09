@@ -36,6 +36,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -491,6 +492,15 @@ type AIDiscoveryConfig struct {
 	// Off by default for the same reason as IncludeUserEmail: the principal
 	// identifies a person across systems.
 	IncludeUserPrincipal bool `mapstructure:"include_user_principal" yaml:"include_user_principal,omitempty"`
+	// TrustedADChildDomains lists the child domains of the joined Active
+	// Directory realm whose SSSD accounts DefenseClaw verifies on Linux
+	// (emea.corp.example.com on a host joined to corp.example.com). An
+	// account of a child domain that is not listed gets no domain, realm,
+	// directory type or principal, so no users assignment or profile
+	// matches it: neither its name nor its SID proves a trusted child
+	// (GAP-1255). Empty trusts the joined domain only. Validated by
+	// ValidateTrustedADChildDomains.
+	TrustedADChildDomains []string `mapstructure:"trusted_ad_child_domains" yaml:"trusted_ad_child_domains,omitempty"`
 	// IDEInventory scopes the IDE extension and plugin inventory:
 	// IDEInventoryAll (the default, also when empty), IDEInventoryAIOnly
 	// or IDEInventoryOff. Resolve through EffectiveIDEInventory.
@@ -505,6 +515,29 @@ type AIDiscoveryConfig struct {
 	// (restoreSignaturePackDigests).
 	SignaturePackDigests   map[string]string `mapstructure:"-"                        yaml:"signature_pack_digests,omitempty"`
 	ConfidencePolicyDigest string            `mapstructure:"confidence_policy_digest" yaml:"confidence_policy_digest,omitempty"`
+}
+
+// ValidateTrustedADChildDomains refuses an entry of
+// ai_discovery.trusted_ad_child_domains that is not a DNS domain of at least
+// two labels (a wildcard, a NetBIOS name, a name with @ or \), one listed
+// twice, and a list longer than useridentity.MaxTrustedADChildDomains.
+func (a AIDiscoveryConfig) ValidateTrustedADChildDomains() error {
+	if len(a.TrustedADChildDomains) > useridentity.MaxTrustedADChildDomains {
+		return fmt.Errorf("trusted_ad_child_domains lists %d domains, more than %d",
+			len(a.TrustedADChildDomains), useridentity.MaxTrustedADChildDomains)
+	}
+	seen := make(map[string]bool, len(a.TrustedADChildDomains))
+	for i, entry := range a.TrustedADChildDomains {
+		domain, err := useridentity.NormalizeTrustedADChildDomain(entry)
+		if err != nil {
+			return fmt.Errorf("trusted_ad_child_domains[%d]: %w", i, err)
+		}
+		if seen[domain] {
+			return fmt.Errorf("trusted_ad_child_domains[%d]: %q is listed twice", i, entry)
+		}
+		seen[domain] = true
+	}
+	return nil
 }
 
 // IDE inventory scopes for AIDiscoveryConfig.IDEInventory.
@@ -2941,6 +2974,12 @@ func loadConfigSourceChecked(
 		}
 		return nil, fmt.Errorf("config: routing: %w", err)
 	}
+	if err := cfg.AIDiscovery.ValidateTrustedADChildDomains(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "ai_discovery_invalid")
+		}
+		return nil, fmt.Errorf("config: ai_discovery: %w", err)
+	}
 	if err := cfg.ApplicationProtection.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "application_protection_invalid")
@@ -3592,6 +3631,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
 	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
 	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
+	viper.SetDefault("ai_discovery.trusted_ad_child_domains", []string{})
 
 	viper.SetDefault("application_protection.enabled", false)
 	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)

@@ -988,7 +988,12 @@ class TestConfigLoadSave(unittest.TestCase):
                     tmpdir,
                 ),
                 ai_discovery=config_mod._merge_ai_discovery(
-                    {"enabled": True, "ide_inventory": "ai_only", "include_user_principal": True}
+                    {
+                        "enabled": True,
+                        "ide_inventory": "ai_only",
+                        "include_user_principal": True,
+                        "trusted_ad_child_domains": ["emea.corp.example.com"],
+                    }
                 ),
             )
             cfg.save()
@@ -1006,6 +1011,7 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(raw["guardrail"]["default_profile"], "contractors")
             self.assertEqual(raw["ai_discovery"]["ide_inventory"], "ai_only")
             self.assertTrue(raw["ai_discovery"]["include_user_principal"])
+            self.assertEqual(raw["ai_discovery"]["trusted_ad_child_domains"], ["emea.corp.example.com"])
 
             with patch("defenseclaw.config.default_data_path") as mock_dp:
                 mock_dp.return_value = Path(tmpdir)
@@ -1013,12 +1019,14 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(loaded.guardrail.profiles["contractors"].connectors["codex"].mode, "observe")
             self.assertEqual(loaded.guardrail.profile_assignments[0].match.groups, ["CORP\\Contractors"])
             self.assertEqual(loaded.ai_discovery.ide_inventory, "ai_only")
+            self.assertEqual(loaded.ai_discovery.trusted_ad_child_domains, ["emea.corp.example.com"])
 
             loaded.guardrail.profiles = {}
             loaded.guardrail.profile_assignments = []
             loaded.guardrail.default_profile = ""
             loaded.ai_discovery.ide_inventory = "all"
             loaded.ai_discovery.include_user_principal = False
+            loaded.ai_discovery.trusted_ad_child_domains = []
             loaded.save()
             with open(os.path.join(tmpdir, "config.yaml")) as f:
                 raw = yaml.safe_load(f)
@@ -1026,6 +1034,7 @@ class TestConfigLoadSave(unittest.TestCase):
                 self.assertFalse(raw.get("guardrail", {}).get(key))
             self.assertNotIn("ide_inventory", raw.get("ai_discovery", {}))
             self.assertNotIn("include_user_principal", raw.get("ai_discovery", {}))
+            self.assertNotIn("trusted_ad_child_domains", raw.get("ai_discovery", {}))
 
             # A hand-written unquoted off is the string off to the gateway
             # (YAML 1.2); YAML 1.1 made it False, read as all, and a save then

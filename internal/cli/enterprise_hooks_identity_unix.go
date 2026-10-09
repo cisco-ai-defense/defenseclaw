@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Identity spool (standalone profile, Linux and macOS). After a reconcile
@@ -114,6 +115,9 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	if dir == "" {
 		return
 	}
+	// The guardian follows a pushed config's trusted child domains, as the
+	// gateway does on reload (GAP-1255).
+	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	accounts, keys := enterpriseHookIdentitySpoolAccounts(stderr, run)
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")

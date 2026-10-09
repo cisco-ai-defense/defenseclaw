@@ -483,6 +483,7 @@ ai_discovery:
   ide_inventory: all           # all | ai_only | off
   include_user_principal: false
   signature_packs: []          # pack files to load; only listed packs load (see the table below)
+  trusted_ad_child_domains: []   # child AD domains whose users are verified on Linux
 
 # What happens to a skill, MCP server or plugin by scan severity. Unset
 # actions derive from the scanner gate (scanners.skill_scanner.*). See
@@ -551,6 +552,7 @@ The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 | `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity (hook decisions, tool activity, agent, model and tool spans, `identity.observed`). Off, records keep the domain, directory, assurance, session kind and client address but no principal. |
 | `ai_discovery.signature_packs` | `[]` | Signature pack files to load. Since `config_version: 9` only listed packs load; the migration lists and pins the packs it finds in `<data_dir>/signature-packs/`. |
 | `ai_discovery.signature_pack_digests` | `{}` | The sha256 of each pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load, and an apply (`ensure`) refuses a config whose pack file does not match its digest or has none. |
+| `ai_discovery.trusted_ad_child_domains` | `[]` | Child domains of the joined Active Directory realm whose SSSD accounts are verified on Linux (`emea.corp.example.com`). An account of a child domain that is not listed gets no domain, realm, directory or principal, so no `users` assignment matches it. Empty trusts the joined domain only. See [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). |
 
 Within a profile, the precedence for one connector is the profile's
 `connectors.<connector>` entry, then the profile field, then
