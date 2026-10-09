@@ -93,3 +93,31 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnreadableState(t *testing.T) {
 		t.Fatalf("servers %v, unreadable %+v (err %v); want no servers and the state marked unreadable", servers, unreadable, err)
 	}
 }
+
+// A rejected project file leaves the account unreadable instead of silently
+// publishing a partial server set.
+func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
+	home := t.TempDir()
+	project := `\\server\share\project`
+	state := map[string]any{
+		"mcpServers": map[string]any{"user-srv": map[string]any{"command": "x"}},
+		"projects":   map[string]any{project: map[string]any{}},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	const sid = "S-1-5-21-1-1001"
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != filepath.Join(project, ".mcp.json") {
+		t.Fatalf("servers %v, unreadable %+v (err %v); want rejected project marked unreadable", servers, unreadable, err)
+	}
+}

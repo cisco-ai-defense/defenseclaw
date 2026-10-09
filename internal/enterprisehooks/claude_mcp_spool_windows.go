@@ -58,14 +58,14 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 			continue
 		}
 		keep[strings.ToLower(name)] = true
-		servers, err := windowsClaudeStateServers(home)
+		servers, unreadablePath, err := windowsClaudeStateServers(home)
 		var data []byte
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			if logf != nil {
 				logf("[hook-enumerator] WARN Claude Code MCP servers for %s: %v", key, err)
 			}
 			data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
-				User: strings.TrimSpace(target.User), Home: home, Path: filepath.Join(home, ".claude.json"), Reason: err.Error(),
+				User: strings.TrimSpace(target.User), Home: home, Path: unreadablePath, Reason: err.Error(),
 			})
 		} else {
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
@@ -92,14 +92,29 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 
 // windowsClaudeStateServers reads the Claude Code MCP servers of the user
 // whose profile is home.
-func windowsClaudeStateServers(home string) ([]config.MCPServerEntry, error) {
+func windowsClaudeStateServers(home string) ([]config.MCPServerEntry, string, error) {
+	statePath := filepath.Join(home, ".claude.json")
 	data, err := readWindowsProfileFile(home, ".claude.json", maxClaudeStateBytes)
 	if err != nil {
-		return nil, err
+		return nil, statePath, err
 	}
-	return config.ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
-		return readWindowsClaudeProjectMCP(project)
+	var projectErr error
+	var projectPath string
+	servers, err := config.ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
+		data, readErr := readWindowsClaudeProjectMCP(project)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) && projectErr == nil {
+			projectPath = filepath.Join(project, ".mcp.json")
+			projectErr = fmt.Errorf("read Claude Code project MCP file %s: %w", projectPath, readErr)
+		}
+		return data, readErr
 	})
+	if err != nil {
+		return nil, statePath, err
+	}
+	if projectErr != nil {
+		return nil, projectPath, projectErr
+	}
+	return servers, "", nil
 }
 
 // Project keys are user-controlled. Reject UNC, device, mapped and substituted
