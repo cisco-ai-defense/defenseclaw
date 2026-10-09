@@ -915,13 +915,19 @@ func (c *JudgeCategory) EffectiveSeverity(direction, fallback string) string {
 // the first error is returned as a value-safe RulePackError and no invalid
 // pack is returned by LoadRulePack.
 func (rp *RulePack) Validate() error {
+	return rp.validate(false)
+}
+
+// validate permits an empty enabled category only in a composed in-memory pack.
+// On-disk packs still require an enabled rule in every category.
+func (rp *RulePack) validate(allowEmptyCategories bool) error {
 	if rp == nil {
 		return rulePackErr(".", "validation", "rule pack must not be nil")
 	}
 	if err := rp.validateJudges(); err != nil {
 		return err
 	}
-	if err := rp.validateRuleFiles(); err != nil {
+	if err := rp.validateRuleFiles(allowEmptyCategories); err != nil {
 		return err
 	}
 	if err := rp.validateLocalPatterns(); err != nil {
@@ -933,7 +939,7 @@ func (rp *RulePack) Validate() error {
 	return rp.validateSensitiveTools()
 }
 
-func (rp *RulePack) validateRuleFiles() error {
+func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 	seenCategories := make(map[string]struct{}, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
 	totalRules := 0
@@ -1042,7 +1048,7 @@ func (rp *RulePack) validateRuleFiles() error {
 				enabled++
 			}
 		}
-		if enabled == 0 {
+		if enabled == 0 && !allowEmptyCategories {
 			return rulePackErr(rel, "empty_category", "category must contain at least one enabled rule")
 		}
 	}

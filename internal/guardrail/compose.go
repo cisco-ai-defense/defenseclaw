@@ -109,8 +109,7 @@ func Compose(base *RulePack, protections ProtectionSource, layers ...Customizati
 			return nil, err
 		}
 	}
-	rp.dropFilesWithoutEnabledRules()
-	if err := rp.Validate(); err != nil {
+	if err := rp.validate(true); err != nil {
 		return nil, fmt.Errorf("guardrail.rules: composed rule pack: %w", err)
 	}
 	return rp, nil
@@ -248,29 +247,6 @@ func (rp *RulePack) layerProtection(name string, protections ProtectionSource) e
 	}
 	rp.RuleFiles = kept
 	return nil
-}
-
-// dropFilesWithoutEnabledRules removes the rule files whose rules the layers
-// all disabled. Disabling the last enabled rule of a category is a valid
-// request, and a file with nothing left to scan for would otherwise fail
-// validation as an empty category. A base pack never loads with such a file.
-func (rp *RulePack) dropFilesWithoutEnabledRules() {
-	kept := rp.RuleFiles[:0:0]
-	for _, ruleFile := range rp.RuleFiles {
-		enabled := ruleFile == nil
-		if ruleFile != nil {
-			for _, rule := range ruleFile.Rules {
-				if rule.Enabled == nil || *rule.Enabled {
-					enabled = true
-					break
-				}
-			}
-		}
-		if enabled {
-			kept = append(kept, ruleFile)
-		}
-	}
-	rp.RuleFiles = kept
 }
 
 func (rp *RulePack) ruleFileCategory(category string) *RulesFileYAML {

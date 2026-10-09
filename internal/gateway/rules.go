@@ -541,9 +541,7 @@ func mergeRulePackCategories(
 				Tags:         append([]string(nil), r.Tags...),
 			})
 		}
-		if len(compiled) == 0 {
-			continue
-		}
+		// An explicitly disabled category replaces defaults with zero rules.
 		if i, ok := idx[rf.Category]; ok {
 			merged[i].Rules = compiled
 			overridden++
