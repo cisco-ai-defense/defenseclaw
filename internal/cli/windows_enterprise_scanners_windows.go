@@ -263,6 +263,7 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 	// against that record first (GAP-0311).
 	got, gotErr := windowsEnterpriseFileSHA256(target)
 	admitted, _ := managed.ReadScannerRuntimeAdmission(root)
+	copied := false
 	if gotErr != nil || got != want || admitted != want {
 		if err := admitWindowsScannerRuntimePayload(source, want, opts); err != nil {
 			return err
@@ -271,6 +272,7 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 			if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
 				return err
 			}
+			copied = true
 		}
 		if err := managed.WriteScannerRuntimeAdmission(root, want); err != nil {
 			return fmt.Errorf("record the admitted scanner runtime: %w", err)
@@ -282,9 +284,16 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 	if err := managed.CheckScannerRuntimeAdmitted(root, target); err != nil {
 		return err
 	}
-	// prepare is a no-op once the runtime is unpacked; prune drops the
-	// runtimes earlier builds left.
-	for _, step := range []string{"prepare", "prune"} {
+	// prepare checks every file of an unpacked runtime against the archive
+	// and compiles what is not compiled; prune drops the runtimes earlier
+	// builds left. A copy has just prepared the same bytes under their
+	// temporary name, so it only prunes: a second prepare read the whole
+	// tree again, minutes on a slow disk (GAP-1063).
+	steps := []string{"prepare", "prune"}
+	if copied {
+		steps = steps[1:]
+	}
+	for _, step := range steps {
 		if err := runWindowsScannerRuntime(target, step); err != nil {
 			return err
 		}
