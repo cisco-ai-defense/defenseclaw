@@ -336,7 +336,17 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
         settings_failure = any(
             step.name == "Sidecar"
             and step.status in {"warn", "fail"}
-            and "settings.json" in step.detail
+            and (
+                "settings.json" in step.detail
+                or (
+                    "connector claudecode setup failed" in step.detail.lower()
+                    and "claudecode settings hooks" in step.detail.lower()
+                    and any(
+                        failure in step.detail.lower()
+                        for failure in ("operation not permitted", "permission denied", "read-only")
+                    )
+                )
+            )
             for step in report.setup
         )
         if settings_failure:
