@@ -303,21 +303,25 @@ func TestRepairRemovesMacOSACLEntriesThatLetOtherAccountsChangeTheDeployment(t *
 				dropIn:                              "user:dcm-w4h2 allow write,append",
 				l.BinDir:                            "user:dcm-w4h2 allow add_file,delete_child",
 			}
+			managedDir := h.env.P("/Library/Application Support/ClaudeCode/managed-settings.d")
 			denyOnly := h.env.P(l.ConfigDir)
-			h.runner.acls = map[string][]string{denyOnly: {"group:everyone deny delete"}}
+			h.runner.acls = map[string][]string{denyOnly: {"group:everyone deny delete"}, managedDir: {"group:everyone deny list,search"}}
 			for canonical, entry := range writable {
 				h.runner.acls[h.env.P(canonical)] = []string{"group:everyone deny delete", entry}
 			}
 			status := h.run(Options{Action: ActionStatus})
 			requireError(t, status, codeVerify)
 			got := messagesOf(status.Errors, codeVerify)
+			if !strings.Contains(got, "deny users access to published machine-policy directories") || !strings.Contains(got, "/ClaudeCode/managed-settings.d") {
+				t.Errorf("status does not report the denied managed directory: %s", got)
+			}
 			for canonical := range writable {
 				if !strings.Contains(got, canonical) || !strings.Contains(got, " repair`") {
 					t.Errorf("status does not name %s and the repair: %s", canonical, got)
 				}
 			}
 			requireOK(t, h.run(Options{Action: ActionRepair}))
-			if len(h.runner.acls) != 1 || h.runner.acls[denyOnly] == nil {
+			if len(h.runner.acls) != 1 || h.runner.acls[denyOnly] == nil || h.runner.acls[managedDir] != nil {
 				t.Fatalf("after repair the ACL entries are %v, want only the deny entry on %s", h.runner.acls, l.ConfigDir)
 			}
 			requireOK(t, h.run(Options{Action: ActionStatus}))

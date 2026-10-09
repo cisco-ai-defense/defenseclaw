@@ -49,10 +49,13 @@ import (
 const aclListBatch = 200
 
 // aclTarget is a rooted path whose macOS ACL the deployment checks. On a
-// private one any allow entry is wrong; elsewhere an entry that grants write.
+// private one any allow entry is wrong; on a published directory a deny
+// entry that hides policy is also wrong; elsewhere an entry that grants write.
 type aclTarget struct {
-	path    string
-	private bool
+	path         string
+	private      bool
+	publishedDir bool
+	requireList  bool
 }
 
 // aclFinding is a path with the ACL entries that are wrong for it; write is
@@ -62,6 +65,7 @@ type aclFinding struct {
 	rooted  string
 	entries []string
 	write   bool
+	deny    bool
 }
 
 // aclTargets are the folders of the deployment, the files it installs
@@ -74,6 +78,12 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 		return nil
 	}
 	seen := map[string]bool{}
+	publishedDirs := map[string]bool{}
+	for _, connector := range connectors {
+		for _, dir := range machinePolicyDirs(e.GOOS, connector) {
+			publishedDirs[e.P(dir)] = true
+		}
+	}
 	var targets []aclTarget
 	// private is nil to take it from the current mode.
 	add := func(rooted string, private *bool) {
@@ -89,7 +99,10 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 		if private != nil {
 			closed = *private
 		}
-		targets = append(targets, aclTarget{path: rooted, private: closed})
+		targets = append(targets, aclTarget{
+			path: rooted, private: closed, publishedDir: info.IsDir() && publishedDirs[rooted],
+			requireList: filepath.Base(rooted) == "managed-settings.d" || filepath.Base(rooted) == "policy.d",
+		})
 	}
 	yes := true
 	for _, dir := range e.managedDirs(Account{}, false) {
@@ -176,9 +189,11 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 		for _, target := range batch {
 			finding := aclFinding{path: e.canonical(target.path), rooted: target.path}
 			for _, entry := range listed[target.path] {
-				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) {
+				deny := target.publishedDir && entry.DeniesDirectoryAccess(target.requireList)
+				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
 					finding.entries = append(finding.entries, entry.Text)
 					finding.write = finding.write || entry.GrantsWrite()
+					finding.deny = finding.deny || deny
 				}
 			}
 			if len(finding.entries) > 0 {
@@ -202,13 +217,17 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	findings, err := e.aclFindings(ctx, e.aclTargets(sortedKeys(record.Files), record.MachinePolicyConnectors))
 	var problems []string
 	if err != nil && e.Geteuid() == 0 {
-		problems = append(problems, fmt.Sprintf("the macOS ACLs of the deployment could not be read (%v), so entries that let other accounts change it are not checked", err))
+		problems = append(problems, fmt.Sprintf("the macOS ACLs of the deployment could not be read (%v), so entries that grant write or deny policy access are not checked", err))
 	}
-	var write, read []aclFinding
+	var write, read, deny []aclFinding
 	for _, finding := range findings {
 		if finding.write {
 			write = append(write, finding)
-		} else {
+		}
+		if finding.deny {
+			deny = append(deny, finding)
+		}
+		if !finding.write && !finding.deny {
 			read = append(read, finding)
 		}
 	}
@@ -216,6 +235,11 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 		problems = append(problems, fmt.Sprintf(
 			"macOS ACL entries let other accounts change DefenseClaw files and folders that root and every agent rely on, although their owner and mode bits do not: %s; run `%s` to remove them (it runs chmod -N on each path)",
 			describeACLFindings(write), e.lifecycleCommand(ActionRepair)))
+	}
+	if len(deny) > 0 {
+		problems = append(problems, fmt.Sprintf(
+			"macOS ACL entries deny users access to published machine-policy directories, so their agents cannot load DefenseClaw hooks: %s; run `%s` to remove them",
+			describeACLFindings(deny), e.lifecycleCommand(ActionRepair)))
 	}
 	if len(read) > 0 {
 		problems = append(problems, fmt.Sprintf(
@@ -273,10 +297,10 @@ func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) 
 		return fmt.Errorf("read the macOS ACLs of the deployment after removing them: %w", err)
 	}
 	if len(left) > 0 {
-		return fmt.Errorf("macOS ACL entries that let other accounts change or read DefenseClaw files are still there after chmod -N: %s; remove them with `chmod -N <path>`, then rerun `%s`",
+		return fmt.Errorf("harmful macOS ACL entries are still there after chmod -N: %s; remove them with `chmod -N <path>`, then rerun `%s`",
 			describeACLFindings(left), env.lifecycleCommand(l.opts.Action))
 	}
-	l.noteChange("removed the macOS ACL entries that let other accounts change or read %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))
+	l.noteChange("removed harmful macOS ACL entries from %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))
 	return nil
 }
 
