@@ -60,3 +60,46 @@ func TestWindowsStandaloneNamesAgentSessionsStartedBeforeActivation(t *testing.T
 	applyWindowsEnterpriseAgentSessions(status, &windowsEnterpriseLifecycleOptions{})
 	check(status)
 }
+
+// A staged install must retain enough state for the first successful repair
+// to date activation, without dating unrelated upgrades from old releases.
+func TestWindowsStandaloneStagedInstallRecordsActivationOnRepair(t *testing.T) {
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(metadata, []byte(`{"installed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	started := time.Date(2026, 10, 8, 14, 0, 0, 0, time.UTC)
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{{PID: 41, Connector: "cursor", User: `DCFC\dcw-std1`, StartedAt: started}}, nil
+	}
+	staged := enterprisestatus.New("install", managed.ProfileStandalone, "windows", "1.0.0")
+	staged.Installed = true
+	applyWindowsEnterpriseAgentSessions(staged, &windowsEnterpriseLifecycleOptions{activationStartedAt: started.Add(time.Minute), noStart: true})
+	if len(staged.Warnings) != 0 {
+		t.Fatalf("staged install warnings = %+v", staged.Warnings)
+	}
+	path := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), `"pending":true`) {
+		t.Fatalf("staged activation record = %q, err = %v", data, err)
+	}
+	repaired := enterprisestatus.New("repair", managed.ProfileStandalone, "windows", "1.0.0")
+	repaired.Installed = true
+	repaired.Readiness.Gateway = true
+	applyWindowsEnterpriseAgentSessions(repaired, &windowsEnterpriseLifecycleOptions{
+		activationStartedAt: started.Add(2 * time.Minute), installedBeforeRun: true,
+	})
+	if len(repaired.Warnings) != 1 || repaired.Warnings[0].Code != windowsAgentSessionsRestartCode {
+		t.Fatalf("repair warnings = %+v", repaired.Warnings)
+	}
+	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	status.Installed = true
+	applyWindowsEnterpriseAgentSessions(status, &windowsEnterpriseLifecycleOptions{})
+	if len(status.Warnings) != 1 || status.Warnings[0].Code != windowsAgentSessionsRestartCode {
+		t.Fatalf("status warnings = %+v", status.Warnings)
+	}
+}
