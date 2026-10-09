@@ -619,6 +619,41 @@ _read_json_version() {
   _read_json_field "${path}" "version"
 }
 
+# _claude_native_version_from_home HOME -> echoes the active native-install
+# Claude Code version or "".
+#
+# Anthropic's recommended native installer publishes the selected executable
+# as:
+#
+#   ~/.local/bin/claude -> ~/.local/share/claude/versions/<X.Y.Z>
+#
+# The versioned payload has no package.json sibling. Read the direct symlink
+# target's basename as metadata instead of executing the user-owned binary from
+# this root LaunchDaemon. Only accept an executable, non-symlink payload that
+# is a direct child of the expected versions directory; this prevents an
+# arbitrary ~/.local/bin/claude link from being treated as version metadata.
+_claude_native_version_from_home() {
+  local home="$1"
+  local launcher="${home}/.local/bin/claude"
+  local versions_root="${home}/.local/share/claude/versions"
+  [[ -L "${launcher}" && -d "${versions_root}" ]] || return 0
+
+  local target version
+  target="$(readlink -- "${launcher}" 2>/dev/null || true)"
+  [[ -n "${target}" ]] || return 0
+
+  # The native installer currently writes an absolute link. Reject relative
+  # and nested targets rather than canonicalizing attacker-controlled path
+  # components while running as root.
+  [[ "${target}" == /* ]] || return 0
+  [[ "$(dirname -- "${target}")" == "${versions_root}" ]] || return 0
+  [[ -f "${target}" && ! -L "${target}" && -x "${target}" ]] || return 0
+
+  version="$(basename -- "${target}")"
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$ ]] || return 0
+  printf '%s\n' "${version}"
+}
+
 # _claude_desktop_embedded_version_from_home HOME -> echoes the highest
 # Claude Code version bundled inside Claude Desktop, or "".
 #
@@ -799,21 +834,28 @@ discover_agent_version() {
       fi
       ;;
     claudecode)
-      # Claude Code ships both as a standalone npm CLI (has a
-      # package.json we can read) and as a Cursor / VS Code extension,
-      # AND as a per-user Claude Desktop-bundled binary.
+      # Claude Code ships through Anthropic's native installer, as a
+      # standalone npm CLI (has a package.json we can read), as a Cursor /
+      # VS Code extension, and as a per-user Claude Desktop-bundled binary.
       #
       # Probe order:
-      #   1. Claude Desktop-bundled — ~/Library/Application Support/Claude/
+      #   1. Native installer — ~/.local/bin/claude points at
+      #      ~/.local/share/claude/versions/<X.Y.Z>. This is the active CLI
+      #      selected by Anthropic's installer and must win over stale
+      #      Desktop/npm copies.
+      #   2. Claude Desktop-bundled — ~/Library/Application Support/Claude/
       #      claude-code/<X.Y.Z>/claude.app/... — the shim at
       #      ~/.local/bin/claude points here on newer Claude Desktop
       #      builds and the shim-basename walk yields "claude"/"MacOS"
       #      which fails the semver regex. Consulting the version-labelled
       #      parent directory is the only way to recover the version.
       #      Regression on customer bundle 0827_0914 (jlunde, AIFW-32990).
-      #   2. npm-global / Cursor / VS Code extension package.json
+      #   3. npm-global / Cursor / VS Code extension package.json
       #      (historical baseline).
       local v
+      v="$(_claude_native_version_from_home "${home}")"
+      if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+
       v="$(_claude_desktop_embedded_version_from_home "${home}")"
       if [[ -n "${v}" ]]; then echo "${v}"; return; fi
 

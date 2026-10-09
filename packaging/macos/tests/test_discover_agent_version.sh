@@ -86,6 +86,56 @@ JSON
   assert_eq "${got}" "2.0.99" "claudecode version from VS Code extension"
 }
 
+t_claudecode_via_native_installer_symlink() {
+  # Anthropic's recommended native installer keeps versioned executable
+  # payloads under ~/.local/share/claude/versions and selects the active one
+  # with ~/.local/bin/claude. There is no package.json to inspect.
+  local home; home="$(mktest_tmp)"
+  local payload="${home}/.local/share/claude/versions/2.1.295"
+  mkdir -p "$(dirname -- "${payload}")" "${home}/.local/bin"
+  : > "${payload}"
+  chmod 0755 "${payload}"
+  ln -s "${payload}" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.295" "claudecode version from native installer symlink"
+}
+
+t_claudecode_native_installer_wins_over_stale_desktop_bundle() {
+  # The native launcher represents the CLI the user will actually invoke. A
+  # stale Claude Desktop embedded copy must not win contract selection.
+  local home; home="$(mktest_tmp)"
+  local native_payload="${home}/.local/share/claude/versions/2.1.295"
+  local desktop_payload="${home}/Library/Application Support/Claude/claude-code/2.1.272/claude.app/Contents/MacOS/claude"
+  mkdir -p "$(dirname -- "${native_payload}")" "${home}/.local/bin" \
+    "$(dirname -- "${desktop_payload}")"
+  : > "${native_payload}"
+  : > "${desktop_payload}"
+  chmod 0755 "${native_payload}" "${desktop_payload}"
+  ln -s "${native_payload}" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.295" "active native claudecode wins over stale Desktop bundle"
+}
+
+t_claudecode_native_installer_rejects_external_symlink_target() {
+  # The root enumerator must not trust a user-controlled launcher that points
+  # outside Anthropic's fixed native versions directory.
+  local home; home="$(mktest_tmp)"
+  local external_dir; external_dir="$(mktest_tmp)"
+  local external_payload="${external_dir}/2.1.295"
+  mkdir -p "${home}/.local/bin" "${home}/.local/share/claude/versions"
+  : > "${external_payload}"
+  chmod 0755 "${external_payload}"
+  ln -s "${external_payload}" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "claudecode rejects native launcher target outside fixed versions directory"
+}
+
 t_claudecode_via_claude_desktop_embedded_bundle() {
   # Regression for customer bundle 0827_0914 (jlunde). Claude Desktop
   # bundles Claude Code under ~/Library/Application Support/Claude/
@@ -617,6 +667,9 @@ run_case "amp package metadata identity"      t_amp_metadata_requires_package_id
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
+run_case "claudecode via native installer symlink" t_claudecode_via_native_installer_symlink
+run_case "claudecode native installer wins over stale Desktop bundle" t_claudecode_native_installer_wins_over_stale_desktop_bundle
+run_case "claudecode native installer rejects external symlink target" t_claudecode_native_installer_rejects_external_symlink_target
 run_case "claudecode via Claude Desktop embedded bundle" t_claudecode_via_claude_desktop_embedded_bundle
 run_case "claudecode Claude Desktop picks highest bundled" t_claudecode_desktop_embedded_picks_highest_version
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
