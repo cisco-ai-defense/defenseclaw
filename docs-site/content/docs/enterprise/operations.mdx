@@ -356,8 +356,7 @@ What the lifecycle does with it:
   has no `policy` object.
 
 The gateway reports the same digest, with its own policy generation, on
-`/health` and `/status`. This is the `policy` object of a test home, trimmed to
-three components:
+`/health` and `/status`. This is the `policy` object of a test home:
 
 ```json title="/health (policy)"
 "policy": {
@@ -366,18 +365,16 @@ three components:
   "config_generation": 7,
   "config_generation_recorded": true,
   "built_at": "2026-10-06T18:32:07Z",
-  "components": {
-    "config": "sha256:157b3b04f3bfcaf4f4a79c8066f64a62bc524aeb0b2a6487e0564d2a58d275da",
-    "rego": "sha256:1394e701de498838fa07251f7d5d3c858ed6ce44dcc164536fd13dc58d2a38b3",
-    "rule_pack:global": "sha256:46ece6be297f9c9b221524923b4baf2035c810503ddfa1b83a1024ee3c55c6e0"
-  }
+  "component_count": 6
 }
 ```
 
 `generation` counts the policies this gateway process has built, so it restarts
 at 1 with the process; `config_generation` is the counter in
-`config.generation.json`. `config_generation_recorded: false` means the file was
-edited and no writer recorded it. A change that does not build adds
+`config.generation.json`. `component_count` is the number of inputs the digest
+covers; `policy digest` (below) lists each input with its own digest.
+`config_generation_recorded: false` means the file was edited and no writer
+recorded it. A change that does not build adds
 `last_reload_error` and leaves the previous generation in force.
 
 The same digest is available without the lifecycle, as root on the host:

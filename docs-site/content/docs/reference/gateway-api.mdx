@@ -281,17 +281,16 @@ gateway is enforcing. It is omitted on a Secure Client device.
   "config_generation": 19,
   "config_generation_recorded": true,
   "built_at": "2026-10-06T18:20:23Z",
-  "components": {
-    "config": "sha256:150a9776534fadc10878caa01804f4626f0a1e4a13017a78bdf900a2228765d0",
-    "rego": "sha256:1394e701de498838fa07251f7d5d3c858ed6ce44dcc164536fd13dc58d2a38b3"
-  }
+  "component_count": 6
 }
 ```
 
 `effective_digest` and `generation` identify the policy generation in force;
 `config_generation` is the writer's counter from `config.generation.json`;
-`components` holds the digest of each input (config, the Rego modules, the
-providers and every rule pack in use, with more keys than this example shows).
+`component_count` is the number of inputs the digest covers (config, the Rego
+modules, the providers, every rule pack in use and each guardrail profile).
+Their digests are not on `/health`, so the object stays small with thousands
+of profiles; `defenseclaw-gateway policy digest` lists each one.
 When a change fails to build, the previous generation keeps running and the
 object gains `last_reload_error` with the reason; `defenseclaw doctor` reports
 that as a failed Policy row. The next change that builds clears it.
