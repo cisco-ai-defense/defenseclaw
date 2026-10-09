@@ -183,14 +183,28 @@ _probe_json_version() {
 
 # discover_agent_version CONNECTOR HOME -> echoes the agent version or "".
 #
-# Metadata-only: reads files under HOME or under signed system app bundles
-# and never executes user-installed agent binaries. install.sh runs as root,
-# so invoking $PATH-resolved `codex` / `claude` / etc. would be a
-# privilege-escalation surface — the caller must pass --agent-version
-# explicitly for connectors that don't ship a stable metadata file.
-# _read_codex_version_as_user USER -> echoes codex --version output (first line, ≤512 bytes) or "".
+# Version discovery prefers metadata. The only executable probes are fixed
+# Codex application-bundle paths and the final PATH fallback, and both execute
+# as the target user rather than as the root installer/LaunchDaemon.
+
+# _run_as_target_user USER COMMAND [ARG...] -> command output/status.
 #
-# Runs `sudo -n -u USER codex --version` with a bounded wall-clock
+# Keep the privilege boundary in one helper. The absolute sudo path prevents a
+# root LaunchDaemon from resolving an attacker-controlled PATH shim. Tests may
+# replace this shell function after sourcing the trusted installer library.
+_run_as_target_user() {
+  local user="$1"
+  shift
+  [[ -n "${user}" && $# -gt 0 ]] || return 1
+  /usr/bin/sudo -n -u "${user}" -- "$@"
+}
+
+# _read_codex_version_as_user USER [CODEX_BIN] -> echoes `--version` output
+# (first line, <=512 bytes) or "". CODEX_BIN defaults to PATH-resolved codex
+# for the final, unprivileged fallback; bundle callers pass a trusted absolute
+# path.
+#
+# Runs the command as USER with a bounded wall-clock
 # limit (5 s) so a hung codex cannot stall the installer. Pure-bash
 # implementation: previously this shelled out to python3 for the
 # timeout + bounded-read logic, but that violated the "no python3
@@ -202,6 +216,7 @@ _probe_json_version() {
 # 512 bytes via `head -c` so a chatty codex cannot fill the pipe.
 _read_codex_version_as_user() {
   local user="$1"
+  local codex_bin="${2:-codex}"
   local out_file rc=0
   # Fail closed on mktemp failure. The prior fallback
   # `/tmp/defenseclaw-codex-version.$$` was predictable — a
@@ -222,7 +237,7 @@ _read_codex_version_as_user() {
   # macOS the child inherits the shell's session and $$ but exec's
   # `-a` and `sudo`'s `-b` do not give us a clean PGID, so we settle
   # for killing the immediate PID plus a wait.
-  ( sudo -n -u "${user}" codex --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
+  ( _run_as_target_user "${user}" "${codex_bin}" --version 2>/dev/null | head -c 512 | head -n 1 > "${out_file}" ) &
   local pid=$!
   # Poll for completion with a 5-second wall-clock budget. `wait -n`
   # would block indefinitely; a tight sleep+kill loop hits the
@@ -619,6 +634,41 @@ _read_json_version() {
   _read_json_field "${path}" "version"
 }
 
+# _claude_native_version_from_home HOME -> echoes the active native-install
+# Claude Code version or "".
+#
+# Anthropic's recommended native installer publishes the selected executable
+# as:
+#
+#   ~/.local/bin/claude -> ~/.local/share/claude/versions/<X.Y.Z>
+#
+# The versioned payload has no package.json sibling. Read the direct symlink
+# target's basename as metadata instead of executing the user-owned binary from
+# this root LaunchDaemon. Only accept an executable, non-symlink payload that
+# is a direct child of the expected versions directory; this prevents an
+# arbitrary ~/.local/bin/claude link from being treated as version metadata.
+_claude_native_version_from_home() {
+  local home="$1"
+  local launcher="${home}/.local/bin/claude"
+  local versions_root="${home}/.local/share/claude/versions"
+  [[ -L "${launcher}" && -d "${versions_root}" ]] || return 0
+
+  local target version
+  target="$(readlink -- "${launcher}" 2>/dev/null || true)"
+  [[ -n "${target}" ]] || return 0
+
+  # The native installer currently writes an absolute link. Reject relative
+  # and nested targets rather than canonicalizing attacker-controlled path
+  # components while running as root.
+  [[ "${target}" == /* ]] || return 0
+  [[ "$(dirname -- "${target}")" == "${versions_root}" ]] || return 0
+  [[ -f "${target}" && ! -L "${target}" && -x "${target}" ]] || return 0
+
+  version="$(basename -- "${target}")"
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._+-].*)?$ ]] || return 0
+  printf '%s\n' "${version}"
+}
+
 # _claude_desktop_embedded_version_from_home HOME -> echoes the highest
 # Claude Code version bundled inside Claude Desktop, or "".
 #
@@ -663,6 +713,134 @@ _claude_desktop_embedded_version_from_home() {
   [[ -n "${best}" ]] && echo "${best}"
 }
 
+# _codex_app_bundle_metadata_version APP_ROOT -> echoes version or "".
+#
+# Current app releases package Codex under Resources/codex-cli/ and publish the
+# bundled CLI version in codex-package.json. Prefer that fixed-bundle metadata
+# over executing the embedded CLI. APP_ROOT is an explicit argument so tests
+# can stage a hermetic bundle without overriding production /Applications
+# paths.
+_codex_app_bundle_metadata_version() {
+  local app_root="$1"
+  local metadata="${app_root}/Contents/Resources/codex-cli/codex-package.json"
+  [[ -f "${metadata}" ]] || return 0
+
+  local version
+  version="$(_probe_json_version "${metadata}" codex)"
+  [[ -n "${version}" ]] || return 0
+  if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+    _record_discovery_error codex "${metadata}" "invalid-version"
+    return 0
+  fi
+  printf '%s\n' "${version}"
+}
+
+# _codex_app_bundle_version APP_ROOT -> echoes version or "".
+#
+# Supports both the current codex-cli package layout and the original
+# standalone Codex.app layout whose CLI is Contents/Resources/codex. The
+# caller supplies one of the fixed /Applications roots below in production;
+# the argument exists so tests can stage the same bundle-relative structure.
+# Executable probes require DC_INSTALLER_TARGET_USER and always cross the
+# privilege boundary through _run_as_target_user. A root caller never executes
+# the app-bundled CLI directly.
+_codex_app_bundle_version() {
+  local app_root="$1"
+  local version raw candidate relative
+
+  version="$(_codex_app_bundle_metadata_version "${app_root}")"
+  if [[ -n "${version}" ]]; then
+    printf '%s\n' "${version}"
+    return 0
+  fi
+
+  [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] || return 0
+
+  for relative in \
+    Contents/Resources/codex-cli/bin/codex \
+    Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex \
+    Contents/Resources/codex \
+    Contents/MacOS/codex; do
+    candidate="${app_root}/${relative}"
+    [[ -f "${candidate}" && -x "${candidate}" ]] || continue
+
+    raw="$(_read_codex_version_as_user \
+      "${DC_INSTALLER_TARGET_USER}" "${candidate}" || true)"
+    if [[ -z "${raw}" ]]; then
+      _record_discovery_error codex "${candidate}" "version-probe-failed"
+      continue
+    fi
+
+    # Codex prints "codex-cli X.Y.Z" (optionally with a prerelease/build
+    # suffix). Accept exactly one semver-shaped token and reject everything
+    # else rather than carrying untrusted command output into targets.yaml.
+    version="$(printf '%s' "${raw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$/) {print $i; exit}}')"
+    if [[ -z "${version}" ]]; then
+      _record_discovery_error codex "${candidate}" "invalid-version"
+      continue
+    fi
+    printf '%s\n' "${version}"
+    return 0
+  done
+}
+
+# _codex_native_version_from_home HOME -> echoes the active version selected by
+# OpenAI's standalone installer, or "".
+#
+# The installer publishes:
+#
+#   ~/.codex/packages/standalone/current -> releases/<version>-<target>
+#   ~/.local/bin/codex -> .../standalone/current/{bin/codex,codex}
+#
+# Read the selected release directory and its bounded JSON metadata instead of
+# executing a user-owned binary from the root LaunchDaemon. The current link
+# must resolve directly below the fixed releases directory and the visible
+# command must point through that exact current link. Legacy standalone
+# releases have no codex-package.json, so their validated release-directory
+# prefix is the metadata fallback.
+_codex_native_version_from_home() {
+  local home="$1"
+  local standalone_root="${home}/.codex/packages/standalone"
+  local releases_root="${standalone_root}/releases"
+  local current="${standalone_root}/current"
+  local launcher="${home}/.local/bin/codex"
+  [[ -d "${releases_root}" && -L "${current}" && -L "${launcher}" ]] || return 0
+
+  local current_target launcher_target release_dir release_leaf version
+  current_target="$(readlink -- "${current}" 2>/dev/null || true)"
+  launcher_target="$(readlink -- "${launcher}" 2>/dev/null || true)"
+  [[ -n "${current_target}" && -n "${launcher_target}" ]] || return 0
+  [[ "${current_target}" == /* ]] || return 0
+  [[ "$(dirname -- "${current_target}")" == "${releases_root}" ]] || return 0
+  case "${launcher_target}" in
+    "${current}/bin/codex"|"${current}/codex") ;;
+    *) return 0 ;;
+  esac
+
+  release_dir="${current_target}"
+  [[ -d "${release_dir}" && ! -L "${release_dir}" ]] || return 0
+  if [[ "${launcher_target}" == "${current}/bin/codex" ]]; then
+    [[ -f "${release_dir}/bin/codex" && -x "${release_dir}/bin/codex" ]] || return 0
+  else
+    [[ -f "${release_dir}/codex" && -x "${release_dir}/codex" ]] || return 0
+  fi
+
+  if [[ -f "${release_dir}/codex-package.json" ]]; then
+    version="$(_probe_json_version "${release_dir}/codex-package.json" codex)"
+    if [[ -n "${version}" && "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+      printf '%s\n' "${version}"
+      return 0
+    fi
+    _record_discovery_error codex "${release_dir}/codex-package.json" "invalid-version"
+    return 0
+  fi
+
+  release_leaf="$(basename -- "${release_dir}")"
+  version="$(printf '%s\n' "${release_leaf}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?)-.+$/\1/')"
+  [[ "${version}" != "${release_leaf}" ]] || return 0
+  printf '%s\n' "${version}"
+}
+
 discover_agent_version() {
   local connector="$1"
   local home="$2"
@@ -686,49 +864,38 @@ discover_agent_version() {
       done
       ;;
     codex)
-      # Codex-cli is a Rust binary that ships from three OpenAI-owned
+      # Codex-cli is a Rust binary that ships from multiple OpenAI-owned
       # channels on macOS. Probe order picks the first-party
-      # ChatGPT.app bundled copy FIRST because it is the newest
-      # distribution (auto-updated with the desktop app) and it is
-      # what customers actually have on a fresh Mac — stray old
+      # current ChatGPT.app bundle FIRST, followed by the legacy standalone
+      # Codex.app bundle. Stray old
       # `npm i -g @openai/codex` installs from an earlier engagement
       # frequently linger and would otherwise win with a stale
       # version that fails our MinAgentVersion contract gate.
       #
       # Order:
-      #   1. ChatGPT.app bundled binary       (Codex 0.145.0+ current)
-      #   2. Homebrew Caskroom                (versioned dir name)
-      #   3. npm module package.json         (user-global then system)
-      #   4. `command -v codex` last resort   (arbitrary PATH install)
+      #   1. ChatGPT.app bundled metadata/binary (current distribution)
+      #   2. Codex.app bundled metadata/binary   (legacy standalone app)
+      #   3. OpenAI standalone installer         (~/.codex/packages/...)
+      #   4. Homebrew Caskroom                   (versioned dir name)
+      #   5. npm module package.json             (user-global then system)
+      #   6. `command -v codex` last resort      (arbitrary PATH install)
       #
-      # Every probe runs as the target user via sudo -u (not root).
-      # The app bundle is Gatekeeper-signed and world-readable by
-      # design; running its --version as an unprivileged user is
-      # safe. install.sh's outer sudo already dropped privs before
-      # calling this helper, matching the security posture of the
-      # hook guardian's connector.Setup call.
-      local vraw
-
-      # 1. ChatGPT.app bundled codex — /Applications/ChatGPT.app/
-      # Contents/Resources/codex is the current stable location; the
-      # older MacOS/ path is kept as a fallback for pre-2026 builds.
-      local chatgpt_codex
-      for chatgpt_codex in \
-        /Applications/ChatGPT.app/Contents/Resources/codex \
-        /Applications/ChatGPT.app/Contents/MacOS/codex; do
-        [[ -x "${chatgpt_codex}" ]] || continue
-        if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]]; then
-          vraw="$(sudo -n -u "${DC_INSTALLER_TARGET_USER}" "${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        else
-          vraw="$("${chatgpt_codex}" --version 2>/dev/null | head -1 || true)"
-        fi
-        # Codex prints "codex-cli X.Y.Z" (or "codex-cli X.Y.Z-alpha.N");
-        # take the first token that looks like a version.
-        vraw="$(printf '%s' "${vraw}" | awk '{for(i=NF;i>=1;i--) if ($i ~ /^[0-9]+\.[0-9]+/) {print $i; exit}}')"
+      # Bundle metadata is read directly. Bundle executable fallbacks use the
+      # bounded target-user probe and are never executed as root.
+      local vraw app_root
+      for app_root in \
+        "${home}/Applications/ChatGPT.app" \
+        /Applications/ChatGPT.app \
+        "${home}/Applications/Codex.app" \
+        /Applications/Codex.app; do
+        vraw="$(_codex_app_bundle_version "${app_root}")"
         if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
       done
 
-      # 2. Homebrew cask keeps the binary under Caskroom with a
+      vraw="$(_codex_native_version_from_home "${home}")"
+      if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
+
+      # 4. Homebrew cask keeps the binary under Caskroom with a
       # version in the path itself:
       #   /opt/homebrew/Caskroom/codex/<version>/...
       # Glob-based version pick (avoids shellcheck SC2010 on ls|grep).
@@ -748,11 +915,13 @@ discover_agent_version() {
         if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
       done
 
-      # 3. npm module package.json — user-global first (most likely
+      # 5. npm module package.json — user-global first (most likely
       # up to date on developer boxes), then system dirs.
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@openai/codex/package.json \
+        "${home}"/.nvm/versions/node/*/lib/node_modules/@openai/codex/package.json \
+        "${home}"/.bun/install/global/node_modules/@openai/codex/package.json \
         /usr/local/lib/node_modules/@openai/codex/package.json \
         /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
         [[ -f "${pkg}" ]] || continue
@@ -760,7 +929,7 @@ discover_agent_version() {
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
 
-      # 4. Last resort: exec codex --version as the target user (not
+      # 6. Last resort: exec codex --version as the target user (not
       # as root). Requires TARGET_USER to be known to the caller.
       if [[ -n "${DC_INSTALLER_TARGET_USER:-}" ]] && command -v codex >/dev/null 2>&1; then
         local vraw
@@ -771,27 +940,36 @@ discover_agent_version() {
       fi
       ;;
     claudecode)
-      # Claude Code ships both as a standalone npm CLI (has a
-      # package.json we can read) and as a Cursor / VS Code extension,
-      # AND as a per-user Claude Desktop-bundled binary.
+      # Claude Code ships through Anthropic's native installer, as a
+      # standalone npm CLI (has a package.json we can read), as a Cursor /
+      # VS Code extension, and as a per-user Claude Desktop-bundled binary.
       #
       # Probe order:
-      #   1. Claude Desktop-bundled — ~/Library/Application Support/Claude/
+      #   1. Native installer — ~/.local/bin/claude points at
+      #      ~/.local/share/claude/versions/<X.Y.Z>. This is the active CLI
+      #      selected by Anthropic's installer and must win over stale
+      #      Desktop/npm copies.
+      #   2. Claude Desktop-bundled — ~/Library/Application Support/Claude/
       #      claude-code/<X.Y.Z>/claude.app/... — the shim at
       #      ~/.local/bin/claude points here on newer Claude Desktop
       #      builds and the shim-basename walk yields "claude"/"MacOS"
       #      which fails the semver regex. Consulting the version-labelled
       #      parent directory is the only way to recover the version.
       #      Regression on customer bundle 0827_0914 (jlunde, AIFW-32990).
-      #   2. npm-global / Cursor / VS Code extension package.json
+      #   3. npm-global / Cursor / VS Code extension package.json
       #      (historical baseline).
       local v
+      v="$(_claude_native_version_from_home "${home}")"
+      if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+
       v="$(_claude_desktop_embedded_version_from_home "${home}")"
       if [[ -n "${v}" ]]; then echo "${v}"; return; fi
 
       local pkg
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@anthropic-ai/claude-code/package.json \
+        "${home}"/.nvm/versions/node/*/lib/node_modules/@anthropic-ai/claude-code/package.json \
+        "${home}"/.bun/install/global/node_modules/@anthropic-ai/claude-code/package.json \
         /usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json \
         /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/package.json \
         "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
@@ -804,10 +982,14 @@ discover_agent_version() {
     cursor)
       # Cursor.app is a signed macOS bundle; read the Info.plist rather
       # than exec'ing the binary. PlistBuddy is an Apple system tool.
-      if [[ -f /Applications/Cursor.app/Contents/Info.plist ]]; then
-        /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
-          /Applications/Cursor.app/Contents/Info.plist 2>/dev/null || true
-      fi
+      local cursor_root
+      for cursor_root in "${home}/Applications/Cursor.app" /Applications/Cursor.app; do
+        if [[ -f "${cursor_root}/Contents/Info.plist" ]]; then
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            "${cursor_root}/Contents/Info.plist" 2>/dev/null || true
+          return
+        fi
+      done
       ;;
   esac
 }

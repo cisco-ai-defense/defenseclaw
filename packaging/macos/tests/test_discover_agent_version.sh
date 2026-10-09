@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # discover_agent_version: per-connector metadata probing.
 #
-# The lib never execs agent binaries (see the security note in
-# installer_lib.sh:discover_agent_version), so all cases are driven from
-# staged tmpdirs / bundle files — no host-agent leakage possible.
+# The lib prefers metadata and only executes fixed Codex app-bundle candidates
+# or the final PATH fallback as the target user. Tests stage bundle files and
+# replace the target-user runner so no host-agent execution is required.
 . "${PKG_DIR}/lib/installer_lib.sh"
 
 # Wrapper that masks any host `amp` / `claude` / `codex` CLI on PATH. We used
@@ -86,6 +86,56 @@ JSON
   assert_eq "${got}" "2.0.99" "claudecode version from VS Code extension"
 }
 
+t_claudecode_via_native_installer_symlink() {
+  # Anthropic's recommended native installer keeps versioned executable
+  # payloads under ~/.local/share/claude/versions and selects the active one
+  # with ~/.local/bin/claude. There is no package.json to inspect.
+  local home; home="$(mktest_tmp)"
+  local payload="${home}/.local/share/claude/versions/2.1.295"
+  mkdir -p "$(dirname -- "${payload}")" "${home}/.local/bin"
+  : > "${payload}"
+  chmod 0755 "${payload}"
+  ln -s "${payload}" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.295" "claudecode version from native installer symlink"
+}
+
+t_claudecode_native_installer_wins_over_stale_desktop_bundle() {
+  # The native launcher represents the CLI the user will actually invoke. A
+  # stale Claude Desktop embedded copy must not win contract selection.
+  local home; home="$(mktest_tmp)"
+  local native_payload="${home}/.local/share/claude/versions/2.1.295"
+  local desktop_payload="${home}/Library/Application Support/Claude/claude-code/2.1.272/claude.app/Contents/MacOS/claude"
+  mkdir -p "$(dirname -- "${native_payload}")" "${home}/.local/bin" \
+    "$(dirname -- "${desktop_payload}")"
+  : > "${native_payload}"
+  : > "${desktop_payload}"
+  chmod 0755 "${native_payload}" "${desktop_payload}"
+  ln -s "${native_payload}" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.295" "active native claudecode wins over stale Desktop bundle"
+}
+
+t_claudecode_native_installer_rejects_external_symlink_target() {
+  # The root enumerator must not trust a user-controlled launcher that points
+  # outside Anthropic's fixed native versions directory.
+  local home; home="$(mktest_tmp)"
+  local external_dir; external_dir="$(mktest_tmp)"
+  local external_payload="${external_dir}/2.1.295"
+  mkdir -p "${home}/.local/bin" "${home}/.local/share/claude/versions"
+  : > "${external_payload}"
+  chmod 0755 "${external_payload}"
+  ln -s "${external_payload}" "${home}/.local/bin/claude"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "claudecode rejects native launcher target outside fixed versions directory"
+}
+
 t_claudecode_via_claude_desktop_embedded_bundle() {
   # Regression for customer bundle 0827_0914 (jlunde). Claude Desktop
   # bundles Claude Code under ~/Library/Application Support/Claude/
@@ -142,8 +192,9 @@ t_claudecode_no_install_returns_empty() {
 
 t_codex_no_home_metadata_uses_system_or_empty() {
   # With no metadata under the tmp HOME, the probe falls through to
-  # /Applications/ChatGPT.app -> Homebrew Caskroom -> system npm dirs
-  # -> PATH. On a CI/dev box without any codex install, that returns
+  # /Applications/ChatGPT.app -> /Applications/Codex.app -> Homebrew
+  # Caskroom -> system npm dirs -> PATH. On a CI/dev box without any
+  # codex install, that returns
   # empty. On a dev box with codex installed (via any channel), we get
   # a real version. Both are valid; assert the shape rather than the
   # specific value.
@@ -156,6 +207,208 @@ t_codex_no_home_metadata_uses_system_or_empty() {
     _fail "codex probe returned unexpected non-empty non-version: ${got}"
     return 1
   fi
+}
+
+t_codex_from_official_standalone_installer() {
+  local home; home="$(mktest_tmp)"
+  local releases="${home}/.codex/packages/standalone/releases"
+  local release="${releases}/0.161.0-aarch64-apple-darwin"
+  mkdir -p "${release}/bin" "${home}/.local/bin"
+  : > "${release}/bin/codex"
+  chmod 0755 "${release}/bin/codex"
+  printf '%s\n' \
+    '{"layoutVersion":1,"version":"0.161.0","target":"aarch64-apple-darwin","variant":"codex"}' \
+    > "${release}/codex-package.json"
+  ln -s "${release}" "${home}/.codex/packages/standalone/current"
+  ln -s "${home}/.codex/packages/standalone/current/bin/codex" \
+    "${home}/.local/bin/codex"
+
+  local got
+  got="$(_codex_native_version_from_home "${home}")"
+  assert_eq "${got}" "0.161.0" \
+    "codex version from official standalone installer metadata"
+}
+
+t_codex_official_standalone_rejects_external_selection() {
+  local home; home="$(mktest_tmp)"
+  local outside; outside="$(mktest_tmp)/0.161.0-aarch64-apple-darwin"
+  mkdir -p "${home}/.codex/packages/standalone/releases" \
+    "${home}/.local/bin" "${outside}/bin"
+  : > "${outside}/bin/codex"
+  chmod 0755 "${outside}/bin/codex"
+  printf '%s\n' '{"version":"0.161.0"}' > "${outside}/codex-package.json"
+  ln -s "${outside}" "${home}/.codex/packages/standalone/current"
+  ln -s "${home}/.codex/packages/standalone/current/bin/codex" \
+    "${home}/.local/bin/codex"
+
+  local got
+  got="$(_codex_native_version_from_home "${home}")"
+  assert_eq "${got}" "" \
+    "codex standalone current link outside releases root rejected"
+}
+
+t_codex_from_nvm_global_metadata() {
+  _codex_app_bundle_version() { :; }
+  _codex_native_version_from_home() { :; }
+  local home; home="$(mktest_tmp)"
+  local pkg="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex/package.json"
+  mkdir -p "$(dirname -- "${pkg}")"
+  printf '%s\n' '{"name":"@openai/codex","version":"0.162.0"}' > "${pkg}"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version codex "${home}")"
+  assert_eq "${got}" "0.162.0" "codex version from NVM global metadata"
+  . "${PKG_DIR}/lib/installer_lib.sh"
+}
+
+t_claudecode_from_nvm_global_metadata() {
+  local home; home="$(mktest_tmp)"
+  local pkg="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@anthropic-ai/claude-code/package.json"
+  mkdir -p "$(dirname -- "${pkg}")"
+  printf '%s\n' '{"name":"@anthropic-ai/claude-code","version":"2.1.301"}' > "${pkg}"
+
+  local got
+  got="$(without_host_agent_bins discover_agent_version claudecode "${home}")"
+  assert_eq "${got}" "2.1.301" "claudecode version from NVM global metadata"
+}
+
+t_codex_from_chatgpt_bundle_metadata() {
+  # Current ChatGPT.app releases moved the embedded CLI below
+  # Resources/codex-cli/ and publish its version in codex-package.json.
+  # Exercise the metadata reader against a staged bundle so CI does not
+  # depend on a host application install.
+  local root; root="$(mktest_tmp)/ChatGPT.app"
+  local metadata="${root}/Contents/Resources/codex-cli/codex-package.json"
+  mkdir -p "$(dirname -- "${metadata}")"
+  printf '%s\n' \
+    '{"layoutVersion":1,"version":"0.159.2","target":"aarch64-apple-darwin","variant":"codex"}' \
+    > "${metadata}"
+
+  local got
+  got="$(_codex_app_bundle_metadata_version "${root}")"
+  assert_eq "${got}" "0.159.2" "codex version from current ChatGPT.app bundle metadata"
+}
+
+t_codex_chatgpt_bundle_metadata_rejects_invalid_version() {
+  local root; root="$(mktest_tmp)/ChatGPT.app"
+  local metadata="${root}/Contents/Resources/codex-cli/codex-package.json"
+  local log; log="$(mktest_tmp)/errors.log"
+  mkdir -p "$(dirname -- "${metadata}")"
+  printf '%s\n' '{"version":"not-a-version"}' > "${metadata}"
+  : > "${log}"
+
+  local got
+  got="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+    _codex_app_bundle_metadata_version "${root}")"
+  assert_eq "${got}" "" "invalid ChatGPT.app Codex metadata version rejected"
+  assert_contains "$(cat "${log}")" "invalid-version" \
+    "invalid ChatGPT.app Codex metadata version recorded"
+}
+
+t_codex_from_standalone_app_executes_as_target_user() {
+  # AIFW-35673: the original standalone desktop app exposes its bundled CLI
+  # at Contents/Resources/codex and launchd supplies a restricted PATH. The
+  # version probe must use the enumerated console user, never root.
+  local root; root="$(mktest_tmp)/Codex.app"
+  local bin="${root}/Contents/Resources/codex"
+  local trace; trace="$(mktest_tmp)/runner.trace"
+  mkdir -p "$(dirname -- "${bin}")"
+  cat > "${bin}" <<'SH'
+#!/bin/sh
+printf '%s\n' 'codex-cli 0.146.0'
+SH
+  chmod 0755 "${bin}"
+
+  _run_as_target_user() {
+    local user="$1"
+    shift
+    printf '%s\t%s\t%s\n' "${user}" "$1" "${2:-}" > "${trace}"
+    "$@"
+  }
+
+  local got
+  got="$(PATH=/usr/bin:/bin DC_INSTALLER_TARGET_USER="aifw-user" \
+    _codex_app_bundle_version "${root}")"
+  assert_eq "${got}" "0.146.0" "codex version from standalone Codex.app"
+  assert_eq "$(cat "${trace}")" "$(printf '%s\t%s\t%s' 'aifw-user' "${bin}" '--version')" \
+    "standalone Codex.app probe runs as target user"
+
+  # Restore the production runner before later cases execute.
+  . "${PKG_DIR}/lib/installer_lib.sh"
+}
+
+t_codex_standalone_app_requires_target_user() {
+  local root; root="$(mktest_tmp)/Codex.app"
+  local bin="${root}/Contents/Resources/codex"
+  local called; called="$(mktest_tmp)/runner.called"
+  mkdir -p "$(dirname -- "${bin}")"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'codex-cli 0.146.0'" > "${bin}"
+  chmod 0755 "${bin}"
+
+  _run_as_target_user() {
+    : > "${called}"
+    return 1
+  }
+
+  local got
+  got="$(DC_INSTALLER_TARGET_USER= _codex_app_bundle_version "${root}")"
+  assert_eq "${got}" "" "standalone Codex.app is not executed as root"
+  if [[ -e "${called}" ]]; then
+    _fail "standalone Codex.app probe executed without a target user"
+  fi
+  . "${PKG_DIR}/lib/installer_lib.sh"
+}
+
+t_codex_standalone_app_rejects_malformed_version() {
+  local root; root="$(mktest_tmp)/Codex.app"
+  local bin="${root}/Contents/Resources/codex"
+  local log; log="$(mktest_tmp)/errors.log"
+  mkdir -p "$(dirname -- "${bin}")"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'codex-cli nightly'" > "${bin}"
+  chmod 0755 "${bin}"
+  : > "${log}"
+
+  _run_as_target_user() {
+    shift
+    "$@"
+  }
+
+  local got
+  got="$(PATH=/usr/bin:/bin DC_INSTALLER_TARGET_USER="aifw-user" \
+    DC_DISCOVERY_ERRORS_LOG="${log}" _codex_app_bundle_version "${root}")"
+  assert_eq "${got}" "" "malformed standalone Codex.app version rejected"
+  assert_contains "$(cat "${log}")" "invalid-version" \
+    "malformed standalone Codex.app version recorded"
+  . "${PKG_DIR}/lib/installer_lib.sh"
+}
+
+t_codex_discovery_probes_standalone_app_before_package_fallbacks() {
+  # This hermetic seam verifies the production /Applications root itself;
+  # _codex_app_bundle_version has separate tests for its relative layout.
+  _codex_app_bundle_version() {
+    case "$1" in
+      /Applications/ChatGPT.app) return 0 ;;
+      /Applications/Codex.app) printf '%s\n' '0.146.0' ;;
+      *) return 0 ;;
+    esac
+  }
+
+  local got
+  got="$(PATH=/usr/bin:/bin DC_INSTALLER_TARGET_USER="aifw-user" \
+    discover_agent_version codex "$(mktest_tmp)")"
+  assert_eq "${got}" "0.146.0" \
+    "discover_agent_version probes the standalone Codex.app root"
+
+  local home; home="$(mktest_tmp)"
+  local manifest
+  manifest="$(PATH=/usr/bin:/bin render_targets_manifest \
+    "/opt/cisco/secureclient/defenseclaw" codex \
+    "aifw-user:501:20:${home}")"
+  assert_contains "${manifest}" 'connector: "codex"' \
+    "standalone Codex.app produces a guardian target"
+  assert_contains "${manifest}" 'agent_version: "0.146.0"' \
+    "standalone Codex.app version reaches the guardian manifest"
+  . "${PKG_DIR}/lib/installer_lib.sh"
 }
 
 t_codex_chatgpt_app_bundled_wins_over_npm() {
@@ -173,8 +426,11 @@ t_codex_chatgpt_app_bundled_wins_over_npm() {
   # Runs only when /Applications/ChatGPT.app is present so CI /
   # non-desktop-app boxes still pass. On a box with ChatGPT.app
   # missing this returns "skip".
-  local chatgpt_codex="/Applications/ChatGPT.app/Contents/Resources/codex"
-  if [[ ! -x "${chatgpt_codex}" ]]; then
+  if [[ ! -f /Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/MacOS/codex ]]; then
     if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (ChatGPT.app not installed)\n'; fi
     return 0
   fi
@@ -210,8 +466,16 @@ t_codex_from_user_npm_metadata() {
   # dir) — those correctly win over stale npm installs on real customer
   # boxes, but would defeat this test's fixture. The ChatGPT.app-wins
   # case is covered by t_codex_chatgpt_app_bundled_wins_over_npm above.
-  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+  if [[ -f /Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
      || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
+     || [[ -f /Applications/Codex.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     || [[ -x /Applications/Codex.app/Contents/Resources/codex-cli/bin/codex ]] \
+     || [[ -x /Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     || [[ -x /Applications/Codex.app/Contents/Resources/codex ]] \
+     || [[ -x /Applications/Codex.app/Contents/MacOS/codex ]] \
      || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
      || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
     if [[ "${VERBOSE:-false}" == "true" ]]; then
@@ -543,8 +807,16 @@ t_discover_agent_version_records_error_for_corrupt_codex_npm() {
   # version and never touch our corrupt fixture. The unit-level
   # coverage on _probe_json_version already proves the log-append
   # semantics; this is the end-to-end guard for the codex npm branch.
-  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+  if [[ -f /Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
      || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
+     || [[ -f /Applications/Codex.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     || [[ -x /Applications/Codex.app/Contents/Resources/codex-cli/bin/codex ]] \
+     || [[ -x /Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     || [[ -x /Applications/Codex.app/Contents/Resources/codex ]] \
+     || [[ -x /Applications/Codex.app/Contents/MacOS/codex ]] \
      || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
      || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
     if [[ "${VERBOSE:-false}" == "true" ]]; then
@@ -575,10 +847,23 @@ run_case "amp package metadata identity"      t_amp_metadata_requires_package_id
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
+run_case "claudecode via native installer symlink" t_claudecode_via_native_installer_symlink
+run_case "claudecode native installer wins over stale Desktop bundle" t_claudecode_native_installer_wins_over_stale_desktop_bundle
+run_case "claudecode native installer rejects external symlink target" t_claudecode_native_installer_rejects_external_symlink_target
 run_case "claudecode via Claude Desktop embedded bundle" t_claudecode_via_claude_desktop_embedded_bundle
 run_case "claudecode Claude Desktop picks highest bundled" t_claudecode_desktop_embedded_picks_highest_version
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
+run_case "codex via official standalone installer" t_codex_from_official_standalone_installer
+run_case "codex standalone rejects external current link" t_codex_official_standalone_rejects_external_selection
+run_case "codex via NVM global metadata"     t_codex_from_nvm_global_metadata
+run_case "claudecode via NVM global metadata" t_claudecode_from_nvm_global_metadata
+run_case "codex via current ChatGPT.app bundle metadata" t_codex_from_chatgpt_bundle_metadata
+run_case "codex rejects invalid ChatGPT.app bundle version" t_codex_chatgpt_bundle_metadata_rejects_invalid_version
+run_case "codex via standalone Codex.app as target user" t_codex_from_standalone_app_executes_as_target_user
+run_case "codex standalone app refuses root execution" t_codex_standalone_app_requires_target_user
+run_case "codex standalone app rejects malformed version" t_codex_standalone_app_rejects_malformed_version
+run_case "codex discovery probes standalone app root" t_codex_discovery_probes_standalone_app_before_package_fallbacks
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
 run_case "unknown connector returns empty"   t_unknown_connector
