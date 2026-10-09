@@ -160,7 +160,9 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     {
         uint8_t pct = 0;
         if (s->eval_count > 0) {
-            pct = (uint8_t)(100U * s->eval_cache_hit_count / s->eval_count);
+            /* M-5 fix: Cap at 100% to prevent overflow on counter wrap */
+            uint32_t raw = 100U * s->eval_cache_hit_count / s->eval_count;
+            pct = (uint8_t)(raw > 100 ? 100 : raw);
         }
         buf[pos++] = pct;
     }

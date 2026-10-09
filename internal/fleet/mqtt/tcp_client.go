@@ -111,9 +111,13 @@ func buildTLSConfig() (*tls.Config, error) {
 		MinVersion:         tls.VersionTLS12,
 	}
 
-	// Allow skipping certificate verification for dev/self-signed certs.
+	// H-5 fix: Allow skipping verification only when NOT in production mode.
 	if skip := os.Getenv("DCLAW_TLS_SKIP_VERIFY"); skip == "true" || skip == "1" {
-		cfg.InsecureSkipVerify = true
+		if isProductionMode() {
+			log.Printf("[mqtt] WARNING: DCLAW_TLS_SKIP_VERIFY ignored in production mode — certificate verification enforced")
+		} else {
+			cfg.InsecureSkipVerify = true
+		}
 	}
 
 	// Custom CA certificate.
@@ -175,6 +179,17 @@ func NewTCPClient(addr, clientID string) *TCPClient {
 	}
 }
 
+// checkRequireTLS returns an error if DCLAW_REQUIRE_TLS is set and the
+// address is plaintext. Used in both Connect() and doConnect() paths.
+func (c *TCPClient) checkRequireTLS() error {
+	if requireTLS := os.Getenv("DCLAW_REQUIRE_TLS"); requireTLS == "true" || requireTLS == "1" {
+		if !isTLSScheme(c.addr) {
+			return fmt.Errorf("DCLAW_REQUIRE_TLS is set but broker address %q does not use mqtts:// or ssl://", c.addr)
+		}
+	}
+	return nil
+}
+
 // Connect establishes a TCP connection and sends the MQTT CONNECT packet.
 func (c *TCPClient) Connect(ctx context.Context) error {
 	c.mu.Lock()
@@ -184,13 +199,10 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 		return nil // already connected
 	}
 
-	// DCLAW_REQUIRE_TLS guard: If the operator has set DCLAW_REQUIRE_TLS=true
-	// (or "1"), refuse to connect unless the address uses mqtts:// or ssl://.
-	// This lets operators enforce TLS without code changes.
-	if requireTLS := os.Getenv("DCLAW_REQUIRE_TLS"); requireTLS == "true" || requireTLS == "1" {
-		if !isTLSScheme(c.addr) {
-			return fmt.Errorf("DCLAW_REQUIRE_TLS is set but broker address %q does not use mqtts:// or ssl://. Use a TLS scheme or unset DCLAW_REQUIRE_TLS", c.addr)
-		}
+	// H-6 fix: Extract REQUIRE_TLS check into helper so it runs in both
+	// Connect() and doConnect() (reconnect) paths.
+	if err := c.checkRequireTLS(); err != nil {
+		return err
 	}
 
 	var conn net.Conn
@@ -623,6 +635,11 @@ func (c *TCPClient) reconnectLoop(ctx context.Context) {
 // reconnectLoop(). It establishes a TCP connection, sends CONNECT, reads
 // CONNACK, and starts the reader/ping goroutines.
 func (c *TCPClient) doConnect(ctx context.Context) error {
+	// H-6 fix: Check REQUIRE_TLS in reconnect path too
+	if err := c.checkRequireTLS(); err != nil {
+		return err
+	}
+
 	c.mu.Lock()
 	if c.conn != nil {
 		c.mu.Unlock()

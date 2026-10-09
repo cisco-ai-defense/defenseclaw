@@ -821,7 +821,7 @@ int dclaw_mqtt_connect(void) {
             mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
             return -1;
         }
-        if (dclaw_tls_connect(fd) != 0) {
+        if (dclaw_tls_connect(fd, host) != 0) {
             fprintf(stderr, "[DCLAW-MQTT] TLS handshake failed\n");
             dclaw_tls_shutdown();
             close(fd);

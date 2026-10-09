@@ -108,8 +108,23 @@ int dclaw_tls_init(void) {
 
     mbedtls_ssl_conf_rng(&tls_conf, mbedtls_ctr_drbg_random, &tls_drbg);
 
-    /* Default: VERIFY_OPTIONAL. Upgraded to REQUIRED when a CA cert is loaded. */
+    /* CRT-1 fix: Default to VERIFY_REQUIRED. In dev mode only, allow
+     * VERIFY_OPTIONAL when no CA cert is provided. */
+#if DCLAW_DEV_MODE
     mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+#else
+    mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+#endif
+
+    /* CRT-3 fix: Enforce TLS 1.2 minimum to prevent downgrade attacks
+     * (BEAST, POODLE, Lucky13 on TLS 1.0/1.1). */
+    mbedtls_ssl_conf_min_version(&tls_conf,
+                                  MBEDTLS_SSL_MAJOR_VERSION_3,
+                                  MBEDTLS_SSL_MINOR_VERSION_3); /* TLS 1.2 */
+
+    /* H-1 fix: Set handshake timeout to prevent blocking forever on
+     * stalled servers. 10 seconds min, 30 seconds max. */
+    mbedtls_ssl_conf_handshake_timeout(&tls_conf, 10000, 30000);
 
     /* 4. Load CA certificate if DCLAW_CA_CERT_PATH is set */
     const char *ca_path = getenv("DCLAW_CA_CERT_PATH");
@@ -210,7 +225,7 @@ fail:
     return -1;
 }
 
-int dclaw_tls_connect(int tcp_fd) {
+int dclaw_tls_connect(int tcp_fd, const char *hostname) {
     if (!tls_initialized) {
         fprintf(stderr, "[DCLAW-TLS] ERROR: tls_connect called before tls_init\n");
         return -1;
@@ -223,6 +238,17 @@ int dclaw_tls_connect(int tcp_fd) {
         mbedtls_strerror(ret, errbuf, sizeof(errbuf));
         fprintf(stderr, "[DCLAW-TLS] ssl_session_reset failed: %s (0x%04x)\n", errbuf, (unsigned)-ret);
         return -1;
+    }
+
+    /* CRT-2 fix: Set hostname for SNI and certificate verification.
+     * Without this, any valid certificate is accepted regardless of domain. */
+    if (hostname && hostname[0]) {
+        ret = mbedtls_ssl_set_hostname(&tls_ssl, hostname);
+        if (ret != 0) {
+            fprintf(stderr, "[DCLAW-TLS] set_hostname(%s) failed: 0x%04x\n",
+                    hostname, (unsigned)-ret);
+            return -1;
+        }
     }
 
     /* Wrap the existing TCP socket FD in an mbedtls_net_context */
@@ -321,7 +347,10 @@ void dclaw_tls_shutdown(void) {
     mbedtls_x509_crt_free(&tls_ca_cert);
     mbedtls_x509_crt_free(&tls_device_cert);
     mbedtls_pk_free(&tls_device_key);
+    /* H-3 fix: mbedtls_net_free closes the fd. Set it to -1 so the caller
+     * (mqtt_client.c) does not double-close in mqtt_mark_disconnected(). */
     mbedtls_net_free(&tls_net);
+    tls_net.fd = -1;
 
     tls_initialized = false;
     fprintf(stderr, "[DCLAW-TLS] TLS engine shut down\n");
@@ -335,7 +364,7 @@ void dclaw_tls_shutdown(void) {
  */
 
 int  dclaw_tls_init(void)                                          { return -1; }
-int  dclaw_tls_connect(int tcp_fd)                                 { (void)tcp_fd; return -1; }
+int  dclaw_tls_connect(int tcp_fd, const char *hostname)            { (void)tcp_fd; (void)hostname; return -1; }
 int  dclaw_tls_write(const uint8_t *data, size_t len)              { (void)data; (void)len; return -1; }
 int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms)      { (void)buf; (void)len; (void)timeout_ms; return -1; }
 void dclaw_tls_shutdown(void)                                       {}

@@ -337,7 +337,7 @@ void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb);
 /* === TLS Engine (mbedTLS transport for MQTT) === */
 
 int  dclaw_tls_init(void);
-int  dclaw_tls_connect(int tcp_fd);
+int  dclaw_tls_connect(int tcp_fd, const char *hostname);
 int  dclaw_tls_write(const uint8_t *data, size_t len);
 int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms);
 void dclaw_tls_shutdown(void);
