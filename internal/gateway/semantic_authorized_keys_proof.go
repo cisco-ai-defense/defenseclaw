@@ -20,7 +20,9 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite = regexp.MustCompile(`^import pathlib; p = pathlib\.Path\.home\(\) / "\.ssh" / "authorized_keys"; p\.write_text\(p\.read_text\(\) \+ "[^"\\]*(?:\\n)?"\)$`)
+	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
+	trustedPythonOpenAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bopen\s*\(\s*os\.path\.expanduser\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\s*,\s*['"][aw](?:b|\+)?['"]\s*\)\.write\s*\(`)
+	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 )
 
@@ -37,7 +39,9 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	switch command.Program {
 	case "python3":
 		return command.Argv[1] == "-c" &&
-			trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) &&
+			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
+				trustedPythonOpenAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
+				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2])) &&
 			facts.ActiveHome != ""
 	case "perl":
 		return command.Argv[1] == "-e" &&
