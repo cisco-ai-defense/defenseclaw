@@ -177,6 +177,8 @@ type InstallWatcher struct {
 	// and addWatch adds such a watch. Both are used on the Run goroutine only.
 	pluginWaiting map[string]struct{}
 	addWatch      func(dir string)
+	// addContentWatch watches a skill folder's files (GAP-1087); Run sets it.
+	addContentWatch func(dir string)
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   ObservabilityV8Runtime
@@ -863,6 +865,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	watched := 0
 	watchedDirs := make(map[string]struct{})
 	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
+	w.addContentWatch = func(dir string) { addSkillContentWatches(fsw, dir, watchedDirs) }
 	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
 	watchOnce := func(dir, kind string) bool {
 		absolute, absErr := filepath.Abs(dir)
@@ -899,6 +902,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	for _, dir := range w.skillDirs {
 		if watchOnce(dir, "skill") {
 			w.watchIncompleteSkillFolders(dir)
+			w.watchSkillContents(dir)
 			// Claude Code syncs account skills two levels down
 			// (skills/synced/<account>/<skill>); watch those folders too so
 			// a newly synced skill is scanned on arrival (GAP-1409).
@@ -1015,6 +1019,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			evtType := "create"
 			if event.Op&fsnotify.Rename != 0 {
 				evtType = "rename"
+			}
+			if w.addContentWatch != nil && w.inSkillRoot(queued) {
+				w.addContentWatch(queued)
 			}
 			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(queued).Type.String(), "")
 			w.queuePending(queued)
@@ -1269,14 +1276,93 @@ func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
 	}
 }
 
-// changedSkillFolder maps an fsnotify event inside a folder the watcher waits
-// on in a skill root (one with no markdown content yet) to that folder.
+// changedSkillFolder maps an fsnotify event inside a skill folder to that
+// folder: one the watcher waits on (no markdown content yet), or an
+// installed skill whose files changed. The watcher used to act only on a
+// new folder in the root, so an edited SKILL.md or helper script (an
+// in-place append, an editor's atomic rename) waited for the hourly rescan
+// or a config reload (GAP-1087). Editor swap and backup files, hidden
+// files, Claude's synced account skills and vendor-bundled skills are left
+// to the rescan.
 func (w *InstallWatcher) changedSkillFolder(path string) (string, bool) {
 	parent := filepath.Clean(filepath.Dir(path))
-	if _, waiting := w.pluginWaiting[parent]; !waiting || !w.inSkillRoot(parent) {
+	if _, waiting := w.pluginWaiting[parent]; waiting && w.inSkillRoot(parent) {
+		return parent, true
+	}
+	if editorScratchFile(filepath.Base(path)) {
 		return "", false
 	}
-	return parent, true
+	if _, synced := w.claudeSyncedDepth(path); synced {
+		return "", false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range w.skillDirs {
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(rootAbs, pathAbs)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		if len(parts) < 2 || strings.HasPrefix(parts[0], ".") {
+			return "", false
+		}
+		skill := filepath.Join(rootAbs, parts[0])
+		if discover, _ := hermesSkillsDiscover(root); discover != nil {
+			// Hermes holds skills in category folders: the skill is the
+			// nearest folder with a SKILL.md.
+			skill = ""
+			for dir := filepath.Dir(pathAbs); dir != rootAbs && watcherPathAtOrBelow(dir, rootAbs); dir = filepath.Dir(dir) {
+				if info, statErr := os.Stat(filepath.Join(dir, "SKILL.md")); statErr == nil && info.Mode().IsRegular() {
+					skill = dir
+					break
+				}
+			}
+			if skill == "" {
+				return "", false
+			}
+		}
+		if info, statErr := os.Lstat(skill); statErr != nil || !info.IsDir() || isBundledSkillWatchPath(skill) {
+			return "", false
+		}
+		return skill, true
+	}
+	return "", false
+}
+
+// editorScratchFile reports the swap, lock and backup files editors keep
+// next to a file while it is open (vim .x.swp and 4913, emacs .#x and #x#,
+// x~), and hidden files: writing them is not a change to the skill.
+func editorScratchFile(name string) bool {
+	return strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~") || name == "4913" ||
+		(strings.HasPrefix(name, "#") && strings.HasSuffix(name, "#"))
+}
+
+// watchSkillContents watches the files of every skill folder already in
+// root, so a change to one reaches admission.
+func (w *InstallWatcher) watchSkillContents(root string) {
+	if w.addContentWatch == nil {
+		return
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || isBundledSkillWatchPath(path) {
+			continue
+		}
+		if _, synced := w.claudeSyncedDepth(path); synced {
+			continue
+		}
+		w.addContentWatch(path)
+	}
 }
 
 // inSkillRoot reports whether dir is a direct child of a watched skill root.
@@ -1296,6 +1382,11 @@ func (w *InstallWatcher) inSkillRoot(dir string) bool {
 func (w *InstallWatcher) skillFolderEvent(ctx context.Context, event fsnotify.Event, skill string) {
 	if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) == 0 {
 		return
+	}
+	if event.Op&fsnotify.Create != 0 && w.addContentWatch != nil {
+		if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
+			w.addContentWatch(event.Name)
+		}
 	}
 	w.recordWatcherEvent(ctx, "change", string(InstallSkill), "")
 	w.queuePending(skill)
@@ -3120,6 +3211,48 @@ func forgetDirWatches(fsw *fsnotify.Watcher, path string, watched map[string]str
 
 // addDirWatches watches root and its real (non-symlink) subfolders down to
 // maxDepth levels below it.
+// skillContentWatchDepth bounds how far below a skill folder its files are
+// watched (SKILL.md, scripts/, scripts/lib/...).
+const skillContentWatchDepth = 3
+
+// addSkillContentWatches watches dir and its sub-folders down to
+// skillContentWatchDepth, skipping links, hidden folders and dependency or
+// cache trees, whose churn says nothing about the skill.
+func addSkillContentWatches(fsw *fsnotify.Watcher, dir string, watched map[string]struct{}) {
+	dir = filepath.Clean(dir)
+	_ = filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == dir {
+				return fs.SkipAll
+			}
+			return fs.SkipDir
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fs.SkipDir
+		}
+		if path != dir {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") || name == "node_modules" || name == "__pycache__" {
+				return fs.SkipDir
+			}
+			if rel, relErr := filepath.Rel(dir, path); relErr != nil ||
+				len(strings.Split(rel, string(filepath.Separator))) > skillContentWatchDepth {
+				return fs.SkipDir
+			}
+		}
+		key := strings.ToLower(path)
+		if _, exists := watched[key]; !exists {
+			if addErr := fsw.Add(path); addErr == nil {
+				watched[key] = struct{}{}
+			}
+		}
+		return nil
+	})
+}
+
 func addDirWatches(
 	fsw *fsnotify.Watcher,
 	root string,

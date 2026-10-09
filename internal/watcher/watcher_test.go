@@ -439,6 +439,39 @@ func TestWatcher_DetectsNewDirectory(t *testing.T) {
 	}
 }
 
+// GAP-1087: a write inside an installed skill folder (here a helper script
+// one level down) reaches admission at once, not at the next rescan.
+func TestWatcher_AdmitsSkillChangedInPlace(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.AssetPolicy.Skill.Allowed = append(cfg.AssetPolicy.Skill.Allowed, config.AssetPolicyRule{Name: "usm-notes", Reason: "pre-approved"})
+	scripts := filepath.Join(skillDir, "usm-notes", "scripts")
+	if err := os.MkdirAll(scripts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "usm-notes", "SKILL.md"), []byte("# notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admitted := make(chan AdmissionResult, 4)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, func(r AdmissionResult) { admitted <- r })
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx) }()
+	defer func() { cancel(); <-errCh }()
+	time.Sleep(500 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(scripts, "helper.py"), []byte("print('edited')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-admitted:
+		if r.Event.Name != "usm-notes" {
+			t.Fatalf("admitted %+v, want usm-notes", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an edit inside the installed skill reached no admission")
+	}
+}
+
 func TestAdmission_GatePrecedence_BlockBeatsAllow(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
