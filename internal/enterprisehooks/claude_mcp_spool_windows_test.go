@@ -9,8 +9,18 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// Project names in .claude.json are controlled by the enrolled user. A UNC
+// path must be rejected before LocalSystem touches the remote filesystem.
+func TestWindowsClaudeProjectMCPRejectsUNC(t *testing.T) {
+	_, err := readWindowsClaudeProjectMCP(`\\server\share\project`)
+	if err == nil || !strings.Contains(err.Error(), "local drive letter") {
+		t.Fatalf("UNC project path was not rejected before filesystem access: %v", err)
+	}
+}
 
 // GAP-0424: the enumerator publishes the Claude Code servers of an enrolled
 // user (user scope, local scope, and project .mcp.json files) for the
