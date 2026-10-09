@@ -398,6 +398,25 @@ def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
     assert "mode: action # keep" in open(path, encoding="utf-8").read()
 
 
+def test_stale_registry_sources_save_preserves_concurrent_addition(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+    from defenseclaw.config import RegistrySource
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path)
+    first = config_module.load(data_dir=str(tmp_path))
+    second = config_module.load(data_dir=str(tmp_path))
+    first.registries.sources.append(RegistrySource(id="source-a", kind="clawhub", content="skill"))
+    second.registries.sources.append(RegistrySource(id="source-b", kind="clawhub", content="skill"))
+
+    first.save()
+    with pytest.raises(config_writer.ConfigConflictError, match="registries.sources"):
+        second.save()
+    sources = yaml.safe_load(open(path, encoding="utf-8"))["registries"]["sources"]
+    assert [source["id"] for source in sources] == ["source-a"]
+
+
 def test_verified_noop_rejects_a_concurrent_registry_policy_change(tmp_path, monkeypatch):
     from defenseclaw import config as config_module
     from defenseclaw.registry_policy import RegistryRequiredUpdateError, set_registry_required
