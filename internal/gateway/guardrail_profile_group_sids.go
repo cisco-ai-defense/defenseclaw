@@ -123,7 +123,7 @@ type profileGroupSIDEntry struct {
 }
 
 // newProfileGroupSIDs resolves the group names of assignments, waiting at most
-// wait for them. SIDs need no lookup; numeric names are no Windows group.
+// wait for them. SIDs need no lookup; numeric names still require one.
 func newProfileGroupSIDs(assignments []config.ProfileAssignment, lookup func(string) (string, error), wait time.Duration) *profileGroupSIDs {
 	s := &profileGroupSIDs{lookup: lookup, entries: map[string]*profileGroupSIDEntry{}}
 	now := time.Now()
@@ -165,7 +165,7 @@ func newProfileGroupSIDs(assignments []config.ProfileAssignment, lookup func(str
 // profileGroupNeedsSID reports whether an assignment group is a name to
 // resolve rather than a SID.
 func profileGroupNeedsSID(group string) bool {
-	return group != "" && !strings.HasPrefix(strings.ToUpper(group), "S-1-") && strings.Trim(group, "0123456789") != ""
+	return group != "" && !strings.HasPrefix(strings.ToUpper(group), "S-1-")
 }
 
 // refresh absorbs completed lookups and starts retries that are due. Hooks
