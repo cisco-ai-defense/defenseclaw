@@ -22,18 +22,23 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
 // What the hook guardian finds changed between lifecycle runs, and the
-// lifecycle puts back without a transaction (GAP-1217): a missing hook
-// binary (an antivirus quarantine), which every agent treats as a
-// non-blocking hook error and so runs tool calls without DefenseClaw. The
-// guardian runs sandboxed and cannot write the install root on Linux, so it
-// only notices it (TamperedFiles) and starts the config-apply job
-// (RequestTamperRestore). That job's ensure restores it under the lifecycle
-// lock before it checks for changes, from the copy the lifecycle sealed when
-// it committed the deployment.
+// lifecycle puts back without a transaction (GAP-1178, GAP-1217): a missing
+// hook binary (an antivirus quarantine), which every agent treats as a
+// non-blocking hook error and so runs tool calls without DefenseClaw, and a
+// DefenseClaw machine-policy drop-in that was edited or deleted. The
+// guardian runs sandboxed and cannot write the install root or the
+// lifecycle state on Linux, so it only notices them (TamperedFiles) and
+// starts the config-apply job (RequestTamperRestore). That job's ensure
+// restores them under the lifecycle lock before it checks for changes: the
+// hook binary from the copy the lifecycle sealed when it committed the
+// deployment, and the machine policy from the applied config.
 
 // codeHookBinaryNotRestored warns that a missing hook binary could not be
 // put back from the sealed copy.
@@ -181,8 +186,52 @@ func (l *lifecycle) restoreTamperedHookBinary(record *Deployment) bool {
 	return restored
 }
 
+// restoreTamperedMachinePolicy puts DefenseClaw's machine policy back before
+// ensure checks for changes, when the installed config is the applied one
+// and a connector the deployment published no longer has its hooks in its
+// vendor file. It publishes what the last transaction published, as
+// reconcile does, so the config-apply job the hook guardian starts for an
+// edited or deleted drop-in restores it with no transaction and no service
+// restart. A change of the covered connectors still takes the transaction.
+func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
+	env := l.env
+	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
+	if err != nil || sha256Bytes(raw) != record.ConfigSHA256 || len(record.MachinePolicyConnectors) == 0 {
+		return false
+	}
+	validated, err := env.validateConfig(raw)
+	if err != nil {
+		return false
+	}
+	intended, err := env.MachinePolicy.Intended(validated.Loaded)
+	if err != nil {
+		return false
+	}
+	want := intersectSorted(record.MachinePolicyConnectors, intended)
+	result, err := env.MachinePolicy.Verify(validated.Loaded)
+	if isCoded(err, codeMachinePolicy) || (sameStrings(coveredMachinePolicy(want, result), want) && missingClaudeVersionFloor(result) == "") {
+		return false
+	}
+	published, err := env.MachinePolicy.Publish(validated.Loaded)
+	if isCoded(err, codeMachinePolicy) {
+		return false
+	}
+	restored := false
+	for _, state := range published.States {
+		if state.Changed && contains(want, state.Connector) {
+			l.result.Changes = append(l.result.Changes, fmt.Sprintf(
+				"put back DefenseClaw's %s machine policy (%s), which was changed or removed after the last lifecycle run",
+				state.Connector, strings.Join(state.Paths, ", ")))
+			restored = true
+		}
+	}
+	return restored
+}
+
 // TamperedFiles lists what the hook guardian finds changed since the last
-// lifecycle run that ensure puts back: a missing hook binary.
+// lifecycle run that ensure puts back: a missing hook binary, and a
+// DefenseClaw machine-policy drop-in whose bytes are not the ones the
+// lifecycle published.
 func (e *Env) TamperedFiles() []string {
 	e.fillDefaults()
 	var out []string
@@ -190,6 +239,20 @@ func (e *Env) TamperedFiles() []string {
 		if record, err := e.loadDeployment(); err == nil && record != nil && record.Files[e.installedHookPath()] != "" {
 			out = append(out, e.installedHookPath())
 		}
+	}
+	manager, ok := e.MachinePolicy.(*policyManager)
+	if !ok {
+		return out
+	}
+	opts, err := manager.options(nil)
+	if err != nil {
+		return out
+	}
+	for _, path := range enterprisepolicy.TamperedDropIns(opts) {
+		if e.Root != "" {
+			path = strings.TrimPrefix(path, e.Root)
+		}
+		out = append(out, path)
 	}
 	return out
 }

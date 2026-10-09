@@ -26,18 +26,23 @@ import (
 )
 
 // The standalone Unix guardian notices, between lifecycle runs, a missing
-// hook binary (an antivirus quarantine). Its sandbox cannot write the
-// install root, so it starts the lifecycle's config-apply job, whose ensure
-// puts it back, and logs each find as a tamper (GAP-1217). Before, a missing
-// hook binary left every agent running tool calls without DefenseClaw until
-// an administrator reinstalled the package.
+// hook binary (an antivirus quarantine) and an edited or deleted DefenseClaw
+// machine-policy drop-in. Its sandbox cannot write either, so it starts the
+// lifecycle's config-apply job, whose ensure puts them back, and logs each
+// find as a tamper (GAP-1178, GAP-1217). Before, a missing hook binary left
+// every agent running tool calls without DefenseClaw, and a changed drop-in
+// left the hooks off for every user, until an administrator ran repair.
 
 // unixTamperCheckInterval is how often the guardian checks between
-// reconciles; unixTamperRetry is how long it waits before it starts the
-// restore again for the same files.
+// reconciles. While the same files stay tampered after a restore was
+// started (a drop-in another tool holds with chattr +i, say), the next start
+// waits unixTamperRetry, doubling up to unixTamperMaxRetry: an ensure that
+// cannot restore a drop-in applies a transaction, which restarts the
+// services, and must not do so every half minute.
 var (
 	unixTamperCheckInterval = 5 * time.Second
 	unixTamperRetry         = 30 * time.Second
+	unixTamperMaxRetry      = 15 * time.Minute
 )
 
 // unixTamperEnv is the lifecycle environment; tests replace it.
@@ -56,6 +61,7 @@ var unixTamper struct {
 	sync.Mutex
 	files     string
 	requested time.Time
+	wait      time.Duration
 }
 
 func init() {
@@ -85,7 +91,7 @@ func watchUnixStandaloneTamper(ctx context.Context, stderr io.Writer) {
 }
 
 // checkUnixStandaloneTamper starts the lifecycle's restore when it finds
-// tampered files, at most once per unixTamperRetry for the same files.
+// tampered files, backing off while the same files stay tampered.
 func checkUnixStandaloneTamper(ctx context.Context, stderr io.Writer, now time.Time) {
 	if !enterpriseHooksStandaloneUnixActive() || os.Geteuid() != 0 {
 		return
@@ -98,11 +104,16 @@ func checkUnixStandaloneTamper(ctx context.Context, stderr io.Writer, now time.T
 	unixTamper.Lock()
 	defer unixTamper.Unlock()
 	if files == "" {
-		unixTamper.files, unixTamper.requested = "", time.Time{}
+		unixTamper.files, unixTamper.requested, unixTamper.wait = "", time.Time{}, 0
 		return
 	}
-	if files == unixTamper.files && now.Sub(unixTamper.requested) < unixTamperRetry {
-		return
+	if files == unixTamper.files {
+		if now.Sub(unixTamper.requested) < unixTamper.wait {
+			return
+		}
+		unixTamper.wait = min(unixTamper.wait*2, unixTamperMaxRetry)
+	} else {
+		unixTamper.wait = unixTamperRetry
 	}
 	unixTamper.files, unixTamper.requested = files, now
 	if err := host.RequestTamperRestore(ctx); err != nil {

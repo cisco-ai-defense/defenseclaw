@@ -263,6 +263,46 @@ func TestVerifyReportsMissingMachinePolicy(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 }
 
+// GAP-1178: an edited or deleted Claude Code drop-in stayed so, with the
+// hooks off for every user, until an administrator ran repair. The hook
+// guardian finds it and starts the config-apply job, whose ensure puts the
+// drop-in back byte for byte with no transaction and no service restart.
+func TestTamperedClaudeDropInIsFoundAndPutBackByEnsure(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	want := h.read(claudeDropIn)
+	if got := h.env.TamperedFiles(); len(got) != 0 {
+		t.Fatalf("a fresh install reports tampered files: %v", got)
+	}
+	for name, tamper := range map[string]func() error{
+		"edited": func() error {
+			return os.WriteFile(h.env.P(claudeDropIn), []byte(strings.Replace(want, "defenseclaw-hook", "defenseclaw-hookx", 1)), 0o644)
+		},
+		"deleted": func() error { return os.Remove(h.env.P(claudeDropIn)) },
+	} {
+		if err := tamper(); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{claudeDropIn}) {
+			t.Fatalf("%s: the guardian check found %v", name, got)
+		}
+		calls := len(h.services.calls)
+		ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+		requireOK(t, ensure)
+		if h.read(claudeDropIn) != want || ensure.Noop || !strings.Contains(strings.Join(ensure.Changes, "\n"), "put back DefenseClaw's claudecode machine policy") {
+			t.Fatalf("%s: ensure did not put the drop-in back: noop=%v changes=%v", name, ensure.Noop, ensure.Changes)
+		}
+		for _, call := range h.services.calls[calls:] {
+			if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "restart ") {
+				t.Fatalf("%s: the restore ran a transaction (%s)", name, call)
+			}
+		}
+		if got := h.env.TamperedFiles(); len(got) != 0 {
+			t.Fatalf("%s: still tampered after ensure: %v", name, got)
+		}
+	}
+}
+
 // A DefenseClaw entry removed from vendor machine policy was reported twice
 // with a generic "vendor machine policy changed since the last transaction;
 // run ensure" that named neither the connector nor the file, while the
