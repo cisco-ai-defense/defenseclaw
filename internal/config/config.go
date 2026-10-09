@@ -3167,6 +3167,16 @@ func restoreRuntimeV8GuardrailConnectors(cfg *Config, configFile string, raw []b
 		Connectors map[string]profileConnectorRules `yaml:"connectors"`
 	}
 	var source struct {
+		ApplicationProtection struct {
+			Guardrail struct {
+				Rules *GuardrailRulesConfig `yaml:"rules"`
+			} `yaml:"guardrail"`
+			Connectors map[string]struct {
+				Guardrail struct {
+					Rules *GuardrailRulesConfig `yaml:"rules"`
+				} `yaml:"guardrail"`
+			} `yaml:"connectors"`
+		} `yaml:"application_protection"`
 		Admission    AdmissionConfig    `yaml:"admission"`
 		LLMProviders LLMProvidersConfig `yaml:"llm_providers"`
 		Guardrail    struct {
@@ -3177,6 +3187,15 @@ func restoreRuntimeV8GuardrailConnectors(cfg *Config, configFile string, raw []b
 	}
 	if err := document.Document.Decode(&source); err != nil {
 		return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+	}
+	cfg.ApplicationProtection.Guardrail.Rules = source.ApplicationProtection.Guardrail.Rules
+	for name, restored := range source.ApplicationProtection.Connectors {
+		if cfg.ApplicationProtection.Connectors == nil {
+			cfg.ApplicationProtection.Connectors = make(map[string]ApplicationProtectionConnectorConfig)
+		}
+		connector := cfg.ApplicationProtection.Connectors[name]
+		connector.Guardrail.Rules = restored.Guardrail.Rules
+		cfg.ApplicationProtection.Connectors[name] = connector
 	}
 	cfg.Guardrail.Connectors = source.Guardrail.Connectors
 	cfg.Guardrail.Rules = source.Guardrail.Rules
