@@ -21,7 +21,7 @@ import (
 
 var (
 	trustedPathlibAuthorizedKeysWrite = regexp.MustCompile(`^import pathlib; p = pathlib\.Path\.home\(\) / "\.ssh" / "authorized_keys"; p\.write_text\(p\.read_text\(\) \+ "[^"\\]*(?:\\n)?"\)$`)
-	trustedPerlAuthorizedKeysWrite    = regexp.MustCompile(`^open\(F, ">>", "\$ENV\{HOME\}/\.ssh/authorized_keys"\); print F "[^"\\]*(?:\\n)?"; close\(F\)$`)
+	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 )
 
 func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
@@ -46,6 +46,119 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	default:
 		return false
 	}
+}
+
+// A redirection truncates its target before the command runs. In particular,
+// a shell no-op (or a redirect without a command) still changes the file.
+func trustedNoOpAuthorizedKeysRedirect(input actionfacts.Input) bool {
+	if input.Command == "" || len(input.Command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	if stmt.Background || stmt.Negated || stmt.Redirs[0].Op != syntax.RdrOut {
+		return false
+	}
+	if stmt.Cmd != nil {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) != 1 ||
+			len(call.Args[0].Parts) != 1 {
+			return false
+		}
+		literal, ok := call.Args[0].Parts[0].(*syntax.Lit)
+		if !ok || literal.Value != ":" {
+			return false
+		}
+	}
+	return trustedAuthorizedKeysRedirectTarget(input, stmt.Redirs[0].Word)
+}
+
+func trustedHereStringAuthorizedKeysWrite(input actionfacts.Input) bool {
+	if input.Command == "" || len(input.Command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 2 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Negated || len(call.Assigns) != 0 ||
+		len(call.Args) != 1 || len(call.Args[0].Parts) != 1 {
+		return false
+	}
+	program, ok := call.Args[0].Parts[0].(*syntax.Lit)
+	if !ok || program.Value != "cat" {
+		return false
+	}
+	var output *syntax.Word
+	for _, redirect := range stmt.Redirs {
+		if redirect.Op == syntax.RdrOut || redirect.Op == syntax.AppOut {
+			output = redirect.Word
+		} else if redirect.Op != syntax.WordHdoc {
+			return false
+		}
+	}
+	return trustedAuthorizedKeysRedirectTarget(input, output)
+}
+
+func trustedDDOutputAuthorizedKeysWrite(input actionfacts.Input) bool {
+	if input.Command == "" || len(input.Command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return false
+	}
+	var output string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) < 2 ||
+			len(call.Args[0].Parts) != 1 {
+			return true
+		}
+		program, ok := call.Args[0].Parts[0].(*syntax.Lit)
+		if !ok || program.Value != "dd" {
+			return true
+		}
+		for _, word := range call.Args[1:] {
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < 0 || end > len(input.Command) || end-start <= 3 {
+				continue
+			}
+			if candidate := input.Command[start:end]; strings.HasPrefix(candidate, "of=") {
+				output = candidate[3:]
+				return false
+			}
+		}
+		return false
+	})
+	return output != "" && trustedAuthorizedKeysRedirectText(input, output)
+}
+
+func trustedAuthorizedKeysRedirectTarget(input actionfacts.Input, target *syntax.Word) bool {
+	if target == nil {
+		return false
+	}
+	start, end := int(target.Pos().Offset()), int(target.End().Offset())
+	if start < 0 || end <= start || end > len(input.Command) {
+		return false
+	}
+	return trustedAuthorizedKeysRedirectText(input, input.Command[start:end])
+}
+
+func trustedAuthorizedKeysRedirectText(input actionfacts.Input, target string) bool {
+	inner := input
+	inner.Args, inner.Argv = nil, nil
+	inner.Command = "true > " + target
+	inner.DialectHint = actionfacts.DialectPOSIX
+	parsed := actionfacts.Analyze(inner)
+	enforcement := parsed.EnforcementProjection()
+	return enforcement.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcement) ||
+		homeResolvedTwinProves(inner, parsed, sshAuthorizedKeysCommandPrerequisite)
 }
 
 func trustedFindExecAuthorizedKeysWrite(input actionfacts.Input) bool {
