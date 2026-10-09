@@ -1684,6 +1684,26 @@
       "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
     },
     {
+      "name": "DEFENSECLAW_GUARD_BODY",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the JSON body of the block it sends to the gateway's foreign-hook session route when the check gave no decision. curl reads it on a descriptor (defenseclaw_gateway_post), never on its command line.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
       "name": "DEFENSECLAW_GUARD_CAUSE",
       "category": "hook_internal",
       "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: why the foreign-hook check gave no decision (its exit status, no answer, or an answer DefenseClaw could not read), named in the block message.",
