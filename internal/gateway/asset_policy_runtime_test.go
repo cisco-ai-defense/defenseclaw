@@ -819,6 +819,30 @@ func TestMCPURLRuleMatchesTheCallersServer(t *testing.T) {
 	if call(other) {
 		t.Fatal("url deny matched another user's server")
 	}
+
+	// GAP-0954: a server the agent's command line defines (claude
+	// --mcp-config) wins over the one the caller's files name, and a
+	// command-line source the hook could not read fails closed.
+	benign := t.TempDir()
+	if err := os.WriteFile(filepath.Join(benign, ".claude.json"), []byte(`{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28562/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1004, Home: benign})
+	commandLine := context.WithValue(peer, claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: &assetfacts.MCPServer{
+		Name: "notes", URL: "http://127.0.0.1:28561/mcp", Source: assetfacts.SourceCommandLine}})
+	if !call(commandLine) {
+		t.Fatal("url deny did not match the server the agent's command line defines")
+	}
+	if call(peer) {
+		t.Fatal("url deny matched the caller's benign server")
+	}
+	unproven := context.WithValue(peer, claimedAssetFactsContextKey{}, assetfacts.Facts{MCPUnproven: "notes"})
+	decision, matched := api.claudeCodeMCPAssetDecision(unproven, claudeCodeHookRequest{
+		HookEventName: "PreToolUse", ToolName: "mcp__notes__count_words", CWD: project,
+	})
+	if !matched || decision.Action != "block" || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("unproven command-line server: matched=%v decision=%+v, want a fail-closed block", matched, decision)
+	}
 }
 
 // GAP-0939: Codex shows a hyphenated MCP server to its hooks as

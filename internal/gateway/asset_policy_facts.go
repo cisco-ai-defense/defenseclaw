@@ -144,6 +144,16 @@ func (a *APIServer) skillFolderAccessDecision(
 // gateway reads the caller's home and, where it may not (Linux and macOS),
 // takes the definition the standalone hook read as the user (GAP-0576).
 func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Config, connector, cwd, name string) (config.MCPServerEntry, bool) {
+	// The agent's own command line (claude --mcp-config, codex -c) overrides
+	// every file this gateway can read, so the hook's reading of it decides
+	// (GAP-0954).
+	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Source == assetfacts.SourceCommandLine &&
+		config.SameMCPToolServer(connector, server.Name, name) {
+		return config.MCPServerEntry{
+			Name: server.Name, URL: server.URL, Command: server.Command,
+			Args: append([]string(nil), server.Args...), Transport: server.Transport,
+		}, true
+	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount {
 		return cfg.LookupMCPToolServerForConnector(connector, cwd, name)

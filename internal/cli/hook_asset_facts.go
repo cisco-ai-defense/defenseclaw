@@ -12,10 +12,12 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -57,13 +59,62 @@ func hookAssetFacts(connector string, payload []byte) string {
 		addSkill(ref.Name, ref.Dir)
 	}
 	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" {
-		if entry, ok := (*config.Config)(nil).LookupMCPToolServerForConnector(connector, event.CWD, server); ok {
+		entry, source, ok := hookCommandLineMCPServer(connector, event.CWD, server)
+		switch {
+		case source == unprovenMCPSource:
+			facts.MCPUnproven = server
+		case !ok:
+			entry, ok = (*config.Config)(nil).LookupMCPToolServerForConnector(connector, event.CWD, server)
+		}
+		if ok {
 			facts.MCP = &assetfacts.MCPServer{
 				Name: entry.Name, URL: entry.URL, Command: entry.Command, Args: entry.Args, Transport: entry.Transport,
+				Source: source,
 			}
 		}
 	}
 	return assetfacts.Encode(facts)
+}
+
+// hookAgentCommandLine reads the agent process's arguments; tests replace it.
+var hookAgentCommandLine = agentprocess.CommandLine
+
+const unprovenMCPSource = "unproven"
+
+// hookCommandLineMCPServer resolves the MCP server a tool call names from
+// the agent's command line, which overrides the config files: Claude Code
+// started with --mcp-config FILE reached an unapproved URL under an approved
+// server name while DefenseClaw judged the definition in ~/.claude.json
+// (GAP-0954). The source is assetfacts.SourceCommandLine when the command
+// line defines the server, unprovenMCPSource when the agent's arguments or a
+// source they name cannot be read, or when --strict-mcp-config leaves the
+// server without a definition, and "" when the files decide.
+func hookCommandLineMCPServer(connector, cwd, server string) (config.MCPServerEntry, string, bool) {
+	args, dir, err := hookAgentCommandLine()
+	if errors.Is(err, agentprocess.ErrNoAgent) {
+		return config.MCPServerEntry{}, "", false
+	}
+	if err != nil {
+		return config.MCPServerEntry{}, unprovenMCPSource, false
+	}
+	if strings.TrimSpace(dir) == "" {
+		dir = cwd
+	}
+	found, present, err := config.CommandLineMCPServer(connector, args, dir, cwd, server)
+	switch {
+	case !present:
+		return config.MCPServerEntry{}, "", false
+	case err != nil:
+		return config.MCPServerEntry{}, unprovenMCPSource, false
+	case found.Found && (strings.TrimSpace(found.Entry.URL) != "" || strings.TrimSpace(found.Entry.Command) != ""):
+		return found.Entry, assetfacts.SourceCommandLine, true
+	case found.Found:
+		return config.MCPServerEntry{}, unprovenMCPSource, false
+	case found.Exclusive:
+		return config.MCPServerEntry{}, unprovenMCPSource, false
+	default:
+		return config.MCPServerEntry{}, "", false
+	}
 }
 
 // hookInvokedSkillName is the skill a Claude Code Skill call or a Codex
