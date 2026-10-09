@@ -53,6 +53,7 @@ func init() {
 		previousBefore(stderr)
 		if enterprisehooks.WindowsStandaloneProcess() {
 			keepWindowsStandaloneHookBinary(stderr, false)
+			keepWindowsStandaloneClaudeDropIn(stderr)
 		}
 	}
 	previous := enterpriseHookAfterWatchReconcile
@@ -76,8 +77,9 @@ var (
 	windowsHookBinaryLastErr string
 )
 
-// watchWindowsStandaloneHookBinary restores a missing hook binary within
-// one check interval for the life of the guardian watch loop.
+// watchWindowsStandaloneHookBinary restores a missing hook binary, and an
+// edited or deleted Claude Code drop-in, within one check interval for the
+// life of the guardian watch loop.
 func watchWindowsStandaloneHookBinary(ctx context.Context, stderr io.Writer) {
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return
@@ -90,6 +92,7 @@ func watchWindowsStandaloneHookBinary(ctx context.Context, stderr io.Writer) {
 			return
 		case <-ticker.C:
 			keepWindowsStandaloneHookBinary(stderr, true)
+			keepWindowsStandaloneClaudeDropIn(stderr)
 		}
 	}
 }
@@ -162,6 +165,40 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenMissing bool) {
 	windowsHookBinaryLastErr = ""
 	if restored {
 		fmt.Fprintf(stderr, "[hook-guardian] restored the missing hook binary %s from the guardian's protected copy (sha256 %s)\n", target, want)
+	}
+}
+
+// windowsRestoreClaudeDropIn puts DefenseClaw's Claude Code drop-in back
+// from its ownership record; tests replace it.
+var windowsRestoreClaudeDropIn = enterprisehooks.RestoreWindowsClaudeManagedPolicyDrift
+
+// windowsClaudeDropInLastErr keeps the drop-in check from logging the same
+// failure every interval.
+var windowsClaudeDropInLastErr string
+
+// keepWindowsStandaloneClaudeDropIn puts DefenseClaw's own Claude Code
+// drop-in (90-defenseclaw.json) back when it was edited or deleted, as the
+// Unix guardian does (GAP-1178). The Windows guardian left it changed, so
+// every enrolled user's Claude Code prompt failed closed and the reconcile
+// and Setup /repair refused the file as an administrator edit (GAP-1108).
+func keepWindowsStandaloneClaudeDropIn(stderr io.Writer) {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
+		return
+	}
+	windowsHookBinaryMu.Lock()
+	defer windowsHookBinaryMu.Unlock()
+	restored, err := windowsRestoreClaudeDropIn()
+	if err != nil {
+		if message := err.Error(); message != windowsClaudeDropInLastErr {
+			windowsClaudeDropInLastErr = message
+			fmt.Fprintf(stderr, "[hook-guardian] %s\n", message)
+		}
+		return
+	}
+	windowsClaudeDropInLastErr = ""
+	if restored {
+		fmt.Fprintf(stderr, "[hook-guardian] tamper: put back DefenseClaw's Claude Code drop-in, which was changed or removed outside DefenseClaw\n")
 	}
 }
 

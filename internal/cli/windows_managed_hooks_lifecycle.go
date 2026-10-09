@@ -292,6 +292,14 @@ func runWindowsManagedHooksLifecycle(
 		if err := windowsManagedHooksVendorFolderTakeBack(); err != nil {
 			return fail(err)
 		}
+		if enterprisehooks.WindowsStandaloneProcess() {
+			// DefenseClaw's own Claude Code drop-in, edited or deleted, is put
+			// back from its ownership record before the snapshot reads it:
+			// the snapshot refused it as an administrator edit and Setup
+			// /repair failed 1603 (GAP-1108). A drop-in it cannot put back is
+			// left to the snapshot, which names the refusal.
+			_, _ = enterprisehooks.RestoreWindowsClaudeManagedPolicyDrift()
+		}
 		current, active, err := enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
 		if err != nil {
 			return fail(err)
