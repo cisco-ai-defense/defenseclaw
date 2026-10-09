@@ -425,13 +425,12 @@ dc_validate_args() {
     fi
 }
 
-# dc_binaries_damaged: the installed gateway or hook binary is empty, which
-# a power loss during a package upgrade leaves behind (GAP-0467). The same
-# package version then counts as not installed, so it is installed again.
+# dc_binaries_damaged: a missing or empty required binary means the
+# installed package needs repair even when its version already matches.
 dc_binaries_damaged() {
     bin_dir=$(dirname "$DC_GATEWAY")
-    for name in defenseclaw-gateway defenseclaw-hook; do
-        if [ -e "$bin_dir/$name" ] && [ ! -s "$bin_dir/$name" ]; then
+    for name in defenseclaw-gateway defenseclaw-hook defenseclaw-sensor-helper; do
+        if [ ! -s "$bin_dir/$name" ]; then
             return 0
         fi
     done
@@ -891,7 +890,7 @@ dc_main() {
     elif ! dc_trusted_path "$gateway"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned"
     elif dc_binaries_damaged; then
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "the installed DefenseClaw binaries are empty, likely from a power loss during a package upgrade; run this script with the package as --source, or reinstall the package"
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "a required installed DefenseClaw binary is missing or empty; run this script with the package as --source, or reinstall the package"
     fi
 
     # The credential is stored first: a config that references it (the AI
