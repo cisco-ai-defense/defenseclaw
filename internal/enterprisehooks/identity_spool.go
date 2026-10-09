@@ -100,18 +100,19 @@ const identitySpoolClockSlack = time.Minute
 // written under a slow clock did once it was corrected, and the accounts
 // assigned by UPN fell to the default profile until the guardian's next
 // interval (GAP-0921). oldest is the time of the oldest record, zero for
-// none.
-func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest time.Time, stale bool) {
+// none, and key its uid or SID.
+func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest time.Time, key string, stale bool) {
 	if dir == "" {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	future := false
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name, ok := strings.CutSuffix(entry.Name(), ".json")
+		if entry.IsDir() || !ok {
 			continue
 		}
 		info, err := entry.Info()
@@ -120,13 +121,13 @@ func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest 
 		}
 		written := info.ModTime()
 		if oldest.IsZero() || written.Before(oldest) {
-			oldest = written
+			oldest, key = written, name
 		}
 		if written.Sub(now) > identitySpoolClockSlack {
 			future = true
 		}
 	}
-	return oldest, !oldest.IsZero() && (future || now.Sub(oldest) > fresh)
+	return oldest, key, !oldest.IsZero() && (future || now.Sub(oldest) > fresh)
 }
 
 // IdentitySpoolDir is the spool directory for a guardian authorization
