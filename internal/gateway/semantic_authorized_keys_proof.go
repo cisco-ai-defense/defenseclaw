@@ -22,6 +22,10 @@ import (
 var (
 	trustedPathlibAuthorizedKeysWrite = regexp.MustCompile(`^import pathlib; p = pathlib\.Path\.home\(\) / "\.ssh" / "authorized_keys"; p\.write_text\(p\.read_text\(\) \+ "[^"\\]*(?:\\n)?"\)$`)
 	trustedPerlAuthorizedKeysWrite    = regexp.MustCompile(`^open\(F, ">>", "\$ENV\{HOME\}/\.ssh/authorized_keys"\); print F "[^"\\]*(?:\\n)?"; close\(F\)$`)
+	trustedInterpreterKeysPath        = regexp.MustCompile(`(?:~|\$HOME|\$ENV\{HOME\}|/[A-Za-z0-9_./ -]+)/\.ssh/authorized_keys(?:2)?`)
+	trustedInterpreterOpenCall        = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync)\s*\(`)
+	trustedInterpreterWriteMode       = regexp.MustCompile(`['"](?:[awx](?:[bt]?\+?|\+[bt]?)|r(?:[bt]?\+|\+[bt]?)|>>|>)['"]`)
+	trustedInterpreterWriteCall       = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
 )
 
 func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
@@ -35,17 +39,116 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 		return false
 	}
 	switch command.Program {
-	case "python3":
-		return command.Argv[1] == "-c" &&
-			trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) &&
-			facts.ActiveHome != ""
+	case "python", "python3":
+		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
+			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
+				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
 	case "perl":
-		return command.Argv[1] == "-e" &&
-			trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) &&
-			facts.ActiveHome != ""
+		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+			(trustedPerlAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
+				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
+	case "ruby", "node":
+		return command.Argv[1] == "-e" && facts.ActiveHome != "" &&
+			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome)
 	default:
 		return false
 	}
+}
+
+func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
+	if len(code) == 0 || len(code) > 16<<10 ||
+		!trustedAuthorizedKeysPathInText(code, activeHome) {
+		return false
+	}
+	for _, location := range trustedInterpreterOpenCall.FindAllStringIndex(code, -1) {
+		if !interpreterCodePosition(code, location[0]) {
+			continue
+		}
+		call, ok := boundedInterpreterCall(code, location[1]-1)
+		if ok && trustedAuthorizedKeysPathInText(call, activeHome) &&
+			trustedInterpreterWriteMode.MatchString(call) {
+			return true
+		}
+	}
+	for _, location := range trustedInterpreterWriteCall.FindAllStringIndex(code, -1) {
+		if !interpreterCodePosition(code, location[0]) {
+			continue
+		}
+		if call, ok := boundedInterpreterCall(code, location[1]-1); ok &&
+			trustedAuthorizedKeysPathInText(call, activeHome) {
+			return true
+		}
+	}
+	return false
+}
+
+func interpreterCodePosition(code string, position int) bool {
+	var quote byte
+	for i := 0; i < position; i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		} else if c == '\'' || c == '"' {
+			quote = c
+		}
+	}
+	return quote == 0
+}
+
+func trustedAuthorizedKeysPathInText(text, activeHome string) bool {
+	for _, location := range trustedInterpreterKeysPath.FindAllStringIndex(text, -1) {
+		if location[0] > 0 && strings.ContainsRune("/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_", rune(text[location[0]-1])) {
+			continue
+		}
+		value := text[location[0]:location[1]]
+		if strings.HasPrefix(value, "~/") || strings.HasPrefix(value, "$HOME/") ||
+			strings.HasPrefix(value, "$ENV{HOME}/") {
+			return true
+		}
+		if relative, ok := liveHomeRelative(value); ok &&
+			(relative == ".ssh/authorized_keys" || relative == ".ssh/authorized_keys2") {
+			return true
+		}
+		if activeHome != "" &&
+			(value == strings.TrimRight(activeHome, "/")+"/.ssh/authorized_keys" ||
+				value == strings.TrimRight(activeHome, "/")+"/.ssh/authorized_keys2") {
+			return true
+		}
+	}
+	return false
+}
+
+// boundedInterpreterCall keeps a path and its mode within the same call.
+func boundedInterpreterCall(code string, open int) (string, bool) {
+	depth := 0
+	var quote byte
+	for i := open; i < len(code); i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return code[open : i+1], true
+			}
+		}
+	}
+	return "", false
 }
 
 func trustedFindExecAuthorizedKeysWrite(input actionfacts.Input) bool {
@@ -135,20 +238,32 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 		if len(value.Parts) != 1 {
 			return ""
 		}
-		literal, ok := value.Parts[0].(*syntax.Lit)
-		if !ok {
-			return ""
+		switch part := value.Parts[0].(type) {
+		case *syntax.Lit:
+			return part.Value
+		case *syntax.SglQuoted:
+			return part.Value
+		case *syntax.DblQuoted:
+			if len(part.Parts) == 1 {
+				if literal, ok := part.Parts[0].(*syntax.Lit); ok {
+					return literal.Value
+				}
+			}
 		}
-		return literal.Value
+		return ""
 	}
-	if word(link.Args[0]) != "ln" || word(link.Args[1]) != "-sf" ||
-		word(link.Args[2]) != "~/.ssh/authorized_keys" ||
-		word(link.Args[3]) != "./keys.link" {
+	if word(link.Args[0]) != "ln" ||
+		(word(link.Args[1]) != "-s" && word(link.Args[1]) != "-sf") ||
+		!trustedAuthorizedKeysPathInText(word(link.Args[2]), input.ActiveHome) {
+		return false
+	}
+	linkName := word(link.Args[3])
+	if linkName == "" || strings.ContainsAny(linkName, "*?[") {
 		return false
 	}
 	write := sequence.Y
 	if _, ok := write.Cmd.(*syntax.CallExpr); !ok || len(write.Redirs) != 1 ||
-		word(write.Redirs[0].Word) != "./keys.link" {
+		word(write.Redirs[0].Word) != linkName {
 		return false
 	}
 	start, end := int(write.Redirs[0].Word.Pos().Offset()), int(write.Redirs[0].Word.End().Offset())
@@ -158,8 +273,12 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	}
 	inner := input
 	inner.Args, inner.Argv = nil, nil
+	target := word(link.Args[2])
+	if strings.HasPrefix(target, "~/") || strings.HasPrefix(target, "$HOME/") {
+		target = strings.TrimRight(input.ActiveHome, "/") + target[strings.Index(target, "/"):]
+	}
 	inner.Command = input.Command[writeStart:start] +
-		"'" + strings.TrimRight(input.ActiveHome, "/") + "/.ssh/authorized_keys'" +
+		"'" + target + "'" +
 		input.Command[end:writeEnd]
 	inner.DialectHint = actionfacts.DialectPOSIX
 	parsed := actionfacts.Analyze(inner)

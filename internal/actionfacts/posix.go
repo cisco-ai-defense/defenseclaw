@@ -1169,7 +1169,9 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 						if terminalPOSIXShellArgv(argv[i+1:]) {
 							return nil, false, false
 						}
-						return nil, false, true
+						if !staticPOSIXShellCommandArgv(argv[i+1:]) {
+							return nil, false, true
+						}
 					}
 					return cloneSlice(argv[i+1:]), true, false
 				}
@@ -1223,7 +1225,9 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				if terminalPOSIXShellArgv(argv[i:]) {
 					return nil, false, false
 				}
-				return nil, false, true
+				if !staticPOSIXShellCommandArgv(argv[i:]) {
+					return nil, false, true
+				}
 			}
 			return cloneSlice(argv[i:]), true, false
 		}
@@ -1274,6 +1278,18 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 		return nil, false, true
 	}
 	return nil, false, false
+}
+
+func staticPOSIXShellCommandArgv(argv []string) bool {
+	program := commandProgram(argv[0])
+	if program != "sh" && program != "bash" {
+		return false
+	}
+	invocation := parsePOSIXShellInvocation(program, argv)
+	return invocation.valid && !invocation.noExec &&
+		invocation.mode == posixShellModeCommand &&
+		invocation.commandIndex < len(argv) &&
+		strings.TrimSpace(argv[invocation.commandIndex]) != ""
 }
 
 func posixExecLoginOption(arg string) bool {

@@ -1549,6 +1549,7 @@ func sshAuthorizedKeysPrerequisite(
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok ||
+			sshAuthorizedKeysCurlOutput(command, candidate) ||
 			!matchesAuthorizedKeys(facts, candidate) ||
 			!integrityCommandMutatesPath(command, candidate) {
 			continue
@@ -1582,6 +1583,9 @@ func sshAuthorizedKeysSafeNegative(
 	if !facts.Authoritative() {
 		return false
 	}
+	if sshAuthorizedKeysOnlyCurlOutput(facts) {
+		return true
+	}
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok ||
@@ -1605,6 +1609,37 @@ func sshAuthorizedKeysSafeNegative(
 		matchesAuthorizedKeys,
 		matchesSafeSSHDirectoryCandidate,
 	)(facts)
+}
+
+func sshAuthorizedKeysCurlOutput(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	return (strings.EqualFold(command.Program, "curl") ||
+		strings.EqualFold(command.Program, "curl.exe")) &&
+		candidate.Access == actionfacts.PathAccessWrite &&
+		hasOperation(command, actionfacts.OperationFetch)
+}
+
+func sshAuthorizedKeysOnlyCurlOutput(facts actionfacts.Facts) bool {
+	seen := false
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite &&
+			candidate.Access != actionfacts.PathAccessAppend &&
+			candidate.Access != actionfacts.PathAccessDelete {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || !integrityCommandMutatesPath(command, candidate) {
+			continue
+		}
+		if !sshAuthorizedKeysCurlOutput(command, candidate) ||
+			!matchesAuthorizedKeys(facts, candidate) {
+			return false
+		}
+		seen = true
+	}
+	return seen
 }
 
 func integrityExplicitCommandMutator(
