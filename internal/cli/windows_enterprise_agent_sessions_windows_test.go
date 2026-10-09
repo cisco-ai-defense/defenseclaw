@@ -103,3 +103,49 @@ func TestWindowsStandaloneStagedInstallRecordsActivationOnRepair(t *testing.T) {
 		t.Fatalf("status warnings = %+v", status.Warnings)
 	}
 }
+
+// GAP-1193: a full upgrade can enable hooks for a session opened after the
+// original install. The upgrade and later status must both ask for a restart.
+func TestWindowsStandaloneUpgradeNamesNewConnectorSessions(t *testing.T) {
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(metadata, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installedAt := time.Date(2026, 10, 8, 14, 0, 0, 0, time.UTC)
+	upgradedAt := installedAt.Add(2 * time.Hour)
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	previousConnectors := windowsEnterpriseEnrolledConnectors
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+		windowsEnterpriseEnrolledConnectors = previousConnectors
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"codex", "claudecode"}, nil }
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{{
+			PID: 42, Connector: "claudecode", User: "DCFC\\dcw-std1",
+			StartedAt: installedAt.Add(time.Hour),
+		}}, nil
+	}
+	first := enterprisestatus.New("install", managed.ProfileStandalone, "windows", "1.0.0")
+	first.Installed = true
+	applyWindowsEnterpriseAgentSessions(first, &windowsEnterpriseLifecycleOptions{activationStartedAt: installedAt})
+	upgrade := enterprisestatus.New("upgrade", managed.ProfileStandalone, "windows", "1.0.0")
+	upgrade.Installed = true
+	upgrade.Readiness.Gateway = true
+	applyWindowsEnterpriseAgentSessions(upgrade, &windowsEnterpriseLifecycleOptions{
+		activationStartedAt: upgradedAt, installedBeforeRun: true,
+		previousConnectors: []string{"codex"}, previousConnectorsKnown: true,
+	})
+	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	status.Installed = true
+	for _, result := range []*enterprisestatus.Result{upgrade, status} {
+		if result == status {
+			applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+		}
+		if len(result.Warnings) != 1 || result.Warnings[0].Code != windowsAgentSessionsRestartCode ||
+			!strings.Contains(result.Warnings[0].Message, "claudecode (pid 42)") {
+			t.Fatalf("%s warnings = %+v, want restart for existing Claude Code session", result.Action, result.Warnings)
+		}
+	}
+}

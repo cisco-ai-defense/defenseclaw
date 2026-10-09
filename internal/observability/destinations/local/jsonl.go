@@ -50,7 +50,7 @@ type JSONLConfig struct {
 	MaxAgeDays int
 	Compress   bool
 	// FailOnOpenError preserves Secure Client's startup refusal on an
-	// ordinary file-open failure.
+	// ordinary file-open failure and its pre-1.0 ACL handling.
 	FailOnOpenError bool
 }
 
@@ -100,7 +100,7 @@ func NewJSONL(config JSONLConfig) (*JSONL, error) {
 		}
 		return nil, newError(ErrorOpenFailed)
 	}
-	file, identity, size, err := secureOpenAppend(config.Path)
+	file, identity, size, err := secureOpenAppend(config.Path, !config.FailOnOpenError)
 	if err != nil {
 		if isUnsafeFailure(err) {
 			return nil, newError(ErrorUnsafePath)
@@ -300,7 +300,7 @@ func (adapter *JSONL) Reopen(ctx context.Context) error {
 		adapter.file = nil
 		adapter.identity = nil
 	}
-	file, identity, size, err := secureOpenAppend(adapter.config.Path)
+	file, identity, size, err := secureOpenAppend(adapter.config.Path, !adapter.config.FailOnOpenError)
 	if err != nil {
 		if isUnsafeFailure(err) {
 			return newError(ErrorUnsafePath)
@@ -357,7 +357,7 @@ func (adapter *JSONL) unlock() { adapter.gate <- struct{}{} }
 
 func (adapter *JSONL) ensureActive() error {
 	if adapter.file != nil {
-		same, err := securePathMatches(adapter.config.Path, adapter.file, adapter.identity)
+		same, err := securePathMatches(adapter.config.Path, adapter.file, adapter.identity, !adapter.config.FailOnOpenError)
 		if err == nil && same {
 			return nil
 		}
@@ -368,7 +368,7 @@ func (adapter *JSONL) ensureActive() error {
 			return err
 		}
 	}
-	file, identity, size, err := secureOpenAppend(adapter.config.Path)
+	file, identity, size, err := secureOpenAppend(adapter.config.Path, !adapter.config.FailOnOpenError)
 	if err != nil {
 		return err
 	}
@@ -380,7 +380,7 @@ func (adapter *JSONL) rotate(ctx context.Context) error {
 	if adapter.file == nil {
 		return ioFailure()
 	}
-	same, err := securePathMatches(adapter.config.Path, adapter.file, adapter.identity)
+	same, err := securePathMatches(adapter.config.Path, adapter.file, adapter.identity, !adapter.config.FailOnOpenError)
 	if err != nil || !same {
 		if err != nil {
 			return err
@@ -402,12 +402,12 @@ func (adapter *JSONL) rotate(ctx context.Context) error {
 	if err := secureMoveNoReplace(adapter.config.Path, backup); err != nil {
 		return ioFailure()
 	}
-	file, identity, size, openErr := secureOpenAppend(adapter.config.Path)
+	file, identity, size, openErr := secureOpenAppend(adapter.config.Path, !adapter.config.FailOnOpenError)
 	if openErr == nil {
 		adapter.file, adapter.identity, adapter.size = file, identity, size
 	}
 	if adapter.config.Compress {
-		if err := compressSecureFile(ctx, backup); err != nil {
+		if err := compressSecureFile(ctx, backup, !adapter.config.FailOnOpenError); err != nil {
 			if openErr != nil {
 				return openErr
 			}
@@ -560,8 +560,8 @@ func isJSONLBackupName(prefix, name string) bool {
 	return stampErr == nil && stamp > 0 && sequenceErr == nil && sequence > 0
 }
 
-func compressSecureFile(ctx context.Context, sourcePath string) error {
-	source, _, err := secureOpenRead(sourcePath)
+func compressSecureFile(ctx context.Context, sourcePath string, checkReadACL bool) error {
+	source, _, err := secureOpenRead(sourcePath, checkReadACL)
 	if err != nil {
 		return err
 	}

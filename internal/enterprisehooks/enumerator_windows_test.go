@@ -973,9 +973,9 @@ func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *t
 	})
 }
 
-// GAP-1034: a disabled local account cannot sign in, so a never-started
-// Claude Code in its profile is not reported as unprotected (which kept
-// security_complete false for good); an enabled account's still is.
+// GAP-1034: a disabled local account with no active session cannot run
+// its installed agent. An existing session remains able to run it even after
+// the account is disabled, so missing enrollment must still be reported.
 func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing.T) {
 	stubMachineWinGet(t, nil)
 	previousDomain, previousDisabled := windowsMachineAccountDomainSID, windowsLocalAccountDisabled
@@ -988,18 +988,30 @@ func TestEnumerateWindowsDisabledLocalAccountIsNotReportedUnprotected(t *testing
 	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "claude.exe"), []byte("MZ"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stubActiveSessions(t, map[string][]string{})
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
-	for _, disabled := range []bool{true, false} {
-		windowsLocalAccountDisabled = func(string) (bool, error) { return disabled, nil }
+	for _, tc := range []struct {
+		disabled      bool
+		sessionActive bool
+		wantReported  int
+	}{
+		{disabled: true, sessionActive: false, wantReported: 0},
+		{disabled: false, sessionActive: false, wantReported: 1},
+		{disabled: true, sessionActive: true, wantReported: 1},
+	} {
+		windowsLocalAccountDisabled = func(string) (bool, error) { return tc.disabled, nil }
+		sessions := map[string][]string{}
+		if tc.sessionActive {
+			sessions[testLocalUserSID] = []string{}
+		}
+		stubActiveSessions(t, sessions)
 		var reported []UnprotectedAgent
 		if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
 			ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if want := map[bool]int{true: 0, false: 1}[disabled]; len(reported) != want {
-			t.Fatalf("disabled=%v: reported %+v, want %d", disabled, reported, want)
+		if len(reported) != tc.wantReported {
+			t.Fatalf("disabled=%v sessionActive=%v: reported %+v, want %d", tc.disabled, tc.sessionActive, reported, tc.wantReported)
 		}
 	}
 }

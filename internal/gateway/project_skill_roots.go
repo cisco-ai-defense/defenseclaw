@@ -15,10 +15,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 )
 
-// maxProjectSkillRoots bounds the project skill folders the install watcher
-// watches next to the connectors' own folders.
-const maxProjectSkillRoots = 32
-
 // projectSkillRootsSettle is how long the watcher waits after a new project
 // folder before it restarts, so a burst of them restarts it once.
 const projectSkillRootsSettle = 2 * time.Second
@@ -60,15 +56,16 @@ func (p *projectSkillRoots) changes() chan struct{} {
 }
 
 // add registers root for connector and tells the watcher; false when root
-// is already registered, the watcher does not use project folders, or the
-// bound is reached.
+// is already registered or the watcher does not use project folders.
+// Every registered root must remain visible to the pending-admission check;
+// a registration cap would let later project skills run without admission.
 func (p *projectSkillRoots) add(connector, root string) bool {
 	if p == nil {
 		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.active || len(p.roots) >= maxProjectSkillRoots {
+	if !p.active {
 		return false
 	}
 	key := projectRootKey(root)

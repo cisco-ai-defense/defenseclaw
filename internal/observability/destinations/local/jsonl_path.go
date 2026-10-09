@@ -40,6 +40,9 @@ func JSONLPathProblem(path string, allowedWriters ...string) string {
 		if problem := jsonlFileProblem(info); problem != "" {
 			return problem
 		}
+		if problem := jsonlACLProblem(path); problem != "" {
+			return problem
+		}
 	}
 	folder := filepath.Dir(path)
 	info, err := os.Lstat(folder)
