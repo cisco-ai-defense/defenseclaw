@@ -2341,6 +2341,45 @@ func TestPlanWindowsEnterpriseEnsureRefusesAnAPIPortChange(t *testing.T) {
 	}
 }
 
+// A direct upgrade checks the installed API port before starting the installer.
+func TestWindowsEnterpriseDirectUpgradeRefusesAnAPIPortChange(t *testing.T) {
+	originalPort, originalConnectors := windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors
+	originalRunner, originalObserver := windowsEnterpriseStandaloneRunner, windowsEnterpriseStandaloneObserver
+	t.Cleanup(func() {
+		windowsEnterpriseConfigAPIPort, windowsEnterpriseStagedConnectors = originalPort, originalConnectors
+		windowsEnterpriseStandaloneRunner, windowsEnterpriseStandaloneObserver = originalRunner, originalObserver
+	})
+	windowsEnterpriseStagedConnectors = func(string) ([]string, error) { return []string{"codex"}, nil }
+	windowsEnterpriseConfigAPIPort = func(path string) (int, error) {
+		if path == "" {
+			return 18970, nil
+		}
+		return 18971, nil
+	}
+	called := false
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		called = true
+		return windowsEnterpriseStandaloneRun{}, nil
+	}
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", configPath: `C:\stage\config.yaml`, jsonOutput: true}
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "upgrade", opts, "installer.ps1", nil)
+	if called || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+		t.Fatalf("installer called = %v, refusal = %v", called, err)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		!strings.Contains(result.Errors[0].Message, "gateway.api_port from 18970 to 18971") {
+		t.Fatalf("upgrade result errors = %+v", result.Errors)
+	}
+}
+
 // GAP-0935: a verify that fails on the same release (an antivirus quarantine
 // removed defenseclaw-hook.exe) repairs with this run's payload, which the
 // planner found identical to the recorded one, so the missing file comes

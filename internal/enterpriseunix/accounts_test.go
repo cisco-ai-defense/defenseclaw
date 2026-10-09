@@ -102,3 +102,36 @@ func (r *loginAccountRunner) Run(_ context.Context, name string, args ...string)
 	}
 	return CommandResult{ExitCode: 1}, errors.New("exit status 1")
 }
+
+// An existing macOS service account with a login shell must be rejected
+// before the gateway adopts it (GAP-1124).
+func TestDSCLAccountEnsureRefusesLoginShell(t *testing.T) {
+	runner := dsclLoginRunner{}
+	accounts := &dsclAccounts{env: &Env{GOOS: "darwin", Runner: runner}}
+	account, ok, err := accounts.Lookup(t.Context(), "_defenseclaw")
+	if err != nil || !ok || account.LoginShell != "/bin/zsh" {
+		t.Fatalf("Lookup = %+v, %v, %v", account, ok, err)
+	}
+	if _, err := accounts.Ensure(t.Context(), "_defenseclaw"); err == nil {
+		t.Fatal("adopted an interactive macOS account")
+	}
+}
+
+type dsclLoginRunner struct{}
+
+func (dsclLoginRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	if name != "dscl" || len(args) != 4 || args[0] != "." || args[1] != "-read" {
+		return CommandResult{ExitCode: 1}, errors.New("unexpected command")
+	}
+	switch args[2] + " " + args[3] {
+	case "/Users/_defenseclaw UniqueID":
+		return CommandResult{Stdout: []byte("UniqueID: 499\n")}, nil
+	case "/Users/_defenseclaw PrimaryGroupID", "/Groups/_defenseclaw PrimaryGroupID":
+		return CommandResult{Stdout: []byte("PrimaryGroupID: 499\n")}, nil
+	case "/Users/_defenseclaw UserShell":
+		return CommandResult{Stdout: []byte("UserShell: /bin/zsh\n")}, nil
+	case "/Users/_defenseclaw NFSHomeDirectory":
+		return CommandResult{Stdout: []byte("NFSHomeDirectory: /Users/_defenseclaw\n")}, nil
+	}
+	return CommandResult{ExitCode: 1}, errors.New("unexpected attribute")
+}

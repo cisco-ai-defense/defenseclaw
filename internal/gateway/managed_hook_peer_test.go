@@ -66,6 +66,8 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{name: "root denied", enrollment: config.EnterpriseEnrollmentConfig{Root: "deny"}, peer: root, connector: "codex", reason: managedHookReasonRootDenied},
 		{name: "exempt by name", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"carol"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
 		{name: "exempt by uid", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"3001"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
+		{name: "exempt user unverified extension refused", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice"}, UnverifiedVersions: "refuse"}, peer: alice, connector: "claudecode", surface: "extension", reason: managedHookReasonSurfaceUnverified},
+		{name: "exempt user refused ledger row refused", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"carol"}, UnverifiedVersions: "refuse"}, peer: carol, connector: "codex", reason: managedHookReasonSurfaceUnverified},
 		{name: "unknown connector", peer: alice, connector: "", reason: managedHookReasonConnectorUnknown},
 		{name: "refuse denies a user whose only codex install is a refused surface", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: carol, connector: "codex", reason: managedHookReasonSurfaceUnverified},
 		{name: "refuse keeps inspecting other users", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: bob, connector: "codex", allow: true},

@@ -93,7 +93,9 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 			if time.Since(lastDeferred) >= enterpriseHookQuarantineDeferredPoll {
 				lastDeferred = time.Now()
 				channel.ServeDeferred(func(request enforce.QuarantineRemovalRequest) error {
-					err := removeEnrolledQuarantinedSource(current, request, enterprisehooks.RemoveEnrolledUserAssetInSession)
+					err := retryEnterpriseHookQuarantineRemoval(current, request, func(latest *config.Config, request enforce.QuarantineRemovalRequest) error {
+						return removeEnrolledQuarantinedSource(latest, request, enterprisehooks.RemoveEnrolledUserAssetInSession)
+					})
 					switch {
 					case err == nil:
 						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: removed now that the user is signed in\n", request.TargetType, request.SourcePath)
@@ -105,6 +107,17 @@ func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer
 			}
 		}
 	}()
+}
+
+// retryEnterpriseHookQuarantineRemoval rechecks a deferred request against
+// the current protected roots; a hot ensure may have moved quarantine_dir
+// since the request was first deferred.
+func retryEnterpriseHookQuarantineRemoval(startup *config.Config, request enforce.QuarantineRemovalRequest, remove func(*config.Config, enforce.QuarantineRemovalRequest) error) error {
+	latest, err := enterpriseHookQuarantineCurrentConfig(startup)
+	if err != nil {
+		return err
+	}
+	return remove(latest, request)
 }
 
 // enterpriseHookQuarantineCurrentConfig loads the protected config for each

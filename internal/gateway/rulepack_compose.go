@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -115,6 +116,12 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 			scope, s.ref.Name, strings.Join(config.BuiltinRulePacks, ", "))
 	}
 	base, err := loadValidatedRulePack(cache, s.dir, scope)
+	var packErr *guardrail.RulePackError
+	if err != nil && cfg.SecureClientIntegration() &&
+		errors.As(err, &packErr) && packErr.Code == "invalid_manifest" {
+		// Secure Client ignored malformed optional manifests before v9.
+		base, err = guardrail.LoadRulePackForSecureClient(s.dir)
+	}
 	if err != nil {
 		return nil, err
 	}

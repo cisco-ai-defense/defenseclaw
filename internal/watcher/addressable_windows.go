@@ -78,3 +78,21 @@ func physicalAssetName(path string) string {
 	}
 	return filepath.Base(path)
 }
+
+// sameAddressableWatcherPath matches a restored asset journaled with an
+// extended path to the ordinary path later reported by the watcher. It keeps
+// trailing dots and spaces intact; trimming either changes the asset name.
+func sameAddressableWatcherPath(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return strings.EqualFold(
+		filepath.Clean(extendedWindowsPath(leftAbs)),
+		filepath.Clean(extendedWindowsPath(rightAbs)),
+	)
+}

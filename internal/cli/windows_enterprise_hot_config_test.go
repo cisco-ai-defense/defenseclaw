@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -405,5 +406,41 @@ func TestWindowsEnterpriseHotConfigAdoptionRollbackUsesLockedSnapshot(t *testing
 	got, err := os.ReadFile(host.configPath)
 	if err != nil || string(got) != committed {
 		t.Fatalf("rollback replaced committed config: %q, %v", got, err)
+	}
+}
+
+// Enabling a connector in a hot ensure must name sessions that predate its
+// hooks, even if they started after the original deployment activation.
+func TestWindowsEnterpriseHotConnectorEnableWarnsOpenSessions(t *testing.T) {
+	previous := "config_version: 9\nguardrail:\n  connectors:\n    claudecode:\n      enabled: false\n    codex: {}\n"
+	next := strings.Replace(previous, "enabled: false", "enabled: true", 1)
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	original, originalMetadata := windowsEnterpriseAgentProcesses, windowsEnterpriseActivationMetadata
+	t.Cleanup(func() {
+		windowsEnterpriseAgentProcesses, windowsEnterpriseActivationMetadata = original, originalMetadata
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return "", false }
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		started := time.Now().Add(-time.Minute)
+		return []inventory.AgentProcess{
+			{PID: 41, Connector: "claudecode", User: `DCFC\alice`, StartedAt: started},
+			{PID: 42, Connector: "codex", User: `DCFC\alice`, StartedAt: started},
+		}, nil
+	}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	result := runHotConfigEnsure(t, host, opts, stub)
+	if !result.OK || host.refreshes != 1 {
+		t.Fatalf("hot ensure = %+v, target refreshes = %d", result, host.refreshes)
+	}
+	var warnings []string
+	for _, warning := range result.Warnings {
+		if warning.Code == windowsAgentSessionsRestartCode {
+			warnings = append(warnings, warning.Message)
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "claudecode (pid 41)") ||
+		strings.Contains(warnings[0], "codex (pid 42)") {
+		t.Fatalf("session warnings = %q", warnings)
 	}
 }
