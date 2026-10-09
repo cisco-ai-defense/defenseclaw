@@ -284,6 +284,34 @@ class TestProviderConfigBacked(unittest.TestCase):
             self.assertEqual(derived_providers.overlay_state(cfg, path)[0], derived_providers.STATE_EDITED)
 
 
+    def test_add_keeps_a_legacy_overlay_with_request_overrides(self) -> None:
+        """GAP-0500: llm_providers cannot hold request_overrides, so a 0.8.x
+        overlay that sets them stays the live input the gateway merges."""
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            legacy = {"providers": [{"name": "acme-ro", "domains": ["llm.acme.test"],
+                                     "request_overrides": {"temperature": 0}}]}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(legacy, f)
+            cfg = Config()
+            cfg.data_dir = d
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d}
+            with mock.patch.object(Config, "save"):
+                res = CliRunner().invoke(
+                    provider, ["add", "--name", "Acme", "--domain", "llm.other.test", "--no-reload"],
+                    obj=app, env=env, catch_exceptions=False,
+                )
+            self.assertEqual(res.exit_code, 0, res.output)
+            self.assertEqual([p.name for p in cfg.llm_providers.custom], ["acme-ro", "Acme"])
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), legacy)
+            self.assertIn("live input", res.output)
+
+
 class TestProviderAddCommand(unittest.TestCase):
     def _run(self, *args: str, env: dict[str, str] | None = None) -> object:
         runner = CliRunner()

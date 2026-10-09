@@ -438,6 +438,14 @@ def _save_providers(app: AppContext | None, path: str, overlay: _Overlay) -> str
     app.cfg.llm_providers = _merge_llm_providers({"custom": providers, "ollama_ports": overlay.ollama_ports})
     app.cfg.save()
     derived_providers.write(app.cfg, path)
+    kept = derived_providers.legacy_request_override_providers(path)
+    if kept:
+        ux.subhead(
+            f"{path} sets request_overrides for {', '.join(kept)} and stays a live input that the gateway "
+            "merges with llm_providers; edit or remove it by hand once those overrides are no longer needed.",
+            indent="  ",
+        )
+        return "config.yaml llm_providers"
     return f"config.yaml llm_providers (derived {path})"
 
 
