@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -159,6 +160,9 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 		}
 	}
 	version.SetBinaryVersion(appVersion)
+	// Every command that resolves directory facts verifies an account of a
+	// child AD domain only when the administrator lists it (GAP-1255).
+	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
 		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
 			return fmt.Errorf("failed to prepare audit store directory: %w", err)

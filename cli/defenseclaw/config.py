@@ -2930,6 +2930,9 @@ class AIDiscoveryConfig:
     # session's Kerberos principal identify a person. When on they ride every
     # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
     include_user_principal: bool = False
+    # Child domains of the joined AD realm whose SSSD accounts are verified;
+    # empty trusts the joined domain only. Mirrors TrustedADChildDomains.
+    trusted_ad_child_domains: list[str] = field(default_factory=list)
     # IDE plugin inventory scope: all | ai_only | off. Mirrors IDEInventory.
     ide_inventory: str = "all"
     lookup_model_provenance_online: bool = False
@@ -3940,12 +3943,15 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
 
 
 def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
-    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal`` and
-    ``ide_inventory`` so configs that never set them stay byte-identical."""
+    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal``,
+    ``trusted_ad_child_domains`` and ``ide_inventory`` so configs that never
+    set them stay byte-identical."""
     if not isinstance(ai_discovery, dict):
         return
     if not ai_discovery.get("include_user_principal"):
         ai_discovery.pop("include_user_principal", None)
+    if not ai_discovery.get("trusted_ad_child_domains"):
+        ai_discovery.pop("trusted_ad_child_domains", None)
     if ai_discovery.get("ide_inventory") in (None, "", "all"):
         ai_discovery.pop("ide_inventory", None)
 
@@ -4211,6 +4217,7 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.default_profile",
         # AI discovery identity/IDE opt-ins: stripped at their defaults.
         "ai_discovery.include_user_principal",
+        "ai_discovery.trusted_ad_child_domains",
         "ai_discovery.ide_inventory",
     }
 )
@@ -6214,6 +6221,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
         include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
+        trusted_ad_child_domains=[str(v) for v in (raw.get("trusted_ad_child_domains", []) or [])],
         ide_inventory=_normalize_ide_inventory(raw.get("ide_inventory")),
         lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),

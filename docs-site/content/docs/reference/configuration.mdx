@@ -418,6 +418,7 @@ guardrail:
 ai_discovery:
   ide_inventory: all           # all | ai_only | off
   include_user_principal: false
+  trusted_ad_child_domains: []   # child AD domains whose users are verified on Linux
 
 # Notifier webhooks remain separate from telemetry routing.
 webhooks:
@@ -449,6 +450,7 @@ The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 | `guardrail.default_profile` | `""` | The profile for subjects no assignment matches. Empty keeps the `guardrail.*` settings. |
 | `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). |
 | `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity (hook decisions, tool activity, agent, model and tool spans, `identity.observed`). Off, records keep the domain, directory, assurance, session kind and client address but no principal. |
+| `ai_discovery.trusted_ad_child_domains` | `[]` | Child domains of the joined Active Directory realm whose SSSD accounts are verified on Linux (`emea.corp.example.com`). An account of a child domain that is not listed gets no domain, realm, directory or principal, so no `users` assignment matches it. Empty trusts the joined domain only. See [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). |
 
 Within a profile, the precedence for one connector is the profile's
 `connectors.<connector>` entry, then the profile field, then
