@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -461,6 +462,13 @@ func VerifyQuarantineRemoval(request QuarantineRemovalRequest, sourceRoots []str
 	if _, err := quarantineTypeDir(request.TargetType); err != nil {
 		return "", "", err
 	}
+	// Win32 drops a final dot or space of an ordinary path, so the guardian
+	// would hash and remove the folder of the shorter name: such a name comes
+	// only in the extended form the gateway sends (GAP-1007).
+	if runtime.GOOS == "windows" && !strings.HasPrefix(request.SourcePath, `\\?\`) &&
+		(strings.HasSuffix(request.SourcePath, ".") || strings.HasSuffix(request.SourcePath, " ")) {
+		return "", "", fmt.Errorf("the source name ends with a dot or a space, but the path is not in the extended form")
+	}
 	source, sourceRoot, err := pathWithinRoots(request.SourcePath, sourceRoots, false)
 	if err != nil {
 		return "", "", fmt.Errorf("source is not in an enrolled user's watched folder: %w", err)
@@ -469,7 +477,7 @@ func VerifyQuarantineRemoval(request QuarantineRemovalRequest, sourceRoots []str
 	if err != nil {
 		return "", "", fmt.Errorf("copy is not in quarantine storage: %w", err)
 	}
-	if filepath.Base(source) != filepath.Base(copyPath) {
+	if exactAssetBase(source) != exactAssetBase(copyPath) {
 		return "", "", fmt.Errorf("source and copy names differ")
 	}
 	if request.TargetType == "skill" && IsBundledSkillPath(source) {

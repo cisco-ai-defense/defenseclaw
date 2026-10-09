@@ -503,6 +503,27 @@ func safeQuarantineAssetName(name, path string) bool {
 		strings.TrimSpace(name) != "" && !strings.ContainsAny(name, "/\\\x00")
 }
 
+// containmentPath is path without the extended-length prefix the standalone
+// Windows watcher puts on a skill or plugin whose name ends with a dot or a
+// space. The hook guardian checks such a request against enrolled roots in the
+// ordinary form, and filepath.Rel saw two volumes (\\?\C: and C:), so it
+// refused the source as outside the watched folders (GAP-1007). Only the
+// containment checks compare this form; the exact extended path is what is
+// opened, hashed and removed.
+func containmentPath(path string) string {
+	if runtime.GOOS != "windows" || !strings.HasPrefix(path, `\\?\`) {
+		return path
+	}
+	rest := path[len(`\\?\`):]
+	if len(rest) >= 4 && strings.EqualFold(rest[:4], `UNC\`) {
+		return `\\` + rest[4:]
+	}
+	if len(rest) >= 3 && rest[1:3] == `:\` {
+		return rest
+	}
+	return path
+}
+
 func cleanQuarantineSourcePath(path string) string {
 	if extendedTrailingNamePath(path) {
 		return path
@@ -519,6 +540,14 @@ func pathWithinRoots(path string, roots []string, allowEqual bool) (string, stri
 		return "", "", fmt.Errorf("path is not absolute")
 	}
 	path = cleanQuarantineSourcePath(pathInput)
+	// The exact extended path is kept unclean so its final dot or space
+	// survives; refuse one that a lexical clean would change, so its "." and
+	// ".." elements can not differ from what the containment check saw.
+	if extendedTrailingNamePath(path) {
+		if form := containmentPath(path); filepath.Clean(form) != form {
+			return "", "", fmt.Errorf("extended path is not canonical")
+		}
+	}
 	for _, root := range roots {
 		rootInput := strings.TrimSpace(root)
 		if rootInput == "" {
@@ -536,8 +565,8 @@ func pathWithinRoots(path string, roots []string, allowEqual bool) (string, stri
 }
 
 func pathWithin(path, root string, allowEqual bool) bool {
-	path = filepath.Clean(path)
-	root = filepath.Clean(root)
+	path = filepath.Clean(containmentPath(path))
+	root = filepath.Clean(containmentPath(root))
 	relative, err := filepath.Rel(root, path)
 	if err != nil || filepath.IsAbs(relative) {
 		return false
@@ -802,7 +831,7 @@ func validateContainedAncestors(path, root string) error {
 		if fileInfoIsLinkOrReparse(info) {
 			return fmt.Errorf("enforce: linked contained path %s", current)
 		}
-		if current == root {
+		if filepath.Clean(containmentPath(current)) == filepath.Clean(containmentPath(root)) {
 			return nil
 		}
 		parent := filepath.Dir(current)
