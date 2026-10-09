@@ -206,10 +206,10 @@ func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T)
 		t.Skip("Windows registers the native hook launcher")
 	}
 	dir := t.TempDir()
-	script := filepath.Join(dir, ".defenseclaw", "hooks", "claude-code-hook.sh")
+	script := filepath.Join(dir, "Alice Smith", ".defenseclaw", "hooks", "claude-code-hook.sh")
 	command, _ := claudeCodeHookInvocation(SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw")}, script)
-	if !strings.HasPrefix(command, script+" ") {
-		t.Fatalf("command %q does not start with the hook script", command)
+	if !strings.HasPrefix(command, shellSingleQuote(script)+" ") {
+		t.Fatalf("command %q does not start with the quoted hook script", command)
 	}
 	run := func() (int, string) {
 		cmd := exec.Command("/bin/sh", "-c", command)

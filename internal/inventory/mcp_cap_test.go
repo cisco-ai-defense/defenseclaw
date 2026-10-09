@@ -259,7 +259,7 @@ func TestMCPConfigNamesReadEachAgentsLayout(t *testing.T) {
 		if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		names, err := readMCPServerNamesWithErr(path)
+		names, err := readMCPServerNamesWithErr(path, "")
 		if err != nil || len(names) != 1 || names[0] != tc.want {
 			t.Errorf("%s: names = %v, %v; want [%s]", rel, names, err, tc.want)
 		}
