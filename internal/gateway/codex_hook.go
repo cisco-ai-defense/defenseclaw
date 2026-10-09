@@ -236,6 +236,11 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			}
 		}
 	case "UserPromptSubmit":
+		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ObserveSessionPrompt(ctx, req.Prompt)
+			}
+		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).
 		prompt := req.Prompt
