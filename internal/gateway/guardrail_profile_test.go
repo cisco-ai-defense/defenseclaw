@@ -564,6 +564,36 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 	})
 }
 
+// A verified agent assignment before a directory-dependent assignment keeps
+// its profile when the directory lookup fails.
+func TestGuardrailProfileVerifiedAgentSurvivesDirectoryFailure(t *testing.T) {
+	stubProfileSources(t)
+	const agentID = "agt-verified-profile-test"
+	profileAgentSource = func(context.Context) (string, bool) { return agentID, true }
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"},
+		"watch":  {Mode: "observe"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Agents: []string{agentID}}},
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"staff"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{
+		UserID: "1001", LookupFailed: true,
+	})
+	ctx = api.withGuardrailProfileDecision(ctx, "codex")
+	if got := api.resolveProfile(ctx); got.Name != "strict" || got.Match != profileMatchAgent || got.Assignment != 1 {
+		t.Fatalf("resolveProfile = %+v, want first verified agent assignment", got)
+	}
+	if mode := api.agentHookMode(ctx, "codex"); mode != "action" {
+		t.Fatalf("agentHookMode = %q, want action", mode)
+	}
+}
+
 // TestGuardrailProfileReloadRederivesProfiles pins the reload path: a profile
 // edit re-derives the set, changes that profile's digest only, and preloads
 // the rule pack a profile newly selects.

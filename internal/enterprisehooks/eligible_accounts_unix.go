@@ -211,23 +211,25 @@ const unixCreatedDirsLimit = 64
 
 // ManifestEnrolledAccounts keeps the accounts a target of manifest enrolls:
 // the target of the account uid or, for a target that names no uid, of its
-// user name. Under manifest enrollment the enumerator is idle, so the
+// user name or home. Under manifest enrollment the enumerator is idle, so the
 // eligible-accounts record is what its last auto pass published: an account
 // the administrator has since left out of the manifest stayed eligible, and
 // the guardian kept scanning its home and publishing its identity record
 // (GAP-0761).
 func ManifestEnrolledAccounts(accounts []UnixEligibleAccount, manifest Manifest) []UnixEligibleAccount {
-	uids, users := map[int]bool{}, map[string]bool{}
+	uids, users, homes := map[int]bool{}, map[string]bool{}, map[string]bool{}
 	for _, target := range manifest.Targets {
 		if target.UID != nil {
 			uids[*target.UID] = true
 		} else if user := strings.TrimSpace(target.User); user != "" {
 			users[user] = true
+		} else if home := strings.TrimSpace(target.UserHome); filepath.IsAbs(home) {
+			homes[filepath.Clean(home)] = true
 		}
 	}
 	out := make([]UnixEligibleAccount, 0, len(accounts))
 	for _, account := range accounts {
-		if uids[account.UID] || users[strings.TrimSpace(account.User)] {
+		if uids[account.UID] || users[strings.TrimSpace(account.User)] || homes[filepath.Clean(account.Home)] {
 			out = append(out, account)
 		}
 	}

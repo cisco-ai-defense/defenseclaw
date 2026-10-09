@@ -489,16 +489,24 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		report.RuntimeError = err.Error()
 	} else if view != nil {
 		if user != "" {
-			// Runtime findings carry names rather than UIDs or SIDs. Match
-			// the accounts already selected by the resolved inventory filter,
-			// including their bare names. Secure Client keeps the exact
-			// --user match of main (issue #1092).
+			// Runtime findings carry names rather than UIDs or SIDs. A bare
+			// name cannot identify one account when local and domain accounts
+			// share it. Only a bare --user may select bare runtime findings;
+			// qualified and SID selections keep qualified names (GAP-1250).
+			// Secure Client keeps the exact --user match of main (issue #1092).
 			secureClient := cfg != nil && cfg.SecureClientIntegration()
 			selectedNames := make(map[string]struct{}, len(report.Accounts)*2)
 			if !secureClient {
 				for _, account := range report.Accounts {
-					selectedNames[strings.ToLower(account.User)] = struct{}{}
-					selectedNames[strings.ToLower(useridentity.BareAccountName(account.User))] = struct{}{}
+					if useridentity.QualifiedAccountName(account.User) {
+						selectedNames[strings.ToLower(account.User)] = struct{}{}
+					}
+					if useridentity.QualifiedAccountName(user) {
+						selectedNames[strings.ToLower(user)] = struct{}{}
+					}
+					if strings.EqualFold(user, useridentity.BareAccountName(account.User)) {
+						selectedNames[strings.ToLower(user)] = struct{}{}
+					}
 				}
 			}
 			findings := view.Findings[:0]

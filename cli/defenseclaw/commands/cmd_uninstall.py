@@ -91,13 +91,12 @@ _GATEWAY_STOP_TIMEOUT_SECONDS = 45
 _UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
 _UV_NAMES_POSIX = ("uv", "uvx")
 _UV_RECORD_MAX_BYTES = 4096
-# The 0.8.x installer left uv (in the launchers' folder, with uv's default
-# cache and Python folders) and ~/.sigstore (from its temporary Cosign)
-# without a record. The upgrade from 0.8.x records them, and the uv files in
-# _UV_RECORD, only when the evidence shows that installer put them there
-# (scripts/install.sh, find_legacy_leftovers; GAP-0908). One claim per line:
-# "uv-cache", "uv-python <folder in uv's Python folder>" or "sigstore".
-# The uv-python claim is historical; uninstall preserves shared managed Python.
+# The 0.8.x installer left no ownership marker for uv, its cache or Python,
+# and could reuse a user-installed uv. Current upgrades leave those assets
+# alone. They can record the temporary Cosign cache when its contents and
+# timing qualify (scripts/install.sh, find_legacy_leftovers). Historical
+# records may still contain "uv-cache" or "uv-python <folder>"; uninstall
+# preserves shared managed Python. One claim per line.
 _LEGACY_LEFTOVERS_RECORD = "legacy-install-leftovers"
 _LEGACY_LEFTOVERS_MAX_BYTES = 4096
 # The folders DefenseClaw created because they were missing (the gateway's
