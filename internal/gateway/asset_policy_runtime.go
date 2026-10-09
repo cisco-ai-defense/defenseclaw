@@ -138,9 +138,43 @@ func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
+	// Two configured servers that share the tool segment: the call is
+	// judged as each of them and refused if any one is refused.
+	for _, name := range a.codexMCPServerCandidates(ctx, req) {
+		probe := mcpProbeFromFields(name, req.ToolName, req.ToolInput)
+		probe.WorkspaceDir = req.CWD
+		if decision, blocked := a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe); blocked {
+			return decision, true
+		}
+	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
+}
+
+// codexMCPServerCandidates are the configured Codex servers a tool call
+// could belong to when the hook names no server and distinct names share
+// its tool segment (Codex normalizes punctuation); nil otherwise.
+func (a *APIServer) codexMCPServerCandidates(ctx context.Context, req codexHookRequest) []string {
+	if strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name"))) != "" {
+		return nil
+	}
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
+	toolServer := serverFromMCPToolName(req.ToolName)
+	if toolServer == "" {
+		return nil
+	}
+	home, serviceAccount := callerHomeForAssets(ctx)
+	if !serviceAccount {
+		return cfg.CodexMCPToolServerCandidates(req.CWD, toolServer)
+	}
+	if home == "" {
+		return nil
+	}
+	return config.CodexMCPToolServerCandidatesUnderHome(home, req.CWD, toolServer)
 }
 
 // codexMCPServerName is the MCP server a Codex tool call names, spelled as

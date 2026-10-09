@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -302,6 +303,51 @@ func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name s
 		return lookupClaudePluginMCPServer(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), name)
 	}
 	return MCPServerEntry{}, false
+}
+
+// CodexMCPToolServerCandidates lists the distinct servers in the caller's
+// effective Codex configuration whose names produce the hook tool segment
+// toolServer, or nil when at most one does. Codex turns punctuation into "_",
+// so acme-notes and acme_notes both arrive as mcp__acme_notes__<tool>, and a
+// hook without an explicit server name cannot tell them apart.
+func (c *Config) CodexMCPToolServerCandidates(workspaceDir, toolServer string) []string {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" && c != nil {
+		workspaceDir = c.ConnectorWorkspaceDir()
+	}
+	entries, err := c.readMCPServersForConnectorIn("codex", workspaceDir)
+	if err != nil {
+		return nil
+	}
+	return codexMCPToolServerCandidates(entries, toolServer)
+}
+
+// CodexMCPToolServerCandidatesUnderHome reads the managed caller's Codex
+// configuration instead of the gateway service account's.
+func CodexMCPToolServerCandidatesUnderHome(home, workspaceDir, toolServer string) []string {
+	home = strings.TrimSpace(home)
+	if !filepath.IsAbs(home) {
+		return nil
+	}
+	entries := readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+	return codexMCPToolServerCandidates(entries, toolServer)
+}
+
+func codexMCPToolServerCandidates(entries []MCPServerEntry, toolServer string) []string {
+	toolServer = strings.TrimSpace(toolServer)
+	if toolServer == "" {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		if MCPToolServerName("codex", entry.Name) == toolServer && !slices.Contains(names, entry.Name) {
+			names = append(names, entry.Name)
+		}
+	}
+	if len(names) < 2 {
+		return nil
+	}
+	return names
 }
 
 // MCPToolServerName is the server segment an agent puts in the MCP tool

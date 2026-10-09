@@ -981,6 +981,36 @@ func TestPinnedSkillAllowOverridesGlobalDenyAtHook(t *testing.T) {
 	}
 }
 
+// A Codex MCP tool segment cannot identify either configured server when
+// distinct names normalize to the same segment: the call is refused when
+// either server is refused.
+func TestCodexCollidingMCPNamesFailClosed(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[mcp_servers.acme-notes]\nurl = \"http://127.0.0.1:28581/mcp\"\n\n[mcp_servers.acme_notes]\nurl = \"http://127.0.0.1:28582/mcp\"\n"
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(toml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "acme-notes"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	decision, matched := api.codexMCPAssetDecision(ctx, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "mcp__acme_notes__sensitive", CWD: home,
+	})
+	if !matched || decision.Action != "block" {
+		t.Fatalf("colliding MCP names: matched=%v decision=%+v, want block", matched, decision)
+	}
+	cfg.AssetPolicy.MCP.Denied = nil
+	if decision, matched := api.codexMCPAssetDecision(ctx, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "mcp__acme_notes__sensitive", CWD: home,
+	}); matched {
+		t.Fatalf("colliding MCP names with no rule refused: %+v", decision)
+	}
+}
+
 // Every source path for a skill name must be checked before the tool runs.
 func TestCodexReadChecksEverySameNameSkillFolder(t *testing.T) {
 	home := t.TempDir()
