@@ -35,6 +35,7 @@ import (
 	"regexp/syntax"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -396,6 +397,16 @@ func loadEmbeddedRulePack() (*RulePack, error) {
 	}
 	return rp, nil
 }
+
+// EmbeddedToolInjectionPrompt returns the embedded default tool-injection
+// judge prompt, the fallback for a judge built without a rule pack.
+var EmbeddedToolInjectionPrompt = sync.OnceValue(func() string {
+	judge, err := decodeEmbeddedYAML[JudgeYAML](path.Join("judge", "tool-injection.yaml"))
+	if err != nil {
+		return ""
+	}
+	return judge.SystemPrompt
+})
 
 func decodeEmbeddedYAML[T any](rel string) (*T, error) {
 	embeddedPath := path.Join("defaults", rel)
