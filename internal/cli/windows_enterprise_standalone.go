@@ -312,6 +312,9 @@ func runWindowsEnterpriseStandaloneAction(
 		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
+		if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
 	}
 	if action == "uninstall" {
 		present, err := windowsEnterpriseStandaloneFootprint()
