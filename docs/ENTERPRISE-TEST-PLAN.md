@@ -1226,7 +1226,7 @@ old key after `status` shows the new digest.
 | `detect.sh` | `0` detected | `1` not detected | `2` | - | Formats `value` and `jamf` always exit `0` |
 | `detect.ps1` | `0` detected (one stdout line) | `1` (reason on stderr) | - | - | |
 | `Remediate-Detect.ps1` | `0` healthy or not installed | `1` | - | - | |
-| Linux package scripts | postinstall always `0` | preremove `1` only when the lock stays busy for 10 minutes | - | - | |
+| Linux package scripts | postinstall always `0` | preremove `1` when the lock stays busy for 10 minutes or hook-removal precheck refuses | - | - | |
 | macOS pkg postinstall | `0` | The lifecycle's code (fails `installer`) | - | - | preinstall `1` on a Secure Client host or a refused downgrade |
 
 ## Standard-account rows

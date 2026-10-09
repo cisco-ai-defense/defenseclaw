@@ -273,9 +273,11 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 		t.Fatal("process tick did not replace the general snapshot")
 	}
 	cancel()
+	// A hang guard too: Run returns once the in-flight process tick ends,
+	// and on a loaded Windows runner that tick outlasted a 1s budget.
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("discovery service did not stop")
 	}
 	var sawRaw bool

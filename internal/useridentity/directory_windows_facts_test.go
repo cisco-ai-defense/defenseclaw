@@ -62,6 +62,15 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant || hybrid.AccountDomain != "CORP" {
 		t.Fatalf("hybrid AD facts = %+v", hybrid)
 	}
+	// The identity store may retain a cloud sign-in for a hybrid AD SID
+	// while the AD name lookup is temporarily unavailable. It cannot by
+	// itself establish that the SID belongs to an Entra account.
+	delete(reader.accounts, adSID)
+	unresolvedHybrid := resolveWindowsDirectoryFacts(reader, adSID, nil, now)
+	if !unresolvedHybrid.Empty() || unresolvedHybrid.Assurance != "" || unresolvedHybrid.AccountDomain != "" {
+		t.Fatalf("unresolved hybrid AD facts = %+v; want no verified directory facts", unresolvedHybrid)
+	}
+
 	local := resolveWindowsDirectoryFacts(reader, localSID, nil, now)
 	if local.Directory != DirectoryLocal || local.Principal != "" || local.UPN != "" || local.AccountDomain != "WS01" {
 		t.Fatalf("local facts = %+v", local)
