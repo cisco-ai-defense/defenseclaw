@@ -1098,15 +1098,21 @@ func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
 		return a.scannerCfg
 	}
-	base := a.scannerCfg
+	return a.decisionConfigFrom(ctx, a.liveBaseConfig(ctx))
+}
+
+// liveBaseConfig is the configuration decisions start from before a profile
+// applies: the request's pinned generation, else the live one, else the
+// start-time configuration.
+func (a *APIServer) liveBaseConfig(ctx context.Context) *config.Config {
 	g := pinnedGeneration(ctx)
 	if g == nil {
 		g = a.generation()
 	}
 	if g != nil && g.Config != nil {
-		base = g.Config
+		return g.Config
 	}
-	return a.decisionConfigFrom(ctx, base)
+	return a.scannerCfg
 }
 
 // decisionConfigFrom is decisionConfig for a caller that already holds a
