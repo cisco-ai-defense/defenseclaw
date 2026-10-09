@@ -66,6 +66,17 @@ def test_list_text_omits_firewall_template(app):
     assert "strict" in result.output
 
 
+def test_list_text_explains_when_no_policy_matches_the_config(app):
+    # config_version 9 marks the policy whose values config.yaml holds; a later
+    # edit matches none, and the list says why (GAP-0970).
+    assert "No policy is active" not in _invoke(app, ["list"]).output
+    app.cfg.guardrail.block_at = "LOW"
+    result = _invoke(app, ["list"])
+    assert result.exit_code == 0, result.output
+    assert "[active]" not in result.output
+    assert "No policy is active" in result.output
+
+
 def test_show_json_and_unknown(app):
     result = _invoke(app, ["show", "permissive", "--json"])
     assert result.exit_code == 0, result.output

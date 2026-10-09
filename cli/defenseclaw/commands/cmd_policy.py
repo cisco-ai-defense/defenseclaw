@@ -328,6 +328,12 @@ def list_policies(app: AppContext, json_out: bool) -> None:
             click.echo(f"      {ux.dim(summary.description)}")
 
     click.echo()
+    if not active and not asset_lists.is_secure_client(app.cfg):
+        # Since config_version 9 a policy is active when config.yaml holds its
+        # values; an edit made after `policy activate` matches none (GAP-0970).
+        click.echo(ux.dim("  No policy is active: none matches the values config.yaml holds now (activating a policy"))
+        click.echo(ux.dim("  writes its values there, and a later change to one of them leaves no policy matching)."))
+        click.echo()
     click.echo(f"  {ux.dim('Activate a policy:')} defenseclaw policy activate <name>")
     click.echo(f"  {ux.dim('Show details:')}      defenseclaw policy show <name>")
 
