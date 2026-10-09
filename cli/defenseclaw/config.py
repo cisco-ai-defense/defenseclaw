@@ -562,6 +562,18 @@ def _expand(p: str) -> str:
     return p
 
 
+def _expand_home_policy_dir(doc: dict[str, Any]) -> str:
+    """Write a ``~/`` policy_dir as the folder it names; returns the new value
+    ("" when unchanged). The gateway reads policy_dir as written, so
+    ``~/team-policies`` named no folder and it refused every policy reload
+    with "read rego directory" (GAP-1033)."""
+    raw = doc.get("policy_dir")
+    if not isinstance(raw, str) or not raw.strip().startswith("~/"):
+        return ""
+    doc["policy_dir"] = _expand(raw.strip())
+    return doc["policy_dir"]
+
+
 # ---------------------------------------------------------------------------
 # Environment detection (mirrors config.DetectEnvironment)
 # ---------------------------------------------------------------------------
@@ -3707,6 +3719,9 @@ class Config:
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
             merged = self._merged_document(path, dataclass_data, current)
+            expanded = _expand_home_policy_dir(merged)
+            if expanded:
+                self.policy_dir = expanded
             _assert_config_write_allowed(path, merged)
             candidate = config_writer.render_document(current, merged, source_name)
             return candidate, config_writer.diff_documents(current, candidate)

@@ -9689,6 +9689,17 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         reload_error = reload_error.replace(
             "; inspect the canonical v8 schema or generated reference and correct this field", ""
         )
+        remediation = (
+            "Fix the change the error names in config.yaml or the policy asset; "
+            "the gateway applies it once it builds"
+        )
+        policy_dir = str(getattr(cfg, "policy_dir", "") or "")
+        if "read rego directory" in reload_error and policy_dir and not os.path.isabs(policy_dir):
+            # The gateway reads policy_dir as written: "~/x" names no folder (GAP-1033).
+            remediation = (
+                f"policy_dir must be an absolute path ({policy_dir} is read as written, ~ is not expanded): "
+                f"defenseclaw config set policy_dir {os.path.abspath(os.path.expanduser(policy_dir))}"
+            )
         _emit(
             "fail",
             label,
@@ -9696,10 +9707,7 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             r=r,
             check_id="doctor.policy.reload",
             reason_code="policy-reload-rejected",
-            remediation=(
-                "Fix the change the error names in config.yaml or the policy asset; "
-                "the gateway applies it once it builds"
-            ),
+            remediation=remediation,
         )
         return
     local = _local_policy_digest(cfg)

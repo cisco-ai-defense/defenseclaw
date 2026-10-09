@@ -494,6 +494,27 @@ class TestConfigVersion9KeysRoundTrip(unittest.TestCase):
             original["guardrail"]["rules"]["disable"] = ["ENT-DATA-EMPLOYEE-ID"]
             self.assertEqual(persisted, original)
 
+class TestConfigSaveExpandsHomePolicyDir(unittest.TestCase):
+    def test_a_save_writes_a_home_policy_dir_as_the_folder_it_names(self):
+        """The gateway reads policy_dir as written, so a migrated or hand-set
+        "~/team-policies" made every reload fail; any save expands it (GAP-1033)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump({"config_version": 8, "data_dir": tmpdir, "environment": "linux",
+                                "policy_dir": "~/team-policies", "observability": {}}, stream, sort_keys=False)
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False), \
+                    patch.object(config_module, "_home", return_value=config_module.Path(tmpdir)):
+                os.environ.pop("DEFENSECLAW_CONFIG", None)
+                cfg = load()
+                cfg.guardrail.block_at = "HIGH"
+                cfg.save()
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+            self.assertEqual(persisted["policy_dir"], os.path.join(tmpdir, "team-policies"))
+            self.assertEqual(persisted["guardrail"]["block_at"], "HIGH")
+
+
 class TestConfigSaveResilienceContinued(unittest.TestCase):
     def test_corrupt_or_non_mapping_yaml_refuses_the_save(self):
         """A save over a file that no longer parses kept only the changed

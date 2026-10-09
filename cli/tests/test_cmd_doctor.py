@@ -100,6 +100,14 @@ class DoctorPolicyStateTests(unittest.TestCase):
         self.assertNotIn("$.bogus_wp", result.checks[0]["detail"])
         self.assertIn("bogus_wp", result.checks[0]["detail"])
 
+        # A "~/" policy_dir the gateway cannot open: the next step names the absolute path (GAP-1033).
+        policy = {"effective_digest": applied, "generation": 3,
+                  "last_reload_error": "opa: policy: read rego directory: open ~/team-policies: no such file"}
+        result = _DoctorResult()
+        cmd_doctor._check_policy_state(SimpleNamespace(policy_dir="~/team-policies"), result,
+                                       live_health={"policy": policy})
+        self.assertIn(os.path.join(os.path.expanduser("~"), "team-policies"), result.checks[0]["remediation"])
+
         # A digest the gateway holds back for a restart-only key is a pending
         # restart (warn), not a stale gateway (fail) (GAP-0072).
         policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
