@@ -245,6 +245,30 @@ func TestRetiringAConnectorWhoseVendorFileIsHeldRollsBack(t *testing.T) {
 	}
 }
 
+// GAP-1019: an administrator edited the hook paths of 90-defenseclaw.json,
+// repair put the drop-in back, and claudecode was then removed from
+// guardrail.connectors. The run restored the edited copy as administrator
+// content, so every Claude Code prompt was refused while status and verify
+// were green. The drop-in goes, and the result names the removal.
+func TestRetiringClaudeCodeRemovesAnEditedDropInAndSaysSo(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex", "claudecode")}))
+	written := h.read(claudeDropIn)
+	writeHostFile(t, h, claudeDropIn, strings.ReplaceAll(written, "/bin/defenseclaw-hook", "/binx/defenseclaw-hook"))
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if h.read(claudeDropIn) != written {
+		t.Fatal("ensure did not put the edited drop-in back")
+	}
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: machinePolicyConfig(t, h, "codex")})
+	requireOK(t, r)
+	if exists(h.env.P(claudeDropIn)) {
+		t.Fatalf("retiring claudecode left %s:\n%s", claudeDropIn, h.read(claudeDropIn))
+	}
+	if got := strings.Join(r.Changes, "\n"); !strings.Contains(got, "removed DefenseClaw's claudecode machine policy entries") || !strings.Contains(got, "does not inspect it") {
+		t.Fatalf("the result does not name the removal: %s", got)
+	}
+}
+
 func TestVerifyReportsMissingMachinePolicy(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))

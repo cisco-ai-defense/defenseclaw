@@ -120,15 +120,61 @@ func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
 	}
 	agent("4321", "claude\x00--resume\x00", 100)          // started an hour before the activation
 	agent("4322", "claude\x00--resume\x00", 3600*100+600) // started after it
-	// Hermes runs its bootstrap with `python3 -I -c`; Codex reads the
-	// managed hooks without a restart, and so does its app-server daemon
-	// (GAP-0936).
+	// Hermes runs its bootstrap with `python3 -I -c`; a Codex session
+	// reads the managed requirements per turn through an app-server
+	// started after the install (GAP-0936).
 	agent("4323", "/home/u/.hermes/tools/python/bin/python3\x00-I\x00-c\x00import os\nfrom hermes_cli.main import main\x00", 100)
-	agent("4324", "/home/u/.codex/packages/app-server-daemon/releases/0.161.0/codex\x00app-server\x00", 100)
+	agent("4324", "/home/u/.codex/packages/app-server-daemon/releases/0.161.0/codex\x00app-server\x00--listen\x00unix://\x00", 3600*100+600)
+	agent("4325", "codex\x00", 100)
 	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
 	if !strings.Contains(got, "claude (pid 4321)") || !strings.Contains(got, "hermes (pid 4323)") ||
-		strings.Contains(got, "4322") || strings.Contains(got, "4324") {
+		strings.Contains(got, "4322") || strings.Contains(got, "4324") || strings.Contains(got, "4325") {
 		t.Fatalf("status does not name exactly the older uninspected sessions: %q", got)
+	}
+	// A Codex background server started before the install keeps the
+	// requirements it read then: its sessions ran with no decision, and a
+	// new session refuses it until it restarts (GAP-0988, GAP-0983).
+	agent("4324", "/home/u/.codex/packages/app-server-daemon/releases/0.161.0/codex\x00app-server\x00--listen\x00unix://\x00", 100)
+	got = messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
+	if !strings.Contains(got, "the Codex background server (pid 4324)") || !strings.Contains(got, "codex (pid 4325)") ||
+		!strings.Contains(got, "codex app-server daemon restart") {
+		t.Fatalf("status does not name the old Codex background server, its session and the restart: %q", got)
+	}
+}
+
+// GAP-1077: Claude Code sessions that were open while an administrator
+// edited the DefenseClaw drop-in kept the broken hook command after ensure
+// put it back, and ran calls with no decision while status named nothing.
+// Those sessions are named until they restart; newer ones are not.
+func TestStatusNamesClaudeSessionsOpenWhileTheDropInWasChanged(t *testing.T) {
+	h := newTestHost(t, "linux")
+	offset := time.Duration(0)
+	h.env.Now = func() time.Time { return time.Now().Add(offset) }
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	record, err := h.env.loadDeployment()
+	if err != nil || record == nil {
+		t.Fatalf("no deployment: %v", err)
+	}
+	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, "/proc/stat", fmt.Sprintf("cpu 0 0 0 0\nbtime %d\n", activated.Unix()))
+	claude := func(pid string, ticks int64) {
+		writeHostFile(t, h, "/proc/"+pid+"/cmdline", "claude\x00")
+		writeHostFile(t, h, "/proc/"+pid+"/stat", fmt.Sprintf("%s (claude) S 1 %s %s%d 0 0", pid, pid, strings.Repeat("0 ", 16), ticks))
+	}
+	claude("5001", 60*100) // a minute after the activation
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart); got != "" {
+		t.Fatalf("a session started after the activation is named: %q", got)
+	}
+	offset = 10 * time.Minute
+	writeHostFile(t, h, claudeDropIn, strings.ReplaceAll(h.read(claudeDropIn), "/bin/defenseclaw-hook", "/binx/defenseclaw-hook"))
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	claude("5002", (11*60)*100) // started after DefenseClaw put the drop-in back
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart)
+	if !strings.Contains(got, "claude (pid 5001)") || !strings.Contains(got, "drop-in was changed or removed") || strings.Contains(got, "5002") {
+		t.Fatalf("status does not name exactly the session open through the drop-in change: %q", got)
 	}
 }
 

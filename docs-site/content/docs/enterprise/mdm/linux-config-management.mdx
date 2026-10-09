@@ -692,6 +692,20 @@ that were already open. Those sessions keep running without DefenseClaw until
 restarted. `status` and `ensure` report `agent_sessions_restart_required`
 while they remain open.
 
+Codex keeps a shared background server (its app-server daemon, under
+`~/.codex/packages/app-server-daemon`). One that started before the install
+keeps the requirements it read then: the Codex sessions it serves run without
+DefenseClaw, and a Codex session started after the install refuses it with
+`Cannot use the shared background server: This session requires
+api_key_model_discovery to be disabled`. The warning names that server and the
+Codex sessions of its user. Have the user run `codex app-server daemon restart`,
+or start Codex with `codex --no-daemon`.
+
+A Claude Code session that was open while someone changed or removed
+DefenseClaw's drop-in in `/etc/claude-code/managed-settings.d` keeps the hooks
+it loaded, even after DefenseClaw puts the drop-in back. The warning names
+those sessions too, until they are restarted.
+
 | Check | Command or file |
 | --- | --- |
 | Verify, read-only | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json` (exit `1` on a problem) |

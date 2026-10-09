@@ -1395,7 +1395,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := l.settleStateModes(account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
-	if err := l.removeACLs(ctx, planFiles(p), p.intended); err != nil {
+	if err := l.removeACLs(ctx, aclFiles(env, p, record), aclConnectors(p, record)); err != nil {
 		return failAndRollback(codeApply, err)
 	}
 	l.clearStaleHookSocket(account)

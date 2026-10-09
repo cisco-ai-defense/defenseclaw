@@ -10,6 +10,8 @@
 
 package enterprisepolicy
 
+import "time"
+
 // TamperedDropIns lists the machine-policy drop-ins DefenseClaw owns whole
 // and published (an ownership record names them) whose bytes are no longer
 // the ones it wrote, or that are gone: the Claude Code managed-settings
@@ -31,4 +33,21 @@ func TamperedDropIns(opts Options) []string {
 		return []string{record.Path}
 	}
 	return nil
+}
+
+// ClaudeDropInRestoredAt is when DefenseClaw last put back its Claude Code
+// drop-in after another writer changed or removed it, or the zero time.
+// Claude Code keeps the hooks a session loaded, so a session open through
+// that change can still run the broken hook command after the drop-in is
+// back (GAP-1077).
+func ClaudeDropInRestoredAt(opts Options) time.Time {
+	record, err := loadRecord(opts, claudeConnector)
+	if err != nil || record == nil || record.RestoredAt == "" {
+		return time.Time{}
+	}
+	restored, err := time.Parse(time.RFC3339, record.RestoredAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return restored
 }

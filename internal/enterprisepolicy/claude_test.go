@@ -213,6 +213,13 @@ func TestClaudeRemoveDeletesOnlyTheDropIn(t *testing.T) {
 	if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
 		t.Fatal(err)
 	}
+	// An administrator edited every hook path and repair put the drop-in
+	// back; removal must not restore the edited copy (GAP-1099).
+	dropIn := filepath.Join(claudeDir(t, opts), "managed-settings.d", DefenseClawDropInName)
+	writeFile(t, dropIn, strings.ReplaceAll(readFile(t, dropIn), "/bin/defenseclaw-hook", "/binx/defenseclaw-hook"))
+	if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
 		t.Fatal(err)
 	}

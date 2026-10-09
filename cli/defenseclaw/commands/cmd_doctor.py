@@ -1387,12 +1387,16 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     )
 
 
-def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool) -> int:
+def _report_uninitialized_install(
+    cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool, leftover: str = ""
+) -> int:
     """Render the whole Doctor result for an install that was never initialized
     and return the exit code. A managed device has no per-user config by
     design: the administrator's config rules, so Doctor says that (exit 3, as
     every command that needs a per-user config) instead of sending the user
-    to ``defenseclaw init``."""
+    to ``defenseclaw init``. A per-user install left on a managed device
+    (``leftover``, its config.yaml) is reported the same way, not checked as
+    if its gateway and hooks were the protection (GAP-0987)."""
 
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_writer import machine_managed_standalone
@@ -1405,14 +1409,23 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
     if not json_out:
         _doctor_subsection("Configuration")
     if managed:
+        detail = (
+            "This device is managed: DefenseClaw is configured by your administrator (MDM or management plane), "
+            "so there is no per-user config and no per-user check applies"
+        )
+        if leftover:
+            detail += (
+                f"; the per-user install this account still has ({leftover}) is not used here, so neither its "
+                "gateway nor its hooks are checked"
+            )
         _emit(
             "skip",
             "Config file",
-            "This device is managed: DefenseClaw is configured by your administrator (MDM or management plane), "
-            "so there is no per-user config and no per-user check applies",
+            detail,
             r=r,
             check_id="doctor.config.validation",
             reason_code="managed-device",
+            remediation="defenseclaw uninstall --all --binaries --yes" if leftover else "",
         )
     else:
         _emit(
@@ -1445,6 +1458,12 @@ def _report_uninitialized_install(cfg, r: _DoctorResult, *, json_out: bool, writ
             + (f" An administrator checks it with: sudo {lifecycle} status" if lifecycle else ""),
             indent="  ",
         )
+        if leftover:
+            ux.warn(
+                f"The per-user DefenseClaw install this account still has ({leftover}) is not used on this device. "
+                "Remove it with: defenseclaw uninstall --all --binaries --yes",
+                indent="  ",
+            )
         ux.echo()
         return 3
     ux.echo("  Health: " + ux._style(f"{r.failed} failed", fg="red", bold=True))
@@ -11661,9 +11680,14 @@ def doctor(
     # so an install where `defenseclaw init` never ran read as a broken one
     # with a page of failures and --fix / gateway start hints. Say once that
     # DefenseClaw is not initialized and stop, as `defenseclaw status` does.
-    if not _doctor_config_present(cfg):
+    from defenseclaw.config_writer import managed_leftover_config
+
+    leftover = managed_leftover_config()
+    if leftover or not _doctor_config_present(cfg):
         raise SystemExit(
-            _report_uninitialized_install(cfg, r, json_out=json_out, write_cache=not (do_fix and dry_run))
+            _report_uninitialized_install(
+                cfg, r, json_out=json_out, write_cache=not (do_fix and dry_run), leftover=leftover
+            )
         )
 
     # Repair first, then diagnose the resulting state.  The former ordering

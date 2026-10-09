@@ -281,7 +281,11 @@ What follows when the identity is missing:
   `guardrail profile
   explain` asks the operating system directly, so it already shows the new
   profile. The per-user CLI's `cache:` line and warning give the age of the
-  facts requests still use; managed `profile-explain` does not print that age.
+  facts requests still use; managed `profile-explain` gives them in its `cache`
+  object (`age_seconds`, `refresh_after_seconds`, `differs`). A config push
+  that changes `guardrail.profiles`, `guardrail.profile_assignments` or
+  `guardrail.default_profile` has each account refresh its facts at its next
+  request, so a pushed assignment applies to a group the user already joined.
   On a bound Mac, flush Open Directory membership with
   `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
   gateway or wait for its 15-minute refresh. On Windows the

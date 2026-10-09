@@ -272,37 +272,57 @@ func TestARolledBackRunLeavesThePrivateFoldersClosed(t *testing.T) {
 // write entries for a standard user on the hook binary, bin/, the gateway
 // LaunchDaemon plist and the Claude Code drop-in left status, verify and
 // repair green and the entries in place (GAP-0946). status names each path
-// and repair removes those entries; a deny entry elsewhere stays.
+// and repair removes those entries; a deny entry elsewhere stays. A pkg
+// install plans no binaries (the package placed them), and its repair left
+// the entries of the hook and gateway binaries in place.
 func TestRepairRemovesMacOSACLEntriesThatLetOtherAccountsChangeTheDeployment(t *testing.T) {
-	h := newTestHost(t, "darwin")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
-	l := h.env.Layout
-	plist := "/Library/LaunchDaemons/" + labelGateway + ".plist"
-	dropIn := "/Library/Application Support/ClaudeCode/managed-settings.d/" + enterprisepolicy.DefenseClawDropInName
-	writable := map[string]string{
-		filepath.Join(l.BinDir, binHook): "user:dcm-w4h2 allow write,append",
-		plist:                            "user:dcm-w4h2 allow write,append",
-		dropIn:                           "user:dcm-w4h2 allow write,append",
-		l.BinDir:                         "user:dcm-w4h2 allow add_file,delete_child",
+	for _, channel := range []string{ChannelPayload, ChannelPackage} {
+		t.Run(channel, func(t *testing.T) {
+			h := newTestHost(t, "darwin")
+			l := h.env.Layout
+			install := Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}
+			if channel == ChannelPackage {
+				staged := install.PayloadDir
+				if err := os.MkdirAll(h.env.P(l.BinDir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{binGateway, binHook, binSensorHelper} {
+					if err := h.env.copyFileAtomic(filepath.Join(staged, name), filepath.Join(h.env.P(l.BinDir), name), 0o755, rootOwner()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				install.PayloadDir, install.FromPackage, install.Reason = "", true, "package"
+			}
+			requireOK(t, h.run(install))
+			plist := "/Library/LaunchDaemons/" + labelGateway + ".plist"
+			dropIn := "/Library/Application Support/ClaudeCode/managed-settings.d/" + enterprisepolicy.DefenseClawDropInName
+			writable := map[string]string{
+				filepath.Join(l.BinDir, binHook):    "user:dcm-w4h2 allow write,append",
+				filepath.Join(l.BinDir, binGateway): "user:dcm-w4h2 allow write,append",
+				plist:                               "user:dcm-w4h2 allow write,append",
+				dropIn:                              "user:dcm-w4h2 allow write,append",
+				l.BinDir:                            "user:dcm-w4h2 allow add_file,delete_child",
+			}
+			denyOnly := h.env.P(l.ConfigDir)
+			h.runner.acls = map[string][]string{denyOnly: {"group:everyone deny delete"}}
+			for canonical, entry := range writable {
+				h.runner.acls[h.env.P(canonical)] = []string{"group:everyone deny delete", entry}
+			}
+			status := h.run(Options{Action: ActionStatus})
+			requireError(t, status, codeVerify)
+			got := messagesOf(status.Errors, codeVerify)
+			for canonical := range writable {
+				if !strings.Contains(got, canonical) || !strings.Contains(got, " repair`") {
+					t.Errorf("status does not name %s and the repair: %s", canonical, got)
+				}
+			}
+			requireOK(t, h.run(Options{Action: ActionRepair}))
+			if len(h.runner.acls) != 1 || h.runner.acls[denyOnly] == nil {
+				t.Fatalf("after repair the ACL entries are %v, want only the deny entry on %s", h.runner.acls, l.ConfigDir)
+			}
+			requireOK(t, h.run(Options{Action: ActionStatus}))
+		})
 	}
-	denyOnly := h.env.P(l.ConfigDir)
-	h.runner.acls = map[string][]string{denyOnly: {"group:everyone deny delete"}}
-	for canonical, entry := range writable {
-		h.runner.acls[h.env.P(canonical)] = []string{"group:everyone deny delete", entry}
-	}
-	status := h.run(Options{Action: ActionStatus})
-	requireError(t, status, codeVerify)
-	got := messagesOf(status.Errors, codeVerify)
-	for canonical := range writable {
-		if !strings.Contains(got, canonical) || !strings.Contains(got, " repair`") {
-			t.Errorf("status does not name %s and the repair: %s", canonical, got)
-		}
-	}
-	requireOK(t, h.run(Options{Action: ActionRepair}))
-	if len(h.runner.acls) != 1 || h.runner.acls[denyOnly] == nil {
-		t.Fatalf("after repair the ACL entries are %v, want only the deny entry on %s", h.runner.acls, l.ConfigDir)
-	}
-	requireOK(t, h.run(Options{Action: ActionStatus}))
 }
 
 // A recursive read entry for a group of standard users on the install root
