@@ -54,6 +54,10 @@ func enterpriseACPSetupState(dataDir, home, client, agent, profile, mode string)
 	if entry == nil {
 		return false, "the editor file " + configPath + " has no DefenseClaw entry for " + agent
 	}
+	command, _ := entry["command"].(string)
+	if !filepath.IsAbs(command) || !sameEnterpriseHookPath(command, lock.Guard.Path) {
+		return false, fmt.Sprintf("the editor entry uses command %s, not the configured guard %s", command, lock.Guard.Path)
+	}
 	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, client, agent)
 	if err != nil {
 		return false, err.Error()

@@ -149,6 +149,24 @@ func TestUserScanBoundsOddIDEFolderNames(t *testing.T) {
 	}
 }
 
+// A marketplace AI extension creates a signature outside the curated
+// catalog; the guardian must still accept the full user report.
+func TestUserScanAcceptsMarketplaceAISignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-user scans run on Linux and macOS")
+	}
+	withoutMachineIDEs(t)
+	home := t.TempDir()
+	writeVSCodeExtensions(t, home, "augment.vscode-augment")
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), UserScanOptions{}, nil)
+	if len(report.Signals) != 1 || report.Signals[0].SignatureID != "ide-augment.vscode-augment" {
+		t.Fatalf("marketplace signals = %+v", report.Signals)
+	}
+	if err := SanitizeUserScanReport(&report, nil, false, false); err != nil {
+		t.Fatalf("SanitizeUserScanReport: %v", err)
+	}
+}
+
 // GAP-0396: the guardian's per-user scan runs as the home's owner, but a
 // link that owner planted toward another readable home must not put the
 // other account's plugins in this account's managed inventory.

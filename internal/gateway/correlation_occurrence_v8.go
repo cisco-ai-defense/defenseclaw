@@ -499,15 +499,15 @@ func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationReposi
 	if req.AgentID != "" {
 		cursor, err = repo.GetCursor(ctx, instance, req.SessionID, req.AgentID)
 	} else {
-		// Outside Secure Client, an identity-scoped agentless hook may
-		// inherit only its own deterministic main agent. The registry is
-		// process-local, so it cannot authorize a generic cursor after restart.
+		// Outside Secure Client, an identity-scoped agentless hook can
+		// restore only its own deterministic root cursor. This exact key
+		// lookup does not infer that an arbitrary agentless hook is main.
+		// The registry is process-local and cannot authorize a generic
+		// cursor after restart.
 		if req.AgentIdentityID != "" && !secureClient {
-			if spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) {
-				main := agentNodeID(req.AgentIdentityID, req.ConnectorName, req.SessionID, "root")
-				if own, getErr := repo.GetCursor(ctx, instance, req.SessionID, main); getErr == nil && own.Active {
-					return own, true
-				}
+			main := agentNodeID(req.AgentIdentityID, req.ConnectorName, req.SessionID, "root")
+			if own, getErr := repo.GetCursor(ctx, instance, req.SessionID, main); getErr == nil && own.Active {
+				return own, true
 			}
 			return audit.CorrelationCursor{}, false
 		}

@@ -116,6 +116,39 @@ func TestHookOccurrenceMintsOnlyAtReviewedBoundariesAndRestoresCursor(t *testing
 // GAP-0102: the ledger mints the session root agent with the ID the hook model
 // records derive (GAP-0031), except under Secure Client, which keeps the
 // UUIDv7 agent of main (issue #1092).
+// Codex does not declare agentless-main inference, but a verified agent
+// identity can still name the exact root cursor that SessionStart persisted.
+func TestCodexAgentlessHookRestoresIdentityScopedRootCursor(t *testing.T) {
+	agentIdentityTestSetup(t)
+	installCorrelationHMACForTest()
+	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+	t.Cleanup(func() { _ = store.Close() })
+	profile := server.hookProfileForConnector("codex")
+	const identity = "agt-0000000000000c04"
+	const session = "codex-session-cursor"
+	correlate := func(event string) agentHookRequest {
+		payload := map[string]interface{}{"hook_event_name": event, "session_id": session}
+		if event == "PreToolUse" {
+			payload["tool_name"] = "shell_command"
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := normalizeAgentHookRequestWithCorrelationEvent("codex", payload, profile.Correlation, "", identity)
+		_, req, err = server.correlateHookOccurrence(t.Context(), profile, req, raw)
+		if err != nil || req.SuppressCorrelationEmit {
+			t.Fatalf("%s: err=%v suppressed=%t", event, err, req.SuppressCorrelationEmit)
+		}
+		return req
+	}
+	start := correlate("SessionStart")
+	tool := correlate("PreToolUse")
+	if start.AgentID == "" || tool.AgentID != start.AgentID {
+		t.Fatalf("Codex agentless tool agent=%q, SessionStart agent=%q", tool.AgentID, start.AgentID)
+	}
+}
+
 func TestHookOccurrenceRootAgentKeepsUUIDv7UnderSecureClient(t *testing.T) {
 	installCorrelationHMACForTest()
 	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {

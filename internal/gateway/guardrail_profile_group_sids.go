@@ -39,6 +39,9 @@ const (
 	// profileGroupSIDRetryInterval spaces the retries of a name that did not
 	// resolve.
 	profileGroupSIDRetryInterval = time.Minute
+	// A hook waits briefly for a due retry, so a recovered directory can
+	// select the assignment on that hook without waiting indefinitely on LSA.
+	profileGroupSIDRetryWait = 200 * time.Millisecond
 	// profileGroupSIDLookupsMax bounds the name lookups outstanding at once
 	// across every profile set: the OS never abandons a stalled lookup, so
 	// reloads must not pile them up.
@@ -111,11 +114,12 @@ type profileGroupSIDs struct {
 }
 
 type profileGroupSIDEntry struct {
-	name    string
-	sid     string
-	err     error
-	call    *profileGroupSIDLookupCall
-	nextTry time.Time
+	name           string
+	sid            string
+	err            error
+	call           *profileGroupSIDLookupCall
+	nextTry        time.Time
+	retryWaitUntil time.Time
 }
 
 // newProfileGroupSIDs resolves the group names of assignments, waiting at most
@@ -164,21 +168,50 @@ func profileGroupNeedsSID(group string) bool {
 	return group != "" && !strings.HasPrefix(strings.ToUpper(group), "S-1-") && strings.Trim(group, "0123456789") != ""
 }
 
-// refresh takes the answers of lookups that finished since the last call and
-// retries the names whose retry is due. It never waits for a lookup.
-func (s *profileGroupSIDs) refresh(now time.Time) {
+// refresh absorbs completed lookups and starts retries that are due. Hooks
+// share a short wait for an in-flight retry before matching and memoising a
+// decision; a stalled LSA call never holds the request indefinitely.
+func (s *profileGroupSIDs) refresh(now time.Time, wait bool) {
 	if s == nil || s.unresolved.Load() == 0 {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.absorbLocked(now)
+	var pending []*profileGroupSIDLookupCall
+	var waitUntil time.Time
 	for _, entry := range s.entries {
 		if entry.sid == "" && entry.call == nil && !now.Before(entry.nextTry) {
 			entry.call = startProfileGroupSIDLookup(s.lookup, entry.name)
 			entry.nextTry = now.Add(profileGroupSIDRetryInterval)
+			if entry.call != nil {
+				entry.retryWaitUntil = now.Add(profileGroupSIDRetryWait)
+			}
+		}
+		if entry.call != nil && now.Before(entry.retryWaitUntil) {
+			pending = append(pending, entry.call)
+			if entry.retryWaitUntil.After(waitUntil) {
+				waitUntil = entry.retryWaitUntil
+			}
 		}
 	}
+	s.mu.Unlock()
+	if !wait || len(pending) == 0 {
+		return
+	}
+	remaining := time.Until(waitUntil)
+	if remaining > 0 {
+		deadline := time.NewTimer(remaining)
+	waitForRetry:
+		for _, call := range pending {
+			select {
+			case <-call.done:
+			case <-deadline.C:
+				break waitForRetry
+			}
+		}
+		deadline.Stop()
+	}
+	s.absorb(time.Now())
 }
 
 func (s *profileGroupSIDs) absorb(now time.Time) {
@@ -198,6 +231,7 @@ func (s *profileGroupSIDs) absorbLocked(now time.Time) {
 			continue
 		}
 		entry.sid, entry.err, entry.call = entry.call.sid, entry.call.err, nil
+		entry.retryWaitUntil = time.Time{}
 		if entry.sid != "" {
 			s.unresolved.Add(-1)
 			s.generation.Add(1)
