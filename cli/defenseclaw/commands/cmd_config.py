@@ -626,6 +626,29 @@ def _shadowed_mode_notes(changes: list) -> list[str]:
         return []
 
 
+def _shadowed_hilt_notes(changes: list) -> list[str]:
+    if not any(
+        getattr(change, "path", "") == "guardrail.hilt.enabled" and change.value is False
+        for change in changes
+    ):
+        return []
+    try:
+        cfg = config_module.load()
+        enabled = [
+            connector for connector in cfg.active_connectors()
+            if (own := cfg.guardrail._connector_override(connector)) is not None
+            and own.hilt is not None and own.hilt.enabled
+        ]
+    except Exception:  # noqa: BLE001 - config change already committed; keep the hint best effort.
+        return []
+    if not enabled:
+        return []
+    return [
+        f"HILT remains on for {', '.join(enabled)} because each connector has its own override; "
+        "turn it off with: defenseclaw guardrail hilt off"
+    ]
+
+
 def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
@@ -662,6 +685,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     if not result.changed:
         if verb != "unset":
             click.echo(f"{key} already has that value (generation {result.generation}).")
+        for note in _shadowed_hilt_notes(changes):
+            click.echo(note)
         return False
     changed_key = ", ".join(result.changed) if verb == "unset" else key
     click.echo(
@@ -675,6 +700,8 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     if digest:
         click.echo(f"Effective policy digest: {digest['effective_digest']}")
     for note in _shadowed_mode_notes(changes):
+        click.echo(note)
+    for note in _shadowed_hilt_notes(changes):
         click.echo(note)
     for note in _unloaded_signature_pack_notes(cfg):
         click.echo(note)
