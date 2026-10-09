@@ -857,7 +857,7 @@ func newHookContractLockEntry(
 		HookScriptVersion:      contract.HookScriptVersion,
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
-		HookFailMode:           normalizeHookFailMode(opts.HookFailMode),
+		HookFailMode:           resolveHookFailMode(opts, conn),
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
 	if runtime.GOOS == "windows" && entry.Connector == "codex" {
@@ -910,7 +910,7 @@ func HookRuntimeRegistrationCurrent(
 	if runtimeState.Version != 2 {
 		return false, fmt.Errorf("unsupported Codex hook runtime evidence version %d", runtimeState.Version)
 	}
-	wantMode := normalizeHookFailMode(opts.HookFailMode)
+	wantMode := resolveHookFailMode(opts, nil)
 	if strings.TrimSpace(runtimeState.GatewayAddr) != strings.TrimSpace(opts.APIAddr) ||
 		runtimeState.FailModes["codex"] != wantMode ||
 		runtimeState.Managed != opts.ManagedEnterprise {

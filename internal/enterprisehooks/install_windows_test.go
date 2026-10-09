@@ -511,6 +511,7 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 	if err := os.MkdirAll(trustedDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	setWindowsTestPathExactOwner(t, trustedDir, targetSID)
 	for path, body := range map[string][]byte{
 		hookExe:    []byte("test native hook"),
 		gatewayExe: []byte("test native gateway"),
@@ -518,6 +519,7 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 		if err := os.WriteFile(path, body, 0o700); err != nil {
 			t.Fatal(err)
 		}
+		setWindowsTestPathExactOwner(t, path, targetSID)
 	}
 	if err := setWindowsUserPathProtection(trustedDir, targetSID, true); err != nil {
 		t.Fatal(err)
@@ -692,15 +694,13 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 }
 
-func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
+func TestInstallWindowsClaudeNormalizesManagedFailModeOpen(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
 		"allowManagedHooksOnly": true,
 	})
 	opts := windowsManagedInstallOptions(fixture)
-	// Observe-mode and legacy protected configurations may resolve to open.
-	// Windows enterprise native hooks must still publish and verify one
-	// authoritative fail-closed contract.
-	opts.HookFailMode = "open"
+	// A legacy configured closed mode must not replace the enterprise default.
+	opts.HookFailMode = "closed"
 	if _, err := Install(context.Background(), opts); err != nil {
 		t.Fatalf("Install with configured fail-open mode: %v", err)
 	}
@@ -708,8 +708,8 @@ func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
 		filepath.Join(fixture.home, ".defenseclaw"),
 		"claudecode",
 	)
-	if lock.HookFailMode != "closed" {
-		t.Fatalf("managed Claude lock fail mode = %q, want closed", lock.HookFailMode)
+	if lock.HookFailMode != "open" {
+		t.Fatalf("managed Claude lock fail mode = %q, want open", lock.HookFailMode)
 	}
 	if _, err := Verify(context.Background(), opts); err != nil {
 		t.Fatalf("Verify with the same configured fail-open input: %v", err)

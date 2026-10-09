@@ -371,7 +371,7 @@ func trustedNativeHookHome() (string, bool) {
 		}
 		if !filepath.IsAbs(strings.TrimSpace(enterpriseHome)) {
 			// filepath.Clean("") is ".". Preserve an empty/invalid managed home
-			// as unavailable so the fail-closed path never reads project-relative
+			// as unavailable so the managed failure path never reads project-relative
 			// hook state.
 			return "", true
 		}

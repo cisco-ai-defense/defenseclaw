@@ -196,7 +196,7 @@ func validateWindowsCursorManagedRuntime(
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], hooksPath) ||
 		len(lock.Locations.HookScriptPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookScriptPaths[0], adapterPath) ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		!validWindowsManagedHookFailMode(lock.HookFailMode) {
 		return errors.New("enterprise hooks: Cursor managed hook contract does not identify the active enterprise adapter")
 	}
 	return nil
@@ -403,9 +403,6 @@ func validateWindowsCodexManagedRuntime(
 			}
 		}
 	}
-	if err := connector.ValidateManagedHookRuntimeState(dataDir, "codex", "closed"); err != nil {
-		return fmt.Errorf("enterprise hooks: Codex managed runtime sidecars are invalid: %w", err)
-	}
 	lock, err := connector.LoadHookContractLockEntryForMode(
 		dataDir,
 		"codex",
@@ -420,11 +417,14 @@ func validateWindowsCodexManagedRuntime(
 	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
 		return fmt.Errorf("enterprise hooks: Codex managed gateway binding: %w", err)
 	}
+	if err := connector.ValidateManagedHookRuntimeState(dataDir, "codex", lock.HookFailMode); err != nil {
+		return fmt.Errorf("enterprise hooks: Codex managed runtime sidecars are invalid: %w", err)
+	}
 	if lock.Connector != "codex" ||
 		len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], requirementsPath) ||
 		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		!validWindowsManagedHookFailMode(lock.HookFailMode) {
 		return errors.New("enterprise hooks: Codex managed hook contract lock does not identify the active machine requirements")
 	}
 	return nil

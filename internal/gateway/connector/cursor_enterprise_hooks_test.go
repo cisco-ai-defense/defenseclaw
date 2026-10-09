@@ -91,8 +91,8 @@ func TestRenderCursorAdapterFailsOpenOnlyWhenExplicitlyConfigured(t *testing.T) 
 		t.Fatalf("invalid fail mode did not collapse closed:\n%s", closedAdapter)
 	}
 
-	if _, err := RenderWindowsCursorEnterpriseAdapter(testWindowsHookBinary, "open"); err == nil {
-		t.Fatal("enterprise adapter accepted fail-open mode")
+	if managedOpen, err := RenderWindowsCursorEnterpriseAdapter(testWindowsHookBinary, "open"); err != nil || !bytes.Contains(managedOpen, []byte(`{"continue":true}`)) {
+		t.Fatalf("enterprise adapter did not honor fail-open mode: %v", err)
 	}
 }
 
@@ -374,8 +374,8 @@ func TestWindowsCursorEnterpriseHooksRejectMalformedOrDriftedContracts(t *testin
 			}
 		})
 	}
-	if _, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open"); err == nil {
-		t.Fatal("enterprise hook merge accepted fail-open mode")
+	if openHooks, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open"); err != nil || VerifyWindowsCursorEnterpriseHooks(openHooks, testWindowsCursorAdapter, "open") != nil || bytes.Contains(openHooks, []byte(`"failClosed": true`)) {
+		t.Fatalf("enterprise hook merge failed to publish open mode: %v", err)
 	}
 	if _, err := MergeWindowsCursorEnterpriseHooks(
 		bytes.Repeat([]byte(" "), windowsCursorEnterpriseHooksJSONMax+1),

@@ -373,6 +373,9 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 	if strings.TrimSpace(opts.HookFailMode) != "" {
 		failMode = normalizeHookFailMode(opts.HookFailMode)
 	}
+	if opts.ManagedEnterprise {
+		failMode = ManagedEnterpriseHookFailMode
+	}
 	extra := map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 		"DEFENSECLAW_FAIL_MODE":        failMode,

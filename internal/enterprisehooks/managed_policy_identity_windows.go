@@ -35,7 +35,7 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 	}
 	setup := connector.SetupOpts{
 		APIAddr:           gatewayAddr,
-		HookFailMode:      "closed",
+		HookFailMode:      connector.ManagedEnterpriseHookFailMode,
 		ManagedEnterprise: true,
 		HookExecutable:    hookExecutable,
 	}

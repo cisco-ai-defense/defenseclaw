@@ -168,13 +168,13 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
-		// sidecar/token or contact any endpoint derived from those files; hand an
-		// unavailable strict runtime directly to hookexec's fail-closed boundary.
+		// sidecar/token or contact any endpoint derived from those files. Allow
+		// the agent action according to the managed infrastructure failure mode.
 		return hookexec.Options{
 			Connector:             connector,
 			Event:                 event,
-			FailMode:              "closed",
-			StrictAvailability:    true,
+			FailMode:              hookexec.ManagedEnterpriseFailMode,
+			StrictAvailability:    false,
 			ManagedEnterprise:     true,
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
@@ -208,7 +208,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			managedGatewayService = protectedService
 			authenticatedManagedToken = protectedToken
 		} else {
-			// Resolver failure is carried separately and blocks before network
+			// Resolver failure is carried separately and returns before network
 			// contact. Keep a loopback placeholder so no user-supplied flag,
 			// environment value, or target-writable sidecar becomes selected.
 			apiAddr = "127.0.0.1:1"
@@ -299,8 +299,8 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
-		opts.FailMode = "closed"
-		opts.StrictAvailability = true
+		opts.FailMode = hookexec.ManagedEnterpriseFailMode
+		opts.StrictAvailability = false
 	}
 
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
