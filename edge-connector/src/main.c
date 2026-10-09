@@ -256,8 +256,34 @@ int main(void) {
                         if (write(client_fds[i], deny, strlen(deny)) < 0) { /* best-effort */ }
 #endif
                     } else if (msg_len == 81 && base[16] == ':') {
-                        /* Parse 64-hex HMAC after colon */
-                        authenticated = true; /* TODO: verify HMAC against audit key */
+                        /* Verify HMAC-SHA256(audit_key, "release_lockdown") */
+                        uint8_t provided[32];
+                        bool hex_ok = true;
+                        for (int h = 0; h < 32; h++) {
+                            int hi = base[17 + h*2], lo = base[18 + h*2];
+                            int hv = (hi >= '0' && hi <= '9') ? hi-'0' : (hi >= 'a' && hi <= 'f') ? hi-'a'+10 : (hi >= 'A' && hi <= 'F') ? hi-'A'+10 : -1;
+                            int lv = (lo >= '0' && lo <= '9') ? lo-'0' : (lo >= 'a' && lo <= 'f') ? lo-'a'+10 : (lo >= 'A' && lo <= 'F') ? lo-'A'+10 : -1;
+                            if (hv < 0 || lv < 0) { hex_ok = false; break; }
+                            provided[h] = (uint8_t)((hv << 4) | lv);
+                        }
+                        if (hex_ok) {
+                            extern const uint8_t *dclaw_audit_get_key(size_t *out_len);
+                            size_t key_len = 0;
+                            const uint8_t *akey = dclaw_audit_get_key(&key_len);
+                            if (akey && key_len == 32) {
+                                uint8_t expected[32];
+                                extern void dclaw_hmac_sha256(const uint8_t *key, size_t kl,
+                                    const uint8_t *msg, size_t ml, uint8_t *out);
+                                dclaw_hmac_sha256(akey, key_len,
+                                    (const uint8_t *)"release_lockdown", 16, expected);
+                                volatile uint8_t diff = 0;
+                                for (int h = 0; h < 32; h++) diff |= provided[h] ^ expected[h];
+                                authenticated = (diff == 0);
+                                if (!authenticated) {
+                                    fprintf(stderr, "[DCLAW] WARNING: IPC lockdown release HMAC mismatch\n");
+                                }
+                            }
+                        }
                     }
                     if (authenticated) {
                         int rc = dclaw_ipc_release_lockdown();

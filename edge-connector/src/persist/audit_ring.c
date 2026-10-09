@@ -553,3 +553,10 @@ bool dclaw_audit_key_provisioned(void) {
     get_audit_key();
     return s_audit_key_provisioned;
 }
+
+const uint8_t *dclaw_audit_get_key(size_t *out_len) {
+    get_audit_key();
+    if (!s_audit_key_provisioned) return NULL;
+    *out_len = AUDIT_KEY_LEN;
+    return s_audit_key;
+}

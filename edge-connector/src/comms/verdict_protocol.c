@@ -122,7 +122,7 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
      * Matches the mbedTLS path semantics exactly.
      */
     uint8_t hmac_full[32];
-    uint8_t msg[256]; /* Plenty for session_id + 2 + 1 + 1 + 2 + 1 + 1 + 4 + 8 */
+    uint8_t msg[256]; /* session_id + 2 + 1 + 1 + 2 + 1 + 1 + 4 + 32 = ~76 bytes max */
     size_t msg_len = 0;
 
     /* Feed: session_id (NUL-terminated string, excluding NUL) */
