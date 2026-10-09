@@ -13,15 +13,22 @@
 package enterprisehooks
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
+	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
 // windowsAgentVersionMaxBytes caps how many bytes any single
@@ -32,6 +39,71 @@ import (
 // giant file at the probed path. Kept well above realistic sizes so
 // a legitimate agent update never trips it.
 const windowsAgentVersionMaxBytes = 64 * 1024
+
+const windowsNativeAgentProbeTimeout = 10 * time.Second
+
+var (
+	windowsNativeCodexRuntimeLeaf    = regexp.MustCompile(`^[0-9A-Fa-f]{8,128}$`)
+	windowsNativeAgentVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$`)
+	windowsNativeAgentVersion        = probeWindowsNativeAgentVersion
+)
+
+// windowsNativeAgentProbeScript is executed only by the fixed Windows
+// PowerShell binary returned by GetSystemWindowsDirectory. It never executes
+// the candidate. The script holds the PE open without write/delete sharing,
+// validates Authenticode publisher plus PE identity, and emits one normalized
+// version. Candidate values arrive through environment variables rather than
+// PowerShell source text, so a profile path cannot become script input.
+const windowsNativeAgentProbeScript = `$ErrorActionPreference='Stop'
+$connector=$env:DEFENSECLAW_AGENT_CONNECTOR
+$path=$env:DEFENSECLAW_AGENT_CANDIDATE
+$stream=$null
+try {
+  $full=[IO.Path]::GetFullPath($path)
+  $stream=[IO.FileStream]::new($full,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+  if ($stream.Length -le 0 -or $stream.Length -gt 536870912) { exit 1 }
+  $signature=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $full -ErrorAction Stop
+  if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or $null -eq $signature.SignerCertificate) { exit 1 }
+  $signer=$signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false)
+  $identity=[Diagnostics.FileVersionInfo]::GetVersionInfo($full)
+  if ($null -eq $identity) { exit 1 }
+  if ($connector -ceq 'claudecode') {
+    if ($signer -cnotin @('Anthropic PBC','Anthropic, PBC') -or $identity.ProductName -cne 'Claude Code') { exit 1 }
+    if (-not [string]::IsNullOrWhiteSpace($identity.OriginalFilename) -and $identity.OriginalFilename -cne 'claude.exe') { exit 1 }
+    $match=[regex]::Match([string]$identity.FileVersion,'^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.0)?$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $match.Success) { exit 1 }
+    [Console]::Out.WriteLine($match.Groups[1].Value+'.'+$match.Groups[2].Value+'.'+$match.Groups[3].Value)
+    exit 0
+  }
+  if ($connector -cne 'codex' -or $signer -cne 'OpenAI OpCo, LLC') { exit 1 }
+  if (-not [string]::IsNullOrWhiteSpace($identity.ProductName) -and $identity.ProductName -cnotin @('Codex','Codex CLI')) { exit 1 }
+  if (-not [string]::IsNullOrWhiteSpace($identity.OriginalFilename) -and $identity.OriginalFilename -cnotin @('codex.exe','codex-x86_64-pc-windows-msvc.exe')) { exit 1 }
+  $stream.Position=0
+  $decoder=[Text.Encoding]::ASCII
+  $buffer=[byte[]]::new(65536)
+  $carry=''
+  $versions=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  while (($count=$stream.Read($buffer,0,$buffer.Length)) -gt 0) {
+    $text=$carry+$decoder.GetString($buffer,0,$count)
+    foreach ($m in [regex]::Matches($text,'codex-cli[ ]+([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)',[Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
+      [void]$versions.Add($m.Groups[1].Value)
+      if ($versions.Count -gt 1) { exit 1 }
+    }
+    $carry=$text.Substring([Math]::Max(0,$text.Length-[Math]::Min(256,$text.Length)))
+  }
+  if ($versions.Count -ne 1) { exit 1 }
+  $version=''
+  foreach ($item in $versions) { $version=[string]$item; break }
+  if (-not [string]::IsNullOrWhiteSpace($identity.FileVersion)) {
+    $fileMatch=[regex]::Match([string]$identity.FileVersion,'^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.0)?$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $fileMatch.Success) { exit 1 }
+    $fileVersion=$fileMatch.Groups[1].Value+'.'+$fileMatch.Groups[2].Value+'.'+$fileMatch.Groups[3].Value
+    if ($fileVersion -cne $version) { exit 1 }
+  }
+  [Console]::Out.WriteLine($version)
+} finally {
+  if ($null -ne $stream) { $stream.Dispose() }
+}`
 
 // windowsAgentPackageJSON is the shape we care about — just the
 // `version` field. json.Decoder.DisallowUnknownFields is NOT used
@@ -60,10 +132,9 @@ type windowsAgentPackageJSON struct {
 // the same reasons. The enumerator caller drops any user × connector
 // with empty discovery — mirroring macOS's silently-skip behaviour.
 //
-// No process is ever spawned; all reads are static filesystem
-// inspection of well-known JSON manifests. This keeps the probe
-// safe to run as LocalSystem against a hostile user profile — we do
-// not execute the discovered binary or ask it to introspect itself.
+// Package-manager candidates use static filesystem inspection. Native PE
+// candidates are never executed; a fixed system PowerShell process validates
+// Authenticode and PE identity while holding the candidate open.
 func discoverWindowsAgentVersion(profileHome, connectorName string) string {
 	profileHome = strings.TrimSpace(profileHome)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
@@ -74,6 +145,9 @@ func discoverWindowsAgentVersion(profileHome, connectorName string) string {
 		return ""
 	}
 	cleanHome := filepath.Clean(profileHome)
+	if version, observed, _ := discoverWindowsNativeAgentVersion(cleanHome, connectorName); observed {
+		return version
+	}
 
 	candidates := windowsAgentVersionCandidatePaths(cleanHome, connectorName)
 	for _, candidate := range candidates {
@@ -83,6 +157,188 @@ func discoverWindowsAgentVersion(profileHome, connectorName string) string {
 		}
 	}
 	return ""
+}
+
+func encodeWindowsPowerShellCommand(script string) string {
+	encoded := utf16.Encode([]rune(script))
+	raw := make([]byte, len(encoded)*2)
+	for i, value := range encoded {
+		raw[i*2] = byte(value)
+		raw[i*2+1] = byte(value >> 8)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func probeWindowsNativeAgentVersion(connectorName, candidate string) string {
+	if err := winpath.RejectReparseChain(candidate); err != nil {
+		return ""
+	}
+	info, err := os.Lstat(candidate)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 512<<20 {
+		return ""
+	}
+	windowsDirectory, err := windows.GetSystemWindowsDirectory()
+	if err != nil {
+		return ""
+	}
+	powerShell := filepath.Join(windowsDirectory, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+	if err := winpath.RejectReparseChain(powerShell); err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), windowsNativeAgentProbeTimeout)
+	defer cancel()
+	cmd := processutil.CommandContext(
+		ctx,
+		powerShell,
+		"-NoLogo",
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy", "Bypass",
+		"-EncodedCommand", encodeWindowsPowerShellCommand(windowsNativeAgentProbeScript),
+	)
+	system32 := filepath.Join(windowsDirectory, "System32")
+	systemProfile := filepath.Join(system32, "config", "systemprofile")
+	systemTemp := filepath.Join(windowsDirectory, "Temp")
+	cmd.Env = []string{
+		"SystemRoot=" + windowsDirectory,
+		"WINDIR=" + windowsDirectory,
+		"PATH=" + system32,
+		"TEMP=" + systemTemp,
+		"TMP=" + systemTemp,
+		"USERPROFILE=" + systemProfile,
+		"HOMEDRIVE=" + filepath.VolumeName(windowsDirectory),
+		"HOMEPATH=" + strings.TrimPrefix(systemProfile, filepath.VolumeName(systemProfile)),
+		"DEFENSECLAW_AGENT_CONNECTOR=" + connectorName,
+		"DEFENSECLAW_AGENT_CANDIDATE=" + candidate,
+	}
+	output, err := processutil.CombinedOutputTree(cmd, false)
+	if err != nil || len(output) > 256 {
+		return ""
+	}
+	version := strings.TrimSpace(string(output))
+	if !validWindowsNativeAgentVersion(version) {
+		return ""
+	}
+	if err := winpath.RejectReparseChain(candidate); err != nil {
+		return ""
+	}
+	return version
+}
+
+func validWindowsNativeAgentVersion(version string) bool {
+	return len(version) <= 64 && windowsNativeAgentVersionPattern.MatchString(version)
+}
+
+func windowsNativeAgentCandidates(profileHome, connectorName string) ([]string, bool) {
+	switch connectorName {
+	case "claudecode":
+		return []string{filepath.Join(profileHome, ".local", "bin", "claude.exe")}, false
+	case "codex":
+		candidates := make([]string, 0, 2)
+		standaloneRoot := filepath.Join(profileHome, ".codex", "packages", "standalone")
+		current := filepath.Join(standaloneRoot, "current")
+		visibleBin := filepath.Join(profileHome, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin")
+		currentInfo, currentErr := os.Lstat(current)
+		visibleInfo, visibleErr := os.Lstat(visibleBin)
+		currentPresent := currentErr == nil
+		visiblePresent := visibleErr == nil
+		if visiblePresent && !currentPresent {
+			if visibleInfo.Mode()&os.ModeSymlink != 0 || !visibleInfo.IsDir() {
+				return candidates, true
+			}
+			candidates = append(candidates, filepath.Join(visibleBin, "codex.exe"))
+		} else if currentPresent || visiblePresent {
+			if !visiblePresent ||
+				currentInfo.Mode()&os.ModeSymlink == 0 || visibleInfo.Mode()&os.ModeSymlink == 0 {
+				return candidates, true
+			}
+			currentTarget, err := os.Readlink(current)
+			if err != nil {
+				return candidates, true
+			}
+			visibleTarget, err := os.Readlink(visibleBin)
+			if err != nil {
+				return candidates, true
+			}
+			if !filepath.IsAbs(currentTarget) {
+				currentTarget = filepath.Join(filepath.Dir(current), currentTarget)
+			}
+			if !filepath.IsAbs(visibleTarget) {
+				visibleTarget = filepath.Join(filepath.Dir(visibleBin), visibleTarget)
+			}
+			currentTarget = filepath.Clean(currentTarget)
+			visibleTarget = filepath.Clean(visibleTarget)
+			releasesRoot := filepath.Join(standaloneRoot, "releases")
+			if !strings.EqualFold(filepath.Dir(currentTarget), releasesRoot) {
+				return candidates, true
+			}
+			var binary string
+			switch {
+			case strings.EqualFold(visibleTarget, filepath.Join(current, "bin")):
+				binary = filepath.Join(currentTarget, "bin", "codex.exe")
+			case strings.EqualFold(visibleTarget, current):
+				binary = filepath.Join(currentTarget, "codex.exe")
+			default:
+				return candidates, true
+			}
+			candidates = append(candidates, binary)
+		} else if currentErr != nil && !errors.Is(currentErr, os.ErrNotExist) ||
+			visibleErr != nil && !errors.Is(visibleErr, os.ErrNotExist) {
+			return candidates, true
+		}
+		runtimeRoot := filepath.Join(profileHome, "AppData", "Local", "OpenAI", "Codex", "bin")
+		entries, err := os.ReadDir(runtimeRoot)
+		if err != nil {
+			return candidates, err != nil && !errors.Is(err, os.ErrNotExist)
+		}
+		if len(entries) > 256 {
+			return candidates, true
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || !windowsNativeCodexRuntimeLeaf.MatchString(entry.Name()) {
+				continue
+			}
+			candidates = append(candidates, filepath.Join(runtimeRoot, entry.Name(), "codex.exe"))
+		}
+		return candidates, false
+	default:
+		return nil, false
+	}
+}
+
+func discoverWindowsNativeAgentVersion(profileHome, connectorName string) (string, bool, string) {
+	candidates, unsafeEnumeration := windowsNativeAgentCandidates(profileHome, connectorName)
+	if unsafeEnumeration {
+		return "", true, "native candidate enumeration was unsafe"
+	}
+	observed := false
+	invalid := false
+	for _, candidate := range candidates {
+		_, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		observed = true
+		if err != nil {
+			invalid = true
+			continue
+		}
+		version := windowsNativeAgentVersion(connectorName, candidate)
+		if version == "" {
+			invalid = true
+			continue
+		}
+		if !invalid {
+			return version, true, ""
+		}
+	}
+	if invalid {
+		return "", true, "native candidate failed identity verification"
+	}
+	if observed {
+		return "", true, "native candidate had no version"
+	}
+	return "", false, ""
 }
 
 // windowsMachineScopedCursorPackageJSON points at Cursor's per-machine
@@ -120,9 +376,8 @@ var windowsMachineScopedCursorPackageJSON = `C:\Program Files\Cursor\resources\a
 //     — Bun global.
 //     3. `%LOCALAPPDATA%\Yarn\Data\global\node_modules\@openai\codex\package.json`
 //     — Yarn Classic global.
-//     MSIX-store install (`C:\Program Files\WindowsApps\OpenAI.Codex_…\`) still
-//     requires a glob-resolved lookup and stays out of scope here; a follow-up
-//     probe can add it once the glob-vs-reparse-chain interaction is worked out.
+//     Native standalone and Codex Desktop runtime candidates are handled by
+//     discoverWindowsNativeAgentVersion before these package manifests.
 //
 //   - `cursor`:
 //     1. `%LOCALAPPDATA%\Programs\cursor\resources\app\package.json`
@@ -263,6 +518,9 @@ func windowsAgentVersionExplain(profileHome, connectorName string) (string, stri
 	}
 	if !filepath.IsAbs(profileHome) {
 		return "", "profile home is not absolute"
+	}
+	if version, observed, reason := discoverWindowsNativeAgentVersion(filepath.Clean(profileHome), connectorName); observed {
+		return version, reason
 	}
 	candidates := windowsAgentVersionCandidatePaths(filepath.Clean(profileHome), connectorName)
 	if len(candidates) == 0 {

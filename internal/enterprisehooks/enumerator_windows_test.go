@@ -509,14 +509,10 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 	}
 }
 
-// TestApplyPreviousRowStatePreservesAgentVersion asserts the
-// AgentVersion + Enabled + Deferred preservation invariant spec
-// 005 REQ-08's design says: a row that already exists in the file
-// keeps its agent_version + enabled state across enumeration
-// cycles. A NEW row is auto-authorized at the per-user CLI's
-// discovered version (macOS parity) — or dropped entirely if no
-// per-user CLI is present.
-func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
+// TestApplyPreviousRowStatePreservesLastKnownVersionOnDiscoveryFailure pins
+// the availability fallback: existing hooks remain configured if a transient
+// discovery failure prevents a safe refresh.
+func TestApplyPreviousRowStatePreservesLastKnownVersionOnDiscoveryFailure(t *testing.T) {
 	enabled := true
 	previous := map[string]ManifestTarget{
 		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
@@ -544,6 +540,39 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 	}
 	if !matched.Deferred {
 		t.Fatal("existing-row Deferred=true not preserved")
+	}
+}
+
+func TestApplyPreviousRowStateRefreshesExistingAgentVersion(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex")
+	writeWindowsAgentPackageJSON(t, dir, "0.162.0")
+	enabled := false
+	previous := map[string]ManifestTarget{
+		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
+			SID:          "S-1-5-21-1000-2000-3000-1001",
+			Connector:    "codex",
+			AgentVersion: "0.145.0",
+			Enabled:      &enabled,
+			Deferred:     true,
+		},
+	}
+	matched := ManifestTarget{
+		SID:       "S-1-5-21-1000-2000-3000-1001",
+		UserHome:  home,
+		Connector: "codex",
+	}
+	if !applyPreviousRowState(&matched, previous, nil) {
+		t.Fatal("existing-row refresh signal: want true, got false")
+	}
+	if matched.AgentVersion != "0.162.0" {
+		t.Fatalf("existing-row AgentVersion: got %q, want refreshed 0.162.0", matched.AgentVersion)
+	}
+	if matched.Enabled == nil || *matched.Enabled {
+		t.Fatal("existing-row Enabled=false was not preserved during version refresh")
+	}
+	if !matched.Deferred {
+		t.Fatal("existing-row Deferred=true was not preserved during version refresh")
 	}
 }
 

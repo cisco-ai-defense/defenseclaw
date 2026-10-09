@@ -40,6 +40,23 @@ func writeWindowsAgentPackageJSON(t *testing.T, dir, version string) {
 	}
 }
 
+func stubWindowsNativeAgentVersion(t *testing.T, fn func(string, string) string) {
+	t.Helper()
+	previous := windowsNativeAgentVersion
+	windowsNativeAgentVersion = fn
+	t.Cleanup(func() { windowsNativeAgentVersion = previous })
+}
+
+func writeWindowsNativeAgentCandidate(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir native candidate: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("signed-pe-fixture"), 0o755); err != nil {
+		t.Fatalf("write native candidate: %v", err)
+	}
+}
+
 func TestDiscoverWindowsAgentVersionReturnsEmptyForUnknownConnector(t *testing.T) {
 	home := t.TempDir()
 	if got := discoverWindowsAgentVersion(home, "openclaw"); got != "" {
@@ -79,6 +96,97 @@ func TestDiscoverWindowsAgentVersionCodex(t *testing.T) {
 	got := discoverWindowsAgentVersion(home, "codex")
 	if got != "0.42.0" {
 		t.Fatalf("codex discovery: got %q, want 0.42.0", got)
+	}
+}
+
+func TestDiscoverWindowsAgentVersionClaudeNativeInstallWinsOverNPM(t *testing.T) {
+	home := t.TempDir()
+	native := filepath.Join(home, ".local", "bin", "claude.exe")
+	writeWindowsNativeAgentCandidate(t, native)
+	writeWindowsAgentPackageJSON(
+		t,
+		filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code"),
+		"2.1.272",
+	)
+	stubWindowsNativeAgentVersion(t, func(connector, candidate string) string {
+		if connector != "claudecode" || candidate != native {
+			t.Fatalf("unexpected native probe: connector=%q candidate=%q", connector, candidate)
+		}
+		return "2.1.301"
+	})
+
+	if got := discoverWindowsAgentVersion(home, "claudecode"); got != "2.1.301" {
+		t.Fatalf("native Claude discovery: got %q, want 2.1.301", got)
+	}
+}
+
+func TestDiscoverWindowsAgentVersionCodexStandaloneInstall(t *testing.T) {
+	home := t.TempDir()
+	native := filepath.Join(home, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin", "codex.exe")
+	writeWindowsNativeAgentCandidate(t, native)
+	stubWindowsNativeAgentVersion(t, func(connector, candidate string) string {
+		if connector == "codex" && candidate == native {
+			return "0.162.0"
+		}
+		return ""
+	})
+
+	if got := discoverWindowsAgentVersion(home, "codex"); got != "0.162.0" {
+		t.Fatalf("standalone Codex discovery: got %q, want 0.162.0", got)
+	}
+}
+
+func TestDiscoverWindowsAgentVersionCodexDesktopRuntime(t *testing.T) {
+	home := t.TempDir()
+	native := filepath.Join(
+		home,
+		"AppData", "Local", "OpenAI", "Codex", "bin",
+		"0123456789abcdef0123456789abcdef",
+		"codex.exe",
+	)
+	writeWindowsNativeAgentCandidate(t, native)
+	stubWindowsNativeAgentVersion(t, func(connector, candidate string) string {
+		if connector == "codex" && candidate == native {
+			return "0.163.0"
+		}
+		return ""
+	})
+
+	if got := discoverWindowsAgentVersion(home, "codex"); got != "0.163.0" {
+		t.Fatalf("Codex desktop runtime discovery: got %q, want 0.163.0", got)
+	}
+}
+
+func TestDiscoverWindowsAgentVersionInvalidNativeCandidateBlocksMetadataFallback(t *testing.T) {
+	home := t.TempDir()
+	native := filepath.Join(home, ".local", "bin", "claude.exe")
+	writeWindowsNativeAgentCandidate(t, native)
+	writeWindowsAgentPackageJSON(
+		t,
+		filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@anthropic-ai", "claude-code"),
+		"2.1.301",
+	)
+	stubWindowsNativeAgentVersion(t, func(string, string) string { return "" })
+
+	if got := discoverWindowsAgentVersion(home, "claudecode"); got != "" {
+		t.Fatalf("unverified native candidate fell through to metadata version %q", got)
+	}
+}
+
+func TestValidWindowsNativeAgentVersion(t *testing.T) {
+	cases := map[string]bool{
+		"2.1.301":         true,
+		"0.163.0-alpha.1": true,
+		"0.163.0+build.4": true,
+		"0.163":           false,
+		"0.163.0-.":       false,
+		"codex-cli 0.1.0": false,
+		"0.1.0\r\nextra":  false,
+	}
+	for value, want := range cases {
+		if got := validWindowsNativeAgentVersion(value); got != want {
+			t.Errorf("validWindowsNativeAgentVersion(%q) = %v, want %v", value, got, want)
+		}
 	}
 }
 
