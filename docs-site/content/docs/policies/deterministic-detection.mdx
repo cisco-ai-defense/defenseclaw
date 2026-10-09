@@ -88,6 +88,20 @@ The 239 enabled balanced/default rules are generated from
 The generated Go catalog is checked against the YAML in CI. Edit the YAML
 sources, not `internal/gateway/rules_catalog_generated.go`.
 
+### Download piped into a shell
+
+`CMD-PIPE-CURL` is off in the default and permissive profiles, so a command such
+as `curl ... | bash` is not recorded as a finding there. Many legitimate
+installers use that pattern. The strict profile enables the rule at `CRITICAL`.
+`wget ... | sh` (`CMD-PIPE-WGET`) and PowerShell `iwr ... | iex`
+(`CMD-WIN-IWR-IEX`) are still reported in every profile.
+
+To get the finding for `curl` pipelines, switch to the strict pack with
+`defenseclaw guardrail use-pack strict`, or add your own rule in a pack of your
+own. [Authoring CEL rules](/docs/policies/cel/authoring) shows the rule format,
+and [Rules and custom packs](/docs/policies/rules#add-your-own-pack) shows how to
+activate it.
+
 ## ActionFacts
 
 ActionFacts is the typed, bounded representation of one tool action. It parses
