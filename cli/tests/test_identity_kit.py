@@ -1589,6 +1589,36 @@ def test_intune_remediation_does_not_repeat_tenant_detection_only_assignment(
     assert "unchanged (detection only: the tenant stored runRemediationScript=false" in capsys.readouterr().out
 
 
+def test_intune_remediation_rerun_keeps_graph_fractional_schedule(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    intune = _load(INTUNE)
+    monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
+    schedule = {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
+                "interval": 1, "time": "02:00:00.0000000", "useUtc": False}
+    assignment = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
+                  "runRemediationScript": True, "runSchedule": schedule}
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [assignment]
+            return [{"id": "script-1"}]
+
+        def get(self, _path):
+            return {"detectionScriptContent": intune.b64(b"script"),
+                    "remediationScriptContent": intune.b64(b"script")}
+
+        def request(self, *_args):
+            raise AssertionError("unchanged assignment must not be rewritten")
+
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
+    assert intune.cmd_remediation(Graph(), args) == 0
+    assert "assignment to team: unchanged" in capsys.readouterr().out
+
+
 def test_intune_remediation_reads_back_tenant_state_after_assign(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

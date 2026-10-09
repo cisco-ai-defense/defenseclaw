@@ -444,6 +444,45 @@ func TestWindowsEnterpriseDiscoveryKeepsSameNameAccountsApart(t *testing.T) {
 	}
 }
 
+// A qualified account selection still includes runtime findings whose user
+// field carries only the bare account name.
+func TestWindowsEnterpriseDiscoveryQualifiedUserIncludesRuntimeFinding(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-3997"
+	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
+	})
+	cfg = nil
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Claude Code", Category: "supported_connector", UserName: "alice", UserID: sid},
+		}}, "127.0.0.1:18970", nil
+	}
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		if user == `DCLAB\alice` {
+			return []string{sid}
+		}
+		return nil
+	}
+	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+		{PID: 41, User: "alice", Process: "node"},
+		{PID: 42, User: "bob", Process: "python3"},
+	}}, nil)
+
+	var out bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&out, `DCLAB\alice`, true); err != nil {
+		t.Fatal(err)
+	}
+	var report enterpriseDiscoveryReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Accounts) != 1 || report.Runtime == nil || len(report.Runtime.Findings) != 1 ||
+		report.Runtime.Findings[0].User != "alice" {
+		t.Fatalf("qualified account runtime findings: %s", out.String())
+	}
+}
+
 // A Secure Client computer keeps the enterprise groups and the discovery
 // --user match it had before the identity views (GAP-0138, issue #1092).
 func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {

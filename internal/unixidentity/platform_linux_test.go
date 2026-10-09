@@ -489,8 +489,14 @@ func TestSSSDAccountDomainTakesTheAnnouncedFlatName(t *testing.T) {
 		"passwd 80001":        {stdout: []byte(account)},
 		"-s sss passwd 80001": {stdout: []byte(account)},
 		"info " + domain:      {stdout: []byte("[domain]\ndomain-name = " + domain + "\ndomain-short = " + flat + "\n")},
-	}}
-	facts, err := newFakeNSS(f).DirectoryFactsWithoutGroupsForUID(80001, time.Now())
+	}, errs: map[string]error{"info " + domain: errors.New("adcli temporarily unavailable")}}
+	r := newFakeNSS(f)
+	facts, err := r.DirectoryFactsWithoutGroupsForUID(80001, time.Now())
+	if err == nil || facts.Assurance == useridentity.AssuranceVerified {
+		t.Fatalf("failed adcli lookup: facts = %+v, err = %v", facts, err)
+	}
+	delete(f.errs, "info "+domain)
+	facts, err = r.DirectoryFactsWithoutGroupsForUID(80001, time.Now())
 	if err != nil || facts.AccountDomain != flat || facts.Domain != domain {
 		t.Fatalf("facts = %+v, err = %v; want the account domain %s", facts, err, flat)
 	}

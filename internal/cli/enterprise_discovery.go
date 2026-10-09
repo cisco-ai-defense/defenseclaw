@@ -489,9 +489,22 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		report.RuntimeError = err.Error()
 	} else if view != nil {
 		if user != "" {
+			// Runtime findings carry names rather than UIDs or SIDs. Match
+			// the accounts already selected by the resolved inventory filter,
+			// including their bare names. Secure Client keeps the exact
+			// --user match of main (issue #1092).
+			secureClient := cfg != nil && cfg.SecureClientIntegration()
+			selectedNames := make(map[string]struct{}, len(report.Accounts)*2)
+			if !secureClient {
+				for _, account := range report.Accounts {
+					selectedNames[strings.ToLower(account.User)] = struct{}{}
+					selectedNames[strings.ToLower(useridentity.BareAccountName(account.User))] = struct{}{}
+				}
+			}
 			findings := view.Findings[:0]
 			for _, finding := range view.Findings {
-				if strings.EqualFold(finding.User, user) {
+				_, selected := selectedNames[strings.ToLower(finding.User)]
+				if (secureClient && strings.EqualFold(finding.User, user)) || (!secureClient && selected) {
 					findings = append(findings, finding)
 				}
 			}
