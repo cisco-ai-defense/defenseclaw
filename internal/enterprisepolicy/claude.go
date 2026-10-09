@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"sort"
 	"strings"
 
@@ -492,14 +491,10 @@ func (t claudeTarget) RemoveOwned(opts Options) (State, error) {
 
 // claudeStrip treats a drop-in carrying DefenseClaw hooks as a whole file
 // DefenseClaw owns; any other content under the drop-in name is left alone.
-// A handler that runs a defenseclaw-hook binary for the claudecode
-// connector marks the file as DefenseClaw content even when its folder or
-// quoting is no longer the one this install writes: an administrator who
-// edited the hook paths had the edited copy recorded as administrator
-// content when repair put the drop-in back, and uninstall --purge and
-// retiring the connector then restored those hooks for a binary that does
-// not exist, so every Claude Code call failed or was refused (GAP-1099,
-// GAP-1019).
+// It only decides a file DefenseClaw has no record of publishing: once the
+// ownership record names the drop-in, the file is DefenseClaw's whatever it
+// holds (reservedDropIn), so an edited hook command is never taken for an
+// administrator's content (GAP-1099).
 func claudeStrip(opts Options) stripFunc {
 	return wholeFileStrip(func(current []byte) bool {
 		doc, err := decodeOrderedObject(current)
@@ -508,41 +503,8 @@ func claudeStrip(opts Options) stripFunc {
 		}
 		hooks, _ := doc.get("hooks")
 		owned, _, _ := countClaudeHooks(opts, hooks, nil)
-		return owned > 0 || claudeHooksLookOwned(opts, hooks)
+		return owned > 0
 	})
-}
-
-// claudeHooksLookOwned reports a handler whose command runs a binary named
-// defenseclaw-hook (quoted or not, in any folder) as the claudecode hook.
-// Windows drop-ins keep the exact match.
-func claudeHooksLookOwned(opts Options, hooks any) bool {
-	if opts.goos() == "windows" {
-		return false
-	}
-	var lists []any
-	switch v := hooks.(type) {
-	case *object:
-		for _, key := range v.keys {
-			lists = append(lists, v.values[key])
-		}
-	case map[string]any:
-		for _, value := range v {
-			lists = append(lists, value)
-		}
-	}
-	for _, value := range lists {
-		list, _ := value.([]any)
-		for _, entry := range list {
-			for _, handler := range handlersOf(entry) {
-				fields := strings.Fields(stringField(handler, "command"))
-				if len(fields) >= 4 && path.Base(strings.Trim(fields[0], "\"\x27")) == "defenseclaw-hook" &&
-					fields[1] == "hook" && fields[2] == "--connector" && fields[3] == claudeConnector {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func (claudeTarget) Export(opts Options, format string) ([]byte, error) {

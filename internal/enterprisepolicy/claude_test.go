@@ -13,7 +13,6 @@ package enterprisepolicy
 import (
 	"encoding/json"
 	"encoding/xml"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -205,30 +204,59 @@ func TestClaudeExportFormats(t *testing.T) {
 	}
 }
 
+// An administrator edited DefenseClaw's hook commands (another folder,
+// another binary name) and removal restored the edited copy, so every
+// Claude Code call ran a missing hook (GAP-1099). Once DefenseClaw published
+// the drop-in under its reserved name, the file is DefenseClaw's whatever it
+// holds, with or without a repair in between; the administrator's own
+// drop-in stays. Codex marks its blocks, so an edited command there goes too.
 func TestClaudeRemoveDeletesOnlyTheDropIn(t *testing.T) {
 	withHigherSources(t)
-	opts := testOptions(t)
-	adminDropIn := filepath.Join(claudeDir(t, opts), "managed-settings.d", "10-company.json")
-	writeFile(t, adminDropIn, `{"env": {"X": "1"}}`)
-	if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name, from, to string
+		repair         bool
+	}{
+		{"folder edited then repaired", "/bin/defenseclaw-hook", "/binx/defenseclaw-hook", true},
+		{"binary renamed then repaired", "defenseclaw-hook", "defenseclaw-hookX", true},
+		{"binary renamed without a repair", "defenseclaw-hook", "defenseclaw-hookX", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t)
+			adminDropIn := filepath.Join(claudeDir(t, opts), "managed-settings.d", "10-company.json")
+			writeFile(t, adminDropIn, `{"env": {"X": "1"}}`)
+			mustReconcile(t, claudeTarget{}, opts)
+			dropIn := claudeDropIn(t, opts)
+			published := readFile(t, dropIn)
+			writeFile(t, dropIn, strings.ReplaceAll(published, tc.from, tc.to))
+			if readFile(t, dropIn) == published {
+				t.Fatal("test edit did not apply")
+			}
+			if tc.repair {
+				mustReconcile(t, claudeTarget{}, opts)
+			}
+			mustRemove(t, claudeTarget{}, opts)
+			mustNotExist(t, dropIn, "DefenseClaw's drop-in after an edit of its hook commands")
+			if readFile(t, adminDropIn) != `{"env": {"X": "1"}}` {
+				t.Fatal("administrator drop-in must survive removal")
+			}
+		})
 	}
-	// An administrator edited every hook path and repair put the drop-in
-	// back; removal must not restore the edited copy (GAP-1099).
-	dropIn := filepath.Join(claudeDir(t, opts), "managed-settings.d", DefenseClawDropInName)
-	writeFile(t, dropIn, strings.ReplaceAll(readFile(t, dropIn), "/bin/defenseclaw-hook", "/binx/defenseclaw-hook"))
-	if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (claudeTarget{}).RemoveOwned(opts); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(claudeDir(t, opts), "managed-settings.d", DefenseClawDropInName)); !os.IsNotExist(err) {
-		t.Fatalf("drop-in must be removed: %v", err)
-	}
-	if readFile(t, adminDropIn) != `{"env": {"X": "1"}}` {
-		t.Fatal("administrator drop-in must survive removal")
-	}
+	t.Run("codex requirements.toml", func(t *testing.T) {
+		opts := testOptions(t)
+		path := codexPath(t, opts)
+		writeFile(t, path, adminCodexRequirements)
+		mustReconcile(t, codexTarget{}, opts)
+		published := readFile(t, path)
+		writeFile(t, path, strings.ReplaceAll(published, "/bin/defenseclaw-hook", "/binx/defenseclaw-hookX"))
+		if readFile(t, path) == published {
+			t.Fatal("test edit did not apply")
+		}
+		mustReconcile(t, codexTarget{}, opts)
+		mustRemove(t, codexTarget{}, opts)
+		if got := readFile(t, path); got != adminCodexRequirements {
+			t.Fatalf("removal must leave exactly the administrator text:\n%s", got)
+		}
+	})
 }
 
 func TestClaudeWindowsUsesExecForm(t *testing.T) {
