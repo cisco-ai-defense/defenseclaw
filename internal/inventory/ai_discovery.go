@@ -1838,6 +1838,11 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 			if _, ok := current[fp]; ok || replaced[fp] {
 				continue
 			}
+			if s.partialIDEKeepsSignal(stats.ideInventory, old) {
+				budget := 1
+				carry.persist(fp, old, &budget)
+				continue
+			}
 			if stats.TCCSkipped && (old.Detector == "package_manifest" || old.Detector == "model_file") && (s.opts.SecureClient || s.privacySkipAffects(old)) {
 				// This signal may belong to a skipped subtree; absence is not proof of removal.
 				if old.Detector == "model_file" {

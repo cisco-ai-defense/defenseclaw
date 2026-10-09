@@ -258,3 +258,30 @@ func TestDeriveGuardrailProfilesCopiesTheConfigurationOnce(t *testing.T) {
 		t.Fatalf("deriving 1,000 profiles made %.0f allocations per profile; copy the configuration once", per)
 	}
 }
+
+func TestGuardrailPolicyDigestTracksAutomaticProtectionEnabled(t *testing.T) {
+	cfg := &Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]GuardrailProfile{"watch": {}}
+	cfg.ApplicationProtection.Guardrail.Mode = "action"
+
+	disabled, err := cfg.DeriveGuardrailProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := disabled["watch"].Config.EffectiveGuardrailModeForConnector("amp"); got != "observe" {
+		t.Fatalf("disabled automatic protection mode = %q, want observe", got)
+	}
+
+	cfg.ApplicationProtection.Enabled = true
+	enabled, err := cfg.DeriveGuardrailProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := enabled["watch"].Config.EffectiveGuardrailModeForConnector("amp"); got != "action" {
+		t.Fatalf("enabled automatic protection mode = %q, want action", got)
+	}
+	if disabled["watch"].Digest == enabled["watch"].Digest {
+		t.Fatal("profile digest unchanged when automatic protection changes effective enforcement")
+	}
+}

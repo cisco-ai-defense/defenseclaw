@@ -55,6 +55,17 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 	accounts := []enterprisehooks.IdentitySpoolAccount{}
 	keys := []string{}
 	seen := map[int]bool{}
+	// Manifest names may be NSS aliases. Only a name resolved by UID can
+	// distinguish a reassigned UID from an alias of the same account in the
+	// spool; an unavailable lookup leaves the name empty and preserves the
+	// prior record while the gateway validates it independently.
+	canonicalUser := func(uid int) string {
+		account, err := enterprisehooks.StandaloneResolver().LookupUID(uid)
+		if err == nil && account.UID == uid {
+			return account.Name
+		}
+		return ""
+	}
 	for _, row := range run.Rows {
 		// A pending row with a resolved uid (its home is not available, or
 		// was recreated) stays enrolled: its record keeps being refreshed,
@@ -64,15 +75,9 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 			continue
 		}
 		seen[row.UID] = true
-		user := row.User
-		if user == "" {
-			// A home-only manifest row has a verified UID but no user name.
-			// macOS directory collection needs the name to read that UID's
-			// Open Directory record.
-			if account, err := enterprisehooks.StandaloneResolver().LookupUID(row.UID); err == nil && account.UID == row.UID {
-				user = account.Name
-			}
-		}
+		// The manifest's spelling is not proof of the UID's current name.
+		// macOS directory collection also needs this canonical name.
+		user := canonicalUser(row.UID)
 		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: row.UID, User: user})
 		keys = append(keys, strconv.Itoa(row.UID)+":"+user)
 	}
@@ -93,8 +98,9 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 				continue
 			}
 			seen[account.UID] = true
-			accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: account.UID, User: account.User})
-			keys = append(keys, strconv.Itoa(account.UID)+":"+account.User)
+			user := canonicalUser(account.UID)
+			accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: account.UID, User: user})
+			keys = append(keys, strconv.Itoa(account.UID)+":"+user)
 		}
 	}
 	return accounts, keys

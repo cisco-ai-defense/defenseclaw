@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 const enterpriseHookWorkerHelperEnv = "DEFENSECLAW_TEST_APPLY_TARGET_HELPER"
@@ -1610,6 +1611,40 @@ func TestRemoveAllRetriesATimedOutWorkerOnceWithALongerDeadline(t *testing.T) {
 	}
 	if runs[1].Err == nil || !strings.Contains(runs[1].Err.Error(), "also when retried") || runs[2].Err.Error() != "other failure" {
 		t.Fatalf("outcomes after the retry: %v / %v", runs[1].Err, runs[2].Err)
+	}
+}
+
+// A manifest alias is only an enrollment spelling. The spool must use the
+// account name returned for its UID, or a failed privileged refresh can erase
+// the previous verified UPN before the gateway expires it.
+func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
+	t.Cleanup(func() { enterprisehooks.SetStandaloneResolver(nil) })
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"canonical": {Name: "canonical", UID: 4242, GID: 4242},
+	}})
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "accepted-alias", Connector: "codex", OK: true}},
+	})
+	if len(accounts) != 1 || accounts[0].User != "canonical" {
+		t.Fatalf("identity spool accounts = %+v; want canonical UID name", accounts)
+	}
+	dir := t.TempDir()
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+		Key: "4242", User: "canonical", UpdatedAt: time.Now().UTC(),
+		Facts: useridentity.DirectoryFacts{UPN: "alice@example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "4242.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil)
+	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, "4242", nil)
+	if err != nil || record.Facts.UPN != "alice@example.test" {
+		t.Fatalf("failed refresh lost the verified UPN: record=%+v err=%v", record, err)
 	}
 }
 

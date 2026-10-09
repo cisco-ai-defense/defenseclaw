@@ -268,9 +268,6 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 		signals = append(signals, s.ideSignals(machine, index, true)...)
 		inv.add(machine, ideOwner{}, index, now)
 	}
-	if inv.Scope == config.IDEInventoryOff {
-		return signals, nil
-	}
 	inv.applyScope()
 	return signals, inv
 }
@@ -500,6 +497,50 @@ func (s *ContinuousDiscoveryService) IDEInventory() *IDEInventory {
 	return s.lastIDE
 }
 
+// partialIDEKeepsSignal preserves an editor-extension signal when the same
+// installation's incomplete plugin list cannot prove its removal. The IDE
+// inventory uses the previous plugin baseline for this case; both lifecycles
+// must reach the same conclusion.
+func (s *ContinuousDiscoveryService) partialIDEKeepsSignal(inv *IDEInventory, old aiStoredSignal) bool {
+	if s.opts.SecureClient || inv == nil || !inv.Partial || old.Detector != "editor_extension" {
+		return false
+	}
+	if s.ideBaseline == nil {
+		s.ideBaseline = s.loadIDEBaseline()
+	}
+	partial := make(map[string]string)
+	for _, inst := range inv.Installations {
+		if inst.Partial {
+			partial[inst.InstallID] = inst.PathHash
+		}
+	}
+	for _, plugin := range s.ideBaseline {
+		rootHash, ok := partial[plugin.InstallID]
+		if !ok || !plugin.IsAI || plugin.AISignatureID != old.SignatureID {
+			continue
+		}
+		// Service scans key signals on the installation root; per-user
+		// scans (including 0.8.x state) key them on the extension id.
+		for _, ev := range old.StoredEvidence {
+			if ev.PathHash != "" && ev.PathHash == rootHash ||
+				ev.ValueHash != "" && ev.ValueHash == hashValue(strings.ToLower(strings.TrimSpace(plugin.PluginID))) {
+				return true
+			}
+		}
+		for _, pathHash := range old.PathHashes {
+			if pathHash == rootHash {
+				return true
+			}
+		}
+		if old.Fingerprint == s.signalFromValue(
+			AISignature{ID: old.SignatureID}, SignalEditorExtension, "editor_extension",
+			strings.ToLower(strings.TrimSpace(plugin.PluginID))).Fingerprint {
+			return true
+		}
+	}
+	return false
+}
+
 // finishIDEInventory classifies a full scan's inventory against the
 // previous one (new, changed, seen, and the removed rows), or carries the
 // previous one forward on a process-only scan.
@@ -518,7 +559,7 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 		carried.Removed, carried.Carried, carried.persist = nil, true, false
 		return &carried
 	}
-	if inv == nil {
+	if inv == nil || inv.Scope == config.IDEInventoryOff {
 		s.ideBaseline = nil
 		return nil
 	}

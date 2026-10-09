@@ -308,6 +308,11 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
+	if action == "upgrade" {
+		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+	}
 	if action == "uninstall" {
 		present, err := windowsEnterpriseStandaloneFootprint()
 		if err == nil && !present {

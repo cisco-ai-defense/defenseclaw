@@ -431,12 +431,20 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 	if found && !a.managedAIDOnly() {
 		// Conversation IDs are supplied by the OTLP sender. A shared
 		// gateway token does not prove ownership of another user's hook
-		// session, so retain topology only for the same caller and agent
-		// identity. Secure Client keeps its existing correlation output.
+		// session, so retain topology only for a verified matching caller,
+		// with agent identity matching when the request carries one.
+		// Secure Client keeps its existing correlation output.
 		caller := auditCallerIdentity(ctx)
 		identityID := agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), conversationID)
+		// A user-scoped OTLP credential proves the caller even when it
+		// carries no agent identity. In that case, the hook's verified
+		// user is enough to join this exact conversation. An explicit
+		// conflicting agent identity still rules the snapshot out.
+		verifiedCaller, verified := verifiedAuditCaller(ctx)
+		sameVerifiedUser := verified && verifiedCaller.ID != "" && meta.UserID == verifiedCaller.ID
 		if (meta.UserID != "" && meta.UserID != caller.ID) ||
-			(meta.AgentIdentityID != "" && meta.AgentIdentityID != identityID) {
+			(meta.AgentIdentityID != "" && meta.AgentIdentityID != identityID &&
+				!(identityID == "" && sameVerifiedUser)) {
 			found = false
 		}
 	}

@@ -350,21 +350,22 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 // upstream and judge LLM blocks) are deliberately left out, so a digest never
 // commits to a credential.
 type guardrailPolicyDigestView struct {
-	Version           int                                    `json:"v"`
-	Mode              string                                 `json:"mode"`
-	BlockAt           string                                 `json:"block_at"`
-	AlertAt           string                                 `json:"alert_at"`
-	HILT              HILTConfig                             `json:"hilt"`
-	RulePackDir       string                                 `json:"rule_pack_dir"`
-	RulePack          string                                 `json:"rule_pack,omitempty"`
-	Rules             *GuardrailRulesConfig                  `json:"rules,omitempty"`
-	ProfileRules      *GuardrailRulesConfig                  `json:"profile_rules,omitempty"`
-	BlockMessage      string                                 `json:"block_message"`
-	Connectors        map[string]PerConnectorGuardrailConfig `json:"connectors"`
-	ProfileConnectors map[string]PerConnectorGuardrailConfig `json:"profile_connectors"`
-	AutoProtection    PerConnectorGuardrailConfig            `json:"application_protection"`
-	AutoConnectors    map[string]PerConnectorGuardrailConfig `json:"application_protection_connectors"`
-	HookModes         map[string]string                      `json:"hook_modes"`
+	Version               int                                    `json:"v"`
+	Mode                  string                                 `json:"mode"`
+	BlockAt               string                                 `json:"block_at"`
+	AlertAt               string                                 `json:"alert_at"`
+	HILT                  HILTConfig                             `json:"hilt"`
+	RulePackDir           string                                 `json:"rule_pack_dir"`
+	RulePack              string                                 `json:"rule_pack,omitempty"`
+	Rules                 *GuardrailRulesConfig                  `json:"rules,omitempty"`
+	ProfileRules          *GuardrailRulesConfig                  `json:"profile_rules,omitempty"`
+	BlockMessage          string                                 `json:"block_message"`
+	Connectors            map[string]PerConnectorGuardrailConfig `json:"connectors"`
+	ProfileConnectors     map[string]PerConnectorGuardrailConfig `json:"profile_connectors"`
+	AutoProtectionEnabled bool                                   `json:"application_protection_enabled"`
+	AutoProtection        PerConnectorGuardrailConfig            `json:"application_protection"`
+	AutoConnectors        map[string]PerConnectorGuardrailConfig `json:"application_protection_connectors"`
+	HookModes             map[string]string                      `json:"hook_modes"`
 }
 
 // GuardrailPolicyDigest returns "sha256:" + the hex SHA-256 of the canonical
@@ -377,17 +378,18 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 	}
 	g := cfg.Guardrail
 	view := guardrailPolicyDigestView{
-		Version:        1,
-		Mode:           strings.TrimSpace(g.Mode),
-		BlockAt:        canonicalGuardrailLevel(g.BlockAt),
-		AlertAt:        canonicalGuardrailLevel(g.AlertAt),
-		HILT:           g.HILT,
-		RulePackDir:    g.RulePackDir,
-		RulePack:       g.RulePack,
-		ProfileRules:   g.profileRules,
-		BlockMessage:   g.BlockMessage,
-		Connectors:     digestConnectors(g.Connectors),
-		AutoProtection: cfg.ApplicationProtection.Guardrail,
+		Version:               1,
+		Mode:                  strings.TrimSpace(g.Mode),
+		BlockAt:               canonicalGuardrailLevel(g.BlockAt),
+		AlertAt:               canonicalGuardrailLevel(g.AlertAt),
+		HILT:                  g.HILT,
+		RulePackDir:           g.RulePackDir,
+		RulePack:              g.RulePack,
+		ProfileRules:          g.profileRules,
+		BlockMessage:          g.BlockMessage,
+		Connectors:            digestConnectors(g.Connectors),
+		AutoProtectionEnabled: cfg.ApplicationProtection.Enabled,
+		AutoProtection:        cfg.ApplicationProtection.Guardrail,
 		HookModes: map[string]string{
 			"claude_code": cfg.ClaudeCode.Mode,
 			"codex":       cfg.Codex.Mode,

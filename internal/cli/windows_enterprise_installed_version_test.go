@@ -320,3 +320,43 @@ func TestWindowsEnterpriseEnsureRefusesAConnectorlessConfigForAProtectedDeployme
 		t.Fatalf("config with a connector = %+v, %v", plan, err)
 	}
 }
+
+// A direct upgrade must refuse a config that would remove every connector
+// from a protected standalone deployment, before invoking the installer.
+func TestWindowsEnterpriseDirectUpgradeRefusesConnectorlessConfig(t *testing.T) {
+	originalStaged, originalInstalled := windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors
+	originalRunner, originalObserver := windowsEnterpriseStandaloneRunner, windowsEnterpriseStandaloneObserver
+	t.Cleanup(func() {
+		windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors = originalStaged, originalInstalled
+		windowsEnterpriseStandaloneRunner, windowsEnterpriseStandaloneObserver = originalRunner, originalObserver
+	})
+	windowsEnterpriseStagedConnectors = func(string) ([]string, error) { return nil, nil }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"codex"}, nil }
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	called := false
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		called = true
+		return windowsEnterpriseStandaloneRun{Output: []byte("{}")}, nil
+	}
+
+	opts := &windowsEnterpriseLifecycleOptions{
+		profile: "standalone", resolvedProfile: "standalone", configPath: "staged.yaml", jsonOutput: true,
+	}
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "upgrade", opts, "installer.ps1", nil)
+	if called {
+		t.Fatal("installer ran with connectorless config")
+	}
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) && commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+		t.Fatalf("upgrade refusal = %v", err)
+	}
+	var result enterprisestatus.Result
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatalf("decode refusal: %v", decodeErr)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+		t.Fatalf("upgrade result errors = %v", result.Errors)
+	}
+}
