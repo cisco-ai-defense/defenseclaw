@@ -94,11 +94,12 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	input := action.Input
 	input.Tool, input.Args = commandTool, command
 	findings := dispatchTrustedAction(ctx, trustedActionRequest{
-		Input:                     input,
-		LegacyText:                string(command),
-		Connector:                 action.Connector,
-		EnforcementCapable:        action.EnforcementCapable,
-		DowngradeReadOnlyDataArgs: action.DowngradeReadOnlyDataArgs,
+		Input:                         input,
+		LegacyText:                    string(command),
+		Connector:                     action.Connector,
+		EnforcementCapable:            action.EnforcementCapable,
+		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
+		SkipLocalFilesystemResolution: true,
 	})
 	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector), verdict, findings)
 }

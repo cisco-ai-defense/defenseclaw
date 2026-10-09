@@ -6,6 +6,8 @@ package gateway
 import (
 	"bytes"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -282,6 +284,42 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	parsed := actionfacts.Analyze(inner)
 	enforcement := parsed.EnforcementProjection()
 	return enforcement.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcement)
+}
+
+func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if request.SkipLocalFilesystemResolution || facts.ActiveHome == "" ||
+		!filepath.IsAbs(facts.ActiveHome) || !filepath.IsAbs(facts.CWD) {
+		return false
+	}
+	if cwd, err := os.Stat(facts.CWD); err != nil || !cwd.IsDir() {
+		return false
+	}
+	active := canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh", "authorized_keys"))
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite &&
+			candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || !integrityCommandMutatesPath(command, candidate) ||
+			!(integrityExplicitCommandMutator(command, candidate) ||
+				integrityStructuredFileMutator(facts, command)) {
+			continue
+		}
+		target := candidate.Resolved
+		if !filepath.IsAbs(target) {
+			continue
+		}
+		info, err := os.Lstat(target)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(target)
+		if err == nil && canonicalSemanticPath(resolved) == active {
+			return true
+		}
+	}
+	return false
 }
 
 func trustedBase64ShellAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {

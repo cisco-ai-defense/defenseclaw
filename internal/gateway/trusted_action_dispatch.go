@@ -58,8 +58,10 @@ type trustedActionRequest struct {
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
 	DowngradeReadOnlyDataArgs bool
-	record                    func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry           func(trustedActionTelemetry)
+	// A sandbox action may execute in a filesystem the gateway cannot see.
+	SkipLocalFilesystemResolution bool
+	record                        func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry               func(trustedActionTelemetry)
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately

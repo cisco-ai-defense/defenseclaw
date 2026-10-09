@@ -1462,9 +1462,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	commandText := strings.ToLower(input.Command)
+	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
-		!strings.Contains(commandText, "base64") {
+		!strings.Contains(commandText, "base64") && !symlinkWrite {
 		return appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts)
 	}
 	for _, finding := range findings {
@@ -1475,7 +1476,9 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	enforcementFacts := facts.EnforcementProjection()
 	if request.EnforcementCapable &&
-		(enforcementFacts.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
+		(enforcementFacts.EnforcementEligible() &&
+			(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
+				sshAuthorizedKeysStructuredPrerequisite(enforcementFacts)) ||
 			homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
 			trustedStaticStatementAuthorizedKeysWrite(input) ||
 			trustedNoOpAuthorizedKeysRedirect(input) ||
@@ -1485,6 +1488,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			trustedAssignedAuthorizedKeysWrite(input) ||
 			trustedAuthorizedKeysGlobWrite(input) ||
 			trustedAuthorizedKeysSymlinkWrite(input) ||
+			symlinkWrite ||
 			trustedFindExecAuthorizedKeysWrite(input) ||
 			trustedHomeDirectoryAuthorizedKeysWrite(input) ||
 			trustedShellWrapperAuthorizedKeysWrite(input, facts) ||

@@ -283,12 +283,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			)
 		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:                     actionInput,
-			LegacyText:                string(toolArgs),
-			Connector:                 "codex",
-			EnforcementCapable:        true,
-			DowngradeReadOnlyDataArgs: mode != "action",
-			record:                    toolChainRecorderFromContext(ctx),
+			Input:                         actionInput,
+			LegacyText:                    string(toolArgs),
+			Connector:                     "codex",
+			EnforcementCapable:            true,
+			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+			DowngradeReadOnlyDataArgs:     mode != "action",
+			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

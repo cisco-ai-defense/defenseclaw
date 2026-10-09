@@ -6,9 +6,11 @@
 package gateway
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -257,6 +259,12 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"wget compact output", `wget -qO ~/.ssh/authorized_keys https://example.com/marker.pub`, "", "", true},
 		{"no-op truncate", `: > ~/.ssh/authorized_keys`, "", "", true},
 		{"bare truncate", `> ~/.ssh/authorized_keys`, "", "", true},
+		{"structured Write", `{"file_path":"/home/alice/.ssh/authorized_keys","content":"key"}`, "", "", true},
+		{"structured Edit", `{"file_path":"/home/alice/.ssh/authorized_keys","old_string":"a","new_string":"b"}`, "", "", true},
+		{"structured MultiEdit", `{"file_path":"/home/alice/.ssh/authorized_keys","edits":[{"old_string":"a","new_string":"b"}]}`, "", "", true},
+		{"structured Write relative", `{"file_path":"../.ssh/authorized_keys","content":"key"}`, "/home/alice/proj", "", true},
+		{"structured Write tilde", `{"file_path":"~/.ssh/authorized_keys","content":"key"}`, "", "", true},
+		{"structured Write ordinary", `{"file_path":"/home/alice/proj/notes.md","content":"key"}`, "", "", false},
 		{"windows command", `powershell -NoProfile -Command Add-Content -Path C:\Users\alice\.ssh\authorized_keys -Value dccert-block-marker`, `C:/Users/alice/project`, `C:/Users/alice`, true},
 		{"windows home", `pwsh -c "Set-Content -Path $HOME/.ssh/authorized_keys -Value dccert-block-marker"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
 		{"windows spaced home", `powershell -Command "Add-Content -Path 'C:\Users\Alice Smith\.ssh\authorized_keys' -Value dccert-block-marker"`, `C:/Users/Alice Smith/project`, `C:/Users/Alice Smith`, true},
@@ -279,8 +287,13 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 			home = "/home/alice"
 		}
 		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
+		tool := "Bash"
+		if strings.HasPrefix(test.name, "structured ") {
+			tool = strings.Fields(test.name)[1]
+			args = []byte(test.command)
+		}
 		input := actionfacts.Input{
-			Tool: "Bash", Args: args, CWD: cwd,
+			Tool: tool, Args: args, CWD: cwd,
 			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
 		}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
@@ -306,4 +319,30 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 			t.Errorf("%s: findings %v, want one enforced %s", test.name, findingIDs(findings), rule)
 		}
 	}
+	t.Run("existing symlink", func(t *testing.T) {
+		home := t.TempDir()
+		project := filepath.Join(home, "project")
+		if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(project, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		keys := filepath.Join(home, ".ssh", "authorized_keys")
+		if err := os.WriteFile(keys, []byte("key\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(keys, filepath.Join(project, "keys.link")); err != nil {
+			t.Fatal(err)
+		}
+		for _, input := range []actionfacts.Input{
+			{Tool: "Bash", Args: []byte(`{"command":"echo key >> ./keys.link"}`), CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX},
+			{Tool: "Write", Args: []byte(`{"file_path":"./keys.link","content":"key"}`), CWD: project, ActiveHome: home},
+		} {
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector, EnforcementCapable: true})
+			if finding := findingWithID(findings, rule); finding == nil || !finding.contributesToEnforcement() {
+				t.Errorf("%s: findings %v, want enforced %s", input.Tool, findingIDs(findings), rule)
+			}
+		}
+	})
 }
