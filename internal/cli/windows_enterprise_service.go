@@ -461,7 +461,8 @@ func runWindowsEnterpriseLifecycle(
 		}
 		opts.payloadPins = pins
 	}
-	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure" || action == "upgrade") {
+	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure" || action == "upgrade" ||
+		(action == "repair" && strings.TrimSpace(opts.configPath) != "")) {
 		if err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath); err != nil {
 			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
 				fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
