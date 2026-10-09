@@ -237,13 +237,19 @@ func describeACLFindings(findings []aclFinding) string {
 }
 
 // removeACLs removes the macOS ACL of every target with an entry that lets
-// another account change it, or reach it when it is private. chmod -h never follows a link put in place of a
-// path after it was listed.
+// another account change it, or reach it when it is private. chmod -h never
+// follows a link put in place of a path after it was listed. An entry still
+// listed afterwards fails the transaction with the paths, so a repair never
+// reports success while verify keeps naming them (GAP-0946).
 func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) error {
 	env := l.env
-	findings, err := env.aclFindings(ctx, env.aclTargets(files, connectors))
+	targets := env.aclTargets(files, connectors)
+	findings, err := env.aclFindings(ctx, targets)
 	if err != nil {
 		return fmt.Errorf("read the macOS ACLs of the deployment: %w", err)
+	}
+	if len(findings) == 0 {
+		return nil
 	}
 	var removed []string
 	for _, finding := range findings {
@@ -253,17 +259,46 @@ func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) 
 		}
 		removed = append(removed, finding.path)
 	}
-	if len(removed) > 0 {
-		l.noteChange("removed the macOS ACL entries that let other accounts change or read %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))
+	left, err := env.aclFindings(ctx, targets)
+	if err != nil {
+		return fmt.Errorf("read the macOS ACLs of the deployment after removing them: %w", err)
 	}
+	if len(left) > 0 {
+		return fmt.Errorf("macOS ACL entries that let other accounts change or read DefenseClaw files are still there after chmod -N: %s; remove them with `chmod -N <path>`, then rerun `%s`",
+			describeACLFindings(left), env.lifecycleCommand(l.opts.Action))
+	}
+	l.noteChange("removed the macOS ACL entries that let other accounts change or read %d %s (%s)", len(removed), plural(len(removed), "path", "paths"), examples(removed))
 	return nil
 }
 
-// planFiles are the canonical paths of the files a plan installs.
-func planFiles(p *plan) []string {
+// aclFiles are the canonical files whose ACLs a transaction clears: what the
+// plan installs, the binaries it runs, and every file of the deployment
+// record, which is what status and verify check. The package channel plans
+// no binaries (the package placed them), so the hook and gateway binaries
+// kept a write entry through repair while verify kept naming them
+// (GAP-0946).
+func aclFiles(env *Env, p *plan, record *Deployment) []string {
 	files := make([]string, 0, len(p.files)+len(p.binaries))
 	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
 		files = append(files, file.Path)
 	}
+	if p.payload != nil {
+		for _, name := range sortedKeys(p.payload.Digests) {
+			files = append(files, filepath.Join(env.Layout.BinDir, name))
+		}
+	}
+	if record != nil {
+		files = append(files, sortedKeys(record.Files)...)
+	}
 	return files
+}
+
+// aclConnectors are the connectors whose machine-policy files a transaction
+// clears: the ones the config asks for and the ones the record names.
+func aclConnectors(p *plan, record *Deployment) []string {
+	connectors := append([]string{}, p.intended...)
+	if record != nil {
+		connectors = append(connectors, record.MachinePolicyConnectors...)
+	}
+	return connectors
 }
