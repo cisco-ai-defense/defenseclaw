@@ -4188,31 +4188,36 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
     if not base:
         return [], []
     gc = cfg.guardrail
-    scopes: list[tuple[str, object]] = []
+    scopes: list[tuple[str, object, str | None, str | None]] = []
     if connector_key:
-        scopes.append((_scope_key(connector_key, None), _scope_block(cfg, connector_key, None)))
+        scopes.append((_scope_key(connector_key, None), _scope_block(cfg, connector_key, None), connector_key, None))
     else:
-        scopes.append(("guardrail", gc))
-        scopes.extend((f"guardrail.connectors.{c}", b) for c, b in sorted((gc.connectors or {}).items()))
+        scopes.append(("guardrail", gc, None, None))
+        scopes.extend(
+            (f"guardrail.connectors.{c}", b, c, None)
+            for c, b in sorted((gc.connectors or {}).items())
+        )
         for name, profile in sorted((gc.profiles or {}).items()):
             if getattr(profile, "rule_pack", ""):
                 continue
-            scopes.append((f"guardrail.profiles.{name}", profile))
+            scopes.append((f"guardrail.profiles.{name}", profile, None, name))
             scopes.extend(
-                (f"guardrail.profiles.{name}.connectors.{c}", b)
+                (f"guardrail.profiles.{name}.connectors.{c}", b, c, name)
                 for c, b in sorted((profile.connectors or {}).items())
                 if not getattr(b, "rule_pack", "")
             )
-    global_protections = list(getattr(getattr(gc, "rules", None), "protections", None) or [])
     changes: list = []
     dropped: list[str] = []
-    for key, block in scopes:
+    for key, block, scope_connector, scope_profile in scopes:
         rules = getattr(block, "rules", None)
         if rules is None:
             continue
-        known = policy_catalog.rule_defaults_with_protections(
-            pack_dir, [*global_protections, *(getattr(rules, "protections", None) or [])]
-        )
+        protections = [
+            str(protection)
+            for inherited in _scope_blocks(cfg, scope_connector, scope_profile)
+            for protection in (getattr(getattr(inherited, "rules", None), "protections", None) or [])
+        ]
+        known = policy_catalog.rule_defaults_with_protections(pack_dir, protections)
         for field in ("enable", "disable"):
             ids = _rule_ids(rules, field)
             kept = [i for i in ids if i in known]
