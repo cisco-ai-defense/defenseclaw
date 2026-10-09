@@ -436,11 +436,11 @@ Four things to know before you deploy it:
   lifecycle writes when you supply none lists no agents, so it protects
   nothing. On Windows, install and `ensure` require a config. On Linux and
   macOS, naming Codex, Claude Code, Cursor, GitHub Copilot or OpenCode anywhere
-  under `guardrail.connectors` (even with `enabled: false`) or under
+  under `guardrail.connectors` with `enabled: true` or under
   `enterprise.machine_policy.connectors` makes the lifecycle publish
   DefenseClaw's hook in that agent's machine policy; on Windows that rule
   applies to Copilot and OpenCode. To leave an agent unprotected, leave it out
-  of both maps or set its `ownership: "off"`. See
+  of both maps, set `enabled: false`, or set its `ownership: "off"`. See
   [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 - **Observe mode does not block on policy verdicts.** In `observe` mode
   DefenseClaw records each decision, including what it would have blocked.

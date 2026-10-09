@@ -463,10 +463,10 @@ policy; see
   drop-in (a later drop-in, a higher-precedence source), no floor applies
   and `policy verify` fails until you fix or remove the value.
 - **When it applies.** The drop-in is written only in the standalone
-  profile, while `claudecode` is named under `guardrail.connectors` (even
-  with `enabled: false`) or under `enterprise.machine_policy.connectors`,
+  profile, while `claudecode` is enabled under `guardrail.connectors` or
+  named under `enterprise.machine_policy.connectors`,
   with `ownership: merge`. To stop it, remove the name from both maps or set
-  `ownership: "off"`. Windows follows the same name-based rule for the
+  `enabled: false` or `ownership: "off"`. Windows follows the same rule for the
   floor, not the enrolled-row rule it uses for `90-defenseclaw.json`: a
   Windows config that names `claudecode` writes the floor even when no
   Claude Code user is enrolled. Linux and macOS write it at install and at
