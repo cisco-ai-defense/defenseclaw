@@ -711,9 +711,9 @@ func GroupNameLookupDefinitive() bool {
 	return true
 }
 
-// QualifiedGroupName returns name@domain for the first realm the host is
-// joined to (realmd) that has a group of that name, or "" when name is
-// already qualified or no realm has it.
+// QualifiedGroupName returns name@domain, as the host spells it, for the
+// first realm the host is joined to (realmd) that has a group of that name,
+// or "" when name is already qualified or no realm has it.
 func QualifiedGroupName(ctx context.Context, r Resolver, name string) string {
 	if r == nil || name == "" || strings.ContainsAny(name, `@\`) {
 		return ""
@@ -726,9 +726,8 @@ func QualifiedGroupName(ctx context.Context, r Resolver, name string) string {
 		if realm.Domain == "" {
 			continue
 		}
-		candidate := name + "@" + realm.Domain
-		if _, err := r.LookupGroup(candidate); err == nil {
-			return candidate
+		if listed := GroupSpelling(r, name+"@"+realm.Domain); listed != "" {
+			return listed
 		}
 	}
 	return ""

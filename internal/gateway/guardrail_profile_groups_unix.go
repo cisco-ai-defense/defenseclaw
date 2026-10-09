@@ -67,8 +67,8 @@ var profileGroupQualifiedName = func(ctx context.Context, name string) string {
 		return qualified
 	}
 	for _, domain := range observedGroupDomains.list() {
-		if _, err := resolver.LookupGroup(name + "@" + domain); err == nil {
-			return name + "@" + domain
+		if listed := unixidentity.GroupSpelling(resolver, name+"@"+domain); listed != "" {
+			return listed
 		}
 	}
 	return ""
