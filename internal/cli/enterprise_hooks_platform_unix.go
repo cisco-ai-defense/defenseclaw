@@ -7,6 +7,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -120,6 +122,23 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 			warn = cmd.ErrOrStderr()
 		}
 		applyManagedStandaloneAdminEnv(warn)
+	}
+	// A first package install can enroll users, then roll back config.yaml
+	// before uninstall runs. remove-all needs only the trusted manifest and
+	// managed data directory to undo those registrations. Use the package's
+	// explicit standalone pins for that cleanup only; never turn a present
+	// but invalid config into a different policy.
+	if cmd == enterpriseHooksRemoveAllCmd &&
+		managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		if _, statErr := os.Lstat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
+			cfg = config.DefaultConfig()
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			applyStandaloneHookGuardianDefaults(cmd)
+			configureEnterpriseHooksStandaloneUnix()
+			return nil
+		}
 	}
 	var err error
 	if cmd == enterpriseHooksStatusCmd {

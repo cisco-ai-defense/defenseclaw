@@ -102,6 +102,31 @@ func TestUninstallAfterAFailedPackageInstallRemovesItsLeftovers(t *testing.T) {
 	}
 }
 
+// GAP-1151: a failed first package install can enroll users before rollback
+// removes config.yaml. Uninstall must still use the retained manifest to
+// remove their hook registrations while the package binary is present.
+func TestFailedFirstPackageUninstallRemovesHooksWithoutConfig(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n  - user: alice\n    uid: 1001\n    user_home: /home/alice\n    connector: codex\n")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"activation_failed","message":"gateway exited"}]}`)
+	if exists(h.env.P(h.env.Layout.ConfigPath)) || exists(h.env.deploymentPath()) {
+		t.Fatal("test requires a retained manifest without config or deployment")
+	}
+	removed := false
+	h.env.Runner = observingRunner{Runner: h.runner, observe: func(_ string, args []string) {
+		if joined := strings.Join(args, " "); strings.Contains(joined, "hooks remove-all") &&
+			!strings.HasSuffix(joined, " --check") {
+			removed = true
+		}
+	}}
+	done := h.run(Options{Action: ActionUninstall})
+	requireOK(t, done)
+	if !removed {
+		t.Fatal("uninstall did not invoke remove-all for the retained manifest")
+	}
+}
+
 // The same on macOS: the Jamf uninstall script answered noop not_installed
 // (with the finish step of GAP-2410) and left bin, the rejected
 // etc/config.yaml and lifecycle (GAP-0567).
