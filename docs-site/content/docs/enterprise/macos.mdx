@@ -205,8 +205,12 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery -
 
 Skills and MCP servers are inventoried, not scanned: a managed deployment
 does not run the skill or MCP scanners. The inventory names each skill and
-MCP server per user, and its `ai_component` and per-entry skill and MCP
-records go to your observability destinations. The gateway's skill, MCP and
+MCP server per user. `ai_component.discovered`, `changed` and `removed`
+records reach your observability destinations with the user name but without
+the entry name; discovery does not emit per-entry `ai_component.observed`
+records. Skill and MCP names can still reach destinations through hook
+decision and asset-policy audit rows when assets are used, scanned, admitted
+or rejected. The gateway's skill, MCP and
 tool-catalog API routes are not available on a managed host (they answer
 `501`); use the `discovery` view above instead.
 

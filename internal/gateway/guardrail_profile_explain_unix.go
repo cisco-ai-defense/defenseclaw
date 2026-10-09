@@ -67,6 +67,11 @@ func ambiguousAccount(name string, accounts []unixidentity.Account) error {
 	return &useridentity.AmbiguousAccountError{Name: name, Accounts: refs}
 }
 
+// adminViewDomainCouldHold reports whether the domain of a qualified --user
+// filter could hold a uid: always, as a uid does not tell a local account
+// from a directory one (GAP-1221).
+func adminViewDomainCouldHold(string, string) bool { return true }
+
 // profileExplainUnresolved resolves an account the platform resolver cannot
 // name through the OS account database (os/user), with its error.
 var profileExplainQualifiedName = func(ctx context.Context, name string) string {

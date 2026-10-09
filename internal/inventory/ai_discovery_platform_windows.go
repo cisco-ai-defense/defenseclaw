@@ -6,6 +6,7 @@
 package inventory
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -120,12 +121,18 @@ func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 		if fi, err := os.Stat(expanded); err != nil || !fi.IsDir() {
 			continue
 		}
+		name, domain, accountExists := windowsProfileAccount(sid, expanded)
+		if !accountExists && standalone {
+			continue
+		}
+		if !accountExists {
+			name = filepath.Base(expanded)
+		}
 		lower := strings.ToLower(expanded)
 		if _, ok := seen[lower]; ok {
 			continue
 		}
 		seen[lower] = struct{}{}
-		name, domain := windowsProfileAccount(sid, expanded)
 		out = append(out, discoveryHomeOwner{Home: expanded, UserID: sid, UserName: name, Domain: domain})
 	}
 	return out
@@ -148,14 +155,21 @@ func platformDiscoveryAccountName(sid, _ string) string {
 
 // windowsProfileAccount is the account name and domain of sid, or the
 // profile folder's name and no domain when the account cannot be looked up.
-func windowsProfileAccount(sid, home string) (string, string) {
-	if parsed, err := windows.StringToSid(sid); err == nil {
-		// The bare account name, as agent identities and hook records spell it.
-		if account, domain, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
-			return account, strings.TrimSpace(domain)
-		}
+func windowsProfileAccount(sid, home string) (string, string, bool) {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return "", "", false
 	}
-	return filepath.Base(home), ""
+	// The bare account name, as agent identities and hook records spell it.
+	account, domain, _, err := parsed.LookupAccount("")
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) || errors.Is(err, windows.ERROR_NO_SUCH_USER) {
+		return "", "", false
+	}
+	if err == nil && strings.TrimSpace(account) != "" {
+		return account, strings.TrimSpace(domain), true
+	}
+	// A temporary directory-service failure is not proof of deletion.
+	return filepath.Base(home), "", true
 }
 
 // normalizeProfileImagePath trims and cleans a raw ProfileImagePath

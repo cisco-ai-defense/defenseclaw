@@ -372,8 +372,9 @@ prompts and content. To block a tool call, add a CEL expression over complete
 action facts, for example `tool_call_only: true` with
 `expression: f.commands.exists(c, c.argv_complete && c.program == 'pg_dump')`.
 `tool_call_only` alone does not make a regex match enforceable. The text
-`rulepack validate` command warns when an enabled `tool_call_only` rule has no
-expression; see [CEL rule authoring](/docs/policies/cel/authoring).
+`rulepack validate` command names each enabled `tool_call_only` rule you added
+that has no expression (shipped rules that use the same fallback are listed
+only next to yours); see [CEL rule authoring](/docs/policies/cel/authoring).
 
 The gateway ships three rule packs, `default`, `strict` and `permissive`,
 under `/opt/defenseclaw/share/policies/guardrail` on Linux and

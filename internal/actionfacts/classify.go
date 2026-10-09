@@ -3462,21 +3462,24 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 	if !hasMode {
 		mode, hasMode = parsed.values["--mode"]
 	}
-	if !parsed.complete || !hasMode || !dangerousInstallMode(mode) ||
-		len(parsed.positionals) < 2 {
+	if !parsed.complete || len(parsed.positionals) < 2 {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	addOperation(command, OperationPermissionChange)
+	if _, directory := parsed.seen["-d"]; directory {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
 	for _, source := range parsed.positionals[:len(parsed.positionals)-1] {
 		appendCommandPath(out, command, PathAccessRead, source)
 	}
-	appendCommandPath(
-		out,
-		command,
-		PathAccessMetadata,
-		parsed.positionals[len(parsed.positionals)-1],
-	)
+	destination := parsed.positionals[len(parsed.positionals)-1]
+	addOperation(command, OperationCopy)
+	appendCommandPath(out, command, PathAccessWrite, destination)
+	if hasMode && dangerousInstallMode(mode) {
+		addOperation(command, OperationPermissionChange)
+		appendCommandPath(out, command, PathAccessMetadata, destination)
+	}
 }
 
 func dangerousInstallMode(mode string) bool {

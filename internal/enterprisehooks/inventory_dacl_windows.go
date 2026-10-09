@@ -403,6 +403,12 @@ func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, re
 	for _, dir := range inventoryDACLListOnlyDirs {
 		grants = append(grants, grant(dir, ensureInventoryListACE, inventoryListACE))
 	}
+	if rejectLinks {
+		// Claude Code writes user and local-scope MCP servers in this
+		// profile-root file. Grant the standalone gateway this file alone;
+		// no grant is inherited by its neighbours in the profile root.
+		grants = append(grants, grant(".claude.json", ensureInventorySelfACE, inventorySelfACE))
+	}
 	return grants
 }
 

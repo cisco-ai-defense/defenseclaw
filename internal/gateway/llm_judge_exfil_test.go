@@ -24,6 +24,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
+func TestExfilAuthorizedKeysInspectionGuidanceScope(t *testing.T) {
+	judge := &LLMJudge{rp: &guardrail.RulePack{}}
+
+	if !strings.Contains(judge.exfilPrompt(), exfilAuthorizedKeysInspectionGuidance) {
+		t.Fatal("managed hook prompt lacks public-key inspection guidance")
+	}
+	judge.secureClient = true
+	if got := judge.exfilPrompt(); got != exfilSystemPrompt {
+		t.Fatal("Secure Client exfil prompt changed")
+	}
+}
+
 // TestExfilJudge_PoliteEtcPasswdBlocks is the headline regression
 // guard for the new exfil judge. The prompt is deliberately polite
 // — the kind of phrasing the injection judge tends to shrug at and

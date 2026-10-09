@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -38,6 +39,25 @@ const rulePackLongIntro = `Inspect a guardrail rule pack without starting the ga
 config. Administrators validate a custom pack with this command before`
 
 var safeRulePackWireCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// These IDs use the shipped regex fallback without a semantic expression.
+// List IDs here so a copied pack can distinguish its own new rules from them.
+var shippedToolCallRegexIDs = map[string]bool{
+	"CMD-REVSHELL-POWERSHELL-TCP":                     true,
+	"SEC-ENV-DUMP-REQUEST":                            true,
+	"credential.windows_lsass_memory_dump":            true,
+	"tamper.posix_log_and_shell_history_destruction":  true,
+	"credential.kubernetes_named_secret_content_read": true,
+	"credential.kubernetes_batch_secret_collection":   true,
+	"tamper.pam_permit_authentication_bypass":         true,
+	"tamper.docker_insecure_http_registry":            true,
+	"exfil.credential_archive_external_upload":        true,
+	"persistence.global_ld_preload_install":           true,
+	"privilege.host_namespace_entry":                  true,
+	"lateral.workload_exec":                           true,
+	"impact.fork_bomb":                                true,
+	"impact.unbounded_cpu_fanout":                     true,
+}
 
 type rulePackWireDiagnostic struct {
 	Path   string `json:"path"`
@@ -161,24 +181,35 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 	if err := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); err != nil {
 		return err
 	}
+	if problem != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
+	}
 	if !rulePackValidateJSON {
-		count := 0
-		for _, file := range rp.RuleFiles {
-			if file == nil {
+		var customerIDs, shippedIDs []string
+		for _, ruleFile := range rp.RuleFiles {
+			if ruleFile == nil {
 				continue
 			}
-			for _, rule := range file.Rules {
-				if rule.ToolCallOnly && rule.Expression == "" && (rule.Enabled == nil || *rule.Enabled) {
-					count++
+			for _, rule := range ruleFile.Rules {
+				if rule.Enabled != nil && !*rule.Enabled || !rule.ToolCallOnly || rule.Expression != "" {
+					continue
+				}
+				id := safeRulePackWireText(rule.ID, 64, "(unsafe rule id)")
+				if shippedToolCallRegexIDs[rule.ID] {
+					shippedIDs = append(shippedIDs, id)
+				} else {
+					customerIDs = append(customerIDs, id)
 				}
 			}
 		}
-		if count > 0 {
-			fmt.Fprintf(cmd.OutOrStdout(), "warning: %d enabled tool_call_only rules have no expression; their tool-call pattern matches are detection-only and cannot block\n", count)
+		sort.Strings(customerIDs)
+		for _, id := range customerIDs {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: customer rule %s uses tool_call_only without an expression; its tool-call pattern matches use the regex fallback, which is detection-only and cannot block\n", id)
 		}
-	}
-	if problem != "" {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: the gateway cannot load this pack: %s\n", problem)
+		if len(customerIDs) > 0 && len(shippedIDs) > 0 {
+			sort.Strings(shippedIDs)
+			fmt.Fprintf(cmd.ErrOrStderr(), "note: known shipped rule IDs using the same fallback: %s\n", strings.Join(shippedIDs, ", "))
+		}
 	}
 	return nil
 }

@@ -518,6 +518,22 @@ func (p *GuardrailProxy) ReloadCiscoClient(aid *config.CiscoAIDefenseConfig, dat
 	g.SetCiscoInspector(nil)
 }
 
+// SetSecureClientIntegration preserves the existing judge prompt for Secure Client.
+// The sidecar calls this before serving proxy requests. Later generations get
+// a shared judge that buildSharedJudge already marks.
+func (p *GuardrailProxy) SetSecureClientIntegration(enabled bool) {
+	if p == nil {
+		return
+	}
+	g, ok := p.inspector.(*GuardrailInspector)
+	if !ok {
+		return
+	}
+	if judge := g.currentJudge(); judge != nil && judge.secureClient != enabled {
+		judge.secureClient = enabled
+	}
+}
+
 // servedConnector is the connector this proxy serves: the wired connector
 // (guardrail.connector may be empty for OpenClaw), never the /c/<name>/ path
 // prefix or a header.

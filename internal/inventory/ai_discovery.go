@@ -1546,6 +1546,12 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	})
 	measure("mcp", func() ([]AISignal, int, error) { return s.detectMCPPaths(), 0, nil })
 	measure("skill", func() ([]AISignal, int, error) { return s.detectSkills(), 0, nil })
+	if !s.opts.SecureClient {
+		measure("project_skill", func() ([]AISignal, int, error) {
+			out, err := s.detectClaudeProjectSkills()
+			return out, 0, err
+		})
+	}
 	measure("rule", func() ([]AISignal, int, error) { return s.detectRules(), 0, nil })
 	measure("plugin", func() ([]AISignal, int, error) { return s.detectPlugins(), 0, nil })
 	if s.opts.IncludeNetworkDomains {
@@ -2159,7 +2165,15 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	// parse error also propagates because a malformed MCP config
 	// leaves the operator with zero item rows for a real surface,
 	// which downstream must not read as "no MCP servers configured".
-	names, parseErr := readMCPServerNamesWithErr(path, sig.SupportedConnector)
+	var names []string
+	var parseErr error
+	if !s.opts.SecureClient && strings.EqualFold(filepath.Base(path), ".claude.json") {
+		// Managed and per-user discovery apply the one MiB, no-follow
+		// bound. Secure Client retains its existing parser and byte output.
+		names, _, parseErr = readClaudeDiscoveryState(path)
+	} else {
+		names, parseErr = readMCPServerNamesWithErr(path, sig.SupportedConnector)
+	}
 	var partial bool
 	var coverageReason string
 	if parseErr != nil {

@@ -295,11 +295,12 @@ enabled:
   started the scan for, never from the scan's own output. The
   `ai_component.discovered`, `changed` and `removed` records carry the same
   user (`user.id`, `defenseclaw.user.name`) to your observability
-  destinations, without the entry's name. The per-entry skill, plugin and
-  MCP records (`ai_component.observed`, which name each entry) carry the
-  user too, but stay in the local inventory (a Secure Client deployment
-  also sends them to Cisco AI Defense). Read entry names with the
-  `discovery` view below. With `ai_discovery.include_user_email` on, each
+  destinations, without the entry's name. The inventory retains the
+  per-entry skill, plugin and MCP names locally; discovery does not emit
+  per-entry `ai_component.observed` records. Names can still reach configured
+  observability destinations in hook decision and asset-policy audit rows
+  when those assets are used, scanned, admitted or rejected. Read the full
+  inventory with the `discovery` view below. With `ai_discovery.include_user_email` on, each
   account's Claude Code and Codex address goes to your destinations on one
   `ai_component.observed` record per account and connector each discovery
   cycle, without entry names

@@ -61,29 +61,45 @@ func TestRulePackValidateWireProtocol(t *testing.T) {
 	}
 }
 
-func TestRulePackValidateWarnsWhenToolCallPatternCannotBlock(t *testing.T) {
-	directory := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(directory, "rules"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	const rule = "version: 1\ncategory: acme\nrules:\n  - id: ACME-TEST\n    tool_call_only: true\n    pattern: 'marker'\n    title: Marker\n    severity: HIGH\n    confidence: 0.9\n    tags: [test]\n"
-	if err := os.WriteFile(filepath.Join(directory, "rules", "acme.yaml"), []byte(rule), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestRulePackValidateNamesCustomerToolCallRegexRule(t *testing.T) {
 	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
-	previousOutput := rulePackValidateCmd.OutOrStdout()
+	previousOutput, previousErr := rulePackValidateCmd.OutOrStdout(), rulePackValidateCmd.ErrOrStderr()
+	previousProblem := rulePackServiceReadProblemFn
 	t.Cleanup(func() {
 		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
 		rulePackValidateCmd.SetOut(previousOutput)
+		rulePackValidateCmd.SetErr(previousErr)
+		rulePackServiceReadProblemFn = previousProblem
 	})
-	rulePackValidateDir, rulePackValidateJSON = directory, false
-	output := &strings.Builder{}
+	rulePackServiceReadProblemFn = func(context.Context, string) string { return "" }
+	rulePackValidateJSON = false
+	output, warnings := &strings.Builder{}, &strings.Builder{}
 	rulePackValidateCmd.SetOut(output)
+	rulePackValidateCmd.SetErr(warnings)
+	rulePackValidateDir = shippedRulePackForCLITest(t, "default")
 	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "warning: 1 enabled tool_call_only rules have no expression") {
-		t.Fatalf("missing detection-only warning: %s", output)
+	if warnings.Len() != 0 || strings.Contains(output.String(), "tool_call_only") {
+		t.Fatalf("shipped pack warned: %s%s", output.String(), warnings.String())
+	}
+
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rules := "version: 1\ncategory: command\nrules:\n  - id: CUSTOMER-MARKER\n    tool_call_only: true\n    pattern: marker\n    title: Marker\n    severity: HIGH\n    confidence: 0.9\n    tags: [test]\n"
+	if err := os.WriteFile(filepath.Join(directory, "rules", "customer.yaml"), []byte(rules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulePackValidateDir = directory
+	warnings.Reset()
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(warnings.String(), "CUSTOMER-MARKER") || !strings.Contains(warnings.String(), "detection-only and cannot block") ||
+		strings.Contains(warnings.String(), "12 enabled") {
+		t.Fatalf("customer rule warning = %q", warnings.String())
 	}
 }
 

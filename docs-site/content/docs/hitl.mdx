@@ -57,6 +57,19 @@ defenseclaw setup guardrail \
   --restart
 ```
 
+This is an interactive setup command. On an install with Claude Code and
+Codex already configured in action mode, it asks whether to enable the
+guardrail, which connectors should enforce actions, which hook fail mode to
+use when setup or a mode change calls for it, whether to enable human
+approval, the approval minimum severity, and which scanner engine to use.
+The HILT flags preselect the approval answers; they do not skip those
+questions. Other optional configuration may add prompts. With
+`--connector claudecode`, the HILT answer changes Claude Code's connector
+override only. Codex keeps its own approval setting. Run the command for
+Codex separately to change Codex, or omit `--connector` to edit the shared
+default for connectors without an override. Codex has no native approval
+prompt, so its confirm verdict uses an alert fallback.
+
 <TypeTable
   type={{
     "--human-approval / --no-human-approval": {

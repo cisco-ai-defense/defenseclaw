@@ -163,6 +163,7 @@ func BareAccountName(name string) string {
 type AccountFilter struct {
 	raw, account, domain string
 	ids                  []string
+	removed              func(id string) bool
 }
 
 // NewAccountFilter compiles filter. ids are the ids (uid or SID) of the
@@ -178,6 +179,19 @@ func NewAccountFilter(filter string, ids ...string) AccountFilter {
 			f.ids = append(f.ids, id)
 		}
 	}
+	return f
+}
+
+// WithRemovedAccounts lets a qualified filter that resolves to no account,
+// as a deleted account's name does, also select a row recorded with the bare
+// name of its account whose id removed reports: Windows rows keep the bare
+// name next to the SID, as do SSSD rows where names are not fully qualified,
+// and the deleted account is still read by the name it was known by
+// (GAP-1221). removed must report only an id no account holds now (and that
+// the filter's domain could have held), so a live twin is never selected
+// (GAP-0366).
+func (f AccountFilter) WithRemovedAccounts(removed func(id string) bool) AccountFilter {
+	f.removed = removed
 	return f
 }
 
@@ -205,10 +219,15 @@ func (f AccountFilter) Matches(id, name string) bool {
 		return true
 	}
 	rowAccount, rowDomain := SplitQualifiedName(name)
-	if !EqualFold(f.account, rowAccount) {
+	switch {
+	case !EqualFold(f.account, rowAccount):
 		return false
+	case f.domain == "":
+		return true
+	case rowDomain != "":
+		return EqualFold(f.domain, rowDomain)
 	}
-	return f.domain == "" || rowDomain != "" && EqualFold(f.domain, rowDomain)
+	return len(f.ids) == 0 && id != "" && f.removed != nil && f.removed(id)
 }
 
 // AccountRef names one account of an AmbiguousAccountError.
