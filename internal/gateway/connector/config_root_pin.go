@@ -20,6 +20,7 @@ var connectorConfigRootPins = []struct {
 }{
 	{"claudecode", "CLAUDE_CONFIG_DIR", "settings.json", []string{".claude"}, []string{"settings.json"}},
 	{"opencode", "OPENCODE_CONFIG_DIR", "config", []string{".config", "opencode"}, []string{"plugins", "defenseclaw.js"}},
+	{"codex", "CODEX_HOME", "config.toml", []string{".codex"}, []string{"config.toml"}},
 }
 
 // PinConnectorConfigRootsToSetup points the gateway process at the connector

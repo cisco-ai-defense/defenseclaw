@@ -228,3 +228,24 @@ func TestPinConnectorConfigRootsToSetup(t *testing.T) {
 		t.Fatalf("setup after the pin: %v", err)
 	}
 }
+
+func TestPinCodexConfigRootToSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	target := filepath.Join(home, "codex-alt", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(dataDir, "codex", "config.toml", target); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if notes := PinConnectorConfigRootsToSetup(dataDir); len(notes) != 1 {
+		t.Fatalf("Codex home pin notes = %q, want one", notes)
+	}
+	if got := codexConfigPath(); got != target {
+		t.Fatalf("Codex config after pin = %q, want %q", got, target)
+	}
+}
