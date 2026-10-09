@@ -70,6 +70,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from defenseclaw import codex_toml
+
 try:  # Python 3.11+ ships ``tomllib`` in the stdlib.
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
@@ -914,7 +916,7 @@ def _codex_project_root_markers() -> tuple[str, ...]:
     path = os.path.join(codex_home(), "config.toml")
     try:
         payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
-        config = tomllib.loads(payload.decode("utf-8"))
+        config = codex_toml.loads(payload)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return (".git",)
     raw = config.get("project_root_markers")
@@ -3816,7 +3818,7 @@ def _read_codex_config_toml(
     """
     try:
         payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
-        data = tomllib.loads(payload.decode("utf-8"))
+        data = codex_toml.loads(payload)
     except FileNotFoundError:
         return []
     except OSError:
@@ -5200,6 +5202,9 @@ def _codex_mcp_section_names(name: str) -> set[str]:
 
 
 def _strip_codex_mcp_block(text: str, name: str) -> str:
+    has_bom = text.startswith("\ufeff")
+    if has_bom:
+        text = text[1:]
     section_names = _codex_mcp_section_names(name)
     out: list[str] = []
     skipping = False
@@ -5210,7 +5215,8 @@ def _strip_codex_mcp_block(text: str, name: str) -> str:
             skipping = section_name in section_names
         if not skipping:
             out.append(line)
-    return "\n".join(out).rstrip() + ("\n" if out else "")
+    result = "\n".join(out).rstrip() + ("\n" if out else "")
+    return ("\ufeff" if has_bom else "") + result
 
 
 def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -> None:
@@ -5221,7 +5227,7 @@ def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -
         text = ""
     if text.strip():
         try:
-            tomllib.loads(text)
+            codex_toml.loads(text.encode("utf-8"))
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"refusing to modify malformed Codex config.toml: {exc}") from exc
     updated = _strip_codex_mcp_block(text, name)

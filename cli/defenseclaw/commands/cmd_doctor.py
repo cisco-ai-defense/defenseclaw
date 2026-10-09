@@ -5656,9 +5656,7 @@ def _is_disabled_hook_tombstone(path: str) -> bool:
 
 
 def _codex_effective_config_path(cfg) -> str:
-    """Use the current Codex home, or the home setup recorded when unset."""
-    if os.environ.get("CODEX_HOME"):
-        return os.path.join(codex_home(), "config.toml")
+    """Read the root that the gateway recorded for this connector."""
     for path in _hook_health_paths_from_lock(cfg, "codex"):
         if os.path.basename(path).lower() == "config.toml":
             return path
@@ -5875,7 +5873,9 @@ def _codex_dotenv_no_proxy(text: str, shell_value: str) -> tuple[set[str], int]:
     return entries, line_number
 
 
-def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) -> tuple[str, str, str] | None:
+def codex_telemetry_proxy_status(
+    environ=None, *, os_name: str | None = None, codex_root: str | None = None
+) -> tuple[str, str, str] | None:
     """Say whether Codex's telemetry to the local gateway would use a proxy.
 
     Returns ``(status, detail, remediation)``, or ``None`` when no proxy
@@ -5886,7 +5886,7 @@ def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) ->
     proxy_var = next((key for key in _TELEMETRY_PROXY_VARS if str(env.get(key) or "").strip()), "")
     if not proxy_var:
         return None
-    dotenv_path = os.path.join(codex_home(), ".env")
+    dotenv_path = os.path.join(codex_root or codex_home(), ".env")
     try:
         with open(dotenv_path, "rb") as fh:
             dotenv = fh.read(1024 * 1024)
@@ -5932,8 +5932,8 @@ def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) ->
     return ("warn", detail, f"in the shell that starts Codex run: {fix}")
 
 
-def _check_codex_telemetry_proxy(r: _DoctorResult) -> None:
-    status = codex_telemetry_proxy_status()
+def _check_codex_telemetry_proxy(cfg, r: _DoctorResult) -> None:
+    status = codex_telemetry_proxy_status(codex_root=os.path.dirname(_codex_effective_config_path(cfg)))
     if status is None:
         return
     tag, detail, remediation = status
@@ -11920,7 +11920,7 @@ def doctor(
             _check_connector_hooks(cfg, _conn, r)
             if _conn == "codex":
                 _check_codex_otel_alignment(cfg, r)
-                _check_codex_telemetry_proxy(r)
+                _check_codex_telemetry_proxy(cfg, r)
             # Human-approval (HILT) support is per-connector: each connector
             # has a different native ask surface AND may carry its own hilt
             # override, so run it for EVERY active connector (tagged like the

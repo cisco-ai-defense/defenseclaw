@@ -524,7 +524,7 @@ func parseWindowsCodexRequirements(raw []byte) (map[string]interface{}, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return cfg, nil
 	}
-	if err := toml.Unmarshal(raw, &cfg); err != nil {
+	if err := parseCodexTOML(raw, &cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -546,6 +546,7 @@ func reconcileWindowsCodexRequirements(
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal Codex requirements: %w", err)
 	}
+	rendered = retainCodexTOMLBOM(raw, rendered)
 	if len(rendered) > windowsCodexMachineRequirementsLimit {
 		return nil, false, fmt.Errorf(
 			"rendered Codex requirements exceed %d bytes",
@@ -767,6 +768,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal surgically cleaned Codex requirements: %w", err)
 	}
+	rendered = retainCodexTOMLBOM(current, rendered)
 	if len(rendered) > windowsCodexMachineRequirementsLimit {
 		return nil, false, fmt.Errorf(
 			"surgically cleaned Codex requirements exceed %d bytes",

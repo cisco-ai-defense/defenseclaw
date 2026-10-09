@@ -170,6 +170,17 @@ func (s *tomlEditSyntax) visible(line string) string {
 	return string(out)
 }
 
-func parseCodexTOML(raw []byte, target interface{}) error {
+// ParseCodexTOML accepts the UTF-8 BOM emitted by Windows PowerShell 5.1.
+// Keep the original bytes for writers so they can preserve the BOM.
+func ParseCodexTOML(raw []byte, target interface{}) error {
 	return toml.Unmarshal(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}), target)
+}
+
+func parseCodexTOML(raw []byte, target interface{}) error { return ParseCodexTOML(raw, target) }
+
+func retainCodexTOMLBOM(original, rendered []byte) []byte {
+	if bytes.HasPrefix(original, []byte{0xef, 0xbb, 0xbf}) {
+		return append([]byte{0xef, 0xbb, 0xbf}, rendered...)
+	}
+	return rendered
 }

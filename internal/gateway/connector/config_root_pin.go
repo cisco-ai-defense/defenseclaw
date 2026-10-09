@@ -47,6 +47,20 @@ func PinConnectorConfigRootsForCommand(dataDir string) func() {
 	}
 }
 
+// An explicit setup command passes its selected root to the gateway it starts.
+// Other gateway starts keep the root recorded in the managed backup.
+func codexExplicitSetupTarget() string {
+	requested := strings.TrimSpace(os.Getenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP"))
+	if requested == "" || !filepath.IsAbs(requested) {
+		return ""
+	}
+	current := codexHomeDir()
+	if !sameManagedTargetPath(requested, current) {
+		return ""
+	}
+	return current
+}
+
 // PinConnectorConfigRootsToSetup points the gateway process at the connector
 // config roots its setup bound, whatever the shell that started the gateway
 // has set. A restart with only CLAUDE_CONFIG_DIR set to another directory
@@ -59,6 +73,9 @@ func PinConnectorConfigRootsToSetup(dataDir string) []string {
 	}
 	var notes []string
 	for _, pin := range connectorConfigRootPins {
+		if pin.connector == "codex" && codexExplicitSetupTarget() != "" {
+			continue
+		}
 		b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, pin.connector, pin.logical))
 		if err != nil || b.Connector != pin.connector || b.LogicalName != pin.logical {
 			continue

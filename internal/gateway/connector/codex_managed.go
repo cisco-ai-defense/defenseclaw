@@ -42,7 +42,7 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 	render := func(raw []byte) error {
 		cfg := map[string]interface{}{}
 		if len(raw) > 0 {
-			if err := toml.Unmarshal(raw, &cfg); err != nil {
+			if err := parseCodexTOML(raw, &cfg); err != nil {
 				return fmt.Errorf("parse Codex managed config: %w", err)
 			}
 		}
@@ -76,8 +76,9 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 		if err != nil {
 			return fmt.Errorf("marshal Codex managed config: %w", err)
 		}
+		out = retainCodexTOMLBOM(raw, out)
 		rendered := map[string]interface{}{}
-		if err := toml.Unmarshal(out, &rendered); err != nil {
+		if err := parseCodexTOML(out, &rendered); err != nil {
 			return fmt.Errorf("verify rendered Codex managed config: %w", err)
 		}
 		renderedHooks, ok := rendered["hooks"].(map[string]interface{})
@@ -136,7 +137,7 @@ func (c *CodexConnector) patchCodexManagedHooks(opts SetupOpts, hookScript strin
 			return fmt.Errorf("read persisted Codex managed config: %w", err)
 		}
 		persistedConfig := map[string]interface{}{}
-		if err := toml.Unmarshal(persisted, &persistedConfig); err != nil {
+		if err := parseCodexTOML(persisted, &persistedConfig); err != nil {
 			return fmt.Errorf("parse persisted Codex managed config: %w", err)
 		}
 		persistedHooks, ok := persistedConfig["hooks"].(map[string]interface{})

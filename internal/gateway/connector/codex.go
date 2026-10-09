@@ -329,8 +329,60 @@ func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy     { return Subpro
 
 func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return withCodexLifecycleTransaction(opts, func() error {
+		if previous, err := codexPreviousSetupRoot(opts.DataDir); err != nil {
+			return err
+		} else if previous != "" {
+			selected := codexHomeDir()
+			if err := os.Setenv("CODEX_HOME", previous); err != nil {
+				return err
+			}
+			defer os.Setenv("CODEX_HOME", selected)
+			if err := c.teardownLocked(ctx, opts); err != nil {
+				return fmt.Errorf("move Codex hooks from %s: %w", previous, err)
+			}
+			if err := os.Setenv("CODEX_HOME", selected); err != nil {
+				return err
+			}
+			if err := c.setupLocked(ctx, opts); err != nil {
+				_ = os.Setenv("CODEX_HOME", previous)
+				restoreErr := c.setupLocked(ctx, opts)
+				_ = os.Setenv("CODEX_HOME", selected)
+				if restoreErr != nil {
+					return fmt.Errorf("set up Codex under %s: %w; previous home restoration: %v", selected, err, restoreErr)
+				}
+				return fmt.Errorf("set up Codex under %s: %w; previous home restored", selected, err)
+			}
+			return nil
+		}
 		return c.setupLocked(ctx, opts)
 	})
+}
+
+func codexPreviousSetupRoot(dataDir string) (string, error) {
+	if codexExplicitSetupTarget() == "" {
+		return "", nil
+	}
+	backup, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, "codex", "config.toml"))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read previous Codex setup: %w", err)
+	}
+	if backup.Connector != "codex" || backup.LogicalName != "config.toml" {
+		return "", fmt.Errorf("previous Codex setup has invalid backup identity")
+	}
+	previous, err := normalizeManagedTargetPath(backup.Path)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(previous) != "config.toml" {
+		return "", fmt.Errorf("previous Codex setup has invalid config target")
+	}
+	if !sameManagedTargetPath(previous, filepath.Join(codexHomeDir(), "config.toml")) {
+		return filepath.Dir(previous), nil
+	}
+	return "", nil
 }
 
 func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error {

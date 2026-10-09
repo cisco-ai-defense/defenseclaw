@@ -17,7 +17,6 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
-	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -402,7 +401,7 @@ func configFileReferencesHook(path string, needles []string) (bool, error) {
 			return false, fmt.Errorf("parse hook config %s: %w", path, err)
 		}
 	case ".toml":
-		if err := toml.Unmarshal(data, &decoded); err != nil {
+		if err := ParseCodexTOML(data, &decoded); err != nil {
 			return false, fmt.Errorf("parse hook config %s: %w", path, err)
 		}
 	}

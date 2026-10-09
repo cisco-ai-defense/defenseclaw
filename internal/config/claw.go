@@ -39,10 +39,6 @@ import (
 	yaml "gopkg.in/yaml.v3"
 )
 
-// tomlUnmarshal is a thin alias kept private to this package — it
-// lets us swap the TOML implementation later without touching every
-// call site, and keeps the import surface minimal at the top of the
-// file.
 func tomlUnmarshal(data []byte, v any) error { return toml.Unmarshal(data, v) }
 
 // openclawConfig represents the structure of openclaw.json.
@@ -1516,13 +1512,13 @@ func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 			Transport string            `toml:"transport"`
 		} `toml:"mcp_servers"`
 	}
-	if err := tomlUnmarshal(data, &doc); err != nil {
+	if err := gatewayconnector.ParseCodexTOML(data, &doc); err != nil {
 		return nil, err
 	}
 	var rawDoc struct {
 		MCPServers map[string]map[string]any `toml:"mcp_servers"`
 	}
-	if err := tomlUnmarshal(data, &rawDoc); err != nil {
+	if err := gatewayconnector.ParseCodexTOML(data, &rawDoc); err != nil {
 		return nil, err
 	}
 	out := make([]MCPServerEntry, 0, len(doc.MCPServers))

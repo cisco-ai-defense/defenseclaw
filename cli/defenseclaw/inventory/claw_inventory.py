@@ -43,7 +43,7 @@ from typing import Any, NamedTuple, TypedDict
 
 import yaml
 
-from defenseclaw import connector_paths
+from defenseclaw import codex_toml, connector_paths
 from defenseclaw.config import Config, _expand
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import open_regular_file_no_follow
@@ -3613,7 +3613,7 @@ def _load_codex_agent_toml(path: str) -> tuple[dict[str, Any] | None, str]:
     except OSError as exc:
         return None, f"unreadable agent file: {exc}"
     try:
-        data = tomllib.loads(payload.decode("utf-8"))
+        data = codex_toml.loads(payload)
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         return None, f"invalid TOML: {exc}"
     return data, ""
@@ -4061,16 +4061,8 @@ def _load_toml_dict(path: str, *, strict: bool = False) -> dict[str, Any] | None
     if not os.path.isfile(path):
         return None
     try:
-        # tomllib ships in the stdlib on Python 3.11+. On 3.10 (still an
-        # advertised target) it is absent, so fall back to the tomli
-        # backport rather than silently dropping Codex definitions.
-        try:
-            import tomllib
-        except ModuleNotFoundError:
-            import tomli as tomllib
-
         with open(path, "rb") as fh:
-            raw = tomllib.load(fh)
+            raw = codex_toml.loads(fh.read())
     except (OSError, ValueError, ModuleNotFoundError) as exc:
         if strict:
             raise ValueError(f"could not read {path}: {exc}") from exc
