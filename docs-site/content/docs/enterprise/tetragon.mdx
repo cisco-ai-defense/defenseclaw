@@ -806,7 +806,7 @@ returns `Operation not permitted`; see
   speed={1.5}
   height={520}
   ariaLabel="Animated terminal replay of tetragon verify --ready-for enforce on a computer that runs observe: the checks, the burn-in table where two users were reset by a hit and one is still measuring, and the block to approve."
-  caption="Recorded on the same lab computer after a working session. `dcr-std1` and `dcr-std2` each opened the SSH key decoy and wrote `~/.bashrc` where a control would have denied it, so their windows restarted; `dcr-std3` has not run an agent yet. Nothing is ready yet; the output still prints the block to approve for when a user finishes."
+  caption="Recorded on the same lab computer after a working session. `alice` and `bob` each opened the SSH key decoy and wrote `~/.bashrc` where a control would have denied it, so their windows restarted; `carol` has not run an agent yet. Nothing is ready yet; the output still prints the block to approve for when a user finishes."
   frames={[
     { type: 'cmd', text: 'sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce', pauseMs: 700 },
     { type: 'out', text: 'Tetragon readiness for enforce (this host runs observe)', pauseMs: 40 },
@@ -821,14 +821,14 @@ returns `Operation not permitted`; see
     { type: 'ok', text: '  ✓ Tetragon\'s metrics endpoint listens on loopback (127.0.0.1:2112)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Tetragon\'s health endpoint listens on loopback (127.0.0.1:6789)', pauseMs: 40 },
     { type: 'ok', text: '  ✓ AI Discovery Plane C is on and the gateway records it', pauseMs: 40 },
-    { type: 'ok', text: '  ✓ 2 enrolled users have an agent (dcr-std1, dcr-std2); none seen yet for', pauseMs: 40 },
-    { type: 'out', text: '    dcr-std3', pauseMs: 40 },
+    { type: 'ok', text: '  ✓ 2 enrolled users have an agent (alice, bob); none seen yet for', pauseMs: 40 },
+    { type: 'out', text: '    carol', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Every enrolled command-line connector is in action mode (claudecode, codex)', pauseMs: 40 },
     { type: 'out', text: '  i This build\'s kernel controls are not approved yet; approve them (below)', pauseMs: 40 },
     { type: 'out', text: '  i 0 of 3 enrolled users finished burn-in on this host', pauseMs: 40 },
     { type: 'out', text: '  Burn-in (40h of agent use, no would-block hit, per user on this host):', pauseMs: 40 },
     { type: 'out', text: '    USER             PROGRESS              ETA       HITS', pauseMs: 40 },
-    { type: 'out', text: '    dcr-std1 (1001)     0.1h/40h   reset   -         4', pauseMs: 40 },
+    { type: 'out', text: '    alice (1001)        0.1h/40h   reset   -         4', pauseMs: 40 },
     { type: 'out', text: '      persistence_write: ~/.bashrc by /bin/bash', pauseMs: 40 },
     { type: 'out', text: '        last 2026-10-08T18:06:29Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
     { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
@@ -837,7 +837,7 @@ returns `Operation not permitted`; see
     { type: 'out', text: '        last 2026-10-08T18:06:19Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
     { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
     { type: 'out', text: '        in this release; other users are not affected.', pauseMs: 40 },
-    { type: 'out', text: '    dcr-std2 (1002)     0.5h/40h   reset   -         2', pauseMs: 40 },
+    { type: 'out', text: '    bob (1002)          0.5h/40h   reset   -         2', pauseMs: 40 },
     { type: 'out', text: '      persistence_write: ~/.bashrc by /bin/bash', pauseMs: 40 },
     { type: 'out', text: '        last 2026-10-08T17:32:33Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
     { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
@@ -846,7 +846,7 @@ returns `Operation not permitted`; see
     { type: 'out', text: '        last 2026-10-08T17:32:25Z. Stays in monitor until 40h pass with no hit.', pauseMs: 40 },
     { type: 'out', text: '        If the tool is expected, this user cannot be enforced for this control', pauseMs: 40 },
     { type: 'out', text: '        in this release; other users are not affected.', pauseMs: 40 },
-    { type: 'out', text: '    dcr-std3 (1006)     0.0h/40h     0%    measuring 0', pauseMs: 40 },
+    { type: 'out', text: '    carol (1006)        0.0h/40h     0%    measuring 0', pauseMs: 40 },
     { type: 'ok', text: '  ✓ Kernel enforcement is not paused', pauseMs: 40 },
     { type: 'ok', text: '  ✓ No operator override', pauseMs: 40 },
     { type: 'ok', text: '  ✓ DefenseClaw\'s 3 policies are loaded in Tetragon', pauseMs: 40 },
@@ -869,16 +869,16 @@ returns `Operation not permitted`; see
 Once a ring enforces, `status` shows each user's state. This lab ring set
 `burn_in: 0` so the controls could deny without the wait (`status` warns
 `kernel_burn_in_skipped` for it); a real ring keeps a measured burn-in. Of the
-three users, `dcr-std1` is enforcing, `dcr-std2` stays in monitor mode because
-another user's native agent holds the one deny anchor, and `dcr-std3` has no
+three users, `alice` is enforcing, `bob` stays in monitor mode because
+another user's native agent holds the one deny anchor, and `carol` has no
 agent installed. The hits show what was blocked and what would have been:
 
-![tetragon status in enforce: the kernel controls digest approved, four DefenseClaw policies with controls in enforce mode and controls-burnin in monitor mode, a Users table where dcr-std1 is enforcing, dcr-std2 is monitor only because another user's native agent holds the one deny anchor and dcr-std3 has no agent installed, the blocked and would-block hits with their paths and binaries, your four Tetragon policies, and three warnings: kernel_burn_in_skipped, kernel_binary_anchor_scope_limited and kernel_pid_anchor_monitor_only](/images/tetragon/terminal-tetragon-status-enforce.png)
+![tetragon status in enforce: the kernel controls digest approved, four DefenseClaw policies with controls in enforce mode and controls-burnin in monitor mode, a Users table where alice is enforcing, bob is monitor only because another user's native agent holds the one deny anchor and carol has no agent installed, the blocked and would-block hits with their paths and binaries, your four Tetragon policies, and three warnings: kernel_burn_in_skipped, kernel_binary_anchor_scope_limited and kernel_pid_anchor_monitor_only](/images/tetragon/terminal-tetragon-status-enforce.png)
 
 When more than one user is ready, `verify --ready-for enforce` ends with the
 user who holds the deny anchor and how to move it:
 
-![tetragon verify --ready-for enforce on the computer that enforces: every check passes, the burn-in table for burn_in 0 with the hits of two users, and the closing line that one of three users is enforced, two stay in monitor without a deny anchor, dcr-std1 (uid 1001) holds the deny anchor as the lowest uid with a native agent install, and enrollment.exclude_users moves it](/images/tetragon/terminal-tetragon-verify-enforce-holder.png)
+![tetragon verify --ready-for enforce on the computer that enforces: every check passes, the burn-in table for burn_in 0 with the hits of two users, and the closing line that one of three users is enforced, two stay in monitor without a deny anchor, alice (uid 1001) holds the deny anchor as the lowest uid with a native agent install, and enrollment.exclude_users moves it](/images/tetragon/terminal-tetragon-verify-enforce-holder.png)
 
 ## Check the fleet
 
