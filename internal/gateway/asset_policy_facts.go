@@ -146,14 +146,14 @@ func (a *APIServer) skillFolderAccessDecision(
 func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Config, connector, cwd, name string) (config.MCPServerEntry, bool) {
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount {
-		return cfg.LookupMCPServerForConnector(connector, cwd, name)
+		return cfg.LookupMCPToolServerForConnector(connector, cwd, name)
 	}
 	if home != "" {
 		if entry, ok := config.LookupMCPServerUnderHome(connector, home, cwd, name); ok {
 			return entry, true
 		}
 	}
-	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Name == name {
+	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && config.SameMCPToolServer(connector, server.Name, name) {
 		return config.MCPServerEntry{
 			Name: server.Name, URL: server.URL, Command: server.Command,
 			Args: append([]string(nil), server.Args...), Transport: server.Transport,

@@ -57,7 +57,7 @@ func hookAssetFacts(connector string, payload []byte) string {
 		addSkill(ref.Name, ref.Dir)
 	}
 	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" {
-		if entry, ok := (*config.Config)(nil).LookupMCPServerForConnector(connector, event.CWD, server); ok {
+		if entry, ok := (*config.Config)(nil).LookupMCPToolServerForConnector(connector, event.CWD, server); ok {
 			facts.MCP = &assetfacts.MCPServer{
 				Name: entry.Name, URL: entry.URL, Command: entry.Command, Args: entry.Args, Transport: entry.Transport,
 			}

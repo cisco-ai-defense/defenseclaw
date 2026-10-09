@@ -87,9 +87,33 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
-	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, req.ToolInput)
+	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
+}
+
+// codexMCPServerName is the MCP server a Codex tool call names, spelled as
+// the caller's Codex configures it. Codex shows hooks mcp__<server>__<tool>
+// with every character other than a letter, digit or underscore turned into
+// "_", so an approved acme-notes was looked up as acme_notes: refused as
+// unregistered, while a deny or a scan-verdict disable of a hyphenated server
+// missed it (GAP-0939, GAP-0462). It is resolved whatever asset_policy.enabled
+// says, because the lists and runtime disables always apply. "" when the call
+// names no server. Secure Client keeps main: only the payload field (#1092).
+func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest) string {
+	explicit := strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")))
+	cfg := a.liveConfig()
+	if explicit != "" || cfg == nil || cfg.SecureClientIntegration() {
+		return explicit
+	}
+	server := serverFromMCPToolName(req.ToolName)
+	if !strings.Contains(server, "_") {
+		return server
+	}
+	if entry, ok := a.lookupCallerMCPServer(ctx, cfg, "codex", req.CWD, server); ok && strings.TrimSpace(entry.Name) != "" {
+		return strings.TrimSpace(entry.Name)
+	}
+	return server
 }
 
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
@@ -328,6 +352,12 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 	}
 	if !ok {
 		return probe
+	}
+	if !secureClient && strings.TrimSpace(entry.Name) != "" {
+		// The configured name, not the form the agent's tool name carries
+		// (acme_notes for acme-notes in Codex), is what the lists and the
+		// registry name (GAP-0939).
+		probe.ServerName = strings.TrimSpace(entry.Name)
 	}
 	probe.URL = strings.TrimSpace(entry.URL)
 	probe.Command = strings.TrimSpace(entry.Command)
