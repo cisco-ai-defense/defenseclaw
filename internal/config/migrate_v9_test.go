@@ -1189,6 +1189,34 @@ func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
 	}
 }
 
+// TestMigrateV9LeavesTheShippedFirstPartyListUnpinned: the first-party list
+// every 0.8.x data.json shipped (also after `policy activate strict`) is not an
+// operator's choice, so it is not written to config.yaml: the 1.0 built-in
+// list applies and `policy list` still finds the activated preset (GAP-0971).
+func TestMigrateV9LeavesTheShippedFirstPartyListUnpinned(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	dataJSON := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(dataJSON, []byte(`{"first_party_allow_list": [
+	  {"target_type": "plugin", "target_name": "defenseclaw", "source_path_contains": [".openclaw/extensions/defenseclaw",
+	    ".zeptoclaw/extensions/defenseclaw", ".claude/extensions/defenseclaw", ".codex/extensions/defenseclaw"]},
+	  {"target_type": "skill", "target_name": "codeguard", "source_path_contains": [".openclaw/workspace/skills/codeguard",
+	    ".openclaw/skills/codeguard", ".zeptoclaw/skills/codeguard", ".claude/skills/codeguard", ".codex/skills/codeguard"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: filepath.Join(dir, "config.yaml"), DataJSONPath: dataJSON, DryRun: true,
+		Source: []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n"),
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if strings.Contains(string(result.Migrated), "first_party_allow_list") {
+		t.Fatalf("the 0.8.x shipped first-party list was pinned:\n%s", result.Migrated)
+	}
+}
+
 // TestMigrateV9DropsTheKeysTheRuntimeNoLongerHas: a 0.8.10-shaped v8 file with
 // every key only an upgrade still understands (the three *_actions maps,
 // update_check and the privacy: section) migrates to its v9 equivalent or is

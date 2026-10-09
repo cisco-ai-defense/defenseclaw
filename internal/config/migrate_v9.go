@@ -1193,6 +1193,36 @@ var v9BuiltinFirstParty = map[string][]AdmissionFirstParty{
 	}},
 }
 
+// v9ShippedFirstParty are the first_party_allow_list entries data.json shipped
+// before 1.0: the 0.8.0 to 0.8.10 list and the broader 0.4 to 0.7 one, which a
+// bridge upgrade can carry. A shipped list was never an operator's choice
+// (`policy activate` copied the same list from the preset), so it is not
+// pinned: the 1.0 built-in list applies, as on a fresh install, and a migrated
+// preset still matches its named policy in `policy list` (GAP-0971).
+var v9ShippedFirstParty = map[string][][]AdmissionFirstParty{
+	AdmissionTypeSkill: {
+		{{Name: "codeguard", SourcePathContains: []string{".openclaw/workspace/skills/codeguard", ".openclaw/skills/codeguard",
+			".zeptoclaw/skills/codeguard", ".claude/skills/codeguard", ".codex/skills/codeguard"}}},
+		{{Name: "codeguard", SourcePathContains: []string{".defenseclaw", "workspace/skills/codeguard", "skills/codeguard",
+			".openclaw/workspace/skills", ".openclaw/skills", ".zeptoclaw/skills", ".claude/skills", ".codex/skills"}}},
+	},
+	AdmissionTypePlugin: {
+		{{Name: "defenseclaw", SourcePathContains: []string{".openclaw/extensions/defenseclaw", ".zeptoclaw/extensions/defenseclaw",
+			".claude/extensions/defenseclaw", ".codex/extensions/defenseclaw"}}},
+		{{Name: "defenseclaw", SourcePathContains: []string{".defenseclaw", "extensions/defenseclaw", ".openclaw/extensions",
+			".zeptoclaw/extensions", ".claude/extensions", ".codex/extensions", ".codex-plugin"}}},
+	},
+}
+
+func v9IsShippedFirstParty(assetType string, list []AdmissionFirstParty) bool {
+	for _, shipped := range v9ShippedFirstParty[assetType] {
+		if v9SameFirstParty(list, shipped) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a v9DataJSONAction) config() SeverityAction {
 	out := SeverityAction{
 		Install: InstallAction(strings.ToLower(strings.TrimSpace(a.Install))),
@@ -1410,8 +1440,14 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			})
 		}
 		for _, assetType := range []string{AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin} {
-			if v9SameFirstParty(byType[assetType], v9BuiltinFirstParty[assetType]) ||
-				m.keepConfiguredFirstParty(root, assetType, byType[assetType]) {
+			if v9SameFirstParty(byType[assetType], v9BuiltinFirstParty[assetType]) {
+				continue
+			}
+			if v9IsShippedFirstParty(assetType, byType[assetType]) {
+				m.note("data.json first_party_allow_list for %s is the list DefenseClaw 0.x shipped; the 1.0 built-in list applies", assetType)
+				continue
+			}
+			if m.keepConfiguredFirstParty(root, assetType, byType[assetType]) {
 				continue
 			}
 			list := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}

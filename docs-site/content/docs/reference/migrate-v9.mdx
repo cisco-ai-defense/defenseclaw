@@ -208,7 +208,9 @@ admission:
   `allow_list_bypass_scan`, also when it left the key out, because 0.8.x
   bypassed the scan only for an explicit `true`).
 - `first_party_allow_list` is written for a type only when it differs from the
-  built-in list.
+  built-in list and from the list DefenseClaw 0.x shipped. The shipped list was
+  never your choice, so the 1.0 built-in list replaces it, as on a fresh
+  install, and `policy list` still marks the policy you activated.
 - A `first_party_allow_list` entry without `source_path_contains` matched any
   path in v8, and skipped the scan only where `allow_list_bypass_scan` was on.
   A v9 first-party entry needs a path, so where the bypass applies to its type
