@@ -1774,3 +1774,41 @@ func TestAllowRuleReleasesABlockedSkill(t *testing.T) {
 		t.Fatalf("journal %+v, want the allow rule to clear the runtime disable and install block", entry.Actions)
 	}
 }
+
+// An allow rule pinned to one profile cannot release a same-named skill blocked in another.
+func TestAllowRuleDoesNotReleaseAnotherPath(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	other := filepath.Join(t.TempDir(), "other-skills")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(skillDir, "shared")
+	b := filepath.Join(other, "shared")
+	for _, path := range []string{a, b} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("# shared\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for field, value := range map[string]string{"runtime": "disable", "install": "block"} {
+		if err := store.SetActionFieldForConnector("skill", "shared", "claudecode", field, value, "blocked"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetSourcePathForConnector("skill", "shared", "claudecode", b); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "shared", SourcePathContains: []string{a}}}
+	w := New(cfg, []string{skillDir, other}, nil, store, logger, nil, nil)
+	w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "shared", Path: a, Connector: "claudecode", Timestamp: time.Now()})
+	entry, err := store.GetActionForConnector("skill", "shared", "claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry == nil || entry.Actions.Runtime != "disable" || entry.Actions.Install != "block" {
+		t.Fatalf("another profile's block was cleared: %+v", entry)
+	}
+}

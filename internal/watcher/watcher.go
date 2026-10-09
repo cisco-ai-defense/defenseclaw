@@ -2184,7 +2184,8 @@ func (w *InstallWatcher) releaseAllowListed(evt InstallEvent, reason string) {
 	}
 	scope := w.journalScope(w.eventConnector(evt))
 	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
-	if err != nil || entry == nil {
+	if err != nil || entry == nil ||
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return
 	}
 	var cleared []string
@@ -2212,7 +2213,8 @@ func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent
 	}
 	connector := w.eventConnector(evt)
 	entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, w.journalScope(connector))
-	if err != nil || entry == nil || (entry.Actions.Runtime == "" && entry.Actions.Install == "") {
+	if err != nil || entry == nil || (entry.Actions.Runtime == "" && entry.Actions.Install == "") ||
+		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return false
 	}
 	cfg := w.liveConfig()
