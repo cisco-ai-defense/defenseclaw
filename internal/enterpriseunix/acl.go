@@ -335,3 +335,30 @@ func aclConnectors(p *plan, record *Deployment) []string {
 	}
 	return connectors
 }
+
+// jsonlACLProblem checks a custom output file, which is outside the
+// deployment's managed trees. Its mode is private even in a traversable log
+// directory, so any allow ACL entry grants access the mode excludes.
+func (e *Env) jsonlACLProblem(ctx context.Context, path string) (string, error) {
+	if e.GOOS != "darwin" {
+		return "", nil
+	}
+	info, err := os.Lstat(e.P(path))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil
+	}
+	findings, err := e.aclFindings(ctx, []aclTarget{{path: e.P(path), private: true}})
+	if err != nil {
+		return "", err
+	}
+	if len(findings) > 0 {
+		return fmt.Sprintf("has a macOS ACL entry that lets another account read or write the JSONL output: %s; remove it with `chmod -N %s`", describeACLFindings(findings), path), nil
+	}
+	return "", nil
+}
