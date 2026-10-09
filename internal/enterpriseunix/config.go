@@ -335,6 +335,23 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 			return fmt.Errorf("observability destination %q writes %s, which %s; a jsonl destination writes a file only the gateway account can read and write (mode 0600, or a missing file it creates) in a folder only root and the gateway account can write",
 				destination.Name, path, problem)
 		}
+		// A safe parent does not make an existing file writable. The gateway
+		// opens it as the service account with O_APPEND and never changes its
+		// owner or mode. A fresh install may not have that account yet.
+		if info, err := os.Lstat(e.P(path)); err == nil && info.Mode().IsRegular() {
+			account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+			if err != nil {
+				return fmt.Errorf("look up gateway service account for observability destination %q: %w", destination.Name, err)
+			}
+			owner, _, err := e.OwnerOf(e.P(path))
+			if err != nil {
+				return fmt.Errorf("check owner of observability destination %q: %w", destination.Name, err)
+			}
+			if !ok || owner != account.UID || info.Mode().Perm()&0o200 == 0 || info.Mode().Perm()&0o077 != 0 {
+				return fmt.Errorf("observability destination %q writes %s, which the %s gateway service account cannot append to; make the existing file owned by %s with mode 0600, or remove it so the gateway can create it",
+					destination.Name, path, e.Layout.ServiceUser, e.Layout.ServiceUser)
+			}
+		}
 	}
 	return nil
 }

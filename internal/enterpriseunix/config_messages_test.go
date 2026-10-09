@@ -202,6 +202,29 @@ func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {
 	}
 }
 
+// GAP-0917: an administrator-created file can pass the path check while the
+// unprivileged gateway cannot append to it.
+func TestManagedConfigRefusesJSONLFileOwnedByAnotherAccount(t *testing.T) {
+	h := newTestHost(t, "linux")
+	path := "/var/log/defenseclaw/events.jsonl"
+	if err := os.MkdirAll(filepath.Dir(h.env.P(path)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(path), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.accounts.Ensure(t.Context(), h.env.Layout.ServiceUser); err != nil {
+		t.Fatal(err)
+	}
+	h.owners[h.env.P(path)] = [2]int{0, 0}
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
+	got := installMessage(t, h, raw)
+	if !strings.Contains(got, `destination "events" writes `+path) ||
+		!strings.Contains(got, "gateway service account cannot append") {
+		t.Fatalf("existing JSONL file refusal: %s", got)
+	}
+}
+
 // GAP-0890: a jsonl destination the gateway cannot write is refused before
 // anything changes, naming the destination, the path and the rule.
 func TestManagedConfigRefusesUnsafeJSONLDestinations(t *testing.T) {
