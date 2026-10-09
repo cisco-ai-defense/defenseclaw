@@ -2423,3 +2423,29 @@ func TestWindowsEnterpriseProfilesPreflightRefusal(t *testing.T) {
 		t.Fatalf("other inspection failure = %v, want it left to the install", err)
 	}
 }
+
+// GAP-0920, GAP-1041: --force reaches the standalone installer as the
+// environment request on its Uninstall run only, never as an installer
+// parameter, so the Secure Client installer command line stays unchanged.
+func TestWindowsEnterpriseStandaloneForceIsAnEnvironmentRequestOnUninstall(t *testing.T) {
+	originalRunner := windowsEnterpriseStandaloneRunner
+	t.Cleanup(func() { windowsEnterpriseStandaloneRunner = originalRunner })
+	forced := map[string]bool{}
+	windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+		if containsString(args, "-Force") {
+			t.Fatalf("installer args carry -Force: %q", args)
+		}
+		forced[windowsEnterpriseInstallerAction(args)] = windowsEnterpriseForcedUninstallRequested(ctx)
+		body, _ := json.Marshal(map[string]any{"schema_version": 1, "ok": true, "action": "status"})
+		return windowsEnterpriseStandaloneRun{Output: body}, nil
+	}
+	opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", force: true}
+	for _, action := range []string{"status", "uninstall"} {
+		if _, _, err := runWindowsEnterpriseStandaloneInstaller(context.Background(), &cobra.Command{}, opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs(action, opts)); err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+	}
+	if !forced["Uninstall"] || forced["Status"] {
+		t.Fatalf("forced uninstall request by action: %v", forced)
+	}
+}
