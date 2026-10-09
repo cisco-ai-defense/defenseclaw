@@ -1,11 +1,12 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from pathlib import Path
 
 import pytest
 
-from scripts.go_test_shards import discover_test_files, partition_test_files
+from scripts.go_test_shards import discover_test_files, partition_test_files, run_shards
 
 
 def test_go_test_file_shards_are_deterministic_and_exhaustive(tmp_path: Path) -> None:
@@ -45,3 +46,23 @@ def test_go_test_shards_reject_invalid_count() -> None:
         partition_test_files([], 0)
     with pytest.raises(ValueError, match="cannot exceed"):
         partition_test_files([], 1)
+
+
+def test_run_shards_runs_every_shard_with_its_regex_and_fails_on_any(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Local race targets run the gateway package as parallel shards because one
+    # race-enabled binary outlives the 60m timeout; every shard must run with
+    # its own -run regex, and one failing shard must fail the target.
+    probe = (
+        "import sys; args = sys.argv[1:]; print(\"shard\", args[0], args[args.index(\"-run\") + 1]);"
+        " sys.exit(3 if args[0] == \"1\" else 0)"
+    )
+    command = [sys.executable, "-c", probe, "{shard}"]
+
+    assert run_shards([["TestA"], ["TestB", "TestC"]], command) == 1
+    out = capsys.readouterr().out
+    assert "shard 0 ^(?:TestA)$" in out
+    assert "shard 1 ^(?:TestB|TestC)$" in out
+    assert "--- shard 2/2 exit 3" in out
+    assert run_shards([["TestA"]], command) == 0
