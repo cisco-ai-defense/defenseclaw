@@ -977,11 +977,10 @@ func enterpriseHookManifestActivationIssue(
 }
 
 // enterpriseHookRemovedAccountFailures is the number of failed rows in the
-// last reconcile when every one of them belongs to a deleted account whose
-// profile folder was removed (enterpriseHookRemovedAccountRow), and 0
-// otherwise. The enumerator drops such an account's rows at its next pass;
-// until then status reports them for that account instead of failing the
-// whole host.
+// last reconcile when every one of them belongs to an account confirmed
+// removed by the platform (enterpriseHookRemovedAccountRow), and 0
+// otherwise. The enumerator eventually drops these rows; until then
+// status reports them as warnings instead of failing the whole host.
 func enterpriseHookRemovedAccountFailures(state enterpriseHookGuardianState) int {
 	failed := 0
 	for _, row := range state.Results {
@@ -1324,9 +1323,9 @@ type enterpriseHookVerifyRun struct {
 	Rows     []enterpriseHookReconcileRow
 	Failures int
 	Pending  int
-	// Excused are the failed rows of a deleted account whose profile folder
-	// was removed, when every failed row of the guardian's last reconcile is
-	// one (enterpriseHookRemovedAccountFailures). They count in Failures, so
+	// Excused are the failed rows of a confirmed removed account, when
+	// every failed row of the last guardian reconcile qualifies
+	// (enterpriseHookRemovedAccountFailures). They count in Failures, so
 	// the dispositions still match the guardian's records, and verify
 	// reports them as warnings, as status does.
 	Excused          []enterpriseHookReconcileRow
