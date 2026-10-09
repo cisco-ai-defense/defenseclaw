@@ -1114,8 +1114,10 @@ file of an installed one. That takes from seconds to a few minutes, longer on
 a disk that has not been read since the computer was cloned, and at most 15
 minutes. Setup prints `[scanners]` lines meanwhile, with the time elapsed and
 the bound.
-At the bound it stops the prepare and reports a `scanner_runtime_unavailable`
-warning that says `timed out after 15m0s`; `verify` then fails until a
+At the bound it stops the prepare and Setup fails (`1603`) with a
+`scanner_runtime_unavailable` error that says `timed out after 15m0s` and
+names `/repair`: DefenseClaw is installed and its services run, but every
+skill, MCP server and plugin install stays blocked and `verify` fails until a
 `/repair` prepares the runtime.
 
 ## Per-user installs

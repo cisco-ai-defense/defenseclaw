@@ -152,8 +152,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			return
 		}
 		if err := installWindowsScannerRuntime(source, opts); err != nil {
-			result.AddWarning("scanner_runtime_unavailable",
-				"the skill, MCP and plugin scanners could not be installed, so installs are blocked until they are: "+err.Error())
+			result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 		}
 		result.Scanners = readWindowsScannerRuntime()
 	case "uninstall":
@@ -380,10 +379,19 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 		}
 	}
 	if err != nil {
-		result.AddWarning("scanner_runtime_unavailable",
-			"the skill, MCP and plugin scanners could not be installed, so installs are blocked until they are: "+err.Error())
+		result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 	}
 	result.Scanners = readWindowsScannerRuntime()
+}
+
+// windowsScannerRuntimePrepareFailed is the error of a lifecycle run whose
+// scanner runtime step failed. The run fails: an ensure that hit the
+// prepare bound exited 0 with ok=true and a warning, and verify then failed
+// with every skill, MCP server and plugin install blocked (GAP-1063).
+func windowsScannerRuntimePrepareFailed(err error) string {
+	return "DefenseClaw is installed and its services run, but the skill, MCP and plugin scanner runtime could not be prepared (" +
+		err.Error() + "), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed) and verify fails; " +
+		"run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem to prepare it"
 }
 
 // windowsScannerProgress receives a scanner runtime step progress lines
