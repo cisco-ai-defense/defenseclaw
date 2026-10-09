@@ -1644,4 +1644,28 @@ func TestOTLPInboundNativeProjectedLogRejectsIdentityClaims(t *testing.T) {
 	if events := readStoredOTLPV8Events(t, fixture.path); len(events) != 0 {
 		t.Fatalf("native identity claim persisted %d records", len(events))
 	}
+
+	// The projected correlation is sender-controlled, even with a user-scoped
+	// credential. It must not join another user's agent instance.
+	leaf.logRecord.Body = inboundProjectedLogBody(t, leaf)
+	mutateInboundProjectedLogBody(t, &leaf, func(wire map[string]any) {
+		wire["correlation"] = map[string]any{"agent_instance_id": "ais-0123456789abcdef"}
+	})
+	if !unverifiedNativeOTLPIdentityClaimV8(leaf) {
+		t.Fatal("projected correlation agent instance was accepted as a verified claim")
+	}
+	mutateInboundProjectedLogBody(t, &leaf, func(wire map[string]any) {
+		wire["correlation"] = map[string]any{"AGENT_INSTANCE_ID": "ais-0123456789abcdef"}
+	})
+	if !unverifiedNativeOTLPIdentityClaimV8(leaf) {
+		t.Fatal("case-folded correlation agent instance was accepted")
+	}
+	ctx := context.WithValue(withServiceAccountGateway(t.Context()), verifiedUserScopedIdentityContextKey{}, "1001")
+	accounting, err = api.importDecodedOTLPRequestV8(ctx, message, otelSignalLogs, source, time.Now().UTC())
+	if err != nil || !accounting.valid() || accounting.invalidMappedField != 1 {
+		t.Fatalf("native correlation identity claim accounting=%+v err=%v", accounting, err)
+	}
+	if events := readStoredOTLPV8Events(t, fixture.path); len(events) != 0 {
+		t.Fatalf("native correlation identity claim persisted %d records", len(events))
+	}
 }

@@ -269,7 +269,7 @@ func (r *NSSResolver) winbindAccountDomain(account Account, realms []Realm) (str
 // longer than 15 characters (an Entra Domain Services domain) or is not the
 // NetBIOS name (GAP-1095). Only the answer of SSSD confirms one, so a first
 // label is never taken on its own (GAP-0456).
-func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string, domainShort func(string) string) (string, error) {
+func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string, domainShort func(string) (string, error)) (string, error) {
 	bare, nameDomain := useridentity.SplitQualifiedName(name)
 	var candidates []string
 	if strings.Contains(name, `\`) && !strings.Contains(nameDomain, ".") {
@@ -293,7 +293,11 @@ func sssdAccountDomain(sssd *sssdNSS, name, dnsDomain, netBIOS, sid string, doma
 	if domainShort == nil {
 		return "", nil
 	}
-	announced := strings.TrimSpace(domainShort(dnsDomain))
+	short, err := domainShort(dnsDomain)
+	if err != nil {
+		return "", err
+	}
+	announced := strings.TrimSpace(short)
 	if !validNetBIOSCandidate(announced) || slices.ContainsFunc(candidates, func(seen string) bool { return strings.EqualFold(seen, announced) }) {
 		return "", nil
 	}
@@ -355,37 +359,43 @@ type adcliShortName struct {
 }
 
 // adcliDomainShort is the NetBIOS (flat) name the controllers of dnsDomain
-// announce, as adcli info prints it (domain-short), or "" when adcli is not
-// installed or no controller answers. SSSD does not report a domain's flat
-// name over its NSS socket, but it confirms one by an account's SID
-// (sssdAccountDomain), which is what makes this answer safe to use.
-func (r *NSSResolver) adcliDomainShort(dnsDomain string) string {
+// announce, as adcli info prints it (domain-short). If adcli is installed,
+// an execution failure is returned to the caller and not cached, so incomplete
+// directory facts cannot be cached as verified. A successful answer with no
+// flat name is cached briefly.
+func (r *NSSResolver) adcliDomainShort(dnsDomain string) (string, error) {
 	dnsDomain = strings.ToLower(strings.TrimSpace(dnsDomain))
 	if dnsDomain == "" || strings.HasPrefix(dnsDomain, "-") || strings.ContainsAny(dnsDomain, " \t\x00\r\n/\\@") {
-		return ""
+		return "", nil
 	}
 	adcliShortNames.Lock()
 	known, ok := adcliShortNames.byDomain[dnsDomain]
 	adcliShortNames.Unlock()
 	if ok && (known.short != "" || time.Since(known.failedAt) < adcliRetryAfter) {
-		return known.short
+		return known.short, nil
 	}
-	answer := adcliShortName{failedAt: time.Now()}
-	if path, err := adcliTool(); err == nil {
-		ctx, cancel := context.WithTimeout(r.context(), adcliAnswerTimeout)
-		result, runErr := r.runner(ctx, path, []string{"info", dnsDomain})
-		cancel()
-		if runErr == nil && result.exitCode == 0 {
-			answer.short = parseADCLIDomainShort(string(result.stdout))
-		}
+	path, err := adcliTool()
+	if err != nil {
+		// adcli is optional on hosts whose NSS and realmd data suffice.
+		return "", nil
 	}
+	ctx, cancel := context.WithTimeout(r.context(), adcliAnswerTimeout)
+	result, err := r.runner(ctx, path, []string{"info", dnsDomain})
+	cancel()
+	if err != nil {
+		return "", fmt.Errorf("unixidentity: adcli info of %s: %w", dnsDomain, err)
+	}
+	if result.exitCode != 0 {
+		return "", fmt.Errorf("unixidentity: adcli info of %s exited %d", dnsDomain, result.exitCode)
+	}
+	answer := adcliShortName{short: parseADCLIDomainShort(string(result.stdout)), failedAt: time.Now()}
 	adcliShortNames.Lock()
 	if adcliShortNames.byDomain == nil {
 		adcliShortNames.byDomain = map[string]adcliShortName{}
 	}
 	adcliShortNames.byDomain[dnsDomain] = answer
 	adcliShortNames.Unlock()
-	return answer.short
+	return answer.short, nil
 }
 
 // parseADCLIDomainShort reads "domain-short = NAME" of adcli info output.

@@ -250,6 +250,33 @@ func TestUninstallRefusesUnresolvedRowsBeforeStoppingAnything(t *testing.T) {
 	}
 }
 
+// A precheck command can fail before it identifies any manifest rows (for
+// example while parsing an untrusted manifest). The deployment stays intact.
+func TestUninstallRefusesFailedHookPrecheckBeforeStoppingAnything(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		t.Fatal("remove-all ran after its precheck failed")
+		return CommandResult{}, nil
+	}, check: func() (CommandResult, error) {
+		return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false}`)}, errors.New("invalid manifest")
+	}}
+	h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+		t.Fatal("machine policy was removed after the precheck failed")
+	}}
+	before := len(h.services.calls)
+	refused := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireError(t, refused, codeUninstall)
+	for _, call := range h.services.calls[before:] {
+		if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
+			t.Fatalf("the refused uninstall ran %q", call)
+		}
+	}
+	if !exists(h.env.deploymentPath()) {
+		t.Fatal("the refused uninstall removed the deployment record")
+	}
+}
+
 // A macOS uninstall --purge returned ok while one account's Devin hooks,
 // which run the hook binary that same uninstall removed, stayed registered,
 // and its only warning named nobody. Each registration left is now an

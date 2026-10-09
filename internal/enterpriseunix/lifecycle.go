@@ -2655,36 +2655,43 @@ func (l *lifecycle) recordPackageResult(failure int) {
 }
 
 // refuseUnresolvedPerUserRows asks `enterprise hooks remove-all --check`,
-// before any service stops or any policy goes, whether every manifest row
-// resolves to an account whose registrations can be removed. A row it could
-// not resolve failed the removal only after the services were unloaded and
-// part of the machine policy was removed, which left the deployment stopped
-// and half removed (GAP-1101). It names each such row and refuses with
-// nothing changed. An installed binary without --check answers no report,
-// and the uninstall goes on as before.
+// before any service stops or policy goes, whether every manifest row can be
+// removed. A failed command or incomplete report also refuses the uninstall:
+// manifest parse and trust errors have no per-row failures to report.
 func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 	env, r := l.env, l.result
-	out, _ := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json", "--check")
+	out, commandErr := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json", "--check")
 	var report struct {
+		OK     bool     `json:"ok"`
 		Failed []string `json:"failed"`
 	}
-	if json.Unmarshal(out.Stdout, &report) != nil {
+	parseErr := json.Unmarshal(out.Stdout, &report)
+	refused := false
+	if parseErr == nil {
+		for _, entry := range report.Failed {
+			user, connector, reason, ok := cutPerUserEntry(entry)
+			if !ok {
+				continue
+			}
+			r.AddError(codePerUserHooks, fmt.Sprintf("the %s manifest row of user %s cannot be removed: %s; fix or remove that row in %s and rerun `%s`",
+				connector, user, reason, env.Layout.ManifestPath, l.uninstallCommand()))
+			refused = true
+		}
+	}
+	if commandErr == nil && parseErr == nil && report.OK && len(report.Failed) == 0 {
 		return false
 	}
-	refused := false
-	for _, entry := range report.Failed {
-		user, connector, reason, ok := cutPerUserEntry(entry)
-		if !ok {
-			continue
+	if !refused {
+		reason := "the hook-removal precheck did not succeed"
+		if commandErr != nil {
+			reason = commandErr.Error()
+		} else if parseErr != nil {
+			reason = "the hook-removal precheck returned an invalid report: " + parseErr.Error()
 		}
-		r.AddError(codePerUserHooks, fmt.Sprintf("the %s manifest row of user %s cannot be removed: %s; fix or remove that row in %s and rerun `%s`",
-			connector, user, reason, env.Layout.ManifestPath, l.uninstallCommand()))
-		refused = true
+		r.AddError(codePerUserHooks, "cannot check per-user hook removal: "+reason)
 	}
-	if refused {
-		r.AddError(codeUninstall, "nothing was changed: every service is still running and the machine policy is in place, because the manifest rows listed above do not resolve to an account")
-	}
-	return refused
+	r.AddError(codeUninstall, "nothing was changed: every service is still running and the machine policy is in place; fix the hook-removal precheck and rerun `"+l.uninstallCommand()+"`")
+	return true
 }
 
 // cutPerUserEntry splits a remove-all entry "user/connector: reason". The
