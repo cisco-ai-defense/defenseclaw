@@ -66,6 +66,9 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 		} else {
 			put("lookup-ok")
 		}
+		if subject.GroupsUnknown {
+			put("groups-unknown")
+		}
 		binary.LittleEndian.PutUint64(n[:], uint64(len(subject.Groups)))
 		h.Write(n[:])
 		for _, g := range subject.Groups {

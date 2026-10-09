@@ -64,6 +64,9 @@ type profileSubject struct {
 	AccountDomain string
 	// Groups are verified directory group names and SIDs.
 	Groups []string
+	// GroupsUnknown means the Windows enumerator has no current desktop
+	// token for group matching; other verified identity fields remain usable.
+	GroupsUnknown bool
 	// LookupFailed is set when the directory lookup for this subject failed
 	// and no cached facts within their TTL exist. Directory-dependent
 	// assignments then select default_lookup_failed; a verified ID can match.
@@ -620,9 +623,10 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 		Domain:        s.Directory.Domain,
 		AccountDomain: accountDomain,
 		Groups:        s.Directory.Groups,
+		GroupsUnknown: lookupAttempted && s.Directory.GroupsPartial,
 		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
 			(s.Directory.Source == useridentity.SourceWindowsLSA ||
-				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory)),
+				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
 		nameUnconfirmed: nameUnconfirmed,
 	}
@@ -768,6 +772,9 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 	if subject != nil && subject.LookupFailed {
 		return set.matchWithFailedLookup(subject, source, connectorName, agent)
 	}
+	if subject != nil && subject.GroupsUnknown {
+		return set.matchWithUnknownGroups(subject, source, connectorName, agent)
+	}
 	verified := subject != nil && source != ""
 	groups := &subjectGroups{sids: set.groupSIDs}
 	if verified {
@@ -787,6 +794,41 @@ func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, c
 		reason = profileMatchDefaultUnverified
 	}
 	return set.decision(set.defaultProfile, reason, "", source)
+}
+
+// matchWithUnknownGroups preserves verified user and agent assignments in
+// order. An earlier group assignment whose other conditions match could
+// preempt them, so use the default until a current desktop token supplies
+// its membership.
+func (set *guardrailProfileSet) matchWithUnknownGroups(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	fallback := func() profileDecision {
+		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	}
+	if source == "" || subject.UserID == "" {
+		return fallback()
+	}
+	for i, assignment := range set.assignments {
+		m := assignment.Match
+		if m.Empty() {
+			continue
+		}
+		known := m
+		known.Groups = nil
+		if known.Empty() {
+			return fallback()
+		}
+		reason, group, ok := assignmentMatches(known, subject, &subjectGroups{}, true, connectorName, agent)
+		if !ok {
+			continue
+		}
+		if len(m.Groups) > 0 {
+			return fallback()
+		}
+		decision := set.decision(assignment.Profile, reason, group, source)
+		decision.Assignment = i + 1
+		return decision
+	}
+	return fallback()
 }
 
 // matchWithFailedLookup can use a kernel-verified UID or SID or a

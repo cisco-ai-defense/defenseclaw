@@ -273,9 +273,11 @@ What follows when the identity is missing:
   facts requests still use; managed `profile-explain` does not print that age.
   On a bound Mac, flush Open Directory membership with
   `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
-  gateway or wait for its 15-minute refresh. On Windows the
-  groups are those of the sign-in token, so the user must also sign out and
-  back in. While the directory does not answer, the gateway keeps using a
+  gateway or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
+  group membership is unknown: an SSH or scheduled-task agent uses the default
+  profile for group-dependent assignments until the user signs in at the desktop
+  again. Set a strict default profile. A membership change also needs a new
+  desktop sign-in. While the directory does not answer, the gateway keeps using a
   user's last facts, for at most an hour (four times the cache lifetime). After
   that the user has no facts and gets the default profile
   (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
@@ -491,8 +493,10 @@ the machine config, not in a user's home, and apply to every enrolled user.
    profile-explain --user CORP\alice` from an elevated prompt. The answer also
    lists every configured profile and its digest under `profiles`.
 
-On a managed Windows computer the groups come from each user's sign-in token,
-so a user added to a group gets the new profile after signing out and back in.
+On a managed Windows computer, group profiles use the user's active desktop
+session token. After sign-out, group-dependent assignments use the default
+profile; the next desktop sign-in supplies current groups. SSH and scheduled-task
+sessions do not supply those groups.
 Guardrail profiles are rejected under the Secure Client profile, which keeps
 its behavior as it was.
 

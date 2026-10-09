@@ -1356,6 +1356,38 @@ func TestWindowsLiteralAtAccountNameDoesNotSelectNamesakeProfile(t *testing.T) {
 	}
 }
 
+// A record made after desktop sign-out may still contain the last token's
+// groups. They cannot select a profile for a new SSH or task token.
+func TestProfileWindowsPartialGroupsUseLookupFailed(t *testing.T) {
+	set := &guardrailProfileSet{
+		defaultProfile: "strict",
+		profiles:       map[string]config.DerivedGuardrailProfile{"strict": {}, "lenient": {}, "user": {}},
+		assignments: []config.ProfileAssignment{
+			{Profile: "lenient", Match: config.ProfileMatch{Groups: []string{"S-1-5-32-544"}}},
+		},
+	}
+	facts := mergeSpoolFacts(useridentity.DirectoryFacts{Source: useridentity.SourceWindowsLSA, ResolvedAt: time.Now()},
+		enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{UPN: "alice@corp.example", Groups: []string{"S-1-5-32-544"}, GroupsPartial: true}})
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "S-1-5-21-1-2-3-1001", IDKind: useridentity.KindWindowsSID, UserName: "alice", Directory: facts,
+	}, true)
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("last-session group selected %+v, want strict default_lookup_failed", got)
+	}
+	set.assignments = append([]config.ProfileAssignment{{Profile: "user", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}}, set.assignments...)
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name != "user" || got.Match != profileMatchUser {
+		t.Fatalf("verified UPN selected %+v, want user assignment", got)
+	}
+	set.assignments = set.assignments[1:]
+	facts.GroupsPartial = false
+	subject = profileSubjectFromVerified(VerifiedSubject{
+		UserID: "S-1-5-21-1-2-3-1001", IDKind: useridentity.KindWindowsSID, UserName: "alice", Directory: facts,
+	}, true)
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name != "lenient" || got.Match != profileMatchGroup {
+		t.Fatalf("current token group selected %+v, want lenient group", got)
+	}
+}
+
 // Windows LSA facts do not establish group membership until the guardian's
 // current identity record supplies its token groups.
 func TestProfileWindowsAwaitingSpoolUsesLookupFailed(t *testing.T) {

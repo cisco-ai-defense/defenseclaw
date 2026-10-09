@@ -63,8 +63,8 @@ func spoolRecordNote(id string, now time.Time) string {
 	}
 	if record, ok := readIdentitySpoolFacts(id, now); ok {
 		if record.Facts.GroupsPartial {
-			return "the guardian identity record lists the groups of this account's last signed-in session (it has no active " +
-				"session now): a group it has gained since counts only after it signs in again, so the profile above is not final"
+			return "the guardian has no current token groups for this account (it has no active desktop session): " +
+				"group assignments cannot match until it signs in again; a strict default profile protects this gap"
 		}
 		return ""
 	}
