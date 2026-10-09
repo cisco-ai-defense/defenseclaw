@@ -2471,7 +2471,14 @@ targets:
             }
         }
         function script:Start-DefenseClawService {
-            param([Parameter(Mandatory)][string]$Name)
+            param(
+                [Parameter(Mandatory)][string]$Name,
+                [string]$GatewayServiceSID = ''
+            )
+            if ($GatewayServiceSID -and ($Name -cne 'DefenseClawGateway' -or
+                    $GatewayServiceSID -cne 'S-1-5-80-11111-22222-33333-44444-55555')) {
+                throw 'gateway startup received an unexpected service-logon SID'
+            }
             if ($script:HarnessState.service_start_modes[$Name] -eq 4) {
                 throw "queued or explicit start was blocked while $Name was disabled"
             }
@@ -2495,6 +2502,18 @@ targets:
                 $script:HarnessState.gateway_running = $true
             }
             $script:HarnessState.services_running = $true
+        }
+        function script:Set-DefenseClawGatewayServiceLogonRight {
+            param([Parameter(Mandatory)][string]$GatewayServiceName)
+            if ($script:HarnessState.service_start_modes[$GatewayServiceName] -ne 4) {
+                throw 'service logon provisioning occurred after the gateway became startable'
+            }
+            $script:HarnessState.events.Add('gateway-service-logon-right')
+            return [pscustomobject]@{
+                account = "NT SERVICE\$GatewayServiceName"
+                sid = 'S-1-5-80-11111-22222-33333-44444-55555'
+                outcome = 'already_granted'
+            }
         }
         function script:Get-DefenseClawAgentApplicationControlAttestation {
             param([Parameter(Mandatory)][hashtable]$Layout)

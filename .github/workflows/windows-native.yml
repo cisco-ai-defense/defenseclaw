@@ -324,6 +324,18 @@ jobs:
           if ($failures.Count) { throw ($failures -join "`n") }
       - name: Parser, mock timeout, redaction, isolation, and workflow contracts
         run: ./scripts/live-connector-e2e/test-windows.ps1
+      - name: Enterprise service logon rights and startup diagnostics
+        run: |
+          ./packaging/windows/tests/enterprise-service-logon-smoke.ps1
+          ./packaging/windows/tests/enterprise-service-logon-native-smoke.ps1
+          # Production setup uses the in-box engine. Exercise the same tests
+          # there as well as in the default PowerShell 7 runner shell.
+          $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+          $legacy = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $legacy -NoLogo -NoProfile -NonInteractive -File ./packaging/windows/tests/enterprise-service-logon-smoke.ps1
+          if ($LASTEXITCODE -ne 0) { throw "in-box service logon regression failed: $LASTEXITCODE" }
+          & $legacy -NoLogo -NoProfile -NonInteractive -File ./packaging/windows/tests/enterprise-service-logon-native-smoke.ps1
+          if ($LASTEXITCODE -ne 0) { throw "in-box native LSA regression failed: $LASTEXITCODE" }
       - name: Native Setup bootstrap delegation and offline contract
         run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
       - name: Capture bounded diagnostics

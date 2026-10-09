@@ -238,6 +238,167 @@ namespace $nativeNamespace
             internal LUID_AND_ATTRIBUTES Privileges;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_OBJECT_ATTRIBUTES
+        {
+            internal uint Length;
+            internal IntPtr RootDirectory;
+            internal IntPtr ObjectName;
+            internal uint Attributes;
+            internal IntPtr SecurityDescriptor;
+            internal IntPtr SecurityQualityOfService;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_UNICODE_STRING
+        {
+            internal ushort Length;
+            internal ushort MaximumLength;
+            internal IntPtr Buffer;
+        }
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaOpenPolicy(
+            IntPtr systemName,
+            ref LSA_OBJECT_ATTRIBUTES objectAttributes,
+            uint desiredAccess,
+            out IntPtr policyHandle);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaEnumerateAccountRights(
+            IntPtr policyHandle,
+            IntPtr accountSid,
+            out IntPtr userRights,
+            out uint countOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaAddAccountRights(
+            IntPtr policyHandle,
+            IntPtr accountSid,
+            ref LSA_UNICODE_STRING userRights,
+            uint countOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaNtStatusToWinError(uint status);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaFreeMemory(IntPtr buffer);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaClose(IntPtr policyHandle);
+
+        private static IntPtr OpenLocalAccountRightsPolicy(uint access)
+        {
+            LSA_OBJECT_ATTRIBUTES attributes = new LSA_OBJECT_ATTRIBUTES();
+            attributes.Length = checked((uint)Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES)));
+            IntPtr handle;
+            uint status = LsaOpenPolicy(IntPtr.Zero, ref attributes, access, out handle);
+            if (status != 0)
+            {
+                throw new Win32Exception(checked((int)LsaNtStatusToWinError(status)),
+                    "LsaOpenPolicy for local service logon rights failed");
+            }
+            return handle;
+        }
+
+        // An additive assignment to the exact virtual account. This inspects
+        // direct rights only: group grants and denies are decided by SCM at
+        // startup, and central policy can replace a local assignment later.
+        public static bool EnsureServiceLogonRight(string sidValue)
+        {
+            const uint POLICY_LOOKUP_NAMES = 0x00000800;
+            const uint POLICY_CREATE_ACCOUNT = 0x00000010;
+            const string rightName = "SeServiceLogonRight";
+            if (String.IsNullOrEmpty(sidValue) ||
+                !sidValue.StartsWith("S-1-5-80-", StringComparison.Ordinal))
+            {
+                throw new ArgumentException("service logon provisioning requires an NT SERVICE SID", "sidValue");
+            }
+            System.Security.Principal.SecurityIdentifier sid =
+                new System.Security.Principal.SecurityIdentifier(sidValue);
+            if (sid.BinaryLength != 32)
+            {
+                // Five name-derived subauthorities follow S-1-5-80. In
+                // particular, S-1-5-80-0 (ALL SERVICES) is never eligible.
+                throw new ArgumentException("service logon provisioning requires an exact virtual service SID", "sidValue");
+            }
+            byte[] sidBytes = new byte[sid.BinaryLength];
+            sid.GetBinaryForm(sidBytes, 0);
+            IntPtr sidBuffer = Marshal.AllocHGlobal(sidBytes.Length);
+            IntPtr policy = IntPtr.Zero;
+            IntPtr rightsBuffer = IntPtr.Zero;
+            IntPtr rightNameBuffer = IntPtr.Zero;
+            try
+            {
+                Marshal.Copy(sidBytes, 0, sidBuffer, sidBytes.Length);
+                policy = OpenLocalAccountRightsPolicy(POLICY_LOOKUP_NAMES);
+                uint count;
+                uint status = LsaEnumerateAccountRights(policy, sidBuffer, out rightsBuffer, out count);
+                bool missingAccount = false;
+                if (status != 0)
+                {
+                    int error = checked((int)LsaNtStatusToWinError(status));
+                    // LSA returns FILE_NOT_FOUND when this SID has no policy
+                    // entry. All other errors, including access denied, retain
+                    // their native code for the caller to classify narrowly.
+                    if (error != 2)
+                    {
+                        throw new Win32Exception(error, "LsaEnumerateAccountRights failed");
+                    }
+                    missingAccount = true;
+                }
+                else
+                {
+                    if (count > 256 || (count != 0 && rightsBuffer == IntPtr.Zero))
+                    {
+                        throw new InvalidOperationException("LSA returned invalid account rights");
+                    }
+                    int stride = Marshal.SizeOf(typeof(LSA_UNICODE_STRING));
+                    for (uint index = 0; index < count; index++)
+                    {
+                        LSA_UNICODE_STRING existing = (LSA_UNICODE_STRING)Marshal.PtrToStructure(
+                            IntPtr.Add(rightsBuffer, checked((int)index * stride)),
+                            typeof(LSA_UNICODE_STRING));
+                        if (existing.Length % 2 != 0 || existing.Length > existing.MaximumLength ||
+                            (existing.Length != 0 && existing.Buffer == IntPtr.Zero))
+                        {
+                            throw new InvalidOperationException("LSA returned an invalid account right name");
+                        }
+                        string name = Marshal.PtrToStringUni(existing.Buffer, existing.Length / 2);
+                        if (String.Equals(name, rightName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                if (missingAccount)
+                {
+                    LsaClose(policy);
+                    policy = IntPtr.Zero;
+                    policy = OpenLocalAccountRightsPolicy(POLICY_LOOKUP_NAMES | POLICY_CREATE_ACCOUNT);
+                }
+                rightNameBuffer = Marshal.StringToHGlobalUni(rightName);
+                LSA_UNICODE_STRING right = new LSA_UNICODE_STRING();
+                right.Length = checked((ushort)(rightName.Length * 2));
+                right.MaximumLength = checked((ushort)(right.Length + 2));
+                right.Buffer = rightNameBuffer;
+                status = LsaAddAccountRights(policy, sidBuffer, ref right, 1);
+                if (status != 0)
+                {
+                    throw new Win32Exception(checked((int)LsaNtStatusToWinError(status)),
+                        "LsaAddAccountRights for SeServiceLogonRight failed");
+                }
+                return true;
+            }
+            finally
+            {
+                if (rightsBuffer != IntPtr.Zero) { LsaFreeMemory(rightsBuffer); }
+                if (policy != IntPtr.Zero) { LsaClose(policy); }
+                if (rightNameBuffer != IntPtr.Zero) { Marshal.FreeHGlobal(rightNameBuffer); }
+                Marshal.FreeHGlobal(sidBuffer);
+            }
+        }
+
         public sealed class RegularFileSecuritySnapshot
         {
             public string Identity { get; private set; }
@@ -4828,12 +4989,127 @@ function Stop-DefenseClawService {
     }
 }
 
+function Get-DefenseClawWin32ErrorCode {
+    param([Parameter(Mandatory)][Exception]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [ComponentModel.Win32Exception]) {
+            return [int]$current.NativeErrorCode
+        }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Get-DefenseClawGatewayLogonIdentity {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    Assert-DefenseClawServiceName -Name $GatewayServiceName
+    $expectedAccount = "NT SERVICE\$GatewayServiceName"
+    $actualAccount = Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+        -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$GatewayServiceName" `
+        -Name ObjectName `
+        -ErrorAction Stop
+    if (-not [string]::Equals(
+            [string]$actualAccount,
+            $expectedAccount,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "service $GatewayServiceName is not configured as its expected virtual account $expectedAccount"
+    }
+    return [pscustomobject]@{
+        account = $expectedAccount
+        sid = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
+    }
+}
+
+function Set-DefenseClawGatewayServiceLogonRight {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    # Identity/trust and helper compilation errors must never be softened as
+    # LSA policy access denial. The caller has validated the full deployment
+    # while services are still disabled, before invoking this forward-only step.
+    $identity = Get-DefenseClawGatewayLogonIdentity -GatewayServiceName $GatewayServiceName
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    try {
+        $added = $nativeSecurity::EnsureServiceLogonRight([string]$identity.sid)
+    }
+    catch {
+        $nativeCode = Get-DefenseClawWin32ErrorCode -Exception $_.Exception
+        if ($null -eq $nativeCode -or $nativeCode -ne 5) {
+            throw
+        }
+        # A machine may already authorize service logon through a group while
+        # CyberArk restricts local policy access. Do not break that deployment
+        # merely because the direct assignment cannot be inspected or written.
+        # SCM startup/readiness must still succeed before activation commits.
+        Microsoft.PowerShell.Utility\Write-Warning (
+            "LSA policy access denied (Win32 5) while provisioning SeServiceLogonRight " +
+            "for service $GatewayServiceName, account $($identity.account), SID $($identity.sid). " +
+            'When activation is requested, SCM startup/readiness is still required; an existing group assignment may authorize it. ' +
+            'If service logon fails, IT must permit the account in the effective enterprise policy.'
+        )
+        return [pscustomobject]@{
+            account = [string]$identity.account
+            sid = [string]$identity.sid
+            outcome = 'policy_access_denied'
+        }
+    }
+    $outcome = if ($added) { 'added' } else { 'already_granted' }
+    Microsoft.PowerShell.Utility\Write-Verbose (
+        "SeServiceLogonRight for $($identity.account), SID $($identity.sid): $outcome"
+    )
+    return [pscustomobject]@{
+        account = [string]$identity.account
+        sid = [string]$identity.sid
+        outcome = $outcome
+    }
+}
+
+function New-DefenseClawServiceStartException {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [AllowEmptyString()][string]$GatewayServiceSID,
+        [Parameter(Mandatory)][Exception]$Exception
+    )
+    $nativeCode = Get-DefenseClawWin32ErrorCode -Exception $Exception
+    if ([string]::IsNullOrWhiteSpace($GatewayServiceSID) -or
+        $null -eq $nativeCode -or $nativeCode -notin @(1069, 1385)) {
+        return $Exception
+    }
+    # ErrorDetails alone would be lost by the installer's JSON failure result,
+    # which serializes Exception.Message. Retain the original exception chain.
+    $message = (
+        "gateway service $Name could not log on (Win32 $nativeCode); " +
+        "account NT SERVICE\$Name, SID $GatewayServiceSID. " +
+        'Check effective Log on as a service (SeServiceLogonRight) and Deny log on as a service policy. ' +
+        'A deny overrides an allow, and GPO/MDM can replace a local assignment. ' +
+        'IT must update the centrally managed policy when applicable. ' +
+        "Original startup error: $($Exception.Message)"
+    )
+    return [InvalidOperationException]::new($message, $Exception)
+}
+
 function Start-DefenseClawService {
-    param([Parameter(Mandatory)][string]$Name)
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [ValidatePattern('^$|^S-1-5-80-(?:[0-9]+-){4}[0-9]+$')]
+        [string]$GatewayServiceSID = ''
+    )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $Name -ErrorAction Stop
     if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
-        Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
-        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        try {
+            Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
+            $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+        }
+        catch {
+            $original = $_.Exception
+            $diagnostic = New-DefenseClawServiceStartException `
+                -Name $Name `
+                -GatewayServiceSID $GatewayServiceSID `
+                -Exception $original
+            if ([object]::ReferenceEquals($diagnostic, $original)) {
+                throw
+            }
+            throw $diagnostic
+        }
     }
 }
 
@@ -23286,6 +23562,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -ServicingTransaction
+        # Provision the exact virtual account before activation (also for
+        # deferred/no-start installs). Rollback restores service preimages via
+        # separate helpers and must not acquire a new LSA-write prerequisite.
+        # This additive grant is intentionally retained on failure/uninstall:
+        # no ownership evidence exists to safely remove a pre-existing or
+        # centrally managed right from the same SID.
+        $gatewayLogonRight = Set-DefenseClawGatewayServiceLogonRight `
+            -GatewayServiceName $GatewayServiceName
         if (-not $NoStart) {
             $activationSnapshot =
                 Microsoft.PowerShell.Management\Get-Content `
@@ -23363,7 +23647,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
                 -StartMode 3
-            Start-DefenseClawService -Name $GatewayServiceName
+            Start-DefenseClawService `
+                -Name $GatewayServiceName `
+                -GatewayServiceSID ([string]$gatewayLogonRight.sid)
             # Spec 005 D1 (CR PRRT_kwDORuAK-s6au6lZ): the enumerator
             # must be demand-started + RUNNING before the pending-state
             # assertion below, which requires every managed service to
