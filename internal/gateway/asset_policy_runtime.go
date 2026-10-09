@@ -826,7 +826,7 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	for _, plugin := range claudeCodeToolPlugins(req) {
+	for _, plugin := range a.claudeCodeToolPlugins(ctx, req) {
 		probe := skillRuntimeProbe{
 			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
 		}
@@ -837,10 +837,10 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	return config.AssetPolicyDecision{}, false
 }
 
-// claudeCodeToolPlugins lists the plugins a Claude Code tool call may run
-// part of. Claude Code names a plugin's MCP server plugin_<plugin>_<server>,
-// and both names may hold "_", so every split is a candidate.
-func claudeCodeToolPlugins(req claudeCodeHookRequest) []string {
+// claudeCodeToolPlugins obtains MCP plugin ownership from the configured
+// server. An underscore split is only usable when it has one boundary;
+// otherwise plugin and server names cannot be distinguished from the hook.
+func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHookRequest) []string {
 	var out []string
 	add := func(name string) {
 		if name = strings.TrimSpace(name); validNativeSkillSelectionName(name) && !slices.Contains(out, name) {
@@ -852,10 +852,21 @@ func claudeCodeToolPlugins(req claudeCodeHookRequest) []string {
 		server = serverFromMCPToolName(req.ToolName)
 	}
 	if rest, ok := strings.CutPrefix(server, "plugin_"); ok {
-		for i := 1; i < len(rest)-1; i++ {
-			if rest[i] == '_' {
-				add(rest[:i])
+		cfg := a.liveConfig()
+		resolved := false
+		if cfg != nil {
+			if entry, found := a.lookupCallerMCPServer(ctx, cfg, "claudecode", req.CWD, server); found {
+				if pluginServer, ok := strings.CutPrefix(entry.Name, "plugin:"); ok {
+					if plugin, _, ok := strings.Cut(pluginServer, ":"); ok {
+						add(plugin)
+						resolved = true
+					}
+				}
 			}
+		}
+		if !resolved && strings.Count(rest, "_") == 1 {
+			plugin, _, _ := strings.Cut(rest, "_")
+			add(plugin)
 		}
 	}
 	key := ""
