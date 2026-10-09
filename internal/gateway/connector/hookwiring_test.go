@@ -2382,7 +2382,28 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if err := json.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Claude Code config: %v", err)
 				}
-				if !structuredHookCommandReferences(cfg, []string{nativeHookFlag + connectorName}) {
+				// Per-user Setup registers the launcher through the cmd.exe
+				// guard (GAP-1091); read each handler as the exec form it runs.
+				var execView func(raw interface{}) interface{}
+				execView = func(raw interface{}) interface{} {
+					switch value := claudeCodeExecView(raw).(type) {
+					case []interface{}:
+						out := make([]interface{}, len(value))
+						for i, item := range value {
+							out[i] = execView(item)
+						}
+						return out
+					case map[string]interface{}:
+						out := make(map[string]interface{}, len(value))
+						for key, item := range value {
+							out[key] = execView(item)
+						}
+						return out
+					default:
+						return value
+					}
+				}
+				if !structuredHookCommandReferences(execView(cfg), []string{nativeHookFlag + connectorName}) {
 					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
 				}
 			} else if connectorName == "codex" {
