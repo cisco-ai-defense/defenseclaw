@@ -467,8 +467,34 @@ try {
         [void]$closeJob.Invoke($null, @($emptyJob))
     }
     . $harness -NoRun
+    $liveClaudeGuardView = ${function:Get-ClaudeCodeLauncherGuardExecView}
     . $workflowRunPathHelper
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
+    # GAP-1091: both Claude Code registration checks read the exact generated
+    # cmd.exe launcher guard as its exec form and nothing else.
+    $guardLauncher = 'C:\Users\dc user\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe'
+    $guardSentence = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $guardArgs = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', $guardLauncher, 'hook', '--connector',
+        'claudecode', ')', 'else', '(', 'echo') + $guardSentence + @('1>&2', '&', 'exit', '/b', '2', ')')
+    $guardProcessor = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $editedGuardArgs = @($guardArgs); $editedGuardArgs[-2] = '0'
+    foreach ($guardView in @($liveClaudeGuardView, ${function:Get-ClaudeCodeLauncherGuardExecView})) {
+        $exact = & $guardView ([pscustomobject]@{ type = 'command'; command = $guardProcessor; args = $guardArgs } |
+            ConvertTo-Json -Depth 4 | ConvertFrom-Json)
+        Assert-True ([string]$exact.command -ceq $guardLauncher -and
+            (@($exact.args) -join ' ') -ceq 'hook --connector claudecode') `
+            'Claude Code registration checks read the exact cmd.exe launcher guard as its exec form'
+        foreach ($other in @(
+            [pscustomobject]@{ command = $guardProcessor; args = $editedGuardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', 'C:\Tools\other.exe', 'hook', ')', 'else', '(', 'echo', 'x', ')') },
+            [pscustomobject]@{ command = 'C:\Tools\cmd.exe'; args = $guardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'echo', 'hook', '--connector', 'claudecode') }
+        )) {
+            Assert-True ([object]::ReferenceEquals((& $guardView $other), $other)) `
+                'Claude Code registration checks do not read an edited guard or another cmd.exe handler as DefenseClaw'
+        }
+    }
     $missingOptionalCleanupFields = '{"status":"pending-reboot"}' |
         ConvertFrom-Json -ErrorAction Stop
     foreach ($propertyName in @(

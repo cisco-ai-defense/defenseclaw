@@ -6798,6 +6798,53 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
     Write-Result 'amp:self-heal' pass 'live connector guard restored the deleted plugin byte-for-byte'
 }
 
+# Per-user Windows Claude Code Setup registers its launcher through the system
+# cmd.exe so a missing launcher blocks with exit 2 instead of failing open
+# (GAP-1091). Keep this argv identical to
+# internal/gateway/connector/claudecode_launcher_guard.go: an exact generated
+# guard reads as the launcher and hook argv it runs; an edited guard or any
+# other cmd.exe handler is returned unchanged.
+function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
+    if ($null -eq $Handler) { return $Handler }
+    $commandProperty = $Handler.PSObject.Properties['command']
+    $argsProperty = $Handler.PSObject.Properties['args']
+    if ($null -eq $commandProperty -or $null -eq $argsProperty -or
+        $commandProperty.Value -isnot [string] -or $argsProperty.Value -isnot [array]) {
+        return $Handler
+    }
+    $guardArgs = @($argsProperty.Value)
+    if ($guardArgs.Count -lt 8 -or @($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+        return $Handler
+    }
+    $systemRoot = [string]$env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot) -or -not [IO.Path]::IsPathRooted($systemRoot)) {
+        $systemRoot = 'C:\Windows'
+    }
+    try {
+        $command = [IO.Path]::GetFullPath([string]$commandProperty.Value)
+        $processor = [IO.Path]::GetFullPath([IO.Path]::Combine($systemRoot.Trim(), 'System32', 'cmd.exe'))
+    } catch {
+        return $Handler
+    }
+    if (-not [string]::Equals($command, $processor, [StringComparison]::OrdinalIgnoreCase)) { return $Handler }
+    $end = -1
+    for ($i = 7; $i + 1 -lt $guardArgs.Count; $i++) {
+        if ($guardArgs[$i] -ceq ')' -and $guardArgs[$i + 1] -ceq 'else') { $end = $i; break }
+    }
+    if ($end -lt 0) { return $Handler }
+    $launcher = [string]$guardArgs[4]
+    $hookArgs = @(if ($end -gt 7) { $guardArgs[7..($end - 1)] })
+    $words = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $expected = @('/d', '/c', 'if', 'exist', $launcher, '(', $launcher) + $hookArgs +
+        @(')', 'else', '(', 'echo') + $words + @('1>&2', '&', 'exit', '/b', '2', ')')
+    if ($expected.Count -ne $guardArgs.Count) { return $Handler }
+    for ($i = 0; $i -lt $expected.Count; $i++) {
+        if ($expected[$i] -cne $guardArgs[$i]) { return $Handler }
+    }
+    return [pscustomobject]@{ command = $launcher; args = $hookArgs }
+}
+
 function Assert-DoctorWindowsHookRegistration {
     if ($Connector -eq 'opencode') {
         Assert-OpenCodePluginContract
@@ -6815,8 +6862,9 @@ function Assert-DoctorWindowsHookRegistration {
         foreach ($eventProperty in @($settings.hooks.PSObject.Properties)) {
             foreach ($group in @($eventProperty.Value)) {
                 foreach ($handler in @($group.hooks)) {
-                    $hookArgs = @($handler.args | ForEach-Object { [string]$_ })
-                    if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
+                    $execView = Get-ClaudeCodeLauncherGuardExecView $handler
+                    $hookArgs = @($execView.args | ForEach-Object { [string]$_ })
+                    if ([IO.Path]::GetFileName([string]$execView.command) -ieq 'defenseclaw-hook.exe' -and
                         ($hookArgs -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
                         if ($null -ne $handler.PSObject.Properties['shell']) {
                             throw 'claudecode setup registered a shell field on the Windows native exec-form hook'
