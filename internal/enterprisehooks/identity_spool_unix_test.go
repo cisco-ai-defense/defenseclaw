@@ -22,30 +22,60 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList pins GAP-0145: a
-// pass that did not list an account (it could not decide it while the
-// directory was unreachable) must not delete its record while the gateway
-// still trusts it; a record older than that goes.
+// TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList pins GAP-0145 and
+// GAP-1113: a successful pass removes the record of a local account it no
+// longer lists (excluded, out of the manifest or deleted), which nothing
+// would refresh again, so status and verify warned identity_records_stale
+// about it; it keeps a directory account's record while no directory account
+// resolved (the pass could not decide it while the directory was
+// unreachable) and the gateway still trusts it. A failed pass removes no
+// young record; a record older than IdentitySpoolMaxAge goes.
 func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	dir := t.TempDir()
-	for name, age := range map[string]time.Duration{"94401103.json": 5 * time.Minute, "94401104.json": 2 * IdentitySpoolMaxAge} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("{}"), 0o640); err != nil {
+	for _, tc := range []struct {
+		record IdentitySpoolRecord
+		age    time.Duration
+	}{
+		{IdentitySpoolRecord{Key: "94401103", User: "dcad-bob", SSSDDomain: "dclab.test", Facts: useridentity.DirectoryFacts{
+			Directory: useridentity.DirectoryActiveDirectory, Realm: "DCLAB.TEST",
+		}}, 5 * time.Minute},
+		{IdentitySpoolRecord{Key: "94401104", User: "dave"}, 2 * IdentitySpoolMaxAge},
+		{IdentitySpoolRecord{Key: "94401106", User: "carol", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}}, 5 * time.Minute},
+	} {
+		data, err := MarshalIdentitySpoolRecord(tc.record)
+		if err != nil {
 			t.Fatal(err)
 		}
-		when := time.Now().Add(-age)
+		path := filepath.Join(dir, tc.record.Key+".json")
+		if err := os.WriteFile(path, data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-tc.age)
 		if err := os.Chtimes(path, when, when); err != nil {
 			t.Fatal(err)
 		}
 	}
+	exists := func(key string) bool {
+		_, err := os.Stat(filepath.Join(dir, key+".json"))
+		return err == nil
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401107, User: "erin"}}, nil, nil); err == nil {
+		t.Fatal("the canceled lookup did not fail the pass")
+	}
+	if !exists("94401103") || !exists("94401106") || exists("94401104") {
+		t.Fatalf("after a failed pass: directory %v, local %v, expired %v; want the young records kept and the expired one gone",
+			exists("94401103"), exists("94401106"), exists("94401104"))
+	}
 	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "94401103.json")); err != nil {
-		t.Errorf("the record of an unlisted account that is still trusted was removed: %v", err)
+	if !exists("94401103") {
+		t.Error("the record of an unlisted directory account was removed while no directory account resolved")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "94401104.json")); !os.IsNotExist(err) {
-		t.Errorf("a record older than IdentitySpoolMaxAge was kept (stat error %v)", err)
+	if exists("94401106") {
+		t.Error("the record of a local account the pass no longer lists was kept")
 	}
 	const reassigned = "94401105"
 	data, err := MarshalIdentitySpoolRecord(IdentitySpoolRecord{
@@ -58,8 +88,6 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
 	// The canceled lookup fails and the pass reports it; the record of the
 	// previous owner must be gone either way.
 	_ = WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil)
@@ -115,11 +143,11 @@ func TestIdentitySpoolStaleAfterAClockStep(t *testing.T) {
 		if err := os.Chtimes(path, tc.written, tc.written); err != nil {
 			t.Fatal(err)
 		}
-		if _, stale := IdentitySpoolStale(dir, now, 17*time.Minute); stale != tc.stale {
+		if _, _, stale := IdentitySpoolStale(dir, now, 17*time.Minute); stale != tc.stale {
 			t.Errorf("record written %s from now: stale = %v, want %v", tc.written.Sub(now).Round(time.Minute), stale, tc.stale)
 		}
 	}
-	if _, stale := IdentitySpoolStale(t.TempDir(), now, 17*time.Minute); stale {
+	if _, _, stale := IdentitySpoolStale(t.TempDir(), now, 17*time.Minute); stale {
 		t.Error("an empty spool is not stale")
 	}
 }
@@ -142,8 +170,8 @@ func TestIdentitySpoolStaleWhenOneAccountStopsRefreshing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	oldest, stale := IdentitySpoolStale(dir, now, 30*time.Minute)
-	if !stale || now.Sub(oldest) < time.Hour {
-		t.Fatalf("oldest record = %s, stale = %v; want the stale account reported", oldest, stale)
+	oldest, key, stale := IdentitySpoolStale(dir, now, 30*time.Minute)
+	if !stale || now.Sub(oldest) < time.Hour || key != "1001" {
+		t.Fatalf("oldest record = %s (%q), stale = %v; want the stale account reported", oldest, key, stale)
 	}
 }

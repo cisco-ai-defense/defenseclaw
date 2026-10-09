@@ -13,7 +13,8 @@
 # package, and let an apply run that already started finish first.
 #
 # It fails the package transaction only for an administrator config this
-# package cannot read (below); nothing else stops it.
+# package cannot read, or for a downgrade the administrator did not ask for
+# (below); nothing else stops it.
 
 set -u
 case "${1:-}" in
@@ -37,7 +38,62 @@ if [ -f "$config" ]; then
     fi
 fi
 
+# A package older than the deployed release replaced every binary, and then
+# its postinstall ensure refused the downgrade: the older binaries sat next
+# to the newer deployment, and status reported verify_failed and a failed
+# apply unit until `ensure --from-package --allow-downgrade` (GAP-1115).
+# Refuse before any file is replaced instead, unless the administrator
+# created the root-owned rollback marker; the postinstall then applies the
+# package with --allow-downgrade and deletes the marker. The release build
+# stamps the package version below (.goreleaser.yaml); an unstamped copy
+# leaves the refusal to the postinstall ensure.
+package_version="@DC_PKG_VERSION@"
 state=/var/lib/defenseclaw-enterprise
+record="$state/deployment.json"
+marker="$state/allow-downgrade"
+root_owned() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %u "$1" 2>/dev/null)" = 0 ]
+}
+# not_older A B: A is not older than B, by the lifecycle's version order
+# (enterpriseunix compareProductVersions: dotted numbers, a release above its
+# prereleases, prerelease fields compared numerically where both are numbers).
+not_older() {
+    awk -v a="$1" -v b="$2" '
+        function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
+        BEGIN {
+            a = norm(a); b = norm(b); pa = ""; pb = ""
+            if (index(a, "-")) { pa = substr(a, index(a, "-") + 1); a = substr(a, 1, index(a, "-") - 1) }
+            if (index(b, "-")) { pb = substr(b, index(b, "-") + 1); b = substr(b, 1, index(b, "-") - 1) }
+            na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+            for (i = 1; i <= n; i++) {
+                xi = (i <= na) ? x[i] + 0 : 0; yi = (i <= nb) ? y[i] + 0 : 0
+                if (xi > yi) exit 0
+                if (xi < yi) exit 1
+            }
+            if (pa == pb || pa == "") exit 0
+            if (pb == "") exit 1
+            np = split(pa, u, "."); nq = split(pb, w, "."); m = np > nq ? np : nq
+            for (i = 1; i <= m; i++) {
+                if (u[i] == w[i]) continue
+                if (u[i] ~ /^[0-9]+$/ && w[i] ~ /^[0-9]+$/) exit (u[i] + 0 > w[i] + 0) ? 0 : 1
+                exit (u[i] > w[i]) ? 0 : 1
+            }
+            exit 0
+        }'
+}
+case "$package_version" in
+    @*@) ;;
+    *)
+        if root_owned "$record" && ! root_owned "$marker"; then
+            installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" 2>/dev/null | head -n 1)
+            if [ -n "$installed" ] && ! not_older "$package_version" "$installed"; then
+                echo "defenseclaw-enterprise: DefenseClaw $installed is deployed; refusing to downgrade to $package_version. Nothing was changed. For a deliberate rollback, create the rollback marker first (sudo touch $marker) and install this package again: it is then applied with 'enterprise linux ensure --from-package --allow-downgrade'." >&2
+                exit 1
+            fi
+        fi
+        ;;
+esac
+
 apply_path=defenseclaw-enterprise-apply.path
 # The postinstall starts the trigger again when this marker is present.
 held=/run/defenseclaw-enterprise-apply-path.held

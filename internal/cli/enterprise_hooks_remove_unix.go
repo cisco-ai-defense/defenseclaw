@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -47,6 +48,7 @@ import (
 var (
 	enterpriseHooksRemoveAllManifest string
 	enterpriseHooksRemoveAllPurge    bool
+	enterpriseHooksRemoveAllCheck    bool
 )
 
 var enterpriseHooksRemoveAllCmd = &cobra.Command{
@@ -62,6 +64,8 @@ func init() {
 		"YAML manifest of per-user hook targets")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllPurge, "purge", false,
 		"Also remove each enrolled user's ~/.defenseclaw, per-user binaries in ~/.local/bin and DefenseClaw's entries in ~/.cache/uv, after stopping its per-user gateway")
+	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllCheck, "check", false,
+		"Only check that every manifest row resolves to an account whose registrations can be removed; change nothing")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
 	enterpriseHooksCmd.AddCommand(enterpriseHooksRemoveAllCmd)
 }
@@ -85,6 +89,10 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 	report, err := removeAllEnterpriseHookTargets(cmd)
 	if enterpriseHookJSON {
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+	} else if err == nil && enterpriseHooksRemoveAllCheck {
+		for _, entry := range report.Failed {
+			fmt.Fprintf(cmd.OutOrStdout(), "cannot remove %s\n", entry)
+		}
 	} else if err == nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "removed %d per-user registrations; %d pending, %d failed\n", report.Removed, len(report.Pending), len(report.Failed))
 		for _, user := range report.Purged {
@@ -123,8 +131,18 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	if err != nil {
 		return report, err
 	}
-	jobs, pending, failed := enterpriseHookRemoveJobs(manifest)
+	rows := resolveEnterpriseHookRemoveRows(manifest)
+	jobs, pending, failed := enterpriseHookRemoveJobs(rows)
 	report.Pending, report.Failed = pending, failed
+	if enterpriseHooksRemoveAllCheck {
+		// uninstall asks before it stops a service or removes the machine
+		// policy, so a row it cannot resolve leaves the deployment intact
+		// (GAP-1101).
+		sort.Strings(report.Pending)
+		sort.Strings(report.Failed)
+		report.OK = len(report.Failed) == 0
+		return report, nil
+	}
 	accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifestPath))
 	if err != nil {
 		report.Failed = append(report.Failed, "eligible accounts: "+boundedString(err.Error(), 256))
@@ -144,7 +162,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
-		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)...)
+		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, cleanupFailed)...)
 	}
 	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
@@ -213,20 +231,68 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	return report, nil
 }
 
-// enterpriseHookRemoveJobs groups the manifest targets into one worker job
-// per account. Rows without a usable uid or with an unavailable home are
-// reported instead of guessed at.
-func enterpriseHookRemoveJobs(manifest enterprisehooks.Manifest) (map[int]*enterpriseHookWorkerJob, []string, []string) {
+// enterpriseHookRemoveRow is one manifest row and the account it resolved
+// to. A row that names only a user, a uid or a user_home, as enrollment.mdx
+// documents, gets its uid, gid and home from the directory exactly as
+// reconcile resolves it; uninstall required them in the row and stopped
+// halfway on such a manifest (GAP-1101). A row with all three keeps them, so
+// it is removed while the directory does not answer. problem says why a row
+// did not resolve.
+type enterpriseHookRemoveRow struct {
+	target  enterprisehooks.ManifestTarget
+	who     string
+	problem string
+}
+
+func resolveEnterpriseHookRemoveRows(manifest enterprisehooks.Manifest) []enterpriseHookRemoveRow {
+	resolver := enterprisehooks.StandaloneResolver()
+	rows := make([]enterpriseHookRemoveRow, 0, len(manifest.Targets))
+	for _, target := range manifest.Targets {
+		user, home := strings.TrimSpace(target.User), strings.TrimSpace(target.UserHome)
+		row := enterpriseHookRemoveRow{target: target, who: firstNonEmpty(user, home)}
+		if row.who == "" && target.UID != nil {
+			row.who = "uid " + strconv.Itoa(*target.UID)
+		}
+		if target.UID != nil && target.GID != nil && *target.UID > 0 && filepath.IsAbs(filepath.Clean(home)) {
+			rows = append(rows, row)
+			continue
+		}
+		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		switch {
+		case err != nil:
+			row.problem = strings.TrimPrefix(err.Error(), "enterprise hooks: ")
+		case pendingReason != "":
+			row.problem = pendingReason + "; rerun once it is available"
+		default:
+			uid, gid := account.UID, account.GID
+			row.target.UID, row.target.GID = &uid, &gid
+			row.target.User, row.target.UserHome = account.User, account.Home
+			row.who = account.User
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// enterpriseHookRemoveJobs groups the manifest rows into one worker job per
+// account. Rows that did not resolve or whose home is unavailable are
+// reported, as "who/connector: reason", instead of guessed at.
+func enterpriseHookRemoveJobs(rows []enterpriseHookRemoveRow) (map[int]*enterpriseHookWorkerJob, []string, []string) {
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	var pending, failed []string
 	index := 0
-	for _, target := range manifest.Targets {
+	for _, row := range rows {
+		target := row.target
 		user := strings.TrimSpace(target.User)
 		home := filepath.Clean(strings.TrimSpace(target.UserHome))
 		name := strings.ToLower(strings.TrimSpace(target.Connector))
-		label := user + "/" + name
-		if target.UID == nil || target.GID == nil || *target.UID <= 0 || !filepath.IsAbs(home) || name == "" {
-			failed = append(failed, label+": the manifest row has no usable uid, gid or home")
+		label := row.who + "/" + name
+		switch {
+		case row.problem != "":
+			failed = append(failed, label+": "+row.problem)
+			continue
+		case target.UID == nil || target.GID == nil || *target.UID <= 0 || !filepath.IsAbs(home) || name == "":
+			failed = append(failed, label+": the manifest row has no usable uid, gid, home or connector")
 			continue
 		}
 		uid, gid := *target.UID, *target.GID
@@ -419,11 +485,15 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 // accounts in skip, whose pending cleanup failed and whose backups a retry
 // still needs. It returns every enrolled account it did not add a purge for,
 // as "user: reason", so the report names each account whose data stays.
-func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) []string {
+func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []enterpriseHookRemoveRow, skip map[int]bool) []string {
 	dataDirs := map[int][]string{}
 	notPurged := map[string]string{}
-	for _, target := range manifest.Targets {
-		user := strings.TrimSpace(target.User)
+	for _, row := range rows {
+		target, user := row.target, row.who
+		if row.problem != "" {
+			notPurged[user] = row.problem
+			continue
+		}
 		if target.UID == nil || *target.UID <= 0 {
 			notPurged[user] = "its manifest row has no usable uid"
 			continue
