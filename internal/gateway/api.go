@@ -2844,6 +2844,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	result, err := ss.Scan(ctx, req.Target)
+	if err == nil && !cfg.SecureClientIntegration() {
+		err = scanner.JudgeFailure(result)
+	}
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "skill-scanner", "skill", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
