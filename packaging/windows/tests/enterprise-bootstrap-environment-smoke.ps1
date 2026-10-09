@@ -1378,6 +1378,16 @@ function Invoke-CodexWinGetMetadataVersionProbe {
         if ($validPEIdentity -cne '0.146.1') {
             throw 'WinGet Codex optional PE identity was not normalized'
         }
+        $validStandaloneIdentity = Test-DefenseClawCodexWinGetIdentity `
+            -SignatureStatus 'Valid' `
+            -SignerSimpleName 'OpenAI OpCo, LLC' `
+            -ProductName 'Codex CLI' `
+            -OriginalFilename 'codex.exe' `
+            -FileVersion '0.146.1.0' `
+            -EmbeddedVersion '0.146.1'
+        if ($validStandaloneIdentity -cne '0.146.1') {
+            throw 'standalone Codex PE identity was not normalized'
+        }
         foreach ($invalidIdentity in @(
             [pscustomobject]@{
                 Status = 'NotSigned'; Signer = 'OpenAI OpCo, LLC'
@@ -1760,12 +1770,15 @@ function Invoke-CodexWinGetMetadataVersionProbe {
             ),
             [byte[]]@(0x4d, 0x5a)
         )
+        $precedenceObserved = $false
         $precedence = Get-DefenseClawConnectorMetadataVersion `
             -Connector 'codex' `
             -UserHome $precedenceHome `
-            -OwnerSID $ownerSID
-        if ($precedence -cne '0.147.0') {
-            throw "npm/WinGet Codex precedence returned '$precedence'"
+            -OwnerSID $ownerSID `
+            -NativeCandidateObserved ([ref]$precedenceObserved)
+        if (-not [string]::IsNullOrEmpty($precedence) -or
+            -not $precedenceObserved) {
+            throw "invalid native Codex candidate fell back to npm '$precedence'"
         }
     }
     finally {
@@ -1773,6 +1786,72 @@ function Invoke-CodexWinGetMetadataVersionProbe {
             [IO.Directory]::Exists($junctionPath)) {
             [IO.Directory]::Delete($junctionPath, $false)
         }
+        if ([IO.Directory]::Exists($fixtureRoot)) {
+            [IO.Directory]::Delete($fixtureRoot, $true)
+        }
+    }
+    return $true
+}
+
+function Invoke-NativeConnectorMetadataVersionProbe {
+    $fixtureRoot = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        "DefenseClaw-NativeAgent-$([Guid]::NewGuid().ToString('N'))"
+    )
+    try {
+        $claude = [IO.Path]::Combine(
+            $fixtureRoot,
+            '.local\bin\claude.exe'
+        )
+        [void][IO.Directory]::CreateDirectory(
+            [IO.Path]::GetDirectoryName($claude)
+        )
+        [IO.File]::WriteAllBytes($claude, [byte[]]@(0x4d, 0x5a))
+        $claudeObserved = $false
+        $claudeVersion = Get-DefenseClawClaudeNativeMetadataVersion `
+            -UserHome $fixtureRoot `
+            -ExecutableVersionReader {
+                param([string]$Root, [string]$Path)
+                if ($Path -cne $claude -or $Root -cne $fixtureRoot) {
+                    throw 'unexpected Claude native candidate'
+                }
+                return '2.1.301'
+            } `
+            -CandidateObserved ([ref]$claudeObserved)
+        if ($claudeVersion -cne '2.1.301' -or -not $claudeObserved) {
+            throw "Claude native discovery returned '$claudeVersion'"
+        }
+
+        $runtime = [IO.Path]::Combine(
+            $fixtureRoot,
+            'AppData\Local\OpenAI\Codex\bin',
+            '0123456789abcdef0123456789abcdef'
+        )
+        [void][IO.Directory]::CreateDirectory($runtime)
+        $codex = [IO.Path]::Combine($runtime, 'codex.exe')
+        [IO.File]::WriteAllBytes($codex, [byte[]]@(0x4d, 0x5a))
+        $codexObserved = $false
+        $codexVersion = Get-DefenseClawCodexNativeMetadataVersion `
+            -UserHome $fixtureRoot `
+            -OwnerSID 'S-1-5-21-1000-2000-3000-1001' `
+            -ExecutableVersionReader {
+                param(
+                    [string]$Root,
+                    [string]$Path,
+                    [string]$OwnerSID
+                )
+                if ($Path -cne $codex -or
+                    $OwnerSID -cne 'S-1-5-21-1000-2000-3000-1001') {
+                    throw 'unexpected Codex native candidate'
+                }
+                return '0.163.0'
+            } `
+            -CandidateObserved ([ref]$codexObserved)
+        if ($codexVersion -cne '0.163.0' -or -not $codexObserved) {
+            throw "Codex native discovery returned '$codexVersion'"
+        }
+    }
+    finally {
         if ([IO.Directory]::Exists($fixtureRoot)) {
             [IO.Directory]::Delete($fixtureRoot, $true)
         }
@@ -2049,6 +2128,7 @@ $renderedTargetsActiveSessionContract =
     Invoke-RenderedEnterpriseTargetsActiveSessionProbe
 $claudeWinGetMetadataContract = Invoke-ClaudeWinGetMetadataVersionProbe
 $codexWinGetMetadataContract = Invoke-CodexWinGetMetadataVersionProbe
+$nativeConnectorMetadataContract = Invoke-NativeConnectorMetadataVersionProbe
 $renderedConfigEmbeddedRulePack = Invoke-RenderedEnterpriseConfigRulePackProbe
 $raceRoot = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
@@ -2196,6 +2276,8 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$claudeWinGetMetadataContract
     codex_winget_metadata_contract =
         [bool]$codexWinGetMetadataContract
+    native_connector_metadata_contract =
+        [bool]$nativeConnectorMetadataContract
     rendered_config_embedded_rule_pack =
         [bool]$renderedConfigEmbeddedRulePack
     concurrent_workers = 6

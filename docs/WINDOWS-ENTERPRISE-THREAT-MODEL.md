@@ -403,6 +403,19 @@ not an administrator authority even though it is a machine service.
    the guardian authorization ledger accepts — not at the per-device
    authorization layer. Three residual sub-risks follow from this posture:
 
+   Claude Code and Codex native installs are discovered before package-manager
+   metadata. The enumerator never executes a candidate PE: it uses fixed
+   profile-relative paths, rejects unexpected reparse chains, holds the file
+   without write/delete sharing, and requires the expected Authenticode
+   publisher plus PE product/original-filename identity. Codex standalone
+   junctions must resolve directly into the fixed
+   `.codex\packages\standalone\releases` root; Codex Desktop runtime leaves
+   are bounded and shape-checked. A present candidate that cannot be verified
+   blocks metadata/minimum-version fallback. Existing rows retain their
+   enabled/deferred state, refresh `agent_version` after a verified upgrade,
+   and keep the last-known version only when discovery is temporarily
+   unavailable.
+
    a. **Interactive-user creation → auto-enrollment.** Creating a local or
       domain user (`S-1-5-21-…`) or provisioning a Microsoft Entra ID user
       profile (`S-1-12-1-…`) on the target machine causes that user to be

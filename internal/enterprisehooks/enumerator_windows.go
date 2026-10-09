@@ -461,12 +461,12 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 // Returns `true` when the row should be emitted, `false` when the
 // caller should drop it.
 //
-//   - Previously-known (SID, Connector): copy AgentVersion +
-//     Enabled + Deferred + User/UID/GID from the prior row and
-//     return true. Preserving the operator's prior Enabled
-//     decision means a disabled prior row stays disabled, and an
-//     enabled prior row stays enabled with its recorded
-//     AgentVersion.
+//   - Previously-known (SID, Connector): preserve Enabled + Deferred +
+//     User/UID/GID, but re-run trusted version discovery. A successfully
+//     discovered version replaces the recorded AgentVersion so agent upgrades
+//     do not leave hooks pinned to a stale contract. If discovery is
+//     temporarily unavailable, retain the last-known version and row rather
+//     than uninstalling working hooks.
 //   - Newly-discovered (SID, Connector): consult
 //     `discoverWindowsAgentVersion` to see whether this user's
 //     profile contains a supported per-user install of the
@@ -493,12 +493,39 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	}
 	key := previousManifestKey(row.SID, row.Connector)
 	if prev, ok := previous[key]; ok {
-		row.AgentVersion = prev.AgentVersion
 		row.Enabled = prev.Enabled
 		row.Deferred = prev.Deferred
 		row.User = prev.User
 		row.UID = prev.UID
 		row.GID = prev.GID
+		version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
+		if version == "" {
+			row.AgentVersion = prev.AgentVersion
+			logfSafely(
+				logf,
+				row.SID,
+				fmt.Sprintf(
+					"existing (SID, %s) row retained last-known version %s: %s",
+					row.Connector,
+					prev.AgentVersion,
+					reason,
+				),
+			)
+			return true
+		}
+		row.AgentVersion = version
+		if version != prev.AgentVersion {
+			logfSafely(
+				logf,
+				row.SID,
+				fmt.Sprintf(
+					"existing (SID, %s) row refreshed agent version from %s to %s",
+					row.Connector,
+					prev.AgentVersion,
+					version,
+				),
+			)
+		}
 		return true
 	}
 	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)

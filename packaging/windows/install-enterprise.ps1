@@ -2223,9 +2223,11 @@ function Get-DefenseClawClaudeWinGetExecutableVersion {
 function Get-DefenseClawClaudeWinGetMetadataVersion {
     param(
         [Parameter(Mandatory)][string]$UserHome,
-        [scriptblock]$ExecutableVersionReader
+        [scriptblock]$ExecutableVersionReader,
+        [ref]$CandidateObserved
     )
 
+    if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $false }
     try {
         $userHomeFull = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
         $packageRoot = [IO.Path]::Combine(
@@ -2236,8 +2238,16 @@ function Get-DefenseClawClaudeWinGetMetadataVersion {
     catch {
         return ''
     }
+    try { [void][IO.File]::GetAttributes($packageRoot) }
+    catch [IO.FileNotFoundException] { return '' }
+    catch [IO.DirectoryNotFoundException] { return '' }
+    catch {
+        if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $true }
+        return ''
+    }
     if (-not (Test-DefenseClawConnectorMetadataPath `
             -Root $userHomeFull -Path $packageRoot -Directory)) {
+        if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $true }
         return ''
     }
 
@@ -2252,6 +2262,7 @@ function Get-DefenseClawClaudeWinGetMetadataVersion {
     $versions = [Collections.Generic.List[Version]]::new()
     $examined = 0
     $matched = 0
+    $invalidCandidate = $false
     try {
         foreach ($directory in [IO.Directory]::EnumerateDirectories(
                 $packageRoot,
@@ -2259,27 +2270,36 @@ function Get-DefenseClawClaudeWinGetMetadataVersion {
                 [IO.SearchOption]::TopDirectoryOnly
             )) {
             $examined++
+            if ($null -ne $CandidateObserved) {
+                $CandidateObserved.Value = $true
+            }
             if ($examined -gt 256) { return '' }
             $leaf = [IO.Path]::GetFileName($directory)
             if ($leaf -cnotmatch
                 '^Anthropic\.ClaudeCode_Microsoft\.Winget\.Source_[0-9A-Za-z]{1,64}$') {
+                $invalidCandidate = $true
                 continue
             }
             $matched++
             if ($matched -gt 32 -or
                 -not (Test-DefenseClawConnectorMetadataPath `
                     -Root $packageRoot -Path $directory -Directory)) {
-                return ''
+                $invalidCandidate = $true
+                continue
             }
             $executable = [IO.Path]::Combine($directory, 'claude.exe')
             if (-not (Test-DefenseClawConnectorMetadataPath `
                     -Root $packageRoot -Path $executable)) {
+                $invalidCandidate = $true
                 continue
             }
             $version = & $ExecutableVersionReader $packageRoot $executable
             $normalized = ConvertTo-DefenseClawClaudeWinGetVersion `
                 -Value $version
-            if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+            if ([string]::IsNullOrWhiteSpace($normalized)) {
+                $invalidCandidate = $true
+                continue
+            }
             try {
                 $versions.Add([Version]::Parse($normalized))
             }
@@ -2289,9 +2309,10 @@ function Get-DefenseClawClaudeWinGetMetadataVersion {
         }
     }
     catch {
+        if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $true }
         return ''
     }
-    if ($versions.Count -eq 0) { return '' }
+    if ($invalidCandidate -or $versions.Count -eq 0) { return '' }
     return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
 }
 
@@ -2513,7 +2534,10 @@ function Test-DefenseClawCodexWinGetIdentity {
         return ''
     }
     if (-not [string]::IsNullOrWhiteSpace([string]$OriginalFilename) -and
-        [string]$OriginalFilename -cne 'codex-x86_64-pc-windows-msvc.exe') {
+        [string]$OriginalFilename -cnotin @(
+            'codex.exe',
+            'codex-x86_64-pc-windows-msvc.exe'
+        )) {
         return ''
     }
     $embedded = ConvertTo-DefenseClawCodexWinGetVersion `
@@ -2653,8 +2677,10 @@ function Get-DefenseClawCodexWinGetExecutableVersion {
         [Parameter(Mandatory)][string]$OwnerSID
     )
 
-    if ([IO.Path]::GetFileName($Path) -cne
-            'codex-x86_64-pc-windows-msvc.exe' -or
+    if ([IO.Path]::GetFileName($Path) -cnotin @(
+            'codex.exe',
+            'codex-x86_64-pc-windows-msvc.exe'
+        ) -or
         -not (Test-DefenseClawConnectorMetadataPath `
             -Root $Root -Path $Path)) {
         return ''
@@ -2850,6 +2876,220 @@ function Get-DefenseClawCodexWinGetMetadataVersion {
     return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
 }
 
+function Get-DefenseClawClaudeNativeMetadataVersion {
+    param(
+        [Parameter(Mandatory)][string]$UserHome,
+        [scriptblock]$ExecutableVersionReader,
+        [ref]$CandidateObserved
+    )
+
+    if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $false }
+    try {
+        $root = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
+        $candidate = [IO.Path]::Combine($root, '.local\bin\claude.exe')
+        [void][IO.File]::GetAttributes($candidate)
+        if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $true }
+        if (-not (Test-DefenseClawConnectorMetadataPath `
+                -Root $root -Path $candidate)) {
+            return ''
+        }
+        if ($null -eq $ExecutableVersionReader) {
+            $ExecutableVersionReader = {
+                param([string]$CandidateRoot, [string]$CandidatePath)
+                Get-DefenseClawClaudeWinGetExecutableVersion `
+                    -Root $CandidateRoot -Path $CandidatePath
+            }
+        }
+        return & $ExecutableVersionReader $root $candidate
+    }
+    catch [IO.FileNotFoundException] { return '' }
+    catch [IO.DirectoryNotFoundException] { return '' }
+    catch {
+        if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $true }
+        return ''
+    }
+}
+
+function Get-DefenseClawCodexNativeMetadataVersion {
+    param(
+        [Parameter(Mandatory)][string]$UserHome,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$OwnerSID,
+        [scriptblock]$ExecutableVersionReader,
+        [ref]$CandidateObserved
+    )
+
+    if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $false }
+    if ([string]::IsNullOrWhiteSpace($OwnerSID)) { return '' }
+    try {
+        $root = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
+    }
+    catch { return '' }
+    if ($null -eq $ExecutableVersionReader) {
+        $ExecutableVersionReader = {
+            param(
+                [string]$CandidateRoot,
+                [string]$CandidatePath,
+                [string]$ExpectedOwnerSID
+            )
+            Get-DefenseClawCodexWinGetExecutableVersion `
+                -Root $CandidateRoot `
+                -Path $CandidatePath `
+                -OwnerSID $ExpectedOwnerSID
+        }
+    }
+
+    $candidates = [Collections.Generic.List[object]]::new()
+    $standaloneRoot = [IO.Path]::Combine(
+        $root,
+        '.codex\packages\standalone'
+    )
+    $releasesRoot = [IO.Path]::Combine($standaloneRoot, 'releases')
+    $current = [IO.Path]::Combine($standaloneRoot, 'current')
+    $visibleBin = [IO.Path]::Combine(
+        $root,
+        'AppData\Local\Programs\OpenAI\Codex\bin'
+    )
+    $currentExists = [IO.Directory]::Exists($current)
+    $visibleExists = [IO.Directory]::Exists($visibleBin)
+    if ($visibleExists -and -not $currentExists) {
+        if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $true }
+        try {
+            $visibleItem = Microsoft.PowerShell.Management\Get-Item `
+                -LiteralPath $visibleBin -Force -ErrorAction Stop
+            if (-not $visibleItem.PSIsContainer -or
+                ($visibleItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return ''
+            }
+            $candidates.Add([pscustomobject]@{
+                Root = $root
+                Path = [IO.Path]::Combine($visibleBin, 'codex.exe')
+            })
+        }
+        catch { return '' }
+    }
+    elseif ($currentExists -or $visibleExists) {
+        if ($null -ne $CandidateObserved) { $CandidateObserved.Value = $true }
+        if (-not $visibleExists) { return '' }
+        try {
+            $currentItem = Microsoft.PowerShell.Management\Get-Item `
+                -LiteralPath $current -Force -ErrorAction Stop
+            $visibleItem = Microsoft.PowerShell.Management\Get-Item `
+                -LiteralPath $visibleBin -Force -ErrorAction Stop
+            if (($currentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -or
+                ($visibleItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -or
+                $currentItem.LinkType -cne 'Junction' -or
+                $visibleItem.LinkType -cne 'Junction') {
+                return ''
+            }
+            $currentTarget = [string]@($currentItem.Target)[0]
+            $visibleTarget = [string]@($visibleItem.Target)[0]
+            if (-not [IO.Path]::IsPathRooted($currentTarget)) {
+                $currentTarget = [IO.Path]::Combine(
+                    [IO.Path]::GetDirectoryName($current),
+                    $currentTarget
+                )
+            }
+            if (-not [IO.Path]::IsPathRooted($visibleTarget)) {
+                $visibleTarget = [IO.Path]::Combine(
+                    [IO.Path]::GetDirectoryName($visibleBin),
+                    $visibleTarget
+                )
+            }
+            $currentTarget = [IO.Path]::GetFullPath($currentTarget).TrimEnd('\')
+            $visibleTarget = [IO.Path]::GetFullPath($visibleTarget).TrimEnd('\')
+            if (-not [string]::Equals(
+                    [IO.Path]::GetDirectoryName($currentTarget),
+                    $releasesRoot,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                return ''
+            }
+            if ([string]::Equals(
+                    $visibleTarget,
+                    [IO.Path]::Combine($current, 'bin'),
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $standaloneExecutable = [IO.Path]::Combine(
+                    $currentTarget,
+                    'bin\codex.exe'
+                )
+            }
+            elseif ([string]::Equals(
+                    $visibleTarget,
+                    $current,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                $standaloneExecutable = [IO.Path]::Combine(
+                    $currentTarget,
+                    'codex.exe'
+                )
+            }
+            else { return '' }
+            $candidates.Add([pscustomobject]@{
+                Root = $root
+                Path = $standaloneExecutable
+            })
+        }
+        catch { return '' }
+    }
+
+    # Codex Desktop copies its signed CLI into a per-release runtime directory
+    # after first launch. Enumerate only bounded hexadecimal release leaves.
+    $runtimeRoot = [IO.Path]::Combine(
+        $root,
+        'AppData\Local\OpenAI\Codex\bin'
+    )
+    if ([IO.Directory]::Exists($runtimeRoot)) {
+        $examined = 0
+        try {
+            foreach ($directory in [IO.Directory]::EnumerateDirectories(
+                    $runtimeRoot,
+                    '*',
+                    [IO.SearchOption]::TopDirectoryOnly
+                )) {
+                $examined++
+                if ($examined -gt 256) {
+                    if ($null -ne $CandidateObserved) {
+                        $CandidateObserved.Value = $true
+                    }
+                    return ''
+                }
+                $leaf = [IO.Path]::GetFileName($directory)
+                if ($leaf -cnotmatch '^[0-9A-Fa-f]{8,128}$') { continue }
+                $candidate = [IO.Path]::Combine($directory, 'codex.exe')
+                if ([IO.File]::Exists($candidate)) {
+                    if ($null -ne $CandidateObserved) {
+                        $CandidateObserved.Value = $true
+                    }
+                    $candidates.Add([pscustomobject]@{
+                        Root = $runtimeRoot
+                        Path = $candidate
+                    })
+                }
+            }
+        }
+        catch {
+            if ($null -ne $CandidateObserved) {
+                $CandidateObserved.Value = $true
+            }
+            return ''
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not (Test-DefenseClawConnectorMetadataPath `
+                -Root $candidate.Root -Path $candidate.Path)) {
+            return ''
+        }
+        $version = & $ExecutableVersionReader `
+            $candidate.Root $candidate.Path $OwnerSID
+        $normalized = ConvertTo-DefenseClawCodexWinGetVersion -Value $version
+        if ([string]::IsNullOrWhiteSpace($normalized)) { return '' }
+        return $normalized
+    }
+    return ''
+}
+
 function Get-DefenseClawConnectorMetadataVersion {
     param(
         [Parameter(Mandatory)][string]$Connector,
@@ -2899,6 +3139,65 @@ function Get-DefenseClawConnectorMetadataVersion {
         return ''
     }
 
+    # First-party native installs represent the CLI the user actually invokes
+    # and must win over stale npm metadata. A present native candidate whose
+    # Authenticode/PE identity cannot be verified fails closed: the caller is
+    # told not to substitute a minimum-version placeholder.
+    if ($Connector -eq 'claudecode') {
+        $claudeNativeObserved = $false
+        $version = Get-DefenseClawClaudeNativeMetadataVersion `
+            -UserHome $userHomeFull `
+            -CandidateObserved ([ref]$claudeNativeObserved)
+        if ($claudeNativeObserved -and
+            $null -ne $NativeCandidateObserved) {
+            $NativeCandidateObserved.Value = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+        if ($claudeNativeObserved) { return '' }
+        $claudeWinGetObserved = $false
+        $version = Get-DefenseClawClaudeWinGetMetadataVersion `
+            -UserHome $userHomeFull `
+            -CandidateObserved ([ref]$claudeWinGetObserved)
+        if ($claudeWinGetObserved -and
+            $null -ne $NativeCandidateObserved) {
+            $NativeCandidateObserved.Value = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+        if ($claudeWinGetObserved) { return '' }
+    }
+    if ($Connector -eq 'codex') {
+        $codexNativeObserved = $false
+        $version = Get-DefenseClawCodexNativeMetadataVersion `
+            -UserHome $userHomeFull `
+            -OwnerSID $OwnerSID `
+            -CandidateObserved ([ref]$codexNativeObserved)
+        if ($codexNativeObserved -and
+            $null -ne $NativeCandidateObserved) {
+            $NativeCandidateObserved.Value = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+        if ($codexNativeObserved) { return '' }
+        $codexWinGetObserved = $false
+        $version = Get-DefenseClawCodexWinGetMetadataVersion `
+            -UserHome $userHomeFull `
+            -OwnerSID $OwnerSID `
+            -CandidateObserved ([ref]$codexWinGetObserved)
+        if ($codexWinGetObserved -and
+            $null -ne $NativeCandidateObserved) {
+            $NativeCandidateObserved.Value = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            return $version
+        }
+        if ($codexWinGetObserved) { return '' }
+    }
+
     $package = switch ($Connector) {
         'codex' { '@openai\codex'; break }
         'claudecode' { '@anthropic-ai\claude-code'; break }
@@ -2939,29 +3238,9 @@ function Get-DefenseClawConnectorMetadataVersion {
         -ExpectedNames @($expectedName)
     if (-not [string]::IsNullOrWhiteSpace($version)) { return $version }
 
-    if ($Connector -eq 'codex') {
-        $codexCandidateObserved = $false
-        $version = Get-DefenseClawCodexWinGetMetadataVersion `
-            -UserHome $userHomeFull `
-            -OwnerSID $OwnerSID `
-            -CandidateObserved ([ref]$codexCandidateObserved)
-        if ($codexCandidateObserved -and
-            $null -ne $NativeCandidateObserved) {
-            $NativeCandidateObserved.Value = $true
-        }
-        if (-not [string]::IsNullOrWhiteSpace($version)) {
-            return $version
-        }
-        return ''
-    }
+    if ($Connector -eq 'codex') { return '' }
 
     if ($Connector -eq 'claudecode') {
-        $version = Get-DefenseClawClaudeWinGetMetadataVersion `
-            -UserHome $userHomeFull
-        if (-not [string]::IsNullOrWhiteSpace($version)) {
-            return $version
-        }
-
         foreach ($relativeExtensionRoot in @(
             '.cursor\extensions',
             '.vscode\extensions'
