@@ -473,8 +473,12 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error {
 	for _, label := range config.RulePackCheckOrder(v.RulePacks) {
 		dir := v.RulePacks[label]
-		if dir == e.Layout.VendorPolicyDir || strings.HasPrefix(dir, e.Layout.VendorPolicyDir+"/") {
-			continue
+		// Shipped packs are absent before the first install. Once present,
+		// their files are subject to the same trust and readability checks.
+		if pathWithin(dir, e.Layout.VendorPolicyDir) {
+			if _, err := os.Lstat(e.P(dir)); errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 		}
 		// The gateway refuses an untrusted pack only when it starts, so
 		// ensure restarted it into a failed start and rolled back with a

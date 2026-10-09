@@ -688,6 +688,47 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// GAP-1147: vendor packs need the same trust walk as administrator packs.
+func TestVendorRulePackDriftIsRefusedAndReported(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	pack := filepath.Join(h.env.Layout.VendorPolicyDir, "guardrail", "default")
+	nested := filepath.Join(pack, "rules")
+	if err := os.Chmod(h.env.P(nested), 0o775); err != nil {
+		t.Fatal(err)
+	}
+	h.env.Trust = func(path string, kind TrustKind) error {
+		if kind == TrustRulePack {
+			return rulePackTreeTrust(path, func(uid uint32) bool { return uid == uint32(os.Getuid()) })
+		}
+		return nil
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || !strings.Contains(messagesOf(r.Errors, codeVerify), "group/other writable") {
+			t.Fatalf("%s did not report vendor pack drift: %+v", action, r.Errors)
+		}
+	}
+	r := h.run(Options{Action: ActionEnsure})
+	requireError(t, r, codeConfig)
+	if !strings.Contains(messagesOf(r.Errors, codeConfig), "group/other writable") {
+		t.Fatalf("ensure accepted vendor pack drift: %+v", r.Errors)
+	}
+	if err := os.Chmod(h.env.P(nested), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.runner.acls = map[string][]string{
+		h.env.P(nested): {"user:standard allow write,append"},
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || !strings.Contains(messagesOf(r.Errors, codeVerify), nested) ||
+			!strings.Contains(messagesOf(r.Errors, codeVerify), "ACL") {
+			t.Fatalf("%s did not report the nested vendor pack ACL: %+v", action, r.Errors)
+		}
+	}
+}
+
 // GAP-0546: a pack the gateway would refuse as not administrator-controlled
 // (a symlink, group/other write, an ACL, a writable folder above it) is
 // refused before anything changes, with the reason, instead of after a
