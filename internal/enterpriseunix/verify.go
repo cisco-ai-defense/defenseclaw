@@ -458,6 +458,20 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 				add("%s is not active", unit.Name)
 			}
 		}
+		// The launchd apply and daily verify jobs are not readiness checks
+		// (a loaded job waits for its trigger), but launchd runs neither
+		// once it is booted out: status and verify read ok while nothing
+		// would apply the next config push (GAP-0956).
+		for _, unit := range env.Services.Units() {
+			if !unit.Required && unit.Activate && unit.Name != env.SelfUnit && !env.Services.Active(ctx, unit) {
+				switch unit.Kind {
+				case "path":
+					add("%s is not loaded, so nothing applies the next change to config.yaml, a secret or a policy file; run `%s` to load it", unit.Name, env.lifecycleCommand(ActionRepair))
+				case "timer":
+					add("%s is not loaded, so the daily verify does not run; run `%s` to load it", unit.Name, env.lifecycleCommand(ActionRepair))
+				}
+			}
+		}
 		for _, unit := range env.Services.Units() {
 			if unit.Kind != "gateway" {
 				continue
