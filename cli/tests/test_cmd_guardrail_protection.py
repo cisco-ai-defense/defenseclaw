@@ -189,6 +189,35 @@ def test_rule_severity_default_restores_profile_config_and_digest(env, monkeypat
         assert hashlib.sha256(path.read_bytes()).hexdigest() == before_digest
 
 
+def test_rule_severity_default_keeps_empty_assigned_profile(env, monkeypatch) -> None:
+    app, _root, _writes = env
+    app.cfg.guardrail.profiles = {"everyone-default": GuardrailProfile()}
+    path = config_path_for_data_dir(app.cfg.data_dir)
+    original = (
+        b"config_version: 9\nguardrail:\n  profiles:\n    everyone-default: {}\n"
+        b"  profile_assignments:\n    - profile: everyone-default\n      match:\n        users: [test-user]\n"
+    )
+
+    def apply(changes, actor, reason, **_kwargs):
+        return config_writer.write_with(
+            lambda current, source: config_writer._patch(current, changes, source),
+            actor,
+            reason,
+            path=path,
+        )
+
+    monkeypatch.setattr(config_writer, "apply", apply)
+    for scope in ((), ("--connector", "codex")):
+        path.write_bytes(original)
+        set_result = _run(app, "rule", "severity", "CMD-PIPE-CURL", "critical", "--profile", "everyone-default", *scope)
+        assert set_result.exit_code == 0, set_result.output
+        reset_result = _run(app, "rule", "severity", "CMD-PIPE-CURL", "default", "--profile", "everyone-default", *scope)
+        assert reset_result.exit_code == 0, reset_result.output
+        document = config_writer._parse_config_document(path.read_bytes())
+        assert document["guardrail"]["profiles"]["everyone-default"] == {}
+        assert document["guardrail"]["profile_assignments"][0]["profile"] == "everyone-default"
+
+
 def test_rule_enable_of_a_rule_the_pack_ships_on_only_drops_its_disable_entry(env) -> None:
     # GAP-0258: rules.enable is for off-by-default rules; a leftover entry breaks a later pack switch.
     app, _root, writes = env
