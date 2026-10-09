@@ -566,7 +566,9 @@ Code hook refuses the plugin's skills and commands (`/<plugin>:<skill>`), its
 agents (`<plugin>:<agent>`) and its MCP tools
 (`mcp__plugin_<plugin>_<server>__<tool>`). The hook sees the plugin name only,
 so a denied rule written as `plugin@marketplace` refuses that plugin from any
-marketplace.
+marketplace. `claude plugin list` keeps showing such a plugin as enabled, since
+that list is Claude Code's own record and DefenseClaw does not edit it;
+`defenseclaw plugin list` shows the block.
 
 The MCP servers a Claude Code plugin bundles are admitted with their plugin:
 they get no admission row or MCP inventory entry of their own. The hooks hold
