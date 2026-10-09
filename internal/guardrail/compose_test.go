@@ -92,3 +92,23 @@ func TestComposeProtectionMergesCategoryAcrossFilenames(t *testing.T) {
 		t.Fatalf("composition split a single category: %+v", got.RuleFiles)
 	}
 }
+
+func TestComposeManifestPostureChangesDigest(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	before := mustLoadRulePack(t, dir)
+	layer := Customization{SeverityOverrides: map[string]string{"R-1": "LOW"}}
+	composedBefore, err := Compose(before, nil, layer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	after := mustLoadRulePack(t, dir)
+	composedAfter, err := Compose(after, nil, layer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if composedBefore.Summary().Digest == composedAfter.Summary().Digest {
+		t.Fatal("manifest posture edit did not change composed pack digest")
+	}
+}

@@ -305,7 +305,7 @@ func (rp *RulePack) mergeSensitiveTool(override SensitiveToolOverride) {
 // their rules, suppressions, sensitive tools). Judge configurations and
 // local patterns are read-only and stay shared.
 func cloneRulePackForCompose(base *RulePack) *RulePack {
-	out := &RulePack{JudgeConfigs: base.JudgeConfigs, LocalPatterns: base.LocalPatterns}
+	out := &RulePack{JudgeConfigs: base.JudgeConfigs, LocalPatterns: base.LocalPatterns, manifestDigest: base.manifestDigest}
 	if base.Suppressions != nil {
 		supps := *base.Suppressions
 		supps.PreJudgeStrips = append([]PreJudgeStrip(nil), base.Suppressions.PreJudgeStrips...)
