@@ -35,7 +35,7 @@ func (s *ContinuousDiscoveryService) detectClaudeProjectSkills() ([]AISignal, er
 	}
 	_, projects, err := readClaudeDiscoveryState(statePath)
 	if err != nil {
-		return nil, errors.New("Claude project state unavailable or outside the one MiB read limit")
+		return nil, errors.New("Claude project state unavailable or outside the 256 MiB read limit")
 	}
 	var out []AISignal
 	skipped := false

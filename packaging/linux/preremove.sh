@@ -4,10 +4,11 @@
 #
 # defenseclaw-enterprise package: stop and unregister the managed deployment
 # before its files are removed. An upgrade is left to the new package's
-# postinstall. The removal fails only when another lifecycle run keeps the
-# lock for the whole wait: removing the files then would leave machine
-# policy and per-user hooks naming a deleted binary. Any other lifecycle
-# problem is reported and does not stop the package transaction.
+# postinstall. The removal fails when another lifecycle run keeps the lock
+# for the whole wait or when the hook-removal precheck refuses. Removing the
+# files then would leave machine policy or per-user hooks naming a deleted
+# binary. Later lifecycle problems are reported without stopping the package
+# transaction.
 #
 # This uninstall never purges: dpkg passes "remove" here for both apt remove
 # and apt purge, and rpm has no purge. It removes the machine state (config,
@@ -35,6 +36,11 @@ if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     work=$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-preremove.XXXXXX") || exit 1
     "$gateway" enterprise linux uninstall --json --lock-wait 10m >"$work/last-package-result.json" 2>"$work/last-package-result.log"
     status=$?
+    precheck_refused=0
+    if [ "$status" != 0 ] &&
+        grep -Eq '"code"[[:space:]]*:[[:space:]]*"uninstall_precheck_refused"' "$work/last-package-result.json"; then
+        precheck_refused=1
+    fi
     if [ "$status" != 0 ]; then
         mkdir -p "$state" &&
             mv -f "$work/last-package-result.json" "$work/last-package-result.log" "$state/"
@@ -42,6 +48,10 @@ if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     rm -rf "$work"
     if [ "$status" = 75 ]; then
         echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 10 minutes; nothing was removed. Retry the removal." >&2
+        exit 1
+    fi
+    if [ "$precheck_refused" = 1 ]; then
+        echo "defenseclaw-enterprise: hook-removal precheck refused; package files were kept. See $state/last-package-result.json and retry removal after fixing the listed accounts." >&2
         exit 1
     fi
     [ "$status" = 0 ] ||
