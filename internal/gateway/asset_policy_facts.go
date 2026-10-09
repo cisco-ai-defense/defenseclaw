@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 
@@ -129,7 +128,7 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 	}
 	claimed := claimedAssetFactsFromContext(ctx).SkillDirs
 	reported := func(dir string) bool {
-		return slices.ContainsFunc(claimed, func(c string) bool { return samePathFold(c, dir) })
+		return slices.ContainsFunc(claimed, func(c string) bool { return sameCleanPath(c, dir) })
 	}
 	var paths []string
 	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), cwd) {
@@ -143,15 +142,6 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 		}
 	}
 	return paths
-}
-
-// samePathFold compares two clean paths, ignoring case on Windows.
-func samePathFold(a, b string) bool {
-	a, b = filepath.Clean(a), filepath.Clean(b)
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(a, b)
-	}
-	return a == b
 }
 
 // skillFolderAccessDecision blocks a tool call that reaches into the folder
