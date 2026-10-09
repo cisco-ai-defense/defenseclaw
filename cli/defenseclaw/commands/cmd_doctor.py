@@ -5792,6 +5792,38 @@ _LOOPBACK_NO_PROXY_FIX_POSIX = (
 _LOOPBACK_NO_PROXY_FIX_NT = "setx NO_PROXY 127.0.0.1,localhost,::1 (then open a new terminal)"
 
 
+_DOTENV_NO_PROXY_LINE = re.compile(r"^\s*(?:export\s+)?NO_PROXY\s*=(.*)$")
+_DOTENV_NO_PROXY_REF = re.compile(r"\$\{?(?:NO_PROXY|no_proxy)\}?")
+_LOOPBACK_NO_PROXY = frozenset({"*", "127.0.0.1", "localhost"})
+
+
+def _no_proxy_entries(value: str) -> set[str]:
+    return {entry.strip().lower() for entry in value.split(",") if entry.strip()}
+
+
+def _codex_dotenv_no_proxy(text: str, shell_value: str) -> tuple[set[str], int]:
+    """The NO_PROXY Codex ends up with after loading its .env, and the line that set it.
+
+    Codex applies every .env line in order and a later line replaces an
+    earlier one, so a corporate ``NO_PROXY=.corp.example`` after DefenseClaw's
+    entry drops the loopback again (GAP-1097). A line that names
+    ``${NO_PROXY}`` keeps what was there.
+    """
+    entries, line_number = _no_proxy_entries(shell_value), 0
+    for number, line in enumerate(text.splitlines(), 1):
+        match = _DOTENV_NO_PROXY_LINE.match(line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+            value = value[1:-1]
+        assigned = _no_proxy_entries(_DOTENV_NO_PROXY_REF.sub("", value))
+        if _DOTENV_NO_PROXY_REF.search(value):
+            assigned |= entries
+        entries, line_number = assigned, number
+    return entries, line_number
+
+
 def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) -> tuple[str, str, str] | None:
     """Say whether Codex's telemetry to the local gateway would use a proxy.
 
@@ -5809,6 +5841,18 @@ def codex_telemetry_proxy_status(environ=None, *, os_name: str | None = None) ->
             dotenv = fh.read(1024 * 1024)
     except OSError:
         dotenv = b""
+    if _CODEX_DOTENV_PROXY_MARKER.encode() in dotenv:
+        shell_no_proxy = str(env.get("NO_PROXY") or "").strip() or str(env.get("no_proxy") or "").strip()
+        effective, line_number = _codex_dotenv_no_proxy(dotenv.decode("utf-8", "replace"), shell_no_proxy)
+        if not effective & _LOOPBACK_NO_PROXY:
+            return (
+                "warn",
+                f"{proxy_var} is set, but line {line_number} of {dotenv_path} sets NO_PROXY again after "
+                "DefenseClaw's entry and drops the loopback: Codex sends its telemetry for the local gateway, "
+                "with its OTLP credential, through the proxy",
+                "add 127.0.0.1,localhost,::1 to that NO_PROXY line (or start its value with ${NO_PROXY},), "
+                "then restart Codex",
+            )
     if _CODEX_DOTENV_PROXY_MARKER.encode() in dotenv and _CODEX_DOTENV_METADATA_ENTRY not in dotenv:
         return (
             "warn",
