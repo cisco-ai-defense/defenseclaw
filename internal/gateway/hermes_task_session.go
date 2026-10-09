@@ -15,6 +15,9 @@ import (
 // identities whose last tool call is remembered.
 const hermesTaskSessionsMax = 4096
 
+// hermesTaskIDMaxBytes bounds a task id that is looked at or kept.
+const hermesTaskIDMaxBytes = 4 * 1024
+
 // hermesSessionIDMax bounds a remembered session id; a longer one is not kept.
 const hermesSessionIDMax = 256
 
@@ -52,6 +55,10 @@ func (m *hermesTaskSessions) fill(req *agentHookRequest) {
 	}
 	extra, _ := req.Payload["extra"].(map[string]interface{})
 	task, _ := extra["task_id"].(string)
+	// TrimSpace may leave a short view retaining the original large string.
+	if len(task) > hermesTaskIDMaxBytes {
+		return
+	}
 	task = strings.TrimSpace(task)
 	key := hermesTaskKey{identity: req.AgentIdentityID, task: task}
 	event := canonicalEvent(req.HookEventName)

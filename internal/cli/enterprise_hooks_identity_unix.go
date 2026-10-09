@@ -60,8 +60,17 @@ func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookRec
 			continue
 		}
 		seen[row.UID] = true
-		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: row.UID, User: row.User})
-		keys = append(keys, strconv.Itoa(row.UID)+":"+row.User)
+		user := row.User
+		if user == "" {
+			// A home-only manifest row has a verified UID but no user name.
+			// macOS directory collection needs the name to read that UID's
+			// Open Directory record.
+			if account, err := enterprisehooks.StandaloneResolver().LookupUID(row.UID); err == nil && account.UID == row.UID {
+				user = account.Name
+			}
+		}
+		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: row.UID, User: user})
+		keys = append(keys, strconv.Itoa(row.UID)+":"+user)
 	}
 	// Eligible accounts without rows, and accounts whose home is untrusted,
 	// keep their identity record too: a standard user who makes his home
