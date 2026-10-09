@@ -130,7 +130,11 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		sid, inDomain string
 	)
 	if !isLocal {
-		if data, readErr := readSmallFile(nsswitchPath, 1<<20); readErr == nil {
+		data, readErr := readSmallFile(nsswitchPath, 1<<20)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: read NSS configuration: %w", readErr)
+		}
+		if readErr == nil {
 			for _, service := range ParseNSSwitchServices(string(data), "passwd") {
 				known, ok := directoryServices[service]
 				if !ok {
