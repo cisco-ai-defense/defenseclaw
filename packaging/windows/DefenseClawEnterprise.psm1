@@ -8448,6 +8448,34 @@ function Get-DefenseClawTransactionRedactionKeyGatewaySID {
     return ''
 }
 
+function Assert-DefenseClawRepairableConfigAcl {
+    <#
+        ACL repair may restore missing gateway access, but it must not turn a
+        user-writable config into trusted policy. Check the file and both
+        directories that can replace it before changing any managed ACL.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    foreach ($path in @(
+        $Layout.StateRoot,
+        $Layout.ConfigDirectory,
+        $Layout.ConfigPath
+    )) {
+        try {
+            # Missing service rights, inherited ACLs and read-only legacy
+            # entries can be normalized. An untrusted owner or writer cannot.
+            Assert-DefenseClawPathAcl `
+                -Path ([string]$path) `
+                -AllowedWriterSIDs $adminWriters `
+                -AllowInheritance `
+                -IgnoreCreatorTemplates
+        }
+        catch {
+            throw "refusing ACL repair for untrusted managed config path: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Repair-DefenseClawDeploymentAclDrift {
     <#
         Standalone, with the services stopped. When the gateway service lost
@@ -8478,6 +8506,7 @@ function Repair-DefenseClawDeploymentAclDrift {
     if (-not $drifted) {
         return $false
     }
+    Assert-DefenseClawRepairableConfigAcl -Layout $Layout
     Set-DefenseClawRetainedRuntimeAcls `
         -RuntimeDirectory $Layout.RuntimeDirectory `
         -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
