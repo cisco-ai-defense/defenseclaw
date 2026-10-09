@@ -787,7 +787,12 @@ func (a *APIServer) finalizeAgentHook(
 	//     blocks whose UserPromptSubmit bytes hashed to a prior fingerprint.
 	if env.Enforced || !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("observability_v8", func() {
-			result.EnforcementPersisted = a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			// The AVC enforcement companion from #850 is not forward-ported;
+			// treat an enforced hook as notification-ready once the primary
+			// hook_decision log + audit row are persisted. notificationReady()
+			// still gates on AuditPersisted below.
+			result.EnforcementPersisted = env.Enforced
 			if !panicked {
 				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
 			}

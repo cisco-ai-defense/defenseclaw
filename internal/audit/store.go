@@ -3959,12 +3959,22 @@ type Counts struct {
 
 func (s *Store) GetCounts() (Counts, error) {
 	var c Counts
+	legacyActions := legacyAlertEligibleActions()
+	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
-		WHERE ` + activeConnectorHookBlockSQL() + `
+		WHERE ((event.bucket IS NULL OR event.bucket IN (
+			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
+		)) OR ` + connectorEnforcedAlertSQL() + `)
+		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
+		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
 		  AND NOT EXISTS (
 			  SELECT 1 FROM alert_acknowledgement_projection AS projection
 			  WHERE projection.alert_id = event.id
 		  )`
+	alertCountArgs := make([]any, 0, len(legacyActions))
+	for _, action := range legacyActions {
+		alertCountArgs = append(alertCountArgs, action)
+	}
 	queries := []struct {
 		sql  string
 		args []any
@@ -3974,9 +3984,12 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
-		// AVC ActiveAlerts is exactly the number of unacknowledged AI Defense
-		// blocks that managed-enterprise connector hooks actually enforced.
-		{alertCountSQL, nil, &c.Alerts},
+		// ActiveAlerts is the unacknowledged actionable queue, not a count
+		// of every non-INFO audit row. Keep this IPC surface aligned with
+		// the v8 disposition selector: real findings, explicit non-allow
+		// outcomes, and important health failures only. Detection-only,
+		// clean lifecycle, LOW/MEDIUM/WARNING, and reviewed rows stay out.
+		{alertCountSQL, alertCountArgs, &c.Alerts},
 		{`SELECT COUNT(*) FROM scan_results`, nil, &c.TotalScans},
 		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, nil, &c.BlockedEgressCalls},
 	}

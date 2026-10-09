@@ -521,7 +521,7 @@ func assertHistoricalEvidenceCurrentWritesWork(t *testing.T, store *Store) {
 	if got, err := store.ListAlerts(10); err != nil || len(got) != 1 || got[0].ID != "current-alert" {
 		t.Fatalf("current ListAlerts=%+v err=%v", got, err)
 	}
-	if got, err := store.GetCounts(); err != nil || got.TotalScans != 1 || got.Alerts != 0 {
+	if got, err := store.GetCounts(); err != nil || got.TotalScans != 1 || got.Alerts != 1 {
 		t.Fatalf("current GetCounts=%+v err=%v", got, err)
 	}
 }

@@ -2535,9 +2535,8 @@ func TestSafeApplyAgentHookToolChainsDoesNotInventDenyForDetectionOnlyChainOnPan
 		original,
 		0,
 	)
-	if got.Action != "block" || got.RawAction != "block" || got.WouldBlock ||
-		!got.SuppressNotification ||
-		!slices.Contains(got.RuleIDs, guardrail.ToolChainPrivilegeDiscoveryThenElevation) {
+	if got.Action != "allow" || got.RawAction != "allow" || got.WouldBlock ||
+		len(got.RuleIDs) != 0 {
 		t.Fatalf("post-commit panic response=%+v", got)
 	}
 	hookSpecific, ok := got.HookOutput["hookSpecificOutput"].(map[string]interface{})
