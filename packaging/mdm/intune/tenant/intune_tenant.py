@@ -720,6 +720,17 @@ def cmd_remove_assignment(graph: Graph, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- remediation and macos-script
 
 
+def same_run_schedule(stored: dict, requested: dict) -> bool:
+    """Graph returns daily times with seven trailing fractional zeroes."""
+    for key, value in requested.items():
+        actual = stored.get(key)
+        if key == "time" and isinstance(actual, str):
+            actual = re.sub(r"\.0+$", "", actual)
+        if actual != value:
+            return False
+    return True
+
+
 def _upsert(graph: Graph, collection: str, name: str, body: dict, apply: bool, what: str,
             create_body: dict | None = None) -> str | None:
     """Create or update an object by display name. Returns its id (None in a preview that would create)."""
@@ -809,8 +820,9 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             "runRemediationScript": True,
             "runSchedule": schedule,
         }
-        same_schedule = matching and all(matching[0].get(key) == value for key, value in wanted.items()
-                                         if key != "runRemediationScript")
+        same_schedule = matching and matching[0].get("target") == wanted["target"] and same_run_schedule(
+            matching[0].get("runSchedule") or {}, schedule
+        )
         if same_schedule and matching[0].get("runRemediationScript") in (True, False):
             detail = (
                 " (detection only: the tenant stored runRemediationScript=false; enable remediation "
@@ -831,10 +843,10 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
                 stored = next(
                     (item for item in current if (item.get("target") or {}).get("groupId") == group["id"]), None
                 )
-                if stored and stored.get("runSchedule") == schedule:
+                if stored and same_run_schedule(stored.get("runSchedule") or {}, schedule):
                     break
                 time.sleep(2)
-            if stored is None or stored.get("runSchedule") != schedule:
+            if stored is None or not same_run_schedule(stored.get("runSchedule") or {}, schedule):
                 raise SystemExit(
                     f"error: Intune did not return the assignment for {args.group!r}; check it in the admin center"
                 )

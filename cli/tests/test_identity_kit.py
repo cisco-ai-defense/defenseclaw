@@ -1565,7 +1565,7 @@ def test_intune_remediation_does_not_repeat_tenant_detection_only_assignment(
     old = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
            "runRemediationScript": False,
            "runSchedule": {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
-                           "interval": 1, "time": "03:00:00", "useUtc": False}}
+                           "interval": 1, "time": "03:00:00.0000000", "useUtc": False}}
 
     class Graph:
         def get_all(self, path):
@@ -1583,7 +1583,7 @@ def test_intune_remediation_does_not_repeat_tenant_detection_only_assignment(
             writes.append((method, path, body))
             return {}
 
-    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--daily-at", "03:00", "--apply"])
     assert intune.cmd_remediation(Graph(), args) == 0
     assert writes == []
     assert "unchanged (detection only: the tenant stored runRemediationScript=false" in capsys.readouterr().out
@@ -1596,7 +1596,7 @@ def test_intune_remediation_reads_back_tenant_state_after_assign(
     monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
     writes = []
     schedule = {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
-                "interval": 1, "time": "02:00:00", "useUtc": False}
+                "interval": 1, "time": "02:00:00.0000000", "useUtc": False}
     stored = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
               "runRemediationScript": False, "runSchedule": schedule}
 
