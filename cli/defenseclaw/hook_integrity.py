@@ -371,18 +371,24 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
     from ``~/.claude/settings.json``), the agent runs unguarded; status says
     so instead of showing the connector as normal (GAP-1230). When the
     entries are there, their commands must also be ones the shell can run
-    (:func:`hook_command_problems`).
+    (:func:`hook_command_problems`). Per-user Windows gets the same check: a
+    Codex self-update left config.toml without hooks while ``guardrail mode
+    action`` reported success (GAP-1035).
     """
 
-    if _is_windows():
-        return hook_launcher_problems(cfg, connector) or agent_hook_switch_problems(cfg, connector)
+    windows = _is_windows()
+    if windows:
+        launcher = hook_launcher_problems(cfg, connector)
+        if launcher or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+            return launcher
     existing: list[Path] = []
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
             if "defenseclaw" in _registration_text(path.read_text(encoding="utf-8", errors="replace")):
-                return hook_command_problems(cfg, connector) or agent_hook_switch_problems(cfg, connector)
+                commands = [] if windows else hook_command_problems(cfg, connector)
+                return commands or agent_hook_switch_problems(cfg, connector)
         except OSError:
             continue
         existing.append(path)

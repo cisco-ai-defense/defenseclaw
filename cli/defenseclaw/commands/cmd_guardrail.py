@@ -3293,6 +3293,29 @@ def _echo_stopped_gateway_note(what: str | None, *, audit_skipped: bool) -> None
     )
 
 
+def _unguarded_hook_connectors(app: AppContext, connectors: list[str]) -> list[tuple[str, str, str]]:
+    """``(connector, why, repair)`` for each hook connector the running gateway does not guard.
+
+    The same read-back first run uses: the gateway's started roster and the
+    hook registration on disk (GAP-1035).
+    """
+    from defenseclaw.bootstrap import _connector_runtime_readiness
+    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
+
+    found = []
+    for name in connectors:
+        key = normalize_connector(name)
+        if key not in _HOOK_ENFORCED_CONNECTORS:
+            continue
+        try:
+            step = _connector_runtime_readiness(app.cfg, key)
+        except Exception:  # noqa: BLE001 - the change is saved; status and doctor still report it.
+            continue
+        if step is not None and step.status in ("warn", "fail"):
+            found.append((key, step.detail, step.next_command))
+    return found
+
+
 def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: bool, quiet: bool) -> str:
     """Make a saved guardrail change reach a running gateway; returns the outcome.
 
@@ -4707,6 +4730,7 @@ def mode_cmd(
             except OSError:
                 needs_restart.add(c)
     outcome = _apply_to_running_gateway(app, needs_restart=bool(needs_restart), restart=restart, quiet=json_out)
+    unguarded = _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
 
     plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
     if connector_key is None:
@@ -4736,6 +4760,26 @@ def mode_cmd(
         f"change it with: defenseclaw guardrail mode {new_mode} --connector {c}"
         for c in not_covered
     )
+    if unguarded:
+        # Action mode without registered hooks blocks nothing; the command must
+        # not report success then (GAP-1035).
+        notes = [f"Next: {step}" for _name, _detail, step in unguarded if step] + notes
+        names = ", ".join(_connector_label(name) for name, _detail, _step in unguarded)
+        _finish(
+            ok=False,
+            exit_code=1,
+            new_mode=new_mode,
+            previous=previous,
+            source=source,
+            changed=True,
+            not_covered=not_covered,
+            gateway=outcome,
+            notes=notes,
+            message=(
+                f"The mode is saved as action, but {names} is not guarded, so nothing is blocked yet: "
+                + "; ".join(detail for _name, detail, _step in unguarded)
+            ),
+        )
     _finish(
         ok=outcome not in _GATEWAY_UNCONFIRMED,
         exit_code=1 if outcome in _GATEWAY_UNCONFIRMED else 0,

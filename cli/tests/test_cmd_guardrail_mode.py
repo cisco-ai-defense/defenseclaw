@@ -219,3 +219,19 @@ def test_copilot_action_message_names_upstream_fail_open(app) -> None:
     assert result.exit_code == 0, result.output
     assert "upstream limitation" in result.output
     assert "now fail closed" not in result.output
+
+
+def test_action_mode_without_registered_hooks_is_not_reported_as_success(app, restarts, rerenders, tmp_path) -> None:
+    # GAP-1035: after a Codex self-update config.toml had no DefenseClaw hooks,
+    # yet the command said Codex was in action mode and exited 0.
+    config = tmp_path / "codex-config.toml"
+    config.write_text('model = "gpt"\n')
+    data_dir = tmp_path / "dc"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock = {"version": 2, "connectors": {"codex": {"locations": {"hook_config_paths": [str(config)]}}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock))
+
+    result, payload = _run(app, "action", "--connector", "codex", "--json")
+    assert result.exit_code == 1, result.output
+    assert payload["ok"] is False and payload["mode"] == "action"
+    assert "not guarded" in payload["message"] and str(config) in payload["message"]
