@@ -9035,6 +9035,9 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		if !group.hasTarget {
 			continue
 		}
+		if group.hasDownloadFile {
+			addOperation(command, OperationWrite)
+		}
 		if group.hasUploadTarget {
 			addOperation(command, OperationUpload)
 			if !group.hasUploadNetwork {

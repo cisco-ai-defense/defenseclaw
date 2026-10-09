@@ -715,13 +715,22 @@ func integrityCommandOwnsStaticRedirect(
 ) bool {
 	for _, redirect := range command.Redirects {
 		if !redirect.Expands &&
-			redirect.Target == candidate.Value &&
+			redirectMatchesPath(redirect.Target, candidate) &&
 			redirect.Access == candidate.Access &&
 			integrityMutationAccess(redirect.Access) {
 			return true
 		}
 	}
 	return false
+}
+
+func redirectMatchesPath(target string, candidate actionfacts.PathFact) bool {
+	canonical := canonicalSemanticPath(target)
+	if strings.HasPrefix(canonical, "~/") {
+		return strings.HasSuffix(canonicalSemanticPath(candidate.Resolved), canonical[1:])
+	}
+	return canonical == canonicalSemanticPath(candidate.Value) ||
+		canonical == canonicalSemanticPath(candidate.Normalized)
 }
 
 func integrityMutationAccess(access actionfacts.PathAccess) bool {
@@ -1432,15 +1441,10 @@ func sshPrivateKeyMutationPrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
-// appendTrustedHomeResolvedSSHKeyWriteFinding adds PATH-SSH-DIR when the
-// home-resolved twin of a partial action writes, appends or deletes the
-// active user's SSH private key: `echo x >> "$HOME/.ssh/id_rsa"`, `printf x |
-// tee ~/.ssh/id_ed25519`, `mkdir -p ~/.ssh && touch ~/.ssh/id_ed25519`. The
-// shell expands those paths at run time, so neither the action's analysis
-// nor its views had a path fact for the key, and the write had no finding
-// while the absolute path alerted (GAP-1832, GAP-1716). findings are the
-// finalized findings; the added one alerts, as the absolute form does, and
-// never blocks: the twin assumes the shell's HOME is the caller's.
+// appendTrustedHomeResolvedSSHKeyWriteFinding adds the authorized-keys write
+// check when a bounded positive proof can recover the active path from a
+// partial tool call. It also retains PATH-SSH-DIR's alert for a home-resolved
+// private-key write, whose target is resolved under the caller's home.
 func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	findings []RuleFinding,
 	generation *compiledRulePackCategories,
@@ -1448,8 +1452,68 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	facts actionfacts.Facts,
 ) []RuleFinding {
 	input := request.Input
+	if input.Command == "" {
+		if command, ok := trustedBashCommandInput(input); ok {
+			input.Command = command
+		}
+	}
+	commandText := strings.ToLower(input.Command)
+	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
+		!strings.Contains(commandText, "administrators_authorized") &&
+		!strings.Contains(commandText, "base64") {
+		return appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts)
+	}
 	for _, finding := range findings {
-		if finding.RuleID == "PATH-SSH-DIR" || finding.RuleID == "persistence.ssh_authorized_keys_command" {
+		if finding.RuleID == "persistence.ssh_authorized_keys_command" &&
+			finding.contributesToEnforcement() {
+			return findings
+		}
+	}
+	enforcementFacts := facts.EnforcementProjection()
+	if request.EnforcementCapable &&
+		(enforcementFacts.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
+			homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
+			trustedStaticStatementAuthorizedKeysWrite(input) ||
+			trustedSedInPlaceAuthorizedKeysWrite(input) ||
+			trustedAssignedAuthorizedKeysWrite(input) ||
+			trustedAuthorizedKeysGlobWrite(input) ||
+			trustedAuthorizedKeysSymlinkWrite(input) ||
+			trustedFindExecAuthorizedKeysWrite(input) ||
+			trustedHomeDirectoryAuthorizedKeysWrite(input) ||
+			trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
+			trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
+			trustedInlineAuthorizedKeysWrite(facts) ||
+			trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
+			trustedNestedAuthorizedKeysWrite(input, facts)) {
+		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
+		if ok {
+			kept := findings[:0]
+			for _, finding := range findings {
+				if finding.RuleID != "PATH-SSH-DIR" &&
+					finding.RuleID != "persistence.ssh_authorized_keys_command" {
+					kept = append(kept, finding)
+				}
+			}
+			return append(kept, adjustConfidence(input.Tool, RuleFinding{
+				RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
+				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
+				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+				enforcement: findingEnforcementAllowed,
+			}))
+		}
+	}
+	return appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts)
+}
+
+func appendTrustedSSHPrivateKeyWriteFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+) []RuleFinding {
+	input := request.Input
+	for _, finding := range findings {
+		if finding.RuleID == "PATH-SSH-DIR" {
 			return findings
 		}
 	}
@@ -1553,7 +1617,7 @@ func integrityExplicitCommandMutator(
 		return false
 	}
 	switch strings.ToLower(command.Program) {
-	case "tee", "truncate", "rm", "unlink", "cp", "mv", "copy",
+	case "tee", "truncate", "rm", "unlink", "cp", "mv", "install", "sed", "curl", "copy",
 		"move", "set-content", "sc", "add-content", "ac", "out-file",
 		"remove-item", "ri", "copy-item", "cpi", "move-item", "mi":
 		return true

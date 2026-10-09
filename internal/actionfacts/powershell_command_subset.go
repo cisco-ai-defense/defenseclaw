@@ -23,7 +23,91 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"mvdan.cc/sh/v3/syntax"
 )
+
+// POSIXPowerShellCommandFacts analyzes the literal body of a PowerShell
+// -Command invocation carried by a POSIX shell tool. The shell projection
+// loses single backslashes in unquoted Windows paths, so those words are
+// recovered from the same parsed shell call before the PowerShell analysis.
+// Only one unconditional invocation with a statically named executable and
+// a -Command or -c body is eligible.
+func POSIXPowerShellCommandFacts(input Input, facts Facts) []Facts {
+	if input.Command == "" || len(facts.Commands) == 0 ||
+		(facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectMixed) ||
+		len(input.Command) > maxCommandBytes {
+		return nil
+	}
+	outer := facts.Commands[0]
+	if outer.ParentCommandID != 0 || len(outer.Argv) < 3 {
+		return nil
+	}
+	switch strings.ToLower(outer.Program) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+	default:
+		return nil
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 ||
+		file.Stmts[0].Background || file.Stmts[0].Negated {
+		return nil
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != len(outer.Argv) {
+		return nil
+	}
+	argv := append([]string(nil), outer.Argv...)
+	commandSwitch := false
+	for _, argument := range argv[1:] {
+		if strings.EqualFold(argument, "-Command") || strings.EqualFold(argument, "-c") {
+			commandSwitch = true
+		}
+	}
+	if !commandSwitch {
+		return nil
+	}
+	for index, word := range call.Args {
+		if index == 0 {
+			continue
+		}
+		start, end := int(word.Pos().Offset()), int(word.End().Offset())
+		if start < 0 || end <= start || end > len(input.Command) {
+			return nil
+		}
+		raw := input.Command[start:end]
+		if strings.Contains(raw, `\`) && !strings.ContainsAny(raw, `"'`+"`"+`$`) {
+			argv[index] = raw
+		} else if index >= 2 && !outer.ArgvComplete &&
+			strings.HasPrefix(raw, `"`) && strings.HasSuffix(raw, `"`) {
+			body := raw[1 : len(raw)-1]
+			body = strings.ReplaceAll(body, `\"`, `"`)
+			body = strings.ReplaceAll(body, `\$`, `$`)
+			argv[index] = body
+		}
+	}
+	body, ok := exactPowerShellCommandBody(argv)
+	if !ok {
+		return nil
+	}
+	segments, ok := staticPowerShellSegments(body, 0)
+	if !ok {
+		return nil
+	}
+	var result []Facts
+	for _, segment := range segments {
+		inner := input
+		inner.Args, inner.Argv = nil, nil
+		inner.Tool = "powershell"
+		inner.Command = segment
+		inner.DialectHint = DialectPowerShell
+		parsed := Analyze(inner)
+		if parsed.EnforcementEligible() || parsed.Parse.Status == StatusPartial {
+			result = append(result, parsed)
+		}
+	}
+	return result
+}
 
 // PowerShellCommandSubsetReduction projects statically supplied commands of
 // a PowerShell -Command or -EncodedCommand body. The original action remains
