@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/localobservability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	compatredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -2004,10 +2005,17 @@ func TestObservabilityV8ShutdownFlushFitsTheGracefulStopWindow(t *testing.T) {
 }
 
 // GAP-2166: a shutdown flush timeout is a warning that names the bound and the
-// next step, not a "bootstrap failed" error.
+// next step, not a "bootstrap failed" error. GAP-1096: it names each
+// destination and how many records it lost.
 func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
-	got := observabilityV8ShutdownFlushWarning()
-	for _, want := range []string{"WARNING", "did not finish within 4s", "setup observability test", "stopped normally"} {
+	sidecar := &Sidecar{observabilityV8ShutdownLosses: []observabilityruntime.ShutdownLoss{
+		{Destination: "eoi-hec", Signal: observability.SignalLogs, Records: 150},
+	}}
+	got := sidecar.observabilityV8ShutdownFlushWarning()
+	for _, want := range []string{
+		"WARNING", "did not finish within 4s", "150 unsent telemetry records (eoi-hec logs 150)",
+		"setup observability test", "stopped normally",
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("warning %q is missing %q", got, want)
 		}

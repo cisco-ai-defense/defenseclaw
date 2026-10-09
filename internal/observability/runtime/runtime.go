@@ -115,6 +115,13 @@ type Runtime struct {
 	retention           *RetentionController
 	destinationObserver *safeDeliveryObserver
 	lifecycleMu         sync.Mutex
+	secureClient        bool
+	// shutdownLosses is what the first Close that found an active graph
+	// dropped or left unsent (GAP-1096); carried holds such losses of an
+	// earlier process, reported for the generation they were carried into.
+	shutdownLosses        []ShutdownLoss
+	shutdownLossesCounted bool
+	carried               carriedShutdownLosses
 }
 
 // EmitContext is the exact immutable graph snapshot pinned for one Emit call.
@@ -267,7 +274,7 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	owned = true
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
-		destinationObserver: destinationObserver,
+		destinationObserver: destinationObserver, secureClient: options.SecureClient,
 	}, nil
 }
 
@@ -640,6 +647,10 @@ func (runtime *Runtime) Close(ctx context.Context) error {
 	}
 	runtime.lifecycleMu.Lock()
 	defer runtime.lifecycleMu.Unlock()
+	var lossSources []shutdownLossSource
+	if !runtime.shutdownLossesCounted {
+		lossSources = runtime.beginShutdownLossCount(ctx)
+	}
 	var first error
 	if runtime.retention != nil {
 		if err := runtime.retention.stopRuntime(ctx); err != nil {
@@ -662,6 +673,10 @@ func (runtime *Runtime) Close(ctx context.Context) error {
 		if err := runtime.destinationObserver.Close(ctx); first == nil && err != nil {
 			first = &Error{code: ErrorShutdown}
 		}
+	}
+	if lossSources != nil {
+		runtime.shutdownLosses = countShutdownLosses(lossSources, shutdownLossSettle)
+		runtime.shutdownLossesCounted = true
 	}
 	return first
 }

@@ -159,6 +159,11 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			source.Queue = &queue
 			mergeQueue(row, queue)
 		}
+		// Records an earlier gateway process abandoned at shutdown count as
+		// dropped once, in the generation they were carried into (GAP-1096).
+		source.Counters.Dropped = addUint64(
+			source.Counters.Dropped, runtime.carriedDropped(graph.Generation(), source.Destination, source.Signal),
+		)
 		row.Sources = append(row.Sources, source)
 		row.Counters = addCounters(row.Counters, source.Counters)
 		if healthStateRank(source.State) > healthStateRank(row.State) {

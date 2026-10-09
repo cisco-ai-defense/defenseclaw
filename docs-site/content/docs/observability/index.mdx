@@ -276,7 +276,11 @@ them; export that history separately if backfill matters. Doctor shows dropped
 and rejected counts per destination. The `defenseclaw.queue.drops` delta
 metric reports those record losses per `destination.<name>.<signal>` queue,
 with `dropped` or `rejected` as the reason. `dropped` includes queue overflow,
-retry exhaustion, and records abandoned during shutdown.
+retry exhaustion, and records abandoned during shutdown. When the gateway stops
+before a destination takes its queued records, `gateway.log` names each
+destination signal and how many records it lost, and the next gateway start
+counts them in that destination's `dropped` counter and in
+`defenseclaw.queue.drops`.
 
 Gateway health and `defenseclaw doctor` expose the circuit state, consecutive
 failures, bounded failure class, and open deadline. Transient-open and

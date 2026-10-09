@@ -810,6 +810,7 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	if !ok || owner == nil {
 		return nil
 	}
+	s.flushDestinationLossMetricsV8()
 	// Stop new control-plane producers from acquiring this owner before Close
 	// waits for already-started emissions. Sidecar shutdown has already joined
 	// the config/API/proxy producers, so no selected v8 action can legitimately
@@ -828,8 +829,10 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 		s.bindObservabilityV8ConsumersLocked()
 	}
 	s.observabilityV8Mu.Unlock()
-	if err := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout); err != nil {
-		return err
+	closeErr := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout)
+	s.noteObservabilityV8ShutdownLosses(owner, closeErr == nil)
+	if closeErr != nil {
+		return closeErr
 	}
 	if s.health != nil {
 		s.health.clearObservabilityV8HealthSource()
@@ -841,16 +844,6 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	}
 	s.observabilityV8Mu.Unlock()
 	return nil
-}
-
-// observabilityV8ShutdownFlushWarning is the gateway.log line written when the
-// telemetry runtime cannot finish its flush within the shutdown bound. The stop
-// itself succeeded, so it is a warning, not an "Error:" line (GAP-2166).
-func observabilityV8ShutdownFlushWarning() string {
-	return fmt.Sprintf("[sidecar] WARNING: telemetry flush on shutdown did not finish within %s; "+
-		"unsent telemetry was dropped. A telemetry destination is probably unreachable: "+
-		"check it with 'defenseclaw setup observability test <name>'. The gateway stopped normally.\n",
-		sidecarObservabilityV8ShutdownTimeout)
 }
 
 // observabilityV8ActivePlanDigest returns the plan identity actually owned by
