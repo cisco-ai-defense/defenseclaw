@@ -89,7 +89,9 @@ namespace $namespace
                     if (removed != 0 && LsaNtStatusToWinError(removed) != 2) { Check(removed); }
                     return new string[0];
                 }
-                if (add != null)
+                // PowerShell converts a null string argument to String.Empty.
+                // Both representations mean a read-only fixture operation.
+                if (!String.IsNullOrEmpty(add))
                 {
                     name = Marshal.StringToHGlobalUni(add);
                     UnicodeString right = new UnicodeString();
