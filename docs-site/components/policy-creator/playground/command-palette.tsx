@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Cmd-K / Ctrl-K command palette for the Playground. Lets operators
-// jump straight to a knob ("hilt severity", "splunk hec token",
+// jump straight to a knob ("hilt severity", "webhook secret",
 // "block threshold") instead of opening every accordion until they
 // find it.
 //
@@ -70,7 +70,6 @@ export const INDEX: IndexEntry[] = [
   // webhooks
   { sectionId: 'webhooks', group: 'Webhooks', label: 'Webhook destination', keywords: ['webhook', 'callback', 'url'] },
   { sectionId: 'webhooks', group: 'Webhooks', label: 'Webhook signing secret', keywords: ['hmac', 'signing', 'secret', 'env var'] },
-  { sectionId: 'webhooks', group: 'Webhooks', label: 'Splunk HEC sink', keywords: ['splunk', 'hec', 'token', 'url'] },
   { sectionId: 'webhooks', group: 'Webhooks', label: 'PagerDuty sink', keywords: ['pagerduty', 'pd', 'routing key'] },
   { sectionId: 'webhooks', group: 'Webhooks', label: 'Slack webhook', keywords: ['slack', 'channel', 'webhook'] },
 
@@ -236,7 +235,7 @@ export function CommandPalette({ onJump }: CommandPaletteProps) {
                 commit(results[active]);
               }
             }}
-            placeholder="Search knobs (e.g. 'hilt severity', 'splunk token', 'block threshold')"
+            placeholder="Search knobs (e.g. 'hilt severity', 'webhook secret', 'block threshold')"
             className="flex-1 bg-transparent text-sm text-fd-foreground placeholder:text-fd-muted-foreground focus:outline-none"
           />
           <kbd className="rounded border border-fd-border bg-fd-background px-1.5 py-0.5 text-[10px] text-fd-muted-foreground">

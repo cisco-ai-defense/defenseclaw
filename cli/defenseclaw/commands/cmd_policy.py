@@ -777,6 +777,22 @@ def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, 
         if key in guardrail:
             rank = int(guardrail[key])
             setattr(cfg.guardrail, attr, "" if rank == default else _RANK_NAMES.get(rank, ""))
+    if "mode" in guardrail:
+        mode = str(guardrail["mode"]).strip()
+        if mode not in {"observe", "action"}:
+            raise ValueError("guardrail.mode must be observe or action")
+        cfg.guardrail.mode = mode
+    if "hilt" in guardrail:
+        from defenseclaw.config import HILTConfig
+
+        raw_hilt = guardrail["hilt"]
+        if not isinstance(raw_hilt, dict):
+            raise ValueError("guardrail.hilt must be an object")
+        enabled = _policy_bool(raw_hilt.get("enabled", False), "guardrail.hilt.enabled")
+        severity = str(raw_hilt.get("min_severity", "HIGH")).upper()
+        if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            raise ValueError("guardrail.hilt.min_severity must be LOW, MEDIUM, HIGH or CRITICAL")
+        cfg.guardrail.hilt = HILTConfig(enabled=enabled, min_severity=severity)
     if "cisco_trust_level" in guardrail:
         level = str(guardrail["cisco_trust_level"] or "")
         cfg.guardrail.cisco_trust_level = "" if level == "full" else level

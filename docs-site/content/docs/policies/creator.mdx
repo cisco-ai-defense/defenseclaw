@@ -58,7 +58,7 @@ These small affordances exist on top of the two main tabs to shorten the most co
 | --- | --- | --- |
 | **Live preview drawer** | Quick Start (every step except Review) | Floating bottom-right pane that evaluates the in-progress admission or guardrail Rego policy against canned scenarios. |
 | **Custom test input** | Live Test pane (in the drawer or on the Review step) | Switch the OPA/Rego input source from "canned scenario" to "custom input" and paste your own JSON. Per-domain drafts persist to `localStorage`. Re-evaluates 250 ms after you stop typing. |
-| **`⌘K` / `Ctrl-K` palette** | Playground | Fuzzy-search every section and knob ("hilt severity", "splunk hec token", "block threshold"). Selecting a result expands the matching section, scrolls to it, and flashes a brief outline. |
+| **`⌘K` / `Ctrl-K` palette** | Playground | Fuzzy-search every section and knob ("hilt severity", "webhook secret", "block threshold"). Selecting a result expands the matching section, scrolls to it, and flashes a brief outline. |
 | **Syntax-highlighted Rego editor** | Playground → Custom Rego | Zero-dependency editor: transparent textarea over a tokenized overlay. Tab inserts 2 spaces, Shift-Tab dedents. Highlighting is presentation-only — `opa check` runs on your host at install time. |
 | **Copy share link** | Quick Start Review + Playground Review | Encodes the current policy into the URL fragment as `gzip + base64url`, copies the link to your clipboard. The fragment never leaves your browser as a network request, but the link itself contains the policy — share it like you would the YAML. |
 
@@ -121,15 +121,16 @@ the Playground and the [suppression cookbook](/docs/policies/suppression-cookboo
 <Step>
 
 **Step 4 — Response.** Pick how aggressive enforcement should be: log silently, alert on HIGH+, ask
-first (human approval, HITL) on MEDIUM+, or hard block on MEDIUM+. Drives the guardrail thresholds,
-the HITL configuration (the `guardrail.hilt` key), and the skill\_actions matrix.
+first (human approval, HITL) on MEDIUM+, or hard block on MEDIUM+. Drives guardrail mode,
+thresholds, HITL configuration (the `guardrail.hilt` key), and the skill\_actions matrix.
 
 </Step>
 
 <Step>
 
-**Step 5 — Sinks.** Plan local audit and stdout settings, and configure Splunk HEC, Slack webhook, or a generic webhook.
-Secrets are referenced by env var name only — never typed inline.
+**Step 5 — Sinks.** Plan local audit and stdout settings, and configure Slack or generic webhooks.
+For Splunk HEC, use [setup splunk](/docs/observability/splunk) after installing the policy;
+a generic webhook does not send the HEC Authorization header. Secrets are referenced by env var name only.
 
 </Step>
 
@@ -147,7 +148,7 @@ writes it into `config.yaml`:
 defenseclaw policy activate my-policy
 ```
 
-`policy activate` copies the admission policy and guardrail levels into `config.yaml`; it does not
+`policy activate` copies the admission policy, guardrail mode, levels, and HITL settings into `config.yaml`; it does not
 change the rule pack. The rule pack the creator wrote to
 `~/.defenseclaw/policies/guardrail/my-policy/` (rules, suppressions, sensitive tools and judges)
 isn't enforced until you validate it and switch to it. `use-pack` pins the pack's digest in
@@ -176,7 +177,7 @@ The **Backed by** column names the keys in the exported policy file. `policy act
 | Basics           | `name`, `description`, `basedOn` keys in the top-level policy YAML.                                                                    |
 | Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-type `scanner_overrides.<type>.<sev>`; activation writes them to `admission.defaults`, `admission.skill` and `admission.<type>.actions`. |
 | Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
-| Guardrail        | `guardrail.block_threshold` / `alert_threshold` (activation writes `guardrail.block_at` / `alert_at`), `guardrail.hilt`, Cisco trust level. Activation copies only the levels and the trust level. The `patterns` and `severity_mappings` it still exports are not read by the gateway since `config_version: 9`; editing them changes nothing. |
+| Guardrail        | `guardrail.mode`, `guardrail.block_threshold` / `alert_threshold` (activation writes `guardrail.block_at` / `alert_at`), `guardrail.hilt`, Cisco trust level. Activation copies the mode, levels, HITL settings, and trust level. The `patterns` and `severity_mappings` it still exports are not read by the gateway since `config_version: 9`; editing them changes nothing. |
 | Rule pack        | Per-file regex rules and CEL candidate expressions, including `tool_call_only` scoping (`policies/guardrail/<pack>/rules/<filename>.yaml`). |
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
@@ -184,7 +185,7 @@ The **Backed by** column names the keys in the exported policy file. `policy act
 | Session correlator (Layer 5) | Read-only view of the two post-event correlator patterns compiled into the gateway. They always run and aren't exported. These are distinct from the 26 fixed ActionFacts chains. |
 | Deterministic coverage | Read-only inventory of code-owned ActionFacts capabilities, the 26 bounded tool-call chains, and the ten MCP-description YARA signatures; also applies selectable high-assurance rule packs to the custom pack. |
 | Firewall         | Planning notes only: `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports` are excluded from export. |
-| Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
+| Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets. Splunk HEC uses an observability destination configured separately.                                                    |
 | Watch (rescan)   | `watch.rescan_enabled`, `watch.rescan_interval_min`.                                                                                    |
 | Enforcement      | `enforcement.max_enforcement_delay_seconds` is exported but not read by the gateway since `config_version: 9`.                          |
 | Audit            | Planning notes only: `audit.log_all_actions`, `audit.log_scan_results`, `audit.retention_days` are excluded from export. |
