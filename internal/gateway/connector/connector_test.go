@@ -1693,7 +1693,7 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 			entry, _ := rawEntry.(map[string]interface{})
 			commands, _ := entry["hooks"].([]interface{})
 			for _, rawCommand := range commands {
-				command, _ := rawCommand.(map[string]interface{})
+				command, _ := claudeCodeExecView(rawCommand).(map[string]interface{})
 				value, _ := command["command"].(string)
 				switch value {
 				case secondCommand:
@@ -2061,7 +2061,7 @@ func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *
 	for _, rawGroups := range settings["hooks"].(map[string]interface{}) {
 		for _, rawGroup := range rawGroups.([]interface{}) {
 			for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
-				handler := rawHandler.(map[string]interface{})
+				handler := claudeCodeExecView(rawHandler).(map[string]interface{})
 				switch handler["command"] {
 				case oldBinary:
 					oldCount++
@@ -2142,7 +2142,7 @@ func TestClaudeCode_SetupPreservesForeignSameBasenameExecHook(t *testing.T) {
 	for _, rawEntry := range entries {
 		entry := rawEntry.(map[string]interface{})
 		for _, rawHandler := range entry["hooks"].([]interface{}) {
-			handler := rawHandler.(map[string]interface{})
+			handler := claudeCodeExecView(rawHandler).(map[string]interface{})
 			switch handler["command"] {
 			case foreignCommand:
 				foreignCount++
@@ -2349,7 +2349,7 @@ func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepo
 				t.Fatalf("hooks[%q][%d].hooks = %T, want array", eventType, entryIndex, entry["hooks"])
 			}
 			for hookIndex, rawHook := range rawHooks {
-				hook, ok := rawHook.(map[string]interface{})
+				hook, ok := claudeCodeExecView(rawHook).(map[string]interface{})
 				if !ok {
 					t.Fatalf("hooks[%q][%d].hooks[%d] = %T, want object", eventType, entryIndex, hookIndex, rawHook)
 				}
@@ -4779,7 +4779,9 @@ func TestCodexSetupReplacesHookEntriesLeftWithoutCommand(t *testing.T) {
 	}
 	var kept []string
 	for _, line := range strings.Split(string(raw), "\n") {
-		if !strings.Contains(line, "codex-hook.sh") {
+		// The hook command lines (codex-hook.sh, or the native launcher on
+		// Windows) all carry --event.
+		if !strings.HasPrefix(strings.TrimSpace(line), "command") || !strings.Contains(line, "--event") {
 			kept = append(kept, line)
 		}
 	}
