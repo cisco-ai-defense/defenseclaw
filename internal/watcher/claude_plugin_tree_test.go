@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -128,20 +129,22 @@ func TestClaudePluginStagingIsNotAPlugin(t *testing.T) {
 	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
 	staging := filepath.Join(cache, "temp_local_1759900000000", "skills", "epa-plug-ok-skill")
 	final := filepath.Join(cache, "epa-market", "epa-plug-ok", "1.0.0")
-	for _, dir := range []string{staging, final} {
+	marketplace := filepath.Join(cache, "temp_review", "sample-plugin", "1.0.0")
+	for _, dir := range []string{staging, final, marketplace} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
-	if !w.inClaudePluginStaging(staging, 0) || w.inClaudePluginStaging(final, 0) {
+	if !w.inClaudePluginStaging(staging, 0) || w.inClaudePluginStaging(final, 0) ||
+		w.inClaudePluginStaging(marketplace, 0) {
 		t.Fatal("staging and final folders are not told apart")
 	}
 	var plugins []string
 	for _, evt := range w.enumerateTargets() {
 		plugins = append(plugins, evt.Path)
 	}
-	if len(plugins) != 1 || plugins[0] != final {
-		t.Fatalf("rescan targets %v, want only %s", plugins, final)
+	if len(plugins) != 2 || !slices.Contains(plugins, final) || !slices.Contains(plugins, marketplace) {
+		t.Fatalf("rescan targets %v, want %s and %s", plugins, final, marketplace)
 	}
 }

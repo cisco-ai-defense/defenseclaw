@@ -2501,7 +2501,7 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 			continue
 		}
 		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
-		if !strings.HasPrefix(strings.ToLower(first), "temp_") {
+		if !strings.HasPrefix(strings.ToLower(first), "temp_local_") || len(first) <= len("temp_local_") {
 			return false
 		}
 		if grace <= 0 {
