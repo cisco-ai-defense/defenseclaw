@@ -297,7 +297,11 @@ func windowsEnterpriseHotTargetsPath(path string) bool {
 var windowsEnterpriseHotConfigRefreshTargets = func(ctx context.Context, layout managed.StandaloneLayout) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, managedWindowsAdminCLI(),
+	installedCLI, err := windowsEnterpriseInstalledAdminCLI()
+	if err != nil {
+		return fmt.Errorf("resolve installed CLI for enumerator refresh: %w", err)
+	}
+	command := exec.CommandContext(ctx, installedCLI,
 		"enterprise", "windows", "enumerate", "--manifest", layout.ManifestPath, "--once")
 	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
 	if out, err := command.CombinedOutput(); err != nil {

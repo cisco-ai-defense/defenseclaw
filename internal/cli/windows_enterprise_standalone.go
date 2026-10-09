@@ -425,12 +425,27 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 	return command.Output()
 }
 
+// windowsEnterpriseInstalledAdminCLI resolves the CLI from the protected
+// machine registration. An elevated lifecycle can inherit ProgramFiles from
+// a caller, so the path used for a subprocess must not use that environment.
+func windowsEnterpriseInstalledAdminCLI() (string, error) {
+	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
+	}
+	return filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"), nil
+}
+
 func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
 		return nil, err
 	}
-	command := exec.CommandContext(ctx, managedWindowsAdminCLI(), "policy", "digest", "--json", "--check-gateway")
+	installedCLI, err := windowsEnterpriseInstalledAdminCLI()
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, installedCLI, "policy", "digest", "--json", "--check-gateway")
 	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
 	return command, nil
 }
