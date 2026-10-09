@@ -582,13 +582,17 @@ func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, 
 // filter. The primary group always counts. An SSSD group counts when its SID
 // belongs to the account's domain, or when neither account nor group has a
 // SID. A SID-less group of a SID-bearing account counts only if /etc/group
-// holds it or another configured NSS initgroups service confirms that
-// account's membership. This keeps LDAP-supplied groups without accepting
+// lists the account as a member or another configured NSS initgroups service
+// confirms its membership. This keeps LDAP-supplied groups without accepting
 // a group of another SSSD account with the same short name.
 func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Account, domainSID string) ([]int, error) {
-	local, err := localGroupIDs()
+	localIDs, err := localGroupsListing(account.Name)
 	if err != nil {
 		return nil, err
+	}
+	local := make(map[int]bool, len(localIDs))
+	for _, id := range localIDs {
+		local[id] = true
 	}
 	sids := make(map[int]string, len(ids))
 	needOther := false
@@ -663,24 +667,6 @@ func (r *NSSResolver) otherNSSGroupMemberships(name string) (map[int]bool, error
 		}
 	}
 	return groups, nil
-}
-
-// localGroupIDs reads the gids /etc/group holds. A missing file holds none.
-func localGroupIDs() (map[int]bool, error) {
-	data, err := readSmallFile(localGroupPath, 16<<20)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	ids := map[int]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		if gid, _, ok := parseGroupName(line); ok {
-			ids[gid] = true
-		}
-	}
-	return ids, nil
 }
 
 // localGroupsListing returns the gids of the /etc/group entries whose member
