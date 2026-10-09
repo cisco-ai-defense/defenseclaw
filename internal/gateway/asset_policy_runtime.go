@@ -68,6 +68,9 @@ type skillRuntimeProbe struct {
 	// DeclaredNames are the names the skill declares in its SKILL.md
 	// (declaredSkillNames); a denied rule matches them too.
 	DeclaredNames []string
+	// SourcePaths are the folders a skill selected by name alone loads
+	// from (skillSourcePaths); each is judged with its path.
+	SourcePaths []string
 }
 
 type runtimeAssetDecision struct {
@@ -150,6 +153,7 @@ func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claude
 		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
+	probe.SourcePaths = a.skillSourcePaths(ctx, "claudecode", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
 
@@ -270,6 +274,7 @@ func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRe
 		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
+	probe.SourcePaths = a.skillSourcePaths(ctx, "codex", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
@@ -281,6 +286,7 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 		return config.AssetPolicyDecision{}, false
 	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
+	probe.SourcePaths = a.skillSourcePaths(ctx, "codex", req.CWD, probe)
 	return a.evaluateNativeRuntimeSkillSelection(
 		ctx, "codex", req.SessionID, req.HookEventName,
 		runtimeProvenanceCodexPromptSelection, probe,
@@ -484,12 +490,36 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
+	paths := []string{probe.SourcePath}
+	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
+		paths = probe.SourcePaths
+	}
+	var last config.AssetPolicyDecision
+	for _, path := range paths {
+		decision, applies := runtimeSkillPathDecision(cfg, targetType, connector, runtimeSurface, path, probe)
+		if !applies {
+			continue
+		}
+		if decision.Enabled && decision.RawAction == "block" {
+			return decision, true
+		}
+		last = decision
+	}
+	return last, false
+}
+
+// runtimeSkillPathDecision is the asset_policy decision for one folder a
+// skill call can load (path "" when the call names none). applies is false
+// when the hook does not evaluate asset_policy for it.
+func runtimeSkillPathDecision(
+	cfg *config.Config, targetType, connector, runtimeSurface, path string, probe skillRuntimeProbe,
+) (config.AssetPolicyDecision, bool) {
 	input := config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           probe.SkillName,
 		DeclaredNames:  probe.DeclaredNames,
 		Connector:      connector,
-		SourcePath:     probe.SourcePath,
+		SourcePath:     path,
 		RuntimeSurface: runtimeSurface,
 	}
 	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor(targetType)
@@ -528,9 +558,6 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		if strings.TrimSpace(decision.Source) == "" {
 			decision.Source = "skill-path-shaped"
 		}
-	}
-	if !decision.Enabled || decision.RawAction != "block" {
-		return decision, false
 	}
 	return decision, true
 }

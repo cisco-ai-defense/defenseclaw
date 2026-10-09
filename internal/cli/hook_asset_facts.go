@@ -24,8 +24,9 @@ import (
 
 // hookAssetFacts is the assetfacts.Header value of a standalone managed
 // hook: the names the skill folders this event names or reaches into declare
-// in their SKILL.md, and the definition of the MCP server a tool call names,
-// read as the user (GAP-0570, GAP-0576). The gateway, a service account,
+// in their SKILL.md, the folders a skill selected by name exists in, and the
+// definition of the MCP server a tool call names, read as the user
+// (GAP-0570, GAP-0576, GAP-1212). The gateway, a service account,
 // may not read this home.
 func hookAssetFacts(connector string, payload []byte) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
@@ -52,7 +53,11 @@ func hookAssetFacts(connector string, payload []byte) string {
 	}
 	if name := hookInvokedSkillName(event.ToolName, event.ToolInput, event.Prompt); name != "" {
 		for _, root := range assetfacts.SkillRoots(connector, home, event.CWD) {
-			addSkill(name, filepath.Join(root, name))
+			dir := filepath.Join(root, name)
+			addSkill(name, dir)
+			if _, err := os.Lstat(dir); err == nil {
+				facts.SkillDirs = append(facts.SkillDirs, dir)
+			}
 		}
 	}
 	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {

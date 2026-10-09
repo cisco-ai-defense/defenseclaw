@@ -899,6 +899,50 @@ func TestCodexHyphenatedMCPServerMatchesItsConfiguredName(t *testing.T) {
 	}
 }
 
+// GAP-1212: an allow pinned to the user's own skill folder
+// (source_path_contains) overrides a global deny at the hook as it does in
+// the watcher: a skill called by name alone is judged at the folders it
+// loads from, seen by the gateway or, where the service cannot read the
+// home, reported by the hook. The other agent's copy stays denied.
+func TestPinnedSkillAllowOverridesGlobalDenyAtHook(t *testing.T) {
+	home := t.TempDir()
+	pinned := filepath.Join(home, ".claude", "skills", "usm-shared")
+	for _, dir := range []string{pinned, filepath.Join(home, ".agents", "skills", "usm-shared")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "usm-shared"}}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{
+		Name: "usm-shared", Connector: "claudecode", SourcePathContains: []string{pinned},
+	}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	skill := map[string]interface{}{"skill": "usm-shared"}
+	if decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: skill, CWD: home,
+	}); matched {
+		t.Fatalf("pinned Claude Code copy: decision=%+v, want it allowed", decision)
+	}
+	if decision, matched := api.codexSkillAssetDecision(ctx, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: skill, CWD: home,
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("Codex copy: matched=%v decision=%+v, want the global deny", matched, decision)
+	}
+	unreadable := filepath.Join(t.TempDir(), "absent-home")
+	unreadablePin := filepath.Join(unreadable, ".claude", "skills", "usm-shared")
+	cfg.AssetPolicy.Skill.Allowed[0].SourcePathContains = []string{unreadablePin}
+	header := http.Header{}
+	header.Set(assetfacts.Header, assetfacts.Encode(assetfacts.Facts{SkillDirs: []string{unreadablePin}}))
+	claimed := withClaimedAssetFacts(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: unreadable}), header)
+	if decision, matched := api.claudeCodeSkillAssetDecision(claimed, claudeCodeHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: skill, CWD: unreadable,
+	}); matched {
+		t.Fatalf("pinned copy the hook reported: decision=%+v, want it allowed", decision)
+	}
+}
+
 // Every source path for a skill name must be checked before the tool runs.
 func TestCodexReadChecksEverySameNameSkillFolder(t *testing.T) {
 	home := t.TempDir()
