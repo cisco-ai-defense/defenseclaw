@@ -36,3 +36,18 @@ type DeviceKeyStore interface {
 	// NEW-5 fix: Called during decommission to revoke the device's key.
 	DeleteDeviceKey(deviceID uint64) error
 }
+
+// DecommissionStore is the persistence interface for decommission tombstones.
+// NEW-3 fix: Tombstones must be persisted to SQLite so that decommissioned
+// devices remain blocked across gateway restarts.
+type DecommissionStore interface {
+	// SaveDecommissioned records a device ID as decommissioned.
+	SaveDecommissioned(deviceID uint64) error
+
+	// LoadDecommissioned returns all decommissioned device IDs.
+	LoadDecommissioned() ([]uint64, error)
+
+	// DeleteDecommissioned removes a device from the tombstone table
+	// on re-registration.
+	DeleteDecommissioned(deviceID uint64) error
+}

@@ -6937,6 +6937,17 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		// instead of falling back to the fleet-wide shared key.
 		if deviceStore != nil {
 			bridge.SetDeviceKeyStore(deviceStore)
+			// NEW-3 fix: Restore decommission tombstones from SQLite so the
+			// bridge rejects messages from previously decommissioned devices
+			// even after a gateway restart.
+			if ids, err := deviceStore.LoadDecommissioned(); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] fleet load decommissioned: %v\n", err)
+			} else if len(ids) > 0 {
+				for _, id := range ids {
+					bridge.MarkDecommissioned(id)
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] fleet restored %d decommission tombstones\n", len(ids))
+			}
 		}
 		// P0-6 fix: Only allow auto-registration of unknown devices when
 		// DCLAW_FLEET_AUTO_REGISTER=true (dev mode). In production (default),
@@ -7007,6 +7018,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	if deviceStore != nil {
 		fleetOpts = append(fleetOpts, fleet.WithDeviceKeyStore(deviceStore))
+		// NEW-3 fix: Wire the decommission tombstone store so that
+		// decommissioned device IDs are persisted across gateway restarts.
+		fleetOpts = append(fleetOpts, fleet.WithDecommissionStore(deviceStore))
 	}
 	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache, fleetOpts...))
 	// Load scoped tokens that connector setup or the enterprise hook guardian

@@ -311,6 +311,40 @@ func (b *Bridge) Start(ctx context.Context) error {
 
 	b.logger.Printf("[mqtt-bridge] subscribed to %s, %s, and %s", TopicHeartbeat, TopicVerdictReq, TopicRegister)
 
+	// NEW-4 fix: Spawn a goroutine that periodically cleans up stale entries
+	// from the rate limiter maps to prevent unbounded memory growth. Entries
+	// older than 5 minutes are removed every 60 seconds.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-b.stopped:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-5 * time.Minute)
+
+				b.lastHeartbeatMu.Lock()
+				for id, ts := range b.lastHeartbeat {
+					if ts.Before(cutoff) {
+						delete(b.lastHeartbeat, id)
+					}
+				}
+				b.lastHeartbeatMu.Unlock()
+
+				b.verdictRateMu.Lock()
+				for id, entry := range b.verdictRateMap {
+					if entry.windowAt.Before(cutoff) {
+						delete(b.verdictRateMap, id)
+					}
+				}
+				b.verdictRateMu.Unlock()
+			}
+		}
+	}()
+
 	// Wait for context cancellation
 	<-ctx.Done()
 
@@ -573,10 +607,12 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	// H-1 fix: If the device is in lockdown, return BLOCK immediately
 	// without evaluating through the pipeline. Lockdown devices must not
 	// be able to obtain ALLOW verdicts.
+	// NEW-2 fix: Pass the raw CBOR payload so we can extract the real
+	// RequestID and ToolHash instead of using sentinel 0 values.
 	if dev.Status == manager.StatusLockdown {
 		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
 			parts.DeviceID)
-		b.sendLockdownBlockResponse(parts)
+		b.sendLockdownBlockResponse(parts, msg.Payload)
 		b.incErrors()
 		return
 	}
@@ -721,9 +757,23 @@ func (b *Bridge) incErrors() {
 // sendLockdownBlockResponse sends a BLOCK verdict response to a device that
 // is in lockdown status. H-1 fix: lockdown devices must receive BLOCK for
 // every verdict request without going through the evaluation pipeline.
-func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts) {
+// NEW-2 fix: Accepts the raw CBOR payload and decodes it to extract the real
+// RequestID and ToolHash. The C agent discards responses with RequestID==0
+// because 0 is its sentinel for "unused slot."
+func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte) {
+	// Decode the verdict request to get the real RequestID and ToolHash.
+	var requestID uint16
+	var toolHash [32]byte
+	if vr, err := DecodeVerdictRequest(rawPayload); err == nil {
+		requestID = vr.RequestID
+		toolHash = vr.ToolHash
+	} else {
+		b.logger.Printf("[mqtt-bridge] lockdown BLOCK: failed to decode verdict request: %v (using request_id=1)", err)
+		requestID = 1 // fallback to non-zero so the C agent does not discard
+	}
+
 	resp := &VerdictResponse{
-		RequestID: 0, // unknown — we haven't decoded the payload
+		RequestID: requestID,
 		Action:    uint8(verdict.ActionBlock),
 		Severity:  0,
 		TTL:       0,
@@ -733,10 +783,9 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts) {
 	sessionID := fmt.Sprintf("%d", parts.DeviceID)
 	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 	deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
-	var emptyHash [32]byte
 	resp.HMACTag = computeVerdictHMACFull(deviceKey, sessionID,
 		resp.RequestID, resp.Action, resp.Severity, resp.TTL,
-		resp.Reason, resp.Flags, resp.ServerTS, emptyHash)
+		resp.Reason, resp.Flags, resp.ServerTS, toolHash)
 
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
 		parts.TenantID, parts.FleetID, parts.DeviceID)

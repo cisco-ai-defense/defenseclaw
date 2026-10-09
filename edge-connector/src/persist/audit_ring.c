@@ -19,23 +19,23 @@ static uint16_t ring_head = 0; /* next write position in flash ring */
  * Flash layout (within HAL_FLASH_AUDIT_OFFSET .. +HAL_FLASH_AUDIT_SIZE):
  *   [0..1]   magic      0xDC, 0xA1  (identifies a valid header)
  *   [2..3]   head_pos   uint16_t LE (next write slot index)
- *   [4..7]   last_hmac  4 bytes     (HMAC tag of the last written entry)
+ *   [4..19]  last_hmac  16 bytes    (HMAC tag of the last written entry)
  *
- * Total header = 8 bytes (fits in one aligned flash word).
+ * Total header = 20 bytes (magic + head_pos + 16-byte HMAC).
  * Audit entries start at HAL_FLASH_AUDIT_OFFSET + AUDIT_RING_HDR_SIZE.
  */
 #define AUDIT_RING_HDR_MAGIC_0  0xDC
 #define AUDIT_RING_HDR_MAGIC_1  0xA1
-#define AUDIT_RING_HDR_SIZE     8
+#define AUDIT_RING_HDR_SIZE     20
 
 typedef struct __attribute__((packed)) {
     uint8_t  magic[2];
     uint16_t head_pos;
-    uint8_t  last_hmac[4];
+    uint8_t  last_hmac[16];
 } audit_ring_hdr_t;
 
 _Static_assert(sizeof(audit_ring_hdr_t) == AUDIT_RING_HDR_SIZE,
-               "audit ring header must be 8 bytes");
+               "audit ring header must be 20 bytes");
 
 /*
  * Write the persistent header to flash.  Called after every flush and
@@ -46,7 +46,7 @@ static int audit_ring_persist_header(const uint8_t *last_hmac) {
     hdr.magic[0]  = AUDIT_RING_HDR_MAGIC_0;
     hdr.magic[1]  = AUDIT_RING_HDR_MAGIC_1;
     hdr.head_pos  = ring_head;
-    memcpy(hdr.last_hmac, last_hmac, 4);
+    memcpy(hdr.last_hmac, last_hmac, 16);
     return hal_flash_write(HAL_FLASH_AUDIT_OFFSET, &hdr, sizeof(hdr));
 }
 
@@ -65,7 +65,7 @@ static int audit_ring_restore_header(uint16_t *out_head, uint8_t *out_last_hmac)
         return -1; /* no valid header — first boot or erased */
     }
     *out_head = hdr.head_pos;
-    memcpy(out_last_hmac, hdr.last_hmac, 4);
+    memcpy(out_last_hmac, hdr.last_hmac, 16);
     return 0;
 }
 
@@ -179,32 +179,32 @@ static const uint8_t *get_audit_key(void) {
  * Build the HMAC input covering ALL decision fields of the audit entry,
  * excluding the hmac tag itself and padding.
  *
- * Layout of dclaw_audit_entry_t (24 bytes):
+ * Layout of dclaw_audit_entry_t (32 bytes):
  *   [0..7]   timestamp       (8 bytes)
  *   [8..9]   target_hash     (2 bytes)
  *   [10..11] session_id      (2 bytes)
- *   [12..15] hmac            (4 bytes) -- EXCLUDED from HMAC input
- *   [16]     action          (1 byte)
- *   [17]     reason          (1 byte)
- *   [18..23] _pad            (6 bytes) -- EXCLUDED (padding only)
+ *   [12..27] hmac            (16 bytes) -- EXCLUDED from HMAC input
+ *   [28]     action          (1 byte)
+ *   [29]     reason          (1 byte)
+ *   [30..31] _pad            (2 bytes) -- EXCLUDED (padding only)
  *
- * HMAC message = prev_hmac(4) || timestamp(8) || target_hash(2) || session_id(2) || action(1) || reason(1)
- *              = 18 bytes
+ * HMAC message = prev_hmac(16) || timestamp(8) || target_hash(2) || session_id(2) || action(1) || reason(1)
+ *              = 30 bytes
  *
  * Comment 33 fix: The previous HMAC tag is included in the message (for chain
  * integrity) but a proper device key is used as the HMAC key, not the prev tag.
  */
-#define AUDIT_HMAC_MSG_LEN 18
+#define AUDIT_HMAC_MSG_LEN 30
 
 static void build_hmac_message(const dclaw_audit_entry_t *entry,
                                const uint8_t *prev_hmac, uint8_t *msg) {
-    /* Include previous HMAC tag in message for chain integrity */
-    memcpy(msg, prev_hmac, 4);
+    /* Include previous 16-byte HMAC tag in message for chain integrity */
+    memcpy(msg, prev_hmac, 16);
     /* Copy fields before the hmac tag: timestamp + target_hash + session_id = 12 bytes */
-    memcpy(msg + 4, entry, 12);
+    memcpy(msg + 16, entry, 12);
     /* Copy fields after the hmac tag: action + reason = 2 bytes */
-    msg[16] = entry->action;
-    msg[17] = entry->reason;
+    msg[28] = entry->action;
+    msg[29] = entry->reason;
 }
 
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
@@ -216,8 +216,8 @@ static void build_hmac_message(const dclaw_audit_entry_t *entry,
 static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_hmac,
                          uint8_t *out_hmac) {
     /*
-     * Real HMAC-SHA256 truncated to 4 bytes (Comment 33 fix).
-     * Key: device audit key (32 bytes), Message: prev_hmac(4) + decision fields(14) = 18 bytes.
+     * Real HMAC-SHA256 truncated to 16 bytes (BLK-1 consistency fix).
+     * Key: device audit key (32 bytes), Message: prev_hmac(16) + decision fields(14) = 30 bytes.
      */
     uint8_t hmac_full[32];
     uint8_t entry_data[AUDIT_HMAC_MSG_LEN];
@@ -234,8 +234,8 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
 
-    /* Truncate to 4 bytes */
-    memcpy(out_hmac, hmac_full, 4);
+    /* Truncate to 16 bytes (BLK-1: matches struct hmac[16]) */
+    memcpy(out_hmac, hmac_full, 16);
 }
 
 #else /* Built-in HMAC-SHA256 — no external library required */
@@ -245,8 +245,8 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
 static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_hmac,
                          uint8_t *out_hmac) {
     /*
-     * Real HMAC-SHA256 truncated to 4 bytes (Comment 33 fix).
-     * Key: device audit key (32 bytes), Message: prev_hmac(4) + decision fields(14) = 18 bytes.
+     * Real HMAC-SHA256 truncated to 16 bytes (BLK-1 consistency fix).
+     * Key: device audit key (32 bytes), Message: prev_hmac(16) + decision fields(14) = 30 bytes.
      * Matches the mbedTLS path semantics exactly.
      */
     uint8_t hmac_full[32];
@@ -256,8 +256,8 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
 
     dclaw_hmac_sha256(key, AUDIT_KEY_LEN, entry_data, AUDIT_HMAC_MSG_LEN, hmac_full);
 
-    /* Truncate to 4 bytes */
-    memcpy(out_hmac, hmac_full, 4);
+    /* Truncate to 16 bytes (BLK-1: matches struct hmac[16]) */
+    memcpy(out_hmac, hmac_full, 16);
 }
 
 #endif /* DCLAW_HAS_MBEDTLS */
@@ -302,7 +302,7 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
     }
 
     /* Update prev_hmac to the last flushed entry for cross-flush HMAC chaining */
-    memcpy(w->prev_hmac, w->buffer[w->count - 1].hmac, 4);
+    memcpy(w->prev_hmac, w->buffer[w->count - 1].hmac, 16);
 
     w->total_flash_writes++;
     w->count = 0;
@@ -322,9 +322,9 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
  */
 static bool verify_entry_hmac(const dclaw_audit_entry_t *entry,
                               const uint8_t *prev_hmac) {
-    uint8_t expected[4];
+    uint8_t expected[16];
     compute_hmac(entry, prev_hmac, expected);
-    return memcmp(expected, entry->hmac, 4) == 0;
+    return memcmp(expected, entry->hmac, 16) == 0;
 }
 
 /*
@@ -359,10 +359,10 @@ static void audit_ring_migrate_old_format(dclaw_audit_writer_t *w) {
     const uint16_t max_old_entries = (uint16_t)(HAL_FLASH_AUDIT_SIZE /
                                                 sizeof(dclaw_audit_entry_t));
 
-    uint8_t chain_hmac[4] = {0, 0, 0, 0}; /* old format chain started from zeros */
+    uint8_t chain_hmac[16] = {0}; /* old format chain started from zeros */
     uint16_t last_valid_slot = 0;
     bool found_any = false;
-    uint8_t last_valid_hmac[4] = {0, 0, 0, 0};
+    uint8_t last_valid_hmac[16] = {0};
 
     for (uint16_t i = 0; i < max_old_entries && i < DCLAW_AUDIT_RING_SIZE; i++) {
         dclaw_audit_entry_t entry;
@@ -378,9 +378,9 @@ static void audit_ring_migrate_old_format(dclaw_audit_writer_t *w) {
         }
 
         if (verify_entry_hmac(&entry, chain_hmac)) {
-            memcpy(chain_hmac, entry.hmac, 4);
+            memcpy(chain_hmac, entry.hmac, 16);
             last_valid_slot = i;
-            memcpy(last_valid_hmac, entry.hmac, 4);
+            memcpy(last_valid_hmac, entry.hmac, 16);
             found_any = true;
         } else {
             /* HMAC chain broke — stop here; this is the first invalid slot. */
@@ -401,7 +401,7 @@ static void audit_ring_migrate_old_format(dclaw_audit_writer_t *w) {
          * after the last known-good position.  If last_valid_slot+1 overflows
          * past the new partition entries, wrap around. */
         ring_head = (last_valid_slot + 1) % DCLAW_AUDIT_PARTITION_ENTRIES;
-        memcpy(w->prev_hmac, last_valid_hmac, 4);
+        memcpy(w->prev_hmac, last_valid_hmac, 16);
         fprintf(stderr,
                 "[DCLAW-AUDIT] Migrated old-format ring: %u valid entries found, "
                 "head set to %u\n", (unsigned)(last_valid_slot + 1),
@@ -409,7 +409,7 @@ static void audit_ring_migrate_old_format(dclaw_audit_writer_t *w) {
     } else {
         /* No valid old entries — truly fresh flash. */
         ring_head = 0;
-        memset(w->prev_hmac, 0, 4);
+        memset(w->prev_hmac, 0, 16);
         fprintf(stderr, "[DCLAW-AUDIT] No old-format entries found — starting fresh\n");
     }
 
@@ -435,11 +435,11 @@ int dclaw_audit_ring_init(void) {
     dclaw_audit_writer_t *w = &s->audit_writer;
 
     uint16_t saved_head = 0;
-    uint8_t  saved_hmac[4] = {0};
+    uint8_t  saved_hmac[16] = {0};
 
     if (audit_ring_restore_header(&saved_head, saved_hmac) == 0) {
         ring_head = saved_head;
-        memcpy(w->prev_hmac, saved_hmac, 4);
+        memcpy(w->prev_hmac, saved_hmac, 16);
         fprintf(stderr, "[DCLAW-AUDIT] Restored ring head=%u from flash\n",
                 (unsigned)ring_head);
     } else {
@@ -475,11 +475,11 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
     };
 
     /* Compute HMAC chain — use writer's prev_hmac for cross-flush continuity */
-    uint8_t prev_hmac[4];
+    uint8_t prev_hmac[16];
     if (w->count > 0) {
-        memcpy(prev_hmac, w->buffer[w->count - 1].hmac, 4);
+        memcpy(prev_hmac, w->buffer[w->count - 1].hmac, 16);
     } else {
-        memcpy(prev_hmac, w->prev_hmac, 4);
+        memcpy(prev_hmac, w->prev_hmac, 16);
     }
     compute_hmac(&entry, prev_hmac, entry.hmac);
 
@@ -509,7 +509,7 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
         ring_head = (ring_head + 1) % DCLAW_AUDIT_RING_SIZE;
         w->total_flash_writes++;
         /* Update prev_hmac so the next buffered entry chains from this BLOCK entry */
-        memcpy(w->prev_hmac, entry.hmac, 4);
+        memcpy(w->prev_hmac, entry.hmac, 16);
         /* NEW-1 fix: Persist head position and last HMAC to flash header */
         audit_ring_persist_header(w->prev_hmac);
         /* Sync to durable storage for BLOCK durability (Comment 33 fix) */

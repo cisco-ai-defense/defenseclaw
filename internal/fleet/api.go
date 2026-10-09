@@ -47,14 +47,15 @@ type MQTTBridge interface {
 
 // API handles fleet REST endpoints.
 type API struct {
-	manager    *manager.FleetManager
-	cache      *verdict.Cache
-	policy     *policy.Service
-	mqttClient mqtt.Client
-	bridge     MQTTBridge
-	audit      AuditEmitter
-	keyStore   DeviceKeyStore
-	mux        *http.ServeMux
+	manager     *manager.FleetManager
+	cache       *verdict.Cache
+	policy      *policy.Service
+	mqttClient  mqtt.Client
+	bridge      MQTTBridge
+	audit       AuditEmitter
+	keyStore    DeviceKeyStore
+	decommStore DecommissionStore // NEW-3 fix: persists decommission tombstones
+	mux         *http.ServeMux
 }
 
 // NewAPI creates the fleet API with its dependencies.
@@ -110,6 +111,16 @@ func WithAuditEmitter(e AuditEmitter) APIOption {
 func WithDeviceKeyStore(ks DeviceKeyStore) APIOption {
 	return func(a *API) {
 		a.keyStore = ks
+	}
+}
+
+// WithDecommissionStore attaches a decommission tombstone store so that
+// decommissioned device IDs are persisted across gateway restarts.
+// NEW-3 fix: Without this, tombstones only live in-memory and are lost
+// on restart, allowing decommissioned devices to resume communication.
+func WithDecommissionStore(ds DecommissionStore) APIOption {
+	return func(a *API) {
+		a.decommStore = ds
 	}
 }
 
@@ -247,6 +258,13 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		if a.bridge != nil {
 			a.bridge.ClearDecommissioned(dev.DeviceID)
 		}
+		// NEW-3 fix: Remove the persisted tombstone so a restart does not
+		// re-decommission this device.
+		if a.decommStore != nil {
+			if err := a.decommStore.DeleteDecommissioned(dev.DeviceID); err != nil {
+				log.Printf("[fleet-api] failed to delete decommission tombstone for %d: %v", dev.DeviceID, err)
+			}
+		}
 
 		// M-17: On re-registration of a previously decommissioned device,
 		// regenerate the device key instead of reusing the old one.  The old
@@ -284,6 +302,12 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 	// manager entry was already cleaned up but the bridge tombstone persists.
 	if a.bridge != nil {
 		a.bridge.ClearDecommissioned(dev.DeviceID)
+	}
+	// NEW-3 fix: Remove any persisted tombstone for this device.
+	if a.decommStore != nil {
+		if err := a.decommStore.DeleteDecommissioned(dev.DeviceID); err != nil {
+			log.Printf("[fleet-api] failed to delete decommission tombstone for %d: %v", dev.DeviceID, err)
+		}
 	}
 
 	// Generate and persist a per-device HMAC signing key (32 random bytes).
@@ -773,6 +797,13 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 			// this device without waiting for a process restart.
 			if a.bridge != nil {
 				a.bridge.MarkDecommissioned(fullID)
+			}
+			// NEW-3 fix: Persist the decommission tombstone to SQLite so the
+			// bridge can restore it on gateway restart.
+			if a.decommStore != nil {
+				if err := a.decommStore.SaveDecommissioned(fullID); err != nil {
+					log.Printf("[fleet-api] failed to persist decommission tombstone for %d: %v", fullID, err)
+				}
 			}
 			decommissioned++
 		} else {

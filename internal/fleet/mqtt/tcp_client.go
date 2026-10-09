@@ -45,6 +45,12 @@ type TCPClient struct {
 	packetID     uint16
 	reconnecting bool // NEW-4: true while a reconnect attempt is in progress
 
+	// NEW-1 fix: Channel-based PUBACK delivery to eliminate the concurrent
+	// read race between waitForPUBACK and readLoop. The readLoop is the
+	// sole reader of the connection; when it sees a PUBACK packet it sends
+	// the packet ID on this channel so Publish can receive it.
+	pubackCh chan uint16
+
 	// subscriptions maps topic filters to message handlers.
 	subs   map[string]func(Message)
 	subsMu sync.RWMutex
@@ -85,6 +91,7 @@ func NewTCPClient(addr, clientID string) *TCPClient {
 		addr:     stripMQTTScheme(addr),
 		clientID: clientID,
 		subs:     make(map[string]func(Message)),
+		pubackCh: make(chan uint16, 4), // NEW-1 fix: buffered channel for PUBACK delivery
 	}
 }
 
@@ -222,58 +229,22 @@ func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload
 	return nil
 }
 
-// waitForPUBACK reads from the connection looking for a PUBACK matching the
-// given packet ID. Times out after the specified duration. Non-PUBACK packets
-// received during the wait are silently discarded (they will be handled by the
-// readLoop if still relevant).
-func (c *TCPClient) waitForPUBACK(conn net.Conn, packetID uint16, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d)", packetID)
+// waitForPUBACK waits for the readLoop to deliver a PUBACK matching the given
+// packet ID via the pubackCh channel. NEW-1 fix: This replaces the previous
+// implementation that read directly from conn, which raced with readLoop.
+// The readLoop is now the sole goroutine reading from the connection.
+func (c *TCPClient) waitForPUBACK(_ net.Conn, packetID uint16, timeout time.Duration) error {
+	select {
+	case id := <-c.pubackCh:
+		if id == packetID {
+			return nil
 		}
-
-		conn.SetReadDeadline(time.Now().Add(remaining))
-
-		// Read the fixed header byte
-		hdr := make([]byte, 1)
-		if _, err := io.ReadFull(conn, hdr); err != nil {
-			conn.SetReadDeadline(time.Time{})
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d)", packetID)
-			}
-			return fmt.Errorf("read error waiting for PUBACK: %w", err)
-		}
-
-		// Read remaining length
-		rl, err := readRemainingLength(conn)
-		if err != nil {
-			conn.SetReadDeadline(time.Time{})
-			return fmt.Errorf("read remaining length: %w", err)
-		}
-
-		// Read the body
-		body := make([]byte, rl)
-		if rl > 0 {
-			if _, err := io.ReadFull(conn, body); err != nil {
-				conn.SetReadDeadline(time.Time{})
-				return fmt.Errorf("read PUBACK body: %w", err)
-			}
-		}
-
-		conn.SetReadDeadline(time.Time{})
-
-		pktType := hdr[0] & 0xF0
-		if pktType == 0x40 && len(body) >= 2 { // PUBACK = 0x40
-			ackID := binary.BigEndian.Uint16(body[0:2])
-			if ackID == packetID {
-				return nil // Got matching PUBACK
-			}
-			// PUBACK for a different packet ID — keep waiting
-			log.Printf("[mqtt] received PUBACK for packet %d while waiting for %d", ackID, packetID)
-		}
-		// Non-PUBACK packet — discard and keep waiting for our PUBACK
+		// PUBACK for a different packet ID — log and treat as timeout
+		// (the expected PUBACK may arrive later but we cannot block forever).
+		log.Printf("[mqtt] received PUBACK for packet %d while waiting for %d", id, packetID)
+		return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d, got %d)", packetID, id)
+	case <-time.After(timeout):
+		return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d)", packetID)
 	}
 }
 
@@ -376,6 +347,17 @@ func (c *TCPClient) readLoop(ctx context.Context) {
 		switch pktType {
 		case mqttPktPublish & 0xF0:
 			c.handleIncomingPublish(hdr[0], body)
+		case 0x40: // PUBACK
+			// NEW-1 fix: Deliver PUBACK to the waiting Publish goroutine via
+			// channel instead of having two goroutines read from the connection.
+			if len(body) >= 2 {
+				ackID := binary.BigEndian.Uint16(body[0:2])
+				select {
+				case c.pubackCh <- ackID:
+				default:
+					log.Printf("[mqtt] pubackCh full, dropping PUBACK for packet %d", ackID)
+				}
+			}
 		case mqttPktPingResp:
 			// keepalive response — nothing to do
 		case mqttPktSubAck & 0xF0:
