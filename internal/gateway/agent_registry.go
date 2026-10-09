@@ -20,7 +20,9 @@ package gateway
 //     from the agent identity (defenseclaw.agent.identity.id) and the
 //     session id ("ais-…", agentidentity.InstanceID), so it is stable
 //     across sidecar restarts and two users who send the same session
-//     id get different instances. Under the Secure Client integration
+//     id get different instances. Before an agent identity is known, the
+//     instance is scoped to this sidecar so matching session ids from
+//     different users cannot collide. Under the Secure Client integration
 //     it stays a random UUID minted on first sight.
 //   - SidecarInstanceID: the sidecar process. Minted exactly once
 //     at boot and stable for the process lifetime. Primarily
@@ -242,7 +244,14 @@ func (r *AgentRegistry) agentInstanceFor(agentIdentityID, sessionID string) (str
 	if len(r.sessions) >= agentRegistryMaxSessions {
 		r.evictOldestLocked()
 	}
-	instance := agentidentity.InstanceID(key.agent, key.session)
+	// A session can reach the gateway before its hook identity. A hash of
+	// the session alone would give two users the same fleet-wide instance
+	// ID; scope this temporary identity to the sidecar instead.
+	identityForHash := key.agent
+	if identityForHash == "" {
+		identityForHash = r.sidecarInstanceID
+	}
+	instance := agentidentity.InstanceID(identityForHash, key.session)
 	if ManagedEnterpriseActive() {
 		// Secure Client keeps the random, process-scoped instance ids its
 		// records have always carried.
