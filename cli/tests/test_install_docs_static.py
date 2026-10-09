@@ -996,3 +996,10 @@ def test_documented_rule_pack_dirs_are_absolute() -> None:
             if value.strip("\"'").startswith("~"):
                 offenders.append(f"{path.relative_to(ROOT)}: {value}")
     assert not offenders, offenders
+
+def test_mdm_claude_windows_guide_uses_audit_export() -> None:
+    guide = (ROOT / "docs-site/content/docs/enterprise/mdm/index.mdx").read_text()
+    section = guide.split("### Claude Code on Windows", 1)[1].split("\n## ", 1)[0]
+    assert "audit export --connector claudecode" in section
+    assert "ATTESTCLAUDEEFFECTIVEPOLICY=1" in section
+    assert "enterprise policy verify --live" not in section
