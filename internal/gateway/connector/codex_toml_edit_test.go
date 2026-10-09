@@ -72,3 +72,18 @@ func TestCodexOwnedEditPreservesMultilineInstructions(t *testing.T) {
 		t.Fatalf("root notify = %#v", cfg["notify"])
 	}
 }
+
+func TestCodexOwnedEditIgnoresCommentBracketsInNotify(t *testing.T) {
+	before := []byte("notify = [\n  \"personal\", # [ example\n]\nmodel = \"gpt-5\"\napproval_policy = \"on-request\"\n")
+	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := parseCodexTOML(after, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["model"] != "gpt-5" || cfg["approval_policy"] != "on-request" {
+		t.Fatalf("user settings lost: %#v", cfg)
+	}
+}

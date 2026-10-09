@@ -58,13 +58,15 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 		rootWritten = true
 	}
 	var syntax tomlEditSyntax
-	skipNotifyDepth := 0
+	skipNotify := false
 	for _, line := range lines {
 		inMultiline, inArray := syntax.multiline != 0, syntax.arrayDepth != 0
 		visible := syntax.visible(line)
 		trimmed := strings.TrimSpace(visible)
-		if skipNotifyDepth > 0 {
-			skipNotifyDepth += strings.Count(line, "[") - strings.Count(line, "]")
+		if skipNotify {
+			if syntax.arrayDepth == 0 {
+				skipNotify = false
+			}
 			continue
 		}
 		rawTrimmed := strings.TrimSpace(line)
@@ -81,7 +83,7 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 			if section == "" && (key == "notify" || key == "openai_base_url" && desired[key] == nil) {
 				if key == "notify" {
 					writeRoot()
-					skipNotifyDepth = strings.Count(line, "[") - strings.Count(line, "]")
+					skipNotify = syntax.arrayDepth != 0
 				}
 				continue
 			}
