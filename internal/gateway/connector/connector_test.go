@@ -4658,7 +4658,7 @@ func TestCodexCommandHookHashSelectsWindowsCommandAndStatus(t *testing.T) {
 	}
 }
 
-func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
+func TestRemoveOwnedCodexHookStateKeepsOnlyUnrelatedTrust(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
@@ -4673,7 +4673,7 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 
 	state := map[string]interface{}{
 		key: map[string]interface{}{
-			"trusted_hash": "sha256:user-replacement",
+			"trusted_hash": "sha256:edited-hook",
 		},
 		otherKey: map[string]interface{}{
 			"trusted_hash": "sha256:unrelated",
@@ -4684,15 +4684,20 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 		t.Fatalf("build Codex hooks: %v", err)
 	}
 	hooks["state"] = state
+	// Trust at a position the DefenseClaw hook holds goes with the hook, even
+	// when an edit changed its hash before guardian repaired it (GAP-1032).
 	removed, err := removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
 	if err != nil {
-		t.Fatalf("inspect user replacement trust: %v", err)
+		t.Fatalf("remove edited DefenseClaw trust: %v", err)
 	}
-	if removed {
-		t.Fatalf("user replacement trust state was removed: %v", hooks)
+	if !removed {
+		t.Fatalf("trust at the DefenseClaw hook position was kept: %v", hooks)
 	}
-	if _, ok := state[key]; !ok {
-		t.Fatalf("user replacement trust entry missing: %v", state)
+	if _, ok := state[key]; ok {
+		t.Fatalf("trust entry at the DefenseClaw hook position still present: %v", state)
+	}
+	if _, ok := state[otherKey]; !ok {
+		t.Fatalf("unrelated trust entry removed: %v", state)
 	}
 
 	locations, err := ownedCodexHookLocations(runtime.GOOS, "pre_tool_use", hooks["PreToolUse"], filepath.Dir(hookPath))
@@ -5350,6 +5355,9 @@ env_key = "OPENAI_API_KEY"
 }
 
 func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Codex registers the native hook launcher, not hooks/codex-hook.sh (GAP-1032 is the shell-script form)")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	original := []byte("# personal\nmodel = \"gpt-5\"\n[profiles.review]\nmodel = \"gpt-5.1\"\n")
