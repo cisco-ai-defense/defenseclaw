@@ -207,7 +207,7 @@ func TestUninstallRefusesUnresolvedRowsBeforeStoppingAnything(t *testing.T) {
 			before := len(h.services.calls)
 			refused := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireError(t, refused, codePerUserHooks)
-			requireError(t, refused, codeUninstall)
+			requireError(t, refused, codeUninstallPrecheck)
 			if got := messagesOf(refused.Errors, codePerUserHooks); !strings.Contains(got, "claudecode manifest row of user /Users/gone cannot be removed") {
 				t.Fatalf("the refusal does not name the row: %s", got)
 			}
@@ -239,7 +239,7 @@ func TestUninstallRefusesFailedHookPrecheckBeforeStoppingAnything(t *testing.T) 
 	}}
 	before := len(h.services.calls)
 	refused := h.run(Options{Action: ActionUninstall, Purge: true})
-	requireError(t, refused, codeUninstall)
+	requireError(t, refused, codeUninstallPrecheck)
 	for _, call := range h.services.calls[before:] {
 		if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
 			t.Fatalf("the refused uninstall ran %q", call)

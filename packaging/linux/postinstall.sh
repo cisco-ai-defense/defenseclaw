@@ -12,9 +12,9 @@
 
 set -u
 # dpkg runs "postinst abort-remove" after preremove refused a removal because
-# another lifecycle run kept the lock: nothing was removed, so there is
-# nothing to apply, and a second 10-minute wait on the same busy lock would
-# only stall apt.
+# another lifecycle run kept the lock or hook-removal precheck refused.
+# Nothing was removed, so there is nothing to apply; a second wait on the
+# same busy lock would only stall apt.
 case "${1:-}" in
     abort-remove) exit 0 ;;
     abort-upgrade|abort-install|abort-deconfigure)

@@ -112,6 +112,7 @@ const (
 	codeRollbackFailed      = "rollback_failed"
 	codeRecovered           = "recovered_interrupted_transaction"
 	codeUninstall           = "uninstall_failed"
+	codeUninstallPrecheck   = "uninstall_precheck_refused"
 	codeReconcile           = "reconcile_failed"
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
@@ -2021,7 +2022,7 @@ func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
 		}
 		r.AddError(codePerUserHooks, "cannot check per-user hook removal: "+reason)
 	}
-	r.AddError(codeUninstall, "nothing was changed: every service is still running and the machine policy is in place; fix the hook-removal precheck and rerun `"+l.uninstallCommand()+"`")
+	r.AddError(codeUninstallPrecheck, "nothing was changed: every service is still running and the machine policy is in place; fix the hook-removal precheck and rerun `"+l.uninstallCommand()+"`")
 	return true
 }
 
