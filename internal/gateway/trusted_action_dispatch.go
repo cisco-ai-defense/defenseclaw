@@ -1113,7 +1113,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return curlDownloadExecPrerequisite(facts) ||
 				powerShellDownloadExecPrerequisite(facts)
 		},
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"secrets.cloud_secret_manager_read": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {

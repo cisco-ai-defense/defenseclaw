@@ -56,7 +56,11 @@ rules:
     tags: [execution, reverse-shell]
   - id: CMD-PIPE-CURL
     tool_call_only: true
-    expression: 'false'
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
     # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
     # aliases. The exact fallback contract proves stdout-to-interpreter flow.
     pattern: 'a^'
