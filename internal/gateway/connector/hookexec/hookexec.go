@@ -41,6 +41,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -1389,6 +1390,7 @@ const unenrolledAccountExplanation = "this account is not enrolled in DefenseCla
 // the JSON-bodied hooks) gets the same explanation instead of the generic
 // failed-closed text.
 func failUnenrolled(opts Options, sp spec, reason string) int {
+	reportUnenrolledRefusal(opts, sp, reason)
 	logHookFailure(opts, sp, reason, "transport", "closed")
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
@@ -1405,6 +1407,67 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 	result := sp.unreachableStrict
 	result.body = strings.ReplaceAll(result.body, failedClosed, explanation)
 	return emitHookResult(opts, sp, result)
+}
+
+// unenrolledRefusalReportBudget bounds the refusal report of an unenrolled
+// account; the refusal itself never waits for the gateway.
+const unenrolledRefusalReportBudget = 500 * time.Millisecond
+
+// sendUnenrolledRefusal delivers a refusal report to the gateway's refusal
+// pipe (a no-op off Windows); tests replace it.
+var sendUnenrolledRefusal = refusalpipe.Send
+
+// reportUnenrolledRefusal reports the Windows standalone hook's refusal of
+// an account the administrator excludes or has not enrolled yet, so the
+// gateway writes the audit row an administrator reviews (GAP-1242). The
+// gateway names the account from the pipe client token; the report carries
+// only the connector, the reason and the event and tool the agent sent. It
+// is best effort: the refusal text and exit code do not depend on it, and
+// nothing is written on disk. The Unix standalone gateway refuses and audits
+// an unenrolled caller itself (managedUIDUnregisteredReason).
+func reportUnenrolledRefusal(opts Options, sp spec, reason string) {
+	if reason != managedSIDUnregisteredReason && reason != managedEnrollmentPendingReason {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), unenrolledRefusalReportBudget)
+	defer cancel()
+	// The refusal used to return before stdin was read; an agent that keeps
+	// stdin open must not hold it, so the payload read gets part of the
+	// budget and the report goes without the event and tool after that.
+	read := make(chan []byte, 1)
+	go func() {
+		payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
+		if overflow || err != nil {
+			payload = nil
+		}
+		read <- payload
+	}()
+	var payload []byte
+	select {
+	case payload = <-read:
+	case <-time.After(unenrolledRefusalReportBudget / 2):
+	}
+	_ = sendUnenrolledRefusal(ctx, refusalpipe.Report{
+		Connector: sp.connector,
+		Reason:    reason,
+		Event:     resolveHookEvent(opts.Event, payload),
+		Tool:      payloadToolName(payload),
+	})
+}
+
+// payloadToolName is the tool a hook payload names, when it names one.
+func payloadToolName(payload []byte) string {
+	var fields struct {
+		ToolName      string `json:"tool_name"`
+		ToolNameCamel string `json:"toolName"`
+	}
+	if len(payload) == 0 || json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	if fields.ToolName != "" {
+		return fields.ToolName
+	}
+	return fields.ToolNameCamel
 }
 
 func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
