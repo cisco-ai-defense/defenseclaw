@@ -17,6 +17,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -957,6 +958,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
 				forgetDirWatches(fsw, event.Name, watchedDirs)
 			}
+			if skill, inside := w.changedSkillFolder(event.Name); inside {
+				w.skillFolderEvent(ctx, event, skill)
+				continue
+			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
@@ -1198,7 +1203,7 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 
 // skillFolderIncomplete reports whether a folder in a skill root holds nothing
 // an agent or skill-scanner loads as a skill yet: no SKILL.md and no other
-// markdown file at its top. A folder just made with mkdir, being filled in,
+// markdown file at its top with anything in it. A folder just made with mkdir, being filled in,
 // used to be admitted at once, refused by the scanner ("No SKILL.md and no .md
 // files found") and quarantined fail-closed while the user was creating it
 // (GAP-0900); the watcher waits on it instead and admits it, with everything
@@ -1215,11 +1220,26 @@ func skillFolderIncomplete(path string) bool {
 		return false
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), ".md") &&
+			!blankFile(filepath.Join(path, entry.Name())) {
 			return false
 		}
 	}
 	return true
+}
+
+// blankFile reports whether path is a regular file with nothing but white
+// space in it. An editor that creates the file first (Notepad answering
+// "create a new file?", touch, an IDE's new-file action) leaves an empty
+// SKILL.md that the scanner judged HIGH (Low Analyzability), and the folder
+// was quarantined while the user was typing into it (GAP-1105).
+func blankFile(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	return err == nil && len(bytes.TrimSpace(data)) == 0
 }
 
 // watchIncompleteSkillFolders waits on the skill folders in root that have no
@@ -1247,6 +1267,38 @@ func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
 			w.waitForPluginFolder(path)
 		}
 	}
+}
+
+// changedSkillFolder maps an fsnotify event inside a folder the watcher waits
+// on in a skill root (one with no markdown content yet) to that folder.
+func (w *InstallWatcher) changedSkillFolder(path string) (string, bool) {
+	parent := filepath.Clean(filepath.Dir(path))
+	if _, waiting := w.pluginWaiting[parent]; !waiting || !w.inSkillRoot(parent) {
+		return "", false
+	}
+	return parent, true
+}
+
+// inSkillRoot reports whether dir is a direct child of a watched skill root.
+func (w *InstallWatcher) inSkillRoot(dir string) bool {
+	parent, _ := filepath.Abs(filepath.Dir(dir))
+	for _, root := range w.skillDirs {
+		if rootAbs, _ := filepath.Abs(root); sameWatcherPath(parent, rootAbs) {
+			return true
+		}
+	}
+	return false
+}
+
+// skillFolderEvent queues the skill folder an event inside it changed. A
+// file written into a folder the watcher waits on (an empty SKILL.md that
+// now has text) re-checks the folder; a chmod alone changes nothing.
+func (w *InstallWatcher) skillFolderEvent(ctx context.Context, event fsnotify.Event, skill string) {
+	if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) == 0 {
+		return
+	}
+	w.recordWatcherEvent(ctx, "change", string(InstallSkill), "")
+	w.queuePending(skill)
 }
 
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {

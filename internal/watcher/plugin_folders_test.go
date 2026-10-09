@@ -234,8 +234,19 @@ func TestIncompleteSkillFolderWaitsForSkillMD(t *testing.T) {
 		}
 	}
 	skillMD := filepath.Join(live, "SKILL.md")
+	// GAP-1105: an editor's empty new SKILL.md is still waited on, and the
+	// write that fills it re-checks the folder.
+	if err := os.WriteFile(skillMD, []byte("\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if events := w.pendingInstallEvents(live); len(events) != 0 {
+		t.Fatalf("skill folder with an empty SKILL.md events = %v, want none", events)
+	}
 	if err := os.WriteFile(skillMD, []byte("---\nname: new-skill\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if queued, ok := w.changedSkillFolder(skillMD); !ok || queued != live {
+		t.Fatalf("write to SKILL.md in waiting skill folder = %q, %v; want %q", queued, ok, live)
 	}
 	if queued, ok := w.waitingPluginEvent(skillMD); !ok || queued != live {
 		t.Fatalf("SKILL.md in waiting skill folder = %q, %v; want %q", queued, ok, live)
