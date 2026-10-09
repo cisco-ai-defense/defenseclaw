@@ -255,7 +255,12 @@ class RulePack:
         """Walk *path* (file or dir) and apply :meth:`scan_text` to text files."""
         findings: list[Finding] = []
         if os.path.islink(path):
-            return findings
+            # A linked file is skipped; a skill folder given as a link is
+            # scanned as the folder it names (GAP-0891). Links inside it
+            # stay skipped below.
+            if not os.path.isdir(path):
+                return findings
+            path = os.path.realpath(path)
         if os.path.isfile(path):
             text = _read_text(path)
             if text is not None:
