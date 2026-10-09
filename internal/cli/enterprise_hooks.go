@@ -512,6 +512,16 @@ var errEnterpriseHookRepairAwaitsSignIn = errors.New(
 	"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
 )
 
+var enterpriseHookPendingRepairWarn = func(target enterprisehooks.ManifestTarget, cause error) {
+	fmt.Fprintf(
+		os.Stderr,
+		"[hook-guardian] WARN: %s@%s is pending repair until its owner signs in; previously protected hooks failed verification: %v\n",
+		strings.TrimSpace(target.Connector),
+		strings.TrimSpace(target.SID),
+		cause,
+	)
+}
+
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
 // protected, verification failed, its authenticated session was available,
@@ -526,8 +536,8 @@ func enterpriseHookVerifyOrRepairTarget(
 		result, err := enterpriseHookReconcileInstaller(ctx, opts)
 		return result, false, err
 	}
-	result, err := enterpriseHookReconcileVerifier(ctx, opts)
-	if err == nil {
+	result, verifyErr := enterpriseHookReconcileVerifier(ctx, opts)
+	if verifyErr == nil {
 		return result, false, nil
 	}
 	available, err := enterpriseHookReconcileSessionAvailable(target)
@@ -535,7 +545,9 @@ func enterpriseHookVerifyOrRepairTarget(
 		return enterprisehooks.InstallResult{}, false, err
 	}
 	if !available {
-		return enterprisehooks.InstallResult{}, false, errEnterpriseHookRepairAwaitsSignIn
+		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+			"%w (verification: %w)", errEnterpriseHookRepairAwaitsSignIn, verifyErr,
+		)
 	}
 	result, err = enterpriseHookReconcileInstaller(ctx, opts)
 	return result, err == nil, err
@@ -848,14 +860,21 @@ func compareEnterpriseHookGuardianRecords(
 		issues = append(issues, fmt.Sprintf("guardian activation records manifest SHA-256 %s, expected %s", activation.ManifestSHA256, expected))
 	}
 	if state.OK && authorization.OK {
-		protectedRows := enterpriseHookProtectedReconcileRows(state.Results)
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(protectedRows, authorization.ProtectedTargets, "authorization")...,
+			compareEnterpriseHookProtectedTargetSets(
+				enterpriseHookExpectedLedgerRows(state.Results, authorization.ProtectedTargets),
+				authorization.ProtectedTargets,
+				"authorization",
+			)...,
 		)
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(protectedRows, activation.ProtectedTargets, "activation")...,
+			compareEnterpriseHookProtectedTargetSets(
+				enterpriseHookExpectedLedgerRows(state.Results, activation.ProtectedTargets),
+				activation.ProtectedTargets,
+				"activation",
+			)...,
 		)
 	} else {
 		for _, row := range state.Results {
@@ -885,6 +904,32 @@ func enterpriseHookProtectedReconcileRows(rows []enterpriseHookReconcileRow) []e
 		}
 	}
 	return protected
+}
+
+// enterpriseHookExpectedLedgerRows is the set a protected ledger must equal:
+// every successful row, plus each pending row whose prior successful ledger
+// entry mergeProtectedEnterpriseHookTargets retained while its signed-out
+// owner awaits repair. Ledger rows matching neither remain stale.
+func enterpriseHookExpectedLedgerRows(
+	rows []enterpriseHookReconcileRow,
+	ledger []enterpriseHookReconcileRow,
+) []enterpriseHookReconcileRow {
+	expected := enterpriseHookProtectedReconcileRows(rows)
+	retained := make(map[string]struct{}, len(ledger))
+	for _, row := range ledger {
+		if key := enterpriseHookProtectedTargetKey(row); key != "" {
+			retained[key] = struct{}{}
+		}
+	}
+	for _, row := range rows {
+		if !row.Pending {
+			continue
+		}
+		if _, ok := retained[enterpriseHookProtectedTargetKey(row)]; ok {
+			expected = append(expected, row)
+		}
+	}
+	return expected
 }
 
 // compareEnterpriseHookProtectedTargetSets diffs the reconcile-time target
@@ -1000,6 +1045,10 @@ func enterpriseHookDeferredPendingAfterSessionError(
 		if signedIn {
 			return false, err
 		}
+		// Verify cannot tell upgrade drift from tampering, and neither can be
+		// repaired without the owner's token, so the row pends; the cause is
+		// logged on every reconcile so it is never silent.
+		enterpriseHookPendingRepairWarn(target, err)
 		return true, nil
 	}
 	if !enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
@@ -1543,7 +1592,7 @@ func enterpriseHookVerifyDispositionIssues(
 	issues = append(
 		issues,
 		compareEnterpriseHookProtectedTargetSets(
-			protected,
+			enterpriseHookExpectedLedgerRows(run.Rows, authorization.ProtectedTargets),
 			authorization.ProtectedTargets,
 			"authorization",
 		)...,
@@ -1551,7 +1600,7 @@ func enterpriseHookVerifyDispositionIssues(
 	issues = append(
 		issues,
 		compareEnterpriseHookProtectedTargetSets(
-			protected,
+			enterpriseHookExpectedLedgerRows(run.Rows, activation.ProtectedTargets),
 			activation.ProtectedTargets,
 			"activation",
 		)...,

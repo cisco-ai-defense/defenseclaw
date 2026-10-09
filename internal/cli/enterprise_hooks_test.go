@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -343,6 +344,37 @@ func TestEnterpriseHookVerifyPendingUsesProtectedStateProofNotSessionProbe(t *te
 	}
 }
 
+func TestEnterpriseHookLedgerAcceptsRetainedRowOnlyForPendingTarget(t *testing.T) {
+	ok := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1001", Connector: "codex", OK: true}
+	pendingRow := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Pending: true}
+	retained := enterpriseHookReconcileRow{SID: pendingRow.SID, Connector: "codex", OK: true}
+	stale := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1003", Connector: "codex", OK: true}
+	rows := []enterpriseHookReconcileRow{ok, pendingRow}
+
+	ledger := []enterpriseHookReconcileRow{ok, retained}
+	if issues := compareEnterpriseHookProtectedTargetSets(
+		enterpriseHookExpectedLedgerRows(rows, ledger), ledger, "authorization",
+	); len(issues) != 0 {
+		t.Fatalf("retained row for pending target rejected: %v", issues)
+	}
+
+	ledger = []enterpriseHookReconcileRow{ok, retained, stale}
+	issues := compareEnterpriseHookProtectedTargetSets(
+		enterpriseHookExpectedLedgerRows(rows, ledger), ledger, "authorization",
+	)
+	if len(issues) != 1 || !strings.Contains(issues[0], "extra or stale") {
+		t.Fatalf("stale ledger row issues = %v, want one extra-or-stale issue", issues)
+	}
+
+	// A never-enrolled pending target has no ledger row and adds no expectation.
+	ledger = []enterpriseHookReconcileRow{ok}
+	if issues := compareEnterpriseHookProtectedTargetSets(
+		enterpriseHookExpectedLedgerRows(rows, ledger), ledger, "authorization",
+	); len(issues) != 0 {
+		t.Fatalf("never-enrolled pending target produced issues: %v", issues)
+	}
+}
+
 func TestEnterpriseHookVerifyOrRepairTargetSignalsRepairAwaitingSignIn(t *testing.T) {
 	previousVerifier := enterpriseHookReconcileVerifier
 	previousInstaller := enterpriseHookReconcileInstaller
@@ -352,8 +384,9 @@ func TestEnterpriseHookVerifyOrRepairTargetSignalsRepairAwaitingSignIn(t *testin
 		enterpriseHookReconcileInstaller = previousInstaller
 		enterpriseHookReconcileSessionAvailable = previousSession
 	})
+	drift := errors.New("hook contract drift")
 	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
-		return enterprisehooks.InstallResult{}, errors.New("hook contract drift")
+		return enterprisehooks.InstallResult{}, drift
 	}
 	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) {
 		return false, nil
@@ -368,14 +401,18 @@ func TestEnterpriseHookVerifyOrRepairTargetSignalsRepairAwaitingSignIn(t *testin
 		enterprisehooks.InstallOptions{ConnectorName: "codex"},
 		true,
 	)
-	if repaired || !errors.Is(err, errEnterpriseHookRepairAwaitsSignIn) {
-		t.Fatalf("repaired=%t err=%v, want false/errEnterpriseHookRepairAwaitsSignIn", repaired, err)
+	if repaired || !errors.Is(err, errEnterpriseHookRepairAwaitsSignIn) || !errors.Is(err, drift) {
+		t.Fatalf("repaired=%t err=%v, want false and both the sign-in sentinel and the verify cause", repaired, err)
 	}
 }
 
 func TestEnterpriseHookPreviouslyProtectedPendsOnlyWhenOwnerHasNoSession(t *testing.T) {
 	previous := enterpriseHookReconcileAnySession
-	t.Cleanup(func() { enterpriseHookReconcileAnySession = previous })
+	previousWarn := enterpriseHookPendingRepairWarn
+	t.Cleanup(func() {
+		enterpriseHookReconcileAnySession = previous
+		enterpriseHookPendingRepairWarn = previousWarn
+	})
 	deferred := enterprisehooks.ManifestTarget{
 		SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Deferred: true,
 	}
@@ -385,11 +422,21 @@ func TestEnterpriseHookPreviouslyProtectedPendsOnlyWhenOwnerHasNoSession(t *test
 	enterpriseHookReconcileAnySession = func(enterprisehooks.ManifestTarget) (bool, error) {
 		return signedIn, probeErr
 	}
+	var warned []error
+	enterpriseHookPendingRepairWarn = func(_ enterprisehooks.ManifestTarget, cause error) {
+		warned = append(warned, cause)
+	}
 
-	pending, err := enterpriseHookDeferredPendingAfterSessionError(deferred, true, errEnterpriseHookRepairAwaitsSignIn)
+	drift := errors.New("hook contract drift")
+	awaiting := fmt.Errorf("%w (verification: %w)", errEnterpriseHookRepairAwaitsSignIn, drift)
+	pending, err := enterpriseHookDeferredPendingAfterSessionError(deferred, true, awaiting)
 	if err != nil || !pending {
 		t.Fatalf("signed out: pending=%t err=%v, want true/nil", pending, err)
 	}
+	if len(warned) != 1 || !errors.Is(warned[0], drift) {
+		t.Fatalf("pending drift warnings = %v, want one carrying the verify cause", warned)
+	}
+	warned = nil
 
 	signedIn = true
 	pending, err = enterpriseHookDeferredPendingAfterSessionError(deferred, true, errEnterpriseHookRepairAwaitsSignIn)
@@ -412,10 +459,15 @@ func TestEnterpriseHookPreviouslyProtectedPendsOnlyWhenOwnerHasNoSession(t *test
 		t.Fatalf("non-deferred target: pending=%t err=%v, want hard failure", pending, err)
 	}
 
-	tamper := errors.New("hook contract digest mismatch")
-	pending, err = enterpriseHookDeferredPendingAfterSessionError(deferred, true, tamper)
-	if pending || !errors.Is(err, tamper) {
+	// Failures not routed through the awaiting-sign-in signal (for example a
+	// failed repair with the owner present) are never downgraded.
+	installErr := errors.New("repair publication failed")
+	pending, err = enterpriseHookDeferredPendingAfterSessionError(deferred, true, installErr)
+	if pending || !errors.Is(err, installErr) {
 		t.Fatalf("non-session failure: pending=%t err=%v, want original error", pending, err)
+	}
+	if len(warned) != 0 {
+		t.Fatalf("hard-failure paths emitted pending warnings: %v", warned)
 	}
 }
 
