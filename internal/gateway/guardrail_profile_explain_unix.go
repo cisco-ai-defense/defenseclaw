@@ -7,7 +7,6 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"time"
 
@@ -50,7 +49,7 @@ var profileExplainQualifiedName = func(ctx context.Context, name string) string 
 	return unixidentity.QualifiedUserName(ctx, unixidentity.Default(ctx), name)
 }
 
-func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
+func profileExplainUnresolved(name string, lookupErr error) (profileSubject, error) {
 	if local, err := lookupLocalProfileSubject(name); err == nil {
 		return local, nil
 	}
@@ -59,10 +58,7 @@ func profileExplainUnresolved(name string, _ error) (profileSubject, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
-	if qualified := profileExplainQualifiedName(ctx, name); qualified != "" {
-		return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; getent passwd knows %q: use that spelling or its uid", name, qualified)
-	}
-	return profileSubject{UserName: name}, fmt.Errorf("no account named %q on this host; check the current spelling with getent passwd or use the account uid", name)
+	return profileSubject{UserName: name}, unixidentity.AccountLookupError(name, profileExplainQualifiedName(ctx, name), lookupErr)
 }
 
 // profileExplainDirectoryFacts resolves the facts a verified request from

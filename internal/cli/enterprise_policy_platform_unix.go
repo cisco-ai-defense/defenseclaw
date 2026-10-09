@@ -120,13 +120,15 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 	account, err := unixidentity.LookupAccountSpelling(resolver, name, unixidentity.DirectoryFactsFunc(ctx))
 	if err != nil {
 		// A uid names its account as profile-explain takes it: getent answers
-		// a uid with the account name, which is not the spelling typed.
+		// a uid with the account name, which is not the spelling typed. A name
+		// that resolves to nothing gets profile-explain's plain sentence and
+		// its did-you-mean spelling (GAP-1089).
 		uid, convErr := strconv.Atoi(name)
 		if convErr != nil || uid < 0 {
-			return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+			return enterprisehooks.TargetCredentials{}, unixidentity.AccountLookupError(name, unixidentity.QualifiedUserName(ctx, resolver, name), err)
 		}
 		if account, err = resolver.LookupUID(uid); err != nil {
-			return enterprisehooks.TargetCredentials{}, fmt.Errorf("look up user %q: %w", name, err)
+			return enterprisehooks.TargetCredentials{}, unixidentity.AccountLookupError(name, "", err)
 		}
 	}
 	return enterprisehooks.TargetCredentials{UserHome: account.Home, UID: account.UID, GID: account.GID, Username: account.Name}, nil
