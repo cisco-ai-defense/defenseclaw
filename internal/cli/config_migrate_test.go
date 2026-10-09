@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -143,5 +144,40 @@ func TestConfigMigrateLeavesASecureClientConfigUnchanged(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	if raw, _ := os.ReadFile(path); string(raw) != string(v8) || len(entries) != 1 {
 		t.Fatalf("config migrate changed the Secure Client directory: %d entries", len(entries))
+	}
+}
+
+// A v8 policy_dir under the login home must be read by the CLI migration,
+// just as the gateway's in-memory migration reads it.
+func TestConfigMigrateReadsTildePolicyData(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dataDir + "\npolicy_dir: ~/policies\nobservability: {}\n")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataJSON := filepath.Join(home, "policies", "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions":{"MEDIUM":{"install":"block","file":"none","runtime":"block"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input, err := configMigrateV9Input(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.DryRun = true
+	result, err := config.MigrateV9(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(result.Migrated), "medium: block") {
+		t.Fatalf("migration missed policy data from %s", dataJSON)
 	}
 }

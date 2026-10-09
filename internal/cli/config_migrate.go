@@ -181,10 +181,11 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		input.Managed = config.StandaloneManagedSource(raw)
 	}
 	if policyDir != "" {
+		policyDir = expandMigrationInputPath(policyDir)
 		input.PolicyDir = policyDir
 		input.DataJSONPath = filepath.Join(policyDir, "rego", "data.json")
 	}
-	input.AuditDBPath = auditDB
+	input.AuditDBPath = expandMigrationInputPath(auditDB)
 	// The migrated document is validated the way the gateway loads it, with
 	// the credentials of the data directory's .env: a destination key stored
 	// there by `defenseclaw keys set` (the normal layout) must resolve
@@ -193,6 +194,17 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		loadDotEnvIntoOS(filepath.Join(input.DataDir, ".env"))
 	}
 	return input, nil
+}
+
+// expandMigrationInputPath uses the same ~/ expansion as the gateway's
+// in-memory v8 migration for policy_dir and audit.db paths.
+func expandMigrationInputPath(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 // migrateManagedStandaloneConfig is the Windows standalone lifecycle's
