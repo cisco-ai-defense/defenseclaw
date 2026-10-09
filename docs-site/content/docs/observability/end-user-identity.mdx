@@ -18,7 +18,7 @@ gateway's service account is not the person running the AI agent.
 | --- | --- |
 | `user.id` | POSIX effective uid or Windows token SID. |
 | `defenseclaw.user.id_kind` | `posix_uid` or `windows_sid`, set only when the identifier came from the corresponding trusted OS source. |
-| `defenseclaw.user.name` | OS account name from the same lookup as `user.id`, without its domain: `alice` for the SSSD account `alice@corp.example.com` or for `CORP\alice`. The qualified form is the principal. Every record of the account carries the same spelling, in every sink: hook decisions, lifecycle, model and tool records, scans, sandbox rows, AI discovery and IDE inventory. It is never mixed with a fallback identity. A name in any script is kept (for example `dcad-eoé`). Under the Secure Client integration a name with a non-ASCII character is left out and `user.id` names the account. |
+| `defenseclaw.user.name` | OS account name from the same lookup as `user.id`, without its domain: `alice` for the SSSD account `alice@corp.example.com` or for `CORP\alice`. The qualified form is the principal. Every record of the account carries the same spelling, in every sink: hook decisions, lifecycle, model and tool records, scans, sandbox rows, AI discovery and IDE inventory. A local account and a directory account with the same bare name differ by `user.id` and by `defenseclaw.user.directory` and `defenseclaw.user.domain`, which every one of those records carries, `strict` included. It is never mixed with a fallback identity. A name in any script is kept (for example `dcad-eoé`). Under the Secure Client integration a name with a non-ASCII character is left out and `user.id` names the account. |
 | `defenseclaw.user.email` | Optional connector-account email. Collection is off by default. |
 | `defenseclaw.user.principal` | Directory principal of the account: a UPN, a Kerberos principal or `DOMAIN\user`, for example `alice@CORP.EXAMPLE.COM`. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.user.domain` | Directory domain or Kerberos realm of the principal. |
@@ -104,7 +104,7 @@ The `ide.plugin.*` records and the `identity.observed` record carry the same
 | `hook.decision`, `guardrail.evaluation`, `tool.activity` and the agent, model, tool and guardrail spans | The account (`user.id`, `defenseclaw.user.id_kind`, `defenseclaw.user.name`), the directory, session and agent identity attributes, and the guardrail profile on decisions and evaluations |
 | `identity.observed` | Once per user per identity cache lifetime (15 minutes): the directory, source and assurance, and the group count |
 | `ai_component.*` and the endpoint inventory | The owning user's principal, domain, directory, assurance and agent identity |
-| `ide.plugin.discovered`, `changed` and `removed` | One IDE plugin and its enabled state, for the user who owns it |
+| `ide.plugin.discovered`, `changed` and `removed` | One IDE plugin and its enabled state, for the user who owns it, with that user's principal, domain, directory, identity source and assurance |
 
 Join records by `user.id` only after checking
 `defenseclaw.user.id_kind`. Do not join a POSIX uid to a Windows SID or assume

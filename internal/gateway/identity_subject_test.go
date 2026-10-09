@@ -488,3 +488,49 @@ func TestProcessOwnerProfileSubjectKeepsConnectorWithoutIdentityLookup(t *testin
 		t.Fatalf("optional lookup selected %+v", got)
 	}
 }
+
+// An ide.plugin record carries the directory attribution every other
+// inventory record carries, so a local account and a directory account with
+// the same bare name differ by more than user.id in the strict sink
+// (GAP-1088).
+func TestIDEPluginRecordsCarryTheOwnersDirectory(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	facts := useridentity.DirectoryFacts{
+		Principal: "dcad-o4ud@dclab.test", Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+		Source: useridentity.SourceSSSDInfoPipe, Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(),
+	}
+	original := managedHookPeerDirectory
+	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) { return facts, uid == 1201 }
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScanID: "scan-ide", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok"},
+		IDEInventory: &inventory.IDEInventory{Plugins: []inventory.IDEPlugin{{
+			PluginID: "anthropic.claude-code", Product: "vscode", Version: "2.0.1", Enabled: "enabled", IsAI: true,
+			UserID: "1201", UserName: "dcad-o4ud", State: inventory.AIStateNew,
+		}}},
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range capture.snapshot() {
+		if record.EventName() != observability.EventName(observability.TelemetryEventIdePluginDiscovered) {
+			continue
+		}
+		body := canonicalBody(t, record)
+		for key, want := range map[string]string{
+			observability.TelemetryAttributeDefenseClawUserDirectory:          string(facts.Directory),
+			observability.TelemetryAttributeDefenseClawUserDomain:             facts.Domain,
+			observability.TelemetryAttributeDefenseClawUserIdentitySource:     string(facts.Source),
+			observability.TelemetryAttributeDefenseClawUserPrincipalAssurance: string(facts.Assurance),
+		} {
+			if got, _ := body[key].(string); got != want {
+				t.Errorf("%s = %q, want %q", key, got, want)
+			}
+		}
+		return
+	}
+	t.Fatal("no ide.plugin.discovered record")
+}
