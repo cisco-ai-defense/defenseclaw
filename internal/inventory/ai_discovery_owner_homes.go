@@ -5,6 +5,8 @@ package inventory
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -163,6 +165,108 @@ func insideDiscoveryHomeOf(owners []discoveryHomeOwner, path string) bool {
 		}
 	}
 	return false
+}
+
+// ProfilePathThroughLink reports whether path, at or below root (a profile or
+// an ai_discovery.home_dirs folder), goes through a link: on Windows any
+// link, junction or mount point below root, elsewhere a link that leads out
+// of root. A managed gateway that reads a user's files refuses such a path,
+// as the AI Discovery scan does (GAP-1097).
+func ProfilePathThroughLink(root, path string) bool {
+	return discoveryPathThroughLink(root, path)
+}
+
+// profilePathThroughLink reports whether a path below a scanned root goes
+// through a link or junction (discoveryPathThroughLink); tests replace it.
+var profilePathThroughLink = discoveryPathThroughLink
+
+// profileLinkRefused reports a path a managed Windows scan must not read: it
+// lies in a scanned profile or ai_discovery.home_dirs folder and goes
+// through a link, junction or mount point below it. The gateway service may
+// read every enrolled account's agent folders, so a standard user who made
+// their .codex a junction to another account's .codex had that account's
+// Codex config and MCP servers listed under their own SID (GAP-1097). This
+// is the no-follow rule of GAP-0694, which the hook enumerator applies to
+// its grants (GAP-0197) and the IDE inventory to its reads (GAP-0396). Each
+// refused path is warned about once. The Secure Client profile and every
+// per-user scan (no profile owners) keep their reads.
+func (s *ContinuousDiscoveryService) profileLinkRefused(path string) bool {
+	if s == nil || s.opts.SecureClient || len(s.opts.homeOwners) == 0 {
+		return false
+	}
+	root, owner, ok := s.scannedRootFor(path)
+	if !ok || !profilePathThroughLink(root, path) {
+		return false
+	}
+	key := strings.ToLower(filepath.Clean(path))
+	if s.linkWarned == nil {
+		s.linkWarned = map[string]bool{}
+	}
+	if !s.linkWarned[key] {
+		s.linkWarned[key] = true
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." {
+			rel = filepath.Base(path)
+		}
+		if owner == "" {
+			owner = "ai_discovery.home_dirs entry"
+		}
+		fmt.Fprintf(os.Stderr, "[ai-discovery] WARN ai_discovery_link_refused: %s: %s goes through a link or junction; not read\n",
+			owner, filepath.ToSlash(rel))
+	}
+	return true
+}
+
+// scannedRootFor returns the scanned root that holds path and its owner's
+// SID: the profile that holds it, else the ai_discovery.home_dirs folder.
+func (s *ContinuousDiscoveryService) scannedRootFor(path string) (string, string, bool) {
+	if owner, ok := s.homeOwnerForPath(path); ok {
+		return filepath.Clean(owner.Home), owner.UserID, true
+	}
+	best := ""
+	for _, extra := range s.opts.extraHomes {
+		if insideDiscoveryHomeOf([]discoveryHomeOwner{{Home: extra}}, path) && len(extra) > len(best) {
+			best = filepath.Clean(extra)
+		}
+	}
+	return best, "", best != ""
+}
+
+// dropLinkedExtraHomes leaves out of the scan an ai_discovery.home_dirs
+// folder that is itself a link or junction, or is reached through one below
+// the profile that holds it.
+func (s *ContinuousDiscoveryService) dropLinkedExtraHomes() {
+	if s.opts.SecureClient || len(s.opts.homeOwners) == 0 || len(s.opts.extraHomes) == 0 {
+		return
+	}
+	kept := make([]string, 0, len(s.opts.HomeDirs))
+	droppedHomeDir := false
+	for _, home := range s.opts.HomeDirs {
+		if _, profile := s.homeOwnerForPathExact(home); !profile && discoveryHomeListed(s.opts.extraHomes, home) &&
+			s.profileLinkRefused(home) {
+			droppedHomeDir = droppedHomeDir || sameDiscoveryHome(home, s.opts.HomeDir)
+			continue
+		}
+		kept = append(kept, home)
+	}
+	s.opts.HomeDirs = kept
+	if droppedHomeDir {
+		// "~" and the per-user folder variables resolve against HomeDir.
+		s.opts.HomeDir, _ = platformDiscoveryHomeDir()
+		if len(kept) > 0 {
+			s.opts.HomeDir = kept[0]
+		}
+	}
+}
+
+// homeOwnerForPathExact returns the profile owner whose home is path itself.
+func (s *ContinuousDiscoveryService) homeOwnerForPathExact(path string) (discoveryHomeOwner, bool) {
+	for _, owner := range s.opts.homeOwners {
+		if sameDiscoveryHome(owner.Home, path) {
+			return owner, true
+		}
+	}
+	return discoveryHomeOwner{}, false
 }
 
 // connectorEmailReader reads one connector's account address from a profile;

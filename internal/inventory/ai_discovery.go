@@ -642,6 +642,9 @@ type ContinuousDiscoveryService struct {
 	// as the home's owner, but its report lands in the managed inventory,
 	// so the IDE scan follows no link out of the home (GAP-0396).
 	userHomeScan bool
+	// linkWarned holds the paths a managed Windows scan refused because
+	// they go through a link or junction, so each is warned about once.
+	linkWarned map[string]bool
 	// processOwners, when set, limits the process detector to processes of
 	// these owners (the account name or uid of a per-user scan).
 	processOwners map[string]bool
@@ -975,6 +978,7 @@ func (s *ContinuousDiscoveryService) refreshPlatformHomes() {
 		return
 	}
 	s.opts.applyPlatformHomeOwners(discoveryHomeOwnersLookup(s.opts.StandaloneEnterprise))
+	s.dropLinkedExtraHomes()
 }
 
 func (s *ContinuousDiscoveryService) homesToScan() []string {
@@ -2057,7 +2061,7 @@ func (s *ContinuousDiscoveryService) detectConfigPaths() []AISignal {
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.ConfigPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if s.configPathPresent(candidate, path) {
+				if s.configPathPresent(candidate, path) && !s.profileLinkRefused(path) {
 					category := SignalWorkspaceArtifact
 					if sig.SupportedConnector != "" {
 						category = SignalSupportedConnector
@@ -2075,8 +2079,12 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.MCPPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if pathExists(path) {
-					out = append(out, s.signalFromMCPConfigPath(sig, path))
+				if pathExists(path) && !s.profileLinkRefused(path) {
+					signal := s.signalFromMCPConfigPath(sig, path)
+					// A link swapped in during the read leaves no record.
+					if !s.profileLinkRefused(path) {
+						out = append(out, signal)
+					}
 				}
 			}
 		}
@@ -2268,8 +2276,11 @@ func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.SkillPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if dirHasEntry(path) {
-					out = append(out, s.signalFromDirectoryChildren(sig, SignalSkill, "skill", path))
+				if dirHasEntry(path) && !s.profileLinkRefused(path) {
+					signal := s.signalFromDirectoryChildren(sig, SignalSkill, "skill", path)
+					if !s.profileLinkRefused(path) {
+						out = append(out, signal)
+					}
 				}
 			}
 		}
@@ -2282,8 +2293,11 @@ func (s *ContinuousDiscoveryService) detectRules() []AISignal {
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.RulePaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if dirHasEntry(path) {
-					out = append(out, s.signalFromDirectoryChildren(sig, SignalRule, "rule", path))
+				if dirHasEntry(path) && !s.profileLinkRefused(path) {
+					signal := s.signalFromDirectoryChildren(sig, SignalRule, "rule", path)
+					if !s.profileLinkRefused(path) {
+						out = append(out, signal)
+					}
 				}
 			}
 		}
@@ -2296,8 +2310,11 @@ func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.PluginPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if dirHasEntry(path) {
-					out = append(out, s.signalFromDirectoryChildren(sig, SignalPlugin, "plugin", path))
+				if dirHasEntry(path) && !s.profileLinkRefused(path) {
+					signal := s.signalFromDirectoryChildren(sig, SignalPlugin, "plugin", path)
+					if !s.profileLinkRefused(path) {
+						out = append(out, signal)
+					}
 				}
 			}
 		}
@@ -3600,8 +3617,11 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 	var out []AISignal
 	files := 0
 	for _, path := range paths {
+		if s.profileLinkRefused(path) {
+			continue
+		}
 		raw, err := readRegularFileTail(path, s.opts.MaxFileBytes)
-		if err != nil {
+		if err != nil || s.profileLinkRefused(path) {
 			continue
 		}
 		files++
