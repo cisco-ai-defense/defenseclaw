@@ -36,6 +36,54 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// An unreadable custom scanner policy must leave the v8 source intact so an
+// upgrade can retry after access to the policy is restored.
+func TestMigrateV9RetriesUnreadableCustomScannerPolicy(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	policyPath := filepath.Join(dir, "custom-skill-policy.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nscanners:\n  skill_scanner:\n    policy: " + policyPath + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A directory at the policy path gives a read error on every OS, even
+	// when the test runs with elevated privileges.
+	if err := os.Mkdir(policyPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err == nil {
+		t.Fatal("migration succeeded without reading the custom policy")
+	}
+	if got, err := os.ReadFile(configPath); err != nil || string(got) != source {
+		t.Fatalf("v8 config after failed migration = %q (%v)", got, err)
+	}
+	if _, err := os.Stat(configPath + ConfigV8BackupSuffix); !os.IsNotExist(err) {
+		t.Errorf("failed migration wrote a backup: %v", err)
+	}
+	if _, err := os.Stat(MigrationRecordPath(configPath)); !os.IsNotExist(err) {
+		t.Errorf("failed migration wrote a record: %v", err)
+	}
+
+	if err := os.Remove(policyPath); err != nil {
+		t.Fatal(err)
+	}
+	policy := []byte("rules: []\n")
+	if err := os.WriteFile(policyPath, policy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("migration after policy access restored: %v", err)
+	}
+	if !strings.Contains(string(result.Migrated), "policy: custom") ||
+		!strings.Contains(string(result.Migrated), "path: "+policyPath) ||
+		!strings.Contains(string(result.Migrated), "sha256:"+cfgtxn.SHA256Hex(policy)) {
+		t.Errorf("custom policy was not pinned on retry: %s", result.Migrated)
+	}
+}
+
 // The installer's rollback copy covers the data home only. A data.json and
 // audit.db that policy_dir and data_dir place elsewhere keep their v8 state, so
 // restoring config.yaml.v8.bak leaves a 1.0 gateway its policy data.
