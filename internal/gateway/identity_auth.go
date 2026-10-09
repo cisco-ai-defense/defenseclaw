@@ -36,7 +36,7 @@ func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, u
 		return ctx
 	}
 	facts, _ := verifiedIdentityDirectory(userID, identityLookupBlocking.Load())
-	name := useridentity.BareAccountName(userName)
+	name := verifiedAccountName(userID, userName)
 	if name == "" {
 		name = spooledAccountName(userID)
 	}
@@ -73,6 +73,20 @@ func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, u
 	return ctx
 }
 
+// verifiedAccountName preserves a Windows SID's literal account spelling.
+// LSA lookups return the domain separately; a guardian spool may prefix it
+// with DOMAIN\. Neither form makes an @ in the account a UPN suffix.
+func verifiedAccountName(id, name string) string {
+	if useridentity.KindForID(id) == useridentity.KindWindowsSID {
+		name = strings.TrimSpace(name)
+		if at := strings.LastIndexByte(name, '\\'); at >= 0 {
+			return name[at+1:]
+		}
+		return name
+	}
+	return useridentity.BareAccountName(name)
+}
+
 // spooledAccountName is the bare name the guardian recorded for the account
 // id, for a request whose caller was proved by id but not named: a domain
 // controller that is down and an SSSD with a cold cache answer "no such user"
@@ -87,7 +101,7 @@ func spooledAccountName(id string) string {
 	if !ok {
 		return ""
 	}
-	return useridentity.BareAccountName(sanitizeLLMEventUser(record.User))
+	return verifiedAccountName(id, sanitizeLLMEventUser(record.User))
 }
 
 // attachProcessOwnerSubject verifies the caller of a per-user gateway as the

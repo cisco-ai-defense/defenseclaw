@@ -590,8 +590,9 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
 // has unknown groups, not empty ones. A verified ID remains usable.
 //
-// The account name is the bare one (alice for alice@corp.example.com and
-// CORP\alice) here, for every caller: a request and `explain --user` both
+// The account name is the bare one (alice for Unix alice@corp.example.com
+// and CORP\alice) here; a Windows SID keeps a literal @ in its LSA account
+// name. For every caller, a request and `explain --user` both
 // build their subject through this function, so a users entry cannot match
 // one and not the other (GAP-0182). A name whose domain the directory facts
 // do not confirm keeps its domain (profileUserName). The account domain a
@@ -600,6 +601,9 @@ var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 // names every account DOMAIN\name, does the name itself give it (GAP-0814).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
 	userName, nameUnconfirmed := profileUserName(s.UserName, s.Directory)
+	if s.IDKind == useridentity.KindWindowsSID {
+		userName, nameUnconfirmed = verifiedAccountName(s.UserID, s.UserName), false
+	}
 	accountDomain := s.Directory.AccountDomain
 	if accountDomain == "" && runtime.GOOS == "windows" {
 		if domain, _, qualified := strings.Cut(s.UserName, `\`); qualified {

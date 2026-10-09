@@ -1287,6 +1287,45 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	}
 }
 
+// An LSA account name may contain a literal @. It is not a UPN qualifier
+// when LookupAccountSid has already returned the account and domain separately.
+func TestWindowsLiteralAtAccountNameDoesNotSelectNamesakeProfile(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	const sid = "S-1-5-21-1-2-3-1107"
+	const name = "alex@corp.example.com"
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: sid, IDKind: useridentity.KindWindowsSID, UserName: name,
+		Directory: useridentity.DirectoryFacts{
+			Directory:     useridentity.DirectoryActiveDirectory,
+			AccountDomain: "CORP", ResolvedAt: time.Now(),
+		},
+	}, false)
+	for _, input := range []string{name, `CORP\alex@corp.example.com`} {
+		if got := verifiedAccountName(sid, input); got != name {
+			t.Fatalf("verified SID name from %q = %q, want %q", input, got, name)
+		}
+	}
+	if subject.UserName != name || subject.nameUnconfirmed {
+		t.Fatalf("profile subject = %+v, want exact confirmed LSA account name %q", subject, name)
+	}
+	for _, tc := range []struct {
+		entry string
+		want  bool
+	}{
+		{entry: "alex", want: false},
+		{entry: name, want: true},
+		{entry: `CORP\alex@corp.example.com`, want: true},
+	} {
+		if got := userEntryMatches(&subject, tc.entry); got != tc.want {
+			t.Errorf("users entry %q matched literal @ account: %t, want %t", tc.entry, got, tc.want)
+		}
+	}
+	if got := newTrustedLLMEventUser(sid, name).Name; got != name {
+		t.Errorf("trusted event name = %q, want %q", got, name)
+	}
+}
+
 // Windows LSA facts do not establish group membership until the guardian's
 // current identity record supplies its token groups.
 func TestProfileWindowsAwaitingSpoolUsesLookupFailed(t *testing.T) {
