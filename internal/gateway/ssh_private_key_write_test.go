@@ -71,7 +71,8 @@ func TestSSHPrivateKeyWriteIsSSHDirectoryFinding(t *testing.T) {
 // %USERPROFILE% form of an SSH path was partial with no finding, so an
 // authorized_keys append ran and a private key read left no alert, while the
 // same commands under a POSIX home and the spelled-out Windows paths were
-// judged. They are now judged as the spelled-out paths are.
+// judged, and Codex PowerShell commands were parsed as POSIX. They are now
+// judged as the spelled-out paths are.
 func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 	const connector = "windows-home-ssh-paths"
 	installToolCallCorpusProfileConnector(t, connector, "default")
@@ -90,13 +91,21 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 		{"powershell", `echo k >> "$env:USERPROFILE\.ssh\authorized_keys"`, authorizedKeys, true},
 		{"powershell", `Get-Content ~\.ssh\id_rsa`, privateKey, false},
 		{"cmd", `type %USERPROFILE%\.ssh\id_rsa`, privateKey, false},
+		// Codex names its Windows PowerShell tool Bash.
+		{"codex-windows", `Add-Content -Path $HOME\.ssh\authorized_keys -Value k`, authorizedKeys, true},
+		{"codex-windows", "echo k >> $HOME/.ssh/authorized_keys", authorizedKeys, true},
 		{"powershell", `Get-Content $HOME\project\notes.txt`, "", false},
 		{"Bash", "cat ~/project/notes.txt", "", false},
 	}
 	for _, test := range tests {
 		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
+		input := actionfacts.Input{Tool: test.tool, Args: args, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`}
+		if test.tool == "codex-windows" {
+			input.Tool = "Bash"
+			input.DialectHint = codexWindowsShellDialect("Bash", test.command)
+		}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-			Input:              actionfacts.Input{Tool: test.tool, Args: args, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`},
+			Input:              input,
 			LegacyText:         string(args),
 			Connector:          connector,
 			EnforcementCapable: true,

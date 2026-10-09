@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -220,8 +221,12 @@ func TestWindowsCommandHookParityObserveAndAction(t *testing.T) {
 		{`type %WINDIR%\System32\config\SYSTEM`, false},
 	}
 	// A proven local read of a credential path alerts without blocking
-	// (GAP-1516); reads through an environment variable stay unproven.
+	// (GAP-1516); reads through an environment variable stay unproven, except
+	// $env:USERPROFILE under a Windows home, which names that home (GAP-0912).
 	credentialRead := map[int]bool{16: true, 18: true, 22: true}
+	if runtime.GOOS == "windows" {
+		credentialRead[17] = true
+	}
 	for _, mode := range []string{"observe", "action"} {
 		for i, candidate := range commands {
 			command := candidate.command
