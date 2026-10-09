@@ -235,6 +235,10 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 <HookEventsList connector="copilot" />
 
+Copilot CLI has no hook that can stop a prompt, so a prompt rule doesn't block
+here: a matching prompt reaches the model. Tool-call rules still block
+([capability matrix](/docs/connectors/capability-matrix)).
+
 <Callout type="info">
 Copilot CLI supports native ask on documented `preToolUse` hooks. The approval prompt surfaces inside the agent UI, not the DefenseClaw TUI.
 </Callout>

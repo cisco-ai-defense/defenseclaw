@@ -3,7 +3,12 @@
 
 package gateway
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+)
 
 // GAP-1666: a write to the active user's SSH private key is an SSH
 // directory finding; a read stays PATH-SSH-KEY's and ssh-keygen is quiet.
@@ -58,6 +63,58 @@ func TestSSHPrivateKeyWriteIsSSHDirectoryFinding(t *testing.T) {
 		// A detection-only finding never reaches the alerts.
 		if finding != nil && finding.enforcement == findingEnforcementDetectionOnly {
 			t.Errorf("%s: PATH-SSH-DIR is detection-only", test.command)
+		}
+	}
+}
+
+// GAP-0912: under a Windows home every ~, $HOME, $env:USERPROFILE and
+// %USERPROFILE% form of an SSH path was partial with no finding, so an
+// authorized_keys append ran and a private key read left no alert, while the
+// same commands under a POSIX home and the spelled-out Windows paths were
+// judged. They are now judged as the spelled-out paths are.
+func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
+	const connector = "windows-home-ssh-paths"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	const (
+		authorizedKeys = "persistence.ssh_authorized_keys_command"
+		privateKey     = "PATH-SSH-KEY"
+	)
+	tests := []struct {
+		tool, command, rule string
+		block               bool
+	}{
+		{"Bash", "echo k >> ~/.ssh/authorized_keys", authorizedKeys, true},
+		{"Bash", `echo k >> "$HOME/.ssh/authorized_keys"`, authorizedKeys, true},
+		{"Bash", "cat ~/.ssh/id_rsa", privateKey, false},
+		{"powershell", `Add-Content -Path $HOME\.ssh\authorized_keys -Value k`, authorizedKeys, true},
+		{"powershell", `echo k >> "$env:USERPROFILE\.ssh\authorized_keys"`, authorizedKeys, true},
+		{"powershell", `Get-Content ~\.ssh\id_rsa`, privateKey, false},
+		{"cmd", `type %USERPROFILE%\.ssh\id_rsa`, privateKey, false},
+		{"powershell", `Get-Content $HOME\project\notes.txt`, "", false},
+		{"Bash", "cat ~/project/notes.txt", "", false},
+	}
+	for _, test := range tests {
+		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:              actionfacts.Input{Tool: test.tool, Args: args, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`},
+			LegacyText:         string(args),
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+		if test.rule == "" {
+			if len(findings) != 0 {
+				t.Errorf("%s %q: findings=%v, want none", test.tool, test.command, FindingStrings(findings))
+			}
+			continue
+		}
+		finding := findingWithID(findings, test.rule)
+		switch {
+		case finding == nil:
+			t.Errorf("%s %q: no %s; findings=%v", test.tool, test.command, test.rule, FindingStrings(findings))
+		case finding.contributesToEnforcement() != test.block:
+			t.Errorf("%s %q: %s blocks = %t, want %t", test.tool, test.command, test.rule, !test.block, test.block)
+		case !test.block && finding.enforcement != findingEnforcementAlertOnly:
+			t.Errorf("%s %q: %s is not an alert", test.tool, test.command, test.rule)
 		}
 	}
 }
