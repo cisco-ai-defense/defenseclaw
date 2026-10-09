@@ -283,3 +283,28 @@ func spoolUPNAssignmentWarnings(assignments []config.ProfileAssignment, now time
 	return upnAssignmentWarnings(assignments, enterprisehooks.ReadIdentitySpoolRecords(dir, validateManagedGuardianAuthorization,
 		upnAssignmentRecordsMax), now)
 }
+
+// A bound Mac whose domain controller does not answer.
+//
+// Open Directory then answers at once and without an error, but lists an
+// Active Directory account without its domain groups: its primary group
+// (Domain Users) is left as a bare number and its other domain groups are
+// gone. The account's facts looked resolved, so a user a groups assignment
+// selects silently got the default profile, nothing warned, and it stayed
+// there after the domain controller was back until the Open Directory caches
+// were flushed (GAP-1106). An account the guardian records as Active
+// Directory whose primary group has no name is therefore a failed lookup: the
+// gateway keeps the facts it cached (for up to an hour), status and verify
+// warn directory_lookups_failing, and the reason names the flush.
+
+// openDirectoryGroupsUnavailable is the lookup error for the account of
+// record whose primary group primaryGID Open Directory may not name, or nil.
+// named is asked only for an Active Directory account.
+func openDirectoryGroupsUnavailable(record enterprisehooks.IdentitySpoolRecord, primaryGID string, named func(gid string) bool) error {
+	if record.Facts.Directory != useridentity.DirectoryActiveDirectory || primaryGID == "" || named(primaryGID) {
+		return nil
+	}
+	return fmt.Errorf("the Mac's Open Directory lists this Active Directory account without its domain groups (its primary group %s has "+
+		"no name): the domain controller does not answer, or the Mac still answers from the caches it filled while it did not; "+
+		"once the domain controller answers, run sudo dscacheutil -flushcache; sudo dsmemberutil flushcache", primaryGID)
+}

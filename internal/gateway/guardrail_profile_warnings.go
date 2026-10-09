@@ -454,7 +454,8 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 // and one group by dseditgroup (GAP-1107).
 func groupNameCheckHint(platform string) string {
 	if platform == "darwin" {
-		return `check the exact name with id -Gn <user> (an Active Directory group reads DOMAIN\name) or dseditgroup -o read <group>`
+		return `check the exact name with id -Gn <user> (an Active Directory group reads DOMAIN\name) or dseditgroup -o read <group>; ` +
+			`after a domain controller outage, sudo dscacheutil -flushcache; sudo dsmemberutil flushcache refreshes Open Directory`
 	}
 	return "check the qualified name with getent group"
 }

@@ -514,3 +514,24 @@ func TestUPNAssignmentWarnsWhenInfoPipeReportsNoUPN(t *testing.T) {
 		t.Fatalf("warnings = %q with InfoPipe reporting the UPN, want none", got)
 	}
 }
+
+// TestOpenDirectoryGroupsUnavailableIsALookupFailure: with the domain
+// controller down a bound Mac lists an Active Directory account without its
+// domain groups, its primary group only as a number. That is a failed lookup,
+// whose reason names the flush, not facts that send the user to the default
+// profile without a warning (GAP-1106).
+func TestOpenDirectoryGroupsUnavailableIsALookupFailure(t *testing.T) {
+	ad := enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory}}
+	unnamed := func(string) bool { return false }
+	err := openDirectoryGroupsUnavailable(ad, "2027364327", unnamed)
+	if err == nil || !strings.Contains(err.Error(), "dsmemberutil flushcache") {
+		t.Fatalf("err = %v, want a lookup failure naming the flush", err)
+	}
+	if err := openDirectoryGroupsUnavailable(ad, "2027364327", func(string) bool { return true }); err != nil {
+		t.Fatalf("named primary group: %v", err)
+	}
+	local := enterprisehooks.IdentitySpoolRecord{Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}}
+	if err := openDirectoryGroupsUnavailable(local, "20", unnamed); err != nil {
+		t.Fatalf("local account: %v", err)
+	}
+}

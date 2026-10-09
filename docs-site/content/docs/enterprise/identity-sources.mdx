@@ -386,6 +386,20 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
   take seconds. The first request waits up to two seconds, then the default
   profile applies for 15 seconds until the lookup is retried.
+- **A bound Mac whose domain controller does not answer.** Open Directory
+  still answers at once, but lists an Active Directory account without its
+  domain groups (its primary group, Domain Users, only as a number), and after
+  the domain controller is back it can keep listing the account that way for
+  15 minutes or more. On standalone enterprise the gateway treats an Active
+  Directory account whose primary group has no name as a failed lookup: it
+  keeps the facts it cached for up to an hour, `status` and `verify` warn
+  `directory_lookups_failing`, and `profile-explain` gives the reason. Without
+  cached facts the account gets the default profile with
+  `default_lookup_failed`, so keep `default_profile` strict where a group
+  profile blocks. Once the domain controller answers,
+  `sudo dscacheutil -flushcache; sudo dsmemberutil flushcache` makes the Mac
+  list the domain groups again at once; DefenseClaw does not flush the caches
+  itself.
 - **Some facts need the enterprise profile.** The UPN on
   Linux, the group list on Windows and the bound-Mac facts on macOS are read
   with privilege by the root guardian or enumerator, which a per-user install

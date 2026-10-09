@@ -43,7 +43,17 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 		ResolvedAt: now,
 	}
 	if record, ok := readIdentitySpoolFactsForAccount(key, account.Username, now); ok {
+		if err := openDirectoryGroupsUnavailable(record, account.Gid, primaryGroupNamed); err != nil {
+			return useridentity.DirectoryFacts{}, err
+		}
 		return mergeSpoolFacts(own, record), nil
 	}
 	return own, nil
+}
+
+// primaryGroupNamed reports whether Open Directory names the group gid.
+// Tests replace it.
+var primaryGroupNamed = func(gid string) bool {
+	group, err := osuser.LookupGroupId(gid)
+	return err == nil && group.Name != ""
 }
