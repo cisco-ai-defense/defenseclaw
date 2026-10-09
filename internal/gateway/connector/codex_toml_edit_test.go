@@ -39,3 +39,18 @@ func TestCodexOwnedEditPreservesUserTextAndBOM(t *testing.T) {
 		t.Fatalf("edited Codex TOML is invalid: %v", err)
 	}
 }
+
+func TestCodexOwnedEditAppendsAfterMissingFinalNewline(t *testing.T) {
+	before := []byte("model = \"gpt-5\"")
+	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := parseCodexTOML(after, &cfg); err != nil {
+		t.Fatalf("invalid rendered config %q: %v", after, err)
+	}
+	if cfg["model"] != "gpt-5" || cfg["notify"] == nil {
+		t.Fatalf("rendered config = %#v", cfg)
+	}
+}

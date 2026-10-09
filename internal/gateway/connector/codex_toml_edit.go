@@ -47,14 +47,21 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 	var out strings.Builder
 	section := ""
 	rootWritten := false
+	writeRoot := func() {
+		if rootWritten {
+			return
+		}
+		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
+			out.WriteByte('\n')
+		}
+		out.Write(rootBytes)
+		rootWritten = true
+	}
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "[") {
-			if !rootWritten {
-				out.Write(rootBytes)
-				rootWritten = true
-			}
+			writeRoot()
 			name := strings.TrimLeft(strings.TrimRight(trimmed, "]"), "[")
 			section = strings.SplitN(name, ".", 2)[0]
 		}
@@ -64,9 +71,8 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 		if key, _, ok := strings.Cut(trimmed, "="); ok {
 			key = strings.TrimSpace(key)
 			if section == "" && (key == "notify" || key == "openai_base_url" && desired[key] == nil) {
-				if key == "notify" && !rootWritten {
-					out.Write(rootBytes)
-					rootWritten = true
+				if key == "notify" {
+					writeRoot()
 				}
 				// A top-level notify array may span lines. Its closing bracket
 				// belongs to the same value, not to the next user key.
@@ -88,9 +94,7 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 		}
 		out.WriteString(line)
 	}
-	if !rootWritten {
-		out.Write(rootBytes)
-	}
+	writeRoot()
 	if len(sectionBytes) != 0 {
 		if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
 			out.WriteString("\n")
