@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,22 @@ func TestManagedFailClosedTextOutsideStandaloneIsUnchanged(t *testing.T) {
 		sessionStopEvent{connector: "codex", event: "UserPromptSubmit"}, false)
 	if want := `{"decision":"block","reason":"DefenseClaw hook failed closed"}`; strings.TrimSpace(r.stdout) != want {
 		t.Fatalf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+// A stopped gateway's block text names the status command of the platform
+// the hook runs on and ends with the documented refusal code, as the shell
+// hooks' text does: a Linux developer was told to run `enterprise windows
+// status`, with no code to look up (GAP-1179).
+func TestManagedGatewayStoppedTextNamesThisPlatformAndRefusalCode(t *testing.T) {
+	text := managedStandaloneFailClosedText("UserPromptSubmit", "transport", managedGatewayNotRunningReason)
+	command := managedStatusCommand(runtime.GOOS)
+	if !strings.Contains(text, "`"+command+"`") || !strings.HasSuffix(text, " ("+managedGatewayNotRunningReason+")") ||
+		(runtime.GOOS != "windows" && strings.Contains(text, "windows")) {
+		t.Fatalf("text = %q, want %q and the refusal code last", text, command)
+	}
+	if got := managedStatusCommand("linux"); got != "enterprise linux status" {
+		t.Fatalf("linux status command = %q", got)
 	}
 }
 
@@ -158,7 +175,8 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	}
 	code, stdout, stderr, failures := run(true)
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
-		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do."
+		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `" +
+		managedStatusCommand(runtime.GOOS) + "` names what to do. (enterprise_managed_gateway_not_running)"
 	if code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) || !strings.Contains(stdout, mustJSONString(want)) {
 		t.Fatalf("windows standalone: code = %d stdout = %q stderr = %q, want a deny carrying %q", code, stdout, stderr, want)
 	}

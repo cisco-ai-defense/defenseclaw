@@ -1572,3 +1572,45 @@ func TestRefusedFirstInstallKeepsOnlyLockAndNoStartIsUnhealthy(t *testing.T) {
 		requireError(t, h.run(Options{Action: action}), codeNotStarted)
 	}
 }
+
+// GAP-1217: a missing hook binary (an antivirus quarantine) was restored
+// neither by the guardian nor by repair, which refused with payload_invalid;
+// verify named no fix and security_complete stayed true while every agent ran
+// tool calls without DefenseClaw. Verify now names the repair and fails
+// security_complete, the guardian finds the missing binary, and ensure (the
+// job the guardian starts) puts it back from the copy the lifecycle sealed.
+// A copy that is not the recorded binary is never made executable.
+func TestMissingHookBinaryIsPutBackFromTheSealedCopy(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	hook := filepath.Join(h.env.Layout.BinDir, binHook)
+	want := h.read(hook)
+	if err := os.Remove(h.env.P(hook)); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, hook+" is missing") ||
+		!strings.Contains(got, "`"+h.env.lifecycleCommand(ActionRepair)+"`") || verify.SecurityComplete {
+		t.Fatalf("verify: security_complete=%v errors %q", verify.SecurityComplete, got)
+	}
+	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{hook}) {
+		t.Fatalf("the guardian check found %v", got)
+	}
+	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, ensure)
+	if info, err := os.Stat(h.env.P(hook)); err != nil || info.Mode().Perm() != 0o755 || h.read(hook) != want {
+		t.Fatalf("ensure did not put the hook binary back: %v %v", info, err)
+	}
+	if err := os.Remove(h.env.P(hook)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.sealedHookPath(), []byte("not the hook binary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repair := h.run(Options{Action: ActionRepair})
+	if exists(h.env.P(hook)) || !strings.Contains(messagesOf(repair.Warnings, codeHookBinaryNotRestored), "is not the binary the deployment recorded") {
+		t.Fatalf("a sealed copy that is not the recorded binary was used or not reported: %v", repair.Warnings)
+	}
+}

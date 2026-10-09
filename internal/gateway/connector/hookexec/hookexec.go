@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1792,7 +1793,7 @@ func ManagedTransportFailureText(event, reason string) (string, bool) {
 	if reason != managedGatewayNotRunningReason && reason != managedGatewayPortHeldReason {
 		return "", false
 	}
-	return managedStandaloneFailClosedText(event, "transport", reason) + " (" + reason + ")", true
+	return managedStandaloneFailClosedText(event, "transport", reason), true
 }
 
 // failManagedStandaloneClosed delivers a Unix standalone managed hook's
@@ -1848,7 +1849,7 @@ func emitManagedClaudeBlock(opts Options, reason string) int {
 // if this continues, contact your administrator." The internal reason goes
 // to the hook-failure log only (GAP-0554).
 func managedStandaloneFailClosedText(event, layer, reason string) string {
-	var cause, advice string
+	var cause, advice, code string
 	switch {
 	case layer == "oversized":
 		cause, advice = "it is too large for DefenseClaw to inspect", "Make it smaller and try again."
@@ -1859,10 +1860,15 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		cause, advice = "the DefenseClaw gateway service is not running on this computer",
 			// The service is also stopped while a lifecycle transaction is
 			// pending, which starting it does not fix (GAP-0509).
-			"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names what to do."
+			"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `"+
+				managedStatusCommand(runtime.GOOS)+"` names what to do."
+		// The documented refusal code goes last, as in the shell hooks'
+		// text, so an administrator can look it up (GAP-1179).
+		code = reason
 	case reason == managedGatewayPortHeldReason:
 		cause, advice = "another program is using the DefenseClaw gateway's port on this computer, so DefenseClaw cannot check it",
-			"Ask your administrator to check DefenseClaw on this computer: `enterprise windows status` names the program."
+			"Ask your administrator to check DefenseClaw on this computer: `"+managedStatusCommand(runtime.GOOS)+"` names the program."
+		code = reason
 	case reason == ManagedUserNamespaceReason:
 		// The setup is fine; the agent's process is the problem (GAP-0923).
 		cause, advice = "this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket",
@@ -1878,7 +1884,24 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		cause, advice = "the DefenseClaw gateway is not available",
 			"Try again in a moment; if this continues, contact your administrator."
 	}
-	return "DefenseClaw blocked this " + hookEventSubject(event) + ": " + cause + ". " + advice
+	text := "DefenseClaw blocked this " + hookEventSubject(event) + ": " + cause + ". " + advice
+	if code != "" {
+		text += " (" + code + ")"
+	}
+	return text
+}
+
+// managedStatusCommand is the lifecycle status command of the platform the
+// hook runs on, which the block text of a stopped gateway names: a Linux
+// developer was told to run `enterprise windows status` (GAP-1179).
+func managedStatusCommand(goos string) string {
+	switch goos {
+	case "windows":
+		return "enterprise windows status"
+	case "darwin":
+		return "enterprise macos status"
+	}
+	return "enterprise linux status"
 }
 
 // hookEventSubject names what an agent hook event carries, in the words a

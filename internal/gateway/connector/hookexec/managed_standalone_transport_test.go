@@ -193,13 +193,14 @@ func TestStandaloneHookSocketImpostorGetsZeroBytes(t *testing.T) {
 // GAP-0581: with the gateway service and its socket unit stopped the hook
 // socket is gone. The hook fails closed and says the service is stopped,
 // instead of sending the user to socket ownership checks. Claude Code gets
-// a structured deny; the reason code goes to the failure log only (GAP-0554).
+// a structured deny, one plain sentence that ends with the documented
+// refusal code (GAP-0554, GAP-1179).
 func TestStandaloneHookSocketMissingSaysGatewayStopped(t *testing.T) {
 	result := standaloneRun(t, filepath.Join(shortSocketDir(t), "hook.sock"), os.Getuid())
 	out := result.stdout + result.stderr
 	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
 		!strings.Contains(out, "gateway service is not running") ||
-		strings.Contains(out, managedGatewayNotRunningReason) || strings.Contains(out, "not owned") {
+		strings.Count(out, managedGatewayNotRunningReason) != 1 || strings.Contains(out, "not owned") {
 		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 	}
 }
