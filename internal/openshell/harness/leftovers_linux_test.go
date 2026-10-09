@@ -169,8 +169,13 @@ func TestLauncherEndsWhatTheHarnessLeftRunning(t *testing.T) {
 			if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			// The stub exits once its command runs sleep: the terminal's
+			// hangup otherwise races nohup (or the trap) setting SIGHUP to
+			// ignored, and ends the command the case means to keep.
 			stub := filepath.Join(dir, "stub")
-			if err := os.WriteFile(stub, []byte("#!/bin/bash\n"+tc.stub+"\necho $! >\"${0%/*}/leftover\"\nexit 3\n"), 0o755); err != nil {
+			body := "#!/bin/bash\n" + tc.stub + "\necho $! >\"${0%/*}/leftover\"\n" +
+				"for _ in $(seq 500); do read -r c </proc/$!/comm && [ \"$c\" = sleep ] && break; sleep 0.01; done\nexit 3\n"
+			if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			code, out := startPTY(t, dir, nil, wrapper, stub).wait()
