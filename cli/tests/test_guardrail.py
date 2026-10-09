@@ -3916,7 +3916,8 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
                 commands = _load_profile_rules(profile, "commands.yaml")
                 paths = _load_profile_rules(profile, "sensitive-paths.yaml")
 
-                self.assertEqual(commands["CMD-PIPE-CURL"]["expression"], "false")
+                # GAP-0899: curl piped to an interpreter alerts (HIGH) outside strict.
+                self.assertNotEqual(commands["CMD-PIPE-CURL"]["expression"], "false")
                 self.assertEqual(commands["CMD-PIPE-CURL"]["pattern"], "a^")
                 self.assertEqual(commands["CMD-PIPE-CURL"]["severity"], "HIGH")
                 self.assertEqual(paths["PATH-ENV-FILE"]["expression"], "false")
