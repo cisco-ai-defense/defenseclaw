@@ -456,3 +456,39 @@ func TestSSSDAccountDomainLookupFailure(t *testing.T) {
 		t.Fatalf("failed SSSD flat-domain lookup: facts = %+v, err = %v", facts, err)
 	}
 }
+
+func TestSSSDAccountKeepsGroupFromAnotherNSSService(t *testing.T) {
+	dir := t.TempDir()
+	oldPasswd, oldGroup, oldNSS := localPasswdPath, localGroupPath, nsswitchPath
+	t.Cleanup(func() { localPasswdPath, localGroupPath, nsswitchPath = oldPasswd, oldGroup, oldNSS })
+	localPasswdPath, localGroupPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "group"), filepath.Join(dir, "nsswitch.conf")
+	for path, content := range map[string]string{
+		localPasswdPath: "",
+		localGroupPath:  "",
+		nsswitchPath:    "passwd: files sss\ngroup: files sss ldap\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const sid = "S-1-5-21-1-2-3-1101"
+	startFakeSSSD(t, map[string]string{"uid:1001": sid, "sid:" + sid: "1001"})
+	account := "alice:x:1001:1001::/home/alice:/bin/bash\n"
+	f := &fakeRun{results: map[string]commandResult{
+		"passwd 1001":              {stdout: []byte(account)},
+		"-s sss passwd 1001":       {stdout: []byte(account)},
+		"initgroups alice":         {stdout: []byte("alice 1001 7001\n")},
+		"-s ldap initgroups alice": {stdout: []byte("alice 7001\n")},
+		"group 1001":               {stdout: []byte("alice:x:1001:\n")},
+		"group 1001 7001":          {stdout: []byte("alice:x:1001:\nldap-admins:x:7001:\n")},
+	}}
+	facts, err := newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
+	if err != nil || !reflect.DeepEqual(facts.Groups, []string{"alice", "ldap-admins"}) {
+		t.Fatalf("SSSD account groups = %q, %v", facts.Groups, err)
+	}
+	f.results["-s ldap initgroups alice"] = commandResult{stdout: []byte("alice\n")}
+	facts, err = newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
+	if err != nil || !reflect.DeepEqual(facts.Groups, []string{"alice"}) {
+		t.Fatalf("without LDAP membership, groups = %q, %v", facts.Groups, err)
+	}
+}
