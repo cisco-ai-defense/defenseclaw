@@ -547,6 +547,18 @@ once: one the entry names is refused and quarantined, with an
 managed devices remove it with your device management tool; the hooks refuse
 it in the meantime.
 
+A Claude Code plugin is refused at the hook as well. Claude Code runs a plugin
+installed from a local marketplace folder (`claude plugin marketplace add
+<folder>`) from that folder, not from its copy under
+`~/.claude/plugins/cache`, and DefenseClaw never changes a marketplace folder,
+which other users may share. When `asset_policy.plugin` denies a plugin, or
+admission blocked it, the cache copy is quarantined as usual and the Claude
+Code hook refuses the plugin's skills and commands (`/<plugin>:<skill>`), its
+agents (`<plugin>:<agent>`) and its MCP tools
+(`mcp__plugin_<plugin>_<server>__<tool>`). The hook sees the plugin name only,
+so a denied rule written as `plugin@marketplace` refuses that plugin from any
+marketplace.
+
 ### Tool lists
 
 `asset_policy.tool.denied` and `asset_policy.tool.allowed` hold rules with a

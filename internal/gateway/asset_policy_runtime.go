@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -490,6 +491,12 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
+	if targetType == "plugin" && !cfg.SecureClientIntegration() {
+		if decision, blocked := a.pluginJournalBlockDecision(probe.SkillName, connector, runtimeSurface); blocked {
+			return decision, true
+		}
+		probe.DeclaredNames = append(probe.DeclaredNames, deniedPluginMarketplaceNames(cfg, probe.SkillName)...)
+	}
 	paths := []string{probe.SourcePath}
 	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
 		paths = probe.SourcePaths
@@ -666,6 +673,114 @@ func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, run
 	return runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface,
 		fmt.Sprintf("%s %q is runtime-disabled for connector %q", targetType, name, connector),
 		"runtime-disable"), true
+}
+
+// claudeCodePluginAssetDecision refuses a Claude Code tool call that runs
+// part of a plugin, an MCP tool (mcp__plugin_<plugin>_<server>__<tool>), a
+// skill (Skill "<plugin>:<skill>") or an agent (subagent_type
+// "<plugin>:<agent>"), when the plugin is denied by asset_policy or blocked
+// by admission. Claude Code runs a plugin installed from a local
+// marketplace folder from that folder: quarantining the cache copy did not
+// stop it, and a denied plugin's MCP tool still answered (GAP-1189).
+// Secure Client keeps main (issue #1092).
+func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return config.AssetPolicyDecision{}, false
+	}
+	for _, plugin := range claudeCodeToolPlugins(req) {
+		probe := skillRuntimeProbe{
+			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
+		}
+		if decision, matched := a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe); matched {
+			return decision, true
+		}
+	}
+	return config.AssetPolicyDecision{}, false
+}
+
+// claudeCodeToolPlugins lists the plugins a Claude Code tool call may run
+// part of. Claude Code names a plugin's MCP server plugin_<plugin>_<server>,
+// and both names may hold "_", so every split is a candidate.
+func claudeCodeToolPlugins(req claudeCodeHookRequest) []string {
+	var out []string
+	add := func(name string) {
+		if name = strings.TrimSpace(name); validNativeSkillSelectionName(name) && !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	server := strings.TrimSpace(req.MCPServerName)
+	if server == "" {
+		server = serverFromMCPToolName(req.ToolName)
+	}
+	if rest, ok := strings.CutPrefix(server, "plugin_"); ok {
+		for i := 1; i < len(rest)-1; i++ {
+			if rest[i] == '_' {
+				add(rest[:i])
+			}
+		}
+	}
+	key := ""
+	switch strings.TrimSpace(req.ToolName) {
+	case "Skill":
+		key = "skill"
+	case "Task", "Agent":
+		key = "subagent_type"
+	}
+	if value, _ := req.ToolInput[key].(string); key != "" {
+		if plugin, rest, ok := strings.Cut(strings.TrimPrefix(strings.TrimSpace(value), "/"), ":"); ok && rest != "" {
+			add(plugin)
+		}
+	}
+	return out
+}
+
+// pluginJournalBlockDecision refuses a plugin whose journal entry, under
+// its name or plugin@marketplace as the watcher records a Claude Code
+// marketplace plugin, holds an install block or a runtime disable. The hook
+// sees the plugin name only, and a blocked plugin's files can stay where
+// the agent runs them, so its block is enforced here too (GAP-1189).
+func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
+	if a == nil || a.store == nil || strings.TrimSpace(name) == "" {
+		return config.AssetPolicyDecision{}, false
+	}
+	entries, err := a.store.ListActionsByType("plugin")
+	if err != nil {
+		return runtimeAssetDisableBlockDecision("plugin", name, connector, runtimeSurface,
+			fmt.Sprintf("plugin %q block check failed - failing closed: %v", name, err), "runtime-disable-error"), true
+	}
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Connector) != "" && !config.SameConnector(entry.Connector, connector) {
+			continue
+		}
+		plugin, _, _ := strings.Cut(entry.TargetName, "@")
+		if !config.SameAssetName(plugin, name) && !config.SameAssetName(entry.TargetName, name) {
+			continue
+		}
+		if entry.Actions.Install != "block" && entry.Actions.Runtime != "disable" {
+			continue
+		}
+		reason := fmt.Sprintf("plugin %q is blocked by install admission", entry.TargetName)
+		if detail := strings.TrimSpace(entry.Reason); detail != "" {
+			reason += ": " + detail
+		}
+		return runtimeAssetDisableBlockDecision("plugin", name, connector, runtimeSurface, reason, "install-block"), true
+	}
+	return config.AssetPolicyDecision{}, false
+}
+
+// deniedPluginMarketplaceNames are the plugin@marketplace names of the
+// denied plugin rules for plugin. The hook sees no marketplace, so a deny
+// written as plugin@marketplace refuses the plugin from any of them; these
+// names only ever match denied rules.
+func deniedPluginMarketplaceNames(cfg *config.Config, plugin string) []string {
+	var names []string
+	for _, rule := range cfg.AssetPolicy.Plugin.Denied {
+		if name, _, ok := strings.Cut(rule.Name, "@"); ok && config.SameAssetName(name, plugin) {
+			names = append(names, rule.Name)
+		}
+	}
+	return names
 }
 
 func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface, reason, source string) config.AssetPolicyDecision {

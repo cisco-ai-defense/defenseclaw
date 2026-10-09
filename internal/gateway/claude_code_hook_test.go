@@ -218,6 +218,48 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPreToolUse(t *testing.T) {
 	}
 }
 
+// GAP-1189: Claude Code runs a plugin installed from a local marketplace
+// folder from that folder, so quarantining the cache copy did not stop it.
+// A plugin admission blocked (journal under plugin@marketplace) or a denied
+// list names refuses its MCP tools, skills and commands at the hook.
+func TestEvaluateClaudeCodeHook_BlockedPluginRefusesItsToolsSkillsAndCommands(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	store, err := audit.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionFieldForConnector("plugin", "usm-kit@usm-mkt", "claudecode", "install", "block",
+		"auto-block: watch detected HIGH findings"); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: cfg, store: store}
+	calls := []claudeCodeHookRequest{
+		{HookEventName: "PreToolUse", ToolName: "mcp__plugin_usm-kit_kit-time__get_current_time", ToolInput: map[string]interface{}{}},
+		{HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: map[string]interface{}{"skill": "usm-kit:usm-kit-notes"}},
+		{HookEventName: "UserPromptExpansion", ExpansionType: "slash_command", CommandSource: "plugin",
+			CommandName: "usm-kit:usm-kit-notes", Prompt: "/usm-kit:usm-kit-notes"},
+	}
+	for _, req := range calls {
+		if resp := api.evaluateClaudeCodeHook(context.Background(), req); resp.Action != "block" {
+			t.Fatalf("%s %s%s: action=%q, want the blocked plugin refused", req.HookEventName, req.ToolName, req.CommandName, resp.Action)
+		}
+	}
+	other := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__plugin_usm-kit-ok_kit-time__get_current_time", ToolInput: map[string]interface{}{}}
+	if resp := api.evaluateClaudeCodeHook(context.Background(), other); resp.Action == "block" {
+		t.Fatalf("another plugin: action=%q, want it allowed", resp.Action)
+	}
+	cfg.AssetPolicy.Plugin.Denied = []config.AssetPolicyRule{{Name: "usm-kit-ok@usm-mkt"}}
+	if resp := (&APIServer{scannerCfg: cfg}).evaluateClaudeCodeHook(context.Background(), other); resp.Action != "block" {
+		t.Fatalf("denied plugin MCP tool: action=%q, want block", resp.Action)
+	}
+}
+
 func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPermissionRequest(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"

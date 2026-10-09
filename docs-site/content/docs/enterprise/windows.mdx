@@ -808,6 +808,13 @@ per-user install:
   `<project>\.agents\skills`), inside or outside the profile, get no install
   admission; the agent hooks still refuse a denied skill name there (see
   [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
+- Claude Code runs a plugin installed from a local marketplace folder from
+  that folder, which DefenseClaw does not watch and never changes. When
+  admission blocks such a plugin, or `asset_policy.plugin` denies it, its copy
+  under `.claude\plugins\cache` is quarantined and the Claude Code hook
+  refuses the plugin's skills, commands, agents and MCP tools: the refusal
+  says `plugin "<plugin>@<marketplace>" is blocked by install admission` or
+  that the plugin is denied by asset policy.
 - The audit rows of these scans name the user whose profile holds the asset:
   the `scan` and `scan-finding` rows carry `user.id` (the SID) and
   `defenseclaw.user.name`, the `scan` row ends with `judge=<model>` when the
