@@ -724,8 +724,11 @@ def same_run_schedule(stored: dict, requested: dict) -> bool:
     """Graph returns daily times with seven trailing fractional zeroes."""
     for key, value in requested.items():
         actual = stored.get(key)
-        if key == "time" and isinstance(actual, str):
-            actual = re.sub(r"\.0+$", "", actual)
+        if key == "time":
+            if isinstance(actual, str):
+                actual = re.sub(r"\.0+$", "", actual)
+            if isinstance(value, str):
+                value = re.sub(r"\.0+$", "", value)
         if actual != value:
             return False
     return True
