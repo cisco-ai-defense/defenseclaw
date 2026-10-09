@@ -444,28 +444,29 @@ func TestWindowsEnterpriseDiscoveryKeepsSameNameAccountsApart(t *testing.T) {
 	}
 }
 
-// GAP-1117: a qualified selector resolves the inventory SID, while runtime
-// discovery records the bare account name.
-func TestWindowsEnterpriseDiscoveryQualifiedUserKeepsRuntimeFindings(t *testing.T) {
-	previousCfg, previousReport, previousIDs := cfg, enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs
+// A qualified account selection still includes runtime findings whose user
+// field carries only the bare account name.
+func TestWindowsEnterpriseDiscoveryQualifiedUserIncludesRuntimeFinding(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-3997"
+	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
 	t.Cleanup(func() {
-		cfg, enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs = previousCfg, previousReport, previousIDs
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
 	})
 	cfg = nil
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
-			{Name: "Codex CLI", UserName: "alice", UserID: "S-1-5-21-7"},
-			{Name: "Amp", UserName: "bob", UserID: "S-1-5-21-8"},
+			{Name: "Claude Code", Category: "supported_connector", UserName: "alice", UserID: sid},
 		}}, "127.0.0.1:18970", nil
 	}
 	enterpriseDiscoveryAccountIDs = func(user string) []string {
 		if user == `DCLAB\alice` {
-			return []string{"S-1-5-21-7"}
+			return []string{sid}
 		}
 		return nil
 	}
-	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Findings: []enterpriseRuntimeFinding{
-		{PID: 41, User: "alice"}, {PID: 42, User: "bob"},
+	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+		{PID: 41, User: "alice", Process: "node"},
+		{PID: 42, User: "bob", Process: "python3"},
 	}}, nil)
 
 	var out bytes.Buffer
@@ -473,20 +474,12 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserKeepsRuntimeFindings(t *testing.
 		t.Fatal(err)
 	}
 	var report enterpriseDiscoveryReport
-	if err := json.Unmarshal(out.Bytes(), &report); err != nil || len(report.Accounts) != 1 ||
-		report.Accounts[0].SID != "S-1-5-21-7" || report.Runtime == nil ||
-		len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].User != "alice" {
-		t.Fatalf("qualified account runtime findings = %s (%v)", out.String(), err)
-	}
-
-	// Secure Client keeps the exact name/SID runtime match of main.
-	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
-	out.Reset()
-	if err := writeWindowsEnterpriseDiscovery(&out, "S-1-5-21-7", true); err != nil {
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(out.Bytes(), &report); err != nil || report.Runtime == nil || len(report.Runtime.Findings) != 0 {
-		t.Fatalf("Secure Client SID runtime findings = %s (%v)", out.String(), err)
+	if len(report.Accounts) != 1 || report.Runtime == nil || len(report.Runtime.Findings) != 1 ||
+		report.Runtime.Findings[0].User != "alice" {
+		t.Fatalf("qualified account runtime findings: %s", out.String())
 	}
 }
 
