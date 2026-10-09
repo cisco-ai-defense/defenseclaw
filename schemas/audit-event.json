@@ -60,6 +60,7 @@
             "asset-policy",
             "connector-hook-tampered",
             "connector-hook-repaired",
+            "enterprise-exempt-user",
             "codex.notify",
             "codex.notify.agent-turn-complete",
             "codex.notify.malformed",

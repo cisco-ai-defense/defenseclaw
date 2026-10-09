@@ -151,6 +151,21 @@ func TestWindowsEnterpriseProfileFromConfig(t *testing.T) {
 	if err := resolveWindowsEnterpriseLifecycleProfile("install", opts); err != nil || opts.resolvedProfile != "secure_client" {
 		t.Fatalf("plain config resolved %q, %v", opts.resolvedProfile, err)
 	}
+	// GAP-0607: a tab-indented config is refused 1639 (invalid arguments)
+	// with the line, like every other config the gateway cannot load;
+	// Secure Client keeps its result.
+	tabbed := filepath.Join(dir, "tabbed.yaml")
+	if err := os.WriteFile(tabbed, []byte("deployment_mode: managed_enterprise\nguardrail:\n\tconnectors: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed, profile: "standalone"})
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) || !strings.Contains(err.Error(), "line 3") {
+		t.Fatalf("standalone tab-indented config: %v", err)
+	}
+	if err := resolveWindowsEnterpriseLifecycleProfile("ensure", &windowsEnterpriseLifecycleOptions{configPath: tabbed}); err == nil ||
+		errors.Is(err, errWindowsEnterpriseInvalidArguments) {
+		t.Fatalf("Secure Client tab-indented config: %v", err)
+	}
 }
 
 func TestWindowsEnterpriseStandaloneArguments(t *testing.T) {
@@ -1752,18 +1767,22 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	windowsEnterpriseInstalledConfigPath = func() (string, error) { return installed, nil }
 
 	for _, tc := range []struct {
-		action, profile, code, text string
-		exit                        int
+		action, profile, code, text, config string
+		exit                                int
 	}{
-		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", 5},
-		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, 1639},
+		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", "", 5},
+		// GAP-0640: uninstall answers the same, before the module loads.
+		{"uninstall", "standalone", "elevation_required", "a standard account cannot uninstall the managed deployment", "", 5},
+		// GAP-0120: the refusal does not wait for --config to be read.
+		{"ensure", "standalone", "elevation_required", "a standard account cannot ensure the managed deployment", `C:\Users\alice\does-not-compile.yaml`, 5},
+		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, "", 1639},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
 			var stdout, stderr bytes.Buffer
 			var err error
 			command := &cobra.Command{Use: tc.action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
 				err = runWindowsEnterpriseLifecycle(context.Background(), c, tc.action,
-					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput, configPath: tc.config})
 				return err
 			}}
 			command.SetArgs([]string{})
@@ -1941,5 +1960,51 @@ func TestWindowsEnterpriseGatewayDownReportsLocalInspectionUnknown(t *testing.T)
 		if result.Inspection.Local != want || result.Readiness.Gateway != ready {
 			t.Fatalf("gateway ready %v: inspection=%+v readiness=%+v, want local=%s", ready, result.Inspection, result.Readiness, want)
 		}
+	}
+}
+
+// Secure Client keeps the historical ensure preflight even for a standard
+// caller; the standalone elevation answer would direct the user to the
+// wrong lifecycle profile.
+func TestWindowsSecureClientEnsureKeepsHistoricalPreflight(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		"secure_client": winpath.EnterpriseDeploymentInstalled,
+	})
+	originalElevated := windowsEnterpriseIsElevated
+	windowsEnterpriseIsElevated = func() bool { return false }
+	t.Cleanup(func() { windowsEnterpriseIsElevated = originalElevated })
+	for _, profile := range []string{"", "secure_client"} {
+		var stdout, stderr bytes.Buffer
+		command := &cobra.Command{Use: "ensure"}
+		command.SetOut(&stdout)
+		command.SetErr(&stderr)
+		err := runWindowsEnterpriseLifecycle(context.Background(), command, "ensure",
+			&windowsEnterpriseLifecycleOptions{profile: profile})
+		if err == nil || !strings.Contains(err.Error(), "ensure is available only for the standalone profile") ||
+			strings.Contains(err.Error(), "elevation_required") {
+			t.Fatalf("profile %q: error %v", profile, err)
+		}
+	}
+}
+
+// A Secure Client deployment keeps its profile-conflict refusal for a
+// standard user's explicit standalone repair request.
+func TestWindowsEnterpriseStandardUserStandaloneRepairOnSecureClient(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{
+		"secure_client": winpath.EnterpriseDeploymentInstalled,
+	})
+	originalElevated := windowsEnterpriseIsElevated
+	windowsEnterpriseIsElevated = func() bool { return false }
+	t.Cleanup(func() { windowsEnterpriseIsElevated = originalElevated })
+
+	var output bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&output)
+	err := runWindowsEnterpriseLifecycle(context.Background(), command, "repair",
+		&windowsEnterpriseLifecycleOptions{profile: "standalone"})
+	if err == nil || !strings.Contains(err.Error(), "profile_conflict") ||
+		!strings.Contains(output.String(), "this host carries a secure_client enterprise deployment") ||
+		strings.Contains(output.String(), "elevation_required") {
+		t.Fatalf("repair --profile standalone: %v, output %q; want profile conflict", err, output.String())
 	}
 }

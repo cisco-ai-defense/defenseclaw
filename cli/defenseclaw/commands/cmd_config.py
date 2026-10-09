@@ -31,6 +31,7 @@ Five subcommands:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -50,7 +51,7 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_validate_v8
+from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_masked_v8, load_validate_v8
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -126,7 +127,7 @@ def config_validate(quiet: bool) -> None:
         ux.ok("syntax OK", indent="  ")
 
     for issue in result.errors:
-        ux.err(issue, indent="  ")
+        ux.err(issue.removeprefix("Error: ").removeprefix("Error: "), indent="  ")
     for warning in result.warnings:
         ux.warn(warning, indent="  ")
 
@@ -234,7 +235,22 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
     parts = [part for part in key.strip().split(".") if part]
     if not parts:
         raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
-    view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    cfg_path = str(config_module.config_path())
+    v8 = _looks_like_v8_config(cfg_path)
+    written: dict | None = None
+    if v8 and parts[0] != "observability":
+        # One parse of the source serves the value and the "not set" note; the
+        # observability plan and the full validation are not needed for a
+        # key outside observability (GAP-0276).
+        try:
+            written = load_masked_v8(Path(cfg_path).read_bytes(), source_name=cfg_path)
+        except OSError as exc:
+            raise click.ClickException(f"cannot read configuration source: {exc}") from exc
+        except (V8ConfigError, RuntimeError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        view = _merge_defaults(written, _v8_defaults(app))
+    else:
+        view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
     found, value = _lookup(view, parts)
     if not found:
         sections = _v8_sections() or set(view)
@@ -249,10 +265,8 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
             f"{key} is not set and has no default. "
             f"Run 'defenseclaw config show --section {parts[0]}' to see the keys it has."
         )
-    if parts[0] != "observability" and _looks_like_v8_config(str(config_module.config_path())):
-        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
-        if not _lookup(written, parts)[0]:
-            click.echo(f"(default: config.yaml does not set {key})", err=True)
+    if written is not None and not _lookup(written, parts)[0]:
+        click.echo(f"(default: config.yaml does not set {key})", err=True)
     if isinstance(value, (dict, list)) or fmt.lower() == "json":
         _emit(value, fmt)
     elif isinstance(value, bool):
@@ -424,7 +438,7 @@ def _strip_generator_header(rendered: str) -> str:
 @config_cmd.command("reference")
 @click.argument(
     "section",
-    type=click.Choice(["observability"], case_sensitive=False),
+    type=click.Choice(["observability", "ai_discovery"], case_sensitive=False),
     required=False,
     default="observability",
 )
@@ -445,16 +459,17 @@ def _strip_generator_header(rendered: str) -> str:
 def config_reference(section: str, fmt: str, output: Path | None) -> None:
     """Print the configuration reference for this version.
 
-    The yaml and markdown formats cover SECTION, and observability is the
-    only section they have. --format json-schema prints the schema of every
-    section (guardrail, gateway, scanners and the rest) with each field's
-    allowed values.
+    The yaml and markdown formats cover SECTION. --format json-schema prints
+    the schema of every section with each field's allowed values.
     """
 
     try:
-        rendered = (
-            config_v8_schema() if fmt.lower() == "json-schema" else config_v8_reference(fmt, section=section.lower())
-        )
+        if fmt.lower() == "json-schema":
+            rendered = config_v8_schema()
+        elif section.lower() == "ai_discovery":
+            rendered = _ai_discovery_reference(fmt.lower(), config_v8_schema())
+        else:
+            rendered = config_v8_reference(fmt, section=section.lower())
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     if fmt.lower() == "yaml":
@@ -468,6 +483,28 @@ def config_reference(section: str, fmt: str, output: Path | None) -> None:
             stream.write(rendered)
     except OSError as exc:
         raise click.ClickException(f"cannot write reference output: {exc}") from exc
+
+
+def _ai_discovery_reference(fmt: str, raw_schema: str) -> str:
+    """Render discovery fields from the gateway's canonical embedded schema."""
+    schema = json.loads(raw_schema)
+    fields = schema["$defs"]["aiDiscovery"]["properties"]
+    if fmt == "markdown":
+        lines = ["# ai_discovery", "", "| Field | Type | Default | Description |", "| --- | --- | --- | --- |"]
+        for name, field in fields.items():
+            kind = field.get("type", "object" if "$ref" in field else "any")
+            default = json.dumps(field["default"]) if "default" in field else "—"
+            description = str(field.get("description", "")).replace("|", "\\|").replace("\n", " ")
+            lines.append(f"| `ai_discovery.{name}` | {kind} | `{default}` | {description} |")
+        return "\n".join(lines) + "\n"
+    lines = ["# ai_discovery fields from the canonical gateway schema", "ai_discovery:"]
+    for name, field in fields.items():
+        if "default" in field:
+            value = yaml.safe_dump(field["default"], default_flow_style=True).strip().removesuffix("...").strip()
+            lines.append(f"  {name}: {value}")
+        else:
+            lines.append(f"  # {name}: {field.get('type', 'object')} (see --format json-schema)")
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -558,13 +595,26 @@ def validate_config() -> ValidationResult:
             return res
         if inspected.valid is not True:
             res.errors.append("canonical v8 validator returned no validity decision")
+        if os.name == "nt" and res.ok:
+            source = load_masked_v8(_bounded_source(cfg_path) or b"", source_name=cfg_path)
+            res.warnings.extend(_per_user_windows_group_warnings(source))
         return res
 
-    if config_module.config_is_empty(cfg_path):
-        res.errors.append(config_module.empty_config_message(cfg_path))
+    if damage := config_module.config_damage_message(cfg_path):
+        res.errors.append(damage)
         return res
     res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res
+
+
+def _per_user_windows_group_warnings(source: dict) -> list[str]:
+    assignments = ((source.get("guardrail") or {}).get("profile_assignments") or [])
+    return [
+        f"guardrail.profile_assignments[{index}].match.groups: groups cannot match on a per-user "
+        "Windows install; use users or standalone enterprise"
+        for index, assignment in enumerate(assignments)
+        if (assignment.get("match") or {}).get("groups")
+    ]
 
 
 def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
@@ -583,7 +633,7 @@ def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
     """
 
     raw = _bounded_source(cfg_path)
-    if exc.field_path == "$":
+    if exc.field_path == "$" or "configuration violates a semantic v8 constraint" in (exc.reason or ""):
         if raw is None:
             return str(exc)
         syntax = _yaml_syntax_detail(raw)
@@ -775,6 +825,16 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
 
 
 def _looks_like_v8_config(path: str) -> bool:
+    """Detect a root v8 declaration, once per file version in a process."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return False
+    return _looks_like_v8_config_at(path, stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=8)
+def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
     """Detect a root v8 declaration without constructing source values.
 
     ``yaml.compose`` understands valid YAML presentation variants (including
@@ -789,7 +849,7 @@ def _looks_like_v8_config(path: str) -> bool:
     except OSError:
         return False
     try:
-        root = yaml.compose(raw)
+        root = yaml.compose(raw, Loader=config_module.YAML_LOADER)
     except (yaml.YAMLError, RecursionError, OverflowError):
         root = None
     if isinstance(root, yaml.MappingNode):

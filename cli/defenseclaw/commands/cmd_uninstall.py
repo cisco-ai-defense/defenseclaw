@@ -67,7 +67,7 @@ from defenseclaw import legacy_connector, ux
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
 from defenseclaw.bootstrap import remove_own_api_port_claims
-from defenseclaw.commands import windows_native_uninstall
+from defenseclaw.commands import windows_native_uninstall, windows_uninstall_helper
 from defenseclaw.file_lock import tui_lock_held
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -91,6 +91,14 @@ _GATEWAY_STOP_TIMEOUT_SECONDS = 45
 _UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
 _UV_NAMES_POSIX = ("uv", "uvx")
 _UV_RECORD_MAX_BYTES = 4096
+# The 0.8.x installer left no ownership marker for uv, its cache or Python,
+# and could reuse a user-installed uv. Current upgrades leave those assets
+# alone. They can record the temporary Cosign cache when its contents and
+# timing qualify (scripts/install.sh, find_legacy_leftovers). Historical
+# records may still contain "uv-cache" or "uv-python <folder>"; uninstall
+# preserves shared managed Python. One claim per line.
+_LEGACY_LEFTOVERS_RECORD = "legacy-install-leftovers"
+_LEGACY_LEFTOVERS_MAX_BYTES = 4096
 # The folders DefenseClaw created because they were missing (the gateway's
 # install watcher, connector setup); see the Go connector package's
 # watcher_created_dirs.go. Uninstall removes the ones still empty.
@@ -194,16 +202,17 @@ class UninstallPlan:
     # (`defenseclaw setup local-observability`) and its data volumes before
     # its Compose files in data_dir go (uninstall --all only).
     observability_teardown: bool = False
-    # uv_leftovers are uv's download cache and the Python it fetched, which
-    # installers before 1.0.2 left outside data_dir (~/.cache/uv,
-    # ~/.local/share/uv/python; %LOCALAPPDATA%\uv\cache, %APPDATA%\uv\python)
-    # when they installed uv (--all --binaries only, and only when that uv
-    # goes too and no other uv is on PATH).
+    # uv_leftovers contains only the legacy uv installer receipt, when the
+    # upgrade recorded it and the installer uv is being removed.
     uv_leftovers: tuple[str, ...] = ()
     # uv_cache_entries is uv's cache folder when it holds DefenseClaw entries
     # an earlier installer's uv downloaded there; `uv cache clean defenseclaw`
     # removes only those (--all --binaries; GAP-1411).
     uv_cache_entries: str = ""
+    # sigstore_cache is ~/.sigstore when the upgrade from 0.8.x recorded that
+    # the 0.8.x installer's temporary Cosign created it and nothing has
+    # written to it since (--all --binaries; GAP-0908).
+    sigstore_cache: str = ""
     # hook_temp_dirs are the scratch folders (defenseclaw-hook.*) DefenseClaw's
     # shell hooks left in the temp folders (--all; GAP-1411).
     hook_temp_dirs: tuple[str, ...] = ()
@@ -710,10 +719,11 @@ def _build_plan(
         mac_app=_installed_mac_app(platform_name) if wipe_data and binaries else "",
         uv_leftovers=uv_leftovers,
         uv_cache_entries=(
-            _uv_cache_with_defenseclaw(data_dir, platform_name, uv_leftovers)
+            _uv_cache_with_defenseclaw(data_dir, platform_name)
             if wipe_data and binaries and not preserve_data_entries
             else ""
         ),
+        sigstore_cache=_legacy_sigstore_cache(data_dir) if wipe_data and binaries else "",
         hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
     )
 
@@ -827,20 +837,28 @@ def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> boo
     if not os.path.isfile(path) or _is_reparse_path(path):
         return False
     if name.lower().endswith(".cmd"):
-        expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
-    elif name.lower() == "defenseclaw":
+        try:
+            return windows_uninstall_helper.shim_runs(path, os.path.join(venv, "Scripts", name[:-4] + ".exe"))
+        except (OSError, ValueError):
+            return False
+    if name.lower() == "defenseclaw":
         # The Git Bash launcher: exec "C:/.../.venv/Scripts/defenseclaw.exe" "$@"
         expected = f'exec "{os.path.join(venv, "Scripts", "defenseclaw.exe")}" "$@"'.replace("\\", "/").lower()
     elif name.lower() == "defenseclaw.exe":
         # The installer's copy of the venv's uv launcher names the venv's
         # python.exe, which it starts (GAP-2237).
-        expected_bytes = os.path.join(venv, "Scripts", "python.exe").lower().encode("utf-8")
+        # The launcher stores that path in UTF-8; decode before lower-casing
+        # so a non-ASCII profile name compares case-insensitively too.
+        expected = os.path.join(venv, "Scripts", "python.exe").lower()
         try:
             with open(path, "rb") as stream:
                 data = stream.read(_WINDOWS_CLI_LAUNCHER_MAX_BYTES + 1)
         except OSError:
             return False
-        return len(data) <= _WINDOWS_CLI_LAUNCHER_MAX_BYTES and expected_bytes in data.lower()
+        return (
+            len(data) <= _WINDOWS_CLI_LAUNCHER_MAX_BYTES
+            and expected in data.decode("utf-8", errors="replace").lower()
+        )
     else:
         return False
     try:
@@ -910,74 +928,93 @@ def _uv_default_dirs(platform_name: str) -> tuple[str, str]:
     return os.path.join(cache, "uv"), os.path.join(data, "uv", "python")
 
 
-def _venv_base_python_dir(data_dir: str, python_root: str) -> str:
-    """Return the folder in python_root that the data dir's venv runs on, or ""."""
-    try:
-        with open(os.path.join(data_dir, ".venv", "pyvenv.cfg"), encoding="utf-8") as stream:
-            lines = stream.read(16_384).splitlines()
-    except (OSError, UnicodeError):
-        return ""
-    home = next(
-        (value.strip() for key, _, value in (line.partition("=") for line in lines) if key.strip() == "home"),
-        "",
-    )
-    if not home or not os.path.isabs(home):
-        return ""
-    root = _normalized(os.path.realpath(python_root))
-    base = _normalized(os.path.realpath(home))
-    try:
-        if os.path.commonpath((root, base)) != root or base == root:
-            return ""
-    except ValueError:
-        return ""
-    first = os.path.relpath(base, root).split(os.sep)[0]
-    return os.path.join(python_root, first)
-
-
 def _installer_uv_leftovers(
     install_root: str, binary_targets: tuple[str, ...], data_dir: str, platform_name: str
 ) -> tuple[str, ...]:
-    """Name the uv cache and Python an older installer left for DefenseClaw.
+    """Name uv's installer receipt when the legacy upgrade recorded it.
 
-    Only when uninstall removes the uv the installer installed (its digest
-    still matches), no other uv is on PATH, and uv's folders are the
-    defaults. The Python folder goes only when it holds nothing but the
-    Python the data dir's venv runs on (and uv's links and bookkeeping).
+    The default uv cache and managed Python are account-wide resources. A
+    DefenseClaw upgrade record cannot prove that another project has not used
+    either one since installation, so neither directory belongs in this plan.
     """
     uv_name = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)[0]
     if not any(os.path.basename(target) == uv_name for target in binary_targets):
         return ()
-    # Current installers keep uv's cache and Python in data_dir/.uv, so uv's
-    # default folders then hold the user's own uv data, never DefenseClaw's.
-    if os.path.isdir(os.path.join(data_dir, ".uv")):
+    claims = _legacy_leftover_claims(data_dir)
+    if "uv-cache" not in claims:
         return ()
     root = _normalized(install_root)
     for directory in os.get_exec_path():
         if directory and _normalized(directory) != root and os.path.isfile(os.path.join(directory, uv_name)):
             return ()
-    cache, python_root = _uv_default_dirs(platform_name)
-    leftovers: list[str] = []
-    if cache and not os.environ.get("UV_CACHE_DIR") and _plain_owned_dir(cache):
-        leftovers.append(cache)
-    if python_root and not os.environ.get("UV_PYTHON_INSTALL_DIR") and _plain_owned_dir(python_root):
-        base = _venv_base_python_dir(data_dir, python_root)
-        if base and _only_python(python_root, base):
-            leftovers.append(python_root)
-    return tuple(leftovers)
+    # uv's own installer, which the 0.8.x installer ran, left its receipt.
+    config = os.environ.get("XDG_CONFIG_HOME", "")
+    config = os.path.join(config if os.path.isabs(config) else os.path.expanduser("~/.config"), "uv")
+    receipt = os.path.join(config, "uv-receipt.json")
+    try:
+        names = os.listdir(config) if _plain_owned_dir(config) else []
+        with open(receipt, encoding="utf-8") as stream:
+            prefix = json.loads(stream.read(16_384)).get("install_prefix", "")
+    except (OSError, ValueError, AttributeError):
+        names, prefix = [], ""
+    if names == ["uv-receipt.json"] and isinstance(prefix, str) and _normalized(prefix) == root:
+        return (config,)
+    return ()
 
 
-def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str, uv_leftovers: tuple[str, ...]) -> str:
+def _legacy_leftover_claims(data_dir: str) -> dict[str, str]:
+    """Read the claims the upgrade from 0.8.x recorded (_LEGACY_LEFTOVERS_RECORD)."""
+    record = os.path.join(data_dir, _LEGACY_LEFTOVERS_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _LEGACY_LEFTOVERS_MAX_BYTES:
+            return {}
+        with open(record, encoding="utf-8", errors="strict") as stream:
+            lines = stream.read(_LEGACY_LEFTOVERS_MAX_BYTES).splitlines()
+    except (OSError, UnicodeError):
+        return {}
+    claims: dict[str, str] = {}
+    for line in lines:
+        key, _, value = line.strip().partition(" ")
+        if key in ("uv-cache", "sigstore") and not value:
+            claims[key] = ""
+    return claims
+
+
+def _legacy_sigstore_cache(data_dir: str) -> str:
+    """Return ~/.sigstore when the 0.8.x installer's temporary Cosign made it, else "".
+
+    Only when the upgrade from 0.8.x recorded it, no cosign is on PATH, and
+    nothing in it is newer than that record: a Cosign that used it since
+    makes it the user's.
+    """
+    if "sigstore" not in _legacy_leftover_claims(data_dir) or shutil.which("cosign"):
+        return ""
+    path = os.path.expanduser("~/.sigstore")
+    if not _plain_owned_dir(path):
+        return ""
+    try:
+        recorded = os.lstat(os.path.join(data_dir, _LEGACY_LEFTOVERS_RECORD)).st_mtime
+        for root, dirs, files in os.walk(path):
+            for name in (*dirs, *files):
+                if os.lstat(os.path.join(root, name)).st_mtime > recorded:
+                    return ""
+    except OSError:
+        return ""
+    return path
+
+
+def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str) -> str:
     """Return uv's cache folder when it holds DefenseClaw entries, else "".
 
     Installers before 1.0.2 had uv download DefenseClaw into uv's own cache,
-    one entry per install (GAP-1411). The cache is the account's, so only
-    those entries go (`uv cache clean defenseclaw`), unless the plan removes
-    the whole cache anyway (uv_leftovers).
+    one entry per install (GAP-1411). The cache is account-wide, so only
+    DefenseClaw entries go (`uv cache clean defenseclaw`).
     """
     cache = os.environ.get("UV_CACHE_DIR", "")
     if not os.path.isabs(cache) or _normalized(cache) == _normalized(data_dir) or _below(data_dir, cache):
         cache = _uv_default_dirs(platform_name)[0]
-    if not cache or cache in uv_leftovers or not _plain_owned_dir(cache):
+    if not cache or not _plain_owned_dir(cache):
         return ""
     patterns = (
         "archive-v*/*/defenseclaw-*.dist-info",
@@ -1113,24 +1150,6 @@ def _plain_owned_dir(path: str) -> bool:
     return not hasattr(os, "getuid") or info.st_uid == os.getuid()
 
 
-def _only_python(python_root: str, base: str) -> bool:
-    """Report whether python_root holds only base, links to it and uv's dot files."""
-    wanted = _normalized(os.path.realpath(base))
-    try:
-        entries = list(os.scandir(python_root))
-    except OSError:
-        return False
-    for entry in entries:
-        if entry.name.startswith("."):
-            continue
-        if _normalized(entry.path) == _normalized(base) and not _is_reparse_path(entry.path):
-            continue
-        if _is_reparse_path(entry.path) and _normalized(os.path.realpath(entry.path)) == wanted:
-            continue
-        return False
-    return True
-
-
 def _running_base_python() -> str:
     return os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
 
@@ -1146,18 +1165,16 @@ def _deferred_interpreter_dirs(plan: UninstallPlan, base_python: str) -> list[st
     """Name the folders holding base_python that the deferred helper removes after it exits.
 
     The helper runs on base_python, so it cannot remove them while it runs:
-    the installer's <data_dir>/.uv (scripts/install.ps1), or a uv Python
-    folder the plan removes (uv_leftovers).
+    the installer's <data_dir>/.uv (scripts/install.ps1).
     """
     candidates = []
     if plan.remove_data_dir and not plan.preserve_data_entries:
         candidates.append(os.path.join(plan.data_dir, ".uv"))
-    candidates.extend(plan.uv_leftovers)
     return [path for path in candidates if os.path.isdir(path) and _below(os.path.realpath(path), base_python)]
 
 
-def _remove_uv_leftovers(paths: tuple[str, ...]) -> None:
-    """Remove the uv folders the plan names, then their parents left empty."""
+def _remove_leftover_dirs(paths: tuple[str, ...]) -> None:
+    """Remove the uv and Sigstore folders the plan names, then their parents left empty."""
     for path in paths:
         try:
             _remove_tree_no_follow(path)
@@ -1253,6 +1270,54 @@ def _remove_created_dirs(data_dir: str) -> None:
         ux.ok(f"removed the empty folders DefenseClaw created: {', '.join(sorted(removed))}")
 
 
+def _remove_probe_created_state(data_dir: str) -> None:
+    """Remove what agent version probes created in the home folder (GAP-0901).
+
+    Discovery runs each installed agent CLI with ``--version``, and some CLIs
+    create their config and cache folders on the way. Discovery records those
+    with a fingerprint (agent_discovery.PROBE_STATE_RECORD); each entry still
+    exactly as the probe left it, so never used since, is removed, then the
+    parent folders the probes created while they are empty.
+    """
+    from defenseclaw.inventory import agent_discovery
+
+    record = os.path.join(data_dir, agent_discovery.PROBE_STATE_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CREATED_DIRS_RECORD_MAX_BYTES:
+            return
+        with open(record, encoding="utf-8") as stream:
+            payload = json.load(stream)
+        paths, dirs = payload.get("paths"), payload.get("dirs")
+    except (OSError, ValueError, AttributeError):
+        return
+    home = os.path.abspath(os.path.expanduser("~"))
+    removed: list[str] = []
+    for path, fingerprint in sorted((paths or {}).items() if isinstance(paths, dict) else (), reverse=True):
+        if not isinstance(path, str) or not os.path.isabs(path) or not _below(home, path):
+            continue
+        if not _real_dir_chain(home, os.path.dirname(path)) or os.path.islink(path):
+            continue
+        if agent_discovery.probe_state_fingerprint(path) != fingerprint:
+            continue  # used since: the agent's own state now
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError:
+            continue
+        removed.append(path)
+    for path in sorted((d for d in dirs or [] if isinstance(d, str)), key=len, reverse=True):
+        if os.path.isabs(path) and _below(home, path) and _real_dir_chain(home, path):
+            with contextlib.suppress(OSError):
+                os.rmdir(path)
+    with contextlib.suppress(OSError):
+        os.unlink(record)
+    if removed:
+        ux.ok(f"removed what agent version probes created: {', '.join(sorted(removed))}")
+
+
 def _below(root: str, path: str) -> bool:
     root = _normalized(root)
     candidate = _normalized(path)
@@ -1302,7 +1367,23 @@ def _sandbox_state_present(cfg, data_dir: str, platform_name: str) -> bool:
     openshell = getattr(cfg, "openshell", None) if cfg is not None else None
     if openshell is not None and (getattr(openshell, "enabled", False) or getattr(openshell, "wrappers", None)):
         return True
-    return os.path.isdir(os.path.join(data_dir, "sandboxes"))
+    root = os.path.join(data_dir, "sandboxes")
+    if not os.path.isdir(root):
+        return False
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                # The manager creates its directory before any sandbox. An
+                # empty directory is not a teardown receipt.
+                if entry.name == "manager" and entry.is_dir(follow_symlinks=False):
+                    with os.scandir(entry.path) as records:
+                        if any(records):
+                            return True
+                else:
+                    return True
+    except OSError:
+        return True  # let teardown report inaccessible state instead of deleting it
+    return False
 
 
 def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
@@ -1557,7 +1638,9 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         for path in plan.setup_leftovers:
             ux.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
         for path in plan.uv_leftovers:
-            ux.echo(f"      {ux.dim('·')} {path} (what the installer's uv downloaded for DefenseClaw)")
+            ux.echo(f"      {ux.dim('·')} {path} (left by the installer's uv)")
+        if plan.sigstore_cache:
+            ux.echo(f"      {ux.dim('·')} {plan.sigstore_cache} (left by the 0.8.x installer's Cosign)")
         if plan.platform_name == "win32":
             ux.echo(
                 f"      {ux.dim('·')} the {plan.install_root} entry in your user Path, "
@@ -1633,6 +1716,7 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         if not plan.remove_data_dir:
             _turn_guardrail_off(plan.data_dir)
     if plan.stop_gateway and plan.data_dir:
+        _remove_probe_created_state(plan.data_dir)
         # The gateway is stopped, so its watcher no longer uses them.
         _remove_created_dirs(plan.data_dir)
     if "copilot" in plan.connectors or plan.remove_data_dir:
@@ -1700,7 +1784,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # Last: on Linux and macOS this CLI may run on the Python that goes.
         # On Windows that one is in use until the deferred helper exits,
         # which removes it then (_deferred_interpreter_dirs).
-        _remove_uv_leftovers(tuple(path for path in plan.uv_leftovers if not _holds_running_python(path)))
+        _remove_leftover_dirs(tuple(path for path in plan.uv_leftovers if not _holds_running_python(path)))
+    if plan.sigstore_cache:
+        _remove_leftover_dirs((plan.sigstore_cache,))
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
@@ -1962,15 +2048,15 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
             raise click.ClickException(f"refusing Windows binary removal: {_windows_developer_removal(developer)}")
         raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
     try:
-        with open(shim, encoding="utf-8-sig", errors="strict") as stream:
-            contents = stream.read(16_385)
-    except (OSError, UnicodeError) as exc:
+        # The deferred helper repeats this check with the same reader.
+        runs_cli = windows_uninstall_helper.shim_runs(
+            shim, os.path.join(plan.managed_venv, "Scripts", "defenseclaw.exe")
+        )
+    except OSError as exc:
         raise click.ClickException(f"could not verify Windows CLI shim ownership: {exc}") from exc
-    if len(contents) > 16_384:
-        raise click.ClickException("refusing oversized Windows CLI shim")
-    expected_cli = os.path.join(plan.managed_venv, "Scripts", "defenseclaw.exe")
-    expected_invocation = f'"{expected_cli}" %*'.lower()
-    if expected_invocation not in contents.lower():
+    except ValueError:
+        raise click.ClickException("refusing oversized Windows CLI shim") from None
+    if not runs_cli:
         raise click.ClickException("refusing Windows binary removal: CLI shim targets an unrelated runtime")
 
 
@@ -2140,6 +2226,23 @@ def _running_from_managed_venv(plan: UninstallPlan) -> bool:
         return False
 
 
+def _helper_failure_detail(*result_paths: str) -> str:
+    """Return ": <reason> (details: <file>)" from the first failed helper result, else "".
+
+    The helper runs with no console and its stdout and stderr are discarded,
+    so a failed run explains itself only in its result file (GAP-0751).
+    """
+    for path in result_paths:
+        try:
+            with open(path, encoding="utf-8") as stream:
+                result = json.load(stream)
+        except (OSError, ValueError):
+            continue
+        if isinstance(result, dict) and result.get("status") == "failed" and result.get("detail"):
+            return f": {result['detail']} (details: {path})"
+    return ""
+
+
 def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
     """Start the validated standalone helper and wait for its ready signal."""
     _validate_plan(plan)
@@ -2217,7 +2320,10 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
                     )
                 return status_path
             if process.poll() is not None:
-                raise click.ClickException(f"deferred cleanup helper exited before ready (exit {process.returncode})")
+                raise click.ClickException(
+                    f"deferred cleanup helper exited before ready (exit {process.returncode})"
+                    + _helper_failure_detail(status_path, f"{manifest_path}.failed.json")
+                )
             time.sleep(0.05)
         process.terminate()
         raise click.ClickException("deferred cleanup helper did not become ready")
@@ -2489,16 +2595,28 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
         raise click.ClickException(f"sandbox teardown did not finish: {exc}") from exc
     for line in (proc.stdout or "").splitlines():
         if line.strip():
-            ux.echo(f"  {ux.dim('·')} {line.strip()}")
-    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            # The gateway hint is for its teardown command, not uninstall.
+            hint = line.replace("rerun with --keep-images", "rerun uninstall with --skip-sandbox-teardown")
+            ux.echo(f"  {ux.dim('·')} {hint.strip()}")
+    detail = (proc.stderr or "").strip().splitlines()
+    # GAP-0282: teardown goes on past a failed step, so the last line is the
+    # last step that worked. The failures are the lines it marks with a cross.
+    failed = [
+        line.strip().removeprefix("✗").strip()
+        for line in ((proc.stdout or "") + "\n" + (proc.stderr or "")).splitlines()
+        if line.strip().startswith("✗")
+    ]
+    undone = sum(1 for line in (proc.stdout or "").splitlines() if line.strip().startswith("✓"))
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
-        reason = detail[-1].lstrip("✗ ").strip() if detail else "OpenShell sandboxes are not supported here"
+        reason = failed[-1] if failed else (detail[-1] if detail else "OpenShell sandboxes are not supported here")
         ux.subhead(f"sandbox teardown skipped: {reason}")
         return
     if proc.returncode != 0:
+        reason = "; ".join(failed) or (detail[-1] if detail else f"gateway exited with status {proc.returncode}")
         raise click.ClickException(
             "aborting uninstall: sandbox teardown failed"
-            + (f" ({detail[-1]})" if detail else "")
+            + (f" ({reason})" if reason else "")
+            + (f"; {undone} step(s) listed above already ran and stay done" if undone else "")
             + "; fix it and rerun, run `defenseclaw-gateway sandbox teardown` yourself first, "
             + "or rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown"
         )

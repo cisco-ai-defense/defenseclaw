@@ -74,6 +74,7 @@ type proxyGuardrailV8Facts struct {
 	startedAt    time.Time
 	meta         llmEventMeta
 	identity     AgentIdentity
+	profile      guardrailProfileTelemetry
 }
 
 type proxyGuardrailTraceV8Operation struct {
@@ -567,7 +568,8 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 		event, err := observability.NewSpanAgentInvokeGuardrailDecisionEvent(
 			observability.SpanAgentInvokeGuardrailDecisionEventInput{
 				TimeUnixNano: timestamp, DefenseClawEvaluationID: evaluationID,
-				DefenseClawGuardrailDecision: decision, DefenseClawGuardrailEffectiveAction: effective,
+				DefenseClawGuardrailProfileName: facts.profile.Name,
+				DefenseClawGuardrailDecision:    decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
 				DefenseClawGuardrailEnforced: enforced,
 			},
@@ -579,7 +581,8 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 		event, err := observability.NewSpanModelChatGuardrailDecisionEvent(
 			observability.SpanModelChatGuardrailDecisionEventInput{
 				TimeUnixNano: timestamp, DefenseClawEvaluationID: evaluationID,
-				DefenseClawGuardrailDecision: decision, DefenseClawGuardrailEffectiveAction: effective,
+				DefenseClawGuardrailProfileName: facts.profile.Name,
+				DefenseClawGuardrailDecision:    decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
 				DefenseClawGuardrailEnforced: enforced,
 			},
@@ -636,6 +639,7 @@ func proxyGuardrailV8FactsFrom(
 		wouldBlock: wouldBlock, enforced: enforced, ciscoMs: verdict.CiscoElapsedMs,
 		observedAt: observedAt, startedAt: observedAt.Add(-elapsed),
 		meta: hookDecisionMetricMeta(ctx, connector), identity: AgentIdentityFromContext(ctx),
+		profile: proxyGuardrailProfileTelemetryFor(ctx),
 	}
 	if verdict.Confidence > 0 && verdict.Confidence <= 1 &&
 		!math.IsNaN(verdict.Confidence) && !math.IsInf(verdict.Confidence, 0) {
@@ -729,8 +733,10 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		}
 		events = append(events, event)
 	}
+	profileTelemetry := proxyGuardrailProfileTelemetryFor(ctx)
 	decisionEvent, err := observability.NewSpanGuardrailApplyGuardrailDecisionEvent(
 		observability.SpanGuardrailApplyGuardrailDecisionEventInput{
+			DefenseClawGuardrailProfileName:     profileTelemetry.Name,
 			TimeUnixNano:                        uint64(facts.observedAt.UnixNano()),
 			DefenseClawEvaluationID:             observability.Present(facts.evaluationID),
 			DefenseClawGuardrailDecision:        observability.Present(facts.decision),
@@ -758,7 +764,9 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		}
 		events = append(events, enforcementEvent)
 	}
-	return observability.SpanGuardrailApplyInput{
+	input := observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(facts.observedAt),
 			Source:     observability.SourceGateway, Connector: connector,
@@ -778,6 +786,7 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		GenAIAgentName:                      inspectTraceV8AgentName(facts.meta.AgentName),
 		DefenseClawAgentType:                hookV8OptionalText(facts.identity.AgentType, 4096),
 		DefenseClawAgentInstanceID:          optionalJudgeMetricText(facts.identity.AgentInstanceID),
+		DefenseClawAgentIdentityID:          agentIdentityV8(agentIdentityIDForTraffic(ctx, facts.identity)),
 		DefenseClawToolID:                   optionalJudgeMetricText(facts.meta.ToolID),
 		GenAIToolName:                       hookV8OptionalText(facts.meta.ToolName, 4096),
 		GenAIToolCallID:                     optionalJudgeMetricText(facts.meta.ToolID),
@@ -805,7 +814,15 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
 		DefenseClawGuardrailReason:          facts.reason,
 		ConditionConnectorKnown:             connectorKnown, ConditionOperationTerminal: true,
-	}, true
+	}
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	}
+	caller.Identity.applyTo(&input)
+	return input, true
 }
 
 func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtime sidecarRuntimeEmitter) error {
@@ -833,7 +850,10 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		profileTelemetry := proxyGuardrailProfileTelemetryFor(ctx)
+		input := observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: facts.envelope(ctx, snapshot), Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
 			GenAIConversationID:                 optionalJudgeMetricText(facts.meta.SessionID),
@@ -841,6 +861,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 			GenAIAgentName:                      inspectTraceV8AgentName(facts.meta.AgentName),
 			DefenseClawAgentType:                hookV8OptionalText(facts.identity.AgentType, 4096),
 			DefenseClawAgentInstanceID:          optionalJudgeMetricText(facts.identity.AgentInstanceID),
+			DefenseClawAgentIdentityID:          agentIdentityV8(agentIdentityIDForTraffic(ctx, facts.identity)),
 			DefenseClawEvaluationID:             facts.evaluationID,
 			DefenseClawScanID:                   optionalJudgeMetricText(facts.scanID),
 			DefenseClawPolicyID:                 optionalJudgeMetricText(facts.meta.PolicyID),
@@ -864,7 +885,15 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 			DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
 			DefenseClawGuardrailReason:          facts.reason,
 			ConditionSecuritySeverityAvailable:  true,
-		})
+		}
+		caller := auditCallerIdentity(ctx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
 }

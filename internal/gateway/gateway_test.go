@@ -2588,9 +2588,8 @@ func TestClientSignalDisconnect(t *testing.T) {
 
 func TestClientSignalDisconnectIdempotent(t *testing.T) {
 	c := &Client{
-		pending:     make(map[string]chan *ResponseFrame),
-		disconnCh:   make(chan struct{}),
-		disconnOnce: sync.Once{},
+		pending:   make(map[string]chan *ResponseFrame),
+		disconnCh: make(chan struct{}),
 	}
 
 	c.signalDisconnect()
@@ -2606,15 +2605,14 @@ func TestClientHelloReturnsNilBeforeConnect(t *testing.T) {
 
 func TestClientCloseWithoutConnection(t *testing.T) {
 	c := &Client{
-		pending:     make(map[string]chan *ResponseFrame),
-		disconnCh:   make(chan struct{}),
-		disconnOnce: sync.Once{},
+		pending:   make(map[string]chan *ResponseFrame),
+		disconnCh: make(chan struct{}),
 	}
 	err := c.Close()
 	if err != nil {
 		t.Errorf("Close() without connection should return nil, got: %v", err)
 	}
-	if !c.closed {
+	if !c.closed.Load() {
 		t.Error("closed flag should be true after Close()")
 	}
 }

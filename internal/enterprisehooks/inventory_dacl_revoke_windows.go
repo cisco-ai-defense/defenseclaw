@@ -25,7 +25,9 @@ import (
 // removal trust check there expects the exact protected DACL, so the extra
 // ACEs made it refuse to remove the registrations (GAP-1765). The service
 // SIDs are derived from the names, so this works after the services are
-// deleted. A missing folder is skipped; per-folder failures are returned.
+// deleted. The IDE plugin inventory's folders and files are revoked on
+// every profile, whatever the profile granted. A missing path is skipped;
+// per-path failures are returned.
 func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 	names := []string{productionGatewayServiceName}
 	if discovered, err := discoverGatewayServiceName(); err == nil && discovered != productionGatewayServiceName {
@@ -52,7 +54,11 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 			continue
 		}
 		seen[key] = struct{}{}
-		for _, dir := range dirs {
+		homeDirs := append([]string(nil), dirs...)
+		for _, ide := range inventoryDACLIDEGrants(home, nil) {
+			homeDirs = append(homeDirs, ide.dir)
+		}
+		for _, dir := range homeDirs {
 			if err := revokeInventoryACEs(filepath.Join(home, dir), sids); err != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", filepath.Join(home, dir), err))
 			}
@@ -61,8 +67,8 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 	return errors.Join(failures...)
 }
 
-// revokeInventoryACEs removes every ACE for sids from path's DACL and keeps
-// the rest, including the DACL's protection.
+// revokeInventoryACEs removes every ACE for sids from the folder or regular
+// file path's DACL and keeps the rest, including the DACL's protection.
 func revokeInventoryACEs(path string, sids []*windows.SID) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -71,7 +77,7 @@ func revokeInventoryACEs(path string, sids []*windows.SID) error {
 		}
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if !(info.IsDir() || info.Mode().IsRegular()) || info.Mode()&os.ModeSymlink != 0 {
 		return nil
 	}
 	extended, err := winpath.Extended(path)

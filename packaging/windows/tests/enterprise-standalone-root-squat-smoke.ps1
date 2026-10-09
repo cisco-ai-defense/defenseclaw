@@ -248,6 +248,62 @@ try {
             }
             Reset-TestRoots
 
+            # The vendor directory standalone Setup creates lets standard users
+            # read it (that directory only), as their hooks check every
+            # ancestor of the machine policy summary. An existing vendor
+            # directory, and one the Secure Client profile creates, is never
+            # given that entry.
+            function Get-TestUsersRules([string]$Path) {
+                return @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                        Microsoft.PowerShell.Core\Where-Object { $_.IdentityReference.Value -ceq $script:UsersSID })
+            }
+            Initialize-DefenseClawManagedRoot -Path $lock -Label 'lifecycle lock directory' -RequiredBase $Root
+            $usersRules = @(Get-TestUsersRules $vendor)
+            if ($usersRules.Count -ne 1 -or $usersRules[0].IsInherited -or
+                $usersRules[0].AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+                [int]$usersRules[0].FileSystemRights -ne 0x1200a9 -or
+                @(Get-TestUsersRules $lock).Count -ne 0) {
+                $failures.Add('a vendor directory Setup created lacks the this-folder-only Users read entry, or it reached the lock directory')
+            }
+            Reset-TestRoots
+            [void][IO.Directory]::CreateDirectory($vendor)
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $vendor -AclObject $vendorSecurity
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            Initialize-DefenseClawManagedRoot -Path $lock -Label 'lifecycle lock directory' -RequiredBase $Root
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
+                $failures.Add('preparing a root changed the DACL of an existing vendor directory')
+            }
+            # GAP-0577: install, upgrade and repair then give an existing
+            # administrator-owned vendor directory the same entry, once.
+            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
+            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
+            $usersRules = @(Get-TestUsersRules $vendor)
+            if ($usersRules.Count -ne 1 -or $usersRules[0].IsInherited -or
+                $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+                [int]$usersRules[0].FileSystemRights -ne 0x1200a9) {
+                $failures.Add("an existing vendor directory did not get one this-folder-only Users read entry: $($usersRules.Count)")
+            }
+            Reset-TestRoots
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            try {
+                Initialize-DefenseClawManagedRoot -Path ([IO.Path]::Combine($vendor, 'Cisco Secure Client', 'DefenseClaw-Lifecycle')) -Label 'lifecycle lock directory' -RequiredBase $Root
+            }
+            finally {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            }
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            try {
+                Grant-DefenseClawStandaloneVendorDirectoryUsersRead
+            }
+            finally {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            }
+            if (@(Get-TestUsersRules $vendor).Count -ne 0) {
+                $failures.Add('the Secure Client profile gave its vendor directory a Users entry')
+            }
+            Reset-TestRoots
+
             # Actions other than Install name the squatted root with a stable code.
             New-TestDirectory $vendor 'BU'
             try {

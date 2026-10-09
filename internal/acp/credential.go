@@ -16,8 +16,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -25,7 +27,7 @@ import (
 
 const (
 	enterpriseCredentialVersion  = 1
-	maxEnterpriseCredentials     = 1024
+	maxSecureClientCredentials   = 1024
 	maxEnterpriseCredentialBytes = 16 << 10
 	maxEnterpriseIndexBytes      = 1 << 10
 )
@@ -40,12 +42,13 @@ var enterpriseCredentialMutationMu sync.Mutex
 // other enrolled user. It has authority only on ACP routes and only for the
 // exact client, agent, and profile recorded here.
 type EnterpriseCredential struct {
-	Version   int    `json:"version"`
-	Principal string `json:"principal"`
-	ClientID  string `json:"client_id"`
-	AgentID   string `json:"agent_id"`
-	Profile   string `json:"profile"`
-	Token     string `json:"token"`
+	Version     int    `json:"version"`
+	Principal   string `json:"principal"`
+	ClientID    string `json:"client_id"`
+	AgentID     string `json:"agent_id"`
+	Profile     string `json:"profile"`
+	Token       string `json:"token"`
+	UserDataDir string `json:"user_data_dir,omitempty"`
 }
 
 type enterpriseCredentialIndex struct {
@@ -196,6 +199,40 @@ func LoadEnterpriseCredential(dataDir, principal, clientID, agentID, profile str
 	return loadEnterpriseCredentialFile(path)
 }
 
+// SetEnterpriseCredentialUserDataDir records the user directory after the
+// private token has been published. Existing records without this field
+// continue to use the default directory.
+func SetEnterpriseCredentialUserDataDir(dataDir, principal, clientID, agentID, profile, userDataDir string) error {
+	if !filepath.IsAbs(userDataDir) || filepath.Clean(userDataDir) != userDataDir {
+		return errors.New("ACP enterprise user data dir must be an absolute clean path")
+	}
+	enterpriseCredentialMutationMu.Lock()
+	defer enterpriseCredentialMutationMu.Unlock()
+	return withEnterpriseCredentialMutationLock(dataDir, func() error {
+		path, err := EnterpriseCredentialPath(dataDir, principal, clientID, agentID, profile)
+		if err != nil {
+			return err
+		}
+		credential, err := loadEnterpriseCredentialFile(path)
+		if err != nil {
+			return err
+		}
+		if credential.Principal != principal || credential.ClientID != clientID ||
+			credential.AgentID != agentID || credential.Profile != profile {
+			return errors.New("ACP enterprise credential scope does not match its stable path")
+		}
+		if credential.UserDataDir == userDataDir {
+			return nil
+		}
+		credential.UserDataDir = userDataDir
+		body, err := json.MarshalIndent(credential, "", "  ")
+		if err != nil {
+			return err
+		}
+		return writeEnterpriseCredentialFile(dataDir, path, "ACP enterprise credential", append(body, byte(10)))
+	})
+}
+
 // PublishEnterpriseUserToken writes only the bearer into target-user private
 // state. Callers must execute this function under that user's credentials.
 func PublishEnterpriseUserToken(dataDir, clientID, agentID, token string) (string, error) {
@@ -267,15 +304,18 @@ func MatchEnterpriseCredentialKeyID(dataDir, keyID string) (EnterpriseCredential
 	return credential, credential.Token, true
 }
 
-// EnterpriseCredentialsReady validates the bounded managed credential
-// inventory and reports whether at least one enrollment is usable.
-func EnterpriseCredentialsReady(dataDir string) bool {
+// EnterpriseCredentialsReady validates the managed credential inventory and
+// reports whether at least one enrollment is usable. It reads every record;
+// the gateway caches the answer for a time that grows with the inventory.
+// Standalone fleets may exceed the old cap; Secure Client keeps the
+// main branch readiness limit until its contract changes (GAP-0981).
+func EnterpriseCredentialsReady(dataDir string, secureClient bool) bool {
 	dir := enterpriseCredentialDir(dataDir)
 	if err := validateEnterpriseCredentialDirectory(dir); err != nil {
 		return false
 	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 || len(entries) > maxEnterpriseCredentials {
+	if err != nil || len(entries) == 0 || (secureClient && len(entries) > maxSecureClientCredentials) {
 		return false
 	}
 	indexDir := enterpriseCredentialIndexDir(dataDir)
@@ -283,7 +323,7 @@ func EnterpriseCredentialsReady(dataDir string) bool {
 		return false
 	}
 	indexes, err := os.ReadDir(indexDir)
-	if err != nil || len(indexes) != len(entries) || len(indexes) > maxEnterpriseCredentials {
+	if err != nil || len(indexes) != len(entries) || (secureClient && len(indexes) > maxSecureClientCredentials) {
 		return false
 	}
 	for _, entry := range entries {
@@ -304,6 +344,56 @@ func EnterpriseCredentialsReady(dataDir string) bool {
 		}
 	}
 	return true
+}
+
+// EnterpriseEnrollment describes one managed ACP enrollment record without its
+// bearer.
+type EnterpriseEnrollment struct {
+	Principal   string    `json:"principal"`
+	ClientID    string    `json:"client"`
+	AgentID     string    `json:"agent"`
+	Profile     string    `json:"profile"`
+	Created     time.Time `json:"created"`
+	UserDataDir string    `json:"user_data_dir,omitempty"`
+}
+
+// ListEnterpriseEnrollments reads every enrollment record, in principal,
+// client, agent and profile order. invalid names the records that do not
+// load (a revocation tombstone, a damaged or foreign file).
+func ListEnterpriseEnrollments(dataDir string) (enrollments []EnterpriseEnrollment, invalid []string, err error) {
+	dir := enterpriseCredentialDir(dataDir)
+	if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err := validateEnterpriseCredentialDirectory(dir); err != nil {
+		return nil, nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !credentialRecordNameRE.MatchString(entry.Name()) {
+			invalid = append(invalid, entry.Name())
+			continue
+		}
+		credential, loadErr := loadEnterpriseCredentialFile(filepath.Join(dir, entry.Name()))
+		info, infoErr := entry.Info()
+		if loadErr != nil || infoErr != nil {
+			invalid = append(invalid, entry.Name())
+			continue
+		}
+		enrollments = append(enrollments, EnterpriseEnrollment{
+			Principal: credential.Principal, ClientID: credential.ClientID, AgentID: credential.AgentID,
+			Profile: credential.Profile, Created: info.ModTime().UTC(), UserDataDir: credential.UserDataDir,
+		})
+	}
+	sort.Slice(enrollments, func(i, j int) bool {
+		left, right := enrollments[i], enrollments[j]
+		return strings.Join([]string{left.Principal, left.ClientID, left.AgentID, left.Profile}, "\x00") <
+			strings.Join([]string{right.Principal, right.ClientID, right.AgentID, right.Profile}, "\x00")
+	})
+	return enrollments, invalid, nil
 }
 
 // RemoveEnterpriseCredential revokes the service-side credential immediately.
@@ -337,6 +427,10 @@ func removeEnterpriseCredential(dataDir, principal, clientID, agentID, profile s
 	indexPath, err := EnterpriseCredentialIndexPath(dataDir, credential.Token)
 	if err != nil {
 		return err
+	}
+	if !secureClientHost() {
+		// Best effort: it only names the account on later failure rows.
+		_ = recordRevokedEnterpriseCredential(dataDir, credential, time.Now())
 	}
 	// Remove the only bearer-derived lookup first. A stale user copy has no
 	// authority from this point even if record cleanup is interrupted.
@@ -474,7 +568,8 @@ func loadEnterpriseCredentialFileAtPath(readPath, identityPath string) (Enterpri
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return EnterpriseCredential{}, errors.New("ACP enterprise credential has trailing JSON")
 	}
-	if credential.Version != enterpriseCredentialVersion || !validCredentialToken(credential.Token) {
+	if credential.Version != enterpriseCredentialVersion || !validCredentialToken(credential.Token) ||
+		(credential.UserDataDir != "" && (!filepath.IsAbs(credential.UserDataDir) || filepath.Clean(credential.UserDataDir) != credential.UserDataDir)) {
 		return EnterpriseCredential{}, errors.New("ACP enterprise credential is malformed")
 	}
 	for _, value := range []string{credential.Principal, credential.ClientID, credential.AgentID, credential.Profile} {

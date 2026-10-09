@@ -245,3 +245,66 @@ func openWindowsUserStatePin(path string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(handle), path), nil
 }
+
+// WindowsACPUserCopy is an account profile that holds DefenseClaw's managed
+// ACP state: <home>\.defenseclaw\acp with the user's token copies and the
+// editor contract locks.
+type WindowsACPUserCopy struct {
+	SID  string
+	Home string
+}
+
+// WindowsManagedACPUserCopies lists every local profile whose
+// .defenseclaw\acp folder the managed ACP enrollment made, signed in or
+// not: the folder is a plain folder its account does not own (the
+// enrollment creates it for the gateway service). A per-user folder the
+// account made itself is not listed. A purge removes these copies (GAP-0773):
+// once the gateway is gone nothing accepts the tokens.
+func WindowsManagedACPUserCopies() ([]WindowsACPUserCopy, error) {
+	names, err := windowsProfileListSubkeyReader()
+	if err != nil {
+		return nil, err
+	}
+	var copies []WindowsACPUserCopy
+	for _, sidText := range names {
+		sid, err := windows.StringToSid(sidText)
+		if err != nil {
+			continue
+		}
+		home, err := windowsProfileImagePathReader(sidText)
+		if err != nil {
+			continue
+		}
+		acpDir := filepath.Join(home, ".defenseclaw", "acp")
+		info, err := os.Lstat(acpDir)
+		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			continue
+		}
+		owner, err := windowsPathOwnerNoFollow(acpDir)
+		if err != nil || owner.Equals(sid) {
+			continue
+		}
+		copies = append(copies, WindowsACPUserCopy{SID: sidText, Home: home})
+	}
+	return copies, nil
+}
+
+// PurgeWindowsACPUserState removes the account's DefenseClaw ACP folder
+// (<home>\.defenseclaw\acp) as LocalSystem, whether or not the account is
+// signed in, and then its .defenseclaw folder once that is empty. The rest
+// of the folder is left as found.
+func PurgeWindowsACPUserState(rawHome, rawSID string) error {
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	home, sid, err := validateWindowsEnterpriseHome(rawHome, rawSID)
+	if err != nil {
+		return err
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := purgeWindowsUserStateFolder(home, sid, filepath.Join(dataDir, "acp")); err != nil {
+		return err
+	}
+	_ = os.Remove(dataDir)
+	return nil
+}

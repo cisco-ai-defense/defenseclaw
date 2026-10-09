@@ -23,6 +23,7 @@ package sensor
 
 import (
 	"context"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
@@ -349,6 +351,19 @@ func TestPollIsSerializedAgainstConcurrentCallers(t *testing.T) {
 	}
 }
 
+// fixedPeerAcquirer gives plane B a public peer regardless of the test host's
+// current socket table. A loaded build box can otherwise have no eligible
+// sockets during this poll and produce a false failure.
+type fixedPeerAcquirer struct{ acquire.Acquirer }
+
+func (a fixedPeerAcquirer) Processes(context.Context) ([]procprobe.Process, int, error) {
+	return []procprobe.Process{{PID: 42, Name: "python"}}, 0, nil
+}
+
+func (a fixedPeerAcquirer) Connections(context.Context) ([]netprobe.Connection, int, error) {
+	return []netprobe.Connection{{PID: 42, RemoteIP: net.ParseIP("8.8.8.8"), State: netprobe.StateEstablished}}, 0, nil
+}
+
 // TestPollHonoursTheConfiguredPlaneSelection is a privacy boundary, not a
 // display preference. A host that selected only the inference plane must not
 // have its sockets read: consulting the selection only while rendering health
@@ -373,6 +388,7 @@ func TestPollHonoursTheConfiguredPlaneSelection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New(): %v", err)
 			}
+			service.options.Acquirer = fixedPeerAcquirer{service.options.Acquirer}
 			service.Poll(context.Background())
 
 			if got := resolver.calls > 0; got != test.wantNamed {

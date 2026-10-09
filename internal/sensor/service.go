@@ -357,11 +357,13 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	// new peers turn one poll into minutes. Cap the whole naming phase and
 	// let the poll's own cancellation reach it -- an unnamed peer is still a
 	// recorded observation, a poll that never returns is not.
-	nameCtx, cancelNaming := context.WithTimeout(ctx, namingBudget(interval))
-	defer cancelNaming()
-
 	processes, processSkipped, processErr := s.options.Acquirer.Processes(ctx)
 	connections, unattributed, connectionErr := s.options.Acquirer.Connections(ctx)
+
+	// The naming budget starts when naming can begin. A slow process or socket
+	// read must not consume it before plane B sees its first peer.
+	nameCtx, cancelNaming := context.WithTimeout(ctx, namingBudget(interval))
+	defer cancelNaming()
 
 	byPID := make(map[int][]netprobe.Connection, len(processes))
 	for _, connection := range connections {
@@ -578,6 +580,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 	for _, plane := range platform.Planes {
 		capability := capabilities[plane]
 		entry := PlaneHealth{
+			Selected:  selected[string(plane)],
 			Plane:     plane,
 			Available: capability.Available,
 			Mechanism: capability.Mechanism,

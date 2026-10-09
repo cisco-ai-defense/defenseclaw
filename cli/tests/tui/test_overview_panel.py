@@ -1295,6 +1295,68 @@ def test_multi_connector_overview_has_no_false_drift_and_counts_modes() -> None:
     assert model.guardrail_mode_label("claudecode") == "action"
     assert model.guardrail_detail().startswith("observe, 1 action")
 
+    # A profile that decides for this account replaces guardrail.* (GAP-0050).
+    model.set_guardrail_profile(
+        {"user": "alice", "profile": "mlteam", "effective": {"mode": "action", "rule_pack_dir": "/p/idr-marker"}}
+    )
+    assert model.guardrail_detail().startswith("action, profile mlteam, idr-marker pack")
+
+
+def test_overview_uses_selected_connectors_resolved_profile_mode(monkeypatch) -> None:
+    """The selected connector uses the gateway's scoped effective mode."""
+    from defenseclaw import gateway
+    from defenseclaw.config import GuardrailProfile, default_config
+
+    cfg = default_config()
+    cfg.guardrail.profiles = {"base": GuardrailProfile(mode="observe"), "strict": GuardrailProfile(mode="action")}
+    monkeypatch.setattr(gateway, "current_profile_account", lambda **kwargs: ("alice", "alice"))
+    asked = []
+
+    def resolve(self, *, user="", connector="", agent=""):
+        asked.append((user, connector))
+        profile = "strict" if connector == "codex" else "base"
+        mode = "action" if connector == "codex" else "observe"
+        return {"profile": profile, "effective": {"mode": mode}}
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "guardrail_profile_resolve", resolve)
+    model = OverviewPanelModel(
+        OverviewConfig(guardrail_mode="observe", connector_modes=(("codex", "observe"),)), version="test"
+    )
+    model.set_guardrail_profile(gateway.current_user_guardrail_profile(cfg))
+    model.set_guardrail_profile(gateway.current_user_guardrail_profile(cfg, connector="codex"), "codex")
+
+    assert asked == [("alice", ""), ("alice", "codex")]
+    assert model.guardrail_mode_label("codex") == "action, profile strict"
+    assert model.guardrail_mode_label() == "action, profile strict"
+
+
+def test_overview_applies_connector_profile_overrides_to_single_and_all_views() -> None:
+    response = {
+        "profile": "base",
+        "effective": {"mode": "observe"},
+        "overrides": [
+            {"connector": "codex", "agent": "", "profile": "strict", "mode": "action"},
+            {"connector": "claudecode", "agent": "agt-example", "profile": "strict", "mode": "action"},
+        ],
+    }
+    single = OverviewPanelModel(
+        OverviewConfig(guardrail_mode="observe", connector_modes=(("codex", "observe"),)), version="test"
+    )
+    single.set_guardrail_profile(response)
+    assert single.guardrail_mode_label() == "action, profile strict"
+
+    multi = OverviewPanelModel(
+        OverviewConfig(
+            guardrail_mode="observe",
+            connector_modes=(("codex", "observe"), ("claudecode", "observe")),
+        ),
+        version="test",
+    )
+    multi.set_guardrail_profile(response)
+    assert multi.guardrail_mode_label("codex") == "action, profile strict"
+    assert multi.guardrail_mode_label("claudecode") == "observe, profile base"
+    assert multi.guardrail_mode_label() == "observe, 1 action"
+
 
 def test_overview_and_audit_say_loading_until_the_first_read() -> None:
     """GAP-1240: a slow first read is "loading", not "no audit events yet"."""

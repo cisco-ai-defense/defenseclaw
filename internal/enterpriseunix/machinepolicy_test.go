@@ -260,7 +260,8 @@ func TestVerifyNamesTheConnectorAndFileOfMachinePolicyDrift(t *testing.T) {
 
 // With the documented standalone config (no guardrail.connectors block) the
 // enumerator found eligible users but published no target, and status and
-// verify still reported coverage and security complete with 0 targets.
+// verify still reported coverage and security complete with 0 targets. verify
+// now fails on it (GAP-0221).
 func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -277,10 +278,45 @@ func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
 				if r.SecurityComplete {
 					t.Fatalf("%s reports security_complete with no connector enabled", action)
 				}
+				if action == ActionVerify && !strings.Contains(messagesOf(r.Errors, codeVerify), "enables no connector the managed deployment protects") {
+					t.Fatalf("verify passes with no connector enabled: %+v", r.Errors)
+				}
 			}
+			// ensure warns too, as on Windows (GAP-0266), and an explicit
+			// disable beats the singular guardrail.connector (GAP-0263).
+			disabled := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(disabled, append(DefaultConfig(h.env.Layout), "  connector: claudecode\n  connectors:\n    claudecode:\n      enabled: false\n    openclaw: {}\n"...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: disabled})
+			if !hasWarning(r, "no_connectors_enabled") || r.SecurityComplete {
+				t.Fatalf("ensure does not warn that no connector is enabled: %+v", r.Warnings)
+			}
+			// The warning names the entries it ignored (GAP-0272)...
+			if got := messagesOf(r.Warnings, "no_connectors_enabled"); !strings.Contains(got, "(ignored: claudecode (enabled: false), openclaw (not supported") {
+				t.Fatalf("the warning does not name the ignored entries: %q", got)
+			}
+			// ...and ensure publishes no machine policy for the disabled connector
+
+			// either (GAP-0267).
+			if _, published := r.MachinePolicy["claudecode"]; published || (goos == "linux" && exists(h.env.P(claudeDropIn))) {
+				t.Fatalf("ensure published machine policy for a disabled connector: %+v", r.MachinePolicy)
+			}
+
 			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
 			if r := h.run(Options{Action: ActionStatus}); hasWarning(r, "no_connectors_enabled") {
 				t.Fatalf("the warning stays with a connector enabled: %+v", r.Warnings)
+			}
+			// The singular guardrail.connector (the shape the per-user CLI
+			// writes) enrols the connector too, so verify passes (GAP-0263).
+			single := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(single, append(DefaultConfig(h.env.Layout), "  connector: claudecode\n"...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: single}))
+			requireOK(t, h.run(Options{Action: ActionVerify}))
+			if goos == "linux" && !strings.Contains(h.read("/etc/systemd/system/"+unitGuardian+".d/"+dropinPaths), "ReadWritePaths=-/etc/claude-code") {
+				t.Fatal("the guardian sandbox does not allow the Claude Code machine-policy folder for guardrail.connector")
 			}
 		})
 	}

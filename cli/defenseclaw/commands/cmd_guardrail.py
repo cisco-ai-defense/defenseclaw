@@ -345,7 +345,34 @@ def _toggle_connector_guardrail(
     )
 
 
-@click.group("guardrail")
+class _GuardrailGroup(click.Group):
+    """Keep identity profile commands off the Secure Client command tree."""
+
+    def _secure_client(self, ctx: click.Context) -> bool:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        app = ctx.find_object(AppContext)
+        cfg = app.cfg if app is not None else None
+        if cfg is None:
+            from defenseclaw.config import load
+
+            try:
+                cfg = load()
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return _enterprise_profile(cfg) == "secure_client"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = super().list_commands(ctx)
+        return [name for name in names if name != "profile"] if self._secure_client(ctx) else names
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name == "profile" and self._secure_client(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group("guardrail", cls=_GuardrailGroup)
 def guardrail() -> None:
     """Control guardrail policy: status, enable/disable, fail-mode, hilt, block-message.
 
@@ -564,7 +591,10 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
             )
 
 
-def _echo_status_json(gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str]) -> None:
+def _echo_status_json(
+    gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str], profile: dict | None = None,
+    *, secure_client: bool = False,
+) -> None:
     """Machine-readable ``guardrail status``: the same fields as the table."""
     import json  # noqa: PLC0415
 
@@ -574,8 +604,62 @@ def _echo_status_json(gc, rows: list[dict[str, tuple[str, str]]], warnings: list
         item = {"connector": row["key"][0], "label": row["label"][0]}
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
         connectors.append(item)
-    payload = {"enabled": bool(gc.enabled), "port": gc.port, "connectors": connectors, "warnings": warnings}
+    payload = {
+        "enabled": (
+            bool(gc.enabled)
+            if secure_client
+            else bool(gc.enabled and any(item["state"] == "enabled" for item in connectors))
+        ),
+        "port": gc.port,
+        "connectors": connectors,
+        "warnings": warnings,
+    }
+    if profile is not None:
+        payload["profile"] = profile
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def profile_status_text(cfg, result: dict) -> str:
+    """One line naming the guardrail profile that decides for this account.
+
+    *result* comes from ``current_user_guardrail_profile``. Status, guardrail
+    status and doctor show it, because the per-connector settings they list
+    are ``guardrail.*``, which a matching profile replaces (GAP-0056). A
+    connector or agent another assignment picks is named too (GAP-0075).
+    """
+    from defenseclaw import policy_catalog
+
+    user = str(result.get("user") or "this account")
+    if result.get("error"):
+        count = len(getattr(cfg.guardrail, "profiles", {}) or {})
+        if result.get("timed_out"):
+            return (
+                f"unknown for {user}: the gateway is running but did not answer in time; "
+                f"the directory lookup may be slow ({count} profile(s) configured)"
+            )
+        return f"unknown for {user}: the gateway did not answer ({count} profile(s) configured)"
+    name = str(result.get("profile") or "")
+    if not name:
+        text = f"none for {user} (guardrail.* applies)"
+    else:
+        effective = result.get("effective") or {}
+        pack_dir = str(effective.get("rule_pack_dir") or "")
+        pack = policy_catalog.pack_name_for_path(cfg, pack_dir)[0] if pack_dir.strip() else "default"
+        reason = str(result.get("match") or "")
+        if result.get("matched_group"):
+            reason += f" {result['matched_group']}"
+        text = f"{name} for {user} (by {reason}): mode {effective.get('mode') or 'observe'}, rule pack {pack}"
+    scoped = []
+    for item in result.get("overrides") or []:
+        subject = " ".join(
+            part
+            for part in (_connector_label(item.get("connector") or ""), item.get("agent") and f"agent {item['agent']}")
+            if part
+        )
+        scoped.append(f"{item.get('profile')} for {subject} (by {item.get('match')})")
+    if scoped:
+        text += "; except " + ", ".join(scoped)
+    return text
 
 
 @guardrail.command("status")
@@ -597,15 +681,18 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     connector set up, status says so and names the setup command.
     """
     from defenseclaw import policy_catalog
+    from defenseclaw.commands.cmd_status import _enterprise_profile
 
+    secure_client = _enterprise_profile(app.cfg) == "secure_client"
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
-        enabled_txt = "yes" if gc.enabled else "no"
-        enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
-        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
+        if secure_client:
+            enabled_txt = "yes" if gc.enabled else "no"
+            enabled_val = ux._style(enabled_txt, fg="green" if gc.enabled else "yellow")
+            ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
     # Resolve the full active set and render exactly one coherent view: a
     # per-connector block for EACH active connector. active_connectors()
@@ -635,8 +722,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     )
     if not actives and not configured:
         if as_json:
-            _echo_status_json(gc, [], [])
+            _echo_status_json(gc, [], [], secure_client=secure_client)
             return
+        if not secure_client:
+            ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {ux._style('no', fg='yellow')}")
         ux.echo(
             f"  • {ux._style('connectors:', fg='bright_black', bold=True)} "
             f"{ux.dim('(none configured)')}"
@@ -671,11 +760,30 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             raise SystemExit(1)
         actives = scoped
 
+    if not as_json and not secure_client:
+        # The summary must describe the same selected rows as --json.
+        all_enabled = gc.enabled and any(
+            gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
+            for name in actives
+        )
+        enabled_txt = "yes" if all_enabled else "no"
+        enabled_val = ux._style(enabled_txt, fg="green" if all_enabled else "yellow")
+        ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
+
+    from defenseclaw.hook_integrity import setup_command, unrunnable_hook_problem
+
     rows: list[dict[str, tuple[str, str]]] = []
     any_disabled = False
     runtime_drift_rows: list[str] = []
     runtime_limit_rows: list[str] = []
+    posture_rows: list[str] = []
     for name in actives:
+        if not secure_client and normalize_connector(name) == "cursor":
+            runtime_limit_rows.append(
+                "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected "
+                "and fail-closed applies only to hook events the CLI sends. "
+                "Check hook_decision rows for actual coverage"
+            )
         cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
         configured_cfm = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else fail_mode
         cfm = configured_cfm
@@ -727,6 +835,26 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         else:
             state_raw = "disabled"
             state = ux._style(state_raw, fg="yellow")
+        if not secure_client and gc.enabled and c_enabled:
+            unrunnable = unrunnable_hook_problem(app.cfg, name)
+            if unrunnable:
+                # The agent treats a hook it cannot start as a non-blocking
+                # error, so "closed" in the table would be a false promise.
+                posture_rows.append(
+                    f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
+                    f"to a hook the agent cannot run; repair with {setup_command(name)}"
+                )
+            elif (cmode or "") == "action" and cfm == "open" and normalize_connector(name) not in (
+                _UPSTREAM_FAIL_OPEN_CONNECTORS
+            ):
+                # An upgrade keeps the fail mode an older setup chose, while a
+                # new setup gives an action connector closed (GAP-0415).
+                scope = f" --connector {name}" if getattr(gc, "connectors", None) else ""
+                posture_rows.append(
+                    f"{_connector_label(name)} ({name}) is in action mode with fail mode open: while the gateway "
+                    f"is down its hooks allow calls that policy blocks; set closed with "
+                    f"defenseclaw guardrail fail-mode closed{scope}"
+                )
         fail_raw = cfm
         cfm_display = _style_fail_mode(cfm)
         if not (gc.enabled and c_enabled) and not as_json:
@@ -779,14 +907,36 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 "judge": (judge_raw, _style_judge_value(judge_raw)),
             }
         )
+    profile = None
+    if not secure_client:
+        from defenseclaw.gateway import current_user_guardrail_profile
+
+        profile = current_user_guardrail_profile(app.cfg)
     if as_json:
-        _echo_status_json(gc, rows, runtime_drift_rows + runtime_limit_rows)
+        _echo_status_json(
+            gc, rows, posture_rows + runtime_drift_rows + runtime_limit_rows, profile,
+            secure_client=secure_client,
+        )
         return
     _render_connector_table(rows)
+    for posture_row in posture_rows:
+        ux.warn(posture_row, indent="  ")
     for drift_row in runtime_drift_rows:
         ux.warn("runtime fail-mode drift: " + drift_row, indent="  ")
     for limit_row in runtime_limit_rows:
         ux.warn("connector limitation: " + limit_row, indent="  ")
+    if profile is not None:
+        ux.echo(f"  • {ux._style('profile:', fg='bright_black', bold=True)}    {profile_status_text(app.cfg, profile)}")
+        for note in profile.get("warnings") or []:
+            ux.warn(str(note), indent="    ")
+        if (profile.get("directory") or {}).get("message"):
+            ux.warn(str(profile["directory"]["message"]), indent="    ")
+        if profile.get("profile") or profile.get("overrides"):
+            ux.subhead(
+                "The table shows guardrail.*; the profile settings above decide for you. "
+                "Details: defenseclaw guardrail profile explain [--connector NAME] [--agent ID]",
+                indent="    ",
+            )
     ux.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
     if any_disabled:
         ux.echo(f"  • {ux.dim('fail - = disabled connector (no hooks, so no fail mode)')}")
@@ -794,10 +944,15 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     if proxy_in_use:
         ux.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
-    if gc.enabled:
+    if not gc.enabled:
+        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
+    elif secure_client or any(
+        gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True
+        for name in actives
+    ):
         click.echo(f"  {ux.dim('Disable with:')}  defenseclaw guardrail disable")
     else:
-        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable")
+        click.echo(f"  {ux.dim('Enable with:')}   defenseclaw guardrail enable --connector <name>")
     click.echo()
 
 
@@ -1113,9 +1268,19 @@ def _apply_scoped_fail_mode_transaction(
                 conns.pop(key, None)
             else:
                 old_entry.hook_fail_mode = old_mode
-            restore_fail_mode_transaction(snapshots)
-            ux.err(f"Failed to save config: {exc}", indent="  ")
-            raise click.Abort() from exc
+            try:
+                restore_fail_mode_transaction(snapshots)
+            except OSError as rollback_exc:
+                ux.err(
+                    f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                    f"rollback incomplete: {rollback_exc}", indent="  ",
+                )
+                raise SystemExit(1) from exc
+            ux.err(
+                f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                "previous config and runtime files restored.", indent="  ",
+            )
+            raise SystemExit(1) from exc
 
         if restart and gc.enabled:
             try:
@@ -1361,9 +1526,19 @@ def _apply_global_fail_mode_transaction(
                     gc.connectors.pop(name, None)
                 else:
                     old_entry.hook_fail_mode = old_mode
-            restore_fail_mode_transaction(snapshots)
-            ux.err(f"Failed to save config: {exc}", indent="  ")
-            raise click.Abort() from exc
+            try:
+                restore_fail_mode_transaction(snapshots)
+            except OSError as rollback_exc:
+                ux.err(
+                    f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                    f"rollback incomplete: {rollback_exc}", indent="  ",
+                )
+                raise SystemExit(1) from exc
+            ux.err(
+                f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc}; "
+                "previous config and runtime files restored.", indent="  ",
+            )
+            raise SystemExit(1) from exc
 
         if restart and gc.enabled:
             used_full_restart = False
@@ -2731,6 +2906,19 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
     if not path.strip():
         raise click.UsageError("PATH must not be empty.")
 
+    # A bare pack name has the same meaning here as in list-packs/use-pack.
+    if not os.path.exists(os.path.expanduser(path)) and not any(
+        sep in path for sep in (os.sep, os.altsep) if sep
+    ) and not path.startswith(("~", ".")):
+        from defenseclaw import config, policy_catalog
+
+        packs = policy_catalog.discover_rule_packs(config.load())
+        named = next((p.path for p in packs if p.name == path), None)
+        if named:
+            path = named
+        else:
+            names = ", ".join(sorted(p.name for p in packs))
+            raise click.ClickException(f"no pack with the name {path!r} was found; available packs: {names}")
     try:
         result = rulepack_validation.validate_rule_pack(path)
     except rulepack_validation.RulePackValidationBridgeError as exc:
@@ -4002,7 +4190,12 @@ def mode_cmd(
         "open": "the action goes ahead if the hook can't reach the gateway",
     }
     notes = [
-        f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
+        (
+            f"Hook failures for {_connector_label(c)} remain fail-open (upstream limitation): "
+            "the action can go ahead if the hook cannot reach the gateway."
+            if normalize_connector(c) in _UPSTREAM_FAIL_OPEN_CONNECTORS
+            else f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
+        )
         for c, fm in fail_flips.items()
     ]
     notes.extend(
@@ -4274,6 +4467,292 @@ alert_at_cmd = guardrail.command(
     HIGH+).
     """,
 )(_level_command("alert_at"))
+
+
+# ---------------------------------------------------------------------------
+# guardrail profile — identity-based guardrail profiles (read-only)
+# ---------------------------------------------------------------------------
+
+
+@guardrail.group("profile")
+def profile_group() -> None:
+    """Show identity-based guardrail profiles and which one a subject gets.
+
+    \b
+      list     the profiles, their assignments and the default
+      show     one profile's settings
+      explain  which profile a user, connector or agent resolves to
+
+    Profiles live under ``guardrail.profiles`` in config.yaml; assignments
+    are tried in order and the first match wins. Only verified identities
+    select a profile, so ``explain`` asks the running gateway.
+    """
+
+
+def _profile_settings(profile) -> dict:
+    out: dict = {}
+    for key in ("description", "mode", "block_at", "alert_at", "rule_pack_dir", "block_message"):
+        value = getattr(profile, key, "")
+        if value:
+            out[key] = value
+    if profile.hilt is not None:
+        out["hilt"] = {"enabled": profile.hilt.enabled, "min_severity": profile.hilt.min_severity}
+    if profile.connectors:
+        out["connectors"] = {
+            name: {
+                key: value
+                for key, value in (
+                    ("mode", pc.mode),
+                    ("block_at", pc.block_at),
+                    ("alert_at", pc.alert_at),
+                    ("rule_pack_dir", pc.rule_pack_dir),
+                    ("block_message", pc.block_message),
+                )
+                if value
+            }
+            | ({"hilt": {"enabled": pc.hilt.enabled, "min_severity": pc.hilt.min_severity}} if pc.hilt else {})
+            for name, pc in sorted(profile.connectors.items())
+        }
+    return out
+
+
+def _assignment_json(assignment) -> dict:
+    match = {
+        key: list(values)
+        for key, values in (
+            ("groups", assignment.match.groups),
+            ("users", assignment.match.users),
+            ("connectors", assignment.match.connectors),
+            ("agents", assignment.match.agents),
+        )
+        if values
+    }
+    return {"profile": assignment.profile, "match": match}
+
+
+def _gateway_profile_warnings(app: AppContext) -> list[str]:
+    """What the running gateway warns about the configured assignments.
+
+    Empty when the gateway is not running: ``profile list`` works from the
+    config file alone and only adds what the gateway can see (a group the
+    host no longer knows).
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=5,
+        )
+        try:
+            result = client.guardrail_profile_resolve()
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no gateway, no extra warnings.
+        return []
+    return [str(note) for note in result.get("warnings") or []]
+
+
+@profile_group.command("list")
+@click.option("--json", "json_out", is_flag=True, help="Print the profiles as JSON.")
+@pass_ctx
+def profile_list_cmd(app: AppContext, json_out: bool) -> None:
+    """List the guardrail profiles, their ordered assignments and the default."""
+    gc = app.cfg.guardrail
+    payload = {
+        "version": 1,
+        "profiles": {name: _profile_settings(gc.profiles[name]) for name in sorted(gc.profiles)},
+        "assignments": [_assignment_json(a) for a in gc.profile_assignments],
+        "default_profile": gc.default_profile,
+    }
+    warnings = _gateway_profile_warnings(app) if gc.profile_assignments else []
+    if warnings:
+        payload["warnings"] = warnings
+    if json_out:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    ux.section("Guardrail profiles", indent="  ")
+    if not gc.profiles:
+        click.echo(f"  {ux.dim('No guardrail profiles are configured; guardrail.* applies to everyone.')}")
+        click.echo()
+        return
+    for name in sorted(gc.profiles):
+        profile = gc.profiles[name]
+        summary = ", ".join(
+            f"{key}={value}"
+            for key, value in _profile_settings(profile).items()
+            if key not in {"description", "connectors", "hilt"}
+        )
+        detail = ux.dim("(" + (summary or "inherits everything") + ")")
+        ux.echo(f"  • {ux.accent(name)}  {profile.description or ''} {detail}")
+    click.echo()
+    ux.echo(f"  • {ux._style('assignments (first match wins):', fg='bright_black', bold=True)}")
+    if not gc.profile_assignments:
+        click.echo(f"      {ux.dim('none')}")
+    for index, assignment in enumerate(gc.profile_assignments, start=1):
+        match = "; ".join(f"{key}={','.join(values)}" for key, values in _assignment_json(assignment)["match"].items())
+        ux.echo(f"      {index}. {assignment.profile} ← {match}")
+    default = gc.default_profile or ux.dim("none (guardrail.* applies)")
+    ux.echo(f"  • {ux._style('default:', fg='bright_black', bold=True)} {default}")
+    for note in warnings:
+        ux.warn(note, indent="  ")
+    click.echo()
+
+
+@profile_group.command("show")
+@click.argument("name")
+@click.option("--json", "json_out", is_flag=True, help="Print the profile as JSON.")
+@pass_ctx
+def profile_show_cmd(app: AppContext, name: str, json_out: bool) -> None:
+    """Show one guardrail profile's settings and where it is assigned."""
+    gc = app.cfg.guardrail
+    profile = gc.profiles.get(name)
+    if profile is None:
+        known = ", ".join(sorted(gc.profiles)) or "none"
+        ux.err(f"No guardrail profile named {name!r} (configured: {known}).")
+        raise SystemExit(1)
+    payload = {
+        "version": 1,
+        "name": name,
+        "settings": _profile_settings(profile),
+        "assignments": [_assignment_json(a) for a in gc.profile_assignments if a.profile == name],
+        "default": gc.default_profile == name,
+    }
+    if json_out:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    ux.section(f"Guardrail profile {name}", indent="  ")
+    settings = payload["settings"]
+    if not settings:
+        click.echo(f"  {ux.dim('Sets nothing; inherits guardrail.* for its subjects.')}")
+    for key, value in settings.items():
+        if isinstance(value, dict):
+            value = json.dumps(value, sort_keys=True)
+        click.echo(f"  {key}: {value}")
+    assigned = payload["assignments"]
+    click.echo(f"  assigned by: {len(assigned)} assignment(s){' and default_profile' if payload['default'] else ''}")
+    click.echo()
+
+
+def _age_text(seconds) -> str:
+    """A short age such as ``45s`` or ``7m``."""
+    seconds = int(seconds or 0)
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m"
+
+
+# How long explain waits for the gateway. The gateway looks the user up in the
+# directory before it answers, and that lookup is bounded at 20 s (and the
+# account lookup before it at 10 s), so the client waits longer than both.
+PROFILE_EXPLAIN_TIMEOUT_SECONDS = 35
+
+
+@profile_group.command("explain")
+@click.option("--user", "user", default="", help="Account name, uid or SID to resolve (default: you).")
+@click.option("--connector", "connector", default="", help="Connector the request would come from.")
+@click.option("--agent", "agent", default="", help="Agent identity (agt-...) the request would carry.")
+@click.option("--json", "json_out", is_flag=True, help="Print the resolution as JSON.")
+@pass_ctx
+def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, json_out: bool) -> None:
+    """Explain which guardrail profile a subject resolves to, and why.
+
+    Asks the running gateway (loopback, gateway token), which resolves the
+    user through the operating system the way it does for live requests.
+    Without --user it explains the account running the command, also for
+    --connector and --agent, as live requests always carry a user.
+    """
+    import requests
+
+    from defenseclaw.gateway import OrchestratorClient, current_profile_account, gateway_api_client_host
+
+    if not user:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        user = current_profile_account(secure_client=_enterprise_profile(app.cfg) == "secure_client")[0]
+        if not (user or connector or agent):
+            ux.err("Name at least one of --user, --connector or --agent.")
+            raise SystemExit(2)
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=PROFILE_EXPLAIN_TIMEOUT_SECONDS,
+        )
+        try:
+            result = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
+        finally:
+            client.close()
+    except requests.exceptions.ReadTimeout:
+        # The gateway took the connection and is still resolving the user: it
+        # is running, so "start it" would send the operator the wrong way.
+        ux.err(
+            f"The gateway did not answer within {PROFILE_EXPLAIN_TIMEOUT_SECONDS:g} s; "
+            f"the directory lookup for {user or 'this account'} may be slow (SSSD or the domain controller). Try again."
+        )
+        raise SystemExit(1) from None
+    except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
+        ux.err(f"Could not ask the gateway: {exc}")
+        ux.subhead("Start it with: defenseclaw-gateway start", indent="  ")
+        raise SystemExit(1) from None
+    if json_out:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+        return
+    ux.section("Guardrail profile resolution", indent="  ")
+    if not result.get("profiles_configured"):
+        click.echo(f"  {ux.dim('No guardrail profiles are configured; guardrail.* applies.')}")
+    subject = result.get("subject") or {}
+    if subject:
+        who = subject.get("upn") or subject.get("principal") or subject.get("user_name") or user
+        groups = "groups unknown" if result.get("lookup_error") else f"{int(subject.get('group_count') or 0)} group(s)"
+        click.echo(f"  user:    {who} ({groups})")
+    profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
+    click.echo(f"  profile: {profile}")
+    cache = result.get("cache") or {}
+    if result.get("match"):
+        reason = result["match"]
+        if result.get("matched_group"):
+            reason += f" ({result['matched_group']})"
+        # GAP-0275: this lookup worked, but the gateway's own is failing and its
+        # requests get default_lookup_failed; "match: default" read as a verified no-match.
+        if cache.get("match") == "default_lookup_failed" and result["match"] != "default_lookup_failed":
+            reason += " (requests get default_lookup_failed: the gateway's directory lookup for this account fails)"
+        click.echo(f"  match:   {reason}")
+    if result.get("digest"):
+        click.echo(f"  digest:  {result['digest']}")
+    if cache:
+        cache_decision = f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')})"
+        if cache.get("failing_since"):
+            click.echo(
+                f"  cache:   requests have no cached directory facts {cache_decision}; "
+                "the gateway retries its directory lookup"
+            )
+        elif "age_seconds" in cache and "refresh_after_seconds" in cache:
+            age = int(cache["age_seconds"])
+            lifetime = age + int(cache["refresh_after_seconds"])
+            click.echo(
+                f"  cache:   requests use directory facts {_age_text(age)} old "
+                f"{cache_decision}; the gateway refreshes them after {_age_text(lifetime)}"
+            )
+        else:
+            click.echo(f"  cache:   directory fact age unavailable {cache_decision}")
+    if result.get("lookup_error"):
+        ux.warn(f"user lookup failed: {result['lookup_error']}")
+    for note in result.get("warnings") or []:
+        ux.warn(str(note))
+    if (result.get("directory") or {}).get("message"):
+        ux.warn(str(result["directory"]["message"]))
+    effective = result.get("effective") or {}
+    if effective:
+        scope = result.get("connector") or "global"
+        hilt = effective.get("hilt") or {}
+        click.echo(
+            f"  applies ({scope}): mode={effective.get('mode', '')} block_at={effective.get('block_at') or 'pack'} "
+            f"alert_at={effective.get('alert_at') or 'pack'} hilt={'on' if hilt.get('enabled') else 'off'} "
+            f"rule_pack={effective.get('rule_pack_dir') or 'default'}"
+        )
+    click.echo()
 
 
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The

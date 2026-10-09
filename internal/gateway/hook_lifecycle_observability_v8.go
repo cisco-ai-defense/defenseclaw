@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -175,7 +176,7 @@ func buildHookLifecycleV8Record(
 	}
 	if meta.LifecycleEvent == observability.TelemetryEventToolStart ||
 		meta.LifecycleEvent == observability.TelemetryEventToolEnd {
-		return buildHookToolLifecycleV8Record(builder, envelope, meta)
+		return buildHookToolLifecycleV8Record(ctx, builder, envelope, meta)
 	}
 
 	base := observability.LogCompatSessionStartInput{
@@ -206,7 +207,7 @@ func buildHookLifecycleV8Record(
 		DefenseClawRunID:                    hookV8OptionalIdentifier(meta.RunID),
 		UserID:                              hookV8OptionalIdentifier(meta.UserID),
 		DefenseClawUserIDKind:               v8UserIDKind(meta.UserIDKind),
-		DefenseClawUserName:                 hookV8OptionalIdentifier(meta.UserName),
+		DefenseClawUserName:                 v8UserName(meta.UserName, hookV8OptionalIdentifier),
 		DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 		DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
 		DefenseClawDestinationApp:           hookV8OptionalIdentifier(meta.DestinationApp),
@@ -217,7 +218,10 @@ func buildHookLifecycleV8Record(
 		GenAIToolCallID:                     hookV8OptionalIdentifier(meta.ToolID),
 		DefenseClawAgentReportedCostPresent: meta.ReportedCost,
 		DefenseClawAgentReportedCostUsd:     hookV8OptionalReportedCost(meta),
+		DefenseClawAgentIdentityID:          agentIdentityV8(meta.AgentIdentityID),
 	}
+	base.DefenseClawSandboxID, base.DefenseClawSandboxName = hookV8Sandbox(audit.EnvelopeFromContext(ctx))
+	meta.Identity.applyTo(&base)
 
 	switch meta.LifecycleEvent {
 	case observability.TelemetryEventSessionStart:
@@ -282,10 +286,23 @@ func hookLifecycleV8EventInput(base observability.LogCompatSessionStartInput) ob
 		DefenseClawToolSkillKey:             base.DefenseClawToolSkillKey,
 		DefenseClawAgentReportedCostPresent: base.DefenseClawAgentReportedCostPresent,
 		DefenseClawAgentReportedCostUsd:     base.DefenseClawAgentReportedCostUsd,
+		DefenseClawUserPrincipal:            base.DefenseClawUserPrincipal,
+		DefenseClawUserDomain:               base.DefenseClawUserDomain,
+		DefenseClawUserDirectory:            base.DefenseClawUserDirectory,
+		DefenseClawUserTenantID:             base.DefenseClawUserTenantID,
+		DefenseClawUserIdentitySource:       base.DefenseClawUserIdentitySource,
+		DefenseClawUserPrincipalAssurance:   base.DefenseClawUserPrincipalAssurance,
+		DefenseClawSessionKind:              base.DefenseClawSessionKind,
+		DefenseClawSessionKerberosPrincipal: base.DefenseClawSessionKerberosPrincipal,
+		ClientAddress:                       base.ClientAddress,
+		DefenseClawAgentIdentityID:          base.DefenseClawAgentIdentityID,
+		DefenseClawSandboxID:                base.DefenseClawSandboxID,
+		DefenseClawSandboxName:              base.DefenseClawSandboxName,
 	}
 }
 
 func buildHookToolLifecycleV8Record(
+	ctx context.Context,
 	builder *observability.FamilyBuilder,
 	envelope observability.FamilyEnvelopeInput,
 	meta llmEventMeta,
@@ -299,8 +316,9 @@ func buildHookToolLifecycleV8Record(
 		DefenseClawRunID:                   hookV8OptionalIdentifier(meta.RunID),
 		UserID:                             hookV8OptionalIdentifier(meta.UserID),
 		DefenseClawUserIDKind:              v8UserIDKind(meta.UserIDKind),
-		DefenseClawUserName:                hookV8OptionalIdentifier(meta.UserName),
+		DefenseClawUserName:                v8UserName(meta.UserName, hookV8OptionalIdentifier),
 		DefenseClawUserEmail:               v8UserEmail(meta.UserEmail),
+		DefenseClawAgentIdentityID:         agentIdentityV8(meta.AgentIdentityID),
 		DefenseClawPolicyID:                hookV8OptionalIdentifier(meta.PolicyID),
 		DefenseClawDestinationApp:          hookV8OptionalIdentifier(meta.DestinationApp),
 		GenAIConversationID:                hookV8OptionalIdentifier(meta.SessionID),
@@ -328,6 +346,10 @@ func buildHookToolLifecycleV8Record(
 		DefenseClawTelemetryInputReported:  false,
 		DefenseClawTelemetryOutputReported: false,
 	}
+	// tool_start and tool_end join the sandbox like the session lifecycle
+	// and the tool invocation records of the same hook (GAP-0202).
+	base.DefenseClawSandboxID, base.DefenseClawSandboxName = hookV8Sandbox(audit.EnvelopeFromContext(ctx))
+	meta.Identity.applyTo(&base)
 	if meta.LifecycleEvent == observability.TelemetryEventToolEnd {
 		return builder.BuildLogCompatToolEnd(observability.LogCompatToolEndInput(base))
 	}
@@ -420,7 +442,7 @@ func hookLifecycleV8TransitionInput(
 		DefenseClawTurnID:                   hookV8OptionalIdentifier(meta.TurnID),
 		UserID:                              hookV8OptionalIdentifier(meta.UserID),
 		DefenseClawUserIDKind:               v8UserIDKind(meta.UserIDKind),
-		DefenseClawUserName:                 hookV8OptionalIdentifier(meta.UserName),
+		DefenseClawUserName:                 v8UserName(meta.UserName, hookV8OptionalIdentifier),
 		DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 		DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
 		DefenseClawDestinationApp:           hookV8OptionalIdentifier(meta.DestinationApp),

@@ -91,6 +91,13 @@ def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
     # Setup readiness still reads it as pending reload.
     assert "running hermes" in row["detail"].casefold() and "live=false" in row["detail"]
     assert "without --passive" in row["remediation"]
+    # GAP-0100: --fix --dry-run is passive but still lists processes, so it
+    # reports an idle Hermes as the plain doctor does.
+    with mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]), \
+            mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
+        dry_run = _DoctorResult(mode="plan", passive=True, list_processes=True)
+        cmd_doctor._check_hook_health(cfg, "hermes", dry_run)
+    assert dry_run.checks[-1]["status"] == "pass"
 
 
 def test_codex_plugin_cache_missing_is_not_a_warning() -> None:
@@ -312,6 +319,21 @@ def test_header_corrupt_audit_db_names_gateway_restart(tmp_path) -> None:
         cmd_doctor._check_audit_db_store(cfg, r)
     assert r.checks[-1]["status"] == "fail"
     assert "defenseclaw-gateway restart" in r.checks[-1]["remediation"]
+
+
+def test_full_disk_audit_db_names_space_cause(tmp_path) -> None:
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="audit-db-integrity-unavailable")
+    cfg = mock.MagicMock(audit_db=str(tmp_path / "audit.db"), data_dir=str(tmp_path))
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health),
+        mock.patch("defenseclaw.commands.cmd_doctor.shutil.disk_usage", return_value=mock.MagicMock(free=0)),
+    ):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    assert "disk holding" in r.checks[-1]["detail"]
+    assert "free space" in r.checks[-1]["remediation"]
 
 
 def _bedrock_judge_cfg(tmp_path, auth_mode: str):
@@ -760,11 +782,14 @@ def test_stopped_gateway_row_carries_its_next_step(tmp_path) -> None:
 def test_drifted_exporter_warn_names_setup_in_remediation() -> None:
     # GAP-1526: the Connector OTLP drift WARN row had an empty remediation.
     report = _custody_report(managed_config_state="drifted", drop_only_batches=0, drop_only_signals=())
+    # GAP-0076: the text row printed no Next step line (the remedy sat in the detail).
     r = _DoctorResult()
-    cmd_doctor._check_connector_export_custody(report, r)
+    text = _render(lambda: cmd_doctor._check_connector_export_custody(report, r))
     check = r.checks[-1]
     assert check["status"] == "warn"
     assert check["remediation"] == "run 'defenseclaw setup claude-code' to re-apply"
+    assert "Next step: run 'defenseclaw setup claude-code' to re-apply" in text
+    assert text.count("defenseclaw setup claude-code") == 1
 
 
 def test_rows_that_name_a_command_in_their_detail_carry_it_as_remediation() -> None:
@@ -872,3 +897,9 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     fresh = row("2026-10-03T06:21:55Z")
     assert "last under a minute ago" in fresh["detail"]
     assert "0 min" not in fresh["detail"]
+
+
+def test_hermes_bootstrap_process_is_a_running_host() -> None:
+    assert cmd_doctor._hermes_argv_verdict(
+        ["python3", "/home/user/.hermes/tools/hermes_bootstrap.py"]
+    ) is True

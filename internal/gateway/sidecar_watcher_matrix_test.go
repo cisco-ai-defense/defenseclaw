@@ -127,6 +127,18 @@ func TestResolveWatcherDirs_PerConnectorMatrix(t *testing.T) {
 		},
 	}
 
+	// Connector homes follow these variables before $HOME. A host that sets
+	// one (CODEX_HOME on a dev box) moved the dirs off the expected paths.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for _, name := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "ZEPTOCLAW_HOME"} {
+		t.Setenv(name, "") // restored after the test
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	wcfg := config.GatewayWatcherConfig{}
 	wcfg.Skill.Enabled = true
 	wcfg.Plugin.Enabled = true
@@ -595,4 +607,31 @@ func containsExactPath(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A managed enterprise service's home is its service profile, so the watcher
+// must not watch connector (or OpenClaw default) folders there (GAP-0026).
+func TestWatcherUsesConnectorDirsSkipsManagedServiceHome(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "claudecode"
+	if !watcherUsesConnectorDirs(cfg) {
+		t.Fatal("a configured per-user gateway must watch its connector folders")
+	}
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Enterprise.Profile = "standalone"
+	if watcherUsesConnectorDirs(cfg) {
+		t.Fatal("a managed enterprise service must not watch its own profile's connector folders")
+	}
+	cfg.Enterprise.Profile = "secure_client"
+	cfg.Gateway.Watcher.Enabled = true
+	cfg.Gateway.Watcher.Skill.Enabled = true
+	cfg.Gateway.Watcher.Plugin.Enabled = true
+	if !watcherUsesConnectorDirs(cfg) || !WatcherWatchesDirs(cfg) {
+		t.Fatal("Secure Client must retain enabled connector watcher folders and startup status")
+	}
+	cfg.Guardrail.Connector = ""
+	if !watcherStartupEnabled(cfg) {
+		t.Fatal("Secure Client startup must report the enabled watcher switch")
+	}
 }

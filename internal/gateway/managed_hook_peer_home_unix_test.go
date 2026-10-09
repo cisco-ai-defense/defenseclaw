@@ -13,13 +13,18 @@
 package gateway
 
 import (
-	"errors"
+	"context"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 type fakePeerHomeResolver struct {
@@ -32,7 +37,7 @@ func (f *fakePeerHomeResolver) LookupUID(uid int) (unixidentity.Account, error) 
 	f.calls++
 	account, ok := f.accounts[uid]
 	if !ok {
-		return unixidentity.Account{}, errors.New("not found")
+		return unixidentity.Account{}, unixidentity.ErrNotFound
 	}
 	return account, nil
 }
@@ -66,17 +71,25 @@ func TestManagedHookPeerHomeResolvesTheCallersHome(t *testing.T) {
 
 func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	created := 0
+	directoryUp := true
+	stamp, restoreStamp := "before", managedHookPeerAccountsStamp
+	managedHookPeerAccountsStamp = func() string { return stamp }
+	t.Cleanup(func() { managedHookPeerAccountsStamp = restoreStamp })
 	now := time.Unix(1_000_000, 0)
 	cache := &managedHookPeerHomeCache{
 		newResolver: func() unixidentity.Resolver {
 			created++
-			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{
-				1001: {Name: "alice", UID: 1001, Home: "/home/alice"},
-			}}
+			accounts := map[int]unixidentity.Account{}
+			if directoryUp {
+				accounts[1001] = unixidentity.Account{Name: "alice", UID: 1001, Home: "/home/alice"}
+			}
+			return &fakePeerHomeResolver{accounts: accounts}
 		},
-		now: func() time.Time { return now },
+		now:       func() time.Time { return now },
+		homesFile: filepath.Join(t.TempDir(), "managed_peer_homes.json"),
 	}
 	cache.lookup(1001)
+	cache.rememberName(1001, "alice")
 	cache.lookup(1001)
 	if created != 1 {
 		t.Fatalf("resolver created %d times inside the TTL", created)
@@ -85,6 +98,30 @@ func TestManagedHookPeerHomeRefreshesTheResolverAfterTTL(t *testing.T) {
 	cache.lookup(1001)
 	if created != 2 {
 		t.Fatalf("resolver not refreshed after the TTL (created %d)", created)
+	}
+	// A uid removed and handed to a new account inside the TTL is looked up
+	// again as soon as the account database changes (GAP-0947).
+	stamp = "after userdel and useradd"
+	cache.lookup(1001)
+	if created != 3 {
+		t.Fatalf("resolver not refreshed after the account database changed (created %d)", created)
+	}
+	// A directory outage answers "no such account": the uid keeps its last
+	// home, so its config root and agent identity do not move (GAP-0314).
+	directoryUp = false
+	now = now.Add(managedHookPeerHomeTTL + time.Second)
+	if home := cache.lookup(1001); home != "/home/alice" {
+		t.Fatalf("lookup during a directory outage = %q, want the last home /home/alice", home)
+	}
+	if home := cache.lookup(1002); home != "" {
+		t.Fatalf("a uid that never resolved got the home %q", home)
+	}
+	// A gateway that starts during the outage reads the homes the last one
+	// persisted, so the agent identity still does not move.
+	restarted := &managedHookPeerHomeCache{newResolver: cache.newResolver, now: cache.now, homesFile: cache.homesFile}
+	if home := restarted.lookup(1001); home != "/home/alice" || restarted.lastName(1001) != "alice" {
+		t.Fatalf("lookup after a restart during the outage = %q, name %q; want /home/alice and alice",
+			home, restarted.lastName(1001))
 	}
 }
 
@@ -139,5 +176,158 @@ func TestManagedHookPeerNameResolvesDirectoryUsers(t *testing.T) {
 	}, nil, func() (managedHookLedger, error) { return managedHookLedger{}, nil })
 	if decision := authorizer.decide(peer, "claudecode", ""); !decision.Allow || !decision.Exempt {
 		t.Fatalf("exempt directory user by name: %+v, want an exempt allow", decision)
+	}
+}
+
+// GAP-0256: a "no such account" for a caller's uid (an offline SSSD with a
+// cold cache) is asked again after the short retry, not after the 5 minute
+// lifetime of an answer, so the name returns soon after the directory does.
+func TestManagedHookPeerNameRetriesANotFoundAnswer(t *testing.T) {
+	const uid = 1_870_400_124
+	accounts := map[int]unixidentity.Account{}
+	resolver := unixidentity.NewCachingResolver(&fakePeerHomeResolver{accounts: accounts})
+	clock := time.Now()
+	previous := managedHookPeerHomes
+	managedHookPeerHomes = &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver { return resolver },
+		now:         func() time.Time { return clock },
+	}
+	t.Cleanup(func() { managedHookPeerHomes = previous })
+	if name := managedHookPeerName(uid); name != "" {
+		t.Fatalf("name during the outage = %q", name)
+	}
+	accounts[uid] = unixidentity.Account{Name: "dcad-ih12n", UID: uid, Home: "/home/dcad-ih12n"}
+	clock = clock.Add(managedHookPeerLookupRetry + time.Second)
+	if name := managedHookPeerName(uid); name != "dcad-ih12n" {
+		t.Fatalf("name after the directory returned = %q, want it within the retry interval", name)
+	}
+}
+
+// TestUnnamedGroupMakesDirectoryFactsIncomplete pins GAP-0138: a group that
+// is still a number was not named by the directory (a cold or offline
+// SSSD), so the facts refresh after the incomplete lifetime, not 15 minutes.
+func TestUnnamedGroupMakesDirectoryFactsIncomplete(t *testing.T) {
+	named := useridentity.DirectoryFacts{Groups: []string{"dc-ml-team@dclab.test", "domain users@dclab.test"}}
+	unnamed := useridentity.DirectoryFacts{Groups: []string{"dc-ml-team@dclab.test", "94400513"}}
+	if hasUnnamedGroup(named) || !hasUnnamedGroup(unnamed) {
+		t.Fatalf("hasUnnamedGroup(named) = %t, (unnamed) = %t; want false, true", hasUnnamedGroup(named), hasUnnamedGroup(unnamed))
+	}
+}
+
+// TestExplainAndLiveRequestsBuildTheSameSubject pins GAP-0182: the subject a
+// request is matched as and the subject `explain --user` reports are built
+// the same way, so a users entry selects the account in both or in neither,
+// and explain says when an entry selects a directory account by short name.
+func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
+	facts := useridentity.DirectoryFacts{
+		Principal: "dcad-alice@DCLAB.TEST", UPN: "dcad-alice@dclab.test", Domain: "dclab.test",
+		Groups: []string{"dc-devs@dclab.test"}, ResolvedAt: time.Now(),
+	}
+	prevDirectory, prevAccount, prevFacts := managedHookPeerDirectory, profileExplainAccount, profileExplainDirectoryFacts
+	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return facts, true }
+	profileExplainAccount = func(string) (string, string, error) { return "94401103", "dcad-alice@dclab.test", nil }
+	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) { return facts, nil }
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() {
+		managedHookPeerDirectory, profileExplainAccount, profileExplainDirectoryFacts = prevDirectory, prevAccount, prevFacts
+		setIdentityFactsEnabled(false)
+	})
+	ctx := attachVerifiedSubject(context.Background(), nil, "94401103", "dcad-alice@dclab.test", subjectSourcePeerCredentials)
+	live, ok := profileSubjectSource(ctx)
+	explained, err := lookupDirectoryProfileSubject("dcad-alice")
+	if !ok || err != nil || !reflect.DeepEqual(live, explained) {
+		t.Fatalf("live subject %+v (%t) and explained subject %+v (%v) differ", live, ok, explained, err)
+	}
+
+	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"dcad-alice"}}},
+	}}
+	note := shortNameUserNote(set, profileDecision{Assignment: 1}, &explained)
+	if !strings.Contains(note, `"dcad-alice"`) || !strings.Contains(note, "dcad-alice@dclab.test") {
+		t.Errorf("short-name note = %q, want the entry and the account to write instead", note)
+	}
+	local := profileSubject{UserID: "1006", UserName: "dcad-alice"}
+	if note := shortNameUserNote(set, profileDecision{Assignment: 1}, &local); note != "" {
+		t.Errorf("a local account got the short-name note %q", note)
+	}
+
+	// GAP-0328: Himmelblau names Entra accounts by the short name by default,
+	// so the account has no UPN and a users entry written as one cannot match.
+	byUPN := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"carol@contoso.example"}}},
+	}}
+	shortEntra := profileSubject{UserID: "1608906301", UserName: "carol", Directory: useridentity.DirectoryEntraID}
+	if note := entraShortNameNote(byUPN, &shortEntra, "linux"); !strings.Contains(note, "cn_name_mapping = false") {
+		t.Errorf("Entra short-name note = %q, want the cn_name_mapping hint", note)
+	}
+	if note := entraShortNameNote(byUPN, &shortEntra, "windows"); note != "" {
+		t.Errorf("Windows Entra account got a Linux Himmelblau hint %q", note)
+	}
+	shortEntra.UserName, shortEntra.UPN = "carol@contoso.example", "carol@contoso.example"
+	if note := entraShortNameNote(byUPN, &shortEntra, "linux"); note != "" {
+		t.Errorf("an account named by its UPN got the note %q", note)
+	}
+}
+
+// GAP-0720: a new account given the uid of a removed one gets its own
+// groups as soon as the account cache names it, not the old holder's
+// cached facts for up to 15 minutes.
+func TestManagedHookPeerDirectoryForgetsAReplacedAccount(t *testing.T) {
+	previousFacts := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previousFacts) })
+	name := "eli-old"
+	now := time.Unix(1_000_000, 0)
+	cache := &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver {
+			return &fakePeerHomeResolver{accounts: map[int]unixidentity.Account{41001: {Name: name, UID: 41001, Home: "/home/" + name}}}
+		},
+		now: func() time.Time { return now },
+	}
+	cache.directoriesOnce.Do(func() {
+		cache.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+			return useridentity.DirectoryFacts{Groups: []string{name + "-group"}, ResolvedAt: time.Now()}, nil
+		})
+	})
+	if facts, ok := cache.directory(41001, true); !ok || len(facts.Groups) != 1 || facts.Groups[0] != "eli-old-group" {
+		t.Fatalf("first holder facts = %+v, %v", facts, ok)
+	}
+	name = "eli-new"
+	now = now.Add(managedHookPeerHomeTTL + time.Second)
+	if facts, ok := cache.directory(41001, true); !ok || len(facts.Groups) != 1 || facts.Groups[0] != "eli-new-group" {
+		t.Fatalf("facts after the uid changed hands = %+v, %v; want the new account's", facts, ok)
+	}
+}
+
+// GAP-0899: while the directory cannot name an account (SSSD stopped), explain
+// shows the profile its hooks apply from the facts cached for it, with their
+// age, instead of a spelling error.
+func TestProfileExplainDuringOutageServesCachedFacts(t *testing.T) {
+	const uid = 1_870_400_131
+	const name = "dcad-e3a1@dclab.test"
+	accounts := map[int]unixidentity.Account{uid: {Name: name, UID: uid, Home: "/home/" + name}}
+	previous, previousFacts := managedHookPeerHomes, identityFactsEnabled.Load()
+	managedHookPeerHomes = &managedHookPeerHomeCache{
+		newResolver: func() unixidentity.Resolver { return &fakePeerHomeResolver{accounts: accounts} },
+		now:         time.Now,
+	}
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { managedHookPeerHomes = previous; setIdentityFactsEnabled(previousFacts) })
+	facts := useridentity.DirectoryFacts{Domain: "dclab.test", Groups: []string{"dc-e3a-ml@dclab.test"}, ResolvedAt: time.Now()}
+	managedHookPeerHomes.directoriesOnce.Do(func() {
+		managedHookPeerHomes.directories = newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) { return facts, nil })
+	})
+	if _, ok := managedHookPeerHomes.directory(uid, true); !ok {
+		t.Fatal("the hook path did not cache the facts")
+	}
+	for _, spelled := range []string{name, "DCAD-E3A1@DCLAB.TEST", "1870400131"} {
+		subject, err := profileExplainUnresolved(spelled, unixidentity.ErrNotFound)
+		if err != nil || subject.UserID != "1870400131" || !slices.Equal(subject.Groups, facts.Groups) || subject.cachedFactsAge <= 0 {
+			t.Fatalf("explain %s during the outage = %+v, %v; want the cached facts", spelled, subject, err)
+		}
+		if warnings := profileExplainWarnings(nil, profileDecision{}, &subject); len(warnings) != 1 ||
+			!strings.Contains(warnings[0], "identity facts cached") {
+			t.Fatalf("explain warnings = %q, want the age of the cached facts", warnings)
+		}
 	}
 }

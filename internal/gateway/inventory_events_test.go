@@ -1571,6 +1571,14 @@ func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
 	}
 	withManagedEnterprise(t, true)
 	withUserEmailCollection(t, true)
+	// The first pass also reads the gateway's own Claude config: a real
+	// ~/.claude.json with a "github" server added an unowned row, and a
+	// set CLAUDE_CONFIG_DIR skips .claude.json in every home.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "") // restored after the test
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
 
 	home := t.TempDir()
 	claudeConfig := filepath.Join(home, ".claude.json")

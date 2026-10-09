@@ -843,6 +843,44 @@ def test_refresh_repins_only_the_upgraded_defenseclaw_guard(tmp_path, monkeypatc
         cleanup_app(app, db_path, data_dir)
 
 
+def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, monkeypatch):
+    # make all re-pins the entries that start the guard it just published;
+    # doctor --fix plans the same refresh, applies it once, and never
+    # re-pins a changed agent binary.
+    from defenseclaw.commands.cmd_doctor import _fix_acp_guard_pins
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard_path = tmp_path / "bin" / "defenseclaw-acp"
+    guard_path.parent.mkdir()
+    guard = _binary(guard_path)
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    try:
+        setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        guard_path.write_bytes(b"source-build-guard")
+        other = tmp_path / "other" / "defenseclaw-acp"
+        other.parent.mkdir()
+        _binary(other)
+        assert CliRunner().invoke(acp_cmd, ["refresh", "--guard-path", str(other)], obj=app).output == ""
+        result = CliRunner().invoke(acp_cmd, ["refresh", "--guard-path", guard], obj=app)
+        assert "Re-pinned the DefenseClaw ACP guard for zed/kiro" in result.output
+
+        guard_path.write_bytes(b"upgraded-guard")
+        agent_path.write_bytes(b"updated-agent")
+        tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
+        assert tag == "plan" and "zed/kiro" in plan and "defenseclaw acp setup --client zed --agent kiro" in plan
+        assert _fix_acp_guard_pins(app.cfg, assume_yes=True)[0] == "pass"
+        tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
+        assert tag == "skip" and "pins are current" in detail
+        result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert "agent executable digest has drifted" in result.output
+        assert "guard executable digest has drifted" not in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_setup_and_remove_print_each_slow_step_and_keep_json_clean(tmp_path, monkeypatch):
     """GAP-1835: setup and remove ran for minutes on Windows with no output at all."""
     _isolate_client_config(monkeypatch, tmp_path)

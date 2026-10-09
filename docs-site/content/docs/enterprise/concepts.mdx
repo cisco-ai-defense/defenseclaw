@@ -81,7 +81,8 @@ holds the lock exits `75` (Linux, macOS) or `1618` (Windows).
 ### Payload
 
 The DefenseClaw programs a lifecycle action installs: the gateway, the hook,
-the sensor helper, and, when shipped, the ACP guard. On Linux and macOS you
+the sensor helper, and, when shipped, the `defenseclaw-acp` binary, which
+enterprise managed mode does not use. On Linux and macOS you
 point at them with `--payload <directory>` or use the ones the package
 installed (`--from-package`). On Windows the Setup program carries the
 payload inside it.
@@ -220,13 +221,6 @@ policy files, which apply to every user of the computer. Codex, Claude Code,
 Cursor, GitHub Copilot, and OpenCode through DefenseClaw's managed OpenCode
 plugin. DefenseClaw changes only its own entries. See
 [Machine policy](/docs/enterprise/machine-policy).
-
-### ACP-mediated connector
-
-An agent that DefenseClaw protects by sitting between the editor and the agent
-on the Agent Client Protocol (ACP), not through hooks: an editor that starts
-Kiro over ACP, through `defenseclaw-gateway enterprise acp`. See
-[ACP guard](/docs/acp-guard).
 
 ### Managed-hooks-only lock
 

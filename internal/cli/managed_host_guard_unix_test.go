@@ -298,6 +298,17 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 		}
 	}
 
+	// enterprise acp enroll|verify|revoke pin the deployment too (GAP-0249).
+	// The temporary layout holds no config.yaml, so the load itself fails.
+	clearManagedStandaloneAdminEnv(t)
+	withManagedHostCallerUID(t, 0)
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+	_ = enterpriseACPCmd.PersistentPreRunE(enterpriseACPEnrollCmd, nil)
+	if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+		t.Errorf("enterprise acp enroll read %q, want the managed config %q", got, layout.ConfigPath)
+	}
+
 	clearManagedStandaloneAdminEnv(t)
 	withManagedHostCallerUID(t, 1000)
 	if applyManagedStandaloneAdminEnv(nil) || os.Getenv(managed.ConfigPathEnv) != "" {
@@ -425,5 +436,39 @@ func TestEnterpriseHooksTellAStandardUserThatAnAdministratorRunsThem(t *testing.
 	t.Setenv(managed.ConfigPathEnv, "")
 	if err := enterpriseHooksNativePersistentPreRun(enterpriseHooksApplyTargetCmd, nil); err != nil {
 		t.Fatalf("the per-user worker was refused: %v", err)
+	}
+}
+
+// A standard user's `enterprise linux ide-plugins` on a managed host gets
+// the managed-host sentence with the administrator command, as status and
+// audit export do, not a raw config permission error (GAP-0610).
+func TestEnterpriseIDEPluginsTellAStandardUserThatAnAdministratorRunsIt(t *testing.T) {
+	withManagedStandaloneDeployment(t, 991)
+	withManagedHostCallerUID(t, 1000)
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	asked := false
+	enterpriseIdentityViewGet = func(string, any) (string, error) { asked = true; return "", nil }
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	group := &cobra.Command{Use: "enterprise"}
+	parent := &cobra.Command{Use: platform}
+	root.AddCommand(group)
+	group.AddCommand(parent)
+	parent.AddCommand(newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[2]))
+	root.SetArgs([]string{"enterprise", platform, "ide-plugins", "--user", "eob"})
+	root.SetOut(new(strings.Builder))
+	root.SetErr(new(strings.Builder))
+	err := root.Execute()
+	if err == nil || asked {
+		t.Fatalf("err = %v, asked the gateway = %t: a standard user must be refused first", err, asked)
+	}
+	for _, want := range []string{"managed by your organization", "`sudo ", "/defenseclaw-gateway enterprise " + platform + " ide-plugins`"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want %q", err, want)
+		}
 	}
 }

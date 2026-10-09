@@ -976,9 +976,9 @@ function Write-Shim([string]$Name, [string]$Target) {
     # `defenseclaw uninstall` recognizes the CLI shim by this exact command line.
     $path = Join-Path $BinDir "$Name.cmd"
     $text = "@echo off`r`n`"$Target`" %*`r`n"
-    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
     # cmd.exe reads batch files in the OEM code page.
     $encoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path, $encoding) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, $encoding)
     if (Test-Path -LiteralPath $path) { Remove-Aside $path }
     Move-Path "$path.new" $path
@@ -1532,11 +1532,18 @@ function Select-Connector {
     for ($index = 0; $index -lt $ConnectorChoices.Count; $index++) {
         Write-Host ("    {0,2}) {1}" -f ($index + 1), $ConnectorChoices[$index])
     }
-    try { $choice = Read-Host "  Choice [default 1=codex]" } catch { $choice = "" }
-    $number = 0
-    $picked = "codex"
-    if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
-        $picked = $ConnectorChoices[$number - 1]
+    while ($true) {
+        try { $choice = Read-Host "  Choice [default 1=codex]" } catch { $choice = "" }
+        $choice = $choice.Trim()
+        if (-not $choice) { $picked = "codex"; break }
+        $number = 0
+        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
+            $picked = $ConnectorChoices[$number - 1]
+            break
+        }
+        $named = $ConnectorChoices | Where-Object { $_ -eq $choice } | Select-Object -First 1
+        if ($named) { $picked = $named; break }
+        Write-Warn "Choose a listed number or connector name."
     }
     Write-Ok "Connector: $picked"
     return $picked
@@ -1638,6 +1645,20 @@ function Invoke-Rollback {
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
     $forward = if ($current) { $current } else { "1.x" }
+    # Each install shows only its own audit window, so say how to read the
+    # other one (GAP-0126). The newer build's gateway reads either log.
+    $otherAudit = Join-Path $Previous "data\audit.db"
+    if (Test-Path -LiteralPath $otherAudit) {
+        $newerGateway = if ($current -and (Test-Version $current) -and [version]$backTo -lt [version]$current) {
+            Join-Path $Previous "bin\defenseclaw-gateway.exe"
+        } else { "defenseclaw-gateway" }
+        $newerGatewayCommand = if ($newerGateway -eq "defenseclaw-gateway") {
+            $newerGateway
+        } else {
+            '& "' + $newerGateway + '"'
+        }
+        Write-Info "The other install's audit events (written while $forward ran) are kept apart: $newerGatewayCommand audit export --db `"$otherAudit`""
+    }
     if ([version]$backTo -lt [version]"1.0.0") {
         # 0.x has no `defenseclaw rollback`; the 1.x installer is parked in previous\.
         Write-Ok ("Now running DefenseClaw $backTo. To return to $forward, run: " +

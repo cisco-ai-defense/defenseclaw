@@ -105,6 +105,8 @@ const (
 	FailureCodeRequestTimeout       FailureCode = "request_timeout"
 	FailureCodeAcknowledgementLost  FailureCode = "acknowledgement_lost"
 	FailureCodeTransportFailed      FailureCode = "transport_failed"
+	FailureCodeFileWriteFailed      FailureCode = "file_write_failed"
+	FailureCodeNoSpace              FailureCode = "no_space"
 	FailureCodeHTTPAuthentication   FailureCode = "http_authentication"
 	FailureCodeHTTPRetryable        FailureCode = "http_retryable"
 	FailureCodeHTTPRejected         FailureCode = "http_rejected"
@@ -138,6 +140,8 @@ func IsFailureCode(code FailureCode) bool {
 		FailureCodeRequestTimeout,
 		FailureCodeAcknowledgementLost,
 		FailureCodeTransportFailed,
+		FailureCodeFileWriteFailed,
+		FailureCodeNoSpace,
 		FailureCodeHTTPAuthentication,
 		FailureCodeHTTPRetryable,
 		FailureCodeHTTPRejected,
@@ -372,6 +376,7 @@ func (function ObserverFunc) Observe(transition HealthTransition) { function(tra
 // attempt. Jitter may replace a computed delay but its result is clamped into
 // [0, MaxBackoff]. A nil Jitter uses bounded process randomness.
 type RetryPolicy struct {
+	LegacyJitter   bool
 	MaxAttempts    int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
@@ -390,6 +395,7 @@ type CircuitPolicy struct {
 
 // Config is generation-owned and immutable after NewDispatcher returns.
 type Config struct {
+	LegacyCircuit    bool
 	Destination      string
 	Generation       uint64
 	Signal           string

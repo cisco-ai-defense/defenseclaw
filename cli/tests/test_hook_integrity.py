@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.commands.cmd_doctor import _check_hook_runtime_integrity, _DoctorResult
-from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems
+from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, unrunnable_hook_problem
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
@@ -36,6 +36,7 @@ def _install(tmp_path):
     hooks.mkdir()
     script = hooks / "codex-hook.sh"
     script.write_text('#!/bin/bash\n[ -f "${HOOK_DIR}/.hook-codex.token" ] || exit 2\n')
+    script.chmod(0o700)
     (hooks / ".hook-codex.token").write_text("ab" * 32 + "\n")
     digest = "sha256:" + hashlib.sha256(script.read_bytes()).hexdigest()
     lock = {
@@ -74,6 +75,51 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
     assert "defenseclaw setup codex" in row["detail"]
+
+
+def test_non_executable_script_fails_doctor_and_fix_restores_it(tmp_path, monkeypatch):
+    # GAP-0101: a 0644 hook script made Claude Code run every tool call
+    # unguarded while doctor reported healthy and --fix had nothing to do.
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    cfg, script = _install(tmp_path)
+    script.chmod(0o644)
+
+    r = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", r)
+    row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
+    assert row["status"] == "fail" and "not executable" in row["detail"]
+
+    assert cmd_doctor._fix_hook_script_modes(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_hook_script_modes(cfg, assume_yes=True)[0] == "pass"
+    assert script.stat().st_mode & 0o777 == 0o700
+    assert hook_runtime_problems(cfg, "codex") == []
+
+
+def test_mode_repair_does_not_execute_unreadable_tampered_script(tmp_path, monkeypatch):
+    from defenseclaw import hook_integrity
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, script = _install(tmp_path)
+    script.write_text(script.read_text() + "# modified\n")
+    script.chmod(0o000)
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    original_access = hook_integrity.os.access
+    monkeypatch.setattr(
+        hook_integrity.os,
+        "access",
+        lambda path, mode: False if str(path) == str(script) and not script.stat().st_mode & 0o400
+        else original_access(path, mode),
+    )
+
+    try:
+        assert "cannot be read" in hook_runtime_problems(cfg, "codex")[0]
+        assert cmd_doctor._fix_hook_script_modes(cfg, assume_yes=True)[0] == "fail"
+        assert script.stat().st_mode & 0o777 == 0
+    finally:
+        script.chmod(0o700)
 
 
 def test_missing_scoped_token_is_reported_even_with_gateway_token_env(tmp_path, monkeypatch):
@@ -144,3 +190,37 @@ def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
         cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     row = r.checks[-1]
     assert row["status"] == "warn" and "defenseclaw-gateway restart" in row["remediation"]
+
+
+def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch):
+    # GAP-0542 / GAP-0543: after a rename the lock (and the agent hooks) name
+    # the old home; doctor and status say DefenseClaw is not guarding.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    new_home = tmp_path / "new"
+    new_home.mkdir()
+    cfg, script = _install(new_home)
+    lock_path = new_home / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text())
+    old_script = str(tmp_path / "old" / "hooks" / script.name)
+    lock["connectors"]["codex"]["locations"]["hook_script_paths"] = [old_script]
+    lock_path.write_text(json.dumps(lock))
+
+    problem = unrunnable_hook_problem(cfg, "codex")
+    assert f"set up in {tmp_path / 'old'}" in problem
+    assert "not guarding" in problem
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads mode 000 files")
+def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeypatch):
+    # GAP-0403: chmod 000 makes every hook a non-blocking error, so the
+    # connector is not guarded whatever its fail mode.
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    cfg, script = _install(tmp_path)
+    script.chmod(0)
+    try:
+        problem = unrunnable_hook_problem(cfg, "codex")
+        problems = hook_runtime_problems(cfg, "codex")
+    finally:
+        script.chmod(0o700)
+    assert "cannot be read" in problem
+    assert "changed since setup" not in " ".join(problems)

@@ -23,6 +23,16 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def test_enrollment_docs_use_windows_status_for_managed_accounts() -> None:
+    enrollment = (ROOT / "docs-site/content/docs/enterprise/enrollment.mdx").read_text()
+    operations = (ROOT / "docs-site/content/docs/enterprise/operations.mdx").read_text()
+    sections = (enrollment.split("## Supported agent versions", 1)[1],
+                operations.split("## Review activity from the CLI", 1)[1])
+    for section in sections:
+        assert "enterprise windows status --profile standalone --json" in section
+        assert "enrollment.accounts" in section
+
 # Checked-in source fixtures and published documentation share one release
 # identity so native repair/upgrade comparisons remain monotonic.
 CURRENT_RELEASE = "1.0.0"
@@ -975,3 +985,21 @@ def test_quickstart_initializes_before_setup() -> None:
     text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text()
     commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
     assert commands[0] == "defenseclaw init", commands
+
+
+def test_documented_rule_pack_dirs_are_absolute() -> None:
+    # GAP-0304: the gateway reads rule_pack_dir as written and never expands
+    # ~, so a ~ example scans with the base rule set and fails a reload.
+    offenders = []
+    for path in sorted((ROOT / "docs-site/content").rglob("*.mdx")):
+        for value in re.findall(r"^\s*rule_pack_dir:\s*(\S+)", path.read_text(encoding="utf-8"), re.MULTILINE):
+            if value.strip("\"'").startswith("~"):
+                offenders.append(f"{path.relative_to(ROOT)}: {value}")
+    assert not offenders, offenders
+
+def test_mdm_claude_windows_guide_uses_audit_export() -> None:
+    guide = (ROOT / "docs-site/content/docs/enterprise/mdm/index.mdx").read_text()
+    section = guide.split("### Claude Code on Windows", 1)[1].split("\n## ", 1)[0]
+    assert "audit export --connector claudecode" in section
+    assert "ATTESTCLAUDEEFFECTIVEPOLICY=1" in section
+    assert "enterprise policy verify --live" not in section

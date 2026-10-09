@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -96,12 +97,17 @@ func emitHookToolLogV8WithEmitter(
 			return observability.Record{}, buildErr
 		}
 		envelope := hookToolLogEnvelope(ctx, snapshot, meta, connector, eventName)
+		// A sandboxed session's tool records carry the sandbox binding that
+		// authenticated the hook, like its hook decisions, model and lifecycle
+		// records, so they join them (GAP-0202).
+		sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 		if outcome == observability.OutcomeAttempted {
-			return builder.BuildLogToolInvocationRequested(
-				buildHookToolRequestedLogInput(envelope, meta, tool, input),
-			)
+			requested := buildHookToolRequestedLogInput(envelope, meta, tool, input)
+			requested.DefenseClawSandboxID, requested.DefenseClawSandboxName = sandboxID, sandboxName
+			return builder.BuildLogToolInvocationRequested(requested)
 		}
 		completed := buildHookToolCompletedLogInput(envelope, meta, tool, input, output, exitCode, outcome)
+		completed.DefenseClawSandboxID, completed.DefenseClawSandboxName = sandboxID, sandboxName
 		if outcome == observability.OutcomeBlocked {
 			return builder.BuildLogToolInvocationBlocked(observability.LogToolInvocationBlockedInput(completed))
 		}
@@ -224,8 +230,10 @@ func applyHookToolRequestedLogIdentity(input *observability.LogToolInvocationReq
 	input.DefenseClawRunID = hookModelV8OptionalID(meta.RunID)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
-	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawUserName = v8UserName(meta.UserName, hookModelV8OptionalID)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
+	meta.Identity.applyTo(input)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = hookModelV8OptionalID(meta.SessionID)
@@ -270,6 +278,8 @@ func applyHookToolCompletedLogIdentity(input *observability.LogToolInvocationCom
 	input.DefenseClawUserIDKind = requested.DefenseClawUserIDKind
 	input.DefenseClawUserName = requested.DefenseClawUserName
 	input.DefenseClawUserEmail = requested.DefenseClawUserEmail
+	input.DefenseClawAgentIdentityID = requested.DefenseClawAgentIdentityID
+	meta.Identity.applyTo(input)
 	input.DefenseClawPolicyID = requested.DefenseClawPolicyID
 	input.DefenseClawDestinationApp = requested.DefenseClawDestinationApp
 	input.GenAIConversationID = requested.GenAIConversationID

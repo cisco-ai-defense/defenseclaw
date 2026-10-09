@@ -142,6 +142,7 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if alreadyBound {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, nil)
 	}
+	s.bootConfigSourceName, s.bootConfigSource = sourceName, raw
 	compiled, err := config.ParseCompileObservabilityV8(
 		sourceName,
 		raw,
@@ -253,7 +254,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRedaction, err)
 	}
-	engine, err := redaction.NewEngineWithCorrelationKey(key)
+	engine, err := newObservabilityV8RedactionEngine(s.currentConfig(), key)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRedaction, err)
 	}
@@ -283,13 +284,13 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
 	reaper, err := audit.NewRetentionReaper(
-		s.store, s.judgeBodyStore, int64(snapshot.Local.RetentionDays), audit.RetentionOptions{},
+		s.store, s.judgeBodyStore, int64(snapshot.Local.RetentionDays), audit.RetentionOptions{SecureClient: s.currentConfig().SecureClientIntegration()},
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
 	retention, err := observabilityruntime.NewRetentionController(
-		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}},
+		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration()},
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
@@ -298,6 +299,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		s.observeObservabilityV8Delivery(transition)
 	})
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
+		SecureClient:  s.currentConfig().SecureClientIntegration(),
 		ConsoleStream: destinations.ConsoleStderr,
 		Stdout:        os.Stdout, Stderr: os.Stderr,
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
@@ -339,7 +341,8 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		ctx,
 		runtimegraph.ConfigFromPlan(compiled.Plan, retainJudgeBodies),
 		observabilityruntime.Options{
-			Store: s.store, Engine: engine, Signer: signer,
+			SecureClient: s.currentConfig().SecureClientIntegration(),
+			Store:        s.store, Engine: engine, Signer: signer,
 			RecordBuilder: failureBuilder, Reporter: reporter,
 			EventHistoryHealthReporter: sidecarV8EventHistoryObserver{s: s},
 			RetentionController:        retention,
@@ -355,6 +358,18 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		runtime: runtime, redactionEngine: engine, dataDir: filepath.Clean(compiled.DataDir),
 		retainJudgeBodies: retainJudgeBodies,
 	}, nil
+}
+
+// newObservabilityV8RedactionEngine builds the projection engine every
+// destination, the local store and the reporter share. Secure Client keeps
+// every identifier under every profile, as on main (issue #1092); elsewhere
+// strict removes the personal identifiers.
+func newObservabilityV8RedactionEngine(cfg *config.Config, key redaction.CorrelationKey) (*redaction.Engine, error) {
+	engine, err := redaction.NewEngineWithCorrelationKey(key)
+	if err != nil || !cfg.SecureClientIntegration() {
+		return engine, err
+	}
+	return engine.WithPersonalIdentifiersKept(), nil
 }
 
 type sidecarOwnedObservabilityV8Runtime struct {
@@ -433,6 +448,43 @@ func (owner *sidecarOwnedObservabilityV8Runtime) Emit(
 		return pipeline.LocalLogOutcome{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
 	}
 	return owner.runtime.Emit(ctx, metadata, builder)
+}
+
+// EmitAtomicBatch persists a group of related records with one commit
+// (observabilityruntime.Runtime.EmitAtomicBatch).
+func (owner *sidecarOwnedObservabilityV8Runtime) EmitAtomicBatch(
+	ctx context.Context,
+	items []observabilityruntime.LogBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	if owner == nil || owner.runtime == nil {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.EmitAtomicBatch(ctx, items)
+}
+
+// LatestLifecycleProjection reads the newest verified lifecycle record of a
+// hook agent through the active generation. The API server restores a hook
+// session's lineage from it after a restart; without it on the runtime the
+// gateway runs, the restore never ran and a child session's first hook after
+// a restart lost its parent link (GAP-0158).
+func (owner *sidecarOwnedObservabilityV8Runtime) LatestLifecycleProjection(
+	ctx context.Context,
+	query audit.LifecycleProjectionQuery,
+) (audit.LifecycleProjection, bool, error) {
+	if owner == nil || owner.runtime == nil {
+		return audit.LifecycleProjection{}, false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return audit.LifecycleProjection{}, false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.LatestLifecycleProjection(ctx, query)
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) EmitLocalOnly(
@@ -758,6 +810,7 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	if !ok || owner == nil {
 		return nil
 	}
+	s.flushDestinationLossMetricsV8()
 	// Stop new control-plane producers from acquiring this owner before Close
 	// waits for already-started emissions. Sidecar shutdown has already joined
 	// the config/API/proxy producers, so no selected v8 action can legitimately
@@ -776,8 +829,10 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 		s.bindObservabilityV8ConsumersLocked()
 	}
 	s.observabilityV8Mu.Unlock()
-	if err := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout); err != nil {
-		return err
+	closeErr := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout)
+	s.noteObservabilityV8ShutdownLosses(owner, closeErr == nil)
+	if closeErr != nil {
+		return closeErr
 	}
 	if s.health != nil {
 		s.health.clearObservabilityV8HealthSource()
@@ -789,16 +844,6 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	}
 	s.observabilityV8Mu.Unlock()
 	return nil
-}
-
-// observabilityV8ShutdownFlushWarning is the gateway.log line written when the
-// telemetry runtime cannot finish its flush within the shutdown bound. The stop
-// itself succeeded, so it is a warning, not an "Error:" line (GAP-2166).
-func observabilityV8ShutdownFlushWarning() string {
-	return fmt.Sprintf("[sidecar] WARNING: telemetry flush on shutdown did not finish within %s; "+
-		"unsent telemetry was dropped. A telemetry destination is probably unreachable: "+
-		"check it with 'defenseclaw setup observability test <name>'. The gateway stopped normally.\n",
-		sidecarObservabilityV8ShutdownTimeout)
 }
 
 // observabilityV8ActivePlanDigest returns the plan identity actually owned by
@@ -1146,6 +1191,11 @@ func (observer sidecarV8EventHistoryObserver) ReportEventHistoryHealth(
 		return
 	}
 	observer.s.health.observeObservabilityV8EventHistory(transition)
+	if transition.Code == audit.EventHistoryHealthWriteFailed && transition.State == audit.EventHistoryHealthRecovered {
+		// Writes resumed: report the records local history lacks (GAP-1100).
+		// Off this callback, which the writer's health queue delivers.
+		go observer.s.recordLocalWriteGapV8()
+	}
 }
 
 func newSidecarObservabilityV8BootstrapError(

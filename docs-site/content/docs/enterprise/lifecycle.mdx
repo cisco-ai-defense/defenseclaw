@@ -37,6 +37,13 @@ scripts wait the same, and a removal that still finds the lock busy fails
 without deleting anything (the macOS pkg has no removal script). On
 Windows a busy run exits `1618`. MDM agents retry both.
 
+A deb or rpm upgrade holds the apply trigger from before the package manager
+replaces any file until its postinstall has applied the package, and first
+waits for a run already in progress. A `config.yaml` pushed just before the
+package is therefore applied by the new version, not checked by the old binary
+against files being replaced. When the package run keeps the last applied
+config because it rejected `config.yaml`, the install output says so.
+
 A `config.yaml` or credential written while a run holds the lock is
 applied by a follow-up transaction of that run (warning `input_changed`).
 When the run fails instead, the apply trigger runs `ensure` again once it
@@ -148,21 +155,19 @@ Every lifecycle refuses an older release unless you ask for the rollback
 | OS and channel | How to go back |
 | --- | --- |
 | Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade JSON=1`: an explicit `upgrade` does not compare versions. Uninstalling and installing the older release also works |
-| Debian and Ubuntu | `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`, then `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --json` |
-| RHEL | `rpm -U` refuses an older package. Use `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm`, then run the same `ensure --from-package --allow-downgrade` |
+| Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb` |
+| RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package) |
 | Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --json` |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /` |
 
-- **Linux packages.** The package's install script runs
-  `ensure --from-package` without `--allow-downgrade`, so after the package
-  manager installs the older package the lifecycle refuses with
-  `downgrade_refused` and records that in `last-package-result.json`. Run the
-  `ensure --from-package --allow-downgrade` command above to apply the older
-  release.
-- **macOS.** The package's preinstall script refuses an older package before
-  any file changes, unless the marker exists. The postinstall script passes
-  `--allow-downgrade` to the lifecycle and deletes the marker, so each
-  rollback needs a new marker.
+- **Linux packages and macOS.** The package's preinstall script refuses an
+  older package before any file changes, unless the marker exists: the
+  package manager reports the failure, and the deployed release keeps running
+  unchanged. With the marker, the postinstall script runs
+  `ensure --from-package --allow-downgrade` and deletes the marker, so each
+  rollback needs a new marker. An `ensure --from-package` that you run
+  yourself, to finish an install or a rollback, records its result in
+  `last-package-result.json` as the install script does.
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so
   it refuses older RHEL packages.
 
@@ -375,6 +380,13 @@ to keep the machine state for a reinstall instead.
   the deployment record and state stay. Fix the cause, or remove
   DefenseClaw's entries from that user's agent config, and run the same
   uninstall again. `ensure` restores the deployment instead.
+- **Manifest rows (Linux and macOS).** Uninstall resolves each row of
+  `targets.yaml` to its account the way reconcile does, so a row with only
+  `user` or `user_home` works. When a row does not resolve (the account does
+  not exist, or the directory does not answer), uninstall refuses before it
+  stops any service or removes any policy: the result names the row with
+  `per_user_hooks_remaining` and says nothing was changed. Fix or remove that
+  row and run the uninstall again.
 - **Per-user state (Linux and macOS).** `--purge` also removes everything
   DefenseClaw put in each enrolled user's home, as that user. It first stops
   the user's per-user gateway and watchdog, if one runs, and restores the
@@ -459,14 +471,15 @@ it restarts.
   authorization ledger protects that user, so they stop working on the
   guardian's next pass after the removal. They never reach management
   routes, other connectors, or another user's identity.
+  An account that is cut off and still runs an agent is refused, and on
+  Windows each refused call is audited with reason
+  `enterprise_managed_sid_unregistered` (see
+  [Review the audit log](/docs/enterprise/windows#review-the-audit-log)).
 - **Rotate the per-user credentials** on Linux and macOS when a user's
   credentials may have been copied to another account or host. See
   [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials).
 - **Keep the evidence.** Copy the audit database and the logs before you
   uninstall or purge anything.
-- **Revoke ACP credentials.** If the user has an ACP enrollment, revoke it
-  with `enterprise acp revoke` and the same selectors you enrolled with. See
-  [ACP guard](/docs/acp-guard).
 - **Treat root or administrator compromise as an endpoint incident.** The
   deployment's protections assume that the administrator boundary holds (see
   the [threat model](/docs/enterprise/threat-model)). Reimage the host rather

@@ -73,6 +73,11 @@ PROMETHEUS_METRIC_LABELS = {
         "severity",
         "would_block",
     },
+    "defenseclaw_inventory_ide_plugins": {
+        "defenseclaw_ide_plugin_ai",
+        "defenseclaw_ide_plugin_enabled",
+        "defenseclaw_ide_product",
+    },
     "defenseclaw_guardrail_evaluations_total": {
         "guardrail_action_taken",
         "guardrail_connector",
@@ -84,6 +89,10 @@ PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
 }
 PROMETHEUS_EXACT_LABEL_VALUES = {
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_ai"): {"false", "true"},
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_enabled"): {
+        "client_side_unknown", "disabled", "enabled", "unknown",
+    },
     ("defenseclaw_approval_lifecycle_total", "surface"): {"chat", "exec", "native"},
     ("defenseclaw_approval_lifecycle_total", "result"): {
         "approved",
@@ -454,9 +463,6 @@ def static_audit(
     if len(set(titles)) != len(titles):
         errors.append("dashboard titles must be unique")
     known_uids = set(uids)
-
-    if "defenseclaw-reliability" in known_uids:
-        errors.append("the retired Reliability board must stay consolidated into Runtime")
 
     for path, dashboard in dashboards:
         uid = dashboard.get("uid") or path.name
@@ -2019,11 +2025,6 @@ def _golden_approval_log_errors(
         ):
             errors.append("Loki approval.requested must precede approval.resolved by timestamp and sequence")
     return errors
-
-
-def _prometheus_parent_matches(metric: dict[str, Any], parent_id: str) -> bool:
-    value = metric.get("defenseclaw_agent_parent_id")
-    return value == parent_id if parent_id else value in {None, "", "none"}
 
 
 def _golden_metric_errors(

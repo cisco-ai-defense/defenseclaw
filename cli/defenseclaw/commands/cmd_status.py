@@ -470,7 +470,9 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
             )
         _print_audit_log_health(cfg, health)
+        _print_agent_identity_ledger(health)
         _print_agents(cfg, health=health)
+        _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health)
@@ -625,6 +627,16 @@ def _connector_scope_text(cfg) -> str:
     if workspace:
         return f"workspace ({workspace})"
     return "global user config"
+
+
+def _print_guardrail_profile(cfg) -> None:
+    """The guardrail profile that decides for this account, when any are set."""
+    from defenseclaw.commands.cmd_guardrail import profile_status_text
+    from defenseclaw.gateway import current_user_guardrail_profile
+
+    result = current_user_guardrail_profile(cfg)
+    if result is not None:
+        _status_row("Profile", profile_status_text(cfg, result))
 
 
 def _guardrail_turned_off(gc) -> bool:
@@ -1206,6 +1218,16 @@ def _print_audit_log_health(cfg, health: dict | None) -> None:
             value += "; run 'defenseclaw doctor'"
     if value:
         _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
+
+
+def _print_agent_identity_ledger(health: dict | None) -> None:
+    """Warn when the gateway cannot save agent identities (GAP-0393)."""
+    from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
+
+    value = agent_identity_ledger_failure(health)
+    if value:
+        value = value[0].upper() + value[1:] + "; run 'defenseclaw doctor'"
+        _status_row("Agent identities", ux._style(value, fg="yellow"))
 
 
 def _gateway_audit_write_failure(health: dict | None) -> str:

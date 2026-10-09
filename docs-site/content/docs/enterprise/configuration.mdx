@@ -109,7 +109,9 @@ only `profile`.
 
 List each agent under `guardrail.connectors`. The key is the connector
 name; the value can be empty (`{}`) or override guardrail settings for that
-agent. A config without this map protects nothing.
+agent. An empty value enables the agent with the default settings, and only
+`enabled: false` turns a listed agent off. A config without this map protects
+nothing, and `verify` fails on it (`no_connectors_enabled`).
 
 ```yaml title="config.yaml (excerpt)"
 guardrail:
@@ -137,7 +139,6 @@ guardrail:
 | --- | --- | --- |
 | Machine policy | `codex`, `claudecode`, `cursor`, `copilot`, and `opencode` through its managed plugin | The agent's machine-wide policy file, which standard users cannot edit |
 | Per user | `devin`, `antigravity`, `hermes`, `amp`, `kiro` on every OS; `openhands`, `omnigent` on Linux and macOS only | Each enrolled user's own agent config, which the guardian repairs |
-| ACP | `kiro` in an editor that starts it over ACP | Enrolled with `defenseclaw-gateway enterprise acp`, not through this map; see [ACP guard](/docs/acp-guard). This is an optional extra route: the per-user row above covers Kiro on every OS |
 
 `openclaw` and `zeptoclaw` need the guardrail proxy, which a managed host
 does not run, so they are not managed: Linux and macOS skip them (route
@@ -148,15 +149,13 @@ Per-user enrollment also depends on the
 version of the agent being installed for that user.
 
 <Callout type="warn" title="Leave an agent out entirely to leave it unprotected">
-On Linux and macOS, the lifecycle publishes machine policy for Codex,
-Claude Code, Cursor, Copilot and OpenCode when the connector name appears
-anywhere under `guardrail.connectors`, even with `enabled: false`, or under
-`enterprise.machine_policy.connectors`. There, `enabled: false` stops only
-per-user enrollment. Copilot's and OpenCode's machine policy follow the same
-rule on Windows. Windows Codex, Claude Code and Cursor policy is written only
-while the target manifest has an enabled row for that agent. To stop
-publishing machine policy for an agent, remove its name from both maps, or
-set `enterprise.machine_policy.connectors.<name>.ownership: "off"`.
+On standalone enterprise hosts, `guardrail.connectors.<name>.enabled: false`
+disables the connector and removes its DefenseClaw machine policy. An empty
+connector entry (`{}`) enables it. To leave an agent unprotected, omit it from
+`guardrail.connectors` and `enterprise.machine_policy.connectors`, or set
+`enterprise.machine_policy.connectors.<name>.ownership: "off"`. After applying
+a change, use `enterprise policy show` and `enterprise verify` to check which
+agents still have machine coverage.
 </Callout>
 
 The older single-agent key `guardrail.connector` also selects an agent.
@@ -185,7 +184,7 @@ Under `enterprise.enrollment`. See [Enrollment](/docs/enterprise/enrollment).
 | `mode` | `auto`, `manifest`. Default: `auto` | `manifest` stops the enumerator; you write the target manifest yourself. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`). |
 | `include_users` | List of user names. Default: empty | Linux and macOS: also enroll these accounts. Windows: accepted, but every profile is already a candidate, so it changes nothing. |
 | `exclude_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Never enroll these accounts. Wins over every include. |
-| `include_groups` | Linux and macOS: group names or numeric IDs. Windows: group names or SIDs. Default: empty | When not empty, enroll only members of these groups. Windows covers local, Active Directory and Microsoft Entra ID groups; see [Enrollment](/docs/enterprise/enrollment#group-filters-on-windows). |
+| `include_groups` | Linux and macOS: group names or numeric IDs. Windows: group names or SIDs. Default: empty | When not empty, enroll only members of these groups. Windows covers local and Active Directory groups, and the Microsoft Entra ID groups a built-in local group lists; see [Enrollment](/docs/enterprise/enrollment#group-filters-on-windows). |
 | `exclude_groups` | As `include_groups`. Default: empty | Never enroll members. Wins over `include_groups`. |
 | `exempt_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Linux and macOS: not enrolled, but their calls are allowed, inspected and logged. Windows: the machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows. |
 | `unenrolled_users` | `inspect`, `deny`. Default: `inspect` | **Linux and macOS.** How the gateway treats a user without an enrollment who calls a machine-policy agent's hook. |
@@ -306,7 +305,13 @@ rules on Linux and macOS:
    from a copy of a shipped pack: `policies/guardrail/default`, `strict` or
    `permissive` in the DefenseClaw source release of the version you deploy,
    or the `share/policies/guardrail` folder above on a host where DefenseClaw
-   is already installed. The packages ship no copy before they install, so
+   is already installed. Create the parent before copying: packages do not
+   create the administrator's `policies/guardrail` directory. For example on
+   macOS, run `sudo mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail`
+   before `sudo cp -R /opt/cisco/defenseclaw/share/policies/guardrail/default
+   /opt/cisco/defenseclaw/etc/policies/guardrail/<name>`. On Linux, use
+   `/etc/defenseclaw/policies/guardrail` and the `/opt/defenseclaw/share/`
+   source instead. The packages ship no copy before they install, so
    for a first install put the pack in place before the package (with your
    MDM, for example) or install with the built-in packs first and switch
    `rule_pack_dir` afterwards. Keep every file and folder owned by root,

@@ -118,12 +118,12 @@ The alias defaults Hermes to observe mode and can join an existing hook-connecto
 defenseclaw setup hermes
 ```
 
-Confirms once, stages the hooks block and exact allowlist approvals, and restarts
-the DefenseClaw gateway. Reload each Hermes host before expecting the callbacks
+Interactive setup asks for the mode, whether to add to or replace an existing
+connector roster, and whether to add an LLM judge. It stages the hooks block
+and exact allowlist approvals, then restarts the DefenseClaw gateway. Reload each Hermes host before expecting the callbacks
 to be live. Findings flow to mandatory SQLite event history and the TUI;
 configured v8 destinations receive only the buckets/signals their routes
-select. No traffic is intercepted and no requests are blocked. Pass `--yes` to
-skip the confirmation in CI.
+select. No traffic is intercepted and no requests are blocked. For scripted setup, pass `--yes --mode observe` (or `--mode action`).
 
 </Tab>
 
@@ -228,6 +228,10 @@ copies remain ordinary scanable skills.
 ## Hook capabilities
 
 <HookEventsList connector="hermes" />
+
+Hermes has no hook that can stop a prompt, so a prompt rule doesn't block
+here: a matching prompt reaches the model. Tool-call rules still block
+([capability matrix](/docs/connectors/capability-matrix)).
 
 <Callout>
 Hermes can block only `pre_tool_call` through valid synchronous JSON, inject

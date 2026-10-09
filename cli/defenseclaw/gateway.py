@@ -65,6 +65,130 @@ def alert_disposition_timeout_seconds(target_count: int) -> int:
     )
 
 
+def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: float = 3) -> dict[str, Any] | None:
+    """Ask the gateway which guardrail profile applies to the account running this.
+
+    The gateway resolves the account through the OS the way it does for live
+    requests (``guardrail profile explain``). ``None`` when no profiles are
+    configured; when the gateway cannot answer, the result has ``error``.
+    ``overrides`` lists the connectors and agents for which an assignment
+    picks another profile for this account (GAP-0075).
+    """
+    if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
+        return None
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    user, label = current_profile_account(secure_client=_enterprise_profile(cfg) == "secure_client")
+    if not user:
+        return {"user": "", "error": "the account name is unknown"}
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(cfg),
+            port=cfg.gateway.api_port,
+            token=cfg.gateway.resolved_token(),
+            timeout=timeout,
+        )
+        try:
+            result = client.guardrail_profile_resolve(user=user, connector=connector)
+            overrides = (
+                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+                if not connector else []
+            )
+        finally:
+            client.close()
+    except requests.exceptions.ReadTimeout as exc:
+        # The gateway took the connection and was still resolving the user.
+        return {"user": label, "error": str(exc), "timed_out": True}
+    except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
+        return {"user": label, "error": str(exc)}
+    return {**result, "user": label, "overrides": overrides}
+
+
+def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
+    """The account the gateway resolves for "you", and the name to show for it.
+
+    On Unix the effective UID identifies the process account; LOGNAME and USER
+    can name another account. On Windows the process token SID is authoritative
+    because an Entra ID login name may not be resolvable by Windows.
+    """
+    if os.name != "nt" and not secure_client:
+        import pwd
+
+        uid = os.geteuid()
+        try:
+            label = pwd.getpwuid(uid).pw_name
+        except (KeyError, OSError):
+            label = str(uid)
+        return str(uid), label
+
+    import getpass
+
+    try:
+        label = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
+        label = ""
+    if os.name == "nt":
+        from defenseclaw.file_permissions import _windows_current_user_sid
+
+        try:
+            return _windows_current_user_sid(), label
+        except OSError:
+            pass
+    return label, label
+
+
+def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) -> list[dict[str, str]]:
+    """Connector/agent subjects whose resolved profile differs from *profile*.
+
+    An assignment matching ``connectors`` or ``agents`` decides only for that
+    connector or agent, so the user-level answer alone would claim *profile*
+    decides everywhere. Each candidate is resolved by the gateway, which
+    applies the assignment order; an agent is attributed to its connector
+    through the user's agent identities, and agents of other users are skipped.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, normalize
+
+    assignments = getattr(cfg.guardrail, "profile_assignments", None) or []
+    scoped = [a for a in assignments if a.match.connectors or a.match.agents]
+    if not scoped:
+        return []
+    owners: dict[str, str] | None = None
+    if any(a.match.agents for a in scoped):
+        try:
+            rows = client.agent_identities_all(user=user).get("identities") or []
+            owners = {str(r.get("agent_id")): normalize(str(r.get("connector") or "")) for r in rows}
+        except Exception:  # noqa: BLE001 - unknown owners: probe without a connector.
+            owners = None
+    probes: list[tuple[str, str]] = []
+    for assignment in scoped:
+        configured = getattr(cfg.guardrail, "connectors", {}) or {}
+        connectors = [
+            normalized for name in assignment.match.connectors
+            if (normalized := normalize(name)) in KNOWN_CONNECTORS or normalized in configured
+        ]
+        if assignment.match.connectors and not connectors:
+            continue
+        for agent in assignment.match.agents or [""]:
+            if agent and owners is not None and agent not in owners:
+                continue
+            for connector in connectors or [owners.get(agent, "") if agent and owners else ""]:
+                if (connector, agent) not in probes:
+                    probes.append((connector, agent))
+    overrides: list[dict[str, str]] = []
+    for connector, agent in probes:
+        try:
+            answer = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
+        except Exception:  # noqa: BLE001 - the user-level answer still stands.
+            break
+        name = str(answer.get("profile") or "")
+        if name and name != profile:
+            match = str(answer.get("match") or "")
+            effective = answer.get("effective")
+            mode = str(effective.get("mode") or "") if isinstance(effective, dict) else ""
+            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match, "mode": mode})
+    return overrides
+
+
 def gateway_api_client_host(cfg: Any) -> str:
     """Return a connectable host for the configured sidecar API bind."""
     from defenseclaw.config import api_bind_host
@@ -541,6 +665,21 @@ class OrchestratorClient:
             raise ValueError("gateway returned a malformed ACP profiles response")
         return data
 
+    def guardrail_profile_resolve(self, *, user: str = "", connector: str = "", agent: str = "") -> dict[str, Any]:
+        """GET /api/v1/guardrail/profiles/resolve: the profile a subject would get."""
+        params = {key: value for key, value in (("user", user), ("connector", connector), ("agent", agent)) if value}
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/guardrail/profiles/resolve",
+            params=params,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("gateway returned a malformed profile resolution")
+        return data
+
     def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
         """Hand one raw Python-CLI fact to the canonical v8 runtime.
 
@@ -701,6 +840,61 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def agent_identities(
+        self, *, user: str | None = None, connector: str | None = None, cursor: str = "", limit: int = 0,
+    ) -> dict[str, Any]:
+        """Fetch one page of agent identities (``GET /api/v1/agents/identities``),
+        optionally narrowed to one user or one connector."""
+        params = {
+            key: value for key, value in (("user", user), ("connector", connector), ("cursor", cursor)) if value
+        }
+        if limit > 0:
+            params["limit"] = str(limit)
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/agents/identities",
+            params=params,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def agent_identities_all(
+        self, *, user: str | None = None, connector: str | None = None, limit: int = 0, max_pages: int = 64,
+    ) -> dict[str, Any]:
+        """Fetch every page of agent identities, or the ``limit`` most recently
+        seen, into one payload.
+
+        Rows can move up between pages when an agent is seen again, so a row
+        already listed is not listed twice. A repeated or missing cursor ends
+        the walk, and ``max_pages`` bounds it. ``next_cursor`` stays set when
+        rows were left out, and ``total`` says how many there are.
+        """
+        rows: list[dict[str, Any]] = []
+        listed: set[str] = set()
+        seen: set[str] = set()
+        cursor = ""
+        pages = 0
+        while True:
+            extra: dict[str, Any] = {"cursor": cursor} if cursor else {}
+            if limit > 0:
+                extra["limit"] = limit - len(rows)
+            payload = self.agent_identities(user=user, connector=connector, **extra)
+            pages += 1
+            for row in payload.get("identities") or []:
+                agent_id = str(row.get("agent_id") or "") if isinstance(row, dict) else ""
+                if agent_id and agent_id not in listed:
+                    listed.add(agent_id)
+                    rows.append(row)
+            seen.add(cursor)
+            cursor = str(payload.get("next_cursor") or "")
+            if not cursor or cursor in seen or pages >= max_pages or 0 < limit <= len(rows):
+                break
+        out = dict(payload)
+        out["identities"] = rows
+        out["next_cursor"] = "" if cursor in seen else cursor
+        return out
+
     def ai_usage(self) -> dict[str, Any]:
         resp = self._session.get(
             f"{self.base_url}/api/v1/ai-usage",
@@ -763,6 +957,78 @@ class OrchestratorClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def ai_usage_ide_plugins(
+        self,
+        *,
+        user: str = "",
+        ide: str = "",
+        ai_only: bool = False,
+        cursor: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Fetch one page of the IDE extension and plugin inventory."""
+        params: dict[str, str] = {}
+        if user:
+            params["user"] = user
+        if ide:
+            params["ide"] = ide
+        if ai_only:
+            params["ai_only"] = "true"
+        if cursor:
+            params["cursor"] = cursor
+        if limit > 0:
+            params["limit"] = str(limit)
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage/ide-plugins",
+            params=params,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage_ide_plugins_all(
+        self,
+        *,
+        user: str = "",
+        ide: str = "",
+        ai_only: bool = False,
+        max_pages: int = 64,
+    ) -> dict[str, Any]:
+        """Fetch every page of the IDE plugin inventory into one payload.
+
+        The first page carries the scope, counts and installations; later
+        pages only add plugins. A repeated or missing cursor ends the walk,
+        and ``max_pages`` bounds it.
+        """
+        payload = self.ai_usage_ide_plugins(user=user, ide=ide, ai_only=ai_only)
+        plugins = list(payload.get("plugins") or [])
+        cursor = str(payload.get("next_cursor") or "")
+        seen: set[str] = set()
+        pages = 1
+        while cursor and cursor not in seen and pages < max_pages:
+            seen.add(cursor)
+            page = self.ai_usage_ide_plugins(user=user, ide=ide, ai_only=ai_only, cursor=cursor)
+            plugins.extend(page.get("plugins") or [])
+            cursor = str(page.get("next_cursor") or "")
+            pages += 1
+        # A plugin names its install; copy the install's remote kind onto it
+        # so a ~/.vscode-server row reads differently from the ~/.vscode one.
+        remote = {
+            str(inst.get("install_id") or ""): str(inst.get("remote_kind") or "")
+            for inst in payload.get("installations") or []
+            if isinstance(inst, dict)
+        }
+        for plugin in plugins:
+            if isinstance(plugin, dict) and not plugin.get("remote_kind"):
+                kind = remote.get(str(plugin.get("install_id") or ""), "")
+                if kind:
+                    plugin["remote_kind"] = kind
+        out = dict(payload)
+        out["plugins"] = plugins
+        out["next_cursor"] = cursor if pages >= max_pages else ""
+        return out
 
     def ai_usage_component_locations(self, ecosystem: str, name: str) -> dict[str, Any]:
         """Fetch the locations detail for one component (the rows

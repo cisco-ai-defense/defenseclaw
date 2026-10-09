@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
@@ -98,6 +100,10 @@ type Sidecar struct {
 	configMgr     *ConfigManager
 	modelRouter   ModelRouter
 
+	// startRulePacks holds the rule packs NewSidecar validated; the first
+	// runAPI hands it to the guardrail profile set and drops it.
+	startRulePacks *guardrail.RulePackCache
+
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
@@ -112,6 +118,7 @@ type Sidecar struct {
 	aiRuntimeMu       sync.RWMutex
 	apiMu             sync.RWMutex
 	apiServer         *APIServer
+	apiProfilesReady  chan struct{}
 	hookGuardsMu      sync.RWMutex
 	hookGuards        map[*HookConfigGuard]struct{}
 	hookGuardsChanged chan struct{}
@@ -136,6 +143,15 @@ type Sidecar struct {
 	// shutdown from republishing capabilities for the retiring owned runtime.
 	observabilityV8ConsumersDetached bool
 	observabilityV8Run               bool
+	// observabilityV8ShutdownLosses keeps what the closed runtime dropped or
+	// left unsent, for the shutdown warning (GAP-1096).
+	observabilityV8ShutdownLosses      []observabilityruntime.ShutdownLoss
+	observabilityV8ShutdownLossesNoted bool
+	// bootConfigSourceName and bootConfigSource are the config.yaml bytes
+	// the observability runtime was bootstrapped from, the source the
+	// gateway runs (GAP-0264).
+	bootConfigSourceName string
+	bootConfigSource     []byte
 	// exporterHealthMetric* retains only monotonic, content-free delivery
 	// counters for the active graph generation. It converts runtime health
 	// snapshots into delta exporter-error metrics without resurrecting a global
@@ -143,6 +159,7 @@ type Sidecar struct {
 	exporterHealthMetricMu         sync.Mutex
 	exporterHealthMetricGeneration uint64
 	exporterHealthMetricCounters   map[exporterHealthMetricKey]uint64
+	destinationLossMetricCounters  map[exporterHealthMetricKey]destinationLossMetricCounters
 	// destinationCircuit* retains only the last-observed circuit state per
 	// destination for the active graph generation. It exists so a durable
 	// health log is emitted exactly once per state transition instead of once
@@ -229,7 +246,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
 	// before creating a client or returning any runnable sidecar state.
-	rp, err := loadInitialSidecarRulePack(cfg)
+	rp, startRulePacks, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -242,8 +259,14 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		return nil, fmt.Errorf("sidecar: prepare guardrail local-pattern activation: %w", err)
 	}
 	initialHarnessRules := prepareInitialSandboxHarnessRules(cfg)
-	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
-		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+	// A hook-only topology (managed standalone, no OpenClaw fleet) never
+	// dials gateway.host:port, so only announce the fleet client when the
+	// gateway loop will actually use it; the device identity still loads.
+	// Secure Client keeps the line of its service log (issue #1092).
+	if RequiresFleetGateway(cfg) || cfg.SecureClientIntegration() {
+		fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
+			cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+	}
 
 	// Mint a per-process agent instance id immediately so every
 	// audit row that fires during sidecar boot (device-identity
@@ -486,6 +509,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		judgeBodyStore:          judgeBodyStore,
 		judgeBodiesReadyPending: judgeBodiesReadyPending,
 		judgeBodiesReadyDetails: judgeBodiesReadyDetails,
+		startRulePacks:          startRulePacks,
 	}
 	// Commit the already-validated cold-start policy candidate only after every
 	// fallible constructor has succeeded. A rejected candidate must leave the
@@ -508,6 +532,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	setStandaloneEnterpriseActive(cfg.StandaloneEnterprise())
 	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
+	setAgentIdentityConfig(cfg)
+	applyIdentityPosture(cfg)
 	return sidecar, nil
 }
 
@@ -821,6 +847,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.beginObservabilityV8Run(); err != nil {
 		return err
 	}
+	s.carryObservabilityV8ShutdownDrops()
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
@@ -832,7 +859,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		// instead of returning an "Error:" that reads as a startup failure
 		// (GAP-2166).
 		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil && !shutdownFlushWarned {
-			fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+			fmt.Fprint(os.Stderr, s.observabilityV8ShutdownFlushWarning())
 		}
 	}()
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -858,7 +885,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 
 	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
-		s.currentConfig().Gateway.AutoApprove, s.currentConfig().Gateway.Watcher.Enabled, s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
+		s.currentConfig().Gateway.AutoApprove, watcherStartupEnabled(s.currentConfig()), s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
 	if err := s.recordSidecarLifecycle(runCtx, audit.ActionSidecarStart); err != nil {
 		return err
 	}
@@ -1000,6 +1027,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.applyConfigReloadSnapshot,
 	)
 	s.configMgr.bindInitialObservabilityV8Plan(s.observabilityV8ActivePlan())
+	s.configMgr.setStartupSource(s.bootConfigSourceName, s.bootConfigSource)
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	s.configMgr.bindObservabilityV8(metricRuntime)
 	// managed_enterprise: wire the AVC-authored env_config.json so the
@@ -1052,6 +1080,47 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.runCapacityObservabilityV8(runCtx, sidecarCapacityInterval)
 	}()
 
+	// The audit write-ahead log is checkpointed once it passes a size limit, so
+	// sustained hook traffic cannot grow it without bound.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditWALGuard(runCtx)
+	}()
+
+	// Query-planner statistics are taken as the audit history grows, so ledger
+	// lookups stay index seeks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditPlannerStats(runCtx)
+	}()
+
+	// Agent identities seen on the hook path are written to inventory.db in
+	// one batch per flush interval, never per hook.
+	agentIdentityStoreToken := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore {
+		if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+			return discovery.InventoryStore()
+		}
+		return nil
+	}, func() string {
+		if cfg := s.currentConfig(); cfg != nil {
+			return cfg.DataDir
+		}
+		return ""
+	}, func() int {
+		// The audit retention window, as AI discovery's history uses.
+		if plan := s.observabilityV8ActivePlan(); plan != nil {
+			return plan.Snapshot().Local.RetentionDays
+		}
+		return config.ObservabilityV8DefaultRetentionDays
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sharedAgentIdentities.runFlusher(runCtx, agentIdentityFlushInterval, agentIdentityStoreToken)
+	}()
+
 	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
 	// fleet is configured (see gatewayShouldConnectForConfiguredConnector).
 	// In standalone hook-connector mode (no fleet, local hooks/native OTLP)
@@ -1077,6 +1146,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			errCh <- err
 		}
 	}()
+
+	// A proxy with configured profiles must not bind before the API worker
+	// publishes its initial profile set. Secure Client has no profiles.
+	if !s.currentConfig().SecureClientIntegration() && s.currentConfig().Guardrail.HasProfiles() {
+		s.apiMu.Lock()
+		s.apiProfilesReady = make(chan struct{})
+		s.apiMu.Unlock()
+	}
 
 	// Goroutine 3: REST API server (always runs)
 	wg.Add(1)
@@ -1222,7 +1299,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.closeOwnedObservabilityV8Runtime(); err != nil {
 		// Runtime.Close contract: the stores stay open until the deferred close
 		// above retries with a fresh context.
-		fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+		fmt.Fprint(os.Stderr, s.observabilityV8ShutdownFlushWarning())
 		shutdownFlushWarned = true
 	} else {
 		s.logger.Close()
@@ -1294,6 +1371,9 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 }
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
+	if err := s.waitForAPIProfilePublication(ctx); err != nil {
+		return err
+	}
 	runGuardrailFn := s.runGuardrail
 	if len(s.currentConfig().ActiveConnectors()) > 1 {
 		runGuardrailFn = s.runGuardrailMulti
@@ -1445,6 +1525,9 @@ func configRestartHelperArgs(argv []string) []string {
 }
 
 type sidecarRulePackCandidate struct {
+	// cache holds every pack of this candidate, for the profile set of the same
+	// transaction.
+	cache          *guardrail.RulePackCache
 	active         *guardrail.RulePack
 	activeRules    *compiledRulePackCategories
 	activePatterns *localPatternsActivation
@@ -1463,7 +1546,7 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 	if rp == nil {
 		return nil, fmt.Errorf("%s rule pack %q: loader returned no rule pack", scope, dir)
 	}
-	if err := rp.Validate(); err != nil {
+	if err := cache.Validate(rp); err != nil {
 		return nil, fmt.Errorf("%s rule pack %q: %w", scope, dir, err)
 	}
 	return rp, nil
@@ -1472,15 +1555,17 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 // loadInitialSidecarRulePack performs the cold-start contract. Multi-connector
 // packs remain isolated to their individual setup transactions, but the global
 // pack and an enabled single connector's effective pack must be valid before a
-// runnable Sidecar can be returned.
-func loadInitialSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error) {
+// runnable Sidecar can be returned. The cache that holds them is returned for
+// the start-time guardrail profile set, which resolves to the same packs and
+// need not load and validate them again (GAP-0264).
+func loadInitialSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, *guardrail.RulePackCache, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
+		return nil, nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
 	}
 	cache := guardrail.NewRulePackCache()
 	global, err := loadValidatedRulePack(cache, cfg.Guardrail.RulePackDir, "global")
 	if err != nil {
-		return nil, fmt.Errorf("sidecar: %w", err)
+		return nil, nil, fmt.Errorf("sidecar: %w", err)
 	}
 	active := global
 	names := cfg.ActiveConnectors()
@@ -1493,12 +1578,12 @@ func loadInitialSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error)
 				"connector "+name,
 			)
 			if err != nil {
-				return nil, fmt.Errorf("sidecar: %w", err)
+				return nil, nil, fmt.Errorf("sidecar: %w", err)
 			}
 		}
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", active)
-	return active, nil
+	return active, cache, nil
 }
 
 // preflightSidecarRulePacks loads a reload candidate through a fresh cache.
@@ -1515,6 +1600,7 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 		return nil, err
 	}
 	candidate := &sidecarRulePackCandidate{
+		cache:          cache,
 		active:         global,
 		connectors:     make(map[string]*guardrail.RulePack),
 		connectorRules: make(map[string]*compiledRulePackCategories),
@@ -1620,6 +1706,7 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) (*LLMJudge, er
 	if judge == nil {
 		return nil, nil
 	}
+	judge.secureClient = cfg.SecureClientIntegration()
 
 	features := "tool-result-pii"
 	if cfg.Guardrail.Judge.ToolInjection {
@@ -1690,6 +1777,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	rulePackCandidate, err := preflightSidecarRulePacks(newCfg)
 	if err != nil {
 		return fmt.Errorf("config reload rule pack preflight: %w", err)
+	}
+	// Identity-based guardrail profiles are derived, digested and their rule
+	// packs preloaded in the same candidate transaction.
+	profileCandidate, err := newGuardrailProfileSet(newCfg, rulePackCandidate.cache, true)
+	if err != nil {
+		return fmt.Errorf("config reload guardrail profiles: %w", err)
 	}
 	onlyReloadModeChange := onlyConfigReloadModeChanged(oldCfg, newCfg) &&
 		len(diff.Changed) == 1 && diff.Changed[0] == "gateway"
@@ -1823,6 +1916,8 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
 	setManagedServiceHosted(nextManagedEnterprise)
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
+	setAgentIdentityConfig(&next)
+	applyIdentityPosture(&next)
 
 	appliedCfg := current
 	if !onlyReloadModeChange {
@@ -1844,6 +1939,14 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		ruleManagedConnectors(current),
 		rulePackCandidate.connectorRules,
 	)
+	if api := s.apiSnapshot(); api != nil {
+		previousProfiles := api.guardrailProfileSet()
+		api.setGuardrailProfiles(profileCandidate)
+		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
+		if profileCandidate != nil {
+			profileCandidate.logProfileWarnings()
+		}
+	}
 	if s.router != nil {
 		if nextRulePack != nil {
 			s.router.SetRulePack(nextRulePack)
@@ -2131,7 +2234,21 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
-		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode)
+		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode) ||
+		!slices.Equal(discoveryExcludeUsers(oldCfg), discoveryExcludeUsers(newCfg))
+}
+
+// discoveryExcludeUsers is the enterprise.enrollment.exclude_users list the
+// standalone profile's AI Discovery scan leaves out. The scan reads it when
+// it starts, so a hot apply that changes it rebuilds the scan: an excluded
+// account otherwise kept the components the gateway could still see (a
+// Copilot CLI package folder it may list) and sent their removal only after
+// a restart (GAP-1024).
+func discoveryExcludeUsers(cfg *config.Config) []string {
+	if !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	return cfg.Enterprise.Enrollment.ExcludeUsers
 }
 
 func notifierChanged(oldCfg, newCfg *config.Config) bool {
@@ -2147,6 +2264,23 @@ func webhooksChanged(oldCfg, newCfg *config.Config) bool {
 	}
 	return !reflect.DeepEqual(oldCfg.Webhooks, newCfg.Webhooks) ||
 		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability)
+}
+
+// waitForAPIProfilePublication keeps the proxy listener closed until the API
+// worker has installed the initial profile set used by proxy requests.
+func (s *Sidecar) waitForAPIProfilePublication(ctx context.Context) error {
+	s.apiMu.RLock()
+	ready := s.apiProfilesReady
+	s.apiMu.RUnlock()
+	if ready == nil {
+		return nil
+	}
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Sidecar) setAPIServer(api *APIServer) {
@@ -2167,6 +2301,10 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
 	}
 	s.apiServer = api
+	if api != nil && s.apiProfilesReady != nil {
+		close(s.apiProfilesReady)
+		s.apiProfilesReady = nil
+	}
 	s.apiMu.Unlock()
 	s.observabilityV8Mu.Unlock()
 }
@@ -3047,6 +3185,42 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 }
 
 // runWatcher starts the skill/MCP install watcher if enabled in config.
+// watcherUsesConnectorDirs reports whether the watcher may watch the
+// connector's (or the OpenClaw default's) folders in the gateway's own home.
+// Not when no connector is configured (init --connector none, or setup remove
+// of the last one): the empty name resolves to the OpenClaw default and
+// watching its folders would create ~/.openclaw (GAP-1056). Not on a managed
+// enterprise service either: its home is the service profile, which never
+// holds a user's skills or plugins (GAP-0026). Secure Client keeps the
+// pre-1.0 connector directories; explicit gateway.watcher dirs apply in all
+// profiles.
+func watcherUsesConnectorDirs(cfg *config.Config) bool {
+	return cfg.HasConnectorConfigured() &&
+		(!managed.IsManagedEnterprise(cfg.DeploymentMode) || cfg.SecureClientIntegration())
+}
+
+// watcherStartupEnabled keeps Secure Client's pre-1.0 startup value, which
+// reports the configured switch even when no directories are resolved.
+func watcherStartupEnabled(cfg *config.Config) bool {
+	if cfg.SecureClientIntegration() {
+		return cfg.Gateway.Watcher.Enabled
+	}
+	return WatcherWatchesDirs(cfg)
+}
+
+// WatcherWatchesDirs reports whether the watcher is enabled and may watch a
+// folder: the connector's, or explicit gateway.watcher dirs. The start
+// banner and the subsystems line report the watcher off otherwise, as
+// runWatcher idles with "no directories to watch" (GAP-0077).
+func WatcherWatchesDirs(cfg *config.Config) bool {
+	w := cfg.Gateway.Watcher
+	if !w.Enabled {
+		return false
+	}
+	return watcherUsesConnectorDirs(cfg) ||
+		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
+}
+
 func (s *Sidecar) runWatcher(ctx context.Context) error {
 	wcfg := s.currentConfig().Gateway.Watcher
 
@@ -3073,11 +3247,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 
 	skillDirs, pluginDirs, src := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
-	if cfg := s.currentConfig(); cfg != nil && !cfg.HasConnectorConfigured() {
-		// No connector configured (init --connector none, or setup remove of
-		// the last one): there is no agent to watch. The empty name resolves
-		// to the OpenClaw default, and watching its folders would create
-		// ~/.openclaw (GAP-1056). Explicit gateway.watcher dirs still apply.
+	if cfg := s.currentConfig(); cfg != nil && !watcherUsesConnectorDirs(cfg) {
 		if src.Skill != watcherDirsFromConfig {
 			skillDirs = nil
 		}
@@ -3510,7 +3680,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
-	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
+	conn, err := resolveActiveConnector(registry, guardrailConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
 		// not exist. Returning here aborts sidecar boot so the operator
@@ -3658,7 +3828,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
-	if !s.currentConfig().Guardrail.Enabled {
+	// `guardrail disable --connector X` on the only configured connector:
+	// the multi-connector boot drops X from its active set and tears it down,
+	// but a single-connector boot set X up again, so its hooks kept calling
+	// the gateway after the CLI said they were removed (GAP-0369).
+	connectorOff := s.currentConfig().Guardrail.Enabled && !guardianManagedLifecycle &&
+		!s.currentConfig().Guardrail.EffectiveEnabled(conn.Name())
+	if !s.currentConfig().Guardrail.Enabled || connectorOff {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
 		if err := conn.Teardown(ctx, setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
@@ -3676,6 +3852,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		connector.ClearActiveConnector(s.currentConfig().DataDir)
 		RemoveConnectorRulePackOverrides(conn.Name())
+		if connectorOff {
+			s.health.SetGuardrail(StateDisabled, fmt.Sprintf("connector %s disabled; its hooks were removed", conn.Name()), nil)
+			fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — hooks removed\n", conn.Name(), conn.Name())
+			<-ctx.Done()
+			return nil
+		}
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {
@@ -3785,6 +3967,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetWebhookDispatcher(webhooks)
 	}
 	if err == nil && proxy != nil {
+		proxy.SetSecureClientIntegration(s.currentConfig().SecureClientIntegration())
 		proxy.SetModelRouter(s.modelRouter)
 		s.setGuardrailProxy(proxy)
 		defer s.setGuardrailProxy(nil)
@@ -5718,6 +5901,30 @@ func configuredConnectorName(cfg *config.Config) string {
 	return strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
 }
 
+// guardrailConnectorName is the connector a single-connector guardrail boot
+// sets up. guardrail.connectors without guardrail.connector (an
+// administrator config) names it; the claw.mode default does not: the
+// gateway set up an openclaw connector nobody configured at every start and
+// the guardrail exited on its missing extension (GAP-0361). claw.mode still
+// picks among the listed connectors, and decides alone without the map.
+// Secure Client keeps the historical connector selection from claw.mode.
+func guardrailConnectorName(cfg *config.Config) string {
+	name := configuredConnectorName(cfg)
+	if cfg == nil || cfg.SecureClientIntegration() || strings.TrimSpace(cfg.Guardrail.Connector) != "" || len(cfg.Guardrail.Connectors) == 0 {
+		return name
+	}
+	roster := cfg.ActiveConnectors()
+	for _, listed := range roster {
+		if listed == name {
+			return name
+		}
+	}
+	if len(roster) > 0 {
+		return roster[0]
+	}
+	return name
+}
+
 func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	if cfg == nil {
 		return true
@@ -5820,7 +6027,10 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		// when discovery found no OpenClaw behind a loopback host.
 		return !openClawImpliedButNotInstalled(cfg) && !openClawNotInstalledLocally(cfg)
 	case "zeptoclaw":
-		return true
+		// Like OpenClaw, skip the loopback fleet address on a machine where
+		// discovery found no ZeptoClaw: it would dial ws://127.0.0.1:18789
+		// every 15 s for ever (GAP-0185).
+		return !(isLoopbackGatewayHost(cfg.Gateway.Host) && connector.CachedAgentNotFound(cfg.DataDir, "zeptoclaw"))
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
 	default:
@@ -6767,13 +6977,17 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
-	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	api := newAPIServer(s.startRulePacks, addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	s.startRulePacks = nil
 	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 	}
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
+	if set := api.guardrailProfileSet(); set != nil {
+		set.logProfileWarnings()
+	}
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward

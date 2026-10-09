@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -104,6 +105,9 @@ func (e *Env) managedDirs(account Account, loadCredential bool) []desiredDir {
 		{Path: l.SecretsDir, Mode: secretsMode, Owner: secretsOwner},
 		{Path: filepath.Dir(l.ManifestPath), Mode: 0o750, Owner: rootService},
 		{Path: l.DataDir, Mode: 0o700, Owner: service}, // the device identity key requires a private directory
+		// The ACP enrollment records. The hook enumerator unit can write
+		// only paths that exist when it starts (GAP-0697).
+		{Path: filepath.Join(l.DataDir, "acp"), Mode: 0o700, Owner: service},
 		{Path: l.GuardianAuthDir, Mode: 0o750, Owner: rootService},
 		{Path: l.LifecycleDir, Mode: 0o700, Owner: root},
 		{Path: l.LogDir, Mode: 0o750, Owner: service},
@@ -262,7 +266,7 @@ func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []stri
 			// State this lifecycle kept on a non-purge uninstall.
 			continue
 		}
-		if entries, err := os.ReadDir(e.P(dir)); err == nil && len(entries) > 0 {
+		if holdsState(e.P(dir)) {
 			candidates = append(candidates, dir)
 		}
 	}
@@ -289,6 +293,27 @@ func (e *Env) unmanagedLeftovers(services ServiceManager, channel string) []stri
 		}
 	}
 	sort.Strings(found)
+	return found
+}
+
+// holdsState reports whether dir holds anything but empty directories.
+// The tmpfiles.d entry of the rpm and deb creates empty state directories
+// (such as /var/lib/defenseclaw/acp) before the postinstall ensure runs;
+// they hold no machine state, so they must not trip the adoption guard.
+// Any file, symlink or unreadable entry counts as state.
+func holdsState(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			found = path != dir
+			return filepath.SkipAll
+		}
+		if !d.IsDir() {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
 	return found
 }
 

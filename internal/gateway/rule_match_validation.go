@@ -390,6 +390,9 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		return false
 	}
 	if start >= 0 && end >= start && end <= len(text) {
+		if gitUserEmailPlaceholder(text[:start], matchLower) {
+			return false
+		}
 		tail := strings.TrimLeft(text[end:], " \t\r\n\"'`")
 		if strings.HasPrefix(tail, ":") {
 			return false
@@ -410,6 +413,25 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		}
 	}
 	return true
+}
+
+// gitUserEmailPlaceholder reports a documentation-domain address given as
+// git's user.email, as git's own "Author identity unknown" hint prints it
+// (git config --global user.email "you@example.com"): setup text, not a
+// person's address. The hint usually arrives inside a JSON-encoded tool
+// response, where the quote before the address is escaped (\"), so the
+// backslash is trimmed along with the quotes.
+func gitUserEmailPlaceholder(before, email string) bool {
+	key := strings.TrimRight(strings.ToLower(before), " \t\"'=\\")
+	if !strings.HasSuffix(key, "user.email") {
+		return false
+	}
+	_, domain, _ := strings.Cut(email, "@")
+	switch domain {
+	case "example.com", "example.net", "example.org":
+		return true
+	}
+	return strings.HasSuffix(domain, ".example")
 }
 
 func emailDomainLooksLikeNumericHost(email string) bool {

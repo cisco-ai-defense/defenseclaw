@@ -49,12 +49,17 @@ func runAsTarget(target TargetCredentials, fn func() error) error {
 		}
 		return fn()
 	}
+	if target.AllowDisconnected {
+		return withWindowsEnterpriseTargetTokenImpersonation(sid, home, windowsEnterpriseSignedInTargetTokenResolver, fn)
+	}
 	return withWindowsEnterpriseTargetImpersonation(sid, home, fn)
 }
 
 func chmodOwnedPath(path string, mode os.FileMode) error {
 	return errEnterpriseHooksUnsupportedWindows
 }
+
+func tightenLooseUserHookConfig(string, int) error { return nil }
 
 func lchownInstallFootprint(_, _ int, _ string, _ connector.AgentPaths, _ []string) error {
 	return errEnterpriseHooksUnsupportedWindows

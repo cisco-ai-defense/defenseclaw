@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -58,6 +60,16 @@ func TestAuditExportManagedEnvironmentPointsAnAdministratorAtTheDeployment(t *te
 			t.Fatalf("%s = %q, want %q", key, got, value)
 		}
 	}
+	// enterprise acp enroll|verify|revoke get the same pins (GAP-0249).
+	withAuditExportManagedSeams(t, true, true)
+	if err := pinEnterpriseACPAdministratorEnv(enterpriseACPEnrollCmd); err != nil {
+		t.Fatalf("enterprise acp: %v", err)
+	}
+	for key, value := range want {
+		if got := os.Getenv(key); got != value {
+			t.Fatalf("enterprise acp: %s = %q, want %q", key, got, value)
+		}
+	}
 }
 
 // GAP-2039: a standard account's read-only managed view (AI Discovery,
@@ -101,5 +113,37 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 	err = writeWindowsEnterpriseDiscovery(io.Discard, "", false)
 	if commandExitCode(err) != 5 || !strings.HasPrefix(err.Error(), "the AI Discovery inventory of a managed computer") {
 		t.Fatalf("discovery = %v (exit %d)", err, commandExitCode(err))
+	}
+}
+
+// The rollback database option belongs to per-user and standalone installs,
+// while a managed audit export must use the deployment store.
+func TestAuditExportDBFlagAndManagedBoundary(t *testing.T) {
+	secure := &cobra.Command{Use: "export"}
+	registerAuditExportDBFlag(secure, true)
+	if secure.Flags().Lookup("db") != nil {
+		t.Fatal("Secure Client gained --db")
+	}
+	standalone := &cobra.Command{Use: "export"}
+	registerAuditExportDBFlag(standalone, false)
+	if standalone.Flags().Lookup("db") == nil {
+		t.Fatal("standalone lost --db")
+	}
+
+	withAuditExportManagedSeams(t, true, false)
+	previousDB := auditExportDB
+	auditExportDB = "previous/audit.db"
+	t.Cleanup(func() { auditExportDB = previousDB })
+	if err := auditExportPersistentPreRunE(nil, nil); commandExitCode(err) != 5 {
+		t.Fatalf("managed standard account with --db = %v, want elevation refusal", err)
+	}
+	auditExportCallerIsAdministrator = func() bool { return true }
+	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "not available on a managed deployment") {
+		t.Fatalf("managed administrator with --db = %v, want managed refusal", err)
+	}
+	auditExportManagedHost = func() bool { return false }
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "not available on a managed deployment") {
+		t.Fatalf("managed unix mode with --db = %v, want managed refusal", err)
 	}
 }

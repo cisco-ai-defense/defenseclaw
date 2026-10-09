@@ -53,7 +53,8 @@ def aibom() -> None:
     "categories",
     default=None,
     help=(
-        "Comma-separated categories to scan and show: skills,plugins,mcp,agents,rules,tools,models,memory. "
+        "Comma-separated categories to scan and show: "
+        "skills,plugins,mcp,agents,rules,tools,models,memory,ide_plugins. "
         "The others are not collected (JSON marks them \"collected\": false)."
     ),
 )
@@ -100,7 +101,7 @@ def scan(
             c = _CATEGORY_ALIASES.get(c, c)
             if c not in ALL_CATEGORIES:
                 # GAP-2399: an unknown category is a usage error, not "all".
-                valid = "skills, plugins, mcp, agents, rules, tools, models, memory"
+                valid = "skills, plugins, mcp, agents, rules, tools, models, memory, ide_plugins"
                 raise click.BadParameter(
                     f"unknown category {raw.strip()!r} (valid: {valid})",
                     param_hint="'--only'",
@@ -120,18 +121,42 @@ def scan(
     else:
         connectors = [None]
     if not connectors:
-        # Nothing to inventory: say so instead of printing nothing (GAP-2073).
+        if cats == {"ide_plugins"} and not connector_flag:
+            from defenseclaw.inventory.claw_inventory import attach_ide_plugins, format_ide_plugins_human
+
+            payload, note = _fetch_ide_plugins(app)
+            if payload is None or note:
+                raise click.ClickException(f"IDE plugins: {note or 'not collected'}")
+            inv: dict[str, object] = {"summary": {}, "ide_plugins": []}
+            attach_ide_plugins(inv, payload)
+            if as_json:
+                click.echo(json.dumps(inv, indent=2, sort_keys=True))
+            else:
+                format_ide_plugins_human(inv)
+            return
+        # Connector categories need a configured connector.
         from defenseclaw.commands import echo_no_connector
 
         echo_no_connector()
         return
 
+    # IDE extensions and plugins belong to the user, not to one connector:
+    # fetch them once from the gateway and attach them to the first BOM.
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(app.cfg) == "secure_client"
+    ide: tuple[dict | None, str] | None = None
+    if not secure_client and (cats is None or "ide_plugins" in cats):
+        ide = _fetch_ide_plugins(app)
+
     invs: list[dict] = []
     pending_telemetry: list[tuple[object, str, str]] = []
-    for c in connectors:
+    for index, c in enumerate(connectors):
         if len(connectors) > 1 and not as_json:
             ux.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
-        inv, pending = _scan_one_connector(app, c, cats, as_json, summary_only)
+        inv, pending = _scan_one_connector(
+            app, c, cats, as_json, summary_only, ide=ide if index == 0 else None,
+        )
         invs.append(inv)
         if pending is not None:
             pending_telemetry.append(pending)
@@ -172,12 +197,51 @@ def _scan_hints(cats: set[str] | None) -> list[str]:
     return [text for cat, text in _SCAN_HINTS if cat in cats]
 
 
+def _fetch_ide_plugins(app: AppContext) -> tuple[dict | None, str]:
+    """Best-effort IDE plugin inventory from the gateway: (payload, note).
+
+    A missing token, a stopped gateway or an older gateway yields no payload
+    and a one-line note; the rest of the BOM is unaffected.
+    """
+    import requests
+
+    from defenseclaw.commands.cmd_agent import _resolve_gateway_target
+    from defenseclaw.gateway import OrchestratorClient
+
+    try:
+        host, port, token = _resolve_gateway_target(
+            app, gateway_host=None, gateway_port=None, gateway_token_env=None,
+        )
+    except Exception:  # noqa: BLE001 - config trouble only skips this category.
+        return None, "not collected (the gateway settings could not be read)"
+    if not token:
+        return None, "not collected (no gateway token; IDE plugins come from the gateway)"
+    try:
+        payload = OrchestratorClient(host=host, port=port, token=token, timeout=5).ai_usage_ide_plugins_all()
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 404:
+            return None, "not collected (this gateway does not list IDE plugins yet)"
+        return None, f"not collected (gateway answered HTTP {status})"
+    except (requests.RequestException, ValueError):
+        return None, "not collected (the gateway is not running; start it with 'defenseclaw-gateway start')"
+    if not isinstance(payload, dict):
+        return None, "not collected (unexpected gateway answer)"
+    if payload.get("enabled") is False:
+        return payload, "not collected (AI discovery is disabled)"
+    if payload.get("scope") == "off":
+        return payload, "not collected (ai_discovery.ide_inventory is off)"
+    return payload, ""
+
+
 def _scan_one_connector(
     app: AppContext,
     connector: str | None,
     cats: set[str] | None,
     as_json: bool,
     summary_only: bool,
+    *,
+    ide: tuple[dict | None, str] | None = None,
 ) -> tuple[dict, tuple[object, str, str] | None]:
     """Build, enrich, log and render the inventory for a single connector.
 
@@ -226,6 +290,12 @@ def _scan_one_connector(
             ux.warn(f"{len(errors)} connector inventory command(s) failed")
 
     stamp_aibom_inventory(inv, app.cfg)
+    if ide is not None:
+        # After the audit digest and findings: the gateway already reports
+        # IDE plugin changes itself, so they do not churn the AIBOM record.
+        from defenseclaw.inventory.claw_inventory import attach_ide_plugins
+
+        attach_ide_plugins(inv, *ide)
     if as_json:
         # The caller aggregates every connector's inventory and prints once
         # (a bare object for one connector, a list for several), so just
@@ -233,6 +303,10 @@ def _scan_one_connector(
         return inv, pending_telemetry
 
     format_claw_aibom_human(inv, summary_only=summary_only, categories=cats)
+    if ide is not None:
+        from defenseclaw.inventory.claw_inventory import format_ide_plugins_human
+
+        format_ide_plugins_human(inv)
     return inv, pending_telemetry
 
 

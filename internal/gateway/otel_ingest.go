@@ -875,7 +875,8 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 
 	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
 	sessionID := codexNotifySessionID(p)
-	ctx := ContextWithSessionID(r.Context(), sessionID)
+	ctx := withSessionAgentInstance(ContextWithSessionID(r.Context(), sessionID), sessionID)
+	agentID := a.codexNotifyAgentID(ctx, sessionID)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -884,6 +885,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 		Actor:     "codex",
 		Details:   details,
 		Severity:  severity,
+		AgentID:   agentID,
 		AgentName: "codex",
 		SessionID: sessionID,
 		Connector: "codex",
@@ -909,26 +911,10 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 	recordCodexNotifyV8(ctx, metricRuntime, kind, statusLabel, result, p.TurnID)
 
-	// Fold the notify event into the unified hook collector as a
-	// synthetic Stop event. The native codex CLI emits
-	// "agent-turn-complete" notifications outside the PreToolUse /
-	// PostToolUse stream, so without this fold the unified hook
-	// collector would have no visibility into them — breaking the
-	// "every connector emits the same hook metric set" invariant
-	// that downstream dashboards (defenseclaw.connector.hook.*) rely
-	// on for codex.
-	//
-	// The synthetic translation runs only when the parse succeeded
-	// (parseErr == nil) — a malformed payload should not invent a
-	// Stop event; the existing audit + metric path already captured
-	// the malformed marker above.
-	//
-	// handleAgentHookSynthetic emits a separate audit row under
-	// audit.ActionConnectorHookSynthetic so the canonical
-	// `codex.notify.<sanitized-type>` row count (one per inbound
-	// notify) is preserved — see the function godoc and
-	// TestCodexNotify_PersistsDynamicSuffixAction.
-	if parseErr == nil {
+	// Secure Client keeps folding a parsed notify into the unified hook
+	// collector as a synthetic Stop event: a connector-hook-synthetic row
+	// and its hook records (issue #1092).
+	if parseErr == nil && a.managedAIDOnly() {
 		synthetic := codexNotifyToAgentHookRequest(p, body)
 		a.handleAgentHookSynthetic(ctx, "codex", synthetic, body)
 	}
@@ -981,6 +967,17 @@ func codexNotifySessionID(p codexNotifyPayload) string {
 		return p.ThreadID
 	}
 	return p.TurnID
+}
+
+// codexNotifyAgentID is the root agent of the notify's thread: the ID the
+// correlation ledger mints for the Codex session and its hook rows carry,
+// so the notify row and its model records join them on agent_id.
+func (a *APIServer) codexNotifyAgentID(ctx context.Context, sessionID string) string {
+	// Secure Client keeps its notify records without an agent (issue #1092).
+	if sessionID == "" || a.managedAIDOnly() {
+		return ""
+	}
+	return agentNodeID(agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID), "codex", sessionID, "root")
 }
 
 func normalizeCodexNotifyPayloadAliases(p *codexNotifyPayload, body []byte) map[string]any {
@@ -1036,12 +1033,17 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		SessionID:  sessionID,
 		TurnID:     turnID,
 		PromptID:   promptID,
+		AgentID:    a.codexNotifyAgentID(ctx, sessionID),
 		AgentName:  "codex",
 		AgentType:  "codex",
 		UserID:     user.ID,
 		UserIDKind: user.IDKind,
 		UserName:   user.Name,
+		// The notify webhook is no hook, so it joins the session's agent
+		// identity from the hook path (GAP-0203).
+		AgentIdentityID: agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
 	}
+	meta = a.joinCodexNotifyLineage(meta)
 
 	if prompt := codexNotifyPrompt(payload); prompt != "" {
 		emittedPromptID := a.emitLLMPromptEventV8(ctx, meta, prompt, nil)
@@ -1062,6 +1064,51 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		spanMeta.Source = "codex"
 		a.emitHookLLMSpan(ctx, spanMeta, response)
 	}
+}
+
+// joinCodexNotifyLineage gives a notify model log the lineage the hook path
+// retained for its session (root and parent session, agent root, parent and
+// depth, lifecycle), so the notify pair joins the session's hook rows
+// (GAP-0203). The user's identity facts are taken only when the hook path
+// saw the same user. Secure Client notify logs carry no agent and are left
+// as they are.
+func (a *APIServer) joinCodexNotifyLineage(meta llmEventMeta) llmEventMeta {
+	if a == nil || meta.AgentID == "" || meta.SessionID == "" {
+		return meta
+	}
+	snapshot, exact := a.hookLifecycleSnapshot("codex", meta.SessionID, meta.AgentID)
+	if !exact {
+		// A sub-agent thread's hooks name its own agent node.
+		var ok bool
+		if snapshot, ok = a.hookLifecycleSnapshot("codex", meta.SessionID, ""); !ok {
+			return meta
+		}
+	}
+	// Hook state retained for a named user joins only a notify from that
+	// same user, never another or an unnamed one (GAP-1017). State kept
+	// without account facts still joins its session; identity facts below
+	// always need the same named user.
+	if snapshot.UserID != "" && meta.UserID != snapshot.UserID {
+		return meta
+	}
+	if !exact {
+		meta.AgentID = snapshot.AgentID
+	}
+	meta.RootAgentID = firstNonEmpty(snapshot.RootAgentID, snapshot.AgentID)
+	meta.ParentAgentID = snapshot.ParentAgentID
+	meta.LineageProvenance = snapshot.LineageProvenance
+	meta.RootSessionID = firstNonEmpty(snapshot.RootSessionID, snapshot.SessionID)
+	meta.ParentSessionID = snapshot.ParentSessionID
+	meta.AgentDepth = snapshot.AgentDepth
+	meta.LifecycleID = snapshot.LifecycleID
+	meta.ExecutionID = snapshot.ExecutionID
+	meta.SessionSource = snapshot.SessionSource
+	meta.SessionResumed = snapshot.SessionResumed
+	if meta.UserID != "" && meta.UserID == snapshot.UserID {
+		meta.UserEmail = firstNonEmpty(meta.UserEmail, snapshot.UserEmail)
+		meta.Identity = snapshot.Identity
+	}
+	return meta
 }
 
 func codexNotifyPrompt(payload map[string]any) string {

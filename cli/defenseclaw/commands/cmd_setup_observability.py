@@ -216,8 +216,13 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     \b
       # Tag this computer's telemetry (host.name comes from the OS)
       defenseclaw setup observability add otlp --non-interactive \\
-          --endpoint 127.0.0.1:4317 --protocol grpc \\
+          --endpoint 10.0.0.5:4317 --protocol grpc \\
           --allow-private-networks --plaintext --environment lab-win2
+    \b
+      # Feed the bundled Grafana boards on another computer (plain otlp
+      # exports canonical metric labels the boards do not read)
+      defenseclaw setup observability add local-otlp --non-interactive \\
+          --endpoint stack-host:4317
     """
     preset = resolve_preset(preset_id.lower())
     token_source = click.get_current_context().get_parameter_source("token_value")
@@ -321,7 +326,13 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             "add --endpoint <https://<cluster>/otel/traces>"
         )
     if not dry_run:
-        click.echo(f"  Test it with: defenseclaw setup observability test {destination_name}")
+        if preset.id in {"splunk-hec", "splunk-enterprise"}:
+            click.echo(
+                f"  Test event acceptance with: defenseclaw observability destination test "
+                f"{destination_name} --write-probe"
+            )
+        else:
+            click.echo(f"  Test it with: defenseclaw setup observability test {destination_name}")
 
     if not dry_run:
         # The destination is already saved, and the gateway loads it when it
@@ -661,6 +672,12 @@ def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[An
     path = config_path_for_data_dir(data_dir)
     source = load_validate_v8(path.read_bytes(), source_name=str(path)).source
     attributes = ((source.get("observability") or {}).get("resource") or {}).get("attributes") or {}
+    current = attributes.get("deployment.environment.name") if isinstance(attributes, dict) else None
+    if current and current != value:
+        raise ValueError(
+            f"--environment is gateway-wide and applies to all destinations; "
+            f"it is already {current!r}. Edit the gateway resource tag explicitly to change it."
+        )
     if isinstance(attributes, dict) and "deployment.environment" in attributes:
         mutations.append(V8YAMLMutation.set((*prefix, "deployment.environment"), value))
     return mutations

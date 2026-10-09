@@ -316,6 +316,14 @@ your own Codex configuration does not change.
   `OPENAI_API_KEY`), run `codex app-server daemon restart` from a shell that
   has the new key, then open Codex again. The request fails before any tool
   call, so DefenseClaw's hooks are not involved.
+- **The first prompt of a new session is recorded twice.** Codex 0.156 starts
+  a second, internal session during the first turn of a new session. It has its
+  own session id and no transcript file, and it fires `SessionStart`,
+  `UserPromptSubmit` and `Stop` for the same prompt. DefenseClaw registers one
+  hook source and evaluates each session, so the audit log, alerts and
+  telemetry show those three decisions once per session, two rows with
+  different `defenseclaw.session.root.id` values. Later turns are recorded
+  once. Count prompts by session and turn id rather than by row.
 - **Connections to OpenAI or the model provider when the gateway starts
   (Windows).** Each gateway start or restart with the Codex connector
   enabled runs Codex's app-server once to read Codex's effective

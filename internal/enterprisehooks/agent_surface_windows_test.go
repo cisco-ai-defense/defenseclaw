@@ -16,6 +16,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -111,5 +112,30 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	impersonated, rowContext.sessionActive = 0, false
 	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "" || impersonated != 0 {
 		t.Fatalf("signed-out version = %q, impersonated %d times", got, impersonated)
+	}
+}
+
+// A native claude.exe whose build Claude Code has not recorded yet (it
+// writes .local\share\claude\versions on first start) cannot be enrolled,
+// and the account is reported with what is missing instead of being left
+// without a row and without a reason (GAP-0597).
+func TestWindowsStandaloneNativeClaudeWithoutRecordedBuildSaysWhatIsMissing(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "claude.exe"), []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reported []UnprotectedAgent
+	rowContext := windowsStandaloneRowContext{sessionActive: true, user: "ecw1", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	row := ManifestTarget{SID: "S-1-5-21-1000000001-1000000002-1000000003-1101", UserHome: home, Connector: "claudecode"}
+	if applyStandaloneRowStateFor(&row, map[string]ManifestTarget{}, nil, rowContext) {
+		t.Fatal("a launcher without a recorded build was enrolled")
+	}
+	if len(reported) != 1 || !strings.Contains(reported[0].Reason, filepath.Join(bin, "claude.exe")) ||
+		!strings.Contains(reported[0].Reason, filepath.Join(home, ".local", "share", "claude", "versions")) {
+		t.Fatalf("reported %+v, want the launcher and the missing versions folder named", reported)
 	}
 }

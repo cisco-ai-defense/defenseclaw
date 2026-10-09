@@ -37,11 +37,7 @@ The merge gate covers:
   digest-pinned official `3000.4.25` Windows archive solely to retain the
   product's exact fixed-path, Authenticode-signer, and version admission; it
   does not log in, run an interactive client session, or claim live-client
-  evidence;
-- a separate required packaged OmniGent 0.7.0 native-degraded cell that
-  exercises its official server and SDK policy path as a disposable standard
-  user without upgrading that evidence to authenticated-client or full-sandbox
-  coverage; and
+  evidence; and
 - the Amp cell covers setup, observe/action
   allow/block behavior, audit correlation, gateway-generated connector
   telemetry, bounded timeout handling, teardown, and cleanup. It additionally

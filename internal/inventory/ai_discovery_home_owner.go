@@ -57,18 +57,62 @@ func brokeredProcessAccounts() map[int]ProcessAccount {
 	return lookup()
 }
 
+// discoveryAccountName names the account of a profile owner; tests replace it.
+var discoveryAccountName = platformDiscoveryAccountName
+
+// refreshHomeOwnerNames names each profile's account again at the start of
+// a scan. An account renamed while the gateway runs (Rename-LocalUser keeps
+// its SID and profile folder) otherwise kept the name it had when the
+// gateway started in discovery and the IDE inventory, and --user with the
+// new name found none of its rows, until a restart (GAP-0702).
+func (s *ContinuousDiscoveryService) refreshHomeOwnerNames() {
+	if s.opts.SecureClient {
+		// Secure Client keeps main's names, read once at start.
+		return
+	}
+	for i := range s.opts.homeOwners {
+		owner := &s.opts.homeOwners[i]
+		if name := strings.TrimSpace(discoveryAccountName(owner.UserID, owner.Home)); name != "" {
+			owner.UserName = name
+		}
+	}
+}
+
 // homeOwnerForAccount returns the one profile owner whose account is user.
 func (s *ContinuousDiscoveryService) homeOwnerForAccount(user string) (discoveryHomeOwner, bool) {
-	user = strings.TrimSpace(user[strings.LastIndex(user, `\`)+1:])
 	var found discoveryHomeOwner
 	matches := 0
 	for _, owner := range s.opts.homeOwners {
-		if user != "" && owner.Home != "" && strings.EqualFold(strings.TrimSpace(owner.UserName), user) {
+		if owner.Home != "" && processAccountMatchesOwner(user, owner, s.opts.SecureClient) {
 			found = owner
 			matches++
 		}
 	}
+	// A short brokered name cannot distinguish an excluded domain account
+	// from an enrolled local account with the same name.
+	if !s.opts.SecureClient {
+		for _, owner := range s.opts.excludedOwners {
+			if processAccountMatchesOwner(user, owner, false) {
+				matches++
+			}
+		}
+	}
 	return found, matches == 1
+}
+
+func processAccountMatchesOwner(user string, owner discoveryHomeOwner, secureClient bool) bool {
+	user = strings.TrimSpace(user)
+	domain := ""
+	if i := strings.LastIndex(user, `\`); i >= 0 {
+		domain, user = user[:i], user[i+1:]
+	}
+	if user == "" || !strings.EqualFold(strings.TrimSpace(owner.UserName), user) {
+		return false
+	}
+	// An owner record without a domain predates domain capture: match it by
+	// name, as before, so a qualified process account still attributes.
+	ownerDomain := strings.TrimSpace(owner.Domain)
+	return secureClient || domain == "" || ownerDomain == "" || strings.EqualFold(ownerDomain, domain)
 }
 
 // discoveryHomeOwner names the account that owns one profile root of a
@@ -80,6 +124,9 @@ type discoveryHomeOwner struct {
 	Home     string
 	UserID   string // the account's SID
 	UserName string
+	// Domain is the account's domain (the computer's name for a local
+	// account), for enterprise.enrollment entries written DOMAIN\name.
+	Domain string
 }
 
 // homeOwnerForPath returns the owner of the profile root that holds path.
@@ -129,15 +176,12 @@ func (s *ContinuousDiscoveryService) stampHomeOwner(sig *AISignal, path string) 
 	}
 }
 
-// attributeProcessOwners gives each process the account whose profile holds
-// its executable. The service cannot open other accounts' processes, so the
-// token owner is unknown, but the image path is not: per-user agents run
-// from the user's profile (~\.local\bin\claude.exe, ~\.codex\...\codex.exe).
-// An agent installed machine-wide (VS Code's copilot-runtime.exe under
-// Program Files) takes the profile owner of its session account, or of the
-// account the sensor helper reads from its token (GAP-2043).
-// A node process outside every profile takes the owner of the nearest
-// attributed ancestor, the agent that launched it.
+// attributeProcessOwners uses the process session SID or a brokered token
+// account for standalone managed Windows signals. The executable path is only
+// evidence of where a binary lives; another user may run it, so it cannot
+// establish the process owner or a verified directory identity. Secure Client
+// keeps origin/main's image-path attribution. Node helpers inherit only an
+// already attributed parent.
 func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo) {
 	if len(s.opts.homeOwners) == 0 {
 		return
@@ -145,9 +189,12 @@ func (s *ContinuousDiscoveryService) attributeProcessOwners(procs []processInfo)
 	byPID := make(map[int]int, len(procs))
 	for i := range procs {
 		byPID[procs[i].PID] = i
-		owner, ok := s.homeOwnerForPath(procs[i].Image)
-		if !ok {
-			owner, ok = s.homeOwnerForSID(procs[i].SessionOwnerID)
+		owner, ok := s.homeOwnerForSID(procs[i].SessionOwnerID)
+		if s.opts.SecureClient {
+			owner, ok = s.homeOwnerForPath(procs[i].Image)
+			if !ok {
+				owner, ok = s.homeOwnerForSID(procs[i].SessionOwnerID)
+			}
 		}
 		if ok {
 			procs[i].OwnerID, procs[i].OwnerName = owner.UserID, owner.UserName
@@ -194,6 +241,14 @@ func (s *ContinuousDiscoveryService) discoveryAccessSkipped(err error) bool {
 		return false
 	}
 	if macOSPrivacyDenied(runtime.GOOS, err) {
+		var pathErr *fs.PathError
+		if s != nil && !s.opts.SecureClient && errors.As(err, &pathErr) {
+			s.tccSkipped = true
+			if s.tccSkippedPaths == nil {
+				s.tccSkippedPaths = make(map[string]bool)
+			}
+			s.tccSkippedPaths[hashPath(filepath.Clean(pathErr.Path))] = true
+		}
 		return true
 	}
 	return s != nil && len(s.opts.homeOwners) > 0 && errors.Is(err, fs.ErrPermission)

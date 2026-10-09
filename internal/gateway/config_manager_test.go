@@ -34,9 +34,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -74,6 +77,45 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	}
 	if got := mgr.Current().Guardrail.Mode; got != "action" {
 		t.Fatalf("current mode = %q, want action", got)
+	}
+}
+
+// GAP-0264: the startup reconcile does not parse, validate and compile
+// config.yaml again while the file still holds the bytes the gateway booted
+// from; once they changed it reloads.
+func TestConfigManagerStartupReconcileSkipsAnUnchangedSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		return nil
+	})
+	loads := 0
+	load := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, data []byte) (*config.Config, error) {
+		loads++
+		return load(source, data)
+	}
+	mgr.setStartupSource(path, raw)
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fsw.Close() })
+	if err := mgr.reconcileStartup(t.Context(), fsw); err != nil || loads != 0 {
+		t.Fatalf("reconcile of the boot source: err %v, %d loads, want none", err, loads)
+	}
+	writeConfigForManagerTest(t, path, dir, "action")
+	if err := mgr.reconcileStartup(t.Context(), fsw); err != nil || loads == 0 || mgr.Current().Guardrail.Mode != "action" {
+		t.Fatalf("reconcile of a changed source: err %v, %d loads, mode %q", err, loads, mgr.Current().Guardrail.Mode)
 	}
 }
 
@@ -726,6 +768,21 @@ func TestDiffConfigsMarksACPChangedHotReloadable(t *testing.T) {
 	}
 }
 
+// GAP-0104: an ai_discovery edit reloads hot (GAP-0047) except under Secure
+// Client, which keeps the restart of main (issue #1092).
+func TestDiffConfigsAIDiscoveryRestartOnlyForSecureClient(t *testing.T) {
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		oldCfg := config.DefaultConfig()
+		oldCfg.DeploymentMode, oldCfg.Enterprise.Profile = managed.DeploymentModeManagedEnterprise, profile
+		newCfg := cloneConfig(oldCfg)
+		newCfg.AIDiscovery.Enabled = !oldCfg.AIDiscovery.Enabled
+		diff := diffConfigs(oldCfg, newCfg)
+		if got, want := slices.Contains(diff.RestartRequired, "ai_discovery"), profile == managed.ProfileSecureClient; got != want {
+			t.Fatalf("%s: restart_required = %v, ai_discovery restart %t, want %t", profile, diff.RestartRequired, got, want)
+		}
+	}
+}
+
 func TestDiffConfigsMarksRoutingRestartRequired(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)
@@ -976,13 +1033,13 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	api := NewAPIServer("", nil, nil, nil, nil, cloneConfig(boot))
 	api.SetConfigRuntime(nil, func() *config.Config { return live })
 
-	if got := api.codexMode(); got != "action" {
+	if got := api.codexMode(context.Background()); got != "action" {
 		t.Fatalf("Codex mode = %q, want published action", got)
 	}
-	if got := api.claudeCodeMode(); got != "action" {
+	if got := api.claudeCodeMode(context.Background()); got != "action" {
 		t.Fatalf("Claude Code mode = %q, want published action", got)
 	}
-	rows := api.connectorModesSummary()
+	rows := api.connectorModesSummary(context.Background())
 	if len(rows) != 2 {
 		t.Fatalf("connector mode rows = %d, want 2: %#v", len(rows), rows)
 	}
@@ -1044,6 +1101,16 @@ func TestAIDiscoveryRestartPredicateIncludesLiveManagedModeTransitions(t *testin
 				t.Fatal("deployment-mode-only transition did not restart AI discovery")
 			}
 		})
+	}
+	// A hot exclude_users apply on the standalone profile rebuilds the scan,
+	// so the excluded account leaves discovery at the next scan (GAP-1024).
+	oldCfg := config.DefaultConfig()
+	oldCfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	oldCfg.Enterprise.Profile = managed.ProfileStandalone
+	newCfg := *oldCfg
+	newCfg.Enterprise.Enrollment.ExcludeUsers = []string{"dcw-qv"}
+	if !aiDiscoveryNeedsRestart(oldCfg, &newCfg) {
+		t.Fatal("an exclude_users change did not restart AI discovery")
 	}
 }
 

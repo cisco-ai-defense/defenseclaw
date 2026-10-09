@@ -167,6 +167,7 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
+    _rule_pack_label,
     format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
@@ -239,6 +240,17 @@ def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
     transport = getattr(process, "_transport", None)
     if transport is not None:
         transport.close()
+
+
+def _inventory_scan_args(
+    base_args: tuple[str, ...], config: object | None
+) -> tuple[str, ...]:
+    """Use IDE-only mode only when the runtime has no active connector."""
+    try:
+        connectors = config.active_connectors() if config is not None else ()
+    except (AttributeError, ValueError, RuntimeError):
+        connectors = ()
+    return base_args if connectors else ("aibom", "scan", "--json", "--only", "ide_plugins")
 
 
 def _no_connector_hint(stderr: bytes) -> str:
@@ -1559,6 +1571,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # selected on behalf of the app so delayed sync messages cannot bounce
         # the operator back to an older tab after rapid mouse clicks.
         self._suppressed_tab_activations: dict[str, int] = {}
+        # When the guardrail profile for this account was last asked for.
+        self._guardrail_profile_at = float("-inf")
+        self._guardrail_profile_scope = ""
+        # The Inventory sub-tab the button bar last scrolled to.
+        self._inventory_bar_subtab = ""
         # Auto-dismissing toast queue. Mirrors the Go TUI's
         # ToastManager: cap of MAX_TOASTS (3), TTLs of 4s/4s/6s/8s for
         # info/success/warn/error. The widget itself is mounted in
@@ -1679,6 +1696,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     yield Button("Tools", id="inventory-tab-tools", compact=True)
                     yield Button("Models", id="inventory-tab-models", compact=True)
                     yield Button("Memory", id="inventory-tab-memory", compact=True)
+                    yield Button("IDE plugins", id="inventory-tab-ide_plugins", compact=True)
                     yield Button("All scope", id="inventory-scope-all", compact=True)
                     yield Button("Fast", id="inventory-scope-fast", compact=True)
                     yield Button("Refresh", id="inventory-refresh", compact=True)
@@ -4972,6 +4990,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("h/l", "Switch sub-tab (Tab moves to the next panel)"),
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
                 ("o", "Toggle a faster scan of skills and plugins only"),
                 ("r", "Scan inventory"),
@@ -5168,6 +5187,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.body_text
         if self.active_panel == "inventory":
             self._sync_catalog_connector_filters()
+            # The IDE plugins table fits its cells to the terminal width.
+            self.inventory_model.set_size(
+                int(getattr(self.size, "width", 0) or 0), int(getattr(self.size, "height", 0) or 0)
+            )
             self._table_columns = self.inventory_model.data_table_columns()
             self._table_rows = self.inventory_model.data_table_rows()
             empty = self.inventory_model.empty_state()
@@ -5631,6 +5654,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _sync_inventory_controls(self) -> None:
         for tab in self.inventory_model.subtab_info():
             self._set_button_active(f"#inventory-tab-{tab.subtab}", tab.active)
+        # At 80 columns the bar scrolls sideways and IDE plugins, All scope,
+        # Fast and Refresh sat behind "… more" (GAP-0020). Bring the active
+        # sub-tab into view when it changes; a manual scroll stays put.
+        if self._inventory_bar_subtab != self.inventory_model.active_sub:
+            self._inventory_bar_subtab = self.inventory_model.active_sub
+            self.call_after_refresh(self._scroll_inventory_bar_to_active)
         self._set_button_active("#inventory-scope-all", not bool(self.inventory_model.category_scope))
         self._set_button_active("#inventory-scope-fast", self.inventory_model.is_fast_scan())
         active_filter = self.inventory_model.filter or "all"
@@ -5986,6 +6015,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         model.set_filter(value)
         self._render_chrome()
+
+    def _scroll_inventory_bar_to_active(self) -> None:
+        try:
+            bar = self.query_one("#inventory-controls", Horizontal)
+            button = self.query_one(f"#inventory-tab-{self.inventory_model.active_sub}", Button)
+        except NoMatches:
+            return
+        # Leave a fully visible tab alone; otherwise put it at the left edge,
+        # which at the end of the bar shows the last buttons whole.
+        region = button.virtual_region
+        left = bar.scroll_x
+        if not (left <= region.x and region.right <= left + bar.scrollable_content_region.width):
+            bar.scroll_to(x=region.x, animate=False)
+        self.call_after_refresh(self._mark_overflowing_controls)
 
     def _set_button_active(self, selector: str, active: bool) -> None:
         try:
@@ -10479,6 +10522,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         filter_text = (
             f"  [{TOKENS.text_muted}]showing:[/] {self.inventory_model.filter}" if self.inventory_model.filter else ""
         )
+        if (self.inventory_model.active_sub == "ide_plugins"
+                and self.inventory_model.inventory is not None
+                and self.inventory_model.inventory.ide_partial):
+            scan_scope += " · partial installation"
+
         # 8.13: surface the shared connector filter chip (multi-connector
         # installs) so it's explicit which connector's inventory is shown and
         # how to change it. Empty for single-connector installs.
@@ -10830,6 +10878,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel == "setup":
             return self._setup_view()
         if active_panel == "registries" and self.registries_model.detail_open:
+            return "detail"
+        if active_panel == "inventory" and self.inventory_model.detail_open:
             return "detail"
         return ""
 
@@ -11851,6 +11901,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if key == "m" and len(self._active_connector_names()) > 1:
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
+            if self.inventory_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the card shows two of an IDE plugin's eleven lines
+                # and no key reached the rest (GAP-0090).
+                return self._scroll_detail_panel(key)
             action = self._handle_inventory_key(key)
             return self._apply_inventory_action(action)
 
@@ -13836,7 +13890,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             await self._load_inventory_merged(names, announce=announce)
             return
         self.inventory_model.show_connector_column = False
+        # The Overview roster is empty for both zero and one connector; use
+        # the runtime config to decide whether an IDE-only scan is needed.
         intent = self.inventory_model.load_intent()
+        intent = replace(intent, args=_inventory_scan_args(intent.args, self.config))
         loading = intent.hint or "Loading inventory..."
         if announce and self.active_panel == "inventory":
             self._set_status(loading)
@@ -13863,6 +13920,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.inventory_model.message = hint
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
+        # After the inventory is on screen: this call may wait on the gateway.
+        await self._load_agent_identities()
+        self._render_chrome()
+
+    async def _load_agent_identities(self) -> None:
+        """Add stable agent ids to the Agents sub-tab, quietly.
+
+        ``defenseclaw agent identities`` is newer than this panel; when it is
+        missing or fails the Agents sub-tab simply shows the inventory rows.
+        """
+        intent = self.inventory_model.identities_intent()
+        try:
+            returncode, stdout, _stderr = await _communicate_captured(intent.binary, intent.args)
+        except OSError:
+            self.inventory_model.apply_agent_identities(None)
+            return
+        self.inventory_model.apply_agent_identities(stdout.decode(errors="replace") if returncode == 0 else None)
 
     async def _load_inventory_merged(self, names: list[str], *, announce: bool = True) -> None:
         """Inventory every active connector and merge the snapshots.
@@ -13895,6 +13969,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.inventory_model.message = "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
+        self._render_chrome()
+        # After the inventory is on screen: this call may wait on the gateway.
+        await self._load_agent_identities()
         self._render_chrome()
 
     async def _load_runtime_model(self) -> None:
@@ -15089,6 +15166,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         finally:
             self._ai_usage_poll_running = False
 
+    async def _refresh_guardrail_profile(self) -> None:
+        """Ask, at most once a minute, which guardrail profile decides for you."""
+
+        now = monotonic()
+        connector = self._connector_filter()
+        if now - self._guardrail_profile_at < 60 and connector == self._guardrail_profile_scope:
+            return
+        self._guardrail_profile_at = now
+        self._guardrail_profile_scope = connector
+        from defenseclaw.gateway import current_user_guardrail_profile
+
+        try:
+            result = await asyncio.to_thread(current_user_guardrail_profile, self.config, connector=connector)
+        except Exception:  # noqa: BLE001 - the profile line is informational.
+            result = None
+        self.overview_model.set_guardrail_profile(result, connector)
+
     async def _poll_health(self) -> None:
         result = await asyncio.to_thread(_fetch_gateway_health, self.config)
         # Compatibility for tests/extensions that replace the fetcher with
@@ -15108,6 +15202,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if snapshot is not None:
             self.overview_model.set_health(snapshot)
             self._propagate_connector(snapshot)
+            await self._refresh_guardrail_profile()
         # Mirror Go: clear the queued-restart banner once the gateway
         # has actually restarted (its StartedAt moved). Without this
         # the banner sticks around forever even though the restart
@@ -16209,7 +16304,6 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         guardrail_rule_pack_dir=effective_rule_pack_dir,
         guardrail_port=int(getattr(guardrail, "port", 0) or 0),
         guardrail_model=str(getattr(guardrail, "model", "") or ""),
-        guardrail_strategy=str(getattr(guardrail, "strategy", "") or "default"),
         guardrail_judge_enabled=bool(getattr(guardrail, "judge_enabled", False)),
         guardrail_judge_model=str(getattr(guardrail, "judge_model", "") or ""),
         hilt_enabled=bool(getattr(effective_hilt, "enabled", False)),
@@ -17017,7 +17111,7 @@ def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) ->
     if cfg is None:
         return "unknown"
     mode = cfg.guardrail_mode or "observe"
-    scanner = cfg.guardrail_strategy or "default"
+    rule_pack = _rule_pack_label(cfg.guardrail_rule_pack_dir) or "default"
     # Multi-connector: each connector can carry its own rule pack (and thus
     # its own block threshold), so naming one global pack would be wrong.
     # Detect whether the connectors actually diverge; if they do, point the
@@ -17027,12 +17121,12 @@ def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) ->
         modes = {m for _conn, m in cfg.connector_modes if m}
         if len(packs) > 1 or len(modes) > 1:
             return "per-connector (see roster)"
-        only_pack = next(iter(packs)) if packs else scanner
+        only_pack = next(iter(packs)) if packs else rule_pack
         only_mode = next(iter(modes)) if modes else mode
         return f"all connectors: {only_mode} ({only_pack})"
     if mode == "action":
-        return f"action: block CRIT, alert MED+ ({scanner})"
-    return f"balanced: block CRIT, alert MED+ ({scanner})"
+        return f"action: block CRIT, alert MED+ ({rule_pack})"
+    return f"balanced: block CRIT, alert MED+ ({rule_pack})"
 
 
 def _enforcement_label(cfg: OverviewConfig | None) -> str:

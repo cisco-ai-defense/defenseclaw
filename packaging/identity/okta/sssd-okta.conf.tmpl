@@ -1,0 +1,86 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+#
+# Managed by DefenseClaw packaging/identity/okta/install-sssd-okta.sh.
+# The installer refuses a rerun if another SSSD domain was added. Merge
+# Okta changes manually when this host also serves another domain. SSSD reads Okta users and groups through the Okta LDAP
+# Interface (ldaps://<org>.ldap.okta.com:636).
+#
+# This file was run on RHEL 9.8 against an Okta org (SSSD 2.9.8 with the
+# ldap_use_ppolicy backport) and read with sssctl config-check. The line
+# marked for the user principal name is kept only with --map-upn.
+
+[sssd]
+services = nss, pam, ifp
+domains = @DOMAIN@
+
+[nss]
+filter_users = root
+# Include every local /etc/group name at render time, plus common privileged names.
+filter_groups = @FILTER_GROUPS@
+
+[pam]
+
+[ifp]
+user_attributes = @IFP_ATTRS@
+
+[domain/@DOMAIN@]
+id_provider = ldap
+auth_provider = ldap
+chpass_provider = none
+access_provider = simple
+sudo_provider = none
+autofs_provider = none
+simple_allow_groups = @ALLOW_GROUP@
+
+ldap_uri = @LDAP_URI@
+ldap_tls_reqcert = demand
+ldap_tls_cacert = @CA_BUNDLE@
+ldap_referrals = false
+# Okta refuses anonymous operations (LDAP error 50), including the root DSE
+# read, so SSSD reads it after the bind.
+ldap_read_rootdse = authenticated
+# Okta answers the password-policy request control with a response control
+# that has no value. SSSD 2.9 treats that as a failed bind. The option needs
+# SSSD 2.10 or later, or an SSSD 2.9 build with the upstream change.
+ldap_use_ppolicy = false
+ldap_network_timeout = 10
+ldap_opt_timeout = 20
+ldap_search_timeout = 20
+
+# The bind user needs a custom Okta admin role that can read users and
+# groups (okta.users.read and okta.groups.read).
+ldap_default_bind_dn = @BIND_DN@
+ldap_default_authtok_type = password
+ldap_default_authtok = @BIND_PASSWORD@
+
+ldap_search_base = @BASE_DN@
+ldap_user_search_base = ou=users,@BASE_DN@
+ldap_group_search_base = ou=groups,@BASE_DN@
+
+# Okta serves inetOrgPerson users and groupOfUniqueNames groups. The POSIX
+# values are Okta profile attributes that carry their RFC 2307 names.
+ldap_schema = rfc2307bis
+ldap_id_mapping = false
+ldap_user_object_class = inetOrgPerson
+ldap_user_name = unixUsername
+ldap_user_uid_number = uidNumber
+ldap_user_gid_number = gidNumber
+ldap_user_home_directory = homeDirectory
+ldap_user_shell = loginShell
+ldap_user_gecos = cn
+ldap_user_uuid = entryUUID
+ldap_user_extra_attrs = mail, uid
+@UPN@ldap_user_principal = uid
+ldap_group_object_class = groupOfUniqueNames
+ldap_group_name = cn
+ldap_group_member = uniqueMember
+ldap_group_gid_number = gidNumber
+ldap_group_uuid = entryUUID
+ldap_pwd_policy = none
+min_id = @ID_MIN@
+max_id = @ID_MAX@
+
+cache_credentials = false
+enumerate = false
+entry_cache_timeout = @ENTRY_CACHE_TIMEOUT@

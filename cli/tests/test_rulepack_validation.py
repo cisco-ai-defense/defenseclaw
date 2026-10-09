@@ -481,3 +481,33 @@ def test_offline_validation_preflight_matches_only_exact_command_sequence(
     ctx = SimpleNamespace(invoked_subcommand=invoked_subcommand)
     with patch("sys.argv", argv):
         assert main._is_offline_rulepack_validation(ctx) is expected
+
+
+def test_validate_pack_accepts_discovered_bare_name(tmp_path) -> None:
+    pack = tmp_path / "team"
+    pack.mkdir()
+    valid = rulepack_validation.RulePackValidationResult(wire_version=1, kind="validation", valid=True, summary=_summary())
+    with (
+        patch("defenseclaw.config.load", return_value=object()) as load_config,
+        patch("defenseclaw.policy_catalog.discover_rule_packs", return_value=[SimpleNamespace(name="team", path=str(pack))]),
+        patch.object(rulepack_validation, "validate_rule_pack", return_value=valid) as validator,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["team"])
+    load_config.assert_called_once_with()
+    assert result.exit_code == 0, result.output
+    validator.assert_called_once_with(str(pack))
+
+
+def test_validate_pack_prefers_local_directory_over_discovered_name(tmp_path, monkeypatch) -> None:
+    local = tmp_path / "strict"
+    local.mkdir()
+    monkeypatch.chdir(tmp_path)
+    valid = rulepack_validation.RulePackValidationResult(wire_version=1, kind="validation", valid=True, summary=_summary())
+    with (
+        patch("defenseclaw.config.load", return_value=object()),
+        patch("defenseclaw.policy_catalog.discover_rule_packs", return_value=[SimpleNamespace(name="strict", path="/installed/strict")]),
+        patch.object(rulepack_validation, "validate_rule_pack", return_value=valid) as validator,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["strict"])
+    assert result.exit_code == 0, result.output
+    validator.assert_called_once_with("strict")

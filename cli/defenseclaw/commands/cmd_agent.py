@@ -33,6 +33,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw import legacy_connector
 from defenseclaw.config import (
     FULL_RUNTIME_PLANES,
     USER_RUNTIME_PLANES,
@@ -51,7 +52,36 @@ def _mapping_block(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-@click.group()
+class _AgentGroup(click.Group):
+    """Keep new identity and IDE commands off the Secure Client command tree."""
+
+    def _secure_client(self, ctx: click.Context) -> bool:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        app = ctx.find_object(AppContext)
+        cfg = app.cfg if app is not None else None
+        if cfg is None:
+            # Help is rendered before the root callback loads configuration.
+            from defenseclaw.config import load
+
+            try:
+                cfg = load()
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return _enterprise_profile(cfg) == "secure_client"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = super().list_commands(ctx)
+        return ([name for name in names if name not in {"ide-plugins", "identities"}]
+                if self._secure_client(ctx) else names)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name in {"ide-plugins", "identities"} and self._secure_client(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group(cls=_AgentGroup)
 def agent() -> None:
     """Inspect locally installed agent surfaces."""
 
@@ -301,8 +331,7 @@ def usage(
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
@@ -331,6 +360,150 @@ def usage(
             wide=wide,
         ).rstrip()
     )
+
+
+_IDE_PLUGIN_ENABLED_LABELS = {
+    "enabled": "yes",
+    "disabled": "no",
+    "client_side_unknown": "client side",
+    "unknown": "unknown",
+}
+
+
+# IDE cell suffix for a plugin of a remote install (the TUI mirrors it).
+_IDE_REMOTE_LABELS = {"ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"}
+
+
+def ide_plugin_ide_label(item: Mapping[str, Any]) -> str:
+    """IDE cell: the product, plus where it runs for a remote install."""
+    product = str(item.get("ide_product") or item.get("ide_family") or "-")
+    version = str(item.get("ide_version") or "")
+    if version:
+        product = f"{product} {version}"
+    kind = str(item.get("remote_kind") or "")
+    if kind:
+        return f"{product} ({_IDE_REMOTE_LABELS.get(kind, 'remote')})"
+    return f"{product} (remote)" if item.get("scope") == "remote" else product
+
+
+def ide_plugin_enabled_label(value: object) -> str:
+    """Short Enabled cell for an IDE plugin row (shared with the TUI)."""
+    text = str(value or "unknown")
+    return _IDE_PLUGIN_ENABLED_LABELS.get(text, text)
+
+
+def ide_plugin_rows(plugins: list[Any], versions: Mapping[str, str] | None = None) -> list[list[str]]:
+    """User | IDE | Plugin | Version | Enabled | AI cells, sorted for reading."""
+    rows: list[list[str]] = []
+    for item in plugins:
+        if not isinstance(item, Mapping):
+            continue
+        plugin = str(item.get("plugin_id") or "")
+        name = str(item.get("display_name") or "")
+        if name and name.lower() != plugin.lower():
+            plugin = f"{plugin} ({name})" if plugin else name
+        rows.append([
+            str(item.get("user") or item.get("user_id") or "-"),
+            ide_plugin_ide_label({**item, "ide_version": (versions or {}).get(str(item.get("install_id") or ""), "")}),
+            plugin or "-",
+            str(item.get("version") or "-"),
+            ide_plugin_enabled_label(item.get("enabled")),
+            "yes" if item.get("is_ai") else "",
+        ])
+    rows.sort(key=lambda row: (row[0].lower(), row[1], row[2].lower()))
+    return rows
+
+
+@agent.command("ide-plugins")
+@click.option("--user", "user", default="", help="Show only this user's plugins (account name or id).")
+@click.option("--ide", "ide", default="", help="Show only this IDE product, for example vscode, cursor or pycharm.")
+@click.option("--ai-only", "ai_only", is_flag=True, help="Show only AI extensions and plugins.")
+@click.option("--json", "as_json", is_flag=True, help="Output the IDE plugin inventory as JSON.")
+@click.option("--gateway-host", default=None, help="Sidecar API host override.")
+@click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
+@click.option(
+    "--gateway-token-env",
+    default=None,
+    help="Environment variable containing the sidecar API token override.",
+)
+@pass_ctx
+def ide_plugins(
+    app: AppContext,
+    user: str,
+    ide: str,
+    ai_only: bool,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List the extensions and plugins installed in each user's IDEs.
+
+    Covers VS Code and its forks (Cursor, Devin Desktop, Kiro and others,
+    including remote SSH servers), JetBrains IDEs, Visual Studio, Zed,
+    Eclipse and Vim/Neovim, with each plugin's enabled state and an AI flag.
+    The running gateway collects the list during AI discovery.
+    """
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        payload = client.ai_usage_ide_plugins_all(
+            user=user.strip(),
+            ide="devin-desktop" if ide.strip().lower() == legacy_connector.RETIRED_DESKTOP_ID else ide.strip().lower(),
+            ai_only=ai_only,
+        )
+    except requests.ConnectionError as exc:
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 404:
+            raise click.ClickException(
+                "this gateway does not list IDE plugins yet; upgrade it with: defenseclaw upgrade"
+            ) from exc
+        raise click.ClickException(f"sidecar rejected IDE plugins request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if payload.get("enabled") is False:
+        click.echo(
+            "AI discovery is disabled, so there are no IDE plugins to show. "
+            "Enable it with: defenseclaw agent discovery enable"
+        )
+        return
+    if str(payload.get("scope") or "") == "off":
+        click.echo(
+            "The IDE plugin inventory is turned off (ai_discovery.ide_inventory: off). "
+            "Set it to all in the config file that 'defenseclaw config path' shows."
+        )
+        return
+    plugins = payload.get("plugins") or []
+    versions = {str(inst.get("install_id") or ""): str(inst.get("version") or "")
+                for inst in payload.get("installations") or [] if isinstance(inst, Mapping)}
+    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [], versions)
+    if not rows:
+        filtered = bool(user or ide or ai_only)
+        click.echo("No IDE plugins match these filters." if filtered else "No IDE plugins found yet.")
+        return
+    click.echo(_render_runtime_table(["User", "IDE", "Plugin", "Version", "Enabled", "AI"], rows).rstrip())
+    counts = _mapping_block(payload.get("counts"))
+    summary = f"{len(rows)} plugin(s)"
+    if counts:
+        summary += (
+            f" shown; {counts.get('total', 0)} in total, {counts.get('ai', 0)} AI, "
+            f"{counts.get('disabled', 0)} disabled, {counts.get('users', 0)} user(s)"
+        )
+    if payload.get("scope") == "ai_only":
+        summary += " (the inventory keeps AI plugins only)"
+    if payload.get("partial") or any(i.get("partial") for i in payload.get("installations") or []):
+        summary += " — partial installation; scan limits were reached"
+    click.echo(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -396,8 +569,7 @@ def processes(
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
@@ -943,11 +1115,11 @@ def confidence_policy_validate(
 # ---------------------------------------------------------------------------
 # agent discovery — one-shot toggle for the sidecar AI-discovery service.
 #
-# Background: ``ai_discovery.enabled`` is read once at sidecar boot
-# (``inventory.NewContinuousDiscoveryService`` returns nil otherwise),
-# so flipping the flag on disk is necessary but not sufficient. The
-# operator-friendly path is "flip + save + restart + (optional) scan",
-# and the previous workflow required three separate commands plus
+# Background: a running gateway hot-reloads ``ai_discovery``, but the
+# reload is asynchronous, so the operator-friendly path stays "flip +
+# save + restart + (optional) scan": the restart waits for the new
+# gateway before the scan runs. The previous workflow required three
+# separate commands plus
 # manual YAML editing. These subcommands fold all of that into one
 # step and stay parameter-compatible with ``defenseclaw guardrail
 # {enable,disable}`` so muscle memory transfers.
@@ -1084,6 +1256,10 @@ def discovery() -> None:
     ),
 )
 @click.option(
+    "--ide-inventory", type=click.Choice(("all", "ai_only", "off")), default=None,
+    help="IDE plugin inventory scope (all, ai_only or off).",
+)
+@click.option(
     "--enable-host-plane/--no-enable-host-plane",
     default=None,
     help=(
@@ -1120,6 +1296,7 @@ def discovery_enable(
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     enable_host_plane: bool | None,
+    ide_inventory: str | None,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1153,6 +1330,7 @@ def discovery_enable(
         lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
+        ide_inventory=ide_inventory,
     )
 
     from defenseclaw import ux
@@ -1975,11 +2153,13 @@ def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
 
     stream = StringIO()
     console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    from rich.text import Text
+
     table = Table()
     for header in headers:
         table.add_column(header)
     for row in rows:
-        table.add_row(*row)
+        table.add_row(*(Text("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(cell))) for cell in row))
     console.print(table)
     return stream.getvalue()
 
@@ -3096,6 +3276,7 @@ def _build_discovery_overrides(
     lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
+    ide_inventory: str | None = None,
 ) -> dict[str, Any]:
     """Collect non-None overrides into a stable, ordered mapping.
 
@@ -3139,6 +3320,8 @@ def _build_discovery_overrides(
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
         overrides["store_raw_local_paths"] = bool(store_raw_local_paths)
+    if ide_inventory is not None:
+        overrides["ide_inventory"] = ide_inventory
     return overrides
 
 
@@ -3387,8 +3570,11 @@ def _trigger_post_enable_scan(
 
     delays = (0.5, 1.0, 2.0, 3.0)
     last_err = ""
+    discovery_off = False
     for delay in delays:
         time.sleep(delay)
+        # Only the latest attempt can establish why the scan did not run.
+        discovery_off = False
         try:
             client = _usage_client(
                 app,
@@ -3411,8 +3597,11 @@ def _trigger_post_enable_scan(
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             last_err = f"sidecar rejected scan: HTTP {status}"
-            # 503 right after restart is expected; keep retrying.
-            if status != 503:
+            # 503 is the endpoint's "AI discovery is off in this gateway".
+            # The restart already waited for the new gateway, so a 503 that
+            # survives the retries is a config disagreement, not a slow start.
+            discovery_off = status == 503
+            if not discovery_off:
                 break
         except requests.RequestException as exc:
             last_err = f"sidecar request failed: {exc}"
@@ -3420,6 +3609,14 @@ def _trigger_post_enable_scan(
         except click.ClickException as exc:
             last_err = str(exc.message)
             break
+    if discovery_off:
+        ux.warn(
+            "Could not run an initial scan: the restarted gateway reports AI "
+            "discovery as disabled. Run 'defenseclaw agent discovery status' "
+            "to compare the saved config with the gateway.",
+            indent="  ",
+        )
+        return
     ux.warn(
         f"Could not run an initial scan ({last_err or 'sidecar unreachable'}). "
         "Re-run with 'defenseclaw agent usage --refresh' once the sidecar is up.",
@@ -3459,6 +3656,9 @@ def signatures() -> None:
 def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
     """List the merged AI discovery signature catalog."""
     cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     try:
         sigs = ai_signatures.load_ai_signatures(
@@ -3467,12 +3667,18 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,
+            secure_client=secure_client,
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps([asdict(sig) for sig in sigs], indent=2, sort_keys=True))
+        payload = [asdict(sig) for sig in sigs]
+        if secure_client:
+            for sig in payload:
+                for field in ai_signatures.IDE_INVENTORY_FIELDS:
+                    sig.pop(field, None)
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
     click.echo(_render_signatures_table(sigs).rstrip())
 
@@ -3699,6 +3905,22 @@ def _emit_discovery_report(
     return result
 
 
+def _usage_rejected(exc: requests.HTTPError) -> click.ClickException:
+    """The error for an AI usage request the sidecar refused (GAP-0281).
+
+    A refresh with AI discovery off answers 503 "ai discovery disabled"; the
+    bare status gave no hint what to do.
+    """
+    response = exc.response
+    status = response.status_code if response is not None else "unknown"
+    if status == 503 and "discovery disabled" in (response.text or "").lower():
+        return click.ClickException(
+            "AI discovery is disabled, so there is nothing to refresh. "
+            "Enable it with: defenseclaw agent discovery enable"
+        )
+    return click.ClickException(f"sidecar rejected AI usage request: HTTP {status}")
+
+
 def _sidecar_unavailable(exc: Exception, host: str | None = None, port: int | None = None) -> str:
     """A plain hint for an unreachable gateway instead of urllib3's text (GAP-1471)."""
     target = f"{host}:{port}" if host and port else ""
@@ -3833,6 +4055,11 @@ def _format_missing_token_error(app: AppContext) -> str:
     the wording (presence of remediation hints) without bringing the
     whole click.ClickException raise path into the assertion.
     """
+    from defenseclaw import config as config_module
+
+    if not config_module.config_path().is_file():
+        return "DefenseClaw is not initialized — run defenseclaw init first."
+
     configured_env = ""
     cfg = getattr(app, "cfg", None)
     gw = getattr(cfg, "gateway", None) if cfg is not None else None
@@ -5601,3 +5828,153 @@ def _error_class(error: str) -> str:
     if "failed" in err:
         return "probe_failed"
     return "other"
+
+
+# ---------------------------------------------------------------------------
+# agent identities — the stable agt- identity of each harness install
+# (one connector for one user on one machine), from inventory.db.
+# ---------------------------------------------------------------------------
+
+
+@agent.command("identities")
+@click.option("--user", "user", default=None, help="Only this user (uid, SID or account name).")
+@click.option("--connector", "connector_name", default=None, help="Only this connector.")
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="Only the N most recently seen.")
+@click.option("--json", "as_json", is_flag=True, help="Output the identities as JSON.")
+@click.option("--gateway-host", default=None, help="Sidecar API host override.")
+@click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
+@click.option(
+    "--gateway-token-env",
+    default=None,
+    help="Environment variable containing the sidecar API token override.",
+)
+@pass_ctx
+def identities(
+    app: AppContext,
+    user: str | None,
+    connector_name: str | None,
+    limit: int | None,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List agent identities: one per connector install, per user, per machine.
+
+    The ID (agt-...) is derived from the machine id, the verified user,
+    the connector and its config root, so it is stable across sessions
+    and gateway restarts. Each session of an agent has its own ais- id.
+    Every identity is listed, most recently seen first.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS
+
+    if connector_name:
+        raw_connector, connector_name = connector_name, normalize_connector(connector_name)
+        if connector_name not in KNOWN_CONNECTORS:
+            raise click.BadParameter(
+                f"unknown connector {raw_connector!r}; valid names: {', '.join(KNOWN_CONNECTORS)}",
+                param_hint="--connector",
+            )
+    if limit is not None and limit > 1000:
+        raise click.BadParameter("limit too large (maximum 1000)", param_hint="--limit")
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        payload = client.agent_identities_all(user=user, connector=connector_name or None, limit=limit or 0)
+    except requests.ConnectionError as exc:
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    rows = [row for row in payload.get("identities", []) or [] if isinstance(row, Mapping)]
+    total = payload.get("total")
+    total = total if isinstance(total, int) and total > len(rows) else len(rows)
+    next_cursor = str(payload.get("next_cursor") or "")
+    if next_cursor:
+        hint = "" if limit else " Narrow the list with --user or --connector."
+        click.echo(f"Showing the {len(rows)} most recently seen of {total} agent identities.{hint}", err=True)
+    persisted = payload.get("persisted")
+    persist_error = str(payload.get("persist_error") or "").strip()
+    if as_json:
+        out: dict[str, Any] = {"enabled": bool(payload.get("enabled", False)), "identities": rows,
+                               "total": total, "next_cursor": next_cursor}
+        if isinstance(persisted, bool):
+            out["persisted"] = persisted
+        if persist_error:
+            out["persist_error"] = persist_error
+        click.echo(json.dumps(out, indent=2, sort_keys=True))
+        return
+    if persisted is False and payload.get("enabled") is not False:
+        # GAP-0393: the list is the gateway's memory only.
+        reason = f" ({persist_error})" if persist_error else ""
+        click.echo(
+            f"Warning: agent identities are not being saved to inventory.db{reason}; session counts and "
+            "first-seen times reset at the next gateway restart. Run 'defenseclaw doctor'.",
+            err=True,
+        )
+    if payload.get("enabled") is False:
+        click.echo("Agent identities are not recorded on this deployment.")
+        return
+    if not rows:
+        if user or connector_name:
+            try:
+                existing = client.agent_identities(limit=1).get("total", 0)
+            except requests.ConnectionError as exc:
+                raise click.ClickException(_sidecar_unavailable(exc)) from exc
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+            except requests.RequestException as exc:
+                raise click.ClickException(f"sidecar request failed: {exc}") from exc
+            label = f"--user {user}" if user else f"--connector {connector_name}"
+            click.echo(
+                f"No agent identity matches {label} "
+                f"({existing} identities exist; run without a filter to list them)."
+            )
+        else:
+            click.echo(
+                "No agent identities seen yet. They appear after an agent's first hook, "
+                "LLM proxy or ACP request."
+            )
+        return
+    click.echo(_render_agent_identities(rows))
+
+
+def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
+    headers = ("User", "Connector", "Agent identity", "Sessions", "Last seen", "Config root")
+    table = [headers]
+    for row in rows:
+        user = str(row.get("user_name") or row.get("user_id") or "")
+        root = str(row.get("install_fp") or "")
+        hint = str(row.get("install_hint") or "")
+        if hint:
+            root = f"{root} (agent claims {hint})"
+        table.append((
+            # A retired identity's account no longer holds its uid (GAP-0947).
+            _bounded(user, 32) + (" (retired)" if row.get("retired") else ""),
+            str(row.get("connector", "")),
+            str(row.get("agent_id", "")),
+            str(row.get("sessions_seen", 0)),
+            _format_relative_time(str(row.get("last_seen", "") or "")),
+            root,
+        ))
+    from rich.cells import cell_len
+
+    table = [
+        tuple("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in cell) for cell in line)
+        for line in table
+    ]
+    widths = [max(cell_len(line[i]) for line in table) for i in range(len(headers) - 1)]
+    lines = [
+        "  ".join(cell + " " * (width - cell_len(cell)) for cell, width in zip(line[:-1], widths))
+        + "  " + line[-1]
+        for line in table
+    ]
+    return "\n".join(line.rstrip() for line in lines)

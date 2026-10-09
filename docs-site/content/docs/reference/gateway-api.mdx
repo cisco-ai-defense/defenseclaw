@@ -171,7 +171,9 @@ home directory), the active connectors with per-agent request and block
 counts, and the guardrail, routing and telemetry state, including
 telemetry destinations. In a managed install on the standalone profile it
 also carries `inspection` (whether local and AI Defense inspection are
-active) and `user_scoped_credentials.key_ids`, the non-secret SHA-256
+active), `directory` while directory lookups fail (how many accounts, since
+when, with neither a reason nor an account name), and
+`user_scoped_credentials.key_ids`, the non-secret SHA-256
 fingerprints of the per-machine keys from which the per-user credentials
 that authenticate right now are derived (the current key, plus a staged or
 retiring one during a key rotation). They let the lifecycle check a key
@@ -482,6 +484,145 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | `POST` | `/api/v1/ai-usage/confidence/policy/validate` | Dry-run validation of a candidate policy file. |
 | `GET` | `/api/v1/ai-usage/runtime` | Latest runtime-discovery snapshot: each runtime plane (what it can see and why) and scored findings. Returns `enabled: false` with empty lists when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime status` and `findings`. |
 | `POST` | `/api/v1/ai-usage/runtime/scan` | Poll the runtime planes now and return the new snapshot. Answers `503` when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime scan`. |
+
+### Identity, profiles and IDE inventory
+
+Three read-only routes back the identity features. They answer with the
+gateway token on loopback, like the rest of `/api/v1`. They are what
+`defenseclaw guardrail profile explain`, `defenseclaw agent identities` and
+`defenseclaw agent ide-plugins` call, and what the managed
+`enterprise <os> profile-explain`, `agent-identities` and `ide-plugins`
+commands read with the deployment's service token. Secure Client does not
+register these three routes; each returns `404` there. See
+[Identity and authentication](/docs/enterprise/identity-and-authentication).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/guardrail/profiles/resolve` | Which guardrail profile a subject resolves to, and why. Query: `user` (account name, uid, SID or principal), `connector`, `agent` (`agt-` and 16 hex digits). Loopback only; a hook credential is refused with `403`. The route is absent on Secure Client and answers `404`. |
+| `GET` | `/api/v1/agents/identities` | The agent identities the gateway recorded. Query: `user` (account name or ID), `connector`, `limit` (default and at most 1000) and `cursor` (the previous page's `next_cursor`). A bad `limit` or `cursor` answers `400`. On Secure Client the route is absent and answers `404`. |
+| `GET` | `/api/v1/ai-usage/ide-plugins` | The last full scan's IDE installations and plugins. Query: `user`, `ide` (product or family), `ai_only` (`true` or `false`), `limit` (default 500, at most 1000) and `cursor` (the previous page's `next_cursor`). A bad `limit`, `cursor` or `ai_only` answers `400`. On Secure Client the route is absent and answers `404`. |
+
+`profiles/resolve` resolves the user through the operating system the way a
+live request does. With no `user`, no subject is resolved, so only
+`connectors` assignments and the default can apply, and `agent` is ignored.
+
+```json title="GET /api/v1/guardrail/profiles/resolve?user=alice@corp.example.com&connector=codex (trimmed)"
+{
+  "profiles_configured": true,
+  "user": "alice@corp.example.com",
+  "connector": "codex",
+  "subject": {
+    "user_id": "94401103",
+    "user_name": "alice",
+    "principal": "alice@corp.example.com",
+    "upn": "alice@CORP.EXAMPLE.COM",
+    "groups": ["ml-team@corp.example.com", "developers@corp.example.com"],
+    "group_count": 2
+  },
+  "profile": "ml-team",
+  "match": "group",
+  "matched_group": "ml-team@corp.example.com",
+  "digest": "sha256:4f460f32fe21aa052aa524027ba08c9f89fe695cbe39cea2fb0252e5e0a738bd",
+  "effective": {
+    "mode": "observe",
+    "block_at": "HIGH",
+    "alert_at": "MEDIUM",
+    "rule_pack_dir": "/etc/defenseclaw/policies/guardrail/default",
+    "hilt": {"enabled": false, "min_severity": "HIGH"}
+  },
+  "profiles": {"ml-team": "sha256:4f46...", "contractors": "sha256:98ab..."}
+}
+```
+
+`match` is `agent`, `user`, `group`, `connector`, `default`,
+`default_unverified` or `default_lookup_failed`. When the directory lookup
+failed, the answer adds `lookup_error`. `profiles` lists every configured
+profile with its digest. With no profiles configured the answer is
+`"profiles_configured": false` with an empty `profile` and the global
+settings under `effective`; `subject` is still resolved when `user` is given.
+
+```json title="GET /api/v1/agents/identities?user=alice (trimmed)"
+{
+  "enabled": true,
+  "persisted": true,
+  "identities": [
+    {
+      "agent_id": "agt-3f9c0a1b2c3d4e5f",
+      "user_id": "94401103",
+      "user_name": "alice@corp.example.com",
+      "connector": "codex",
+      "machine_hash": "…",
+      "first_seen": "2026-10-05T16:41:09Z",
+      "last_seen": "2026-10-06T10:32:15Z",
+      "last_session_id": "3034b58b-38bc-48da-bd70-efffc86bff40",
+      "sessions_seen": 4
+    }
+  ],
+  "total": 1,
+  "next_cursor": ""
+}
+```
+
+Rows are most recently seen first. `user_name` is the account as the host
+names its uid or SID now. A row whose uid another account holds now (the
+account was removed and the uid reused, or renamed) keeps the name it was
+recorded with and has `"retired": true`; the account that holds the uid has
+agent identities of its own. On a managed host, so does a row of a deleted
+account, whose uid or SID no account holds now, once the hook guardian keeps
+no identity record for it; the guardian keeps the records of enrolled
+accounts while the directory cannot be reached. The gateway writes new rows to
+`inventory.db` in a batch every 30 seconds, and the route writes the rows it
+has not written yet before it lists them, so a new agent shows at once.
+While the gateway cannot write `inventory.db` (a read-only file or a full
+disk), `persisted` is `false` and `persist_error` says why: the rows are then
+held in memory only, and their counts and first-seen times reset at the next
+restart. `/health` reports the same under `agent_identities`, and
+`defenseclaw status` and `defenseclaw doctor` warn about it. The rows are
+saved on the next write that succeeds, without a restart.
+`sessions_seen` counts each chat once, however many are open and also when one
+resumes after a gateway restart. A sub-agent that runs in a session of its own,
+as a Codex 0.160 thread does, is not a chat and is not counted. `total` counts every matching identity; while
+`next_cursor` is not empty, pass it as `cursor` for the next page.
+`defenseclaw agent identities` reads every page.
+
+```json title="GET /api/v1/ai-usage/ide-plugins?ai_only=true (trimmed)"
+{
+  "enabled": true,
+  "scope": "all",
+  "scan_id": "…",
+  "scanned_at": "2026-10-06T10:30:00Z",
+  "total": 1,
+  "next_cursor": "",
+  "counts": {"total": 1, "ai": 1, "disabled": 0, "users": 1, "installations": 1, "by_ide": {"vscode": 1}},
+  "installations": [
+    {"install_id": "…", "user": "alice", "ide_family": "vscode", "ide_product": "vscode", "channel": "stable", "path_hash": "…", "last_seen": "2026-10-06T10:30:00Z"}
+  ],
+  "plugins": [
+    {
+      "user": "alice",
+      "ide_family": "vscode",
+      "ide_product": "vscode",
+      "plugin_id": "github.copilot",
+      "display_name": "GitHub Copilot",
+      "publisher": "GitHub",
+      "version": "1.250.0",
+      "enabled": "enabled",
+      "enabled_source": "state_vscdb",
+      "scope": "user",
+      "is_ai": true,
+      "ai_signature_id": "…",
+      "path_hash": "…",
+      "last_seen": "2026-10-06T10:30:00Z"
+    }
+  ]
+}
+```
+
+`enabled` is `enabled`, `disabled`, `client_side_unknown` or `unknown`.
+`scope` in the response is the `ai_discovery.ide_inventory` setting; `off`
+returns no rows. `total` and `counts` describe the rows the filters select
+across all pages. Plugin and installation paths appear only as hashes. When AI
+discovery is off, `enabled` is `false` and the lists are empty.
 
 ### ACP guard
 
@@ -970,7 +1111,9 @@ are capped at 4 MiB, far below the main receiver's 64 MiB.
 **Other differences from the main API.**
 
 - Identity comes from the binding: records are attributed to the host user
-  who launched the sandbox. Identity headers such as `X-User-Id` are dropped.
+  who launched the sandbox. The bearer does not verify the calling process,
+  so the attributed user and directory groups cannot select an identity-based
+  guardrail profile. Identity headers such as `X-User-Id` are dropped.
 - Client-supplied request IDs are ignored. The gateway always mints the
   `X-DefenseClaw-Request-Id` it returns.
 - A hook or notify post may send `X-DefenseClaw-Hook-Idempotency-Key`. A retry

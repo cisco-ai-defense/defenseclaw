@@ -3574,6 +3574,13 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
             "function Write-DefenseClawJsonAtomic"
         )
     ]
+    # The replacement helpers branch on the enterprise profile (Standalone
+    # retires stale replacement backups); run the probe under both profiles.
+    profile_check = module[
+        module.index("function Test-DefenseClawStandaloneProfile") : module.index(
+            "function Get-DefenseClawClaudeMinimumClientVersion"
+        )
+    ]
     probe = tmp_path / f"atomic-file-replacement-{Path(engine).stem}.ps1"
     probe.write_text(
         "Set-StrictMode -Version Latest\n"
@@ -3595,8 +3602,11 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "    param([Parameter(Mandatory)][string]$Path)\n"
         "    [void][IO.Directory]::CreateDirectory($Path)\n"
         "}\n"
+        + profile_check
         + atomic_install
         + r'''
+foreach ($profileName in @('SecureClient', 'Standalone')) {
+$script:DefenseClawEnterpriseProfile = $profileName
 $root = [IO.Path]::Combine(
     [IO.Path]::GetTempPath(),
     "DefenseClaw-AtomicFile-$([Guid]::NewGuid().ToString('N'))"
@@ -3641,15 +3651,16 @@ try {
     }
     if (@([IO.Directory]::GetFiles($root, '*.new.*')).Count -ne 0 -or
         @([IO.Directory]::GetFiles($root, '*.backup.*')).Count -ne 0) {
-        throw 'atomic replacement left a staging or backup file behind'
+        throw "$profileName atomic replacement left a staging or backup file behind"
     }
-    'ok'
 }
 finally {
     if ([IO.Directory]::Exists($root)) {
         [IO.Directory]::Delete($root, $true)
     }
 }
+}
+'ok'
 ''',
         encoding="utf-8",
     )
@@ -5254,16 +5265,19 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "CodexManagedHooksLockPath" in module
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
-    # A standalone purge then removes the Claude Code folders Setup created
-    # once they are empty (GAP-0100), and stale protected PowerShell temp
+    # A standalone purge then removes the runtime selector state (GAP-0262)
+    # and the Claude Code folders Setup created once they are empty
+    # (GAP-0100), and stale protected PowerShell temp
     # folders (GAP-1734), and reports what it kept (behaviour in
     # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
     assert (
         "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
         "    $machineStateRemaining = [string[]]@()\n"
         "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
-        "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
+        "        $machineStateRemaining = [string[]]@(\n"
+        "            @(Remove-DefenseClawRuntimeSelectorState -Directories @("
     ) in module
+    assert "@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles $script:ProgramFiles)" in module
     # GAP-2057: stale installer staging and bootstrap folders go too.
     assert (
         "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
@@ -5340,6 +5354,12 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     )
     assert quiesce < validate_only < ipc_revoke < destructive_root_cleanup
     assert destructive_root_cleanup < service_delete
+    # GAP-0250: standalone removes its own IPC directory and OpenCode plugin,
+    # which the native validator does not adopt, once the services are
+    # stopped and before the root is validated.
+    standalone_ipc = fallback.index("Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $Layout")
+    assert quiesce < standalone_ipc < validate_only
+    assert "Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $Layout" in fallback[standalone_ipc:validate_only]
     quiesce_body = fallback[quiesce:ipc_revoke]
     assert "Set-DefenseClawServiceStartMode" in quiesce_body
     assert "Stop-DefenseClawService -Name $name" in quiesce_body

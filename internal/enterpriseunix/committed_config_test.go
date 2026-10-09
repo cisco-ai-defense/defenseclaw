@@ -132,8 +132,10 @@ func TestRejectedConfigStaysReportedUntilConfigIsPushedAgain(t *testing.T) {
 		if again := h.run(Options{Action: ActionEnsure, Reason: "path"}); !again.Noop || !hasWarning(again, codeConfigRejected) {
 			t.Fatalf("ensure after the revert: noop=%v warnings=%+v", again.Noop, again.Warnings)
 		}
-		if status := h.run(Options{Action: ActionStatus}); !hasWarning(status, codeConfigRejected) {
-			t.Fatalf("status does not report the rejected edit: %+v", status.Warnings)
+		if status := h.run(Options{Action: ActionStatus}); !hasWarning(status, codeConfigRejected) ||
+			!hasMessage(status.Warnings, "api_port") || hasMessage(status.Warnings, "the lifecycle log says why") {
+			// The warning names the cause, not only the log (GAP-0689).
+			t.Fatalf("status does not report the rejected edit and why: %+v", status.Warnings)
 		}
 		if verify := h.run(Options{Action: ActionVerify}); !hasMessage(verify.Errors, "rejected") {
 			t.Fatalf("verify does not fail on the rejected edit: %+v", verify.Errors)

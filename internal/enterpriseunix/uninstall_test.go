@@ -73,7 +73,7 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 			}
 			removeAll := false
 			h.env.Runner = observingRunner{Runner: h.runner, observe: func(name string, args []string) {
-				if strings.Contains(strings.Join(args, " "), "hooks remove-all") {
+				if joined := strings.Join(args, " "); strings.Contains(joined, "hooks remove-all") && !strings.HasSuffix(joined, " --check") {
 					removeAll = true
 					check("per-user remove-all")
 				}
@@ -165,17 +165,89 @@ func TestFailedUninstallKeepsTheRecordForARetryOrReinstall(t *testing.T) {
 	}
 }
 
-// removeAllRunner answers `enterprise hooks remove-all` with answer.
+// removeAllRunner answers `enterprise hooks remove-all` with answer, and
+// its --check preflight with check (nil: every row resolves).
 type removeAllRunner struct {
 	Runner
 	answer func(args string) (CommandResult, error)
+	check  func() (CommandResult, error)
 }
 
 func (r removeAllRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
 	if joined := strings.Join(args, " "); strings.HasPrefix(joined, "enterprise hooks remove-all ") {
-		return r.answer(joined)
+		if !strings.HasSuffix(joined, " --check") {
+			return r.answer(joined)
+		}
+		if r.check == nil {
+			return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+		}
+		return r.check()
 	}
 	return r.Runner.Run(ctx, name, args...)
+}
+
+// GAP-1101: a manifest row remove-all cannot resolve (no such account, a
+// home-only row whose owner is unknown) failed the uninstall only after the
+// services were unloaded and part of the machine policy was removed. The
+// preflight names the row and refuses before anything changes.
+func TestUninstallRefusesUnresolvedRowsBeforeStoppingAnything(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				t.Fatal("remove-all ran after its preflight refused")
+				return CommandResult{}, nil
+			}, check: func() (CommandResult, error) {
+				return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"failed":["/Users/gone/claudecode: user home /Users/gone: no such file or directory"]}`)}, errors.New("exit 1")
+			}}
+			h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+				t.Fatal("the machine policy was removed after the preflight refused")
+			}}
+			before := len(h.services.calls)
+			refused := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireError(t, refused, codePerUserHooks)
+			requireError(t, refused, codeUninstallPrecheck)
+			if got := messagesOf(refused.Errors, codePerUserHooks); !strings.Contains(got, "claudecode manifest row of user /Users/gone cannot be removed") {
+				t.Fatalf("the refusal does not name the row: %s", got)
+			}
+			for _, call := range h.services.calls[before:] {
+				if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
+					t.Fatalf("the refused uninstall ran %q", call)
+				}
+			}
+			if !exists(h.env.deploymentPath()) {
+				t.Fatal("the refused uninstall removed the deployment record")
+			}
+		})
+	}
+}
+
+// A precheck command can fail before it identifies any manifest rows (for
+// example while parsing an untrusted manifest). The deployment stays intact.
+func TestUninstallRefusesFailedHookPrecheckBeforeStoppingAnything(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		t.Fatal("remove-all ran after its precheck failed")
+		return CommandResult{}, nil
+	}, check: func() (CommandResult, error) {
+		return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false}`)}, errors.New("invalid manifest")
+	}}
+	h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+		t.Fatal("machine policy was removed after the precheck failed")
+	}}
+	before := len(h.services.calls)
+	refused := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireError(t, refused, codeUninstallPrecheck)
+	for _, call := range h.services.calls[before:] {
+		if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
+			t.Fatalf("the refused uninstall ran %q", call)
+		}
+	}
+	if !exists(h.env.deploymentPath()) {
+		t.Fatal("the refused uninstall removed the deployment record")
+	}
 }
 
 // A macOS uninstall --purge returned ok while one account's Devin hooks,

@@ -7,8 +7,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "ok", "action", "noop", "profile", "platform", "product_version",
-    "installed", "transaction_pending", "services", "readiness", "inspection",
-    "machine_policy", "enrollment", "coverage_complete", "security_complete", "errors", "exit_code"
+    "coverage_complete", "security_complete", "errors", "exit_code"
   ],
   "properties": {
     "schema_version": { "const": 2 },
@@ -85,6 +84,7 @@
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "changes": { "type": "array", "items": { "type": "string" } },
     "api_port_holders": { "type": "array", "items": { "$ref": "#/$defs/portHolder" }, "description": "With error api_port_held: the processes other than the DefenseClaw gateway that listen where the gateway API binds." },
+    "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
@@ -103,8 +103,25 @@
       "if": { "properties": { "ok": { "const": true } } },
       "then": { "properties": { "exit_code": { "enum": [0, 3010] } } },
       "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } } } }
+    },
+    {
+      "$comment": "A not_root result (Linux, macOS) checked nothing: a standard user cannot read the root-only deployment record, so it leaves out every field that reports the deployment. Every other result has them.",
+      "if": {
+        "required": ["errors"],
+        "properties": { "errors": { "contains": { "required": ["code"], "properties": { "code": { "const": "not_root" } } } } }
+      },
+      "then": {
+        "properties": {
+          "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false
+        }
+      },
+      "else": {
+        "required": ["installed", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment"]
+      }
     }
   ],
+
   "$defs": {
     "service": {
       "type": "object",
@@ -133,6 +150,19 @@
         "higher_precedence": { "type": "array", "items": { "type": "string" } },
         "conflicts": { "type": "array", "items": { "type": "string" } },
         "live_verified_at": { "type": "string" }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "enabled", "signals", "redaction_profiles"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "preset": { "type": "string" },
+        "signals": { "type": "array", "items": { "enum": ["logs", "traces", "metrics"] } },
+        "redaction_profiles": { "type": "array", "items": { "type": "string" }, "description": "Distinct effective profiles of the destination's send routes; empty when it sends only metrics." }
       }
     },
     "portHolder": {

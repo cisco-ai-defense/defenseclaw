@@ -8,6 +8,7 @@ package gateway
 import (
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -207,4 +208,105 @@ func TestNetcatListenerUsesExposureTaxonomy(t *testing.T) {
 		}
 	}
 	t.Fatal("CMD-NETCAT-LISTEN missing")
+}
+
+// TestHomeSpelledAuthorizedKeysWriteBlocks pins GAP-0892/0894/0896 on the
+// default pack. A lone `echo k >> ~/.ssh/authorized_keys` lost its blocking
+// finding because the tilde rewrite gave the path fact its "~" spelling back
+// but not the redirect target, so the owner no longer tied the redirect to
+// the path; every spelling and writer must block alike, and reads stay quiet.
+func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
+	const connector = "home-spelled-authorized-keys"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	const rule = "persistence.ssh_authorized_keys_command"
+	tests := []struct {
+		name, command, cwd, home string
+		write                    bool
+	}{
+		{"redirect", `echo dccert-block-marker >> ~/.ssh/authorized_keys`, "", "", true},
+		{"home variable", `echo dccert-block-marker >> "$HOME/.ssh/authorized_keys"`, "", "", true},
+		{"absolute", `echo dccert-block-marker >> /home/alice/.ssh/authorized_keys`, "", "", true},
+		{"quoted suffix", `echo dccert-block-marker >> ~/".ssh/authorized_keys"`, "", "", true},
+		{"mkdir and redirect", `mkdir -p ~/.ssh && echo dccert-block-marker >> ~/.ssh/authorized_keys`, "", "", true},
+		{"tee", `echo dccert-block-marker | tee -a ~/.ssh/authorized_keys`, "", "", true},
+		{"install", `install -m 600 marker.pub ~/.ssh/authorized_keys`, "", "", true},
+		{"copy to second keys file", `cp marker.pub ~/.ssh/authorized_keys2`, "", "", true},
+		{"move to keys file", `mv marker.pub ~/.ssh/authorized_keys`, "", "", true},
+		{"sed in place", `sed -i "$a dccert-block-marker" ~/.ssh/authorized_keys`, "", "", true},
+		{"directory change", `cd ~/.ssh && echo dccert-block-marker >> authorized_keys`, "", "", true},
+		{"home directory change", `cd ~ && echo dccert-block-marker >> .ssh/authorized_keys`, "", "", true},
+		{"assigned path", `D=~/.ssh; echo dccert-block-marker >> "$D/authorized_keys"`, "", "", true},
+		{"nested shell", `sh -c 'echo dccert-block-marker >> "$HOME/.ssh/authorized_keys"'`, "", "", true},
+		{"normalized path", `echo dccert-block-marker >> ~//.ssh//authorized_keys`, "", "", true},
+		{"glob path", `echo dccert-block-marker | tee -a ~/.ssh/authorized_k*`, "", "", true},
+		{"python write", `python3 -c 'import pathlib; p = pathlib.Path.home() / ".ssh" / "authorized_keys"; p.write_text(p.read_text() + "dccert-block-marker\n")'`, "", "", true},
+		{"python append absolute", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
+		{"python home append", `python -c 'open("$HOME/.ssh/authorized_keys", "a").write("dccert-block-marker")'`, "", "", true},
+		{"perl write", `perl -e 'open(F, ">>", "$ENV{HOME}/.ssh/authorized_keys"); print F "dccert-block-marker\n"; close(F)'`, "", "", true},
+		{"perl append absolute", `perl -e 'open(F, ">>", "/home/alice/.ssh/authorized_keys"); print F "dccert-block-marker"'`, "", "", true},
+		{"ruby append", `ruby -e 'File.open("~/.ssh/authorized_keys", "a") { |f| f.write("dccert-block-marker") }'`, "", "", true},
+		{"node append", `node -e 'require("fs").appendFileSync("/home/alice/.ssh/authorized_keys", "dccert-block-marker")'`, "", "", true},
+		{"find exec", `find ~/.ssh -name authorized_keys -exec sh -c 'echo dccert-block-marker >> "$1"' _ {} \;`, "", "", true},
+		{"decoded shell", `echo ZWNobyAic3NoLWVkMjU1MTkgQUFBQXVjY21hcmtlciB1Y2NAdGVzdCIgPj4gfi8uc3NoL2F1dGhvcml6ZWRfa2V5cw== | base64 -d | sh`, "", "", true},
+		{"symlink write", `ln -sf ~/.ssh/authorized_keys ./keys.link && echo dccert-block-marker >> ./keys.link`, "", "", true},
+		{"symlink arbitrary name", `ln -s ~/.ssh/authorized_keys ~/project/key-target && echo dccert-block-marker >> ~/project/key-target`, "", "", true},
+		{"symlink quoted name", `ln -sf /home/alice/.ssh/authorized_keys './key target' && echo dccert-block-marker >> './key target'`, "", "", true},
+		{"sudo sh append", `sudo sh -c 'echo dccert-block-marker >> /home/alice/.ssh/authorized_keys'`, "", "", true},
+		{"sudo bash append", `sudo bash -c 'echo dccert-block-marker >> /root/.ssh/authorized_keys'`, "", "", true},
+		{"curl output", `curl -s -o ~/.ssh/authorized_keys http://127.0.0.1:9/marker.pub; echo rc=$?`, "", "", false},
+		{"windows command", `powershell -NoProfile -Command Add-Content -Path C:\Users\alice\.ssh\authorized_keys -Value dccert-block-marker`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows home", `pwsh -c "Set-Content -Path $HOME/.ssh/authorized_keys -Value dccert-block-marker"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows spaced home", `powershell -Command "Add-Content -Path 'C:\Users\Alice Smith\.ssh\authorized_keys' -Value dccert-block-marker"`, `C:/Users/Alice Smith/project`, `C:/Users/Alice Smith`, true},
+		{"windows admin keys", `powershell.exe -Command "Add-Content -Path C:/ProgramData/ssh/administrators_authorized_keys -Value dccert-block-marker"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows admin out file", `pwsh -c "'dccert-block-marker' | Out-File -Append C:/ProgramData/ssh/administrators_authorized_keys"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"cat", `cat ~/.ssh/authorized_keys`, "", "", false},
+		{"python read", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "r").read()'`, "", "", false},
+		{"python separate write", `python3 -c 'open("/home/alice/.ssh/authorized_keys", "r"); open("/tmp/other", "a")'`, "", "", false},
+		{"python printed write", `python3 -c 'print("open(\"/home/alice/.ssh/authorized_keys\", \"a\")")'`, "", "", false},
+		{"ruby read", `ruby -e 'File.open("~/.ssh/authorized_keys", "r") { |f| puts f.read }'`, "", "", false},
+		{"node read", `node -e 'require("fs").readFileSync("/home/alice/.ssh/authorized_keys")'`, "", "", false},
+		{"symlink read", `ln -s ~/.ssh/authorized_keys ./reader.link && cat ./reader.link`, "", "", false},
+		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", false},
+		{"metadata", `ls -l ~/.ssh/authorized_keys`, "", "", false},
+		{"diff", `diff ~/.ssh/authorized_keys marker.pub | head -5`, "", "", false},
+		{"line count", `wc -l ~/.ssh/authorized_keys`, "", "", false},
+		{"local copy", `cp ~/.ssh/authorized_keys /var/tmp/authorized-keys-copy.txt`, "", "", false},
+		{"mention", `echo "check ~/.ssh/authorized_keys" > notes.txt`, "", "", false},
+	}
+	for _, test := range tests {
+		cwd, home := test.cwd, test.home
+		if cwd == "" {
+			cwd = "/repo"
+		}
+		if home == "" {
+			home = "/home/alice"
+		}
+		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
+		input := actionfacts.Input{
+			Tool: "Bash", Args: args, CWD: cwd,
+			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
+		}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, LegacyText: string(args), Connector: connector,
+			EnforcementCapable: true,
+		})
+		if !test.write {
+			if len(findings) != 0 {
+				t.Errorf("%s: unexpected findings %v", test.name, findingIDs(findings))
+			}
+			continue
+		}
+		enforced := 0
+		for _, finding := range findings {
+			if finding.contributesToEnforcement() {
+				enforced++
+				if finding.RuleID != rule {
+					t.Errorf("%s: unexpected enforced rule %s", test.name, finding.RuleID)
+				}
+			}
+		}
+		if enforced != 1 {
+			t.Errorf("%s: findings %v, want one enforced %s", test.name, findingIDs(findings), rule)
+		}
+	}
 }

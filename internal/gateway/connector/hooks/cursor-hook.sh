@@ -66,7 +66,8 @@ emit_cursor_deny() {
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
-DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+{{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+{{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
@@ -199,7 +200,7 @@ fail_unreachable() {
   defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    emit_cursor_deny "DefenseClaw hook failed closed"
+    emit_cursor_deny "{{if .Managed}}DefenseClaw hook failed closed{{else}}DefenseClaw gateway unreachable; run defenseclaw-gateway start{{end}}"
     exit 2
   fi
   emit_cursor_allow
@@ -270,7 +271,8 @@ defenseclaw_hook_post() {
 RESPONSE=$(defenseclaw_hook_post) || {
   defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
   RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
-}{{end}}
+}
+defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')

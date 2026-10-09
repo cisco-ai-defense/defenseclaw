@@ -52,6 +52,30 @@ class AlertFindingRowsTests(unittest.TestCase):
         else:
             os.environ["COLUMNS"] = self._columns
 
+    def test_alert_identity_does_not_cross_users_with_shared_request_id(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        alert = Event(action="scan-finding", severity="HIGH", connector="claudecode",
+                      structured={"user.id": "alice"}, timestamp=now)
+        bob = Event(action="hook_decision", severity="INFO", connector="claudecode",
+                    structured={"user.id": "bob", "defenseclaw.agent.identity.id": "agt-bob"},
+                    timestamp=now)
+        store.log_event(alert)
+        store.log_event(bob)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id IN (?, ?)",
+                         ("shared-request", alert.id, bob.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([alert.id])[alert.id], {"user": "alice"})
+
+        alice = Event(action="hook_decision", severity="INFO", connector="claudecode",
+                      structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-alice"},
+                      timestamp=now)
+        store.log_event(alice)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?", ("shared-request", alice.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([alert.id])[alert.id],
+                         {"user": "alice", "agent_identity": "agt-alice"})
+
     def _finding(self, request_id: str, hook_details: str, at: datetime) -> str:
         store = self.app.store
         hook = Event(action="connector-hook", target="PreToolUse", severity="INFO",
@@ -114,6 +138,40 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(copilot_hook_target("copilot:UserPromptSubmit"), "copilot:userPromptSubmitted")
         self.assertEqual(copilot_hook_target("claudecode:PreToolUse"), "claudecode:PreToolUse")
 
+    def test_opencode_hook_target_keeps_event_name_in_list(self):
+        self.app.store.log_event(Event(
+            action="scan-finding", target="", severity="HIGH", connector="opencode",
+            details="finding.observed", timestamp=datetime.now(timezone.utc),
+            structured={**FINDING, "defenseclaw.finding.target_ref": "opencode:tool.execute.before"},
+        ))
+        table = self.runner.invoke(alerts, ["--connector", "opencode"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertIn("tool.execute.before", table.output)
+        self.assertNotIn("....execute.before", table.output)
+
+    def test_table_target_matches_exact_selector_outside_secure_client(self):
+        from unittest.mock import patch
+
+        self.app.store.log_event(Event(
+            action="scan-finding", target="", severity="HIGH",
+            connector="opencode", details="finding.observed",
+            structured={**FINDING, "defenseclaw.finding.target_ref": "opencode:acp"},
+            timestamp=datetime.now(timezone.utc),
+        ))
+        table = self.runner.invoke(alerts, ["--connector", "opencode"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertIn("opencode:acp", table.output)
+        self.assertEqual(
+            _alert_selector(alert_ids=(), connector="opencode", target="opencode:acp",
+                            severity="all", since=None, before=None)["target"],
+            "opencode:acp",
+        )
+        with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+            legacy = self.runner.invoke(alerts, ["--connector", "opencode"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(legacy.exit_code, 0, legacy.output)
+        self.assertNotIn("opencode:acp", legacy.output)
+        self.assertIn("acp", legacy.output)
+
     def test_target_selector_sends_the_shown_copilot_target(self):
         # GAP-2619: acknowledge/dismiss --target takes the Target alerts print.
         def selector(target, connector=None):
@@ -151,6 +209,41 @@ class AlertFindingRowsTests(unittest.TestCase):
                      "SF2-MARKER-BLOCK: Certification marker command (block)", "hook-rules",
                      f"alerts acknowledge --id {blocked_id}"):
             self.assertIn(text, show.output)
+
+    def test_show_names_the_user_agent_session_and_depth(self):
+        # GAP-0381: an admin goes from a block alert to the agent that caused it.
+        for column in ("session_id", "agent_instance_id"):
+            if column not in {row[1] for row in self.app.store.db.execute("PRAGMA table_info(audit_events)")}:
+                self.app.store.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        finding_id = self._finding("req-sub", "connector=claudecode result=ok action=block mode=action",
+                                   datetime.now(timezone.utc))
+        # The gateway stamps the verified user ID on both rows. A request ID
+        # alone must never authorize borrowing the hook's agent identity.
+        self.app.store.db.execute(
+            """UPDATE audit_events
+               SET structured_json=json_set(structured_json, '$."user.id"', 'alice-id')
+               WHERE id=?""",
+            (finding_id,),
+        )
+        decision = Event(action="hook_decision", target="PreToolUse", severity="INFO", connector="claudecode",
+                         structured={"user.id": "alice-id", "defenseclaw.user.name": "alice",
+                                     "defenseclaw.agent.depth": 1,
+                                     "defenseclaw.agent.identity.id": "agt-0123456789abcdef"})
+        self.app.store.log_event(decision)
+        self.app.store.db.execute("UPDATE audit_events SET request_id='req-sub' WHERE id=?", (decision.id,))
+        self.app.store.db.execute("UPDATE audit_events SET session_id=?, agent_instance_id=? WHERE id=?",
+                                  ("sess-1\u202e", "ais-fedcba9876543210", finding_id))
+        self.app.store.db.commit()
+
+        show = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(show.exit_code, 0, show.output)
+        for text in ("alice", "agt-0123456789abcdef", "ais-fedcba9876543210", "1 (sub-agent)",
+                     "agent identities --user alice --connector claudecode"):
+            self.assertIn(text, show.output)
+        self.assertIn("sess-1", show.output)
+        self.assertNotIn("\u202e", show.output)
+        as_json = self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertIn('"agent_depth": 1', as_json.output)
 
     def test_a_block_explained_by_a_finding_is_one_alert(self):
         """GAP-1305: one alert per block, like the TUI; a lone hook block stays."""
@@ -217,7 +310,7 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertIn("decision=detected after the tool ran (cannot block)", table.output)
         self.assertNotIn("observe mode", table.output)
         # GAP-1535: a wide terminal shows the whole hook event, not "...tToolUse".
-        self.assertIn("| PostToolUse ", table.output.replace("\u2503", "|").replace("\u2502", "|"))
+        self.assertIn("| claudecode:PostToolUse ", table.output.replace("\u2503", "|").replace("\u2502", "|"))
 
     # GAP-1525: a plugin finding names the plugin (target_ref) and the file.
     def test_plugin_finding_names_plugin_and_file(self):

@@ -27,6 +27,7 @@ import logging
 import ntpath
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -76,6 +77,44 @@ from defenseclaw.file_permissions import (
     make_private_directory,
     read_regular_file_no_follow,
 )
+
+# libyaml parses a 150 KB policy config in tens of milliseconds where the
+# pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
+# than once (100 profiles and 2,000 assignments made each command take 7 to
+# 10 s). PyYAML builds without libyaml fall back to the pure-Python loader.
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+
+
+class _GatewayBooleanLoader(YAML_LOADER):  # type: ignore[misc, valid-type]
+    """YAML_LOADER that reads only true/false as booleans, as the gateway does."""
+
+
+_GatewayBooleanLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+    for first, resolvers in YAML_LOADER.yaml_implicit_resolvers.items()
+}
+_GatewayBooleanLoader.add_implicit_resolver(
+    _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
+
+def parse_config_yaml(text: str) -> Any:
+    """Parse config.yaml text the way the gateway reads it.
+
+    The gateway (yaml.v3, YAML 1.2 core schema) and the v8 source validator
+    read only true/false as booleans. PyYAML follows YAML 1.1, where yes, no,
+    on and off are booleans too, so a hand-written ``ide_inventory: off`` came
+    back as False: the CLI read it as ``all`` and a save wrote back a boolean
+    the v8 schema rejects. A pre-v8 document keeps the YAML 1.1 reading, the
+    one the v7 upgrade converter uses.
+    """
+    raw = yaml.load(text, Loader=_GatewayBooleanLoader)
+    if not isinstance(raw, dict) or _exact_config_version(raw.get("config_version")) == 8:
+        return raw
+    return yaml.load(text, Loader=YAML_LOADER)
+
 
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
@@ -127,6 +166,15 @@ class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
 
+class ConfigSaveError(OSError):
+    """An atomic config.yaml save failed before replacing the prior file."""
+
+    def __init__(self, path: str, cause: OSError) -> None:
+        super().__init__(cause.errno, cause.strerror or str(cause), path)
+        self.path = path
+
+
+
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
 # gateway's MaxSupportedConfigVersion.
@@ -150,7 +198,7 @@ def source_config_version(*, path: str | None = None) -> int | None:
     cfg_file = path or str(config_path())
     try:
         with open(cfg_file, encoding="utf-8") as stream:
-            root = yaml.compose(stream)
+            root = yaml.compose(stream, Loader=YAML_LOADER)
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -223,6 +271,16 @@ def empty_config_message(path: str | None = None) -> str:
         f"{_previous_config_hint(home)}, "
         "or remove the empty file and run 'defenseclaw init'."
     )
+
+
+def config_damage_message(path: str | None = None) -> str:
+    """The repair text for an empty config.yaml, or "" for any other file."""
+
+    if config_is_empty(path):
+        return empty_config_message(path)
+    # source_config_version handles malformed YAML. A valid legacy config
+    # need not end with a newline, even if DefenseClaw's writer adds one.
+    return ""
 
 
 def _newest_config_backup(home: str) -> tuple[str, float] | None:
@@ -303,8 +361,8 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
             "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
         )
     if version != CURRENT_CONFIG_VERSION:
-        if version == 0 and config_is_empty(path):
-            raise ConfigVersionError(empty_config_message(path))
+        if version == 0 and (damage := config_damage_message(path)):
+            raise ConfigVersionError(damage)
         raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
 
@@ -2209,6 +2267,54 @@ class PerConnectorGuardrailConfig:
 
 
 @dataclass
+class GuardrailProfileMatch:
+    """Subjects one ``guardrail.profile_assignments`` entry selects.
+
+    Mirrors ``config.ProfileMatch`` in ``internal/config/guardrail_profiles.go``.
+    Set keys combine with AND, the values of one key with OR.
+    """
+
+    groups: list[str] = field(default_factory=list)
+    users: list[str] = field(default_factory=list)
+    connectors: list[str] = field(default_factory=list)
+    agents: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GuardrailProfileAssignment:
+    """One ordered ``guardrail.profile_assignments`` entry (first match wins).
+
+    Mirrors ``config.ProfileAssignment``.
+    """
+
+    profile: str = ""
+    match: GuardrailProfileMatch = field(default_factory=GuardrailProfileMatch)
+
+
+@dataclass
+class GuardrailProfile:
+    """One ``guardrail.profiles`` entry: identity-based guardrail overrides.
+
+    Mirrors ``config.GuardrailProfile``. Unset fields inherit. ``enabled`` and
+    ``hook_fail_mode`` are not allowed in a profile (the gateway rejects them
+    because both are baked into the installed hooks); they are modeled only
+    so a load/save round-trip preserves them for that check instead of
+    silently dropping them.
+    """
+
+    description: str = ""
+    mode: str = ""
+    block_at: str = ""
+    alert_at: str = ""
+    hilt: HILTConfig | None = None
+    rule_pack_dir: str = ""
+    block_message: str = ""
+    connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
+    enabled: bool | None = None
+    hook_fail_mode: str = ""
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"  # observe | action
@@ -2308,6 +2414,14 @@ class GuardrailConfig:
     # ``internal/config/config.go``; resolution goes through the
     # ``effective_*`` methods, never by reading the map directly.
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
+    # Identity-based guardrail profiles. Mirror ``GuardrailConfig.Profiles``,
+    # ``ProfileAssignments`` and ``DefaultProfile`` in
+    # ``internal/config/config.go``; all empty by default, which keeps the
+    # guardrail.* behaviour. The gateway validates them and rejects them
+    # under the Secure Client integration.
+    profiles: dict[str, GuardrailProfile] = field(default_factory=dict)
+    profile_assignments: list[GuardrailProfileAssignment] = field(default_factory=list)
+    default_profile: str = ""
 
     def _connector_override(self, connector: str) -> PerConnectorGuardrailConfig | None:
         """Return the override block for ``connector`` if configured.
@@ -2467,6 +2581,89 @@ class GuardrailConfig:
                 _validate_guardrail_level("alert_at", pc.alert_at)
             except ValueError as exc:
                 raise ValueError(f"guardrail.connectors[{name!r}]: {exc}") from exc
+
+
+_GUARDRAIL_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_AGENT_IDENTITY_RE = re.compile(r"^agt-[0-9a-f]{16}$")
+_PROFILE_FORBIDDEN_KEY = (
+    "is not allowed in a guardrail profile (it is baked into the installed hooks); "
+    "set it on guardrail or guardrail.connectors instead"
+)
+
+
+def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
+    """Validate ``guardrail.profiles`` / ``profile_assignments`` / ``default_profile``.
+
+    Mirrors ``GuardrailConfig.validateProfiles`` in
+    ``internal/config/guardrail_profiles.go`` message for message. The
+    Secure Client rejection stays with the gateway, which knows the
+    deployment profile. Raises :class:`ValueError` on the first violation.
+    """
+    if not (gc.profiles or gc.profile_assignments or (gc.default_profile or "").strip()):
+        return
+    for name in sorted(gc.profiles):
+        if not _GUARDRAIL_PROFILE_NAME_RE.match(name):
+            raise ValueError(
+                f"guardrail.profiles: invalid profile name {name!r} "
+                "(want lowercase letters, digits, '-' or '_', at most 64)"
+            )
+        try:
+            _validate_guardrail_profile(gc.profiles[name])
+        except ValueError as exc:
+            raise ValueError(f"guardrail.profiles[{name!r}]: {exc}") from exc
+    for i, assignment in enumerate(gc.profile_assignments):
+        if assignment.profile not in gc.profiles:
+            raise ValueError(f"guardrail.profile_assignments[{i}]: unknown profile {assignment.profile!r}")
+        match = assignment.match
+        if not (match.groups or match.users or match.connectors or match.agents):
+            raise ValueError(
+                f"guardrail.profile_assignments[{i}]: match needs at least one of groups, users, "
+                "connectors or agents; use guardrail.default_profile for everyone else"
+            )
+        for agent in match.agents:
+            if not _AGENT_IDENTITY_RE.match(agent):
+                raise ValueError(
+                    f"guardrail.profile_assignments[{i}].match.agents: {agent!r} is not an agent "
+                    "identity (want agt- followed by 16 hex digits)"
+                )
+    default = (gc.default_profile or "").strip()
+    if default and default not in gc.profiles:
+        raise ValueError(f"guardrail.default_profile: unknown profile {default!r}")
+
+
+def _validate_guardrail_profile(profile: GuardrailProfile) -> None:
+    if profile.enabled is not None:
+        raise ValueError("enabled " + _PROFILE_FORBIDDEN_KEY)
+    if profile.hook_fail_mode:
+        raise ValueError("hook_fail_mode " + _PROFILE_FORBIDDEN_KEY)
+    _validate_guardrail_mode(profile.mode)
+    _validate_guardrail_level("block_at", profile.block_at)
+    _validate_guardrail_level("alert_at", profile.alert_at)
+    if profile.hilt is not None:
+        _validate_guardrail_min_severity(profile.hilt.min_severity)
+    seen: dict[str, str] = {}
+    for name in sorted(profile.connectors):
+        if not name.strip():
+            raise ValueError("connectors: empty connector name is not allowed")
+        norm = connector_paths.normalize(name)
+        if norm in seen:
+            raise ValueError(
+                f"connectors: {seen[norm]!r} and {name!r} refer to the same connector {norm!r}; keep only one"
+            )
+        seen[norm] = name
+        pc = profile.connectors[name]
+        if pc.enabled is not None:
+            raise ValueError(f"connectors[{name!r}]: enabled {_PROFILE_FORBIDDEN_KEY}")
+        if pc.hook_fail_mode:
+            raise ValueError(f"connectors[{name!r}]: hook_fail_mode {_PROFILE_FORBIDDEN_KEY}")
+        try:
+            _validate_guardrail_mode(pc.mode)
+            _validate_guardrail_level("block_at", pc.block_at)
+            _validate_guardrail_level("alert_at", pc.alert_at)
+            if pc.hilt is not None:
+                _validate_guardrail_min_severity(pc.hilt.min_severity)
+        except ValueError as exc:
+            raise ValueError(f"connectors[{name!r}]: {exc}") from exc
 
 
 #: Values of ``guardrail.block_at`` / ``alert_at`` (global or per connector),
@@ -2729,6 +2926,15 @@ class AIDiscoveryConfig:
     # person rather than an account on one endpoint, and it leaves the endpoint
     # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
     include_user_email: bool = False
+    # Opt-in like include_user_email: the directory principal (UPN) and the
+    # session's Kerberos principal identify a person. When on they ride every
+    # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
+    include_user_principal: bool = False
+    # Child domains of the joined AD realm whose SSSD accounts are verified;
+    # empty trusts the joined domain only. Mirrors TrustedADChildDomains.
+    trusted_ad_child_domains: list[str] = field(default_factory=list)
+    # IDE plugin inventory scope: all | ai_only | off. Mirrors IDEInventory.
+    ide_inventory: str = "all"
     lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
@@ -3333,8 +3539,15 @@ class Config:
         refuses to reload.
         """
         path = str(config_path_for_data_dir(self.data_dir))
-        with locked_config_yaml(path):
-            self._save_locked(path)
+        try:
+            with locked_config_yaml(path):
+                self._save_locked(path)
+        except OSError as exc:
+            if exc.errno is None:
+                # A refusal (a managed_enterprise change without admin
+                # rights), not a failed write: keep its own error.
+                raise
+            raise ConfigSaveError(path, exc) from exc
 
     def save_verified(self, verify: Callable[[str], None]) -> None:
         """Persist, verify the exact written generation, and roll back on failure.
@@ -3678,6 +3891,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 if entry.get("hilt") is None:
                     entry.pop("hilt", None)
                 _strip_unset_levels(entry)
+    _serialize_guardrail_profiles(cfg, guardrail)
     # The compatibility dataclass can preview a retired ``splunk:`` source for
     # upgrade/credential recovery, but exact-v8 serialization must never write
     # it. Splunk forwarding is a canonical observability destination.
@@ -3690,6 +3904,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     for wh in d.get("webhooks") or []:
         _strip_webhook_omitempty(wh)
     _prune_ai_runtime(d.get("ai_discovery"))
+    _strip_ai_discovery_omitempty(d.get("ai_discovery"))
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
     if d.get("application_protection") == _default_application_protection_dict():
@@ -3725,6 +3940,78 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _serialize_openshell(d)
     _serialize_routing(d)
     return d
+
+
+def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
+    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal``,
+    ``trusted_ad_child_domains`` and ``ide_inventory`` so configs that never
+    set them stay byte-identical."""
+    if not isinstance(ai_discovery, dict):
+        return
+    if not ai_discovery.get("include_user_principal"):
+        ai_discovery.pop("include_user_principal", None)
+    if not ai_discovery.get("trusted_ad_child_domains"):
+        ai_discovery.pop("trusted_ad_child_domains", None)
+    if ai_discovery.get("ide_inventory") in (None, "", "all"):
+        ai_discovery.pop("ide_inventory", None)
+
+
+def _strip_empty_keys(block: dict[str, Any], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        if block.get(key) in (None, ""):
+            block.pop(key, None)
+
+
+def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
+    """Mirror Go's ``omitempty`` tags on the guardrail profile fields.
+
+    Empty profiles, assignments and default profile are dropped so existing
+    configs stay byte-identical, and unset profile fields are dropped so the
+    serialized profile only spells what the operator set (the v8 schema
+    rejects ``enabled`` and ``hook_fail_mode`` inside a profile, so an unset
+    one must not be written as an empty value). Like ``guardrail.connectors``,
+    a map that was populated at load and is now empty is written as ``{}`` so
+    the v8 structural delta clears it on disk.
+    """
+    if not isinstance(guardrail, dict):
+        return
+    profiles = guardrail.get("profiles")
+    if not profiles:
+        if (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("guardrail.profiles"):
+            guardrail["profiles"] = {}
+        else:
+            guardrail.pop("profiles", None)
+    elif isinstance(profiles, dict):
+        for profile in profiles.values():
+            if not isinstance(profile, dict):
+                continue
+            _strip_empty_keys(
+                profile,
+                ("description", "mode", "rule_pack_dir", "block_message", "hilt", "enabled", "hook_fail_mode"),
+            )
+            _strip_unset_levels(profile)
+            connectors = profile.get("connectors")
+            if not connectors:
+                profile.pop("connectors", None)
+                continue
+            for entry in connectors.values():
+                if isinstance(entry, dict):
+                    _strip_empty_keys(
+                        entry, ("mode", "hilt", "hook_fail_mode", "block_message", "rule_pack_dir", "enabled")
+                    )
+                    _strip_unset_levels(entry)
+    assignments = guardrail.get("profile_assignments")
+    if not assignments:
+        guardrail.pop("profile_assignments", None)
+    elif isinstance(assignments, list):
+        for assignment in assignments:
+            match = assignment.get("match") if isinstance(assignment, dict) else None
+            if isinstance(match, dict):
+                for key in ("groups", "users", "connectors", "agents"):
+                    if not match.get(key):
+                        match.pop(key, None)
+    if not guardrail.get("default_profile"):
+        guardrail.pop("default_profile", None)
 
 
 def _strip_unset_levels(block: Any) -> None:
@@ -3792,7 +4079,7 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
     """
     try:
         with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+            raw = parse_config_yaml(f.read()) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
@@ -3876,6 +4163,9 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
         # deleted/cleared connector propagate to disk, which is the whole
         # point of the removal.
         "guardrail.connectors",
+        # Identity-based guardrail profiles map: fully modeled, so a removed
+        # profile must not be resurrected from the prior file.
+        "guardrail.profiles",
         # Per-connector asset_policy overrides map (OTHER-7). Same rationale as
         # guardrail.connectors: the dataclass is the single source of truth for
         # the configured per-connector set, so clearing an override in-memory and
@@ -3922,6 +4212,13 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.judge.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Identity-based guardrail profile selection: empty = no profiles.
+        "guardrail.profile_assignments",
+        "guardrail.default_profile",
+        # AI discovery identity/IDE opt-ins: stripped at their defaults.
+        "ai_discovery.include_user_principal",
+        "ai_discovery.trusted_ad_child_domains",
+        "ai_discovery.ide_inventory",
     }
 )
 
@@ -4265,6 +4562,7 @@ def _disabled_ai_discovery_dict() -> dict[str, Any]:
     # "is this just the default?" comparison stays an equality check on one
     # shape rather than drifting every time a nested block gains a field.
     _prune_ai_runtime(disabled)
+    _strip_ai_discovery_omitempty(disabled)
     return disabled
 
 
@@ -4887,11 +5185,14 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
         llm_role=_normalize_llm_role(raw.get("llm_role", "")),
         connectors=_merge_guardrail_connectors(raw.get("connectors")),
+        profiles=_merge_guardrail_profiles(raw.get("profiles")),
+        profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
+        default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
 
 
 def _merge_guardrail_connectors(
-    raw: Any,
+    raw: Any, *, profile: bool = False,
 ) -> dict[str, PerConnectorGuardrailConfig]:
     """Parse the optional ``guardrail.connectors`` map.
 
@@ -4917,13 +5218,67 @@ def _merge_guardrail_connectors(
         enabled = enabled_raw if isinstance(enabled_raw, bool) else None
         out[str(name)] = PerConnectorGuardrailConfig(
             mode=entry.get("mode", ""),
-            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
+            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None and (not profile or bool(hilt_entry)) else None,
             hook_fail_mode=entry.get("hook_fail_mode", ""),
             block_message=entry.get("block_message", ""),
             rule_pack_dir=entry.get("rule_pack_dir", ""),
             enabled=enabled,
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
+        )
+    return out
+
+
+def _string_list(raw: Any) -> list[str]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item) for item in raw if str(item).strip()]
+
+
+def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
+    """Parse ``guardrail.profiles`` (mirrors the Go unmarshal of
+    ``map[string]GuardrailProfile``). Load only: validation is the gateway's."""
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, GuardrailProfile] = {}
+    for name, entry in raw.items():
+        entry = entry if isinstance(entry, dict) else {}
+        hilt_entry = entry.get("hilt")
+        enabled_raw = entry.get("enabled")
+        out[str(name)] = GuardrailProfile(
+            description=str(entry.get("description", "") or ""),
+            mode=str(entry.get("mode", "") or ""),
+            block_at=normalize_guardrail_level(entry.get("block_at")),
+            alert_at=normalize_guardrail_level(entry.get("alert_at")),
+            hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) and hilt_entry else None,
+            rule_pack_dir=str(entry.get("rule_pack_dir", "") or ""),
+            block_message=str(entry.get("block_message", "") or ""),
+            connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
+            enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
+            hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
+        )
+    return out
+
+
+def _merge_guardrail_profile_assignments(raw: Any) -> list[GuardrailProfileAssignment]:
+    """Parse the ordered ``guardrail.profile_assignments`` list."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[GuardrailProfileAssignment] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        match = entry.get("match") if isinstance(entry.get("match"), dict) else {}
+        out.append(
+            GuardrailProfileAssignment(
+                profile=str(entry.get("profile", "") or ""),
+                match=GuardrailProfileMatch(
+                    groups=_string_list(match.get("groups")),
+                    users=_string_list(match.get("users")),
+                    connectors=_string_list(match.get("connectors")),
+                    agents=_string_list(match.get("agents")),
+                ),
+            )
         )
     return out
 
@@ -5629,7 +5984,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     raw: dict[str, Any] = {}
     try:
         with open(cfg_file) as f:
-            raw = yaml.safe_load(f) or {}
+            raw = parse_config_yaml(f.read()) or {}
     except OSError:
         pass
     _warn_untrusted_managed_config(cfg_file, raw)
@@ -5800,6 +6155,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # gateway's Load() which rejects the same shapes. Value-only check —
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
+    validate_guardrail_profiles(cfg.guardrail)
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.
@@ -5847,7 +6203,11 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
     if not isinstance(raw, dict):
         return AIDiscoveryConfig(enabled=False)
     return AIDiscoveryConfig(
-        enabled=bool(raw.get("enabled", True)),
+        # Go defaults ai_discovery.enabled to false (viper), so a block that
+        # omits the key is disabled there too. Defaulting to true here made the
+        # CLI report discovery as on while the gateway kept it off, and a later
+        # save never wrote the flag because it already matched the loaded value.
+        enabled=_coerce_bool(raw.get("enabled", False)),
         mode=str(raw.get("mode", "enhanced") or "enhanced"),
         scan_interval_min=int(raw.get("scan_interval_min", 5) or 5),
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),
@@ -5860,6 +6220,9 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
+        include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
+        trusted_ad_child_domains=[str(v) for v in (raw.get("trusted_ad_child_domains", []) or [])],
+        ide_inventory=_normalize_ide_inventory(raw.get("ide_inventory")),
         lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
@@ -5869,6 +6232,12 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
         runtime=_merge_ai_runtime(raw.get("runtime")),
     )
+
+
+def _normalize_ide_inventory(value: Any) -> str:
+    """Coerce ``ai_discovery.ide_inventory`` to all | ai_only | off (default all)."""
+    scope = str(value or "").strip().lower()
+    return scope if scope in {"ai_only", "off"} else "all"
 
 
 def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:

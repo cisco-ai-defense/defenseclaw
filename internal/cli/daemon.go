@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -277,7 +278,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	err = runStartLocked(cmd, args, coldStart)
 	if err != nil && coldStart {
 		if running, _ := daemon.New(dataDir).IsRunning(); !running {
-			recordHookColdStartFailure(dataDir)
+			recordHookColdStartFailure(dataDir, err)
 		}
 	}
 	return err
@@ -307,12 +308,13 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return err
 	}
+	bootSource := configSourceDigest(config.ConfigPath())
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	if rotationTransaction && cfgLoadErr != nil {
 		return fmt.Errorf("rotation start requires valid configuration: %w", cfgLoadErr)
 	}
 	if err := daemonConfigLoadError("start", cfgLoadErr); err != nil {
-		return err
+		return startConfigLoadError{err: err}
 	}
 	if rotationTransaction {
 		if err := verifyRotationConfigState(cfg, expectedConnectorState); err != nil {
@@ -337,6 +339,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
 		if note := otherGatewayBinaryNote(d.RecordedExecutable()); note != "" {
 			fmt.Println(note)
+		}
+		if note := movedCLILauncherNote(); note != "" {
+			Warn(note)
 		}
 		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
@@ -378,7 +383,14 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return fmt.Errorf("start daemon: %w%s", err, gatewayStartFailureDiskNote(config.DefaultDataPath()))
 	}
 
-	cfg, cfgErr = loadDaemonConfig(cmd)
+	// The readiness checks need the configuration the daemon reads. Load it
+	// again only when config.yaml changed since the load above, or a rotation
+	// must re-check the committed state: with a large guardrail policy each
+	// load is a full parse and validation (GAP-0264).
+	if rotationTransaction || cfgLoadErr != nil || bootSource == nil ||
+		!bytes.Equal(bootSource, configSourceDigest(config.ConfigPath())) {
+		cfg, cfgErr = loadDaemonConfig(cmd)
+	}
 	if rotationTransaction && cfgErr != nil {
 		return fmt.Errorf("rotation start could not reload committed configuration: %w", cfgErr)
 	}
@@ -446,6 +458,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	}
 	// The name records the move to the second; allow for that rounding.
 	printMovedCorruptAuditStores(cfg, startAttemptedAt.Add(-time.Second))
+	if note := movedCLILauncherNote(); note != "" {
+		Warn(note)
+	}
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -572,6 +587,23 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
 		_ = runWatchdogStop(nil, nil)
+		if hookColdStartSupported && !secureClientHost() {
+			// The watchdog can be waiting for an independent cold-start child
+			// when it exits. Wait for that child's start lock before taking the
+			// final running snapshot and publishing the stop marker. A start
+			// that passed its first marker check can otherwise clear a marker
+			// after stop has already returned.
+			release, lockErr := acquireGatewayStartLock(config.DefaultDataPath(), gatewayStartLockWait)
+			if lockErr != nil {
+				return fmt.Errorf("wait for gateway start before stop: %w", lockErr)
+			}
+			defer release()
+			// The child may have started a fresh watchdog while finishing.
+			// With its start lock held, stop that instance before checking
+			// the gateway and writing the final marker.
+			_ = runWatchdogStop(nil, nil)
+			running, pid = d.IsRunning()
+		}
 	}
 
 	// Written before the stop so a hook refused mid-shutdown does not start
@@ -1049,6 +1081,11 @@ func daemonConfigLoadError(verb string, err error) error {
 	if err == nil {
 		return nil
 	}
+	if !secureClientHost() {
+		if _, statErr := os.Stat(config.ConfigPath()); errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("cannot %s the gateway: no config.yaml exists yet; run defenseclaw init first", verb)
+		}
+	}
 	if secretErr := missingObservabilitySecretError(verb, err); secretErr != nil {
 		return secretErr
 	}
@@ -1085,6 +1122,20 @@ func daemonConfigLoadError(verb string, err error) error {
 // emptyConfigProbeBytes matches the Python CLI's _EMPTY_CONFIG_PROBE_BYTES.
 const emptyConfigProbeBytes = 64 << 10
 
+// incompleteConfigProbeBytes bounds the read of a config.yaml that failed to
+// load, to tell a cut-short file from an older or invalid one.
+const incompleteConfigProbeBytes = 4 << 20
+
+var configVersionLine = regexp.MustCompile(`(?m)^config_version[ \t]*:`)
+
+// incompleteConfigFile reports a config.yaml that stops mid-document:
+// DefenseClaw always ends it with a newline, and a file cut short before
+// config_version has none (the Python CLI config_is_incomplete).
+func incompleteConfigFile(raw []byte) bool {
+	return len(raw) > 0 && len(raw) <= incompleteConfigProbeBytes && raw[len(raw)-1] != 0x0a &&
+		!onlyYAMLComments(raw) && !configVersionLine.Match(raw)
+}
+
 // emptyConfigFileMessage reports a config.yaml that exists but holds no
 // settings (0 bytes, blank or comments only) in the Python CLI's words
 // (GAP-1633). The YAML loader calls it a root that must be a mapping and told
@@ -1095,8 +1146,21 @@ func emptyConfigFileMessage(path string) (string, bool) {
 		return "", false
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, emptyConfigProbeBytes+1))
-	if err != nil || len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
+	raw, err := io.ReadAll(io.LimitReader(file, incompleteConfigProbeBytes+1))
+	if err != nil {
+		return "", false
+	}
+	if incompleteConfigFile(raw) {
+		// Cut short while it was written: not an older configuration, so
+		// not "run defenseclaw migrate" either (GAP-0482).
+		return fmt.Sprintf(
+			"%s is incomplete: it stops in the middle of the file (as after a crash or a full disk). "+
+				"It is not an older configuration, and nothing was changed. Restore your copy of config.yaml%s, "+
+				"or remove the file and run defenseclaw init.",
+			path, previousConfigHint(filepath.Dir(path)),
+		), true
+	}
+	if len(raw) > emptyConfigProbeBytes || !onlyYAMLComments(raw) {
 		return "", false
 	}
 	return fmt.Sprintf(
@@ -1173,6 +1237,22 @@ func onlyYAMLComments(raw []byte) bool {
 		}
 	}
 	return true
+}
+
+// configSourceDigest is the SHA-256 of the file at path, or nil when it
+// cannot be read within the config loader's source-size limit.
+func configSourceDigest(path string) []byte {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, int64(config.V8YAMLMaxSourceBytes)+1))
+	if err != nil || n > int64(config.V8YAMLMaxSourceBytes) {
+		return nil
+	}
+	return hash.Sum(nil)
 }
 
 func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
@@ -2586,6 +2666,7 @@ func telemetryReadinessFailureDetail(details map[string]interface{}) string {
 		"adapter_result_invalid", "adapter_input_invalid", "projection_invalid", "envelope_encode_failed",
 		"envelope_size_invalid", "request_build_failed", "endpoint_prohibited", "resolution_failed",
 		"connection_failed", "request_canceled", "request_timeout", "acknowledgement_lost", "transport_failed",
+		"file_write_failed", "no_space",
 		"http_authentication", "http_retryable", "http_rejected", "hec_ack_invalid",
 		"hec_ack_authentication", "hec_ack_retryable", "hec_ack_rejected")
 	retentionStates := allowed("", "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped")
@@ -2825,4 +2906,63 @@ func otherGatewayBinaryNote(running string) string {
 		return ""
 	}
 	return fmt.Sprintf("It runs %s, not this binary (%s). To switch: 'defenseclaw-gateway stop', then start again.", running, self)
+}
+
+// movedCLILauncherNote says when the defenseclaw command next to this gateway
+// binary no longer runs. install.sh links ~/.local/bin/defenseclaw into
+// ~/.defenseclaw/.venv by absolute path and the venv entry point names its
+// interpreter the same way, so after an account rename or a home move the
+// user only saw "command not found" while this binary, a plain copy, still
+// ran and said nothing (GAP-0732).
+func movedCLILauncherNote() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return movedCLILauncherNoteIn(filepath.Dir(self))
+}
+
+func movedCLILauncherNoteIn(binDir string) string {
+	link := filepath.Join(binDir, "defenseclaw")
+	target, err := os.Readlink(link)
+	if err != nil {
+		return ""
+	}
+	missing := ""
+	if _, err := os.Stat(link); errors.Is(err, os.ErrNotExist) {
+		missing = target
+	} else if interpreter := scriptInterpreter(link); interpreter != "" {
+		if _, err := os.Stat(interpreter); errors.Is(err, os.ErrNotExist) {
+			missing = interpreter
+		}
+	}
+	if missing == "" {
+		return ""
+	}
+	return fmt.Sprintf("The defenseclaw command (%s) does not run: it needs %s, which no longer exists "+
+		"(was this account renamed or its home moved?). Rerun the DefenseClaw installer to repair it.", link, missing)
+}
+
+// scriptInterpreter returns the absolute interpreter a script names on its
+// #! line, or "".
+func scriptInterpreter(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := f.Read(head)
+	line, _, _ := strings.Cut(string(head[:n]), "\n")
+	if !strings.HasPrefix(line, "#!") {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimPrefix(line, "#!"))
+	if len(fields) == 0 || !filepath.IsAbs(fields[0]) {
+		return ""
+	}
+	return fields[0]
 }

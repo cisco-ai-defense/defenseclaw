@@ -132,6 +132,11 @@ type EnumerateOptions struct {
 	// ReportUnprotected receives each agent the standalone enumerator found
 	// installed for an eligible profile but could not enroll.
 	ReportUnprotected func(UnprotectedAgent)
+	// ReportExcluded receives each profile the standalone enrollment
+	// excludes (exclude_users or exclude_groups), with its SID and home, so
+	// the cycle can take the gateway's inventory read access off it
+	// (GAP-1024).
+	ReportExcluded func(ManifestTarget)
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -201,7 +206,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
-	connectors := effectiveWindowsHookConnectors(cfg)
+	connectors := EffectiveWindowsHookConnectors(cfg)
 	if len(connectors) == 0 {
 		// No enabled hook-based connector → no per-user rows to
 		// emit. Return an empty (but valid) manifest so the atomic
@@ -268,6 +273,16 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
 			continue
 		}
+		if standalone && windowsDeletedLocalAccount(profile.SID, lookupAccount) {
+			// A deleted local account whose profile folder could not be
+			// removed (a hive another process still holds) kept its rows: the
+			// guardian could never repair them, status failed and every
+			// later Setup /ensure stopped at the activation evidence. No one
+			// can sign in as it, so its rows are revoked now (GAP-0430).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account no longer exists; its rows are revoked although its profile folder remains")
+			continue
+		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
 		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
 			if groupDecision, groupReason := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
@@ -276,6 +291,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
 			continue
 		}
 		if decision != windowsEnrollmentEnrolled {
@@ -681,6 +699,18 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 	}
 }
 
+// windowsDeletedLocalAccount reports a local account SID that no longer
+// names an account. A domain or Entra account lookup also fails while its
+// directory is unreachable, so only local accounts are judged, and only by
+// ERROR_NONE_MAPPED (a timeout or a spent budget is not proof).
+func windowsDeletedLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	_, _, err := lookup(sid)
+	return errors.Is(err, windows.ERROR_NONE_MAPPED)
+}
+
 // windowsProfileEnrollmentDecision applies enterprise.enrollment to one
 // profile. Exclusion wins over exemption. SID and profile-directory entries
 // are decided without a lookup; a name-form entry that did not already match
@@ -1049,7 +1079,7 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 	return sid.SubAuthority(0) == securityNTNonUnique
 }
 
-// effectiveWindowsHookConnectors returns the connector names for
+// EffectiveWindowsHookConnectors returns the connector names for
 // which the enumerator emits per-user rows. Filters the operator-
 // configured connector list down to those the Windows per-user
 // installer actually supports (see `windowsHookConnectors`),
@@ -1073,7 +1103,7 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
 // authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
-func effectiveWindowsHookConnectors(cfg *config.Config) []string {
+func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
 	seen := make(map[string]struct{})
 	// disabledNames captures every name the operator explicitly
 	// disabled in cfg.Guardrail.Connectors. The scalar-connector

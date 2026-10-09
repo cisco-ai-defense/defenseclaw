@@ -1,0 +1,510 @@
+---
+title: User- and group-based policies
+description: Give a directory group, a user, a connector or a single agent its own guardrail policy with guardrail profiles. Write the assignments, see which profile a person gets, read the audit record, and ship the same config to managed hosts.
+keywords:
+  - DefenseClaw guardrail profiles
+  - per-user guardrail policy
+  - AD group policy
+  - profile_assignments
+  - guardrail profile explain
+  - identity-based policy
+---
+
+One guardrail setting for everyone is rarely right. Contractors may need
+enforcement from day one, the ML team may need to stay in observe mode, and
+one connector may need a stricter threshold for one person. **Guardrail
+profiles** do that without one override per agent: you define a few named
+profiles, then assign them by directory group, user, connector or agent. The
+gateway picks the profile for each request after it knows who made it.
+
+A profile is a named set of guardrail overrides. Assignments are an ordered
+list; the first one that matches wins. A default profile catches everyone
+else.
+
+<Callout type="info" title="Where the identity comes from">
+DefenseClaw reads who a user is from the operating system and never calls
+Active Directory, Okta or Entra. Only facts the OS vouches for (`verified`)
+can select a profile. See
+[How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
+</Callout>
+
+## A complete example
+
+```yaml title="~/.defenseclaw/config.yaml"
+guardrail:
+  mode: observe                  # the global posture, used when no profile applies
+  block_at: HIGH
+
+  profiles:
+    strict:
+      description: Default for verified users who match nothing else
+      mode: action
+      block_at: MEDIUM
+    contractors:
+      description: Contractors are enforced from day one
+      mode: action
+      block_at: MEDIUM
+      alert_at: LOW
+      hilt: {enabled: true, min_severity: HIGH}
+      rule_pack_dir: /home/<you>/.defenseclaw/policies/guardrail/strict   # absolute: ~ is not expanded
+      connectors:
+        codex: {mode: observe}   # but Codex only observes for this profile
+    ml-team:
+      description: The ML team stays in observe mode
+      mode: observe
+    alice-codex:
+      description: Stricter Codex policy for one person
+      connectors:
+        codex: {mode: action, block_at: MEDIUM}
+
+  profile_assignments:           # ordered: the first match wins, so list the narrowest first
+    - profile: ml-team           # by one agent install
+      match: {agents: ["agt-3f9c0a1b2c3d4e5f"]}
+    - profile: alice-codex       # by user and connector together
+      match:
+        users: ["alice@CORP.EXAMPLE.COM"]
+        connectors: [codex]
+    - profile: contractors       # by directory group
+      match: {groups: ["contractors@corp.example.com"]}
+    - profile: ml-team           # by directory group
+      match: {groups: ["ml-team@corp.example.com"]}
+
+  default_profile: strict        # everyone verified who matched nothing above
+```
+
+Then check it and see who gets what:
+
+```bash
+defenseclaw config validate
+defenseclaw guardrail profile list
+defenseclaw guardrail profile explain --user alice@corp.example.com --connector codex
+```
+
+`profile list` prints the profiles, the ordered assignments and the default.
+`config validate` rejects an unknown profile name, an assignment with an empty
+`match`, a malformed agent ID and a forbidden key.
+
+## What a profile can set
+
+| Key | Meaning |
+| --- | --- |
+| `description` | Free text for operators. |
+| `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. The hooks of a sandboxed agent always enforce, whatever `mode` says. |
+| `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`, for tool-call decisions ([tool-call levels](/docs/reference/cli#tool-call-levels)). When unset, the rule pack's level applies. Prompts and responses always use the rule pack's levels (a `strict` pack blocks MEDIUM and above, others CRITICAL), so `block_at: MEDIUM` blocks a MEDIUM finding in a command, not in a prompt. A plain regex rule that only matches text an inert command prints (`echo marker`) is recorded on a tool call but does not block; a rule meant to block a command needs an `expression` over the parsed command ([CEL rules](/docs/policies/cel/authoring)). |
+| `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, stored in upper case) for [human approval](/docs/hitl). |
+| `rule_pack_dir` | A rule pack for this profile: the absolute path of its directory. `~` is not expanded. When the directory does not load as the gateway starts (it is created a moment later, for example by the MDM that delivers it), the profile scans with the base rule set and the gateway retries the pack every 30 seconds; `explain` says so meanwhile. A reload refuses a pack that does not load. |
+| `block_message` | The text a blocked user sees. |
+| `connectors.<name>` | The same settings for one connector, except `description`. |
+
+`enabled` and `hook_fail_mode` are rejected inside a profile and inside its
+connector entries, because both are built into the hooks installed on the
+machine. A profile name is lower case letters, digits, `-` and `_`, at most 64
+characters.
+
+For one connector, the most specific value wins:
+
+1. the profile's `connectors.<name>` entry;
+2. the profile's own field;
+3. `guardrail.connectors.<name>` (see [Multi-connector](/docs/guardrail/multi-connector));
+4. the application protection overlay;
+5. the global `guardrail.*` value.
+
+## Write the assignments
+
+Each assignment has a `profile` and a `match` with at least one of four keys.
+
+| Key | Matches | Spell it as |
+| --- | --- | --- |
+| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Write it fully qualified then: the bare name selects nobody, and the warning names the spelling the host knows. `id -Gn` separates groups with spaces, and a space can belong to a name: Active Directory's default group prints as `domain users@corp.example.com`, so copy everything up to and including `@domain`, or read the exact name with `getent group <gid>` (`id -G` lists the gids). Quote such a name in YAML (`'domain users@corp.example.com'`). Case does not matter. Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. A standalone enterprise gateway resolves each name to its SID when it loads the config and matches the SIDs of the caller, so a slow domain controller cannot make a group miss; a name that does not resolve selects nobody, and `profile explain`, `status` and `doctor` name it until it does (the gateway retries it every minute). An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: use the exact group name from `dscl` or `dseditgroup`; `id -Gn` splits names containing spaces. For macOS and Windows domain groups in YAML, use single quotes such as `'CORP\ML-Team'` or double the backslash inside double quotes (`"CORP\\ML-Team"`). Obtain Windows names containing spaces from the Windows group tools. Entra groups reach Linux only through Himmelblau or Entra Domain Services, and never reach macOS through Platform SSO ([Entra groups per platform](/docs/enterprise/identity-entra-id#pick-your-setup)). |
+| `users` | The verified user | A uid or SID, the account name, `DOMAIN\user` (`CORP\alice`, the form winbind and Windows report), or the principal or UPN (`alice@CORP.EXAMPLE.COM`). `DOMAIN` is the account's NetBIOS domain (`CORP`) or its DNS domain. On Windows a local account also matches as `COMPUTER\user` or `.\user`, and an Entra ID account as `AzureAD\name`. On macOS an AD account matches as `DOMAIN\user` when it is in the domain the Mac is bound to, the form macOS uses for its groups. On standalone enterprise Linux the UPN of an SSSD account comes from SSSD InfoPipe (`userPrincipalName` listed in the `[ifp]` `user_attributes`); when InfoPipe stops reporting it, the guardian keeps the UPN it read before, and `status`, `verify`, `profile explain` and the gateway log warn (`profile_assignment_unmatched`), as they do when an entry written as a UPN matches no account while InfoPipe reports none. |
+| `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
+| `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
+
+How the keys combine:
+
+- **Keys AND, values OR.** Inside one `match`, every key you list must match.
+  For one key, any one value is enough. `{groups: [a, b], connectors: [codex]}`
+  means "in group a or b, **and** using Codex".
+- **First match wins.** Put the narrowest assignment first (an agent or a user
+  and connector), the broad group assignments after it.
+- **Case and accents' encoding do not matter.** Groups, account names,
+  principals and UPNs compare without regard to case, so
+  `alice@CORP.EXAMPLE.COM` and `alice@corp.example.com` are the same user. They
+  also compare as the same text whether an accented letter is typed
+  precomposed (`é`) or as a letter plus a combining accent, as some editors and
+  copy-paste sources produce it.
+- **An account name is not unique.** It is the name without its domain, so
+  `alice` matches a local account `alice` and a directory account
+  `alice@corp.example.com` alike, for requests and for `guardrail profile
+  explain` (both build the user the same way). A name whose domain the
+  directory does not confirm, such as an `nss_ldap` or plain LDAP account
+  named `bob@corp.example.com` or `CORP\bob`, is not matched by name at all,
+  only by its uid. Use the principal, the uid or the SID to tell two people of
+  the same short name apart. When a bare name selects a directory account,
+  `explain`, `status` and `doctor` warn and name the principal to write
+  instead.
+- **`DOMAIN\user` names the verified account domain.** The domain part is the
+  NetBIOS name (or DNS name) the directory confirms for the account: winbind,
+  also with `use default domain = yes` where accounts have bare names; SSSD
+  for an Active Directory account it holds by its SID; the LSA on Windows; the
+  AD binding on a Mac. It is never guessed from the first label of the DNS
+  domain, so `CORP\alice` does not select an account of another domain.
+- **On Linux a principal needs the account's SID.** A principal-only
+  assignment (`alice@CORP.EXAMPLE.COM`) matches an SSSD account only when SSSD
+  holds a SID for its uid and the joined domain holds `alice` with that same
+  SID. An account of another SSSD domain, such as plain LDAP, or an `nss_ldap`
+  account never gets the AD principal, whatever its name. While SSSD does not
+  answer (stopped,
+  restarting, or no answer within 2 seconds) the lookup fails and the account
+  keeps its last facts for up to an hour; with none, it gets the default
+  profile with `default_lookup_failed`. Add the uid to the assignment when the
+  account must match regardless. Groups follow the same rule: an account keeps
+  only the groups inside the domain of its SID (an LDAP `carol` next to an AD
+  `carol` does not get the AD `carol`'s groups), and an account whose
+  qualified-looking name no directory confirms (an LDAP account named
+  `bob@corp.example.com` or `CORP\bob`) is selected by its uid only. See
+  [When Linux attributes a principal](/docs/enterprise/identity-sources#when-linux-attributes-a-principal).
+- **Nothing matches: the default.** A request that no assignment selects gets
+  `guardrail.default_profile`. An empty default keeps the global `guardrail.*`
+  settings.
+
+Find the exact spelling of a user's groups before you write the assignment:
+
+```bash
+defenseclaw guardrail profile explain --user alice@corp.example.com --json | jq .subject
+```
+
+The `subject` lists the user ID, the principal and the groups exactly as the
+gateway sees them, so the name in your assignment is the name that matches.
+
+Assign by the name `id -Gn` prints, and check the assignments again after a
+group is renamed or deleted in the directory: an assignment that names the old
+name selects nobody, and the users of that group fall through to the next
+assignment or the default. The gateway looks the groups of your assignments up
+in the operating system, and a group it definitely does not find is a warning in
+`guardrail profile explain`, `guardrail profile list`, `guardrail status` and
+`doctor` (on standalone enterprise, `enterprise <os> status` and `verify`,
+code `profile_assignment_unmatched`), and a line in the gateway log at start,
+at every reload and when a later check (at most once a minute, while the
+gateway is asked for its health or a profile) first finds it, for example after
+an SSSD naming switch
+(`[guardrail] assignment 1: group "..." is not known to this host`). A lookup
+that fails or times out says nothing. Neither does the check while the
+directory is unreachable: an SSSD that is offline with a cold cache answers
+"no such group" for groups that exist, so the warnings wait while the
+"Directory lookups" warning is showing, and for an account whose own lookup
+failed. A bare group name (no domain to ask) is not reported as renamed or
+deleted on standalone enterprise while the directory answers for none of the
+directory accounts in the guardian's identity records: one note says the
+groups could not be checked, and they are checked again once it answers. On
+Windows the SID of a group survives a rename, so it is the spelling to use
+there; on Linux and macOS a group is matched by its name.
+
+### The match reason
+
+Every decision records why a profile was chosen. When an assignment sets more
+than one key, the reason names the most specific key, in the order
+`connector`, `group`, `user`, `agent`.
+
+| `match` | Meaning |
+| --- | --- |
+| `agent` | An `agents` entry matched. |
+| `user` | A `users` entry matched (also when `connectors` was set too). |
+| `group` | A `groups` entry matched; `matched_group` names it. |
+| `connector` | Only a `connectors` entry matched. |
+| `default` | The user is verified, but no assignment matched, so `default_profile` applied. |
+| `default_unverified` | No verified user reached the gateway, so only assignments that match on `connectors` alone could apply. |
+| `default_lookup_failed` | The directory lookup for a verified user failed or was too slow, so the default profile applied. |
+
+## Only verified facts select a profile
+
+The subject of a profile decision is the user the gateway authenticated the
+request as, with the directory facts it resolved for that user from the
+operating system: the hook socket's peer, a per-user credential, and the
+account the gateway runs as on a per-user install (see
+[how the gateway learns who called](/docs/enterprise/identity-sources#how-the-gateway-learns-who-called)).
+An agent in a sandbox counts as the user who started the sandbox, with the
+same facts and refresh as that user's other agents, and its hooks always
+enforce (see
+[sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents)).
+**Identity headers, hook payloads and claimed
+facts never reach the matcher.** A user who forges a header, sets
+`KRB5CCNAME` or alters a hook payload cannot change verified identity. On a
+standalone enterprise install, the user cannot edit the machine-owned profile
+or move to a weaker one. On a per-user install, the user owns the configuration
+file and can change their own profile; enforce profiles with machine-owned
+configuration when users must not weaken them.
+
+What follows when the identity is missing:
+
+- **No verified user.** Assignments with `users`, `groups` or `agents` cannot
+  match. Only `connectors`-only assignments can, then the default applies
+  (`default_unverified`).
+- **Directory lookup fails or is slow.** A first request for a user the
+  gateway has not seen yet waits up to two seconds for a cold SSSD or Active
+  Directory answer, then the default profile applies
+  (`default_lookup_failed`) and the lookup is retried 15 seconds later. Later
+  requests use the cached answer. A lookup counts as failed unless every part
+  of it finished: an account whose group list timed out, or that is in more
+  than 2,048 groups, has no facts rather than part of its membership. On
+  Linux the group names are looked up 64 at a time, one batch after the other
+  because a cold SSSD answers one request at a time, so an account in several
+  hundred groups resolves in one background lookup even when SSSD starts cold
+  (about 30 ms per group, so 400 groups take around 12 seconds).
+  Facts that still hold a group as a bare number (no group answered for that
+  id) are served but refreshed after two minutes, not 15. The gateway log
+  names the account and the reason once when its lookup starts failing (`[identity]
+  directory lookup for 1201 failed: ... in 3000 groups, more than the 2048 ...`)
+  and once when it works again, and `guardrail profile explain` shows the same
+  reason as a lookup error instead of a profile.
+- **Windows group names have a limit.** Windows resolves names for at most 128
+  groups per account within the two-second lookup budget. Additional groups
+  remain as SIDs. Use a group SID in the assignment when the named group may
+  be beyond that limit; `profile explain` warns about unresolved names.
+- **Group changes take time.** SSSD caches the account first (90 minutes by
+  default). The gateway caches each successful directory lookup for up to
+  15 minutes from the last successful lookup, then starts a background refresh
+  on a request. Incomplete or partial answers are retried sooner. A request
+  after expiry may use the previous facts while its lookup runs. A user added to a group gets the
+  group's profile after the operating system and gateway see the change.
+  `guardrail profile
+  explain` asks the operating system directly, so it already shows the new
+  profile. The per-user CLI's `cache:` line and warning give the age of the
+  facts requests still use; managed `profile-explain` does not print that age.
+  On a bound Mac, flush Open Directory membership with
+  `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
+  gateway or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
+  group membership is unknown: an SSH or scheduled-task agent uses the default
+  profile for group-dependent assignments until the user signs in at the desktop
+  again. Set a strict default profile. A membership change also needs a new
+  desktop sign-in. While the directory does not answer, the gateway keeps using a
+  user's last facts, for at most an hour (four times the cache lifetime). After
+  that the user has no facts and gets the default profile
+  (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
+  group does not keep its profile for the whole outage. `defenseclaw doctor`,
+  `guardrail status` and `guardrail profile explain` warn while lookups are
+  failing, with the number of accounts, the first failure and the reason; the
+  gateway log has one line when an account's lookups start to fail and one when
+  they work again.
+
+Because a failed lookup always lands on the default profile, and so does an
+unverified request that no `connectors`-only assignment selects, **set a strict
+`default_profile`**. A lenient default means a lookup failure is treated more
+leniently than a known user.
+
+<Callout type="warn" title="Per-user installs on Windows have no groups">
+On a per-user Windows install the gateway cannot read the sign-in token's
+groups, so `groups` assignments never match and `explain` shows no groups.
+`users`, `connectors` and `agents` assignments work. Group-based profiles on
+Windows need the standalone enterprise profile, where the SYSTEM enumerator
+supplies the groups. Per-user Linux and macOS installs read groups from the
+OS account database.
+</Callout>
+
+## Worked scenarios
+
+### Contractors enforced, the ML team observing
+
+Start every developer in observe mode while you tune the rule packs, enforce
+for contractors from the first day, and pin the ML team to observe so that
+moving the global mode to `action` later does not change theirs.
+
+```yaml
+guardrail:
+  mode: observe
+  profiles:
+    contractors: {mode: action, block_at: MEDIUM, alert_at: LOW}
+    ml-team: {mode: observe}
+  profile_assignments:
+    - {profile: contractors, match: {groups: ["contractors@corp.example.com"]}}
+    - {profile: ml-team, match: {groups: ["ml-team@corp.example.com"]}}
+```
+
+A person in both groups gets `contractors`, because that assignment is first.
+
+### Block MEDIUM for one group only
+
+Everyone else keeps the global `HIGH` threshold.
+
+```yaml
+guardrail:
+  mode: action
+  block_at: HIGH
+  profiles:
+    finance: {block_at: MEDIUM}
+  profile_assignments:
+    - {profile: finance, match: {groups: ["finance@corp.example.com"]}}
+```
+
+`finance` sets only `block_at`; it inherits the mode, the rule pack and
+everything else from the global settings.
+
+### A stricter policy for one connector for one user
+
+```yaml
+guardrail:
+  profiles:
+    alice-codex:
+      connectors:
+        codex: {mode: action, block_at: MEDIUM}
+  profile_assignments:
+    - profile: alice-codex
+      match:
+        users: ["alice@CORP.EXAMPLE.COM"]
+        connectors: [codex]
+```
+
+Alice's Codex requests get the stricter policy. Alice using Claude Code, and
+everybody else using Codex, fall through to the next assignment or the
+default.
+
+### Pin one agent
+
+```bash
+defenseclaw agent identities --user alice --connector codex
+```
+
+Copy the `agt-` ID into an `agents` assignment. The ID names one connector
+install for one user on one machine and stays the same across sessions,
+restarts and upgrades. See [Agent identity](/docs/enterprise/identity-and-authentication#agent-identity).
+
+The pin applies to every decision the gateway makes for that install: its
+hooks, its `/api/v1/inspect` calls and, for OpenClaw and ZeptoClaw, its LLM
+traffic through the guardrail proxy. The proxy attributes each request to the
+connector it serves and to that connector's install for the user the gateway
+runs as, so an OpenClaw or ZeptoClaw install appears in
+`defenseclaw agent identities` after its first proxied request. On proxied
+traffic the profile sets the mode, the block message, the rule pack (with the
+posture it implies) and `hilt`; `block_at` and `alert_at` apply to hook and
+inspect decisions only, as they do without profiles.
+
+A pin names one install, so keep three things in mind:
+
+- Sub-agents share the agent's `agt-`, so one pin covers the agent and its
+  sub-agents.
+- If the connector's config root moves, the install gets a new `agt-` and the
+  old pin matches nothing. List the identities again.
+- A sandboxed agent has its own `agt-` per sandbox, so pinning the host
+  install does not pin a sandboxed run. See
+  [sandboxed agents](/docs/enterprise/identity-and-authentication#sandboxed-agents).
+
+## Try it and read the result
+
+### Ask the gateway
+
+`explain` asks the running gateway, which resolves the user through the OS
+the way it does for a live request. With no `--user` it explains the account
+that runs the command. On Windows, name an Entra ID user by SID, as
+`AzureAD\<name>`, by the bare name or by the UPN.
+
+```bash
+defenseclaw guardrail profile show contractors
+defenseclaw guardrail profile explain --user alice@corp.example.com --connector codex
+```
+
+```text
+  user:    alice (3 group(s))
+  profile: ml-team
+  match:   group (ml-team@corp.example.com)
+  digest:  sha256:4f460f32fe21aa052aa524027ba08c9f89fe695cbe39cea2fb0252e5e0a738bd
+  applies (codex): mode=observe block_at=pack alert_at=pack hilt=off rule_pack=...
+```
+
+`block_at=pack` means the profile leaves the level to the rule pack. Add
+`--agent agt-...` to see an agent assignment and `--json` for the full answer
+with the subject and the effective settings. `guardrail status`, `status` and
+`doctor` name the profile that decides for the account that runs them.
+
+### Read the decision record
+
+Every hook, ACP and LLM proxy decision carries the profile and the reason:
+
+| Attribute | Meaning |
+| --- | --- |
+| `defenseclaw.guardrail.profile.name` | The profile that applied; absent when none did. |
+| `defenseclaw.guardrail.profile.digest` | `sha256:` digest of the profile's effective policy. |
+| `defenseclaw.guardrail.profile.match` | The reason, from the table above. |
+| `defenseclaw.guardrail.profile.matched_group` | The group that matched, for `group`. |
+
+The same record carries the user and `defenseclaw.agent.identity.id`, and the
+principal when `ai_discovery.include_user_principal` is on.
+
+```bash
+defenseclaw audit export --since 1h \
+  | jq -c 'select(.action=="hook_decision") | .structured
+      | {user: ."defenseclaw.user.name",
+         profile: ."defenseclaw.guardrail.profile.name",
+         match: ."defenseclaw.guardrail.profile.match",
+         digest: ."defenseclaw.guardrail.profile.digest"}'
+```
+
+### See a change land
+
+Edit the config and the running gateway applies it on its next reload, with no
+restart in the default `hot` mode. Each profile whose effective policy changed
+writes one `config-update` audit event with the reason
+`guardrail_profile_reload` and the path `guardrail.profiles.<name>.digest`,
+holding the old and the new digest. Compare the digest in a decision with the
+one `explain` reports to prove which version of the policy decided it.
+
+```bash
+defenseclaw audit export --since 1h \
+  | jq -c 'select(.action=="config-update") | select(tostring | contains("guardrail_profile_reload"))'
+```
+
+The Grafana [Identity & Users](/docs/observability/grafana-dashboards) board
+charts decisions by profile and match reason and the digest timeline.
+
+## Deliver it to managed hosts
+
+On a managed host (the enterprise package, MDM or Setup) the profiles live in
+the machine config, not in a user's home, and apply to every enrolled user.
+
+| OS | Machine config | How a change applies |
+| --- | --- | --- |
+| Linux | `/etc/defenseclaw/config.yaml` | `defenseclaw-enterprise-apply.path` runs `ensure` when the file changes |
+| macOS | `/opt/cisco/defenseclaw/etc/config.yaml` | The apply LaunchDaemon runs `ensure` when the file changes |
+| Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` | Run Setup `/ensure` again with the new file |
+
+1. Add the same `guardrail.profiles`, `profile_assignments` and
+   `default_profile` keys to the machine config. A profile's `rule_pack_dir`
+   should point into the administrator policy folder, as in
+   [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
+2. Deliver the file the way you deliver the rest of the machine config, with
+   your MDM ([Deliver the config](/docs/enterprise/mdm#deliver-the-config)) or
+   by hand:
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --config /root/defenseclaw-config.yaml --json
+   ```
+
+   `ensure` validates the file first. A config with an unknown profile or a
+   forbidden key fails with `config_invalid` and the installed config stays
+   in force. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
+3. Check the result as root. A managed install has no `defenseclaw` Python CLI,
+   so the checks use the gateway binary and print JSON:
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector codex
+   ```
+
+   On a Mac use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise
+   macos ...`. On Windows run `defenseclaw.exe enterprise windows
+   profile-explain --user CORP\alice` from an elevated prompt. The answer also
+   lists every configured profile and its digest under `profiles`.
+
+On a managed Windows computer, group profiles use the user's active desktop
+session token. After sign-out, group-dependent assignments use the default
+profile; the next desktop sign-in supplies current groups. SSH and scheduled-task
+sessions do not supply those groups.
+Guardrail profiles are rejected under the Secure Client profile, which keeps
+its behavior as it was.
+
+## Next steps
+
+<Cards>
+  <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity-sources" description="The OS facts behind a verified identity, per platform, and how Okta and Entra users appear." />
+  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity, the AD guide and troubleshooting." />
+  <Card title="Configuration reference" href="/docs/reference/configuration#guardrail-profiles-and-identity-keys" description="Every key, its default and its allowed values." />
+  <Card title="Multi-connector" href="/docs/guardrail/multi-connector" description="Per-connector guardrail settings that profiles layer on top of." />
+</Cards>

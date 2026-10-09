@@ -85,7 +85,7 @@ func (r *rollback) run(m *Manager, sandbox string) {
 func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
 	cfg := m.config()
 	if !cfg.OpenShell.Enabled {
-		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, "OpenShell sandboxes are disabled (openshell.enabled is false)")
+		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 	}
 	if err := m.listenersReady(); err != nil {
 		return nil, err
@@ -543,6 +543,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	rb.add("delete sandbox", func(ctx context.Context) error { return m.deleteCreated(ctx, gw, name) })
 	if _, err := gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
 		m.dropGateway(gw, err)
+		if tmpl.DriverConfig != nil && openshell.IsConflict(err) && strings.Contains(err.Error(), "driver config") {
+			return nil, bindMountsOff(spec, plan != nil, len(delivered.mounts) > 0, err)
+		}
 		return nil, upstream("create sandbox "+name, err)
 	}
 	sb, err := gw.Client.WaitReady(ctx, name)
@@ -952,11 +955,13 @@ func microVMRefusal(spec *harness.Spec, img image.Record) error {
 			Detail: img.MicroVMProblem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs " + spec.DisplayName +
 				"; to check the image again: " + recheck}
 	}
-	detail := "its image " + img.Tag + " was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
-		"check it: " + recheck
+	// The command comes first: the reason can be a long probe message
+	// (GAP-0274).
+	detail := "run " + recheck + " to check it; its image " + img.Tag + " was not checked with a MicroVM's name resolution " +
+		"(OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts)"
 	if img.MicroVMInconclusive != "" {
-		detail = "its image " + img.Tag + " was run with a MicroVM's name resolution, which settled nothing: " + img.MicroVMInconclusive +
-			"; check it again: " + recheck + " (a run without --no-build checks it first, too)"
+		detail = "run " + recheck + " to check it again (a run without --no-build checks it first, too); its image " + img.Tag +
+			" was run with a MicroVM's name resolution, which settled nothing: " + img.MicroVMInconclusive
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
 		Message: spec.DisplayName + "'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs)", Detail: detail}
@@ -1186,6 +1191,23 @@ func upstream(op string, err error) error {
 		code = sandboxapi.CodeInvalid
 	}
 	return &sandboxapi.Error{Code: code, Message: "OpenShell: " + op + " failed", Detail: err.Error()}
+}
+
+// bindMountsOff explains a create the gateway refused because its docker
+// driver takes no driver config (bind mounts are off in its gateway.toml):
+// a live run mounts the project folder, and a harness with per-run settings
+// (Claude Code, Codex) gets them as read-only mounts on a --copy run too.
+func bindMountsOff(spec *harness.Spec, project, settings bool, err error) error {
+	var what []string
+	if project {
+		what = append(what, "the project folder")
+	}
+	if settings {
+		what = append(what, "the "+spec.DisplayName+" settings DefenseClaw keeps read-only (on a --copy run too)")
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+		Message: "the local OpenShell gateway does not allow bind mounts, and this sandbox mounts " + strings.Join(what, " and "),
+		Detail:  "enable them with `defenseclaw sandbox doctor --fix` (OpenShell: " + err.Error() + ")"}
 }
 
 // settle waits for OpenShell's first settings poll after a start.

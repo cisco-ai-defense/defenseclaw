@@ -230,6 +230,25 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 	return false
 }
 
+// hermesSkillsDiscover returns how to list dir's Hermes skills, or nil when
+// dir is not a Hermes skills root: this process's own root, or a user
+// profile's root that the managed gateway watches for every enrolled user.
+// IsRoot alone resolves only the service account's own Hermes home, so each
+// user's category folders (devops, software-development) were rescanned as
+// skills and logged a failed scan every cycle (GAP-0285). trustBundled is
+// false for a profile root: its manifest and Hermes checkout belong to that
+// account, which could mark its own skill bundled, so every skill there is
+// rescanned.
+func hermesSkillsDiscover(dir string) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
+	switch {
+	case hermesskills.IsRoot(dir):
+		return hermesskills.Discover, true
+	case hermesskills.IsProfileRoot(dir):
+		return hermesskills.DiscoverProfileRoot, false
+	}
+	return nil, false
+}
+
 // enumerateTargets lists all direct child directories under watched roots plus
 // configured MCP servers from openclaw.json.
 func (w *InstallWatcher) enumerateTargets() []InstallEvent {
@@ -241,11 +260,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if hermesskills.IsRoot(dir) {
-			entries, err := hermesskills.Discover(dir, hermesskills.DefaultDirectoryLimit)
+		if discover, trustBundled := hermesSkillsDiscover(dir); discover != nil {
+			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
 				for _, entry := range entries {
-					if entry.Bundled {
+					if entry.Bundled && trustBundled {
 						continue
 					}
 					targets = append(targets, InstallEvent{
@@ -290,6 +309,9 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			if watcherConnectorName(w.cfg) == "claudecode" &&
 				isClaudeSkillsPlugin(path) {
 				continue
+			}
+			if skillFolderIncomplete(path) {
+				continue // not a skill yet; the live watcher admits it once it is (GAP-0900)
 			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallSkill,

@@ -487,6 +487,45 @@ func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testin
 	assertWindowsTargetOwnedCanonicalDirectory(t, hookDir, target)
 }
 
+// GAP-0416: the refused hook of an unenrolled account creates its own
+// %USERPROFILE%\.defenseclaw. A fresh standalone install takes that folder
+// over instead of failing for every account; Secure Client keeps refusing.
+func TestWindowsManagedRuntimeStandaloneInstallTakesOverAnAccountCreatedFolder(t *testing.T) {
+	previous := windowsEnterpriseStandaloneProcess
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+	target := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, target)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	logs := filepath.Join(dataDir, "logs")
+	if err := os.MkdirAll(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(logs, "hook-failures.jsonl")
+	if err := os.WriteFile(record, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dataDir, logs, record} {
+		setWindowsTestPathExactOwner(t, path, target)
+	}
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	digest := strings.Repeat("6", 64)
+
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest); err == nil {
+		t.Fatal("a Secure Client plan took over the folder the account created")
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+	if err != nil {
+		t.Fatalf("standalone install plan refused the folder the account created: %v", err)
+	}
+	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical {
+		t.Fatalf("plan roots = %+v, want canonical baseline", plan.Roots)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+}
+
 func TestWindowsManagedRuntimeCleanupRejectsCanonicalBaselineDACLDrift(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)

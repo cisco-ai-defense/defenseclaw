@@ -351,6 +351,13 @@ func TestOwnedHooksPresent_ClaudeRequiresEffectiveContract(t *testing.T) {
 			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
 			entries[0].(map[string]interface{})["matcher"] = " * "
 		},
+		"block-bypassing-command-suffix": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			command := handler["command"].(string)
+			handler["command"] = claudeCodeUnguardedHookCommand(command) + claudeCodeMissingHookGuardSeparator +
+				"exit 0; exit 2; }"
+		},
 		"asynchronous-block-handler": func(settings map[string]interface{}) {
 			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
 			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})

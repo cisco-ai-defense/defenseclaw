@@ -19,7 +19,11 @@ existing sandbox, so the gauge is republished.
 ## Sandbox correlation (`correlation.sandbox`)
 
 Every sandbox record carries these attributes when they are known. Empty
-values are omitted, never inferred. They are never metric labels.
+values are omitted, never inferred. They are never metric labels. The model
+(`log.model.*`), tool (`log.tool.invocation.*`) and agent lifecycle
+(`log.compat.*`) records of a sandboxed session carry `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name` from the
+binding that authenticated the request, with `defenseclaw.agent.identity.id`,
+so they join that session's hook decisions.
 
 | Attribute | Meaning |
 | --- | --- |
@@ -65,7 +69,9 @@ found), `defenseclaw.sandbox.exit_code` once the main process exited
 (128 plus the signal number for a signal), and the OpenShell condition behind
 the change (`defenseclaw.sandbox.condition.type`, `.status`, `.reason`,
 `.message`). Condition tokens that do not fit their registered shape are
-dropped, and the message is cut to 1,024 bytes.
+dropped, and the message is cut to 1,024 bytes. It also names the host account
+the sandbox runs as (`user.id`, `defenseclaw.user.id_kind`,
+`defenseclaw.user.name`), as the egress records do.
 
 The outcome is `completed` for `ready`, `stopped`, `completed` and `deleted`,
 `failed` for `error` and `unknown`, and `attempted` otherwise. Severity

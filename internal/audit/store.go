@@ -135,6 +135,10 @@ type Event struct {
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
+	// RulePackDirInEnvelope marks a Secure Client hook row, whose directory
+	// rides in the structured envelope and the raw column as on main, not in
+	// a path-class record field (issue #1092).
+	RulePackDirInEnvelope bool `json:"-"`
 
 	// SandboxID and SandboxName attribute an event to the OpenShell
 	// sandbox whose request produced it. They are filled from the
@@ -216,6 +220,10 @@ type Store struct {
 	dbPath      string
 	dbPathGuard *preparedAuditDatabasePath
 
+	// secureClientSchema keeps the tables, columns and indexes main creates
+	// (WithSecureClientSchema).
+	secureClientSchema bool
+
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
 	lifecycleMu sync.RWMutex
@@ -226,6 +234,10 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+
+	// plannerStatsRows is the history size at the last ANALYZE
+	// (RefreshPlannerStatistics).
+	plannerStatsRows atomic.Int64
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -354,12 +366,26 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-func NewStore(dbPath string) (*Store, error) {
+func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
 	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}, nil
+	store := &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}
+	for _, opt := range opts {
+		opt(store)
+	}
+	return store, nil
+}
+
+// StoreOption configures a Store when it is opened.
+type StoreOption func(*Store)
+
+// WithSecureClientSchema keeps audit.db identical to main's on a Secure
+// Client host: the indexes no query reads stay (#1092, GAP-0253). Every
+// opener on such a host sets it.
+func WithSecureClientSchema() StoreOption {
+	return func(s *Store) { s.secureClientSchema = true }
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -1871,6 +1897,35 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 	return count > 0, nil
 }
 
+// unreadAuditIndexes are audit_events indexes no query reads. Every hook
+// writes several audit rows, and each index is another B-tree page per row in
+// the write-ahead log (GAP-0246), so a store outside Secure Client drops them
+// after the migrations, which still create them as main does. The schema
+// version does not move, so an older binary opened on the store after a
+// rollback runs without them.
+var unreadAuditIndexes = []struct{ name, create string }{
+	{"idx_audit_policy_id", `CREATE INDEX IF NOT EXISTS idx_audit_policy_id ON audit_events(policy_id)`},
+	{"idx_audit_tool_name", `CREATE INDEX IF NOT EXISTS idx_audit_tool_name ON audit_events(tool_name)`},
+	{"idx_audit_generation", `CREATE INDEX IF NOT EXISTS idx_audit_generation ON audit_events(generation)`},
+	{"idx_audit_sidecar_instance_id", `CREATE INDEX IF NOT EXISTS idx_audit_sidecar_instance_id ON audit_events(sidecar_instance_id)`},
+	{"idx_audit_finding_id", `CREATE INDEX IF NOT EXISTS idx_audit_finding_id ON audit_events(finding_id)`},
+}
+
+// trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
+// store makes sure they exist, so its schema stays main's.
+func (s *Store) trimUnreadAuditIndexes() error {
+	for _, index := range unreadAuditIndexes {
+		statement := "DROP INDEX IF EXISTS " + index.name
+		if s.secureClientSchema {
+			statement = index.create
+		}
+		if _, err := s.db.Exec(statement); err != nil {
+			return fmt.Errorf("audit: index %s: %w", index.name, err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) Init() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("audit: store is not initialized")
@@ -1917,6 +1972,11 @@ func (s *Store) Init() error {
 			return err
 		}
 		purgedHistory = purgedHistory || (current > 0 && m.description == historicalEvidencePurgeMigrationDescription)
+	}
+	// Before the reclaim below, so the dropped indexes' pages are reclaimed
+	// with the purged history.
+	if err := s.trimUnreadAuditIndexes(); err != nil {
+		return err
 	}
 	if purgedHistory {
 		s.reclaimPurgedHistory()

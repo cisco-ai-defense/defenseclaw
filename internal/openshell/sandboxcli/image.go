@@ -205,6 +205,10 @@ func (b *builderImages) Remove(ctx context.Context, harnesses []string, dryRun b
 		if err != nil && !strings.Contains(stderr.String()+err.Error(), "No such image") {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("docker image rm %s: %w", tag, err)
+				if why := strings.TrimSpace(stderr.String()); why != "" {
+					// What docker said is the reason (GAP-0282): its exit status alone is none.
+					firstErr = fmt.Errorf("%w: %s", firstErr, why[strings.LastIndexByte(why, '\n')+1:])
+				}
 			}
 			continue
 		}
@@ -301,7 +305,10 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force
 		defer file.Close()
 		log = file
 	}
-	a.note("Building the " + spec.DisplayName + " image (the first build downloads about 3 GB)…")
+	// A current image is only checked: its one line is the verdict below.
+	if current, err := a.Images.Current(spec, microVM); force || err != nil || !current {
+		a.note("Building the " + spec.DisplayName + " image (the first build downloads about 3 GB)…")
+	}
 	started := a.Now()
 	rec, built, err := a.Images.Build(ctx, spec, microVM, force, log)
 	if err != nil {
@@ -602,12 +609,25 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	if err != nil {
 		return err
 	}
+	staging := []string(nil)
+	if listed {
+		staging = staleVMStaging(a.vmImageCache(), time.Now())
+	}
 	verb := "removed"
 	if dryRun {
 		verb = "would remove"
 	}
-	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 {
+	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 && len(staging) == 0 {
 		a.ok("nothing to prune")
+	}
+	for _, path := range staging {
+		if dryRun {
+			a.ok("would remove stale MicroVM staging disk " + a.tildePath(path))
+		} else if err := os.RemoveAll(path); err != nil {
+			a.warn("could not remove stale MicroVM staging disk " + a.tildePath(path) + ": " + err.Error())
+		} else {
+			a.ok("removed stale MicroVM staging disk " + a.tildePath(path))
+		}
 	}
 	for _, t := range rep.Removed {
 		a.ok(verb + " " + t)
@@ -647,6 +667,28 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 		}
 	}
 	return nil
+}
+
+// staleVMStaging is limited to old, DefenseClaw-shaped preparation
+// directories. The daemon must have answered its sandbox list before prune
+// calls this, and a new preparation is left alone.
+func staleVMStaging(dir string, now time.Time) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var stale []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !strings.Contains(name, ".staging-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && now.Sub(info.ModTime()) >= 10*time.Minute {
+			stale = append(stale, filepath.Join(dir, name))
+		}
+	}
+	return stale
 }
 
 // ImageRemoveOptions are the `image rm` flags.

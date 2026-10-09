@@ -187,6 +187,17 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if err := lifecycleFailure(busy, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("busy status: %q, want no repair advice", err)
 	}
+	// GAP-0265: a config that enables no connector is fixed in config.yaml
+	// and with ensure, as its line says, not by repair.
+	noConnector := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	noConnector.Installed = true
+	const message = "the enumerator found 2 eligible users, but config.yaml enables no connector the managed deployment protects in guardrail.connector or guardrail.connectors"
+	noConnector.AddWarning("no_connectors_enabled", message)
+	noConnector.AddError("verify_failed", message)
+	noConnector.Finish("linux", 0)
+	if err := lifecycleFailure(noConnector, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("no connector enabled: %q, want no repair advice", err)
+	}
 }
 
 // A verify that found another lifecycle run holding the lock printed an

@@ -43,6 +43,20 @@ def test_empty_config_is_named_not_migrated(data_dir: Path, content: str) -> Non
     assert path.read_text(encoding="utf-8") == content
 
 
+def test_unversioned_config_without_final_newline_can_upgrade(data_dir: Path) -> None:
+    path = data_dir / "config.yaml"
+    content = "guardrail:\n  enabled: true"
+    path.write_text(content, encoding="utf-8")
+
+    result = migrate(str(data_dir), check=True, from_version="0.8.10")
+
+    assert result.from_config_version == 0
+    assert result.applied
+    assert path.read_text(encoding="utf-8") == content
+    with pytest.raises(dcconfig.ConfigVersionError, match="defenseclaw migrate"):
+        dcconfig.require_v8_config(path=str(path))
+
+
 def test_empty_config_hint_dates_the_kept_copy(data_dir: Path) -> None:
     # GAP-1786: previous/ only changes on a version upgrade, so say how old it is.
     path = data_dir / "config.yaml"
@@ -58,6 +72,27 @@ def test_empty_config_hint_dates_the_kept_copy(data_dir: Path) -> None:
 
     assert f"kept the DefenseClaw 1.0.1 config from 2026-10-02 04:40 UTC in {kept}" in message
     assert "lacks every change made since then" in message
+
+
+def test_refused_config_is_not_sent_back_to_init(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0288: a config.yaml that is there and refused (an assignment naming
+    # an undefined profile) is fixed in the file; `init` would not change it.
+    from defenseclaw.main import cli
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    (data_dir / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
+    monkeypatch.setattr(dcconfig, "require_v8_config", lambda **_: None)
+
+    def refuse(**_kwargs):
+        raise ValueError("guardrail.profile_assignments[0]: unknown profile 'ihs-nope'")
+
+    monkeypatch.setattr(dcconfig, "load", refuse)
+    result = CliRunner().invoke(cli, ["guardrail", "status"])
+    text = result.output + (result.stderr or "")
+    assert result.exit_code == 1, text
+    assert "guardrail.profile_assignments[0]: unknown profile 'ihs-nope'" in text
+    assert "defenseclaw config validate" in text
+    assert "defenseclaw init" not in text
 
 
 def test_unversioned_config_still_asks_for_migrate(data_dir: Path) -> None:

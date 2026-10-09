@@ -75,15 +75,23 @@ def _iter_detail_tokens(value: str) -> Iterator[tuple[str, str]]:
 _POST_TOOL_HOOK_EVENTS = frozenset({
     "posttooluse", "posttoolusefailure", "posttoolbatch", "toolresult",
     "aftertool", "aftershellexecution", "aftermcpexecution", "afterfileedit",
+    "post_tool_call",
 })
 
 
 # Hook events that only observe text already on screen: Claude Code runs
 # MessageDisplay async, so a finding there cannot block either (GAP-1531).
-_DISPLAY_HOOK_EVENTS = frozenset({"messagedisplay"})
+_DISPLAY_HOOK_EVENTS = frozenset({"messagedisplay", "post_llm_call"})
+
+# Prompt events an agent gives no veto: in action mode DefenseClaw tells the
+# model not to carry the prompt out instead (agent_hook.go
+# promptNoticeOnlyEvent). Keyed by (connector, event).
+_PROMPT_NOTICE_HOOK_EVENTS = frozenset({("hermes", "pre_llm_call"), ("amp", "agent.start")})
 
 POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
 DISPLAY_DECISION = "detected in the displayed reply (cannot block)"
+PROMPT_NOTICE_DECISION = "agent told not to carry out the prompt (prompts cannot be blocked)"
+OBSERVE_DECISION = "would block (observe mode)"
 
 
 def detection_only_hook_label(event: str) -> str:
@@ -98,12 +106,18 @@ def detection_only_hook_label(event: str) -> str:
     return ""
 
 
-def is_post_tool_hook_event(event: str) -> bool:
-    """True for a hook event that runs after the tool call (PostToolUse, ...).
+def would_block_hook_label(target: str, mode: str) -> str:
+    """Decision label of a would-block finding on a connector:Event target.
 
-    Accepts a bare event name or a ``connector:Event`` hook target."""
-    name = str(event or "").strip().rsplit(":", 1)[-1].strip().lower()
-    return name in _POST_TOOL_HOOK_EVENTS
+    A Hermes or Amp prompt finding in action mode was not observed: the model
+    was told not to carry the prompt out (GAP-0898)."""
+    if label := detection_only_hook_label(target):
+        return label
+    connector, _, name = str(target or "").strip().rpartition(":")
+    prompt_event = (connector.strip().lower(), name.strip().lower())
+    if str(mode or "").strip().lower() == "action" and prompt_event in _PROMPT_NOTICE_HOOK_EVENTS:
+        return PROMPT_NOTICE_DECISION
+    return OBSERVE_DECISION
 
 
 def parse_detail_tokens(value: str) -> dict[str, str]:
@@ -191,22 +205,49 @@ def connector_hook_decision(
 def hook_decision_may_block_sql(details: str, structured: str, enforced: str) -> str:
     """SQL pre-check to put before ``dc_hook_decision(...) = 'block'``.
 
-    A block needs an enforced flag or a block/deny ``action`` value. Checking
-    for them in SQLite first keeps the per-row Python classifier off rows that
-    can't block: on a 1.27 GB audit.db of legacy rows it ran for minutes
-    (GAP-1487), and legacy hook rows carry ``action=allow`` in their details,
-    so a bare ``action`` test still let every one through (GAP-1674). LIKE is
-    case-insensitive, as the classifier is on values; a quoted value is left
-    to the classifier.
+    The classifier is a Python function SQLite calls once per row, about 60 to
+    120 us each, so every row it can skip is time saved: it made the alert
+    count of ``defenseclaw status`` spend its whole 3-second budget on 25,000
+    hook rows (GAP-0199), and ran for minutes on a 1.27 GB audit.db of legacy
+    rows (GAP-1487). The pre-check answers what the classifier would, only
+    cheaper, and may only err towards "maybe". It reads the same sources in
+    the same order:
+
+    * the ``enforced`` column, when set, decides alone;
+    * else, in a structured envelope that is a JSON object, an ``enforced``
+      key decides (false is never a block), and otherwise its ``action`` does:
+      a row blocks only with a block/deny action. The gateway writes NULL in
+      the column for a call it did not enforce and omits ``enforced`` from the
+      envelope, but always states the ``action``, so its allowed and alert rows
+      end here (a bare ``action`` test let every one of 30,180 through,
+      GAP-0199);
+    * else (no envelope, or one without an ``action``) the legacy ``key=value``
+      details decide: a block needs a block/deny ``action`` token. A quoted
+      value is left to the classifier, and so is a structured text that does
+      not parse as JSON, where the old tests still apply.
+
+    LIKE is case-insensitive, as the classifier is on values.
     """
 
-    return (
-        f"(CAST(COALESCE({enforced}, 0) AS TEXT) NOT IN ('0', '')"
-        f" OR {details} LIKE '%action=block%'"
+    tokens = (
+        f"({details} LIKE '%action=block%'"
         f" OR {details} LIKE '%action=deny%'"
-        f" OR {details} LIKE '%action=\"%'"
+        f" OR {details} LIKE '%action=\"%')"
+    )
+    return (
+        f"(CASE"
+        f" WHEN {enforced} IS NOT NULL THEN CAST({enforced} AS TEXT) NOT IN ('0', '')"
+        f" WHEN json_valid({structured}) THEN CASE"
+        f" WHEN json_type({structured}, '$.enforced') = 'false' THEN 0"
+        f" WHEN json_type({structured}, '$.enforced') <> 'null' THEN 1"
+        f" WHEN json_type({structured}, '$.action') = 'text'"
+        f" AND json_extract({structured}, '$.action') <> ''"
+        f" THEN (json_extract({structured}, '$.action') LIKE '%block%'"
+        f" OR json_extract({structured}, '$.action') LIKE '%deny%')"
+        f" ELSE {tokens} END"
+        f" ELSE ({tokens}"
         f" OR instr(COALESCE({structured}, ''), 'action') > 0"
-        f" OR instr(COALESCE({structured}, ''), 'enforced') > 0)"
+        f" OR instr(COALESCE({structured}, ''), 'enforced') > 0) END)"
     )
 
 

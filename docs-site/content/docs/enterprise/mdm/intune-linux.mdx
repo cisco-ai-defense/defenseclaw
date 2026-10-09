@@ -8,7 +8,7 @@ keywords:
   - Linux Bash script Intune
 ---
 
-<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+<Callout title="Validation">An Intune-managed Ubuntu device ran the root platform script and DefenseClaw identity checks in the test tenant. See [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant) for what was observed.</Callout>
 
 <Callout title="At a glance">
 - **You upload:** one platform script that runs as root: your copy of
@@ -31,6 +31,8 @@ detection and logs.
 
 ## Before you start
 
+- **Tenant**: licences and device groups are in place; see
+  [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). Intune has no Linux enrollment setting.
 - **Devices**: a distribution and version on Microsoft's list of Intune-supported
   Linux platforms, enrolled with the Microsoft Intune app, running systemd 239
   or later. The package depends on systemd 239. On a host where systemd is not
@@ -100,6 +102,8 @@ guardrail:
   connectors:
     claudecode: {}
     codex: {}
+ai_discovery:
+  enabled: true
 DEFENSECLAW_CONFIG
 }
 ```
@@ -110,14 +114,20 @@ sensitive information.
 
 ## 3. Add the platform script
 
-Go to **Devices** > **Manage devices** > **Scripts and remediations** >
-**Platform scripts** > **Add** > **Linux**:
+In the Intune admin center, go to **Devices** > **Manage devices** >
+**Configuration** > **Create** > **New policy** > **Linux** > **Settings catalog** >
+**Create profile** > **Custom Configuration (linuxMdm)**. Complete **Basics**,
+**Configuration settings**, **Scope tags**, **Assignments**, then **Review + create**.
+In Configuration settings choose **Execution context: Root**, **Execution
+frequency: Every 1 day**, **Execution retries: 3 times**, and upload the file
+under **Execution Script** (or paste it in **Bash Script**). The review page may
+show **Platform: No Platform** for this Linux profile.
 
 | Setting | Value |
 | --- | --- |
-| Execution context | **Root**. The script then runs whether or not a user is signed in. The first run can ask the user for consent. |
-| Execution frequency | **Daily**. `ensure` changes nothing when the host already matches, but with `DC_SOURCE_URL` set every run downloads the artifact before it compares versions. Run more often only if that download is acceptable, or leave `DC_SOURCE_URL` empty once installed. |
-| Execution retries | **3**. Exit `75` means dpkg, rpm or another lifecycle run held a lock, and a later run succeeds. |
+| Execution context | **Root**. The Intune daemon still needs authorization for `com.microsoft.intune.actions.ConfigureDevice`; see the polkit rule below for unattended runs. |
+| Execution frequency | **Every 1 day**. `ensure` changes nothing when the host already matches, but with `DC_SOURCE_URL` set every run downloads the artifact before it compares versions. |
+| Execution retries | **3 times**. Exit `75` means dpkg, rpm or another lifecycle run held a lock, and a later run succeeds. |
 | Execution script | Your edited copy of `defenseclaw-enterprise.sh` |
 
 Assign it to device groups. On each run the wrapper downloads the artifact,
@@ -125,6 +135,42 @@ verifies it, installs the package only when its version differs from the
 installed one, runs `ensure` with the config, and exits with the lifecycle's
 code. A busy package manager, for example during unattended upgrades, exits
 `75` (`mdm_package_manager_busy`).
+
+For a local-group profile assignment, upload
+`packaging/mdm/intune/linux/sync-local-group.sh` as a **second** root platform
+script. Edit `GROUP_NAME` and the complete `MEMBERS` array first; the script
+creates the local group if needed and updates its supplementary members only
+when they differ. It refuses pre-existing groups unless a root administrator has
+reviewed and claimed them by writing their numeric GID to
+`/var/lib/defenseclaw-intune/local-groups/<group-name>` (root-only directory and
+file). Use a dedicated group; claiming a system or privileged group would let the
+script replace its entire supplementary member list.
+
+A Linux Intune enrollment does not import Entra group membership into the OS, so maintain this local list from your identity source.
+Changing it affects `profile-explain` after the host's directory cache refresh;
+live hooks may keep the previous profile for up to 15 minutes.
+
+For unattended root scripts, authorize only your enrolled Intune users for the
+Intune daemon's polkit action. Without this, an xrdp or SSH session has no
+active local seat and the daemon can fail before the script starts. For example,
+put enrolled users in a dedicated local group and install this root-owned file
+as `/etc/polkit-1/rules.d/49-intune-scripts.rules`:
+
+```javascript
+polkit.addRule(function(action, subject) {
+    if (action.id === "com.microsoft.intune.actions.ConfigureDevice" &&
+        subject.isInGroup("intune-script-operators")) {
+        return polkit.Result.YES;
+    }
+});
+```
+
+Restrict that group to users allowed to trigger device configuration. A console
+administrator can instead authenticate at the polkit prompt. A policy edit
+normally reaches a device at its next agent check-in (about one hour plus up to
+ten minutes), or after the user selects **Refresh** in the Intune app; the test
+device applied changes one to six minutes after Refresh, with one rapid second
+edit taking over 15 minutes.
 
 ## 4. Report health
 

@@ -106,6 +106,11 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote) |
 | `audit findings` | The distinct scan findings that are current: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions (hook rules, the LLM guardrail) are not tracked here; use `alerts` or `audit export` for them |
 
+On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
+from an elevated administrator prompt. The `enrollment.accounts` field lists
+each account's connectors and their enrolled, pending or failed state.
+`enterprise hooks status` is the Linux and macOS guardian view.
+
 On a standalone host, hook decisions, rejected connector hooks, direct
 inspect-tool calls and refused hook-socket requests carry the verified
 account (`user.id`, `defenseclaw.user.name`); a refused request also names
@@ -134,7 +139,7 @@ The MDM wrapper scripts print the same document.
 | `ok` | `true` only when `errors` is empty |
 | `exit_code` | The process exit code |
 | `installed`, `installed_version` | Whether a deployment is recorded, and its version |
-| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Windows, see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction) |
+| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Linux and macOS the scheduled `verify` also starts the apply trigger, which rolls it back and starts the stopped services again; the verify job stays loaded while a run applies. On Windows, see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction) |
 | `services[]` | Each managed service or unit, with its state |
 | `readiness` | `gateway`, `guardian`, `enumerator`, `sensor_helper`: each `true` when that component is ready |
 | `coverage_complete` | The core services are ready (definition per OS below) |
@@ -144,6 +149,7 @@ The MDM wrapper scripts print the same document.
 | `inspection` | `local` and `ai_defense` (see the note below the next table) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
 | `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
+| `destinations[]` | `status` only: each observability destination the installed `config.yaml` compiles to, with its `name`, `kind`, `enabled`, `preset`, `signals` and `redaction_profiles` (the effective profiles of its send routes, from the same compiler as `defenseclaw observability plan`). The human `status` prints one line per destination |
 
 A healthy `status` from a Linux host, trimmed to two of its eleven
 `services` entries and two of its `machine_policy` connectors:
@@ -177,14 +183,18 @@ A healthy `status` from a Linux host, trimmed to two of its eleven
 ```
 
 A failed run sets `ok` to `false` and names each problem in `errors[]`. This
-`verify` ran without root, so it checked nothing and exited `1`:
+`verify` ran without root, so it checked nothing and exited `1`. A `not_root`
+result leaves out every field that reports the deployment (`installed`,
+`installed_version`, `transaction_pending`, `services`, `readiness`,
+`inspection`, `machine_policy`, `enrollment`, `destinations`): a standard user cannot read the
+deployment record, and those fields would read as "not installed":
 
 ```json title="enterprise linux verify --json (failed, trimmed)"
 {
   "ok": false,
   "action": "verify",
-  "installed": false,
   "coverage_complete": false,
+
   "security_complete": false,
   "errors": [
     { "code": "not_root", "message": "run this command as root (sudo or the MDM agent)" }
@@ -464,7 +474,8 @@ from enrollment as described in
 | MDM wrapper log | `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` |
 | Event log | The `DefenseClaw` event log, source **DefenseClaw Lifecycle** (table below). Only SYSTEM and Administrators can write it. A legacy copy of each event goes to the Application log, source **DefenseClaw Enterprise**, where any account can write under any source name; see [Windows](/docs/enterprise/windows#verify-the-install) |
 | Gateway log | `C:\ProgramData\Cisco\DefenseClaw\logs\gateway\gateway.log` |
-| Guardian log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log` |
+| Guardian and enumerator log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log`. The hook enumerator writes here too, each line prefixed `[hook-enumerator]`; its warnings about one account (an `include_user_email` warning, for example) name the account's SID |
+| Sensor helper log | `C:\ProgramData\Cisco\DefenseClaw\logs\sensor-helper\sensor-helper.log` |
 
 Standard users can read the files in `%WINDIR%\Logs\DefenseClaw`. Only SYSTEM
 and Administrators can write them. The lifecycle writes these logs and events
@@ -526,6 +537,15 @@ SQLite database set by `observability.local.path`. By default it is
 To forward records to a SIEM, add `observability.destinations` to the managed
 config that you deploy. Destination kinds include OTLP, Splunk HEC, HTTP
 JSONL, and JSONL files. See [Observability](/docs/observability).
+
+`enterprise linux status --profile standalone`, `enterprise linux verify
+--profile standalone`, and their macOS and Windows equivalents warn when an
+optional destination is failing. For the destination name, circuit state,
+last failure code and rejected count, run `defenseclaw-gateway status` on the
+managed host or inspect its loopback `/health` `telemetry.details.destinations`
+object. A failed optional destination does not stop the local audit store or
+sibling destinations. `no_space` means a JSONL file destination's volume is
+full; free space there and let its retry resume.
 
 Two rules apply on a managed host:
 

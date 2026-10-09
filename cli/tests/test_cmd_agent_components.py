@@ -43,6 +43,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import legacy_connector
 from defenseclaw.commands import cmd_agent
 from defenseclaw.context import AppContext
 
@@ -908,6 +909,24 @@ class DiscoveryOffAndWordingTests(unittest.TestCase):
             self.assertIn("defenseclaw agent discovery enable", result.output)
             self.assertNotIn(empty_table, result.output)
 
+    def test_refresh_with_discovery_off_names_the_next_step(self):
+        # GAP-0281: the scan answers 503 "ai discovery disabled"; the CLI printed the bare status.
+        class _Refused(_FakeClient):
+            def scan_ai_usage(self):
+                response = requests.Response()
+                response.status_code = 503
+                response._content = b'{"error":"ai discovery disabled"}'
+                raise requests.HTTPError("503 Server Error", response=response)
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", _Refused):
+            result = CliRunner().invoke(cmd_agent.usage, ["--refresh"], obj=_make_ctx())
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("AI discovery is disabled", result.output)
+        self.assertIn("defenseclaw agent discovery enable", result.output)
+        self.assertNotIn("HTTP 503", result.output)
+
     def test_runtime_plane_changes_read_as_plain_words(self):
         self.assertEqual(
             cmd_agent._runtime_change_line("planes", [], ["a", "b"]),
@@ -919,3 +938,69 @@ class DiscoveryOffAndWordingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IDEPluginsTests(unittest.TestCase):
+    def test_untrusted_names_render_literally_and_ide_version_distinguishes_rows(self):
+        from defenseclaw.commands import cmd_agent
+
+        table = cmd_agent._render_runtime_table(["Plugin"], [["[/] close tag"]])
+        self.assertIn("[/] close tag", table)
+        rows = cmd_agent.ide_plugin_rows(
+            [{"ide_product": "intellij-idea-ce", "install_id": "i1", "plugin_id": "com.tabnine"}],
+            {"i1": "2025.2"},
+        )
+        self.assertEqual(rows[0][1], "intellij-idea-ce 2025.2")
+
+    def test_lists_every_page_with_filters_and_scope_messages(self):
+        from defenseclaw.gateway import OrchestratorClient
+
+        pages = {
+            "": {"enabled": True, "scope": "all", "next_cursor": "c2",
+                 "counts": {"total": 2, "ai": 1, "disabled": 1, "users": 2},
+                 "installations": [{"install_id": "i2", "remote_kind": "ssh_server"}],
+                 "plugins": [{"user": "bob", "ide_product": "pycharm", "plugin_id": "org.rust.lang",
+                              "display_name": "Rust", "version": "0.4", "enabled": "disabled"}]},
+            "c2": {"enabled": True, "scope": "all", "next_cursor": "",
+                   "plugins": [{"user": "alice", "ide_product": "vscode", "install_id": "i2",
+                                "plugin_id": "github.copilot",
+                                "version": "1.250.0", "enabled": "client_side_unknown", "is_ai": True}]},
+        }
+        calls = []
+
+        class PagedClient:
+            ai_usage_ide_plugins_all = OrchestratorClient.ai_usage_ide_plugins_all
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage_ide_plugins(self, **kwargs):
+                calls.append(kwargs)
+                return pages[kwargs.get("cursor", "")]
+
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", PagedClient):
+            result = runner.invoke(cmd_agent.agent, ["ide-plugins", "--ide", "VSCode", "--ai-only"], obj=_make_ctx())
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(calls[0], {"user": "", "ide": "vscode", "ai_only": True})
+            self.assertEqual(calls[1]["cursor"], "c2")
+            lines = result.output.splitlines()
+            alice = next(line for line in lines if "github.copilot" in line)
+            self.assertIn("client side", alice)
+            # The install on a later page is marked as the SSH server one (GAP-0055).
+            self.assertIn("vscode (ssh)", alice)
+            self.assertIn("org.rust.lang (Rust)", result.output)
+            self.assertLess(result.output.index("alice"), result.output.index("bob"))
+            self.assertIn("2 plugin(s) shown; 2 in total, 1 AI, 1 disabled, 2 user(s)", result.output)
+
+            calls.clear()
+            alias = runner.invoke(cmd_agent.agent, ["ide-plugins", "--ide", legacy_connector.RETIRED_DESKTOP_ID], obj=_make_ctx())
+            self.assertEqual(alias.exit_code, 0, msg=alias.output)
+            self.assertEqual(calls[0]["ide"], "devin-desktop")
+
+            pages[""] = {"enabled": True, "scope": "off", "plugins": []}
+            result = runner.invoke(cmd_agent.agent, ["ide-plugins"], obj=_make_ctx())
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("ide_inventory: off", result.output)

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -39,8 +40,12 @@ import (
 const (
 	committedConfigName = "committed-config.yaml"
 	rejectedConfigName  = "rejected-config.yaml"
-	codeConfigReverted  = "config_reverted"
-	codeConfigRejected  = "config_rejected"
+	// rejectedReasonName holds why the kept edit was rejected: status and
+	// verify said only that "the lifecycle log says why" (GAP-0689).
+	rejectedReasonName = "rejected-config.reason"
+	maxRejectedReason  = 1 << 10
+	codeConfigReverted = "config_reverted"
+	codeConfigRejected = "config_rejected"
 )
 
 func (e *Env) committedConfigPath() string {
@@ -49,6 +54,10 @@ func (e *Env) committedConfigPath() string {
 
 func (e *Env) rejectedConfigPath() string {
 	return filepath.Join(e.P(e.Layout.LifecycleDir), rejectedConfigName)
+}
+
+func (e *Env) rejectedReasonPath() string {
+	return filepath.Join(e.P(e.Layout.LifecycleDir), rejectedReasonName)
 }
 
 // saveCommittedConfig records the config a committed transaction applied.
@@ -83,7 +92,7 @@ func (l *lifecycle) inPlaceConfigEdit(record *Deployment) []byte {
 // edit, not the newer one nobody checked, and the newer bytes are returned
 // so the caller puts them back once the rollback restart is done and the
 // apply trigger applies them in their own transaction.
-func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned []byte) (newer []byte) {
+func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned []byte, cause string) (newer []byte) {
 	env, r := l.env, l.result
 	rejected := planned
 	if current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
@@ -96,6 +105,15 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 	if rejected != nil {
 		if err := env.writeFileAtomic(env.rejectedConfigPath(), rejected, 0o600, rootOwner()); err != nil {
 			r.AddWarning(codeConfigReverted, "could not keep a copy of the rejected config: "+err.Error())
+		}
+		reason := strings.Join(strings.Fields(cause), " ")
+		if len(reason) > maxRejectedReason {
+			reason = strings.ToValidUTF8(reason[:maxRejectedReason], "") + "..."
+		}
+		if reason == "" {
+			_ = removeFile(env.rejectedReasonPath())
+		} else if err := env.writeFileAtomic(env.rejectedReasonPath(), []byte(reason+"\n"), 0o600, rootOwner()); err != nil {
+			r.AddWarning(codeConfigReverted, "could not keep why the config was rejected: "+err.Error())
 		}
 	}
 	owner := fileOwner{UID: 0, GID: record.ServiceGID}
@@ -144,8 +162,14 @@ func (e *Env) rejectedConfigProblem() string {
 	}
 	// The run may have failed for a reason other than the file (a service
 	// that did not start), so the hint does not call the file invalid.
-	return fmt.Sprintf("the config.yaml edit rejected at %s is not applied: the run that applied it failed (the lifecycle log says why), the last applied config is in place and the rejected file is kept at %s. Write config.yaml again, even unchanged, to retry it, or push a corrected one",
-		rejected.ModTime().UTC().Format(time.RFC3339), filepath.Join(e.Layout.LifecycleDir, rejectedConfigName))
+	why := "the lifecycle log says why"
+	if body, readErr := readBounded(e.rejectedReasonPath(), maxRejectedReason+16); readErr == nil {
+		if reason := strings.TrimSpace(string(body)); reason != "" {
+			why = reason
+		}
+	}
+	return fmt.Sprintf("the config.yaml edit rejected at %s is not applied: the run that applied it failed (%s), the last applied config is in place and the rejected file is kept at %s. Write config.yaml again, even unchanged, to retry it, or push a corrected one",
+		rejected.ModTime().UTC().Format(time.RFC3339), why, filepath.Join(e.Layout.LifecycleDir, rejectedConfigName))
 }
 
 // rejectionSuperseded reports whether config.yaml was written after the
@@ -166,5 +190,6 @@ func (l *lifecycle) settleRejectedConfig() {
 	}
 	if l.opts.ConfigFile != "" || env.rejectionSuperseded(rejected) {
 		_ = removeFile(env.rejectedConfigPath())
+		_ = removeFile(env.rejectedReasonPath())
 	}
 }

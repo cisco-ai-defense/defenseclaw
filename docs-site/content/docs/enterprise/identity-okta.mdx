@@ -1,0 +1,482 @@
+---
+title: Okta on Linux
+description: Read Okta users and groups on a Linux host through the Okta LDAP Interface and SSSD, choose DefenseClaw guardrail profiles by Okta group, and check the result. Covers the Okta setup, the SSSD build that can bind to Okta, the starter scripts, what was tested, and troubleshooting.
+keywords:
+  - DefenseClaw Okta
+  - Okta LDAP Interface
+  - SSSD ldap_use_ppolicy
+  - guardrail profiles Okta groups
+  - Okta Linux SSH
+  - identity-based policy
+---
+
+DefenseClaw never calls Okta. On Linux, Okta users become operating-system
+accounts through the Okta LDAP Interface, which SSSD reads like any other LDAP
+directory. DefenseClaw then sees an Okta user the way it sees any SSSD account,
+and an Okta group can choose that user's guardrail profile. This page is the
+whole path: the Okta side, an SSSD that can talk to Okta, the host, DefenseClaw,
+and the checks. The starter scripts in
+[`packaging/identity/okta`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/packaging/identity/okta)
+do each step and can be run again safely.
+
+Read [Attribution, not authentication](/docs/enterprise/identity-and-authentication#attribution-not-authentication)
+first if you are new to how DefenseClaw uses identity.
+
+## Where this applies
+
+- **OSS per-user installs** and **the standalone enterprise profile** on Linux.
+- **Not the Secure Client integration.** It rejects `guardrail.profiles`,
+  `profile_assignments` and `default_profile`, and this work does not change its
+  behavior.
+- A per-user install keeps its config in the user's own home, so the user can
+  change their own profile. To enforce a profile, deliver it in the machine
+  config of the standalone enterprise profile.
+
+## What was tested
+
+| Tested live | Not tested |
+| --- | --- |
+| RHEL 9.8 and one Okta org on okta.com | Ubuntu, Debian and SLES hosts, and other RHEL-family distributions |
+| SSSD 2.9.8 from RHEL 9 with the `ldap_use_ppolicy` backport: binds to Okta | RHEL 10 and SSSD 2.10 or later. Upstream has `ldap_use_ppolicy` since 2.10.0; we did not run it. A nightly SSSD 2.12 build did not install on RHEL 9.8 |
+| Stock RHEL 9 SSSD 2.9.8: cannot bind to Okta | Okta domains other than okta.com |
+| Okta users signing in over SSH with their Okta passwords | Sign-on rules for large groups: tested with groups of one user |
+| Per-user installs and the standalone enterprise profile with Claude Code: Okta groups chose the profile, and a block was enforced | macOS and Windows hosts with Okta (see [macOS and Windows](#macos-and-windows)) |
+| Every script in the kit, on that host and against that org | Running the scripts from a configuration-management tool |
+
+## Requirements
+
+| Part | What you need |
+| --- | --- |
+| Okta | A super administrator, to create an API token and to turn on the LDAP Interface in the Admin Console. Users that sign in with a password: an LDAP bind cannot answer a second-factor prompt. |
+| Host | RHEL 9 (tested on 9.8) with systemd and root access. `install-sssd-okta.sh` also accepts other RHEL-family distributions, which were not tested. Outbound TCP 636 to `<org>.ldap.okta.com`. |
+| SSSD | A build that has `ldap_use_ppolicy`. See [Get an SSSD that can bind to Okta](#get-an-sssd-that-can-bind-to-okta). |
+| DefenseClaw | A per-user install, or the standalone enterprise package. |
+| Where you run `okta-ldap-setup.py` | Python 3.9 or later and HTTPS access to your Okta org. It needs no packages. |
+
+## Set it up
+
+<Steps>
+
+<Step>
+
+### Prepare Okta
+
+1. Create an API token in the Admin Console (under Security, API) for a super
+   administrator. Set the org URL, then let the setup script prompt for the
+   API token in the terminal. The prompt does not echo the token, and typing it
+   there keeps it out of shell history:
+
+   ```bash
+   export OKTA_ORG_URL=https://example.okta.com
+   ```
+
+2. Turn on the LDAP Interface: Admin Console, Directory, Directory
+   Integrations, Add LDAP Interface. **Okta has no API for this step.** It then
+   serves `ldaps://<org>.ldap.okta.com:636`, with users under
+   `ou=users,dc=<org>,dc=okta,dc=com` and groups under
+   `ou=groups,dc=<org>,dc=okta,dc=com`.
+
+3. Create the people as usual. You need:
+   - the **Linux users**, ordinary Okta users with passwords, collected in one Okta
+     group (`engineering` below) so the setup script can find them;
+   - a **bind user** that SSSD reads the directory with: an ordinary Okta user
+     with its own password, not a Linux account, not in the Linux groups;
+   - the **groups** that will choose profiles, for example `contractors` and
+     `ml-research`.
+
+4. Prepare the org with the setup script. Run it from the kit folder of a
+   checkout or source archive of the DefenseClaw repository, on any machine that
+   can reach your Okta org over HTTPS; it does not have to be the Linux host. A
+   command that writes prints its plan and changes nothing until you add
+   `--apply`, so run each one without it first.
+
+   ```bash
+   ./okta-ldap-setup.py posix-schema --apply
+   ./okta-ldap-setup.py assign-posix --users-from engineering --primary-group linux-users \
+       --group contractors --group ml-research --apply
+   ./okta-ldap-setup.py bind-role --bind-login ldap-bind@example.com --apply
+   ./okta-ldap-setup.py signon-policy --bind-login ldap-bind@example.com --group linux-users --apply
+   ./okta-ldap-setup.py check --bind-login ldap-bind@example.com --group linux-users \
+       --group contractors --group ml-research
+   ```
+
+   | Command | What it changes in Okta |
+   | --- | --- |
+   | `posix-schema` | Adds the user attributes `uidNumber`, `gidNumber`, `homeDirectory`, `loginShell` and a unique `unixUsername`, and the group attribute `gidNumber`. Okta profiles carry no POSIX data, and the LDAP Interface exposes these custom attributes under the same names. |
+   | `assign-posix` | Gives each selected user a `uidNumber` (from 1710000), `unixUsername` (the login's local part, lower case), `gidNumber`, `homeDirectory` and `loginShell`, adds the users to the primary group, and gives that group and each `--group` a `gidNumber` (from 1720000). SSSD skips a group without a `gidNumber`, such as Okta's built-in `Everyone`. |
+   | `bind-role` | Creates a custom admin role with only `okta.users.read` and `okta.groups.read`, on a resource set of all users and groups, and assigns it to the bind user. Without a role the bind user sees only itself. |
+   | `signon-policy` | Creates a sign-on policy for the LDAP Interface app with two password-only rules (one for the bind user, one for the group) and assigns it to the app. Its catch-all rule still requires a second factor from everyone else. |
+   | `check` | Changes nothing. Reports what is ready and what is missing. |
+
+   `assign-posix --home-template '/srv/home/{name}' --shell /bin/bash` sets
+   nondefault homes and shells. For homes outside `/home` and `/var/home`, add
+   the parent to `enterprise.enrollment.home_roots` before enrollment.
+   Accounts with `/sbin/nologin`, `/usr/sbin/nologin` or `/bin/false` shells
+   are skipped by hook enrollment. `verify-okta-identity.sh --user NAME`
+   reports the shell skip reason and points out nonstandard homes.
+
+   Run `assign-posix` from one admin at a time. Okta does not enforce
+   uniqueness on the numeric UID attribute in this schema; `check` detects
+   duplicates, but concurrent assignments can otherwise pick the same number.
+   If a UID is shared, clear it on one affected user's profile in Okta Admin
+   Console (**Directory** > **People** > user > **Profile**), save, then rerun
+   `assign-posix --user LOGIN` for that user.
+   Every command can be run again and changes only what differs. Pick user and
+   group IDs outside the local accounts of your hosts. The host step limits SSSD
+   to the range 1710000 to 1729999 by default (`--id-min` and `--id-max` of
+   `install-sssd-okta.sh`), which holds the IDs that `assign-posix` hands out by
+   default.
+
+<Callout type="warn" title="Password-only sign-in">
+An LDAP bind cannot answer a second-factor prompt, so the LDAP Interface needs a
+rule that accepts a password alone, and the SSH sign-in in this guide then also
+needs only the Okta password. The rule from `signon-policy` covers only the bind
+user and one group, and only the LDAP Interface app; the rest of your Okta policy
+is unchanged. In the test, a user in neither the group nor the rule was refused
+with "Resource owner password credentials authentication denied by sign on
+policy." Restrict who can reach SSH as you would for any password login.
+</Callout>
+
+In a test of the group rule, members of the group and the bind user could bind,
+and users outside the group were refused. Okta requires all the conditions of
+one rule to hold, so the script makes two rules instead of one rule naming both
+the bind user and the group.
+
+</Step>
+
+<Step>
+
+### Get an SSSD that can bind to Okta
+
+**SSSD 2.9, the version in RHEL 9, cannot bind to Okta.** It always sends the
+password-policy request control, Okta answers with a response control that has no
+value, and SSSD 2.9 treats that as a failed bind. No Okta user resolves,
+`getent passwd` finds nothing, `sssctl domain-status` says `Offline` and the SSSD
+log says `ldap_parse_passwordpolicy_control failed`. Upstream SSSD 2.10.0 added the
+option `ldap_use_ppolicy` for this (SSSD commit 1980e2c4, issue 6666). Check your
+host:
+
+```bash
+grep ldap_use_ppolicy /usr/share/sssd/cfg_rules.ini    # a match means this SSSD can bind to Okta
+```
+
+| SSSD | Result |
+| --- | --- |
+| RHEL 9.8 stock `sssd-2.9.8-4.el9_8.1` | Cannot bind. `sssctl config-check` reports `Attribute 'ldap_use_ppolicy' is not allowed` |
+| The same source package rebuilt with the backport | Binds. Tested |
+| SSSD 2.10 or later (RHEL 10) | Has the option upstream. Not tested here |
+
+To rebuild RHEL 9.8's SSSD with the option, run this as a normal user with `sudo`
+on a RHEL 9.8 host (about 15 minutes on 2 vCPUs). It installs `rpm-build`,
+`gcc` and SSSD build dependencies through `sudo dnf` (roughly 370 packages
+on a stock RHEL 9.8 host), then builds the SSSD packages. It does not install
+the rebuilt SSSD packages. Build on a separate host or container if the target
+must stay free of those dependencies; copy the RPMs from the printed `RPMS`
+directory to the target. Remove build-only dependencies on the build host only
+after recording which packages `dnf` added.
+
+```bash
+./build-sssd-ppolicy-backport.sh --workdir "$HOME/sssd-ppolicy-build"
+```
+
+The script is pinned to `sssd-2.9.8-4.el9_8.1`. The upstream patch does not apply
+to that tree, so `backport-ppolicy.py` makes the same change by exact text
+replacement and stops with the first text it does not find, so on any other SSSD
+release it fails instead of building something wrong. When it finishes, it prints
+the install commands: `rpm -Uvh --oldpackage` for the packages that are installed
+now (a local build has the dist tag `.el9`, which sorts below `.el9_8.1`), and an
+`excludepkgs` line for `/etc/dnf/dnf.conf` so that `dnf upgrade` cannot put the
+stock build back.
+
+<Callout type="warn" title="You own this package">
+The rebuilt packages are a local fork of a Red Hat package. Red Hat does not
+support them, and you have to rebuild them for each later SSSD security update
+until you can move to an SSSD that has the option.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Configure the host
+
+`install-sssd-okta.sh` configures SSSD, PAM and sshd on a RHEL-family host. It
+reads the bind password from a file (mode 0600), from `OKTA_BIND_PASSWORD`, or at a
+prompt, never from the command line. Read the password without echoing it
+so the dry run can test the bind as well; the command entered into shell history
+contains no password. Run as root, dry run first, then clear the variable:
+
+```bash
+read -rsp 'Okta bind password: ' OKTA_BIND_PASSWORD; printf '\n'
+export OKTA_BIND_PASSWORD
+sudo --preserve-env=OKTA_BIND_PASSWORD ./install-sssd-okta.sh --org example \
+    --bind-login ldap-bind@example.com --allow-group linux-users --dry-run
+sudo --preserve-env=OKTA_BIND_PASSWORD ./install-sssd-okta.sh --org example \
+    --bind-login ldap-bind@example.com --allow-group linux-users
+unset OKTA_BIND_PASSWORD
+```
+
+Choose an Okta group name absent from the host's `/etc/group`. The installer
+rejects a local name collision before changing the host because the sshd group
+rule would also permit password sign-in for members of that local group.
+
+For Ansible, Puppet or another configuration manager, the final line is
+`changed: 0` or `changed: 1` on a successful apply. A dry run exits `0` when
+unchanged and `4` when it would change the host; it still checks the bind and
+can fail if the LDAP endpoint is unreachable. Run the dry run as root so it can
+compare the existing root-owned config. Treat exit `1`, `2` and `3` as failures,
+not planned changes.
+
+It:
+
+1. refuses to go on when the host is not RHEL family, when a package is missing
+   (`--install-packages` installs it), or when the installed SSSD has no
+   `ldap_use_ppolicy` (exit 3 in each case, before any change);
+2. renders `sssd-okta.conf.tmpl` with your values, checks it with `sssctl
+   config-check`, and, when `ldapsearch` is installed (package `openldap-clients`),
+   tests the bind user against Okta before it changes anything. A wrong password
+   or a sign-on policy that refuses the bind user stops the run with exit 1 and
+   leaves `sssd.conf` as it was;
+3. installs `/etc/sssd/sssd.conf` (root, mode 0600), keeping the previous file as
+   `sssd.conf.bak-<time>`. It will not replace an `sssd.conf` that it did not
+   write unless you pass `--force`. A rerun also refuses to replace a marked
+   file that contains another SSSD domain (for example, one added by an Active
+   Directory join). Merge the updated Okta settings into that file manually,
+   or pass `--force` if replacing every domain is intentional;
+4. selects the authselect `sssd` profile with home directories (`with-mkhomedir`)
+   and enables `oddjobd`;
+5. writes `/etc/ssh/sshd_config.d/45-okta-ldap.conf`, so members of the allowed
+   group can sign in with their Okta password and everyone else keeps the sshd
+   default;
+6. restarts SSSD when the config changed and waits for the `okta` domain to be
+   Online.
+
+A second run with the same options reports every step as unchanged. On another
+distribution, `--render-only FILE` writes the SSSD config to a file and checks it,
+and you install it yourself.
+
+The template is the SSSD config that was run against Okta. The settings that are
+specific to Okta:
+
+| Setting | Why |
+| --- | --- |
+| `ldap_use_ppolicy = false` | Okta's valueless password-policy response breaks the bind (see above) |
+| `ldap_read_rootdse = authenticated` | Okta refuses every anonymous operation, including the root DSE read (LDAP error 50) |
+| `ldap_schema = rfc2307bis`, `ldap_user_object_class = inetOrgPerson`, `ldap_group_object_class = groupOfUniqueNames`, `ldap_group_member = uniqueMember` | Okta serves these classes, not `posixAccount` and `posixGroup` |
+| `ldap_user_name = unixUsername`, `ldap_id_mapping = false`, `min_id`, `max_id` | The account name and the IDs come from the Okta attributes |
+| `access_provider = simple`, `simple_allow_groups` | Only members of the allowed group can sign in |
+| `sudo_provider = none`, `autofs_provider = none`, `chpass_provider = none` | Okta holds no such data, and passwords change in Okta |
+| `entry_cache_timeout = 600` | How long SSSD keeps a user or group before it asks Okta again |
+
+The names are bare (`alice`, `ml-research`) unless you set
+`use_fully_qualified_names`.
+
+</Step>
+
+<Step>
+
+### Check the accounts
+
+`verify-okta-identity.sh` only reads. Run it as root on the host for every check,
+or as a normal user for the account checks:
+
+```bash
+sudo ./verify-okta-identity.sh --user alice --expect-group ml-research --allow-group linux-users
+```
+
+```text
+SSSD
+PASS  sssd service is active
+PASS  this SSSD knows ldap_use_ppolicy (it can bind to Okta)
+PASS  the allowed group linux-users resolves
+PASS  SSSD domain okta is Online
+PASS  /etc/sssd/sssd.conf is root:root 0600
+User alice
+PASS  getent passwd: uid 1710001, gid 1720000, home /home/alice
+      groups: linux-users ml-research
+PASS  id -Gn lists ml-research
+```
+
+By hand, the same checks are `getent passwd alice`, `id alice`,
+`sudo sssctl domain-status okta -o` and an SSH sign-in with the Okta password. The
+sign-in works through sshd, PAM and `pam_sss`, which binds to Okta as the user; a
+wrong password is refused.
+
+</Step>
+
+<Step>
+
+### Install DefenseClaw and deliver the profiles
+
+Install DefenseClaw for the Okta users as you would for any Linux user: a
+[per-user install](/docs/get-started/install) for each user, or the
+[standalone enterprise package](/docs/enterprise/linux). Then give it profiles
+that name the complete Okta groups as `id -Gn` prints them. Matching ignores
+case, including in `verify-okta-identity.sh --expect-group`, so avoid groups
+whose names differ only by case:
+
+- **Standalone enterprise profile.** Start from
+  `admin-config.example.yaml`: it sets three profiles, assigns two of them to the
+  groups `contractors` and `ml-research`, and makes `okta-standard` (block at HIGH)
+  the default for everyone else. Change the group names, then apply it as root.
+  `guardrail.connectors` lists the agents to protect; an empty entry such as
+  `claudecode: {}` enables an agent as `enabled: true` does. `ensure` validates the file first and keeps the
+  installed config when it is invalid, for example with
+  `unknown profile "okta-nope"`.
+
+  ```bash
+  sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure \
+      --config /root/defenseclaw-config.yaml --json
+  ```
+
+- **Per-user install.** Merge the `guardrail` keys of `user-config.example.yaml`
+  into the user's `~/.defenseclaw/config.yaml`, then run `defenseclaw config
+  validate`. The running gateway applies the change on its next reload.
+
+Both examples use only built-in settings (`mode`, `block_at`), so they need no
+rule pack. The full set of profile keys, the precedence and the audit record are in
+[User- and group-based policies](/docs/guardrail/user-and-group-policies).
+
+Set a strict `default_profile`. A request whose user DefenseClaw cannot look up
+(for example while Okta and the SSSD cache are both unavailable) gets the default
+profile with the reason `default_lookup_failed`.
+
+</Step>
+
+<Step>
+
+### Confirm the profile
+
+Ask DefenseClaw which profile each user gets:
+
+```bash
+sudo ./verify-okta-identity.sh --user alice --expect-profile okta-observe --connector claudecode
+sudo ./verify-okta-identity.sh --user bob --expect-profile okta-strict --connector claudecode
+```
+
+On a managed host, run it as root: it calls `defenseclaw-gateway enterprise linux
+profile-explain`. On a per-user install, run it as the user whose gateway you want
+to ask: it calls `defenseclaw guardrail profile explain`. Those commands work on
+their own:
+
+```bash
+defenseclaw guardrail profile explain --user alice --connector claudecode
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector claudecode
+```
+
+A match of `group` with the group name shows the assignment worked. `default`
+means no assignment matched. `default_lookup_failed` means DefenseClaw could not
+look the user up.
+
+</Step>
+
+</Steps>
+
+## What DefenseClaw records
+
+With this setup, read a record with `defenseclaw audit export` as in the
+[Active Directory guide](/docs/enterprise/identity-and-authentication#join-a-linux-host-to-ad-and-see-what-defenseclaw-learns):
+
+| Field | Per-user install | Standalone enterprise |
+| --- | --- | --- |
+| `user.id`, `defenseclaw.user.name` | The uid and the `unixUsername` | The same |
+| Groups (`explain` subject, `defenseclaw.user.group_count`) | The user's Okta groups that have a `gidNumber` | The same |
+| `defenseclaw.user.identity.source`, `defenseclaw.user.principal.assurance` | `sssd`, `verified` | The same; `sssd_infopipe` once the UPN is mapped (below) |
+| `defenseclaw.user.directory` | Absent: InfoPipe answers root only | `ldap`, from the InfoPipe domain provider |
+| `defenseclaw.user.domain` | Absent, because the names are not fully qualified | The same |
+| UPN and `defenseclaw.user.principal` | Absent | Absent, unless SSSD maps the Okta login to the UPN (below) |
+| `defenseclaw.session.kind`, `client.address` | `ssh` and the client address, verified through logind | The same |
+
+## In operation
+
+- **Group changes.** A change in Okta reaches the host when SSSD's entry expires
+  (`entry_cache_timeout`, 600 seconds), then the gateway's 15-minute cache. In the
+  test, an Okta group add and remove changed the profile of live requests 11
+  minutes later, with no new sign-in. DefenseClaw follows the directory, while
+  `id -Gn` in an open shell keeps the groups of the sign-in. `sss_cache -E` makes
+  SSSD ask Okta at once; `profile explain` asks the operating system directly, so it
+  can show the change before live requests use it. The managed Linux command
+  does not currently print a `cache:` age line. See the cache layers in
+  [Troubleshooting](/docs/enterprise/identity-and-authentication#troubleshooting).
+- **Okta unreachable.** Open sessions with warm SSSD cache keep their profiles
+  and blocks. New SSH password sign-ins fail while Okta is unreachable because
+  the kit sets `cache_credentials = false`; they can prompt repeatedly without
+  authenticating. With no cached entry, the lookup fails and requests get the
+  default profile with `default_lookup_failed`. SSSD retries an offline domain
+  at an interval that grows with the outage (`offline_timeout`, 60 seconds,
+  doubling with each failed retry up to `offline_timeout_max`), so after Okta is
+  back it can take up to that interval to report Online: in live outage tests
+  about two minutes after a short outage, and 6 minutes 12 seconds after a
+  13-minute one. Group profiles applied 40 to 51 seconds after SSSD reported
+  Online, without a gateway restart. To bring the host back sooner, run
+  `sudo systemctl restart sssd` once Okta answers: after a 10-minute outage SSSD
+  was still offline 90 seconds after connectivity returned, and reported Online
+  2 seconds after the restart (`sssctl domain-status okta -o`).
+- **The Okta login as the UPN** (standalone enterprise only). The Okta LDAP
+  Interface has no `userPrincipalName`; its `uid` is the Okta login. Run
+  `install-sssd-okta.sh` with `--map-upn`, which adds `ldap_user_principal = uid` to
+  the domain and `user_attributes = +mail, +userPrincipalName` to `[ifp]`. The
+  guardian then records the Okta login (`alice@example.com`) as the UPN, with source
+  `sssd_infopipe`, within its 15-minute refresh. The principal leaves the host only
+  with `ai_discovery.include_user_principal: true`. A per-user install never has it.
+
+## macOS and Windows
+
+This kit covers Linux hosts. For the other platforms DefenseClaw reports what the
+operating system already knows, as described in
+[How Okta and Entra users appear](/docs/enterprise/identity-sources#how-okta-and-entra-users-appear):
+
+| Platform | What DefenseClaw sees | State |
+| --- | --- | --- |
+| Windows or macOS joined to Active Directory, with Okta provisioning the users into AD | The AD account, UPN and groups | The AD readers were tested live on a lab domain. Okta provisioning into AD was not tested |
+| Entra-joined Windows, whichever way users sign in to Entra (including Okta federation) | The Entra account, UPN and tenant (directory `entra_id`) | The Entra readers are described in [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources#how-okta-and-entra-users-appear). Federation with Okta was not tested |
+| macOS with Platform SSO or Okta Device Access and Okta Verify | The device's SSO provider: directory `okta`, standalone enterprise only | Not tested live |
+| Any OS where an Okta agent creates local accounts | The local account, directory `local`. No Okta NSS module is recognized | Not tested with an Okta agent |
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `sssctl domain-status okta` says Offline, and the SSSD log has `ldap_parse_passwordpolicy_control failed` | SSSD 2.9 without `ldap_use_ppolicy`. See [Get an SSSD that can bind to Okta](#get-an-sssd-that-can-bind-to-okta) |
+| `sssctl config-check` says `Attribute 'ldap_use_ppolicy' is not allowed in section 'domain/okta'` | The same: this SSSD does not know the option. `install-sssd-okta.sh` stops with exit 3 before it changes anything |
+| A bind fails with LDAP error 49 and the additional info `Resource owner password credentials authentication denied by sign on policy.` | The sign-on policy of the LDAP Interface app wants a second factor for this user. Run `okta-ldap-setup.py check`, then `signon-policy` for the bind user and the Linux group. The user must be in that group |
+| A bind fails with LDAP error 49, `The credentials provided were invalid.` | A wrong login or password for the bind user or the user |
+| SSSD logs LDAP error 50 (insufficient access) while it reads the root DSE | `ldap_read_rootdse = authenticated` is missing. Okta refuses anonymous reads |
+| The domain is Online, but `getent passwd alice` finds nothing | The user has no `uidNumber`, `gidNumber` or `unixUsername` in Okta (`okta-ldap-setup.py check --group ...` lists members without a `uidNumber`), the uid is outside `min_id` to `max_id`, or the bind user has no admin role and sees only itself (`bind-role`). `install-sssd-okta.sh` warns when the bind user finds fewer than two users |
+| `id alice` lacks a group | The Okta group has no `gidNumber`, or the user is not a member. Wait for `entry_cache_timeout` or run `sudo sss_cache -E` |
+| An SSH sign-in with the Okta password is refused | The user is not in the allowed group (`simple_allow_groups` and the sshd `Match Group`), the password is wrong, or the sign-on policy refuses the user. Read `journalctl -u sshd -u sssd` on the host |
+| An Okta group change is not in `defenseclaw guardrail profile explain` yet | SSSD caches for `entry_cache_timeout` (600 seconds). Run `sudo sss_cache -E` and ask again |
+| An Okta group change is in `explain` but not in live requests | The gateway keeps directory facts for up to 15 minutes. `explain` prints the age of the facts; wait or restart the gateway |
+| Every request shows `default_lookup_failed` | DefenseClaw could not resolve the user. Time `getent passwd alice`; check `sssctl domain-status okta -o`. With Okta unreachable and SSSD's cache empty, the default profile applies, so make it strict |
+| `verify-okta-identity.sh` says `DefenseClaw could not explain` | The gateway is not running, or you ran it as a user without a gateway. Run it as root on a managed host, or as the user who owns the per-user gateway |
+
+## Undo
+
+The installer prints the exact `sssd.conf.bak-<time>` it made and the previous
+`authselect` profile. On a rerun, use **that run's** backup, not simply the
+newest backup if a later rerun has replaced it. For a first install, no backup
+exists: remove `/etc/sssd/sssd.conf` only after deciding no other service uses
+it. Restore the previous authselect profile with `sudo authselect select
+<previous profile and features> --force`, or use the host's pre-install
+authselect backup. Stop and disable `sssd` and `oddjobd` only if this kit
+enabled them and no other login path needs them.
+
+Restore the exact `/etc/ssh/sshd_config.d/45-okta-ldap.conf.bak-<time>`
+printed by the run, or remove the drop-in if this was its first install.
+Validate with `sudo sshd -t` before reloading sshd. Restart SSSD only after
+its config has been restored and validated. In Okta, remove only objects you
+created: the sign-on policy and its rules (first assign the app another
+policy), the role and resource set, and the users' POSIX attributes and groups.
+Before stopping SSSD, run `sudo sss_cache -E`. After stopping it, cached NSS
+entries may still resolve for about six minutes from `/var/lib/sss/mc/`; a
+second check after that interval confirms expiry. For immediate removal on a
+dedicated SSSD host, clear only the kit domain's cache files after confirming
+no other SSSD domain needs them. On hosts with `rm -i` aliases, use `command rm`
+after checking the exact paths.
+
+<Cards>
+  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Profile keys, precedence, the audit record and delivery to managed hosts." />
+  <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity-sources" description="The OS facts behind a verified identity, and how Okta and Entra users appear." />
+  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity and the Active Directory guide." />
+  <Card title="Linux standalone deployment" href="/docs/enterprise/linux" description="Install the standalone enterprise services on Linux." />
+</Cards>

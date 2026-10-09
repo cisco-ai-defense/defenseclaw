@@ -604,6 +604,9 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 mode="observe",
                 fail_closed=False,
             )
+            # Cursor has no approval prompt: an inherited human_approval is
+            # the Human approval row's warning, not an inconsistent posture.
+            cfg.guardrail.effective_hilt.return_value = MagicMock(enabled=True)
             r = _DoctorResult()
             _check_cursor_configured_runtime(
                 cfg,
@@ -1983,14 +1986,33 @@ class TestCheckHookHealth(unittest.TestCase):
             # GAP-1804: arguments of another Python program are its own.
             ("/u/.defenseclaw/.venv/bin/python -m defenseclaw.main plugin list --json --connector hermes", False),
             ("python3 -c import --connector hermes", False),
+            ("/home/u/.hermes/tools/python-3.14/bin/python3 -I -c import os, re, sys import hermes_bootstrap from hermes_cli.main import main", True),
             ("python3 -u /u/.local/bin/hermes chat", True),
             ("python3 -Wignore -m hermes_cli", None),
             ("/u/.hermes/hermes-agent/venv/bin/python -m gateway.run", None),
         ):
             listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
             done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
-            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done):
+            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done), patch(
+                "defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=None
+            ):
                 self.assertIs(cmd_doctor._hermes_host_running(), want, args)
+
+    def test_hermes_multiline_python_launcher_uses_proc_argv(self) -> None:
+        from defenseclaw.commands import cmd_setup
+
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX process table only")
+        python = "/home/u/.hermes/tools/python-3.14.7+20260901-linux-x64/bin/python3"
+        listing = f"4242 {os.getuid()} {python} -I -c import os, re, sys\nimport hermes_bootstrap\n"
+        done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
+        argv = (python, "-I", "-c", "import os, re, sys\nimport hermes_bootstrap\nfrom hermes_cli.main import main")
+        with (
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done),
+            patch("defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=argv) as proc,
+        ):
+            self.assertFalse(cmd_setup._hermes_hosts_idle())
+        proc.assert_called_once_with("4242")
 
     def test_lock_path_without_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2925,7 +2947,20 @@ class TestCheckHookHealth(unittest.TestCase):
                 return_value=("pass", f"live effective config verified through --config={config}"),
             ):
                 _check_omnigent_policy_health(cfg, r)
-        self.assertEqual(r.checks[-1]["status"], "pass")
+            self.assertEqual(r.checks[-1]["status"], "pass")
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+                    return_value=("fail", "live server policy does not match"),
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_tmux_requirement",
+                    return_value="; managed terminals require tmux 3.3 or newer",
+                ),
+            ):
+                _check_omnigent_policy_health(cfg, r)
+            self.assertEqual(r.checks[-1]["status"], "fail")
+            self.assertIn("tmux 3.3", r.checks[-1]["detail"])
 
     def test_omnigent_repair_command_preserves_action_closed_hilt_posture(self) -> None:
         cfg = MagicMock()
@@ -3780,3 +3815,14 @@ class TestConnectorSkippedAtStart(unittest.TestCase):
         self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
         self.assertIn("OpenHands was skipped", row["detail"])
         self.assertEqual(row["remediation"], "defenseclaw setup openhands")
+
+
+
+def test_omnigent_tmux_requirement_reports_old_managed_terminal_runtime() -> None:
+    from defenseclaw.commands import cmd_doctor
+    with (
+        patch.object(cmd_doctor.os, "name", "posix"),
+        patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/tmux"),
+        patch.object(cmd_doctor.subprocess, "run", return_value=SimpleNamespace(stdout="tmux 3.2a")),
+    ):
+        assert "tmux 3.3" in cmd_doctor._omnigent_tmux_requirement()

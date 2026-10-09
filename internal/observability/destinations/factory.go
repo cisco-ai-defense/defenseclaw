@@ -16,6 +16,7 @@ package destinations
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -119,6 +120,7 @@ func (function CAFileLoaderFunc) LoadObservabilityCA(ctx context.Context, path s
 // resolved until PrepareDestination, so a new generation observes legitimate
 // rotation without the factory caching prior material.
 type Options struct {
+	SecureClient  bool
 	ConsoleStream ConsoleStream
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -145,7 +147,9 @@ type Options struct {
 // Factory owns no generation resource. Every successful preparation returns a
 // distinct adapter and retryable, idempotent cleanup closure.
 type Factory struct {
+	secureClient     bool
 	console          io.Writer
+	stderr           io.Writer
 	secrets          config.ObservabilityV8SecretResolver
 	caLoader         CAFileLoader
 	resolver         netguard.V8Resolver
@@ -178,7 +182,8 @@ func NewFactory(options Options) (*Factory, error) {
 		return nil, newError(ErrorInvalidDependencies)
 	}
 	return &Factory{
-		console: console, secrets: options.Secrets, caLoader: options.CALoader,
+		secureClient: options.SecureClient,
+		console:      console, stderr: options.Stderr, secrets: options.Secrets, caLoader: options.CALoader,
 		resolver: options.Resolver, dialer: options.Dialer, warnings: options.Warnings,
 		redaction: options.RedactionEngine, deliveryObserver: options.DeliveryObserver,
 		otlpObserver: options.OTLPCanonicalObserver, galileoObserver: options.GalileoObserver,
@@ -220,10 +225,17 @@ func (factory *Factory) PrepareDestination(
 		adapter, err := local.NewJSONL(local.JSONLConfig{
 			Path: destination.Transport.Path, MaxSizeMB: rotation.MaxSizeMB,
 			MaxBackups: rotation.MaxBackups, MaxAgeDays: rotation.MaxAgeDays,
-			Compress: rotation.Compress,
+			Compress: rotation.Compress, FailOnOpenError: factory.secureClient,
 		})
 		if err != nil {
 			return nil, cleanup, newError(ErrorAdapterPrepare)
+		}
+		if adapter.OpenDeferred() && !nilInterface(factory.stderr) {
+			// The administrator's own destination name and file path: the one
+			// line that says why this destination delivers nothing.
+			_, _ = fmt.Fprintf(factory.stderr,
+				"defenseclaw: observability destination %q cannot open %s for writing; the gateway runs without it and retries the file on every delivery\n",
+				destination.Name, destination.Transport.Path)
 		}
 		cleanup = retryableCleanup(adapter.Close)
 		if err := ctx.Err(); err != nil {

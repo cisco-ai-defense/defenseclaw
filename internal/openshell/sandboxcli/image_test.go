@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -52,6 +53,30 @@ func prepareVMDisk(t *testing.T, ta *testApp, imageID string) string {
 		"sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-1000-1000-sha256-"+strings.TrimPrefix(imageID, "sha256:"))
 	writeFile(t, filepath.Join(dir, "rootfs.ext4"), strings.Repeat("x", 4096))
 	return dir
+}
+
+func TestImagePruneRemovesOnlyStaleMicroVMStaging(t *testing.T) {
+	ta := newTestApp(t, "")
+	cache := filepath.Join(ta.home, ".local", "state", "openshell", "vm-driver", "images")
+	old := filepath.Join(cache, openshell.PreparedDiskPrefix+"sha256-old.staging-1")
+	fresh := filepath.Join(cache, openshell.PreparedDiskPrefix+"sha256-new.staging-2")
+	foreign := filepath.Join(cache, "overlay-templates")
+	for _, path := range []string{old, fresh, foreign} {
+		writeFile(t, filepath.Join(path, "rootfs.ext4"), "x")
+	}
+	mtime := time.Now().Add(-11 * time.Minute)
+	if err := os.Chtimes(old, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	ta.ok(t, ta.ImagePrune(bg, false))
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("stale disk remains: %v", err)
+	}
+	for _, path := range []string{fresh, foreign} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("prune removed %s: %v", path, err)
+		}
+	}
 }
 
 // Prune keeps every image the daemon's sandboxes run, by tag and ID, run

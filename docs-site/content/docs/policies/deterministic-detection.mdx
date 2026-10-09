@@ -426,7 +426,7 @@ Run the repository checks after changing a detector:
 
 ```bash
 make check-guardrail-catalog
-go test ./internal/actionfacts ./internal/guardrail ./internal/gateway
+go test -timeout 30m ./internal/actionfacts ./internal/guardrail ./internal/gateway
 go test ./benchmarks/...
 ```
 

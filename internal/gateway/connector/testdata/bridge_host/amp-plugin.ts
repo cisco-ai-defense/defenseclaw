@@ -16,11 +16,11 @@
 // does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { lstat } from 'node:fs/promises'
-import { userInfo } from 'node:os'
-import { dirname } from 'node:path'
+import { homedir, userInfo } from 'node:os'
+import { dirname, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
@@ -90,7 +90,63 @@ function identityHeaders(): Record<string, string> {
 		info.username.length <= 256 && /^[A-Za-z0-9._-]+$/.test(info.username)) {
 		headers["X-DefenseClaw-User-Name"] = info.username
 	}
+	const facts = sessionFactsHeader()
+	if (facts !== "") {
+		headers["X-DefenseClaw-Session-Facts"] = facts
+	}
 	return headers
+}
+
+// The Kerberos principal of this login sits in a credential cache the plugin
+// cannot read (a KCM cache is a socket protocol), so a DefenseClaw binary reads
+// it: `hook session-facts` prints the whole X-DefenseClaw-Session-Facts value,
+// the principal included, and keeps its own five-minute cache in
+// ~/.defenseclaw. A managed install runs its administrator-owned hook binary
+// (DC_FOREIGN_GUARD); a per-user install runs the gateway binary the installer
+// puts in ~/.local/bin. No answer is a supported outcome: the SSH and logind
+// variables alone follow.
+const DC_SESSION_FACTS_TTL_MS = 300000
+const DC_SESSION_FACTS_RETRY_MS = 30000
+let sessionFactsCache = { key: "", value: "", until: 0 }
+
+function fullSessionFacts(): string {
+	const env = process.env
+	const key = [env.KRB5CCNAME, env.XDG_SESSION_ID, env.SSH_CONNECTION, env.SSH_TTY].map((v) => String(v || "")).join("|")
+	const now = Date.now()
+	if (sessionFactsCache.key === key && now < sessionFactsCache.until) return sessionFactsCache.value
+	let value = ""
+	try {
+		const binary = DC_FOREIGN_GUARD ||
+			join(homedir(), ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+		const out = String(execFileSync(binary, ["hook", "session-facts"], {
+			timeout: 3000, maxBuffer: 4096, windowsHide: true, stdio: ["ignore", "pipe", "ignore"],
+		})).trim()
+		if (out.startsWith("v1;") && out.length <= 1024 && /^[A-Za-z0-9._@\/:;=-]+$/.test(out)) value = out
+	} catch (_) {
+		// No binary or no answer: the caller falls back to the SSH variables.
+	}
+	sessionFactsCache = { key, value, until: now + (value ? DC_SESSION_FACTS_TTL_MS : DC_SESSION_FACTS_RETRY_MS) }
+	return value
+}
+
+// sessionFactsHeader renders the claimed SSH and logind session facts as the
+// X-DefenseClaw-Session-Facts value the hook runner also sends. Each value is
+// dropped unless it matches the header's allowlisted charset.
+function sessionFactsHeader(): string {
+	const full = fullSessionFacts()
+	if (full !== "") return full
+	const env = process.env
+	const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || ""
+	const tty = String(env.SSH_TTY || "").replace(/^\/dev\//, "")
+	const session = String(env.XDG_SESSION_ID || "")
+	const kind = address !== "" || tty !== "" ? "ssh" : (session !== "" ? "local" : "")
+	const parts = ["v1"]
+	for (const [key, value] of [["k", kind], ["tty", tty], ["ls", session], ["ca", address]]) {
+		if (value.length > 0 && value.length <= 256 && /^[A-Za-z0-9._@\/:-]+$/.test(value)) {
+			parts.push(key + "=" + value)
+		}
+	}
+	return parts.length > 1 ? parts.join(";") : ""
 }
 
 type GatewayResponse = {
@@ -200,6 +256,30 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 		throw new Error("the DefenseClaw hook socket needs the Bun runtime")
 	}
 	return fetch(`http://localhost${path}`, { ...init, unix: DC_HOOK_SOCKET } as RequestInit)
+}
+
+// retryBusy sends the call again while the gateway answers 429: it is taking
+// all the hook calls it can, or this account is over its budget, and has not
+// evaluated the call. It waits the Retry-After the gateway asks for (1 to
+// 3 s) at most 3 times; the caller's abort signal keeps the whole exchange
+// inside the plugin timeout. The native hook runner does the same
+// (GAP-0205); without it a short burst failed the tool call (GAP-0535).
+async function retryBusy(send: () => Promise<Response>, signal: AbortSignal): Promise<Response> {
+	let response = await send()
+	for (let retry = 0; retry < 3 && response.status === 429; retry++) {
+		const asked = Number.parseInt(response.headers.get("retry-after") || "", 10)
+		const delay = Math.min(Math.max(Number.isFinite(asked) ? asked : 1, 1), 3) * 1000
+		await new Promise<void>((resolve, reject) => {
+			if (signal.aborted) return reject(new Error("DefenseClaw gateway busy"))
+			const timer = setTimeout(resolve, delay)
+			signal.addEventListener("abort", () => {
+				clearTimeout(timer)
+				reject(new Error("DefenseClaw gateway busy"))
+			}, { once: true })
+		})
+		response = await send()
+	}
+	return response
 }
 
 async function scopedHookToken(): Promise<string> {
@@ -315,6 +395,22 @@ async function deploymentRemoved(): Promise<boolean> {
 	} catch (error) {
 		return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
 	}
+}
+
+// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
+// service is stopped, in the words of the native hook, instead of the
+// runtime's network error (GAP-0639).
+const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
+	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+	"(enterprise_managed_gateway_not_running)"
+
+// gatewayStopped reports a transport failure that means the gateway is not
+// running: its hook socket is missing, or nothing accepts the connection
+// (Node ECONNREFUSED, Bun ConnectionRefused).
+function gatewayStopped(error: unknown): boolean {
+	const failure = error as { code?: unknown; cause?: { code?: unknown } } | null
+	const codes = [failure?.code, failure?.cause?.code]
+	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
 function failureResponse(reason: string): GatewayResponse {
@@ -490,12 +586,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		if (token) headers.Authorization = `Bearer ${token}`
 
 		try {
-			const response = await gatewayFetch("/api/v1/amp/hook", {
+			const response = await retryBusy(() => gatewayFetch("/api/v1/amp/hook", {
 				method: "POST",
 				headers,
 				body,
 				signal: controller.signal,
-			}, token)
+			}, token), controller.signal)
 			if (!response.ok) return failureResponse(`HTTP ${response.status}`)
 
 			const data = await response.json() as GatewayResponse
@@ -505,6 +601,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
+			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
+				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
+			}
 			return failureResponse(safeError(error))
 		} finally {
 			clearTimeout(timer)

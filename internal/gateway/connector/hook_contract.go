@@ -74,13 +74,13 @@ type HookContract struct {
 	// structured, stateful tool-call path. Its nested version is independent
 	// of this vendor hook contract's version.
 	ToolCallLifecycle ToolCallLifecycleContract
-	// ContentEnvelopeKey names the single nested payload object this
-	// connector hides inspectable content in (hermes: "extra"). Empty
-	// for flat-payload connectors. See HookProfile.ContentEnvelopeKey
-	// for the generic-decoder semantics and the no-recursive-scan
-	// rationale.
-	ContentEnvelopeKey string
-	Notes              []string
+	// ContentEnvelope names the one nested payload object this connector
+	// puts inspectable content in, and the field inside it for each event
+	// (hermes: "extra"). Zero for flat-payload connectors. See
+	// HookProfile.ContentEnvelope for the decoder semantics and the
+	// no-recursive-scan rationale.
+	ContentEnvelope ContentEnvelope
+	Notes           []string
 }
 
 // HookContractResolution records how a raw agent --version string mapped to a
@@ -627,8 +627,9 @@ var builtinHookContracts = map[string][]HookContract{
 			},
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   hermesToolCallLifecycle(),
+			ContentEnvelope:     hermesContentEnvelope(),
 			Notes: []string{
-				"Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. Official hook payload fields remain top-level; events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
+				"Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. Hermes puts tool_name, tool_input, session_id, cwd and profile at the top level and every other hook argument under extra (agent/shell_hooks.py _payload_fields); events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
 				"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects {\"context\":...}; pre_verify accepts {\"action\":\"continue\",\"message\"} to keep the bounded verification loop going. Transform hooks require Python string returns, pre_gateway_dispatch requires skip/rewrite/allow plugin results, and approval/API/Kanban/lifecycle return values are ignored or undocumented by the shell lane, so DefenseClaw audits them without claiming mutation. Confirm verdicts are recorded and alerted without hook output. Non-zero exit codes and hook timeouts only warn upstream, so there is no fail-closed surface; Hermes remains live-smoke pending (https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/hermes/).",
 				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
 				"The v1 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
@@ -678,8 +679,9 @@ var builtinHookContracts = map[string][]HookContract{
 			},
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   hermesToolCallLifecycleV2(),
+			ContentEnvelope:     hermesContentEnvelope(),
 			Notes: []string{
-				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. Official hook payload fields remain top-level.",
+				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. The payload shape is unchanged: the prompt, tool result and model response are under extra (verified on v0.21.5).",
 				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Exit code 2 now blocks pre_tool_call. Timeouts and spawn errors still fail open unless the hook spec sets fail_closed, so SupportsFailClosed stays false. Bounded to >=0.21.0,<0.22.0.",
 				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
 				"The v2 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
@@ -1469,7 +1471,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
-	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
+	profile.ContentEnvelope = contract.ContentEnvelope.clone()
 	profile.ToolCallLifecycle = cloneToolCallLifecycleContract(contract.ToolCallLifecycle)
 	if spec, ok := CorrelationSpecForConnector(profile.Name, contract.ContractID); ok {
 		profile.Correlation = spec
@@ -1550,4 +1552,20 @@ func versionTuple(v string) [3]int {
 		out[i] = n
 	}
 	return out
+}
+
+// hermesContentEnvelope is where Hermes puts hook content. Its shell-hook
+// payload (agent/shell_hooks.py _payload_fields, v0.19-v0.21.5) promotes
+// only tool_name, tool_input (from args), session_id, cwd and profile to
+// the top level; every other hook argument, the prompt included, is under
+// extra. Each event names the one field read: post_llm_call carries both
+// user_message and assistant_response, so a shared key list would read the
+// prompt as the model's response.
+func hermesContentEnvelope() ContentEnvelope {
+	return ContentEnvelope{Key: "extra", Fields: map[string]string{
+		"pre_llm_call":   "user_message",
+		"post_llm_call":  "assistant_response",
+		"post_tool_call": "result",
+		"subagent_stop":  "child_summary",
+	}}
 }

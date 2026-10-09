@@ -163,7 +163,6 @@ OPENCLAW_MISSING=false
 OPENCLAW_INSTALLED=false
 OPENCLAW_NEXT=""
 QUICKSTART_RERUN=""
-INSTALL_SANDBOX=false
 PASSTHROUGH=()
 
 usage() {
@@ -185,7 +184,6 @@ Options:
   --no-openclaw            First install only: do not install OpenClaw
   --quickstart             Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   --quickstart-mode MODE   observe or action (implies --quickstart)
-  --sandbox                Deprecated no-op (the legacy openshell-sandbox installer was removed)
   --help, -h               Show this help
 
 Exit codes:
@@ -222,18 +220,12 @@ while [[ $# -gt 0 ]]; do
             QUICKSTART_MODE="$2"; shift
             case "${QUICKSTART_MODE}" in observe|action) ;; *) die "invalid --quickstart-mode: ${QUICKSTART_MODE}" ;; esac
             RUN_QUICKSTART=true; PASSTHROUGH+=(--quickstart-mode "${QUICKSTART_MODE}") ;;
-        --sandbox) INSTALL_SANDBOX=true ;;
+        --sandbox) die "--sandbox was removed with the legacy openshell-sandbox installer. Install without it; to run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' afterwards; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'." ;;
         --help|-h) usage; exit 0 ;;
         *) warn "Ignoring unknown option: $1" ;;
     esac
     shift
 done
-if [[ "${INSTALL_SANDBOX}" == true ]]; then
-    # The legacy openshell-sandbox (0.0.x) installer was removed; --sandbox is
-    # accepted so existing automation keeps working, and does nothing. It is
-    # not forwarded to another release's installer either.
-    warn "--sandbox is deprecated and ignored: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'."
-fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
     CONNECTOR="${CONNECTOR:-none}"
@@ -521,10 +513,16 @@ if [[ "${ROLLBACK}" == true ]]; then
         info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
+    # Each install shows only its own audit window, so say how to read the
+    # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
         info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+        [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
+            && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else
         info "Data written while ${current} ran is kept in ${PREVIOUS} and comes back if you roll back again."
+        [[ -f "${PREVIOUS}/data/audit.db" ]] \
+            && info "Its audit events: defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     fi
     exit "${rollback_rc}"
 fi
@@ -693,6 +691,9 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+if [[ -n "${PREV_VERSION}" ]] && version_lt "${PREV_VERSION}" 1.0.0; then
+    find_legacy_leftovers
+fi
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
 [[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
@@ -740,6 +741,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     fi
 fi
 finish_swap
+record_legacy_leftovers
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -885,6 +887,32 @@ install_uv() {
     fi
     rm -rf "${tmp}"
     return 1
+}
+
+# A 0.8.x installer could reuse an existing uv, so its receipt and the
+# venv's creation time cannot prove DefenseClaw owns uv, uvx, their cache or
+# downloaded Python. Leave all of them with the user on upgrade. That installer
+# also ran a temporary Cosign; its public Sigstore TUF cache can be claimed
+# only when it matches the narrow window and contents below (GAP-0908).
+readonly LEGACY_WINDOW=600
+LEGACY_LEFTOVERS=""
+mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+find_legacy_leftovers() {
+    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore_t sigstore
+    [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
+    venv_t="$(mtime_of "${cfg}")" || return 0
+    sigstore="${HOME}/.sigstore"
+    if [[ -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
+        && sigstore_t="$(mtime_of "${sigstore}")" && (( venv_t - sigstore_t <= LEGACY_WINDOW )) \
+        && [[ -z "$(find "${sigstore}" -mindepth 1 -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] \
+        && [[ -z "$(find "${sigstore}" -mindepth 1 -maxdepth 2 ! -path "${sigstore}/root" \
+            ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev" ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev.json" \
+            -print -quit 2>/dev/null || echo error)" ]]; then
+        LEGACY_LEFTOVERS+="${LEGACY_LEFTOVERS:+$'\n'}sigstore"
+    fi
+}
+record_legacy_leftovers() {
+    [[ -z "${LEGACY_LEFTOVERS}" ]] || printf '%s\n' "${LEGACY_LEFTOVERS}" > "${DEFENSECLAW_HOME}/legacy-install-leftovers" || true
 }
 
 # A failed install removes what it added for uv: the uv and uvx it
@@ -1091,11 +1119,29 @@ undo_snapshot() {
     rm -rf "${SNAP}"
 }
 
+# private_bin_dir: drop group and other write from BIN_DIR and its parent when
+# this account owns them. DefenseClaw refuses to run a gateway from a folder
+# another account could change, and a user-private-group umask (002, the
+# Debian and Ubuntu default) leaves ~/.local/bin group-writable when another
+# installer created it: install and init succeeded, then every later command
+# refused, naming one folder per run.
+private_bin_dir() {
+    local dir mode
+    for dir in "${BIN_DIR%/*}" "${BIN_DIR}"; do
+        [[ -d "${dir}" && ! -L "${dir}" && -O "${dir}" ]] || continue
+        mode="$(stat -c %a "${dir}" 2>/dev/null || stat -f %Lp "${dir}" 2>/dev/null)" || continue
+        [[ "${mode}" =~ ^[0-7]+$ ]] && (( 8#${mode} & 8#022 )) || continue
+        chmod go-w "${dir}" && info "Removed group and other write access from ${dir}: the gateway does not run from a folder other accounts can change"
+    done
+    return 0
+}
+
 swap_in() {
     local binary link target
     info "Installing DefenseClaw ${VERSION}"
     make_venv "${VENV}" || return 1
     mkdir -p "${BIN_DIR}" || return 1
+    private_bin_dir
     for binary in ${MANAGED_BINARIES}; do
         [[ -f "${STAGING}/bin/${binary}" ]] || continue
         cp -p "${STAGING}/bin/${binary}" "${BIN_DIR}/.${binary}.new" \
@@ -1113,17 +1159,19 @@ swap_in() {
         info "Migrating config and data"
         local args=(migrate --yes)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
-        DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
+        DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" </dev/null || return 1
         # The previous version's agent discovery is absent or stale. Refresh
         # it (bounded --version probes, no telemetry) before the gateway
         # starts, so the gateway records each agent's version in the hook
         # contract lock and doctor can check compatibility. Best effort.
         info "Refreshing agent discovery"
-        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
+        # stdin from /dev/null: a vendor --version probe that reads the
+        # terminal stopped a background (&) upgrade here (GAP-0376).
+        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel </dev/null >/dev/null 2>&1 || true
         # The new defenseclaw-acp has a new digest: re-pin it in configured
         # editor entries, which would otherwise fail closed. Best effort.
         if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
-            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
+            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" </dev/null || true
         fi
     fi
 }
@@ -1222,9 +1270,9 @@ start_gateway() {
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
     if [[ -n "${delegate}" ]]; then
-        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start </dev/null || rc=$?
     else
-        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start </dev/null || rc=$?
     fi
     if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
         # Launched, not yet ready: it is up only once the loop below says so.
@@ -1538,14 +1586,19 @@ pick_connector() {
         printf "    ${BOLD}%2d)${NC} %s\n" "${index}" "${name}"
         index=$((index + 1))
     done
-    printf "  Choice [default 1=codex]: " >&2
-    choice=$(read_tty_line) || choice=""
-    choice="${choice:-1}"
-    index=1
-    CONNECTOR=codex
-    for name in ${CONNECTOR_CHOICES}; do
-        [[ "${index}" == "${choice}" ]] && CONNECTOR="${name}"
-        index=$((index + 1))
+    while true; do
+        printf "  Choice [default 1=codex]: " >&2
+        choice=$(read_tty_line) || choice=""
+        choice="${choice:-1}"
+        index=1
+        for name in ${CONNECTOR_CHOICES}; do
+            if [[ "${choice}" == "${index}" || "${choice}" == "${name}" ]]; then
+                CONNECTOR="${name}"
+                break 2
+            fi
+            index=$((index + 1))
+        done
+        warn "Choose a listed number or connector name."
     done
     ok "Connector: ${CONNECTOR}"
 }
@@ -1569,7 +1622,7 @@ first_install_extras() {
                 # installed; the summary names it as the step after OpenClaw.
                 OPENCLAW_NEXT="defenseclaw ${args[*]}"
             else
-                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
+                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" </dev/null || rc=$?
             fi
             if [[ ${rc} -ne 0 ]]; then
                 # The install stays; the summary names the failure and the re-run.
@@ -1626,8 +1679,13 @@ ensure_path_hint() {
     case ":${CALLER_PATH}:" in *":${BIN_DIR}:"*) return ;; esac
     local rc="${HOME}/.profile"
     case "${SHELL:-}" in */zsh) rc="${HOME}/.zshrc" ;; */bash) rc="${HOME}/.bashrc" ;; esac
+    local quoted_bin="${BIN_DIR//\\/\\\\}" quoted_rc
+    quoted_bin="${quoted_bin//\"/\\\"}"
+    quoted_bin="${quoted_bin//\$/\\\$}"
+    quoted_bin="${quoted_bin//\`/\\\`}"
+    quoted_rc="${rc//\'/\'\\\'\'}"
     printf "\n  Add DefenseClaw to your PATH (then open a new shell):\n"
-    printf "    ${CYAN}echo 'export PATH=\"%s:\$PATH\"' >> %s${NC}\n" "${BIN_DIR}" "${rc}"
+    printf "    ${CYAN}echo 'export PATH=\"%s:\$PATH\"' >> '%s'${NC}\n" "${quoted_bin}" "${quoted_rc}"
 }
 
 main "$@"

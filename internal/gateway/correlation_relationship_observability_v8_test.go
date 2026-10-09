@@ -53,6 +53,13 @@ func TestCommittedCorrelationRelationshipBuildsExplainableExportLog(t *testing.T
 			RuleID: "bounded-similarity", RuleVersion: "codex-correlation-v1",
 			EvidenceCount: 3,
 			Status:        audit.CorrelationRelationshipCandidate, CreatedAt: time.Now().UTC(),
+		}, {
+			// GAP-0423: an occurrence that only added evidence exports nothing.
+			RelationshipID: "rel-fedcba9876543210", FromKind: audit.CorrelationNodeSemanticEvent,
+			FromID: string(semantic), ToKind: audit.CorrelationNodeSession, ToID: "session-1",
+			Type: audit.CorrelationBelongsTo, Method: audit.CorrelationMethodReported, Confidence: 95,
+			RuleID: "session-membership", RuleVersion: "codex-correlation-v1", EvidenceCount: 37,
+			Status: audit.CorrelationRelationshipActive, Unchanged: true,
 		}},
 	)
 	if err != nil {
@@ -115,6 +122,59 @@ func TestCommittedCorrelationRelationshipBuildsExplainableExportLog(t *testing.T
 		got, ok := object[key].(json.Number)
 		if !ok || got.String() != want {
 			t.Errorf("%s=%v want numeric %s", key, object[key], want)
+		}
+	}
+}
+
+// GAP-0087: a native Codex log reports conversation.id but no agent, so its
+// relationship rows take the session agent the hook rows carry.
+func TestCorrelationRelationshipContextTakesSessionAgent(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	api := &APIServer{}
+	sessionOnly := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{SessionID: "session-1"})
+	got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(sessionOnly, "codex")).AgentID
+	// The root agent the session's hooks record, scoped by the agent
+	// identity the hook path derives (GAP-0232).
+	hookCtx := enrichAgentHookContext(t.Context(), agentHookRequest{ConnectorName: "codex", SessionID: "session-1"})
+	if root := hookLLMEventMeta(hookCtx, "codex", "session-1", "", "", "", "", "", "", map[string]interface{}{}).AgentID; got != root {
+		t.Fatalf("no hook snapshot: agent=%q want conversation root %q", got, root)
+	}
+	api.rememberHookSessionState(t.Context(), llmEventMeta{
+		Source: "codex", SessionID: "session-1", AgentID: "agent-live",
+		AgentIdentityID: nativeSessionAgentScopeV8(sessionOnly, "codex", "session-1"),
+		LifecycleEvent:  "session_start",
+	})
+	if got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(sessionOnly, "codex")).AgentID; got != "agent-live" {
+		t.Fatalf("hook snapshot: agent=%q want agent-live", got)
+	}
+}
+
+// GAP-0755: a native relationship must not inherit another caller's hook agent
+// when two authenticated users report the same conversation ID.
+func TestCorrelationRelationshipContextKeepsAuthenticatedIdentity(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	api := &APIServer{}
+	const session = "shared-conversation"
+	first := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-first", UserID: "1001"})
+	second := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-second", UserID: "1002"})
+	api.rememberHookSessionState(first, llmEventMeta{
+		Source: "codex", SessionID: session, AgentID: "first-agent",
+		AgentIdentityID: "agt-first", UserID: "1001", LifecycleEvent: "session_start",
+	})
+	api.rememberHookSessionState(second, llmEventMeta{
+		Source: "codex", SessionID: session, AgentID: "second-agent",
+		AgentIdentityID: "agt-second", UserID: "1002", LifecycleEvent: "session_start",
+	})
+	for _, tc := range []struct {
+		ctx  context.Context
+		want string
+	}{
+		{first, "first-agent"},
+		{second, "second-agent"},
+	} {
+		ctx := audit.ContextWithEnvelope(tc.ctx, audit.CorrelationEnvelope{SessionID: session})
+		if got := audit.EnvelopeFromContext(api.contextWithSessionAgentV8(ctx, "codex")).AgentID; got != tc.want {
+			t.Fatalf("agent=%q want %q", got, tc.want)
 		}
 	}
 }

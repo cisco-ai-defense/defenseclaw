@@ -297,6 +297,37 @@ def test_destination_health_rejects_unbounded_circuit_values() -> None:
     assert result.circuit_label == "unavailable"
 
 
+def test_secure_client_queue_label_keeps_main_counter_set() -> None:
+    health = V8DestinationHealth(name="managed", queue_items=0, dropped=0, rejected=0)
+    assert health.queue_label_for(secure_client=True) == "0 items, 0 dropped"
+    assert health.queue_label_for(secure_client=False) == "0 items, 0 dropped, 0 rejected"
+
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    status = V8OperatorStatus(
+        source="", data_dir="", plan_digest="", bucket_catalog_version=1,
+        retention_days=7, local_path="", judge_bodies_path="",
+        destinations=(V8DestinationStatus(
+            name="managed", kind="otlp", enabled=True, generated=True,
+            capabilities=("logs",), selected_signals=("logs",),
+            policy_form="managed", endpoint="", route_count=1,
+            buckets=(), redaction_profiles=("sensitive",),
+        ),),
+        buckets=(), warnings=(),
+    )
+    result = _DoctorResult()
+    _check_observability_v8_status(
+        status, result, secure_client=True,
+        live_health={"telemetry": {"details": {"destinations": [{
+            "name": "managed", "state": "healthy", "queue_items": 0,
+            "queue_dropped": 0, "counters": {"rejected": 0},
+        }]}}},
+    )
+    detail = next(item["detail"] for item in result.checks if item["label"] == "Destination: managed")
+    assert "queue=0 items, 0 dropped" in detail
+    assert "rejected" not in detail
+
+
 def test_destination_health_humanizes_bounded_circuit_tokens() -> None:
     result = V8DestinationHealth(
         name="collector",
@@ -1156,6 +1187,42 @@ def test_doctor_galileo_canary_names_gateway_delivery_failure() -> None:
     assert "'defenseclaw-gateway restart'" in check["remediation"]
     assert "connects directly" in check["remediation"]
 
+
+
+def test_doctor_dry_run_galileo_canary_skip_names_dry_run() -> None:
+    # GAP-0102: --fix --dry-run is passive; the skip row must name --dry-run,
+    # not a passive mode the user never chose.
+    from defenseclaw.commands.cmd_doctor import (
+        _check_galileo_trace_canaries,
+        _DoctorResult,
+    )
+
+    enabled = V8DestinationStatus(
+        name="galileo",
+        kind="otlp",
+        enabled=True,
+        generated=False,
+        capabilities=("traces",),
+        selected_signals=("traces",),
+        policy_form="capability_default",
+        endpoint="https://api.galileo.ai/otel/traces",
+        route_count=1,
+        buckets=("agent.lifecycle",),
+        redaction_profiles=("none",),
+        preset="galileo",
+    )
+    result = _DoctorResult(mode="plan", passive=True)
+    _check_galileo_trace_canaries(
+        SimpleNamespace(destinations=(enabled,)),
+        result,
+        config_path="/data/config.yaml",
+        data_dir="/data",
+    )
+
+    check = result.checks[0]
+    assert check["status"] == "skip"
+    assert check["detail"].startswith("--dry-run ")
+    assert "passive" not in check["detail"]
 
 def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes() -> None:
     from defenseclaw.commands.cmd_doctor import (

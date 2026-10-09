@@ -85,13 +85,6 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 // per codeguard-0-logging: a hostile prompt that smuggles CR/LF/ANSI
 // escapes cannot forge fake audit rows or corrupt the operator's
 // terminal.
-//
-// Optional action override: when env.AuditActionOverride is set
-// (today: ActionConnectorHookSynthetic for synthetic
-// codex-notify-derived events), the override is used as the audit
-// row's action column instead of the canonical
-// ActionConnectorHook. Sinks that want to keep "1 row per
-// codex.notify in" should filter on action=connector-hook only.
 func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) error {
 	if a.logger == nil {
 		return fmt.Errorf("gateway: audit logger is unavailable")
@@ -104,6 +97,9 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	if env.UserID == "" && env.UserName == "" {
 		caller := auditCallerIdentity(ctx)
 		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
+	}
+	if a.managedAIDOnly() {
+		env.SecureClientRulePackDir = env.RulePackDir
 	}
 	auditAction := string(audit.ActionConnectorHook)
 	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
@@ -129,6 +125,9 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		StepIdx:     env.StepIdx,
 		Enforced:    env.Enforced,
 		RulePackDir: env.RulePackDir,
+		// Secure Client keeps the directory in the envelope and the raw
+		// column, as on main (issue #1092).
+		RulePackDirInEnvelope: env.SecureClientRulePackDir != "",
 		// Carry the cloud-controlled per-inspection redaction directive
 		// (re-injected onto ctx before finalizeAgentHook) so the audit
 		// sanitize + webhook fan-out honor it on the Details surface.
@@ -332,17 +331,17 @@ func isPromptClassHookEvent(name string) bool {
 // effectiveRulePackDir resolves the rule-pack directory for a connector
 // via the per-connector > global resolver, nil-safe for bare test
 // servers that never wired a config.
-func (a *APIServer) effectiveRulePackDir(connector string) string {
-	if a == nil || a.scannerCfg == nil {
+func (a *APIServer) effectiveRulePackDir(ctx context.Context, connector string) string {
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil {
 		return ""
 	}
-	return a.scannerCfg.EffectiveRulePackDirForConnector(connector)
+	return cfg.EffectiveRulePackDirForConnector(connector)
 }
 
 // stampHookEnvelopeIdentity fills the multi-connector identity fields on
-// a HookAuditEnvelope before it is logged. Shared by the live hook path
-// (finalizeAgentHook) and the synthetic codex-notify path so the two
-// cannot drift. connectorName is threaded explicitly from the request
+// a HookAuditEnvelope before finalizeAgentHook logs it. connectorName is
+// threaded explicitly from the request
 // entry point; StepIdx comes from the per-turn populator; Enforced
 // reflects an actual block; RulePackDir from the effective resolver.
 func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName string, env *HookAuditEnvelope, req agentHookRequest, resp agentHookResponse) {
@@ -354,7 +353,7 @@ func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName
 	}
 	env.StepIdx = a.stepIndexForTurn(sandboxSessionStateKey(ctx, req.SessionID), req.TurnID, req.HookEventName)
 	env.Enforced = resp.Action == "block"
-	env.RulePackDir = a.effectiveRulePackDir(connectorName)
+	env.RulePackDir = a.effectiveRulePackDir(ctx, connectorName)
 
 	meta := hookLLMEventMeta(
 		ctx,

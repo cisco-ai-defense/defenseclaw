@@ -43,6 +43,50 @@ func TestInventoryStoreInitMigrates(t *testing.T) {
 	}
 }
 
+// GAP-0103: a Secure Client store keeps inventory.db on the 1.0.0 schema
+// (issue #1092), writes no table or column of a later one, and a store opened
+// for another profile migrates the same file afterwards.
+func TestInventoryStoreSecureClientKeepsSchema3(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "inventory.db")
+	st, err := NewInventoryStoreForProfile(dbPath, true)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	now := time.Now().UTC()
+	report := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "scan-1", ScannedAt: now, Source: "sidecar", Result: "ok", TotalSignals: 1, ActiveSignals: 1},
+		Signals: []AISignal{{Fingerprint: "fp-1", SignalID: "sig-1", SignatureID: "codex", Name: "Codex", Category: SignalSupportedConnector,
+			Detector: "config", State: AIStateNew, Confidence: 0.9, LastSeen: now, UserID: "501"}},
+	}
+	if err := st.RecordScan(ctx, report, ConfidenceParams{}); err != nil {
+		t.Fatalf("record scan: %v", err)
+	}
+	if _, err := st.PruneAgentIdentities(ctx, now); err != nil {
+		t.Fatalf("prune agent identities: %v", err)
+	}
+	if _, err := st.PruneAgentIdentitySessions(ctx, time.Time{}); err != nil {
+		t.Fatalf("prune agent identity sessions: %v", err)
+	}
+	if v, _ := st.SchemaVersion(); v != secureClientInventorySchema {
+		t.Fatalf("Secure Client schema version = %d, want %d", v, secureClientInventorySchema)
+	}
+	var tables int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
+		('agent_identities', 'agent_identity_sessions', 'ide_installations', 'ide_plugins')`).Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("Secure Client store has %d later tables (%v)", tables, err)
+	}
+	st.Close()
+	st, err = NewInventoryStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st.Close()
+	if v, _ := st.SchemaVersion(); v != len(inventoryMigrations) {
+		t.Fatalf("schema version after a profile switch = %d, want %d", v, len(inventoryMigrations))
+	}
+}
+
 // TestInventoryStoreRecordScanRoundTrip writes one scan, reads back
 // the locations + history, and asserts the rolled-up view contains
 // the right counts. This is the integration test for the SQL ↔ Go

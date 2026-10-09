@@ -21,6 +21,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -316,12 +318,9 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	canonical := codexNotifyAuditRows(t, store)
 	if len(canonical) != 1 {
 		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
-	}
-	if len(synthetic) != 1 {
-		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
 	}
 	if got, want := canonical[0].Action, "codex.notify.agent-turn-complete"; got != want {
 		t.Errorf("Action = %q, want %q", got, want)
@@ -340,17 +339,6 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 		canonical[0].DestinationApp != "codex" {
 		t.Errorf("canonical notify row missing correlation envelope: trace=%q request=%q run=%q policy=%q destination=%q",
 			canonical[0].TraceID, canonical[0].RequestID, canonical[0].RunID, canonical[0].PolicyID, canonical[0].DestinationApp)
-	}
-	// F2: synthetic row must carry the same SessionID as the
-	// canonical row so SIEM joins on session_id correlate the
-	// pair. The synthetic row used to drop session_id because
-	// CorrelationMiddleware only sees the inbound HTTP headers
-	// (no X-DefenseClaw-Session-Id from notify-bridge.sh) and the
-	// payload-derived value was never threaded into the audit
-	// envelope. enrichAgentHookContext now refreshes the envelope
-	// so this assertion passes.
-	if synthetic[0].SessionID != "turn-abc" {
-		t.Errorf("synthetic row SessionID = %q, want %q (F2: must inherit from req.SessionID)", synthetic[0].SessionID, "turn-abc")
 	}
 	if strings.Contains(canonical[0].Details, body) {
 		t.Fatalf("Details stored raw notify body: %q", canonical[0].Details)
@@ -398,12 +386,9 @@ func TestCodexNotify_NoTypePersistsBareAction(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	canonical := codexNotifyAuditRows(t, store)
 	if len(canonical) != 1 {
 		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
-	}
-	if len(synthetic) != 1 {
-		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
 	}
 	if got, want := canonical[0].Action, string(audit.ActionCodexNotify); got != want {
 		t.Errorf("Action = %q, want %q (no type → bare codex.notify)", got, want)
@@ -427,23 +412,17 @@ func TestCodexNotify_PrefersThreadIDForSessionCorrelation(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	canonical := codexNotifyAuditRows(t, store)
 	if len(canonical) != 1 {
 		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
-	}
-	if len(synthetic) != 1 {
-		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
 	}
 	if got, want := canonical[0].SessionID, "thread-123"; got != want {
 		t.Fatalf("SessionID = %q, want %q", got, want)
 	}
-	// F2: synthetic row must carry the SAME session id as the
-	// canonical row, even when thread-id is preferred over
-	// turn-id. enrichAgentHookContext reads req.SessionID which
-	// codexNotifyToAgentHookRequest set from codexNotifySessionID,
-	// so the two rows MUST agree.
-	if got, want := synthetic[0].SessionID, "thread-123"; got != want {
-		t.Fatalf("synthetic row SessionID = %q, want %q (F2)", got, want)
+	// GAP-0031: the notify row carries the session's root agent, the ID
+	// the correlation ledger mints for the thread's hook rows.
+	if got, want := canonical[0].AgentID, stableLLMEventID("agent", "codex", "thread-123", "root"); got != want {
+		t.Fatalf("AgentID = %q, want the session root agent %q", got, want)
 	}
 	if !strings.Contains(canonical[0].Details, "thread_id=") {
 		t.Fatalf("Details missing thread_id summary: %q", canonical[0].Details)
@@ -453,46 +432,24 @@ func TestCodexNotify_PrefersThreadIDForSessionCorrelation(t *testing.T) {
 	}
 }
 
-// splitCodexNotifyAuditRows fetches the audit-store contents and
-// partitions them into the two row classes the codex notify
-// pipeline produces:
-//
-//   - canonical: action == "codex.notify[.suffix]" — the row the
-//     SIEM has always seen, one per inbound notify;
-//   - synthetic: action == ActionConnectorHookSynthetic — the
-//     visibility row written by the unified hook collector when it
-//     synthesizes a Stop event from the same payload.
-//
-// Centralizing the split in a helper means every test asserting
-// the contract reads the same way and a future SIEM rule writer
-// can grep for one symbol to discover the row taxonomy.
-func splitCodexNotifyAuditRows(t *testing.T, store *audit.Store) (canonical, synthetic []audit.Event) {
+// codexNotifyAuditRows returns the audit rows one codex notify wrote. A
+// notify writes only its codex.notify[.suffix] row: the turn end is the
+// native Codex Stop hook's record, so any other row (the former synthetic
+// Stop fold) fails the test.
+func codexNotifyAuditRows(t *testing.T, store *audit.Store) []audit.Event {
 	t.Helper()
 	rows, err := store.ListEvents(10)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
+	var canonical []audit.Event
 	for _, r := range rows {
-		switch {
-		case strings.HasPrefix(r.Action, string(audit.ActionCodexNotify)):
-			canonical = append(canonical, r)
-		case r.Action == string(audit.ActionConnectorHookSynthetic):
-			synthetic = append(synthetic, r)
-		case r.Action == "scan":
-			// Zero-finding scan rows are legitimate under the
-			// TotalScans-includes-zero-finding-inspections
-			// contract (see TestEmitInspectVerdictFindings_
-			// ZeroFindingsStillCountsAsScan). They flow from the
-			// hook inspect emitter alongside the notify rows and
-			// are not part of this split (canonical/synthetic
-			// notify rows only), so simply ignore them here.
-			continue
-		default:
-			t.Fatalf("unexpected audit Action=%q (test fixture should only produce codex.notify* + %s)",
-				r.Action, audit.ActionConnectorHookSynthetic)
+		if !strings.HasPrefix(r.Action, string(audit.ActionCodexNotify)) {
+			t.Fatalf("unexpected audit Action=%q (a codex notify writes only its codex.notify* row)", r.Action)
 		}
+		canonical = append(canonical, r)
 	}
-	return canonical, synthetic
+	return canonical
 }
 
 // TestSanitizeCodexNotifySpanString_StripsAndCaps pins the contract
@@ -592,5 +549,38 @@ func TestEnrichCodexNotifySpan_SanitizesAttributes(t *testing.T) {
 	}
 	if !utf8.ValidString(modelAttr) {
 		t.Fatalf("model attr is invalid UTF-8: %q", modelAttr)
+	}
+}
+
+// A Secure Client gateway still folds a Codex notify into the hook collector
+// (GAP-0142, issue #1092): the notify writes its codex.notify row, without
+// an agent, and a connector-hook-synthetic row.
+func TestCodexNotify_SecureClientKeepsTheSyntheticStopRow(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger, scannerCfg: &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(
+		`{"type":"agent-turn-complete","thread-id":"thread-sc","turn-id":"turn-sc","status":"success"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleCodexNotify(w, req)
+	logger.Close()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	time.Sleep(50 * time.Millisecond)
+	rows, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byAction := map[string]audit.Event{}
+	for _, row := range rows {
+		byAction[row.Action] = row
+	}
+	notify, ok := byAction["codex.notify.agent-turn-complete"]
+	if !ok || notify.AgentID != "" {
+		t.Fatalf("codex.notify row = %+v (present %v), want one without an agent", notify, ok)
+	}
+	if _, ok := byAction[string(audit.ActionConnectorHookSynthetic)]; !ok {
+		t.Fatalf("no connector-hook-synthetic row in %d rows", len(rows))
 	}
 }

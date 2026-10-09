@@ -153,7 +153,10 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 		// The block never reaches the gateway, and the managed hook's own
 		// failure log is not user-writable: leave a record in the user's
 		// data directory for the guardian to report (best effort).
-		_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
+		// A stopped gateway is not a foreign-hook block, so it leaves none.
+		if strings.HasPrefix(decision.Reason, hookexec.ForeignHookBlockedReasonPrefix) {
+			_ = hookForeignGuardRecord(accountHome, name, event, decision, time.Now())
+		}
 		return
 	}
 	stderr := opts.Stderr
@@ -193,9 +196,6 @@ func foreignHookGuardedEvent(connectorName, event string) bool {
 // any non-standalone profile, so Secure Client and per-user installs render
 // unchanged.
 func standaloneForeignHookGuardBinary(connectorName string) string {
-	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return ""
-	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "amp", enterprisepolicy.ConnectorOpenCode:
 	case "devin", enterprisepolicy.ConnectorHermes:
@@ -203,6 +203,30 @@ func standaloneForeignHookGuardBinary(connectorName string) string {
 			return ""
 		}
 	default:
+		return ""
+	}
+	return standaloneAdminHookBinary()
+}
+
+// standaloneManagedHookBinary is the administrator-owned hook binary a
+// standalone Linux or macOS connector shell hook runs as `hook
+// session-facts` to read the user's Kerberos credential cache, which a
+// shell cannot read and a managed user has no per-user gateway binary to
+// ask (GAP-0194). Every connector gets it, not only the ones that run the
+// foreign-hook guard. Empty on Windows, whose hooks are not shell scripts,
+// and on any non-standalone profile, so Secure Client and per-user installs
+// render unchanged.
+func standaloneManagedHookBinary() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return standaloneAdminHookBinary()
+}
+
+// standaloneAdminHookBinary is the standalone profile's administrator-owned
+// hook binary, or "" outside that profile.
+func standaloneAdminHookBinary() string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return ""
 	}
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
@@ -402,9 +426,19 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		// is blocked in every fail mode, and the reason must not suggest an
 		// unapproved hook that may not exist (the usual cause is a gateway
 		// that is stopped or restarting).
+		reason := foreignHookSessionUnavailableReason
+		if update.Decision.Deny {
+			// This scan found the unapproved hook itself: name it.
+			reason = update.Decision.Reason
+		} else if hookexec.ManagedGatewayNotRunning(err) {
+			// A stopped gateway is not a foreign-hook finding: the hook
+			// says so in the words, and with the reason code, every other
+			// managed hook uses (GAP-0578, GAP-0639).
+			reason = hookexec.ManagedGatewayNotRunningReason
+		}
 		decision = enterprisepolicy.GuardDecision{
 			Deny:     true,
-			Reason:   foreignHookSessionUnavailableReason,
+			Reason:   reason,
 			Findings: update.Decision.Findings,
 		}
 	}

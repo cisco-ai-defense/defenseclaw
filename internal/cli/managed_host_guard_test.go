@@ -112,6 +112,11 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "upgrades are installed by your organization") {
 		t.Fatalf("upgrade on a managed Windows computer: %v", err)
 	}
+	// GAP-0099: so was `rollback`.
+	root.SetArgs([]string{"rollback"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "rollbacks are done by your organization") {
+		t.Fatalf("rollback on a managed Windows computer: %v", err)
+	}
 	t.Setenv(managed.DeploymentModeEnv, "")
 	t.Setenv(managed.ConfigPathEnv, "")
 	missing := fmt.Errorf("read v8 config C:\\Users\\u\\.defenseclaw\\config.yaml: %w", fs.ErrNotExist)

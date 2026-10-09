@@ -1,0 +1,529 @@
+---
+title: How DefenseClaw knows who a user is
+description: DefenseClaw learns who ran an agent from the operating system alone, with no Active Directory, Okta or Entra integration. What it reads on Linux, Windows and macOS, what is verified and what is only claimed, how Okta and Entra users appear, and the limits.
+keywords:
+  - DefenseClaw identity sources
+  - no identity provider integration
+  - verified vs claimed identity
+  - SSSD NSS Kerberos
+  - Okta Entra ID attribution
+  - Windows token groups
+  - macOS Open Directory
+---
+
+DefenseClaw ties each agent action to a person without integrating with your
+identity provider. It makes **no calls to Active Directory, Okta or Entra**,
+and it needs **no credentials, tokens, service accounts or app
+registrations**. It reads what the operating system already knows about the
+account that is running the agent, and it says how far each fact can be
+trusted.
+
+This page is the reference for what is read, where, and how much to trust it.
+For the supported identity types and the task guides, see
+[Identity and authentication](/docs/enterprise/identity-and-authentication).
+
+## What it never does
+
+- It never contacts an identity provider, a domain controller or a directory
+  API of its own. A lookup is a call to the host's own account database
+  (`getent`, SSSD, the Windows token and registry, Open Directory).
+- It holds no identity credentials: no passwords, tokens, tickets or keys. It
+  records the Kerberos principal name, not the ticket contents. On macOS, it may
+  run `/usr/bin/klist --json` to read the default API cache.
+- It adds no sign-in step and changes no identity setting on the host.
+
+## Verified and claimed
+
+Every fact has an assurance level, recorded as
+`defenseclaw.user.principal.assurance`.
+
+| Assurance | Who vouches for it | Used for |
+| --- | --- | --- |
+| `verified` | The gateway took the uid or SID from how it authenticated the caller, never from anything the caller sent ([see how](#how-the-gateway-learns-who-called)), and the gateway or the root enumerator read the facts from the OS account database for that uid or SID. | Attribution, and **selecting a guardrail profile**. |
+| `claimed` | The hook, which runs as the user and can be changed by the user: the Kerberos principal in the ticket cache, the SSH variables, the Windows logon session. | Attribution only. Never selects a profile. |
+
+<Flow
+  direction="TB"
+  caption="Two paths into one audit record. The way the gateway authenticated the caller and the account database vouch for the verified path. The hook runs as the user, so what it reports is claimed and never reaches the profile matcher."
+>
+  <Zone id="os" label="Z1 · Operating system (root)" tone="trusted">
+    <Node id="k" kind="datastore">{`Caller authentication and account database\nvouch for the uid or SID`}</Node>
+  </Zone>
+  <Zone id="gw" label="Z2 · Gateway (service or user)" tone="privileged">
+    <Node id="g" kind="gateway">{`Gateway\nresolves the facts itself`}</Node>
+    <Node id="m" kind="policy">{`Profile matcher\nverified facts only`}</Node>
+  </Zone>
+  <Zone id="ss" label="Z3 · User session (user)" tone="untrusted">
+    <Node id="h" kind="connector">{`Hook\nreports session facts`}</Node>
+  </Zone>
+  <Node id="r" kind="datastore">{`Audit record\nassurance: verified or claimed`}</Node>
+  <Edge from="k" to="g" label="proves uid, answers lookups" />
+  <Edge from="h" to="g" label="claims" variant="dashed" />
+  <Edge from="g" to="m" label="verified only" />
+  <Edge from="g" to="r" label="records both" />
+  <Edge from="m" to="r" label="profile, reason" />
+</Flow>
+
+A record carries `verified` facts whenever the gateway resolved some. Claimed
+facts fill in only what nothing verified. When the gateway resolved no
+directory facts at all, the record falls back to the principal the hook
+reported, with `defenseclaw.user.principal.assurance` `claimed` and
+`defenseclaw.user.identity.source` `hook_reported`. Profiles ignore such a
+record.
+
+## How the gateway learns who called
+
+The gateway never takes the user from a request. It takes the uid or SID from
+how it authenticated the request, and the install decides which way that is.
+
+| Install | How the caller is authenticated | The user the gateway takes |
+| --- | --- | --- |
+| Per-user, any OS | The gateway, hook or ACP token the request presents. The tokens are in the user's own files, and the gateway runs as that account | The account the gateway runs as |
+| Standalone enterprise, Linux and macOS | The kernel's peer credentials on the hook socket. On loopback TCP, a per-user credential accepted only from a process of the uid it is bound to (the kernel names the owner of the TCP socket) | The peer's uid, or the uid the credential is bound to |
+| Standalone enterprise, Windows | A per-user credential on loopback TCP (`127.0.0.1:18970`). Windows gives the gateway no kernel check of a TCP caller | The SID the credential is bound to |
+| Sandbox of a per-user install | The sandbox binding's credential, which only that sandbox holds | The host user recorded on the binding |
+
+A **per-user credential** is an HMAC-SHA256 of the connector and the uid or
+SID, under a per-machine key that no user holds. The hook guardian writes each
+enrolled user's credentials into that user's own hook files, and the gateway
+derives the same values for every user in its authorization ledger. The
+gateway reads the identity the presented credential is bound to, and refuses
+with `403` a request whose identity headers name anyone else.
+
+On Windows that makes the SID **bound to a credential, not verified by the
+kernel**. Another standard user cannot present the credential, because it is
+in the first user's files. A process that runs as the same user, or an
+Administrator or SYSTEM that can read those files, can present it, as it can
+act as that user in other ways, and the gateway cannot tell those callers from
+the user's own hook.
+
+A **per-user install** has one account to tell apart: the gateway runs as the
+user and only that account can read the tokens, so the gateway takes its own
+account as the user of every request that authenticated. A request that proves
+nothing, such as a provider key alone on the LLM proxy, has no verified user. A
+gateway that runs as a service account, which every standalone enterprise
+install does, never falls back to its own account.
+
+## What each OS tells us and where we read it
+
+### Linux
+
+| What the OS knows | Where DefenseClaw reads it | Assurance |
+| --- | --- | --- |
+| Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
+| Account name and the backend that owns it | NSS through `getent passwd`; each service on the `passwd` line of `nsswitch.conf` is asked for the uid in turn (`sss`, `winbind`, `ldap`, `himmelblau`, `aad`). An account no directory service knows is `local`, and so is an account `/etc/passwd` holds under its name and uid, which the SSSD files provider (the implicit files domain on RHEL 8) also answers for | Verified |
+| Domain | For SSSD, the joined domain that holds the account by its SID ([When Linux attributes a principal](#when-linux-attributes-a-principal)). For winbind, the domain its name reports (`CORP\alice`), in lower case: a NetBIOS domain is reported by the DNS name of its realm (realmd gives the NetBIOS name in the login format `CORP\%U`), as Windows reports it; the NetBIOS domain of a trusted domain is reported as is. An `nss_ldap` (nslcd) account has none: nslcd names an account by its uid attribute, which may be an e-mail address (the Okta login) or `DOMAIN\name`. The NetBIOS domain a `DOMAIN\user` profile entry matches is the one winbind reports, or confirms for a bare name (`use default domain = yes`), or the one SSSD holds the account SID under | Verified |
+| Groups | `initgroups` plus a group lookup through NSS. An SSSD account keeps only the groups inside the domain of its SID, its local groups and its primary group ([When Linux attributes a principal](#when-linux-attributes-a-principal)) | Verified |
+| Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, the winbind realm whose NetBIOS name the domain is, the only winbind realm for an unqualified winbind name. An SSSD account gets the joined realm whose domain holds a user of its name with the SID of its uid ([When Linux attributes a principal](#when-linux-attributes-a-principal)). A winbind realm never takes another NetBIOS domain, which is a trusted domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
+| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `Users.FindByID` for the SSSD domain that holds the uid and the `userPrincipalName` of that user, and, when realmd names no realm for the account, the id provider of that domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@realm`: the account name and the Kerberos realm in lower case (`alice@corp.example.com` for realm `CORP.EXAMPLE.COM`, which `defenseclaw.user.realm` reports in upper case), compared without regard to case. A winbind host has no InfoPipe, so its accounts have no UPN: a users entry by a UPN in another suffix never matches there; name the account by its name, `DOMAIN\user` or `account@realm`. An Entra ID account the `aad` module names, or Himmelblau with `cn_name_mapping = false`, is named by its UPN, which is reported as its UPN and principal on every install. Himmelblau's default (`cn_name_mapping = true`) names it by the short name, which carries no UPN or domain | Verified |
+| SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
+| Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
+
+Himmelblau answers a group only by gid or Entra object ID, not by name
+(`getent group ml-team` finds nothing while `id` names it), so on a host whose
+`group` line lists `himmelblau` DefenseClaw does not warn that an assignment's
+group is unknown. With SSSD's qualified names, the warning for a short name
+names the qualified group the host knows. An answer with a group that is only a
+number (a directory that did not answer for it) is kept 2 minutes instead of
+15, and the next request after that waits for a fresh lookup.
+
+The NSS, SSSD SID and realmd lookups run on every Linux install, without
+privilege. The root guardian adds the InfoPipe facts on
+the standalone enterprise profile only. SSSD serves AD, IPA and plain LDAP
+domains alike, so the directory type comes from realmd. A plain LDAP domain
+that SSSD serves without realmd, such as the Okta LDAP Interface, gets the
+type `ldap` from InfoPipe on standalone enterprise. On a per-user install it
+has no directory type, because InfoPipe answers root only.
+
+#### When Linux attributes a principal
+
+SSSD serves Active Directory, IPA and plain LDAP domains side by side, and the
+name it gives an account does not say which domain holds it. So DefenseClaw
+decides the domain of an SSSD account from its uid, not from its name:
+
+- **The SID of the uid.** The gateway asks the SSSD NSS responder which SID it
+  holds for the uid, the call `libsss_nss_idmap` makes
+  (`sss_nss_getsidbyuid`). Any account may make it, so a per-user install gets
+  the same answer as the root guardian. An Active Directory account has a SID,
+  and so has an IPA account of a domain with an AD trust. An account of a plain
+  LDAP domain has none.
+- **The joined domain confirms it.** The account gets the realm of a joined
+  domain (realmd, client `sssd`), the directory type of that realm and the
+  principal `account@realm` only when that domain holds a user of the
+  account's name with the same SID, and SSSD maps the SID back to the same uid.
+  The name is asked in the `domain\account` form, which SSSD looks up in that
+  domain only. With fully qualified names (`alice@corp.example.com`, what
+  `realm join` writes) the domain is the one the name gives: the joined domain,
+  or a child domain below it that you list in
+  `ai_discovery.trusted_ad_child_domains`
+  ([Child domains of the joined realm](#child-domains-of-the-joined-realm)).
+  With short names (`use_fully_qualified_names = False`) each joined domain
+  and each listed child domain is asked. The SSSD
+  domain must carry the name of the joined domain, as `realm join` names it
+  (`[domain/corp.example.com]`), and keep the default AD or IPA name
+  expression, which reads `domain\account`.
+- **No SID, no realm.** An account of a plain LDAP domain gets no realm,
+  principal or directory type from the joined domain, whatever its name: a
+  short `bob` that shares its name with an AD account, a `frank` whose e-mail
+  address is in the AD domain, or a `bob@corp.example.com` that an LDAP domain
+  names by its e-mail address (`ldap_user_name = mail`). A lookup by name
+  cannot tell these apart, because SSSD looks a `name@domain` that the domain
+  lacks up as a UPN or e-mail address in every domain. Nor does an account of
+  another domain with its own SIDs get the realm of an AD account it shares a
+  name with.
+- **Names that only look qualified.** An SSSD or `nss_ldap` name with a domain
+  that the facts do not confirm, such as the LDAP `bob@corp.example.com` or
+  `CORP\bob`, gets no domain, and no `users` entry selects it by name: its
+  short part is the name of the AD `bob` and the whole name is his principal or
+  his Windows name. Select such an account by its uid.
+- **Groups inside the account's domain.** `initgroups` looks an account up by
+  name, and two SSSD domains may hold the same short name. The gateway keeps
+  the groups SSSD holds a SID for in the domain of the account's SID; for an
+  account without a SID, the groups without one; and, for every account, the
+  groups of the host's `/etc/group` and its primary group. A confirmed
+  account's groups are listed by its `domain\account` name, plus the
+  `/etc/group` groups that list its account name, as the OS gives them at
+  login. Groups of another
+  domain of the forest do not count. Two plain LDAP domains that hold the same
+  short name are not told apart; give them fully qualified names.
+- **When SSSD does not answer.** Each call gets 2 seconds. When SSSD is stopped
+  or restarting (its memory cache may still answer for the account) or does
+  not answer in time, the lookup fails as a whole. The gateway keeps the
+  account's last facts for up to an hour and retries every 15 seconds, instead
+  of keeping facts without the realm, principal or groups. With no earlier
+  facts, requests get the default profile with `default_lookup_failed`.
+  Meanwhile `profile-explain --user` (by name or uid) shows the profile the
+  hooks apply from those kept facts, with a warning that names their age.
+- **Standalone enterprise.** The root guardian asks InfoPipe which SSSD domain
+  holds the uid (`Users.FindByID`, by uid, never by name) and reads the UPN of
+  that user (`userPrincipalName`, listed in the `[ifp]` `user_attributes`).
+  When that domain is not the one the account's SID was confirmed in, as for a
+  domain that copies another domain's SIDs, the guardian's record and the
+  gateway drop that domain, realm and principal. An account without a SID
+  that InfoPipe holds in an AD or IPA domain (`id_provider = ad` or `ipa`) of
+  a joined realm, such as one of an IPA domain without an AD trust, gets that
+  realm and `account@realm` on standalone enterprise only. Two SSSD domains
+  that hold the same SID confuse SSSD itself: a per-user install then takes the
+  account the first domain SSSD searches answers with, while standalone
+  enterprise drops a realm that InfoPipe places in another domain. Without InfoPipe (`sssd_ifp` not running, or `ifp` missing from
+  `services` in `sssd.conf`) the principal of a confirmed account is
+  `account@realm`. Standalone enterprise keeps the facts of an SSSD account
+  that has no UPN for 2 minutes, then asks again. The gateway trusts a
+  guardian record for an hour by the wall clock; the guardian rewrites the
+  records every 15 minutes, and within about a minute after the clock is
+  stepped (an NTP correction, a resume from suspend). It removes the record of
+  an account it no longer publishes (excluded, left the manifest, or deleted)
+  after its next pass; while the directory does not answer it keeps a domain
+  account's record for up to an hour. While the oldest record of an account it
+  still publishes looks older than 30 minutes, or any record is dated in the
+  future, `status` and `verify` warn `identity_records_stale` and name that
+  account's uid: the directory lookup for it keeps failing (the guardian's log
+  says why), the guardian is not running, or the clock was stepped.
+
+#### Child domains of the joined realm
+
+An account of a child domain of the joined realm, such as
+`gail@emea.corp.example.com` on a host joined to `corp.example.com`, is
+verified only when you list its domain in
+`ai_discovery.trusted_ad_child_domains`. Nothing a per-user gateway can ask
+proves that a domain below the joined one is a trusted child: a plain LDAP
+domain configured next to the AD domain can carry a name below it and SIDs of
+its own, and DNS and `adcli` answers are not authenticated. So DefenseClaw
+fails closed:
+
+- **Not listed.** The account keeps its uid and account name but gets no
+  domain, realm, directory type or principal. No `users` entry that names its
+  principal or its qualified name selects it, and it gets the profile of a
+  `groups`, `connectors` or `agents` assignment it matches, or the default
+  profile.
+- **Listed.** When SSSD holds a user of the account's name with the account's
+  SID in the listed domain (asked as `emea.corp.example.com\gail`), the account
+  gets that domain, the realm `EMEA.CORP.EXAMPLE.COM`, the directory type of
+  the joined Active Directory realm and the principal
+  `gail@emea.corp.example.com`, so `users` assignments and profiles match it as
+  they match an account of the joined domain. A listed domain that is not below
+  a joined Active Directory realm trusts nothing.
+- **Empty list** (the default). Only accounts of the joined domain itself are
+  verified.
+
+```yaml title="config.yaml (the admin config on a managed host, ~/.defenseclaw/config.yaml per user)"
+ai_discovery:
+  trusted_ad_child_domains:
+    - emea.corp.example.com
+    - apac.corp.example.com
+```
+
+Each entry is a DNS domain of at least two labels, compared without regard to
+case and a trailing dot. `defenseclaw config validate` refuses a wildcard
+(`*.corp.example.com`), a NetBIOS name (`EMEA`), an account (`alice@...` or
+`EMEA\alice`) and an entry listed twice. The gateway applies a changed list
+at reload and looks every account up again; the guardian uses it at its next
+pass. List only domains of your forest that the domain controllers of the
+joined domain trust: a listed domain is trusted for every account SSSD holds
+in it.
+
+To see whether an account was trusted, run
+`defenseclaw guardrail profile explain --user gail@emea.corp.example.com --json`.
+For an account of a child domain that is not listed, `subject.domain`,
+`subject.directory` and `subject.principal` are empty, and the text output
+shows the account name with no realm. `defenseclaw config get
+ai_discovery.trusted_ad_child_domains` shows the configured list.
+
+A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
+matches an account only while it has that principal. Check it with
+`defenseclaw guardrail profile explain --user alice --json`: `subject.principal`
+is the principal the gateway attributed, and is empty when no joined domain
+confirms the account's SID. Add the uid to the assignment when the account must
+match while SSSD does not answer; a short account name also matches a local or
+LDAP account of that name.
+
+### Windows
+
+| What the OS knows | Where DefenseClaw reads it | Assurance |
+| --- | --- | --- |
+| Which user made the request | Standalone enterprise: the SID a per-user credential is bound to, presented over loopback TCP (the kernel does not verify it). Per-user install: the account the gateway runs as | Verified |
+| Account name and domain | `LookupAccountSid`. The domain is reported in lower case | Verified |
+| AD UPN | `TranslateNameW`. An account's first lookup waits up to 1.5 seconds for it when a users or groups assignment exists, and otherwise resolves it in the background. A successful translation is cached for 5 minutes, below the 15-minute directory refresh interval, so a UPN rename is checked on the next refresh. A failed lookup (no domain controller reachable) is retried after 2 minutes; the last good answer is kept during the outage | Verified |
+| Entra UPN, provider and tenant | `HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>` and the `CloudDomainJoin\JoinInfo` join state, for Entra-joined and hybrid-joined computers | Verified |
+| Groups | The SYSTEM enumerator's cache of each user's sign-in token groups: local and AD groups, and only the Entra groups that a built-in local group lists (see [Entra groups on Windows](#entra-groups-on-windows)). Standalone enterprise only; a per-user install has no group list | Verified |
+| Remote desktop and logon type | `LsaGetLogonSessionData` for the hook's own logon session | Claimed |
+| Logon session UPN and Kerberos principal | `LsaGetLogonSessionData` (the authentication package is Kerberos, NTLM or CloudAP) | Claimed |
+| SSH session | `SSH_CONNECTION` | Claimed |
+
+Windows groups follow the sign-in token. A user added to or removed from a
+group gets a new token after signing out and back in; a new Entra group SID may
+also need `dsregcmd /refreshprt` followed by another sign-out and sign-in.
+Live hooks can keep the old profile until the gateway's 15-minute directory
+cache expires. `profile-explain` can show the new profile before live hooks use it.
+
+### macOS
+
+| What the OS knows | Where DefenseClaw reads it | Assurance |
+| --- | --- | --- |
+| Which user made the request | Standalone enterprise: the kernel's peer credentials on the hook socket, or the uid of a per-user credential on loopback TCP. Per-user install: the account the gateway runs as | Verified |
+| Account name and groups | Open Directory, through the account database. Every install reports directory `local` and source `macos_opendirectory` | Verified |
+| Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
+| AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
+| Device SSO provider (Entra or Okta) | `app-sso platform -s` (JSON on macOS 15, a property list on older releases): Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
+| The user's Platform SSO login | `AltSecurityIdentities` of the account record (`PlatformSSO:<upn>`), which Platform SSO writes when it links or creates the account. Local users can read this directory attribute; only privileged code can write it. The product trusts the controlled write, not the secrecy of the value. It is the account's UPN and principal; accounts that never registered stay `local`. Standalone enterprise only | Verified |
+| Entra or Okta groups through Platform SSO | None reach the macOS group database (macOS 15.8, Company Portal, live) | None |
+| Kerberos principal of the session | The default principal of the default `API:` cache, from `/usr/bin/klist --json` at most once per 5 minutes, or of a `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` | Claimed |
+| SSH session | `SSH_CONNECTION` | Claimed |
+
+A per-user Mac install knows the account and its groups, not the directory it
+may be bound to: the bound-Mac facts come from the root enumerator of the
+standalone enterprise profile.
+
+## Which install resolves what
+
+| Fact | Per-user (OSS) | Standalone enterprise |
+| --- | --- | --- |
+| Account, name, uid or SID | Gateway | Gateway |
+| Linux groups, domain, source | Gateway, through NSS | Gateway, through NSS |
+| Linux directory type and realm | Gateway, through realmd (an SSSD account only when the joined domain holds it by the SID of its uid) | Gateway, through realmd and the SID of the uid; the root guardian drops a realm when InfoPipe holds the uid in another SSSD domain |
+| Linux UPN, and the directory type of a domain no realm covers | Only the UPN of an Entra account (`aad`, or Himmelblau with `cn_name_mapping = false`) | Root guardian; the UPN of an Entra account from the gateway |
+| Windows groups | Not available | SYSTEM enumerator |
+| Windows AD UPN, Entra UPN and tenant | Gateway | Gateway |
+| macOS directory, domain, SSO provider and Platform SSO UPN | Not available | Root enumerator |
+| Session and Kerberos principal | Hook, claimed (Linux SSH confirmed by the gateway) | Hook, claimed (Linux SSH confirmed by the gateway) |
+
+Under the Secure Client profile none of these facts are collected and the
+records stay as they were.
+
+## How Okta and Entra users appear
+
+DefenseClaw does not know what Okta or Entra are. It sees the accounts the OS
+sees, so the way a user appears depends on how the directory reaches the
+machine.
+
+| Your setup | What DefenseClaw reports |
+| --- | --- |
+| Okta provisions users into AD, and the machine is AD-joined (SSSD, winbind, Windows domain or an AD-bound Mac) | The AD account: directory `active_directory`, the AD UPN, groups and domain |
+| The host reads the Okta LDAP Interface through SSSD (`id_provider = ldap`) or `nss_ldap` | The LDAP account: its uid, name and Okta groups, verified, also on a per-user install. Directory `ldap` through `nss_ldap`, and through SSSD on standalone enterprise. No domain unless SSSD uses fully qualified names. No UPN unless SSSD maps the Okta login to it. Tested live on RHEL 9; see [Okta on Linux](/docs/enterprise/identity-okta) |
+| Mac with Platform SSO or Okta Device Access and Okta Verify | An account registered with Platform SSO: directory `okta`, source `macos_platform_sso`, its login UPN (standalone enterprise only). Not tested live |
+| Linux with an Okta agent that creates local accounts | The local account, directory `local`. No Okta NSS module is recognized |
+| Entra-joined or hybrid-joined Windows | Directory `entra_id`, source `windows_identity_store`, the UPN as principal and the tenant ID. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists, and only with the standalone enterprise profile ([below](#entra-groups-on-windows)) |
+| Mac with Platform SSO and Company Portal | An account registered with Platform SSO: directory `entra_id`, source `macos_platform_sso`, the UPN as principal and its domain (standalone enterprise only). No Entra groups: Platform SSO gives the Mac none ([Entra groups on Linux and macOS](#entra-groups-on-linux-and-macos)) |
+| Linux with the `aad` NSS module | Directory `entra_id`, source `nss_aad`, the UPN as principal and its domain. The module (Entra ID sign-in for Azure Linux VMs) gives the account only its own private group, no Entra groups, so a `groups` assignment cannot name an Entra group there |
+| Linux with Himmelblau | Directory `entra_id`, source `himmelblau`, and the user's Entra groups by name. The UPN and domain only with `cn_name_mapping = false` |
+| Linux joined to Microsoft Entra Domain Services (realmd, SSSD) | The AD account of the managed domain: directory `active_directory`, the synced Entra groups (`name@domain` unless SSSD uses short names), the UPN through InfoPipe on standalone enterprise |
+| Entra accounts synced into on-premises AD | The AD account, as above |
+
+### Entra groups on Windows
+
+An Entra-joined computer puts an Entra group's SID into a user's sign-in
+token only when one of the built-in local groups lists that group:
+Administrators, Users, Guests, Power Users, Remote Desktop Users or Remote
+Management Users. A Windows 11 Enterprise 24H2 live check with 21 different
+Entra group SIDs in the built-in Users group showed all 21 in the signed-in
+user's token. Do not rely on a 20-group ceiling to limit access; verify the
+actual token on the devices and accounts you deploy.
+Membership in any other Entra group never reaches the computer, so a `groups`
+assignment or an enrollment `include_groups` or `exclude_groups` entry that
+names such a group matches no one: its members get the default profile, and
+`exclude_groups` excludes none of them.
+
+To use an Entra group:
+
+1. Read the group's SID: the `securityIdentifier` property of the group in
+   Microsoft Graph.
+2. Add the group to the built-in **Users** group on the computers. In Intune,
+   use an Account protection policy (Local user group membership) with the
+   group **Users**, the action **Add (Update)** and the group's SID, or the
+   `LocalUsersAndGroups` policy CSP. Do not use **Add (Replace)**: it replaces
+   the existing members. Users is the least-privileged choice, because every
+   signed-in user is already a member through Authenticated Users.
+3. Have the users sign out and back in. A new sign-in token can take up to
+   4 hours to carry a membership change.
+4. Name the group by its SID in DefenseClaw. The computer cannot resolve the
+   name of an Entra group.
+
+The starter scripts in `packaging/identity/entra` read the SID, make the
+membership on one computer and check the token; see
+[Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
+
+### Entra groups on Linux and macOS
+
+- **Linux, `aad` module:** no Entra groups. Use `users` assignments.
+- **Linux, Himmelblau:** `id` and initgroups name the user's Entra groups, and a
+  `groups` assignment by that name matches (Ubuntu 24.04, Himmelblau 5.0.0,
+  live).
+- **Linux, Microsoft Entra Domain Services:** SSSD reads the synced groups as
+  AD groups; name them as `id -Gn` prints them (RHEL 9.8, live).
+- **macOS, Platform SSO:** no Entra group reaches the Mac, not even with the
+  Platform SSO `AdditionalGroups` or `AdministratorGroups` settings, which
+  create empty local groups. A local group has to carry the membership.
+
+The steps, measured delays and caveats of each are in
+[Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
+
+### Entra ID fields, as seen live
+
+These are the attributes per-user installs reported for one Entra ID user,
+`alice@contoso.onmicrosoft.com`, on a live tenant.
+
+| Attribute | Entra-joined Windows 11 | Ubuntu 22.04 with the `aad` module |
+| --- | --- | --- |
+| `user.id`, `defenseclaw.user.id_kind` | The user's `S-1-12-1-...` SID, `windows_sid` | The uid the module assigns, `posix_uid` |
+| `defenseclaw.user.name` | The account name Windows assigns, shown as `AzureAD\<name>` (without `AzureAD\`) | `alice`, the account part of the UPN |
+| `defenseclaw.user.principal` | `alice@contoso.onmicrosoft.com` | `alice@contoso.onmicrosoft.com` |
+| `defenseclaw.user.domain` | `contoso.onmicrosoft.com` | `contoso.onmicrosoft.com` |
+| `defenseclaw.user.directory` | `entra_id` | `entra_id` |
+| `defenseclaw.user.identity.source` | `windows_identity_store` | `nss_aad` |
+| `defenseclaw.user.tenant_id` | The tenant ID | Not reported |
+| `defenseclaw.user.principal.assurance` | `verified` | `verified` |
+| `defenseclaw.user.group_count` | `0`: a per-user install has no group list | `1`: the private group |
+| `defenseclaw.session.kind` | Not reported: a remote desktop session is only claimed | `ssh` with `client.address`, confirmed through logind |
+
+A `users` assignment that names the UPN selected the profile on both. On
+Windows, name an Entra user to `guardrail profile explain --user` by SID, as
+`AzureAD\<name>`, by the bare name or by the UPN.
+
+## Limits, stated plainly
+
+- **Attribution, not authentication.** DefenseClaw does not sign anyone in and
+  proves nothing to another system. Do not use these fields to grant access.
+- **Policy selection by facts the OS vouches for.** Only `verified` facts
+  choose a [guardrail profile](/docs/guardrail/user-and-group-policies).
+  Headers, payloads and claimed facts never do.
+- **Local accounts have no directory groups.** A local account has only the
+  groups its OS account database lists, no domain and no UPN.
+- **Windows group naming is bounded.** DefenseClaw names at most 128 groups
+  per account within the two-second lookup budget. Remaining groups stay as
+  SIDs, so use the SID in a group assignment when necessary.
+- **Group changes take time.** The gateway caches a user's directory facts for
+  15 minutes and refreshes them in the background (2 minutes for an answer with
+  a group that has no name, or an SSSD account still waiting for its UPN on
+  standalone enterprise). A Windows user must also sign out and back in, and
+  Himmelblau and SSSD add their own caches. On Linux and macOS the facts belong
+  to the account that held the uid when they were read: a new account given
+  the uid of a removed one gets its own facts within 5 minutes (when the
+  gateway next resolves the uid's account), never the old holder's for the
+  full 15.
+- **A first lookup can be slow.** A cold SSSD or Active Directory answer can
+  take seconds. The first request waits up to two seconds, then the default
+  profile applies for 15 seconds until the lookup is retried.
+- **A bound Mac whose domain controller does not answer.** Open Directory
+  still answers at once, but lists an Active Directory account without its
+  domain groups (its primary group, Domain Users, only as a number), and after
+  the domain controller is back it can keep listing the account that way for
+  15 minutes or more. On standalone enterprise the gateway treats an Active
+  Directory account whose primary group has no name as a failed lookup: it
+  keeps the facts it cached for up to an hour, `status` and `verify` warn
+  `directory_lookups_failing`, and `profile-explain` gives the reason. Without
+  cached facts the account gets the default profile with
+  `default_lookup_failed`, so keep `default_profile` strict where a group
+  profile blocks. Once the domain controller answers,
+  `sudo dscacheutil -flushcache; sudo dsmemberutil flushcache` makes the Mac
+  list the domain groups again at once; DefenseClaw does not flush the caches
+  itself.
+- **Some facts need the enterprise profile.** The UPN on
+  Linux, the group list on Windows and the bound-Mac facts on macOS are read
+  with privilege by the root guardian or enumerator, which a per-user install
+  does not have.
+- **The Kerberos principal and the session can be changed by the user.** They
+  are always `claimed`, except an SSH session the gateway confirmed through
+  logind or utmp.
+- **Three bridges send no Kerberos principal.** The OpenCode plugin, the Amp
+  plugin and the Omnigent policy bridge run inside the agent process. They
+  report the SSH and login-session facts but do not read the ticket cache, so
+  the records of those connectors carry no
+  `defenseclaw.session.kerberos_principal`. Hooks that go through the
+  DefenseClaw hook runner read it.
+- **Okta through the Okta LDAP Interface and Entra ID were tested live; the
+  other cloud paths are parsed from OS state.** The Okta Device Access and
+  bound-Mac readers, and Platform SSO with Okta, are covered by tests against
+  recorded OS output, not against a live tenant.
+
+What was exercised end to end on real hosts, with a Samba Active Directory
+domain: local accounts on all three OSes; AD over Kerberos with SSSD on RHEL 9
+and Ubuntu 24.04, per-user and managed; and AD UPN and groups on a
+domain-joined Windows per-user install. Group-based profiles on a managed
+Windows computer were exercised with local groups. With a live Okta org, on
+RHEL 9.8: Okta users read through the Okta LDAP Interface by SSSD, signed in
+over SSH with their Okta passwords, on per-user installs and on standalone
+enterprise. Their uid, name and Okta groups were verified, the groups chose
+guardrail profiles on live Claude Code hooks, an Okta group change reached
+the profile, and an Okta outage fell back as documented. Okta Device Access
+was not tested live. Microsoft Entra ID was
+exercised on a live tenant: per-user installs on an Entra-joined Windows 11
+computer and on Ubuntu 22.04 with Entra ID SSH sign-in (the `aad` module),
+with the fields [above](#entra-id-fields-as-seen-live), and Entra group SIDs in
+the Windows sign-in token with and without a built-in local group listing the
+group. On standalone enterprise on that computer, a `groups` assignment that
+names the Entra group by SID selected its profile while Users listed the group,
+and the default profile after the group was taken out of Users and the user
+signed in again. Intune delivery of the local group membership was not tested.
+Entra groups on Linux were exercised with Himmelblau 5.0.0 on Ubuntu 24.04 and
+with Microsoft Entra Domain Services and SSSD on RHEL 9.8, each per user and on
+standalone enterprise; a group member got the group profile on live Claude Code
+hooks. On macOS 15.8 with Platform SSO no Entra group reached the Mac, and a
+local group that carried the membership selected the profile.
+
+## What a record carries
+
+| Attribute | Meaning |
+| --- | --- |
+| `user.id`, `defenseclaw.user.id_kind` | The uid or SID, and `posix_uid` or `windows_sid` |
+| `defenseclaw.user.name` | The OS account name without its domain (`alice`, also for `alice@corp.example.com`), on every record type |
+| `defenseclaw.user.principal` | The UPN or Kerberos principal. Sent only with `ai_discovery.include_user_principal` |
+| `defenseclaw.user.domain` | The domain or realm, in lower case |
+| `defenseclaw.user.directory` | `local`, `ldap`, `active_directory`, `entra_id`, `okta` or `other` |
+| `defenseclaw.user.tenant_id` | The cloud tenant, for an Entra-joined Windows account |
+| `defenseclaw.user.identity.source` | `nss_files`, `sssd`, `sssd_infopipe`, `winbind`, `nss_ldap`, `himmelblau`, `nss_aad`, `windows_lsa`, `windows_identity_store`, `macos_opendirectory`, `macos_platform_sso` or `hook_reported` |
+| `defenseclaw.user.principal.assurance` | `verified` or `claimed` |
+| `defenseclaw.session.kind`, `client.address` | `local`, `ssh`, `rdp` or `console`, and the client address, reported when the session has the same assurance as the directory facts. Only Linux verifies a session (logind, or utmp), so on Windows and macOS, where the hook reads its own session and the gateway can only call it claimed, a record of a user with verified directory facts carries neither, whether the session is a remote desktop or the console |
+| `defenseclaw.session.kerberos_principal` | The ticket cache's principal, always claimed. Sent only with `ai_discovery.include_user_principal` |
+
+A low-rate `identity.observed` record, once per user per cache lifetime,
+carries `defenseclaw.user.group_count` and never group names. See
+[End-user identity](/docs/observability/end-user-identity) for the full
+attribute list and how to join records.
+
+## Next steps
+
+<Cards>
+  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity, and the task guides." />
+  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write profiles and assignments, and read the audit record." />
+  <Card title="End-user identity" href="/docs/observability/end-user-identity" description="Every identity attribute and how to join records." />
+</Cards>

@@ -83,6 +83,29 @@ func TestDetectSkills_EnumeratesChildBasenames(t *testing.T) {
 	}
 }
 
+func TestDetectClaudeProjectSkillsOnlyInsideOwningHome(t *testing.T) {
+	home, outside := t.TempDir(), t.TempDir()
+	project := filepath.Join(home, "work", "app")
+	for _, root := range []string{project, outside} {
+		if err := os.MkdirAll(filepath.Join(root, ".claude", "skills", "project-skill"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := `{"projects":{"` + filepath.ToSlash(project) + `":{},"` + filepath.ToSlash(outside) + `":{}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home, HomeDirs: []string{home}, StoreRawLocalPaths: true},
+		catalog: []AISignature{{ID: "claudecode", Name: "Claude Code", SupportedConnector: "claudecode"}}}
+	signals, err := svc.detectClaudeProjectSkills()
+	if err == nil || len(signals) != 1 || !slices.Contains(signals[0].Basenames, "project-skill") {
+		t.Fatalf("project skills = %+v, warning = %v", signals, err)
+	}
+	if !evidenceInsideHome(signals[0].Evidence, []string{home}) {
+		t.Fatalf("outside project entered inventory: %+v", signals[0])
+	}
+}
+
 // TestDetectPlugins_EnumeratesChildBasenames — same fix, plugins.
 func TestDetectPlugins_EnumeratesChildBasenames(t *testing.T) {
 	tmp := t.TempDir()
@@ -182,6 +205,60 @@ func TestDetectMCPPaths_EnumeratesServerNames_MCPJSON(t *testing.T) {
 	}
 	if serverRows != 2 {
 		t.Fatalf("mcp_server evidence rows = %d, want 2: %+v", serverRows, got.Evidence)
+	}
+}
+
+func TestDetectMCPPathsClaudeStateScopesAreBoundedAndPrivate(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".claude.json")
+	raw := `{"mcpServers":{"user-server":{"env":{"API_KEY":"private-value"}}},"projects":{"` +
+		filepath.ToSlash(filepath.Join(home, "project")) + `":{"mcpServers":{"local-server":{"headers":{"Authorization":"private-value"}}}}}}`
+	if err := os.WriteFile(state, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home, HomeDirs: []string{home}},
+		catalog: []AISignature{{ID: "claudecode", SupportedConnector: "claudecode", MCPPaths: []string{"~/.claude.json"}}}}
+	signals := svc.detectMCPPaths()
+	if len(signals) != 1 || signals[0].Partial {
+		t.Fatalf("Claude MCP signals = %+v", signals)
+	}
+	for _, name := range []string{"user-server", "local-server"} {
+		if !slices.Contains(signals[0].Basenames, name) {
+			t.Fatalf("missing %q from %v", name, signals[0].Basenames)
+		}
+	}
+	for _, evidence := range signals[0].Evidence {
+		if strings.Contains(evidence.Basename, "private-value") {
+			t.Fatal("MCP credential reached inventory evidence")
+		}
+	}
+	if err := os.Truncate(state, maxClaudeDiscoveryStateBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.detectMCPPaths(); len(got) != 1 || !got[0].Partial {
+		t.Fatalf("oversized Claude state did not mark coverage partial: %+v", got)
+	}
+}
+
+func TestClaudeStateOverOneMiBRetainsMCPAndProjectSkills(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(project, ".claude", "skills", "project-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"mcpServers":{"user-server":{}},"projects":{"` + filepath.ToSlash(project) + `":{}},"history":"` + strings.Repeat("x", 2<<20) + `"}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home, HomeDirs: []string{home}},
+		catalog: []AISignature{{ID: "claudecode", SupportedConnector: "claudecode", MCPPaths: []string{"~/.claude.json"}}}}
+	mcp := svc.detectMCPPaths()
+	if len(mcp) != 1 || mcp[0].Partial || !slices.Contains(mcp[0].Basenames, "user-server") {
+		t.Fatalf("MCP inventory from multi-megabyte Claude state = %+v", mcp)
+	}
+	skills, err := svc.detectClaudeProjectSkills()
+	if err != nil || len(skills) != 1 || !slices.Contains(skills[0].Basenames, "project-skill") {
+		t.Fatalf("project skills from multi-megabyte Claude state = %+v, err = %v", skills, err)
 	}
 }
 

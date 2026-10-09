@@ -188,3 +188,12 @@ def test_action_switch_probes_versions_and_refuses_an_unverified_connector(app, 
     # Switching back to observe needs no probe.
     _run(app, "observe", "--json")
     assert calls == ["codex", "codex"]
+
+
+def test_copilot_action_message_names_upstream_fail_open(app) -> None:
+    app.cfg.claw.mode = "copilot"
+    app.cfg.guardrail.connector = "copilot"
+    result, _ = _run(app, "action", "--connector", "copilot", "--no-restart")
+    assert result.exit_code == 0, result.output
+    assert "upstream limitation" in result.output
+    assert "now fail closed" not in result.output

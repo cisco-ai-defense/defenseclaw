@@ -85,6 +85,13 @@
       "targetBlank": false
     },
     {
+      "title": "Identity & Users",
+      "type": "link",
+      "url": "/d/defenseclaw-identity?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
       "title": "Scanners",
       "type": "link",
       "url": "/d/defenseclaw-scanners?${__url_time_range}",
@@ -145,6 +152,26 @@
           "selected": true
         },
         "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "user",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows every Loki panel on this board to records that carry that user. Prometheus metric panels have no per-user label and stay fleet-wide.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
         "hide": 0
       }
     ]
@@ -769,7 +796,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" [$__auto]))",
+          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") [$__auto]))",
           "legendFormat": "{{event_name}}",
           "refId": "A"
         }
@@ -1039,7 +1066,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name!=\"\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name!=\"\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1081,7 +1108,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"model[.].*|tool[.]invocation[.].*\" [5m])) * 60 or vector(0)",
+          "expr": "sum(rate({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"model[.].*|tool[.]invocation[.].*\" [5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -1112,7 +1139,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"model[.].*|tool[.]invocation[.].*\" [$__auto]))",
+          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"model[.].*|tool[.]invocation[.].*\" [$__auto]))",
           "legendFormat": "{{event_name}}",
           "refId": "A"
         }
@@ -1139,7 +1166,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"tool[.]invocation[.].*|model[.].*\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"tool[.]invocation[.].*|model[.].*\"",
           "refId": "A",
           "datasource": {
             "type": "loki",

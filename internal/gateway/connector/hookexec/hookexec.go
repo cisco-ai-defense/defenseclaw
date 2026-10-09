@@ -41,6 +41,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -238,6 +239,8 @@ type Options struct {
 	// deletion of Home or creation of Home\.disabled is tampering, not an
 	// operator-requested no-op, and must therefore fail closed.
 	ManagedEnterprise bool
+	// SecureClient pins the pre-1.0 hook response behavior for that profile.
+	SecureClient bool
 	// AgentHost is the name of the process that started the agent; it is
 	// sent (AgentHostHeader) only with ManagedEnterprise.
 	AgentHost string
@@ -443,7 +446,7 @@ func Run(ctx context.Context, opts Options) int {
 				)
 			}
 			if err != nil {
-				return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+				return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -631,8 +634,48 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// readiness, before this single retry.
 			resp, err = sendHookRequest(ctx, opts, sp, payload, token)
 		} else {
-			return failUnreachable(opts, sp, failMode, "gateway cold start failed")
+			// Keep the cause: hook-failures.jsonl is the only record of why a
+			// hook could not start the gateway (GAP-0480).
+			reason := coldStartFailedReason
+			if !opts.ManagedEnterprise {
+				reason = coldStartFailureReason(recoveryErr)
+			}
+			return failUnreachable(opts, sp, failMode, reason)
 		}
+	}
+	// A gateway that has taken all it can answer in time (or an account over
+	// its own budget) answers 429 with Retry-After at once. The call has not
+	// been evaluated, so it is sent again a few times within the hook's own
+	// deadline instead of failing the tool call for a burst the gateway
+	// clears in seconds (GAP-0205).
+	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
+		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
+		_ = resp.Body.Close()
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return failUnreachable(opts, sp, failMode, "gateway busy")
+		case <-timer.C:
+		}
+		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+	}
+	// A newly enrolled Windows standalone account holds its runtime (and the
+	// credential in it) a moment before the guardian's authorization ledger,
+	// which the gateway rereads every second, names it, so its first call
+	// can meet a 401 (GAP-0680). The call was not evaluated: send it again a
+	// few times within the hook's deadline. Secure Client is unchanged.
+	for retry := 0; err == nil && resp.StatusCode == http.StatusUnauthorized &&
+		opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && retry < hookAuthRetries; retry++ {
+		_ = resp.Body.Close()
+		timer := time.NewTimer(hookAuthRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized))
+		case <-timer.C:
+		}
+		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
 	}
 	if err != nil {
 		reason := "gateway unreachable"
@@ -662,11 +705,41 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			opts.Event = resolveHookEvent("", payload)
 		}
 		return failForeignHookBlocked(opts, sp, surfaceUnverifiedText(opts))
+	case resp.StatusCode == http.StatusForbidden && managedStandaloneHook(opts) &&
+		refusalReason(body) == managedUIDUnregisteredReason:
+		// The gateway is up and refuses an account the enumerator has not
+		// enrolled yet (or the policy excludes): say so, not "HTTP 403"
+		// (GAP-0738).
+		if strings.TrimSpace(opts.Event) == "" {
+			opts.Event = resolveHookEvent("", payload)
+		}
+		return failUnenrolled(opts, sp, managedUIDUnregisteredReason)
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
 	return sp.decide(opts, body)
+}
+
+// hookBusyRetries is how many times a hook sends its call again after the
+// gateway answered 429.
+const hookBusyRetries = 4
+
+// hookAuthRetries and hookAuthRetryDelay bound the resend of a Windows
+// standalone call the gateway answered 401 (GAP-0680): about 8 seconds,
+// inside every agent's hook timeout.
+const hookAuthRetries = 4
+
+var hookAuthRetryDelay = 2 * time.Second
+
+// retryAfterDelay is the pause a 429's Retry-After asks for, in whole seconds,
+// kept between 1 s and 3 s; a missing or unreadable value means 1 s.
+func retryAfterDelay(value string) time.Duration {
+	seconds, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || seconds < 1 {
+		seconds = 1
+	}
+	return time.Duration(min(seconds, 3)) * time.Second
 }
 
 // refusalReason is the reason of a gateway refusal body
@@ -752,7 +825,7 @@ func sendHookRequest(
 	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
 		req.Header.Set("tracestate", v)
 	}
-	setUserIdentityHeaders(req)
+	setUserIdentityHeaders(req, opts)
 
 	return opts.HTTPClient.Do(req)
 }
@@ -772,7 +845,12 @@ func sendHookRequest(
 // A value that is not a safe header field is dropped rather than sanitized,
 // so a hostile account name cannot smuggle a second header into every hook
 // call the endpoint makes.
-func setUserIdentityHeaders(req *http.Request) {
+func setUserIdentityHeaders(req *http.Request, opts Options) {
+	// A Secure Client hook keeps its earlier requests: the account name as
+	// the system reports it and no session facts, so it runs no klist and
+	// writes nothing in the home of the user (issue #1092).
+	secureClient := secureClientHook(opts)
+	useridentity.KeepQualifiedNames(secureClient)
 	identity := useridentity.Current()
 	if v := identity.ID; safeIdentityHeaderValue(v) {
 		req.Header.Set("X-DefenseClaw-User-Id", v)
@@ -780,6 +858,22 @@ func setUserIdentityHeaders(req *http.Request) {
 	if v := identity.Name; safeIdentityHeaderValue(v) {
 		req.Header.Set("X-DefenseClaw-User-Name", v)
 	}
+	// The session the hook runs in (SSH, logind, the Kerberos default
+	// principal): claimed facts the gateway uses for attribution only.
+	// useridentity renders it from an allowlisted charset and bounds it.
+	if secureClient {
+		return
+	}
+	if v := useridentity.CurrentSessionFactsHeader(); v != "" {
+		req.Header.Set(useridentity.SessionFactsHeader, v)
+	}
+}
+
+// secureClientHook reports a hook of the Secure Client profile: an
+// administrator-managed hook that is neither the Unix standalone hook nor
+// the Windows standalone binary.
+func secureClientHook(opts Options) bool {
+	return opts.ManagedEnterprise && !managedStandaloneHook(opts) && !opts.ExplainUnenrolledAccount
 }
 
 // safeIdentityHeaderValue accepts only printable US-ASCII without the
@@ -1140,7 +1234,63 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
+		// Claude Code and Codex do not show the stderr of a hook that exits 0,
+		// so the shell hooks print this systemMessage (GAP-0037); the native
+		// Windows hook printed nothing and the call ran silently (GAP-0480).
+		return emit(opts.Stdout, failResult{body: `{"systemMessage":` + mustJSONString(notice) + `}`})
+	}
 	return emitHookResult(opts, sp, sp.openAllow)
+}
+
+const coldStartFailedReason = "gateway cold start failed"
+
+// coldStartFailureReason is the logged reason of a failed hook cold start,
+// with the first line of its cause, bounded.
+func coldStartFailureReason(err error) string {
+	if err == nil {
+		return coldStartFailedReason
+	}
+	// The cause names local paths only; Secure Client keeps the bare reason.
+	cause, _, _ := strings.Cut(strings.TrimSpace(err.Error()), "\n")
+	if len(cause) > 300 {
+		cause = cause[:300]
+	}
+	return coldStartFailedReason + ": " + cause
+}
+
+// perUserGatewayDownNotice is the systemMessage a fail-open per-user Claude
+// Code or Codex hook shows when this account gateway is down, for the events
+// those agents display it on.
+func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+		return ""
+	}
+	switch sp.connector {
+	case "claudecode":
+		switch strings.TrimSpace(opts.Event) {
+		case "SessionStart", "UserPromptSubmit", "PreToolUse":
+		default:
+			return ""
+		}
+	case "codex":
+		switch strings.TrimSpace(opts.Event) {
+		case "SessionStart", "PreToolUse":
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+	switch {
+	case reason == "gateway unreachable":
+		return "DefenseClaw is not checking this session: the gateway is not running or not answering. " +
+			"Check it with `defenseclaw-gateway status`, or start it with `defenseclaw-gateway start`."
+	case strings.HasPrefix(reason, coldStartFailedReason):
+		return "DefenseClaw is not checking this session: the gateway is not running and the hook could not " +
+			"start it. Run `defenseclaw-gateway start` to resume protection."
+	}
+	return ""
 }
 
 // unreachableLead starts the unreachable line. Another account's process on
@@ -1217,10 +1367,21 @@ const managedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 // account, but it has not signed in since, so it has no runtime yet.
 const managedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
 
+// managedUIDUnregisteredReason is the Unix standalone gateway refusal of an
+// account that is not enrolled (internal/gateway managedHookReasonUIDUnregistered).
+const managedUIDUnregisteredReason = "enterprise_managed_uid_unregistered"
+
+// unixUnenrolledAccountExplanation is why the call of an account the Linux or
+// macOS enumerator has not enrolled is blocked.
+const unixUnenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer yet. " +
+	"DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; " +
+	"if this continues, the policy may exclude this account, so ask your administrator"
+
 // unenrolledAccountExplanation is why an unenrolled account's call is blocked.
 const unenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer; the administrator's " +
-	"policy has not enrolled it yet (enrollment runs while the account is signed in) or excludes it; ask your " +
-	"administrator if this continues"
+	"policy has not enrolled it yet or excludes it. Windows enrolls an account while it is signed in to the desktop " +
+	"(at the console or over Remote Desktop); an SSH, scheduled-task or runas session does not enroll it, so sign " +
+	"in to the desktop once, or ask your administrator if this continues"
 
 // failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
 // an account the administrator has not enrolled (yet) or excludes, and says
@@ -1229,18 +1390,84 @@ const unenrolledAccountExplanation = "this account is not enrolled in DefenseCla
 // the JSON-bodied hooks) gets the same explanation instead of the generic
 // failed-closed text.
 func failUnenrolled(opts Options, sp spec, reason string) int {
+	reportUnenrolledRefusal(opts, sp, reason)
 	logHookFailure(opts, sp, reason, "transport", "closed")
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, unenrolledAccountExplanation, reason)
-	explanation := "DefenseClaw: " + unenrolledAccountExplanation
+	why := unenrolledAccountExplanation
+	if reason == managedUIDUnregisteredReason {
+		why = unixUnenrolledAccountExplanation
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, why, reason)
+	explanation := "DefenseClaw: " + why
 	if sp.connector == "codex" {
 		return emitCodexBlock(opts, explanation)
 	}
 	result := sp.unreachableStrict
 	result.body = strings.ReplaceAll(result.body, failedClosed, explanation)
 	return emitHookResult(opts, sp, result)
+}
+
+// unenrolledRefusalReportBudget bounds the refusal report of an unenrolled
+// account; the refusal itself never waits for the gateway.
+const unenrolledRefusalReportBudget = 500 * time.Millisecond
+
+// sendUnenrolledRefusal delivers a refusal report to the gateway's refusal
+// pipe (a no-op off Windows); tests replace it.
+var sendUnenrolledRefusal = refusalpipe.Send
+
+// reportUnenrolledRefusal reports the Windows standalone hook's refusal of
+// an account the administrator excludes or has not enrolled yet, so the
+// gateway writes the audit row an administrator reviews (GAP-1242). The
+// gateway names the account from the pipe client token; the report carries
+// only the connector, the reason and the event and tool the agent sent. It
+// is best effort: the refusal text and exit code do not depend on it, and
+// nothing is written on disk. The Unix standalone gateway refuses and audits
+// an unenrolled caller itself (managedUIDUnregisteredReason).
+func reportUnenrolledRefusal(opts Options, sp spec, reason string) {
+	if reason != managedSIDUnregisteredReason && reason != managedEnrollmentPendingReason {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), unenrolledRefusalReportBudget)
+	defer cancel()
+	// The refusal used to return before stdin was read; an agent that keeps
+	// stdin open must not hold it, so the payload read gets part of the
+	// budget and the report goes without the event and tool after that.
+	read := make(chan []byte, 1)
+	go func() {
+		payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
+		if overflow || err != nil {
+			payload = nil
+		}
+		read <- payload
+	}()
+	var payload []byte
+	select {
+	case payload = <-read:
+	case <-time.After(unenrolledRefusalReportBudget / 2):
+	}
+	_ = sendUnenrolledRefusal(ctx, refusalpipe.Report{
+		Connector: sp.connector,
+		Reason:    reason,
+		Event:     resolveHookEvent(opts.Event, payload),
+		Tool:      payloadToolName(payload),
+	})
+}
+
+// payloadToolName is the tool a hook payload names, when it names one.
+func payloadToolName(payload []byte) string {
+	var fields struct {
+		ToolName      string `json:"tool_name"`
+		ToolNameCamel string `json:"toolName"`
+	}
+	if len(payload) == 0 || json.Unmarshal(payload, &fields) != nil {
+		return ""
+	}
+	if fields.ToolName != "" {
+		return fields.ToolName
+	}
+	return fields.ToolNameCamel
 }
 
 func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
@@ -1257,9 +1484,11 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
-	if !managedStandaloneHook(opts) {
+	if !managedStandaloneHook(opts) && !opts.ExplainUnenrolledAccount {
 		// The standalone hook socket carries no token, so the token-drift
-		// advice does not apply there.
+		// advice does not apply there. The Windows standalone hook runs as
+		// a standard user, who can run neither command (GAP-0680); its
+		// fail-closed text already says to contact the administrator.
 		reason = responseFailureReason(reason)
 	}
 	closes := !sp.failOpenOnly && failMode != "open"
@@ -1297,7 +1526,16 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	if !opts.ManagedEnterprise || sp.connector != "copilot" {
 		return 0, false
 	}
-	message := mustJSONString(managedCopilotDenyMessage(reason))
+	text := managedCopilotDenyMessage(reason)
+	if reason == managedUIDUnregisteredReason {
+		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
+	}
+	if reason == managedGatewayNotRunningReason {
+		// Only a standalone hook gets this reason (managedPeerFailureReason,
+		// the foreign-hook guard); say the service is stopped and who starts it.
+		text = managedStandaloneFailClosedText(opts.Event, "transport", reason)
+	}
+	message := mustJSONString(text)
 	var body string
 	// Exact reviewed event names only: an unreviewed spelling never reaches
 	// the gateway and never synthesizes enforcement.
@@ -1310,7 +1548,7 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 		if sp.dialect != copilotVSCodeLocalSurface {
 			return 0, false
 		}
-		if body = copilotVSCodeLocalOutput(opts.Event, "block", managedCopilotDenyMessage(reason)); body == "" {
+		if body = copilotVSCodeLocalOutput(opts.Event, "block", text); body == "" {
 			return 0, false
 		}
 	}
@@ -1499,14 +1737,31 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 }
 
 // managedPeerFailureReason is the hook-failure reason of a managed
-// peer-verification failure: a Windows standalone hook says when the gateway
-// service is simply not running; every other hook keeps
+// peer-verification failure: a standalone hook (Windows, or a Unix hook whose
+// socket is missing or refuses the connection) says when the gateway service
+// is simply not running; the Secure Client profile keeps
 // managedGatewayPeerUnverifiedReason.
 func managedPeerFailureReason(opts Options, err error) string {
-	if opts.ExplainUnenrolledAccount && errors.Is(err, errManagedGatewayNotRunning) {
+	if (opts.ExplainUnenrolledAccount || managedStandaloneHook(opts)) && errors.Is(err, errManagedGatewayNotRunning) {
 		return managedGatewayNotRunningReason
 	}
 	return managedGatewayPeerUnverifiedReason
+}
+
+// ManagedGatewayNotRunningReason is the reason code of a managed hook whose
+// gateway service is not running.
+const ManagedGatewayNotRunningReason = managedGatewayNotRunningReason
+
+// ErrManagedGatewayNotRunning is wrapped by every managed hook transport
+// error that means the gateway service is not running.
+var ErrManagedGatewayNotRunning = errManagedGatewayNotRunning
+
+// ManagedGatewayNotRunning reports an error from a managed hook transport
+// (ExchangeForeignHookSession included) that means the gateway service is
+// not running: a stopped Windows service, or a missing or refusing Unix hook
+// socket.
+func ManagedGatewayNotRunning(err error) bool {
+	return errors.Is(err, errManagedGatewayNotRunning)
 }
 
 // failManagedStandaloneClosed delivers a Unix standalone managed hook's

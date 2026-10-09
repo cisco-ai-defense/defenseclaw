@@ -218,8 +218,12 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery --user 
 
 Skills and MCP servers are inventoried, not scanned: a managed deployment
 does not run the skill or MCP scanners. The inventory names each skill and
-MCP server per user, and its `ai_component` and per-entry skill and MCP
-records go to your observability destinations. The gateway's skill, MCP and
+MCP server per user. `ai_component.discovered`, `changed` and `removed`
+records reach your observability destinations with the user name but without
+the entry name; discovery does not emit per-entry `ai_component.observed`
+records. Skill and MCP names can still reach destinations through hook
+decision and asset-policy audit rows when assets are used, scanned, admitted
+or rejected. The gateway's skill, MCP and
 tool-catalog API routes are not available on a managed host (they answer
 `501`); use the `discovery` view above instead.
 
@@ -365,8 +369,8 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `errors` | Empty |
 
 When the config enables no agent under `guardrail.connectors` while there
-are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
-`security_complete` is `false`. Otherwise neither field checks that the
+are users to enroll, `status` warns `no_connectors_enabled`, `verify` fails,
+and `security_complete` is `false`. Otherwise neither field checks that the
 users you expect are enrolled, so check `enrollment` too. For per-user connectors, a newly added
 user shows up after the next enumerator cycle (up to five minutes), then the
 guardian reconciles.
@@ -535,9 +539,17 @@ On a tarball host, `uninstall --purge` removes everything, including
 
 - **Upgrade.** Install the newer package with apt or dnf, or run `ensure`
   with the newer tarball. The lifecycle refuses an older release unless you
-  pass `--allow-downgrade`, and `rpm -U` refuses an older package. See
+  pass `--allow-downgrade`, and the package refuses an older package before it
+  replaces any file unless the rollback marker
+  `/var/lib/defenseclaw-enterprise/allow-downgrade` exists. See
   [Upgrade](/docs/enterprise/lifecycle#upgrade) and
   [Roll back](/docs/enterprise/lifecycle#roll-back).
+- **A package older than the config.** The package refuses to install,
+  before it replaces any file, when `/etc/defenseclaw/config.yaml` has a
+  `config_version` newer than the release reads (a config written for a
+  newer DefenseClaw, for example while rolling back a release). Install a
+  release that reads it, or push a config with the older `config_version`
+  first.
 - **Change the config.** Replace `/etc/defenseclaw/config.yaml`. The apply
   path unit runs `ensure`, which validates the new file and applies it, or
   rolls back. See [Change the config](/docs/enterprise/lifecycle#change-the-config).

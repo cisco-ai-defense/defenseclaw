@@ -6,6 +6,7 @@
 package inventory
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -59,12 +60,15 @@ func platformDiscoveryHomeDir() (string, error) {
 // in the enterprisehooks package.
 const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList`
 
-// platformDiscoveryHomeDirs enumerates interactive-user profile roots by
-// walking HKLM\...\ProfileList. The gateway sidecar runs as a service (its
+// platformDiscoveryHomeOwners enumerates interactive-user profiles, each with
+// its account (SID and account name), by walking HKLM\...\ProfileList. The
+// gateway sidecar runs as a service (its
 // current-user Known Folder resolves to a per-service virtual profile under
 // C:\Windows\ServiceProfiles\), so a bare ~/... expansion never sees any real
 // user's .claude/.codex/.cursor directories. Feeding this list into
-// AIDiscoveryOptions.HomeDirs makes homesToScan() enumerate real profiles.
+// AIDiscoveryOptions.HomeDirs makes homesToScan() enumerate real profiles, and
+// the account lets a service-context scan attribute what it finds under a
+// profile to that profile's user.
 //
 // Filter: only S-1-5-21-... SIDs (local-account or domain-account interactive
 // users, 5+ sub-authorities), matching the same coarse gate the hook
@@ -73,21 +77,6 @@ const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pro
 // the scan does not waste ticks on ghost profiles. The standalone profile
 // uses winpath.IsInteractiveUserSID, the predicate the standalone hook
 // enumerator applies, which also admits Microsoft Entra ID users.
-func platformDiscoveryHomeDirs(standalone bool) []string {
-	owners := platformDiscoveryHomeOwners(standalone)
-	if len(owners) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(owners))
-	for _, owner := range owners {
-		out = append(out, owner.Home)
-	}
-	return out
-}
-
-// platformDiscoveryHomeOwners is platformDiscoveryHomeDirs with the account
-// of each profile (its SID and account name), so a service-context scan can
-// attribute what it finds under a profile to that profile's user.
 func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, profileListRegistryKey, registry.READ)
 	if err != nil {
@@ -132,25 +121,74 @@ func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 		if fi, err := os.Stat(expanded); err != nil || !fi.IsDir() {
 			continue
 		}
+		owner, ok := windowsDiscoveryProfileOwner(sid, expanded, standalone)
+		if !ok {
+			continue
+		}
 		lower := strings.ToLower(expanded)
 		if _, ok := seen[lower]; ok {
 			continue
 		}
 		seen[lower] = struct{}{}
-		out = append(out, discoveryHomeOwner{Home: expanded, UserID: sid, UserName: windowsProfileAccountName(sid, expanded)})
+		out = append(out, owner)
 	}
 	return out
 }
 
-// windowsProfileAccountName is the account name of sid, or the profile
-// folder's name when the account cannot be looked up.
-func windowsProfileAccountName(sid, home string) string {
-	if parsed, err := windows.StringToSid(sid); err == nil {
-		if account, _, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
-			return account
-		}
+// platformDiscoveryAccountName names a profile's account again for
+// refreshHomeOwnerNames, or "" when the LSA does not answer (the owner keeps
+// its last name rather than the profile folder's).
+func platformDiscoveryAccountName(sid, _ string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
 	}
-	return filepath.Base(home)
+	account, _, _, err := parsed.LookupAccount("")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(account)
+}
+
+// windowsProfileAccountLookup is replaceable so a transient directory lookup
+// failure can be tested without changing the machine account database.
+var windowsProfileAccountLookup = func(sid *windows.SID) (string, string, error) {
+	account, domain, _, err := sid.LookupAccount("")
+	return account, domain, err
+}
+
+// windowsProfileAccount returns a resolved account name and domain. An
+// unresolved account must not enter standalone discovery under a guessed name:
+// a qualified exclusion could miss it and a different domain could match it.
+func windowsProfileAccount(sid string) (string, string, bool) {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return "", "", false
+	}
+	// The bare account name, as agent identities and hook records spell it.
+	account, domain, err := windowsProfileAccountLookup(parsed)
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) || errors.Is(err, windows.ERROR_NO_SUCH_USER) {
+		return "", "", false
+	}
+	if err == nil && strings.TrimSpace(account) != "" {
+		return account, strings.TrimSpace(domain), true
+	}
+	// Secure Client still uses the profile folder fallback in the caller.
+	// Standalone discovery skips this profile until its account resolves.
+	return "", "", false
+}
+
+// windowsDiscoveryProfileOwner keeps the legacy folder-name fallback for
+// Secure Client, while standalone discovery requires a resolved account.
+func windowsDiscoveryProfileOwner(sid, home string, standalone bool) (discoveryHomeOwner, bool) {
+	name, domain, accountExists := windowsProfileAccount(sid)
+	if !accountExists && standalone {
+		return discoveryHomeOwner{}, false
+	}
+	if !accountExists {
+		name = filepath.Base(home)
+	}
+	return discoveryHomeOwner{Home: home, UserID: sid, UserName: name, Domain: domain}, true
 }
 
 // normalizeProfileImagePath trims and cleans a raw ProfileImagePath
@@ -451,6 +489,20 @@ func mergeWindowsApplicationNames(groups ...[]string) []string {
 		seed = append(seed, group...)
 	}
 	return collectWindowsApplicationNames(roots, seed)
+}
+
+// platformIDEAppData returns the current user's %APPDATA% and
+// %LOCALAPPDATA% (Known Folders, which folder redirection may move out of
+// the profile) when home is that user's profile. Any other home is read
+// through its own AppData, never this account's.
+func platformIDEAppData(home string) (string, string) {
+	profile, err := platformDiscoveryHomeDir()
+	if err != nil || !strings.EqualFold(profile, filepath.Clean(home)) {
+		return "", ""
+	}
+	resolve := windowsDiscoveryKnownFolderResolver(winpath.CurrentUserKnownFolderPathWithFlags)
+	return windowsKnownFolderValue(resolve, windows.FOLDERID_RoamingAppData),
+		windowsKnownFolderValue(resolve, windows.FOLDERID_LocalAppData)
 }
 
 func platformEditorExtensionRoots(_ string) []string {

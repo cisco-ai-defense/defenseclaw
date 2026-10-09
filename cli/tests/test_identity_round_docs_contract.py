@@ -1,0 +1,86 @@
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2] / "docs-site/content/docs"
+
+
+def page(name: str) -> str:
+    return " ".join((ROOT / name).read_text(encoding="utf-8").split())
+
+
+def test_quickstart_explains_installer_choice_and_init() -> None:
+    text = page("get-started/quickstart.mdx")
+    assert "<include>../../snippets/install-commands.mdx</include>" in text
+    assert "defenseclaw init" in text
+    assert "defenseclaw setup <connector>" in text
+    assert "none" in text
+    assert re.search(r"install.{0,90}(?:pick|choose).{0,50}agent|install.{0,90}agent.{0,50}guard", text, re.I)
+    assert re.search(r"choice.{0,30}sav|remember.{0,30}choice", text, re.I)
+    assert re.search(r"init.{0,50}(?:sets? up|configur\w*).{0,50}(?:agent|connector)", text, re.I)
+
+
+def test_copilot_workspace_scope_and_guardrail_route() -> None:
+    text = page("connectors/copilot.mdx")
+    assert "workspace for the whole install" in text
+    assert "Setup refuses it once another connector is configured" in text
+    assert "defenseclaw setup guardrail --workspace /path/to/repo" in text
+
+
+def test_connector_prompts_and_scripted_mode() -> None:
+    for connector in ("cursor", "copilot", "hermes"):
+        text = page("connectors/" + connector + ".mdx")
+        assert "Interactive setup asks for the mode" in text
+        assert "add to or replace an existing connector roster" in text
+        assert "whether to add an LLM judge" in text
+        assert "--yes --mode observe" in text
+
+
+def test_domain_group_yaml_and_space_lookup() -> None:
+    text = page("guardrail/user-and-group-policies.mdx")
+    quote = chr(39)
+    slash = chr(92)
+    assert quote + "CORP" + slash + "ML-Team" + quote in text
+    assert chr(34) + "CORP" + slash * 2 + "ML-Team" + chr(34) in text
+    assert "dscl" in text and "Windows names containing spaces" in text
+
+
+def test_macos_membership_cache_recovery() -> None:
+    text = page("guardrail/user-and-group-policies.mdx")
+    assert "dscacheutil -flushcache" in text
+    assert "dsmemberutil flushcache" in text
+    assert "then restart the gateway" in text
+
+
+def test_profile_enforcement_matches_install_mode() -> None:
+    text = page("guardrail/user-and-group-policies.mdx")
+    assert "On a standalone enterprise install" in text
+    assert "or move to a weaker one" in text
+    assert "On a per-user install, the user owns the configuration" in text
+
+
+def test_authentication_cooldown_and_half_open_probe() -> None:
+    text = page("observability/index.mdx")
+    assert "Authentication failures open the affected route immediately for five minutes" in text
+    assert "a half-open probe then retries it" in text
+
+
+def test_identity_redaction_warns_about_qualified_account_name() -> None:
+    text = page("observability/end-user-identity.mdx")
+    assert "Every redaction profile preserves `defenseclaw.user.name`" in text
+    assert "alice@corp.example.com" in text
+    assert "must not receive even the bare account name" in text  # the qualified form is only the principal (GAP-1082)
+
+
+def test_quickstart_contract_accepts_equivalent_wording(monkeypatch) -> None:
+    equivalent = """
+    <include>../../snippets/install-commands.mdx</include>
+    During installation, choose one agent to guard or choose none. The installer
+    remembers your choice for init, which configures the selected connector.
+    Add others later using defenseclaw setup <connector>.
+    ```bash
+    defenseclaw init
+    ```
+    """
+    monkeypatch.setitem(test_quickstart_explains_installer_choice_and_init.__globals__,
+                        "page", lambda _name: " ".join(equivalent.split()))
+    test_quickstart_explains_installer_choice_and_init()

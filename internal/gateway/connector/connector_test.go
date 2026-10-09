@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -581,6 +582,25 @@ func TestOpenClaw_ExtensionAvailable_OnFullBuild(t *testing.T) {
 	}
 	if !openClawExtensionAvailable() {
 		t.Fatal("openClawExtensionAvailable() = false on a non-placeholder build — sync-openclaw-extension is broken")
+	}
+}
+
+// A tree synced from a partial dist/ (package.json plus a stray
+// dist/fetch-interceptor.js, no dist/index.js) is not a usable bundle, so
+// Setup must refuse it and the OpenClaw setup tests must skip (GAP-0084).
+func TestOpenClaw_BundleComplete_RequiresEntryPoint(t *testing.T) {
+	t.Parallel()
+	fsys := fstest.MapFS{
+		"x/package.json":              {Data: []byte("{}")},
+		"x/openclaw.plugin.json":      {Data: []byte("{}")},
+		"x/dist/fetch-interceptor.js": {Data: []byte("")},
+	}
+	if openClawBundleComplete(fsys, "x") {
+		t.Fatal("bundle without dist/index.js reported complete")
+	}
+	fsys["x/dist/index.js"] = &fstest.MapFile{Data: []byte("")}
+	if !openClawBundleComplete(fsys, "x") {
+		t.Fatal("bundle with package.json, openclaw.plugin.json and dist/index.js reported incomplete")
 	}
 }
 

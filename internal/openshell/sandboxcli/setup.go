@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -236,17 +237,30 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			return a.ask("Run this plan?", false, false)
 		})
 		res, err := inst.Install(ctx)
-		if errors.Is(err, openshell.ErrHomebrewInstall) {
+		if serr := a.homebrewNotWritable(err); serr != nil {
+			return serr
+		}
+		var hb *openshell.HomebrewInstallError
+		switch {
+		case errors.Is(err, openshell.ErrBrewNeedsTerminal):
+			a.bad("Gateway service: " + openshell.ErrBrewNeedsTerminal.Error())
+			a.note("→ run this command again from a normal terminal (Terminal.app, or an ssh login), not tmux")
+			return &Silent{Err: err}
+		case errors.As(err, &hb) && hb.FormulaInstalled:
+			// The script got past the install and failed after it, in
+			// starting the gateway or registering it with the CLI: the
+			// checks below name the step that still fails, with its fix.
+			a.warn("install OpenShell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it " +
+				"(it starts the gateway and registers it with the OpenShell CLI); what it printed is above")
+		case errors.Is(err, openshell.ErrHomebrewInstall):
 			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
 			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
-		}
-		if err != nil {
+		case err != nil:
 			return fmt.Errorf("install OpenShell: %w", err)
-		}
-		if res.Installed {
+		case res.Installed:
 			a.ok("OpenShell " + res.CLIVersion.String() + " installed, gateway running")
-		} else {
+		default:
 			a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
 		}
 		rep = a.runDoctor(ctx)
@@ -292,7 +306,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		changes = microVMChanges(rep, state, a.Geteuid())
 		copyOnly = true
 	} else if !o.NoMounts && !state.BindMounts.Enabled() {
-		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts the launch folder)", true, assume)
+		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; "+
+			"DefenseClaw mounts only the launch folder and the read-only settings "+strings.Join(mountedSettingsHarnesses(harness.Names()), " and ")+
+			" sandboxes need)", true, assume)
 		if err != nil {
 			return err
 		}
@@ -460,6 +476,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if unwritten {
 		once = "once `" + CommandName + " setup` writes the change above and you restart the gateway"
 	}
+	// Without bind mounts no harness whose settings are mounted can start.
+	noMounts := !microVM && copyOnly && !state.BindMounts.Enabled() && !changes.EnableBindMounts
 	switch {
 	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull` brings the changes back")
@@ -468,8 +486,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			"it runs sandboxes in MicroVMs " + once)
 	case microVM:
 		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs " + once)
+	case noMounts:
+		a.warn("without bind mounts no " + strings.Join(mountedSettingsHarnesses(harness.Names()), " or ") +
+			" sandbox can start, a `--copy` run included: DefenseClaw mounts their per-run settings read-only. " +
+			"Other harnesses run on a copy; `" + CommandName + " doctor --fix` enables bind mounts")
 	case copyOnly:
-		a.note("without bind mounts every run works on a copy (`--copy`)")
+		a.note("without project mounts every run works on a copy (`--copy`)")
 	}
 
 	// 4. Harnesses and credentials. --harness adds to openshell.harnesses.
@@ -484,6 +506,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	updates := map[string]any{
 		"openshell.enabled": true, "openshell.harnesses": names, "openshell.upstream_telemetry": !telemetryOff,
 	}
+	// The daemon runs the CLI from the PATH it started with, which may not
+	// have the folder this shell found it in (a Homebrew of your own).
+	bin := cliBinaryToRecord(a.Cfg.OpenShell.Binary, rep.CLIPath)
+	if bin != "" {
+		updates["openshell.binary"] = bin
+	}
 	mode := a.Cfg.OpenShell.Workdir.Mode
 	switch {
 	case microVM:
@@ -491,11 +519,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		// names it: openshell.workdir.mode is not the reason to record.
 	case copyOnly && (mode == "" || mode == config.OpenShellWorkdirMount):
 		updates["openshell.workdir.mode"] = config.OpenShellWorkdirCopy
-	case changes.EnableBindMounts && mode == config.OpenShellWorkdirCopy:
-		// Mounts were just allowed; the copy mode an earlier setup
-		// without them recorded goes, and the pack decides again.
-		updates["openshell.workdir.mode"] = ""
-	case !copyOnly && mode == config.OpenShellWorkdirCopy:
+	case (changes.EnableBindMounts || !copyOnly) && mode == config.OpenShellWorkdirCopy:
 		a.note("openshell.workdir.mode is copy in " + a.tildePath(a.ConfigPath) + ", so runs still work on a copy; " +
 			"set it to mount (or remove it) to mount the folder live")
 	}
@@ -504,6 +528,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 	a.Cfg.OpenShell.Enabled, a.Cfg.OpenShell.Harnesses, a.Cfg.OpenShell.UpstreamTelemetry = true, names, !telemetryOff
 	a.ok("openshell.enabled is on in " + a.tildePath(a.ConfigPath))
+	if bin != "" {
+		a.Cfg.OpenShell.Binary = bin
+		a.note("openshell.binary is " + a.tildePath(bin) + ": the daemon runs the OpenShell CLI from there, as that folder may not be on the PATH it started with")
+	}
 
 	// 6. Wrappers, for the harness commands people type.
 	var wrappable []*harness.Spec
@@ -537,9 +565,18 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			skipped = append(skipped, "shell wrappers (not asked with --non-interactive; add one with `"+CommandName+" enable "+HarnessArg(wrappable[0])+"`)")
 		}
 	}
+	// The closing command names a harness that can start: without bind
+	// mounts one whose settings are not mounted, if any is set up.
 	cmd := "claude"
 	if len(specs) > 0 {
 		cmd = HarnessArg(specs[0])
+	}
+	startable := !noMounts
+	for _, s := range specs {
+		if noMounts && !mountsSettings(s) {
+			cmd, startable = HarnessArg(s), true
+			break
+		}
 	}
 
 	// 7. Images, then the ingress provider profile (imported once here:
@@ -617,8 +654,45 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.warn("restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); " +
 			a.manualRestartStops(ctx, rep.Driver == openshell.DriverVM, nil))
 	}
+	if !startable {
+		a.warn("not ready for sandboxes yet: no " + strings.Join(mountedSettingsHarnesses(harness.Names()), " or ") +
+			" sandbox can start without bind mounts; enable them with `" + CommandName + " doctor --fix`, then `cd <project> && " +
+			CommandName + " run " + cmd + "`")
+		return nil
+	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
+}
+
+// daemonPathDirs are the folders a daemon is taken to find the OpenShell
+// CLI in by its bare name, as NVIDIA's installer and the packages place it.
+var daemonPathDirs = []string{"/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"}
+
+// cliBinaryToRecord is the full path to record as openshell.binary: the
+// CLI the doctor found by its bare name, when openshell.binary is still the
+// default and the CLI lies outside daemonPathDirs. The daemon keeps the
+// PATH of its start, and a shell that put a per-user Homebrew on PATH
+// afterwards found a CLI the daemon could not run ("openshell: executable
+// file not found in $PATH" at the first sandbox). "" when nothing needs
+// recording.
+func cliBinaryToRecord(configured, found string) string {
+	if (configured != "" && configured != openshell.DefaultBinary) || !filepath.IsAbs(found) || slices.Contains(daemonPathDirs, filepath.Dir(found)) {
+		return ""
+	}
+	return found
+}
+
+// homebrewNotWritable reports a Homebrew prefix that belongs to another
+// account as the error setup returns, already printed with the way on; nil
+// for any other error.
+func (a *App) homebrewNotWritable(err error) error {
+	var hw *openshell.HomebrewNotWritableError
+	if !errors.As(err, &hw) {
+		return nil
+	}
+	a.bad("install OpenShell: " + a.tildeText(hw.Problem()))
+	a.note("→ " + a.tildeText(hw.Fix()))
+	return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
 }
 
 // homebrewInstallHint says what to update when Homebrew did not install
@@ -836,6 +910,14 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		return &Silent{Err: fmt.Errorf("the OpenShell MicroVM driver needs %s", what)}
 	}
 	changed := false
+	if m.E2fsprogs == "" && m.OwnBrewPrefix != "" {
+		// An e2fsprogs installed in a per-user Homebrew is never found by
+		// the driver, which would then take many minutes to build it from
+		// source for nothing.
+		a.bad("MicroVM driver: " + a.tildeText(openshell.E2fsprogsOwnPrefixFix(m.OwnBrewPrefix)))
+		a.note("→ then run `" + CommandName + " setup` again")
+		return nil, &Silent{Err: errors.New("the OpenShell MicroVM driver needs e2fsprogs where it looks for it")}
+	}
 	if m.E2fsprogs == "" {
 		yes, err := consent("Install e2fsprogs with Homebrew? The MicroVM driver formats its disks with it (" + openshell.InstallE2fsprogsCommand + ")")
 		if err != nil {
@@ -846,6 +928,9 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		}
 		a.note("Installing e2fsprogs with Homebrew…")
 		if err := a.Installer(nil).InstallE2fsprogs(ctx); err != nil {
+			if serr := a.homebrewNotWritable(err); serr != nil {
+				return nil, serr
+			}
 			return nil, fmt.Errorf("install e2fsprogs: %w", err)
 		}
 		a.ok("e2fsprogs installed")

@@ -119,7 +119,7 @@ func dispatchTrustedAction(
 	analyzed = true
 	ctx := parent
 
-	generation := snapshotRulePackGeneration(request.Connector)
+	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
@@ -192,6 +192,11 @@ func dispatchTrustedAction(
 			if partialArgv {
 				viewCandidate = argvSubsetReductionCandidate
 			}
+		} else if view, ok := actionfacts.UnmodeledProgramArgvReduction(request.Input, facts); ok {
+			// A program with no modeled operand grammar (hostname) left the
+			// action partial, so a custom argv rule about it never ran
+			// (GAP-0912). Only a monotone argv rule's match counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
 		} else if powerShellView != nil {
 			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
 			powerShellView = nil
@@ -5851,7 +5856,20 @@ func trustedUnresolvedReadRuleMatches(
 	facts actionfacts.Facts,
 ) map[string]struct{} {
 	matchesByID := make(map[string]struct{})
+	literalTildeOperands := make(map[string]struct{})
+	if facts.Authoritative() {
+		for _, candidate := range facts.Paths {
+			if strings.HasPrefix(candidate.Value, "~/") &&
+				strings.Contains(candidate.Resolved, "/~/") &&
+				!matchesActiveSensitivePath(facts, candidate) {
+				literalTildeOperands[candidate.Value] = struct{}{}
+			}
+		}
+	}
 	collect := func(value string) {
+		if _, literal := literalTildeOperands[value]; literal {
+			return
+		}
 		if !trustedUnresolvedHomePath(value) {
 			return
 		}

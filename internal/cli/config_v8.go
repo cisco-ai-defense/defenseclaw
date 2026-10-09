@@ -114,7 +114,15 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var schemaError *config.V8SchemaError
 	var semanticError *config.V8SemanticError
 	var secretError *config.V8SecretReferenceError
+	var profileError *config.UnknownGuardrailProfileError
 	switch {
+	case errors.As(err, &profileError):
+		// The runtime loader's check, after the schema pass: name the setting
+		// and the profile, so the fix is to the assignment (GAP-0288).
+		result.Path = "$." + profileError.Field
+		result.Reason = configV8DiagnosticReason("config_semantic_invalid",
+			fmt.Sprintf("unknown profile %q", configV8ShortName(profileError.Profile)), "",
+			configV8DefinedProfiles(profileError.Defined))
 	case errors.As(err, &secretError):
 		result.Path = "$." + secretError.Path
 		result.Reason = "[secret_reference_unresolved] required environment-backed secret is unavailable"
@@ -148,6 +156,29 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 		)
 	}
 	return result
+}
+
+// configV8ShortName is a configured name as a diagnostic shows it.
+func configV8ShortName(name string) string {
+	if len(name) > 64 {
+		return name[:61] + "..."
+	}
+	return name
+}
+
+func configV8DefinedProfiles(names []string) string {
+	if len(names) == 0 {
+		return "guardrail.profiles defines none: add the profile there, or remove this setting"
+	}
+	shown := make([]string, 0, len(names))
+	for _, name := range names {
+		if len(shown) == 8 {
+			shown = append(shown, "...")
+			break
+		}
+		shown = append(shown, configV8ShortName(name))
+	}
+	return "guardrail.profiles defines " + strings.Join(shown, ", ") + ": use one of them, or define this one there"
 }
 
 func configV8DiagnosticPath(value string) string {
@@ -370,15 +401,12 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 	if err != nil {
 		return nil, err
 	}
-	managedOptions, err := config.ResolveObservabilityV8ManagedAIDOptionsForInspection(absPath, raw)
-	if err != nil {
-		return nil, err
-	}
-	compiled.Plan, err = config.WithObservabilityV8ManagedAIDDestination(compiled.Plan, managedOptions)
-	if err != nil {
-		return nil, err
-	}
 	runtimeCandidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	if err != nil {
+		return nil, err
+	}
+	compiled.Plan, err = config.WithObservabilityV8ManagedAIDDestination(
+		compiled.Plan, config.ObservabilityV8ManagedAIDOptionsFromConfig(runtimeCandidate, raw))
 	if err != nil {
 		return nil, err
 	}

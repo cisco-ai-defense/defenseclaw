@@ -2392,6 +2392,37 @@ func TestAntigravityTeardownMigratesLegacyBackupAndRestoresExactBytes(t *testing
 	}
 }
 
+func TestAntigravityPerUserTeardownKeepsUserHookAndRemovesOwnedEntries(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hooks.json")
+	previous := AntigravityHooksPathOverride
+	AntigravityHooksPathOverride = path
+	t.Cleanup(func() { AntigravityHooksPathOverride = previous })
+	conn := NewAntigravityConnector()
+	opts := SetupOpts{DataDir: filepath.Join(root, "data"), APIAddr: "127.0.0.1:18970"}
+	if err := patchAntigravityHooks(path, conn.hookCommand(opts)); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := readJSONObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc["operator-hook"] = map[string]interface{}{"PreToolUse": []interface{}{map[string]interface{}{"command": "/bin/true"}}}
+	if err := writeJSONObject(path, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	clean, err := readJSONObject(path)
+	if err != nil || clean["operator-hook"] == nil {
+		t.Fatalf("user hook lost: %v %v", clean, err)
+	}
+	if owned, err := AntigravityHooksHoldOwnedEntries(path); err != nil || owned {
+		t.Fatalf("owned hook registrations remain: %v %v", owned, err)
+	}
+}
+
 func TestAntigravityManagedBackupMigrationCollapsesIdenticalRecords(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
 	target := filepath.Join(t.TempDir(), "antigravity-home", "hooks.json")
@@ -3729,6 +3760,41 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 	}
 }
 
+// GAP-0535: a gateway that is taking all the hook calls it can answers 429
+// with Retry-After before it evaluates the call. The shell hook waits and
+// sends the same call again instead of failing the tool call.
+func TestOpenHandsHookScript_RetriesBusyGateway(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows registers the defenseclaw-hook launcher for OpenHands, not this shell hook")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited","retry_after_seconds":"1"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "tok-test", HookFailMode: "closed"}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, NewOpenHandsConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "openhands-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"date"}}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+t.TempDir())
+	if out, err := cmd.CombinedOutput(); err != nil || calls.Load() != 2 {
+		t.Fatalf("busy gateway: err=%v calls=%d output=%s, want one retry and an allow", err, calls.Load(), out)
+	}
+}
+
 // Hermes writes its direct-native state only on Windows; elsewhere the
 // file must not be declared as patched, or the enterprise installer
 // refuses every install for a file that never exists.
@@ -3756,4 +3822,99 @@ func raceInstrumentedBuild() bool {
 		}
 	}
 	return false
+}
+
+func TestRemoveJSONHookReferencesKeepsOperatorEmptyHook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	owned := "/defenseclaw/openhands-hook.sh"
+	body := `{"hooks":{"PreToolUse":[{"command":"/defenseclaw/openhands-hook.sh"}],"Custom":[]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeJSONHookReferences(path, owned); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"Custom": []`) {
+		t.Fatalf("operator empty hook lost: %s", got)
+	}
+	if strings.Contains(string(got), "PreToolUse") {
+		t.Fatalf("owned hook remains: %s", got)
+	}
+}
+
+func TestRemoveOpenHandsHookReferencesPrunesOnlyNewlyEmptyMatcherGroups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	source := `{"pre_tool_use":[{"matcher":"*","hooks":[{"command":"dc-hook"}]},{"matcher":"operator","hooks":[]},{"matcher":"other","hooks":[{"command":"user-hook"}]}],"operator":[]}`
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := &hookOnlyConnector{name: "openhands"}
+	if err := conn.removeConfigEntries(path, "dc-hook", SetupOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	groups, ok := got["pre_tool_use"].([]interface{})
+	if !ok || len(groups) != 2 || !strings.Contains(string(body), "user-hook") || strings.Contains(string(body), "dc-hook") {
+		t.Fatalf("OpenHands matcher groups after cleanup: %s", body)
+	}
+	if _, ok := got["operator"]; !ok {
+		t.Fatalf("operator-owned empty event lost: %s", body)
+	}
+}
+
+func TestRemoveSecureClientJSONHookReferencesPrunesEmptyEntriesLikeMain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	opts := SetupOpts{DataDir: t.TempDir(), ManagedEnterprise: true}
+	owned := cursorOwnedHookCommands(opts)[0]
+	source := fmt.Sprintf(`{"hooks":{"PreToolUse":[{"command":%q}],"Custom":[]}}`, owned)
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := &hookOnlyConnector{name: "cursor"}
+	if err := conn.removeConfigEntries(path, owned, opts); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "{}\n" {
+		t.Fatalf("Secure Client cleanup differs from main: %s", body)
+	}
+}
+
+func TestRemoveOpenHandsHookReferencesKeepsOperatorKeysAndHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	source := `{"extra":{"keep":[]},"hooks":{"pre":[{"hooks":[{"command":"dc-hook"},{"command":"user-hook"}]}]}}`
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeJSONHookReferences(path, "dc-hook"); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := result["extra"]; !ok {
+		t.Fatalf("operator key lost: %s", body)
+	}
+	if !strings.Contains(string(body), "user-hook") || strings.Contains(string(body), "dc-hook") {
+		t.Fatalf("hook cleanup changed operator hook or retained managed hook: %s", body)
+	}
 }

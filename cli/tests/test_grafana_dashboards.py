@@ -281,6 +281,44 @@ def test_security_and_policy_log_queries_preserve_connector_scope() -> None:
     assert "process-global control-plane records without a connector" in policy["description"]
 
 
+# Loki panels whose records carry no user, so the User box cannot narrow them.
+_FLEET_WIDE_LOG_PANELS = {
+    "defenseclaw-agent-360.json": {
+        "Relationship warnings observed",
+        "Relationship evidence and conflict chronology",
+    },
+    "defenseclaw-agent-identity.json": {"Discovery runs ($__range)"},
+    "defenseclaw-ai-discovery.json": {"AI discovery summary log"},
+    "defenseclaw-policy-decisions.json": {"Recent OPA + egress events"},
+}
+
+
+def _all_panels(panels: list[dict]):
+    for panel in panels:
+        yield panel
+        yield from _all_panels(panel.get("panels", []))
+
+
+def test_user_variable_narrows_every_log_panel_that_carries_a_user() -> None:
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        dashboard = json.loads(path.read_text(encoding="utf-8"))
+        variables = {v["name"]: v for v in dashboard.get("templating", {}).get("list", [])}
+        if "user" not in variables:
+            continue
+        fleet_wide = _FLEET_WIDE_LOG_PANELS.get(path.name, set())
+        unfiltered = {
+            panel["title"]
+            for panel in _all_panels(dashboard["panels"])
+            for target in panel.get("targets", [])
+            if "loki" in json.dumps(target.get("datasource") or panel.get("datasource") or "").lower()
+            and "$user" not in target.get("expr", "")
+        }
+        assert unfiltered == fleet_wide, path.name
+        description = variables["user"].get("description", "")
+        for title in fleet_wide:
+            assert title.split(" (")[0] in description, (path.name, title)
+
+
 def test_traffic_dashboard_exposes_generated_stream_metrics() -> None:
     dashboard = _dashboard("defenseclaw-traffic.json")
     transitions = _panel(dashboard, "Stream transitions by outcome")
@@ -3380,3 +3418,61 @@ def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
         "Rule activity — rule_id (rows) × time (cols)",
     ):
         assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")
+
+
+def test_identity_dashboard_counts_acp_only_agents_and_sessions() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    for title in (
+        "Agent identities (agt-)",
+        "Agent sessions (ais-)",
+        "SSH vs local sessions",
+        "Agents per user (agt- ids)",
+        "Sessions per agent",
+    ):
+        expression = _panel(dashboard, title)["targets"][0]["expr"]
+        assert "guardrail[.]evaluation[.]completed" in expression, title
+
+
+def test_verified_principal_share_is_zero_for_claimed_only_activity() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    expression = _panel(dashboard, "Verified principal share")["targets"][0]["expr"]
+    numerator, denominator = expression.split(" / ", 1)
+    assert "or vector(0)" in numerator
+    assert "claimed" in denominator
+
+
+def test_identity_assurance_pie_assigns_each_host_user_once() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    panel = _panel(dashboard, "Verified vs claimed identity")
+    expression = panel["targets"][0]["expr"]
+
+    assert "unless on (host_name, user_id)" in expression
+    assert 'body_defenseclaw_user_principal_assurance="verified"' in expression
+    assert 'body_defenseclaw_user_principal_assurance="claimed"' in expression
+    assert "sum by (host_name, user_id, assurance)" in expression
+
+
+def test_user_name_regex_is_case_insensitive_on_filtered_log_panels() -> None:
+    filtered = 0
+    for path in DASHBOARD_DIR.glob("*.json"):
+        dashboard = _dashboard(path.name)
+        for panel in _all_panels(dashboard["panels"]):
+            for target in panel.get("targets", []):
+                expression = target.get("expr", "")
+                if 'body_defenseclaw_user_name=~' in expression:
+                    filtered += 1
+                    assert 'body_defenseclaw_user_name=~"(?i)$user"' in expression, (path.name, panel["title"])
+    assert filtered > 0
+
+
+def test_identity_dashboard_keeps_host_local_user_ids_separate() -> None:
+    dashboard = _dashboard("defenseclaw-identity.json")
+    variables = {variable["name"] for variable in dashboard["templating"]["list"]}
+    assert "host" in variables
+    users_observed = _panel(dashboard, "Users observed")["targets"][0]["expr"]
+    assert "sum by (host_name, user_id)" in users_observed
+    for panel in dashboard["panels"]:
+        for target in panel.get("targets", []):
+            expression = target.get("expr", "")
+            if "$user" in expression:
+                assert 'host_name=~"$host"' in expression, panel["title"]

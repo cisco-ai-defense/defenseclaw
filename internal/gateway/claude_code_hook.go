@@ -127,7 +127,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
-	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode())
+	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
@@ -272,13 +272,19 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// row + HTTP response will surface.
 	evalCtx := a.emitClaudeCodeHookRuleFindings(ctx, req, verdict, time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+		a.dispatchClaudeCodeHookNotification(ctx, req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := claudeCodeResponseFor(
-		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
-		sinkPolicyFor(ctx, verdict.RedactionEnabled),
-	)
+	// A configured block message (the guardrail profile of the request, then
+	// the global guardrail) replaces the agent-facing reason on blocks, as on
+	// the generic hook path. Secure Client keeps the verdict reason (issue
+	// #1092).
+	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
+	if !a.managedAIDOnly() {
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", action, reason, policy)
+	}
+	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	resp.SourceReason = verdict.Reason
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
@@ -313,9 +319,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // through OnWouldBlock with WouldAsk=true so a single
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
-func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+func (a *APIServer) dispatchClaudeCodeHookNotification(ctx context.Context, req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook("claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+		a.dispatchHookBlockWebhook(ctx, "claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return
@@ -398,17 +404,10 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
 }
 
-func (a *APIServer) claudeCodeMode() string {
-	mode := "observe"
-	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
-		hookCfg := cfg.ConnectorHookConfig("claudecode")
-		mode = strings.TrimSpace(hookCfg.Mode)
-		if mode == "" || mode == "inherit" {
-			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("claudecode"))
-		}
-	}
-	return normalizeAgentHookMode(mode)
+func (a *APIServer) claudeCodeMode(ctx context.Context) string {
+	// The request's guardrail profile, when one applies, replaces the live
+	// configuration (see guardrail_profile.go).
+	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "claudecode")
 }
 
 func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {

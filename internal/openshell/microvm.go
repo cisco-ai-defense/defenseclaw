@@ -71,6 +71,10 @@ type MicroVMHost struct {
 	// has, which the driver under launchd may not see.
 	E2fsprogs string `json:"e2fsprogs,omitempty"`
 	OnPath    string `json:"e2fsprogs_on_path,omitempty"`
+	// OwnBrewPrefix is the Homebrew prefix when it is a per-user one,
+	// which the driver does not search for e2fsprogs (empty for
+	// /opt/homebrew and /usr/local).
+	OwnBrewPrefix string `json:"homebrew_prefix,omitempty"`
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
@@ -100,8 +104,12 @@ type MicroVMHost struct {
 func (m *MicroVMHost) Problems() []string {
 	var out []string
 	if m.E2fsprogs == "" {
-		out = append(out, "e2fsprogs is not installed where the MicroVM driver looks for it, Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): "+
-			"the driver formats every MicroVM's disks with its mke2fs and debugfs")
+		problem := "e2fsprogs is not installed where the MicroVM driver looks for it, Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): " +
+			"the driver formats every MicroVM's disks with its mke2fs and debugfs"
+		if m.OwnBrewPrefix != "" {
+			problem += "; it does not look in your Homebrew at " + m.OwnBrewPrefix
+		}
+		out = append(out, problem)
 	}
 	switch {
 	case m.DriverBinary == "" && !m.DriverRunning:
@@ -228,6 +236,9 @@ func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 	m := &MicroVMHost{Identity: VMIdentity{UID: int64(r.Geteuid()), GID: int64(r.Getegid())},
 		Recommended: RecommendedVMResources(r.HostMemory()).Within(r.MaxCPUMillis, r.MaxMemoryBytes)}
 	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
+	if prefix := r.brewPrefix(); driverSkipsHomebrew(prefix, r.E2fsprogsDirs) {
+		m.OwnBrewPrefix = prefix
+	}
 	if m.E2fsprogs == "" {
 		mke2fs, err1 := r.LookPath("mke2fs")
 		_, err2 := r.LookPath("debugfs")
@@ -400,8 +411,8 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 	problems := m.Problems()
 	var cmds []string
 	var steps []func(context.Context) error
-	if m.E2fsprogs == "" {
-		cmds, steps = append(cmds, InstallE2fsprogsCommand), append(steps, func(ctx context.Context) error { return brew(ctx, r.Runner, "install", "e2fsprogs") })
+	if m.E2fsprogs == "" && m.OwnBrewPrefix == "" {
+		cmds, steps = append(cmds, InstallE2fsprogsCommand), append(steps, func(ctx context.Context) error { return brewTerminal(ctx, r.Runner, "install", "e2fsprogs") })
 	}
 	// The formula's post-install step signs the formula's driver only.
 	unsigned := m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == ""
@@ -432,6 +443,8 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 				}
 				return nil
 			}}
+	case m.E2fsprogs == "" && m.OwnBrewPrefix != "":
+		c.Fix = &Fix{Summary: E2fsprogsOwnPrefixFix(m.OwnBrewPrefix)}
 	case unsigned:
 		c.Fix = &Fix{Summary: VMDriverSigningFix(m.DriverBinary)}
 	case m.DriverBinary == "" && !m.DriverRunning:
@@ -460,6 +473,17 @@ func (r *doctorRun) foreignImages(ctx context.Context) []string {
 		}
 	}
 	return out
+}
+
+// brewTerminal runs a Homebrew command the user consented to attached to
+// the terminal, so that a long install shows Homebrew's own progress (a
+// Homebrew without bottles for its prefix builds from source for many
+// minutes, and captured output left the user looking at one line).
+func brewTerminal(ctx context.Context, run Runner, args ...string) error {
+	if err := run.Run(ctx, Command{Name: "brew", Args: args}); err != nil {
+		return fmt.Errorf("brew %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
 }
 
 // brew runs a Homebrew command the user consented to.
@@ -605,6 +629,11 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes",
 			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size), pruneCommand)
 	}
+	if n, size := stagingDisks(filepath.Join(dir, "images")); n > 0 {
+		c.Detail += fmt.Sprintf("; %s from interrupted first starts occupy %s under %s; "+
+			"after confirming no sandbox start is running, `%s` removes staging disks older than ten minutes",
+			plural(n, "staging MicroVM disk", "staging MicroVM disks"), humanBytes(size), filepath.Join(dir, "images"), pruneCommand)
+	}
 	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
 		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
 		"(a backup or indexing app that holds a removed file open keeps its space until it lets go: `lsof +L1` lists them)",
@@ -618,6 +647,9 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Detail += fmt.Sprintf("; %s or more is recommended", humanBytes(VMDiskWarnBytes))
 	default:
 		c.Status = StatusPass
+	}
+	if n, _ := stagingDisks(filepath.Join(dir, "images")); n > 0 && c.Status == StatusPass {
+		c.Status = StatusWarn
 	}
 	return c
 }
@@ -651,6 +683,37 @@ func preparedDisks(dir string) (n int, size uint64) {
 				return nil
 			}
 			if info, err := d.Info(); err == nil && info.Mode().IsRegular() {
+				size += allocatedBytes(info)
+			}
+			return nil
+		})
+	}
+	return n, size
+}
+
+// stagingDisks reports preparation directories older than ten minutes.
+// A current first start can take several minutes; doctor must not suggest
+// removing its disk while the MicroVM driver is still writing it.
+func stagingDisks(dir string) (n int, size uint64) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, PreparedDiskPrefix) || !strings.Contains(name, ".staging-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || time.Since(info.ModTime()) < 10*time.Minute {
+			continue
+		}
+		n++
+		_ = filepath.WalkDir(filepath.Join(dir, name), func(_ string, item fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info, err := item.Info(); err == nil && info.Mode().IsRegular() {
 				size += allocatedBytes(info)
 			}
 			return nil

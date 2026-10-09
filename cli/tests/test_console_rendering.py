@@ -244,6 +244,31 @@ def test_alerts_table_stays_aligned_when_piped_through_ascii_stream() -> None:
     assert "..." in text and not any(glyph in out.getvalue() for glyph in "…└┏┃")
 
 
+def test_secure_client_alert_table_keeps_main_target_width() -> None:
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_alerts
+
+    event = SimpleNamespace(
+        id="scan-1",
+        severity="HIGH",
+        timestamp=datetime(2026, 10, 2, 4, 5),
+        action="scan",
+        target="/var/tmp/secure-client/suspect-tool-package.bin",
+        details="",
+        connector="",
+    )
+    from rich.console import Console
+
+    out = io.StringIO()
+    with _render_mode(False), redirect_stdout(out), mock.patch(
+        "rich.console.Console", return_value=Console(width=120)
+    ):
+        cmd_alerts._render_table([event], store=None, secure_client=True)
+    assert "...ool-package.bin" in out.getvalue()
+
+
 def test_main_snapshots_capability_before_utf8_reconfigure() -> None:
     events: list[str] = []
     with (

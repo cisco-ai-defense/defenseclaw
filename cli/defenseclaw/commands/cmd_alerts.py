@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 
@@ -221,7 +222,7 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     A post-tool finding (PostToolUse, ...) cannot block the call that already
     ran, so it is not labelled observe mode on an action-mode connector
     (GAP-1303)."""
-    from defenseclaw.hook_metrics import detection_only_hook_label  # noqa: PLC0415
+    from defenseclaw.hook_metrics import would_block_hook_label  # noqa: PLC0415
 
     decision = ""
     for raw in hook_details:
@@ -234,8 +235,9 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
         observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"
         if kv.get("would_block", "").lower() == "true" or observed_block:
             # A post-tool or MessageDisplay finding cannot block, whatever
-            # the connector's mode (GAP-1303, GAP-1531).
-            decision = detection_only_hook_label(hook_event) or "would block (observe mode)"
+            # the connector's mode (GAP-1303, GAP-1531); a Hermes or Amp prompt
+            # in action mode got a notice instead (GAP-0898).
+            decision = would_block_hook_label(hook_event, kv.get("mode", ""))
         elif not decision and action:
             decision = action
     return decision
@@ -472,6 +474,38 @@ def _hook_details_for(store, alert_list: list) -> dict[str, list[str]]:
     return result if isinstance(result, dict) else {}
 
 
+# Control and bidi formatting characters an agent can put in the text it
+# reports (a session id), so the detail cannot render other than it reads.
+_DISPLAY_UNSAFE = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]")
+
+
+def alert_agent_facts(store, alert_ids: list[str]) -> dict[str, list[tuple[str, str]]]:
+    """Labelled facts of who an alert is about: user, agent identity,
+    instance, session and sub-agent depth (GAP-0381)."""
+    lookup = getattr(store, "agent_facts_for_alerts", None)
+    ids = [alert_id for alert_id in alert_ids if alert_id and not alert_id.startswith("gw:")]
+    if lookup is None or not ids:
+        return {}
+    try:
+        found = lookup(ids)
+    except Exception:  # an older or locked audit DB only loses these facts
+        return {}
+    out: dict[str, list[tuple[str, str]]] = {}
+    for alert_id, facts in (found or {}).items():
+        rows = [
+            (label, _DISPLAY_UNSAFE.sub(" ", str(facts[key])).strip()[:200])
+            for key, label in (("user", "User"), ("agent_identity", "Agent"), ("agent_instance", "Instance"),
+                               ("session", "Session"))
+            if facts.get(key)
+        ]
+        depth = str(facts.get("depth") or "")
+        if depth.isdigit():
+            rows.append(("Depth", f"{depth} (sub-agent)" if int(depth) > 0 else "0 (main agent)"))
+        if rows:
+            out[alert_id] = rows
+    return out
+
+
 def _connector_needle(connector: str | None) -> str:
     """The --connector value as a stored connector name: ``claude-code`` (the
     name 'defenseclaw setup claude-code' takes) matches ``claudecode`` (GAP-2130)."""
@@ -516,7 +550,7 @@ def _exit_if_unknown_connector(app: AppContext, needle: str, pool: list) -> None
     raise SystemExit(1)
 
 
-def _render_table(alert_list: list, store, connector: str | None = None) -> None:
+def _render_table(alert_list: list, store, connector: str | None = None, *, secure_client: bool = False) -> None:
     """Plain Rich table — the single renderer since the Textual TUI
     was retired in P3-#20. Kept in a helper so the deprecated
     ``--tui`` flag can fall through here without duplicating the
@@ -530,7 +564,10 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     term_width = console.size.width
     # A wide terminal shows the whole hook event (UserPromptSubmit,
     # PostToolBatch); 11 columns cut it to "...ptSubmit" (GAP-1535).
-    w_target = _W_TARGET if term_width < 100 else 18
+    w_target = (
+        _W_TARGET if term_width < 100 else
+        18 if secure_client else min(40, max(20, (term_width - 60) // 2))
+    )
     w_details = max(11, term_width - _OVERHEAD - _W_FIXED - (w_target - _W_TARGET))
 
     scope = f" — connector={connector}" if (connector or "").strip() else ""
@@ -565,14 +602,19 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        target = _trunc_path(copilot_hook_target(e.target or "", _event_connector(e)), w_target)
+        hook_target = copilot_hook_target(e.target or "", _event_connector(e))
+        shown_target = _short_hook_target(hook_target, _event_connector(e)) if secure_client else hook_target
+        target = _trunc_path(shown_target, w_target)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         facts = _finding_facts(e, hook_details, targets)
         quarantined = _quarantine_facts(e, targets)
         if facts is not None:
-            short = _path_name(_short_hook_target(facts["target"], facts.get("connector", "")))
-            target = _trunc_path(short, w_target)
+            shown_target = (
+                _short_hook_target(facts["target"], facts.get("connector", ""))
+                if secure_client else facts["target"]
+            )
+            target = _trunc_path(_path_name(shown_target), w_target)
             raw_details = _finding_details(facts)
         elif quarantined is not None:
             target = _trunc_path(quarantined["target"], w_target)
@@ -651,6 +693,8 @@ _DELIVERY_FAILURE_REASONS = {
     "request_canceled": "the export was canceled (usually a gateway restart)",
     "acknowledgement_lost": "the export was sent but no reply arrived",
     "transport_failed": "a network error interrupted the export",
+    "file_write_failed": "the destination file could not be written",
+    "no_space": "the destination disk is full",
     "endpoint_prohibited": "the endpoint is blocked by the egress policy",
     "queue_full": "the export queue was full, so records were dropped",
 }
@@ -700,6 +744,12 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         alert_list = app.store.list_alerts(limit)
     hook_details = _hook_details_for(app.store, alert_list)
     targets = _alert_targets_for(app.store, alert_list)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    agents = ({} if _enterprise_profile(app.cfg) == "secure_client"
+              else alert_agent_facts(app.store, [e.id for e in alert_list]))
+    json_keys = {"User": "user", "Agent": "agent_identity_id", "Instance": "agent_instance_id",
+                 "Session": "session_id", "Depth": "agent_depth"}
     rows = []
     for e in alert_list:
         row = {
@@ -722,6 +772,8 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
                 row[key] = facts[key]
         if "moved_to" in facts:
             row.setdefault("decision", "quarantined")
+        for label, value in agents.get(e.id, []):
+            row[json_keys[label]] = int(value.split(" ", 1)[0]) if label == "Depth" else value
         rows.append(row)
     click.echo(json.dumps(rows, indent=2, sort_keys=True))
 
@@ -822,6 +874,14 @@ def _alerts_default(
             human = _humanize_details(e.details)
             if human:
                 click.echo(f"  {label('Details')} {human}")
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        agent = ([] if _enterprise_profile(app.cfg) == "secure_client"
+                 else alert_agent_facts(app.store, [e.id]).get(e.id, []))
+        for name, value in agent:
+            click.echo(f"  {label(name)} {value}")
+        agent_user = next((value for name, value in agent if name == "User"), "")
+        agent_connector = (facts or {}).get("connector") or _event_connector(e)
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         if e.action == "scan" and scanner_name and e.target:
@@ -841,6 +901,8 @@ def _alerts_default(
                     loc = f"  {f['location']}" if f["location"] else ""
                     click.echo(f" {f['title']}{loc}")
         hint = _alert_next_step(e)
+        if not hint and agent_user and agent_connector:
+            hint = f"defenseclaw agent identities --user {shlex.quote(agent_user)} --connector {agent_connector}"
         if hint:
             click.echo(f"  {ux._style('Next:', fg='bright_black', bold=True)}      {hint}")
         if e.id:
@@ -853,7 +915,12 @@ def _alerts_default(
             "Launch `defenseclaw tui` and press 2 for the Alerts panel.",
         )
 
-    _render_table(alert_list, app.store, connector=needle)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    _render_table(
+        alert_list, app.store, connector=needle,
+        secure_client=_enterprise_profile(app.cfg) == "secure_client",
+    )
 
 
 @alerts.command("acknowledge")

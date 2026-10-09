@@ -181,6 +181,14 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			_ = os.Remove(filepath.Join(f.e2fsprogs, "mke2fs"))
 			touchExecutable(f.t, filepath.Join(f.e2fsprogs, "mkfs.ext4"))
 		}, want: checkWant{"vm-driver", pass, "e2fsprogs in "}},
+		// GAP-0112: the driver searches only the kegs under /opt/homebrew
+		// and /usr/local, so an e2fsprogs installed by a Homebrew of your
+		// own is never found: the doctor says so instead of offering a
+		// build that cannot help.
+		{name: "e2fsprogs missing under a Homebrew of your own", setup: func(f *doctorFixture) {
+			f.doctor.E2fsprogsDirs = []string{filepath.Join(f.home, "kegs", "e2fsprogs", "sbin")}
+		}, want: checkWant{"vm-driver", fail, "; it does not look in your Homebrew at "},
+			fix: &fixWant{text: "have an administrator install it with a Homebrew there (brew install e2fsprogs)", manual: true}},
 		// The driver runs under launchd, whose PATH is not the shell's.
 		{name: "e2fsprogs only on PATH", setup: func(f *doctorFixture) {
 			_ = os.RemoveAll(f.e2fsprogs)

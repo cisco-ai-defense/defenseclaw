@@ -6,7 +6,9 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,6 +36,21 @@ func TestInventoryDACLSkipsKiroWhereTheGuardianOwnsIt(t *testing.T) {
 		if _, ok := owned[home][".kiro"]; ok {
 			t.Fatalf("%s's .kiro is guardian-owned: %v", home, owned)
 		}
+	}
+	// The IDE inventory grants nothing on a guardian-owned .kiro either,
+	// only below it (GAP-0897).
+	ide := func(home string) map[string]bool {
+		dirs := map[string]bool{}
+		for _, g := range inventoryDACLIDEGrants(home, owned[strings.ToLower(home)]) {
+			dirs[g.dir] = true
+		}
+		return dirs
+	}
+	if alice := ide(`C:\Users\Alice`); alice[".kiro"] || !alice[`.kiro\extensions`] {
+		t.Fatalf("alice IDE grants on .kiro = %v, below = %v; want none on .kiro, one below", alice[".kiro"], alice[`.kiro\extensions`])
+	}
+	if !ide(`C:\Users\bob`)[".kiro"] {
+		t.Fatal("bob lost the .kiro attributes grant")
 	}
 }
 
@@ -166,6 +183,170 @@ func TestEnsureInventoryListACEGrantsTheFolderOnly(t *testing.T) {
 		if found != want {
 			t.Fatalf("service ACE on %s = %v, want %v", path, found, want)
 		}
+	}
+}
+
+// GAP-0156: the IDE grants reach a Remote-SSH server build's package.json
+// and a %LOCALAPPDATA%\JetBrains product's plugins, but not the caches beside
+// them, and nothing through a junction below the profile.
+func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	write := func(path string) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	jar := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\plugins\ai\lib\ai.jar`))
+	pkg := write(filepath.Join(home, `.vscode-server\cli\servers\Stable-0a1b\server\package.json`))
+	caches := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\caches\content.dat`))
+	privateState := write(filepath.Join(home, `AppData\Roaming\Code\User\globalStorage\agent.example\session.json`))
+	legacyRoot := filepath.Join(home, `AppData\Roaming\Code\User\globalStorage`)
+	if _, err := ensureInventoryReadACE(legacyRoot, sid); err != nil {
+		t.Fatal(err)
+	}
+	linked := write(filepath.Join(outside, `AndroidStudio2025.1\plugins\x.jar`))
+	google := filepath.Join(home, `AppData\Local\Google`)
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", google, outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	hasACE := func(path string) bool {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
+	}
+	for pass, want := range []inventoryDACLResult{inventoryDACLGranted, inventoryDACLAlreadyPresent} {
+		for _, g := range inventoryDACLIDEGrants(home, nil) {
+			result, err := g.ensure(filepath.Join(home, g.dir), sid)
+			if g.dir == `AppData\Local\Google` {
+				if !errors.Is(err, errInventoryDACLLink) {
+					t.Fatalf("grant on the junction = %v, %v; want refused", result, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", g.dir, err)
+			}
+			if result != inventoryDACLSkippedMissing && result != want {
+				t.Fatalf("pass %d %s = %v, want %v", pass, g.dir, result, want)
+			}
+		}
+	}
+	for path, want := range map[string]bool{jar: true, pkg: true, caches: false, filepath.Dir(caches): false, privateState: false, linked: false, outside: false} {
+		if got := hasACE(path); got != want {
+			t.Errorf("service ACE on %s = %v, want %v", path, got, want)
+		}
+	}
+}
+
+// GAP-0197: an agent folder a standard user replaced with a junction gets no
+// grant from the standalone profile, and no ACE reaches the junction's target.
+func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	claudeState := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(claudeState, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(home, ".claude"), outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	hasACE := func(path string) bool {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
+	}
+	for _, g := range inventoryDACLAgentGrants(home, nil, true) {
+		result, err := g.ensure(filepath.Join(home, g.dir), sid)
+		switch g.dir {
+		case ".claude":
+			if !errors.Is(err, errInventoryDACLLink) {
+				t.Fatalf("grant on the junction = %v, %v; want refused", result, err)
+			}
+		case ".codex":
+			if err != nil || result != inventoryDACLGranted {
+				t.Fatalf(".codex = %v, %v; want granted", result, err)
+			}
+		case ".claude.json":
+			if err != nil || result != inventoryDACLGranted {
+				t.Fatalf(".claude.json = %v, %v; want granted", result, err)
+			}
+		}
+	}
+	if hasACE(outside) {
+		t.Fatal("the junction's target gained the service ACE")
+	}
+	if !hasACE(filepath.Join(home, ".codex")) {
+		t.Fatal("a plain agent folder lost its grant")
+	}
+	if !hasACE(claudeState) || hasACE(home) {
+		t.Fatal("Claude state grant did not stay on the file")
+	}
+}
+
+func TestInventoryDACLRejectsDirectoryReplacedAfterCheck(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	parent := filepath.Join(home, "AppData", "Local")
+	dir := filepath.Join(parent, "cursor-agent")
+	outsideDir := filepath.Join(outside, "cursor-agent")
+	for _, path := range []string{dir, outsideDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := inventoryDACLAfterLinkCheck
+	t.Cleanup(func() { inventoryDACLAfterLinkCheck = previous })
+	inventoryDACLAfterLinkCheck = func() {
+		inventoryDACLAfterLinkCheck = func() {}
+		if err := os.RemoveAll(parent); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", parent, outside).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J: %v: %s", err, out)
+		}
+	}
+	var grant inventoryDACLGrant
+	for _, candidate := range inventoryDACLAgentGrants(home, nil, true) {
+		if candidate.dir == `AppData\Local\cursor-agent` {
+			grant = candidate
+			break
+		}
+	}
+	result, err := grant.ensure(dir, sid)
+	if result != inventoryDACLSkippedMissing || !errors.Is(err, errInventoryDACLLink) {
+		t.Fatalf("swapped parent grant = %v, %v; want reparse refusal", result, err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(outsideDir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || daclHasACEFor(dacl, []*windows.SID{sid}) {
+		t.Fatalf("junction target gained the service ACE: %v", err)
 	}
 }
 

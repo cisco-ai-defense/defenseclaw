@@ -204,8 +204,12 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery -
 
 Skills and MCP servers are inventoried, not scanned: a managed deployment
 does not run the skill or MCP scanners. The inventory names each skill and
-MCP server per user, and its `ai_component` and per-entry skill and MCP
-records go to your observability destinations. The gateway's skill, MCP and
+MCP server per user. `ai_component.discovered`, `changed` and `removed`
+records reach your observability destinations with the user name but without
+the entry name; discovery does not emit per-entry `ai_component.observed`
+records. Skill and MCP names can still reach destinations through hook
+decision and asset-policy audit rows when assets are used, scanned, admitted
+or rejected. The gateway's skill, MCP and
 tool-catalog API routes are not available on a managed host (they answer
 `501`); use the `discovery` view above instead.
 
@@ -336,8 +340,8 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `errors` | Empty |
 
 When the config enables no agent under `guardrail.connectors` while there
-are users to enroll, `status` and `verify` warn `no_connectors_enabled` and
-`security_complete` is `false`. Otherwise neither field checks that the
+are users to enroll, `status` warns `no_connectors_enabled`, `verify` fails,
+and `security_complete` is `false`. Otherwise neither field checks that the
 users you expect are enrolled, so check `enrollment` too. The
 enumerator enrolls accounts with a uid of 501 or higher by default. See
 [Enrollment](/docs/enterprise/enrollment). To reconcile at once instead of
@@ -430,16 +434,23 @@ The guardian works only in hidden dot-directories inside each user's home,
 such as `~/.claude`, `~/.codex` and `~/.config`. macOS privacy controls (TCC)
 do not protect those folders, so no profile is needed.
 
-The per-user AI Discovery scan also walks the home for package manifests.
-Without a profile, macOS keeps it out of TCC-protected folders, and it skips
-them.
+The per-user AI Discovery scan also walks the home for package manifests and
+model files. Without Full Disk Access it never opens the folders that make
+macOS ask the employee for permission: Desktop, Documents, Downloads, Movies,
+Music, Pictures, iCloud Drive, other apps' data in `~/Library/Containers` and
+`~/Library/Group Containers`, and Contacts. It skips them without an error,
+so an employee never sees a prompt attributed to `defenseclaw-gateway` and
+the scan stays complete. The other TCC-protected folders answer "operation not
+permitted" and are skipped the same way.
 
 If your organization moves agent configuration into a TCC-protected folder,
 such as Desktop, Documents or iCloud Drive, deploy a PPPC profile that grants
 Full Disk Access (`SystemPolicyAllFiles`) to
 `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. That one binary runs the
 gateway, the guardian (`enterprise hooks watch`) and the enumerator. Identify
-it by its Developer ID code requirement, which needs a signed build.
+it by its Developer ID code requirement, which needs a signed build. With the
+grant, the AI Discovery scan also reads the folders listed above; the gateway
+checks the grant again every ten minutes.
 
 ### AI Discovery Plane C (Endpoint Security)
 

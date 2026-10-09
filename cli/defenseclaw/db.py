@@ -1016,9 +1016,11 @@ class Store:
         structured = "structured_json" if "structured_json" in columns else "NULL"
         details = "COALESCE(details, '')" if "details" in columns else "''"
         decision = f"dc_hook_decision({details}, {structured}, enforced)"
+        may_block = hook_decision_may_block_sql(details, structured, "enforced")
         return f"""(
             LOWER(COALESCE(action, '')) = 'connector-hook'
             AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
+            AND {may_block}
             AND {decision} = 'block'
         )"""
 
@@ -1437,6 +1439,72 @@ class Store:
             (target, scanner),
         )
         return [{"severity": r[0], "title": r[1], "location": r[2] or ""} for r in cur.fetchall()]
+
+    _ALERT_AGENT_KEYS = (
+        "defenseclaw.user.name", "user.id", "defenseclaw.agent.identity.id", "defenseclaw.agent.depth",
+        "gen_ai.conversation.id",
+    )
+
+    def agent_facts_for_alerts(self, alert_ids: list[str]) -> dict[str, dict[str, str]]:
+        """Map alert IDs to who the alert is about (GAP-0381).
+
+        The user, the agent identity (``agt-``), the agent instance (``ais-``),
+        the session and the sub-agent depth come from the alert row and from
+        the hook-decision row of the same request; the alert row's own value
+        wins.
+        """
+        ids = [alert_id for alert_id in alert_ids if alert_id]
+        columns, _tables = self._audit_projection_schema()
+        if not ids or "structured_json" not in columns:
+            return {}
+
+        def row_facts(alias: str) -> str:
+            cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
+            cols += [
+                self._safe_json_extract(f"{alias}.structured_json", f'$."{key}"') for key in self._ALERT_AGENT_KEYS
+            ]
+            return ", ".join(cols)
+
+        width = 2 + len(self._ALERT_AGENT_KEYS)
+        join, hook_cols = "", ", ".join(["NULL"] * width)
+        if "request_id" in columns:
+            # Request IDs are client supplied. Borrow hook facts only when
+            # both records identify the same user independently of that ID.
+            f_user = self._safe_json_extract("f.structured_json", '$."user.id"')
+            h_user = self._safe_json_extract("h.structured_json", '$."user.id"')
+            join = (
+                "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
+                "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id "
+                f"AND COALESCE({f_user}, '') <> '' AND {f_user} = {h_user}"
+            )
+            hook_cols = row_facts("h")
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.db.execute(
+            f"SELECT f.id, {row_facts('f')}, {hook_cols} FROM audit_events AS f {join} WHERE f.id IN ({placeholders})",
+            ids,
+        )
+        names = ("session", "agent_instance", "user_name", "user_id", "agent_identity", "depth", "conversation")
+        found: dict[str, dict[str, str]] = {}
+        for row in cur.fetchall():
+            facts = found.setdefault(row[0], {})
+            for values in (row[1:1 + width], row[1 + width:]):
+                for name, value in zip(names, values):
+                    text = "" if value is None else str(value).strip()
+                    if text and not facts.get(name):
+                        facts[name] = text
+        out: dict[str, dict[str, str]] = {}
+        for alert_id, facts in found.items():
+            shown = {
+                "user": facts.get("user_name") or facts.get("user_id", ""),
+                "agent_identity": facts.get("agent_identity", ""),
+                "agent_instance": facts.get("agent_instance", ""),
+                "session": facts.get("session") or facts.get("conversation", ""),
+                "depth": facts.get("depth", "").split(".", 1)[0],
+            }
+            shown = {key: value for key, value in shown.items() if value}
+            if shown:
+                out[alert_id] = shown
+        return out
 
     def hook_details_for_alerts(self, alert_ids: list[str]) -> dict[str, list[str]]:
         """Map alert IDs to the details of connector-hook rows of the same request.

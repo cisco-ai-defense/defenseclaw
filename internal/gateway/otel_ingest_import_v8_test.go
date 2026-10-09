@@ -180,6 +180,102 @@ func TestOTLPInboundGeneratedConnectorLogImportsThroughSQLite(t *testing.T) {
 	}
 }
 
+// A conversation ID is sender supplied. A shared gateway must not attach
+// another user's hook snapshot to a native OTLP record with no caller identity.
+func TestOTLPInboundDoesNotJoinForeignHookIdentity(t *testing.T) {
+	fixture := newOTLPV8MetricFixture(t)
+	const session = "shared-conversation"
+	const foreignAgent = "agent-alice"
+	meta := llmEventMeta{
+		Source: "codex", SessionID: session, AgentID: foreignAgent,
+		RootAgentID: foreignAgent, UserID: "1001",
+		AgentIdentityID: "agt-0000000000000a11",
+	}
+	key := hookSessionStateKey(meta)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{key: {meta: meta}},
+		hookSessionStateOrder: []string{key},
+	}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.codex.user_prompt.v1.log.model.request")
+	if !ok {
+		t.Fatal("Codex user-prompt match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	now := time.Now().UTC()
+	leaf.logRecord.TimeUnixNano = uint64(now.UnixNano())
+	leaf.logRecord.Attributes = append(leaf.logRecord.Attributes,
+		otlpClassifierStringAttribute("conversation.id", session))
+	message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+		Resource:  &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{leaf.logRecord}}},
+	}}}
+	ctx := withServiceAccountGateway(t.Context())
+	accounting, err := api.importDecodedOTLPRequestV8(ctx, message, otelSignalLogs, source, now)
+	if err != nil || !accounting.valid() || accounting.imported != 1 {
+		t.Fatalf("Codex import accounting=%+v err=%v", accounting, err)
+	}
+	record := inboundStoredProjectedRecord(t, fixture.path, source, "model.request")
+	body, ok := record["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("body=%#v", record["body"])
+	}
+	if body["gen_ai.agent.id"] == foreignAgent || body["defenseclaw.agent.root.id"] == foreignAgent {
+		t.Fatalf("foreign hook identity joined native record: agent=%v root=%v",
+			body["gen_ai.agent.id"], body["defenseclaw.agent.root.id"])
+	}
+}
+
+// A bound user credential proves ownership of that user's hook session even
+// when the service-account gateway cannot infer an agent identity from OTLP.
+func TestOTLPInboundJoinsVerifiedUsersHookLineage(t *testing.T) {
+	fixture := newOTLPV8MetricFixture(t)
+	const (
+		session = "managed-conversation"
+		agentID = "agent-hook"
+		turnID  = "turn-hook"
+	)
+	meta := llmEventMeta{
+		Source: "codex", SessionID: session, AgentID: agentID, TurnID: turnID,
+		RootAgentID: agentID, UserID: "1001", AgentIdentityID: "agt-0000000000000a11",
+	}
+	key := hookSessionStateKey(meta)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{key: {meta: meta}},
+		hookSessionStateOrder: []string{key},
+	}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.codex.user_prompt.v1.log.model.request")
+	if !ok {
+		t.Fatal("Codex user-prompt match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	now := time.Now().UTC()
+	leaf.logRecord.TimeUnixNano = uint64(now.UnixNano())
+	leaf.logRecord.Attributes = append(leaf.logRecord.Attributes,
+		otlpClassifierStringAttribute("conversation.id", session))
+	message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+		Resource:  &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{leaf.logRecord}}},
+	}}}
+	ctx := context.WithValue(withServiceAccountGateway(t.Context()), verifiedUserScopedIdentityContextKey{}, "1001")
+	accounting, err := api.importDecodedOTLPRequestV8(ctx, message, otelSignalLogs, source, now)
+	if err != nil || !accounting.valid() || accounting.imported != 1 {
+		t.Fatalf("Codex import accounting=%+v err=%v", accounting, err)
+	}
+	record := inboundStoredProjectedRecord(t, fixture.path, source, "model.request")
+	body, ok := record["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("body=%#v", record["body"])
+	}
+	if body["gen_ai.agent.id"] != agentID || body["defenseclaw.turn.id"] != turnID {
+		t.Fatalf("hook lineage lost: agent=%v turn=%v",
+			body["gen_ai.agent.id"], body["defenseclaw.turn.id"])
+	}
+}
+
 func TestOTLPInboundConnectorPromptPreservesDeclaredLifecycleCorrelation(t *testing.T) {
 	previousInstance := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("otlp-inbound-log-lifecycle-test")
@@ -480,6 +576,46 @@ func TestOTLPInboundPR403TopologyAndMissingData(t *testing.T) {
 		if value, exists := attributes[absent]; exists {
 			t.Fatalf("generic GenAI span fabricated %s=%#v", absent, value)
 		}
+	}
+}
+
+func TestOTLPInboundRejectsUnverifiedIdentityClaims(t *testing.T) {
+	previousInstance := gatewaylog.SidecarInstanceID()
+	gatewaylog.SetSidecarInstanceID("otlp-unverified-identity-test")
+	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(previousInstance) })
+
+	fixture := newOTLPTraceFixture(t, "always_on", true, nil)
+	api := &APIServer{}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.genai.span.operation.v1.span.model.chat")
+	if !ok {
+		t.Fatal("generated GenAI chat span match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	now := time.Now().UTC()
+	leaf.span.StartTimeUnixNano = uint64(now.Add(-time.Second).UnixNano())
+	leaf.span.EndTimeUnixNano = uint64(now.UnixNano())
+	leaf.span.Kind = tracepb.Span_SPAN_KIND_CLIENT
+	leaf.span.Attributes = append(leaf.span.Attributes,
+		otlpClassifierStringAttribute("user.id", "another-user"),
+		otlpClassifierStringAttribute("defenseclaw.user.principal", "another-user@example.org"),
+		otlpClassifierStringAttribute("defenseclaw.user.principal.assurance", "verified"),
+		otlpClassifierStringAttribute("defenseclaw.agent.identity.id", "agt-0123456789abcdef"),
+		otlpClassifierStringAttribute("defenseclaw.guardrail.profile.name", "administrators"),
+	)
+	message := &collectortracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{
+		Resource:   &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{leaf.span}}},
+	}}}
+	accounting, err := api.importDecodedOTLPRequestV8(
+		context.Background(), message, otelSignalTraces, source, now,
+	)
+	if err != nil || !accounting.valid() || accounting.invalidMappedField != 1 {
+		t.Fatalf("identity claim accounting = %+v err=%v", accounting, err)
+	}
+	if spans := fixture.pipelines.capture(t, 1).snapshot(); len(spans) != 0 {
+		t.Fatalf("unverified identity claim produced %d canonical spans", len(spans))
 	}
 }
 
@@ -1470,5 +1606,66 @@ func TestInboundOriginPolicyRequiresExactLocalForwardPair(t *testing.T) {
 	terminal, err := inboundOptionalExportPolicyV8(leaf("other-instance", "collector-a", int64(wire.MaxForwardHops)), match, wire)
 	if err != nil || policyField(terminal, "originDestination").String() != "" || !policyField(terminal, "suppressAll").Bool() {
 		t.Fatalf("terminal policy = %#v err=%v", terminal, err)
+	}
+}
+
+func TestOTLPInboundNativeProjectedLogRejectsIdentityClaims(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.native.log.v8.log.identity.observed")
+	if !ok {
+		t.Fatal("native log match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	leaf.logRecord.Body = inboundProjectedLogBody(t, leaf)
+	mutateInboundProjectedLogBody(t, &leaf, func(wire map[string]any) {
+		wire["body"] = map[string]any{
+			"user.id":                              "1001",
+			"defenseclaw.user.principal":           "other@example.org",
+			"defenseclaw.user.principal.assurance": "verified",
+			"defenseclaw.agent.identity.id":        "agt-other",
+			"defenseclaw.guardrail.profile.name":   "admins",
+		}
+	})
+	message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+		Resource:  &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		SchemaUrl: leaf.resource.schemaURL,
+		ScopeLogs: []*logspb.ScopeLogs{{
+			Scope:     &commonpb.InstrumentationScope{Name: leaf.scope.name, Version: leaf.scope.version},
+			SchemaUrl: leaf.scope.schemaURL, LogRecords: []*logspb.LogRecord{leaf.logRecord},
+		}},
+	}}}
+	accounting, err := api.importDecodedOTLPRequestV8(t.Context(), message, otelSignalLogs, source, time.Now().UTC())
+	if err != nil || !accounting.valid() || accounting.invalidMappedField != 1 {
+		t.Fatalf("native identity claim accounting=%+v err=%v", accounting, err)
+	}
+	if events := readStoredOTLPV8Events(t, fixture.path); len(events) != 0 {
+		t.Fatalf("native identity claim persisted %d records", len(events))
+	}
+
+	// The projected correlation is sender-controlled, even with a user-scoped
+	// credential. It must not join another user's agent instance.
+	leaf.logRecord.Body = inboundProjectedLogBody(t, leaf)
+	mutateInboundProjectedLogBody(t, &leaf, func(wire map[string]any) {
+		wire["correlation"] = map[string]any{"agent_instance_id": "ais-0123456789abcdef"}
+	})
+	if !unverifiedNativeOTLPIdentityClaimV8(leaf) {
+		t.Fatal("projected correlation agent instance was accepted as a verified claim")
+	}
+	mutateInboundProjectedLogBody(t, &leaf, func(wire map[string]any) {
+		wire["correlation"] = map[string]any{"AGENT_INSTANCE_ID": "ais-0123456789abcdef"}
+	})
+	if !unverifiedNativeOTLPIdentityClaimV8(leaf) {
+		t.Fatal("case-folded correlation agent instance was accepted")
+	}
+	ctx := context.WithValue(withServiceAccountGateway(t.Context()), verifiedUserScopedIdentityContextKey{}, "1001")
+	accounting, err = api.importDecodedOTLPRequestV8(ctx, message, otelSignalLogs, source, time.Now().UTC())
+	if err != nil || !accounting.valid() || accounting.invalidMappedField != 1 {
+		t.Fatalf("native correlation identity claim accounting=%+v err=%v", accounting, err)
+	}
+	if events := readStoredOTLPV8Events(t, fixture.path); len(events) != 0 {
+		t.Fatalf("native correlation identity claim persisted %d records", len(events))
 	}
 }

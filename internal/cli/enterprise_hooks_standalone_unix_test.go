@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 const enterpriseHookWorkerHelperEnv = "DEFENSECLAW_TEST_APPLY_TARGET_HELPER"
@@ -1425,6 +1426,50 @@ func TestStandaloneAIDiscoveryPassSpoolsEachScanAsItsAccount(t *testing.T) {
 	}
 }
 
+// A home whose scan keeps failing pauses after three failed passes in a
+// row, so the guardian stops starting a worker for it on every pass
+// (GAP-0694); the pass after the pause tries again and a good scan closes
+// the breaker.
+func TestStandaloneAIDiscoveryPassPausesAHomeWhoseScanKeepsFailing(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	cfg.AIDiscovery.Enabled = true
+	dir := inventory.UserScanDirForConfig(cfg)
+	previous := enterpriseHookAIDiscoveryBreaker
+	t.Cleanup(func() { enterpriseHookAIDiscoveryBreaker = previous })
+	enterpriseHookAIDiscoveryBreaker = newEnterpriseHookScanBreaker(3, time.Hour, 24*time.Hour)
+	workers, fail := 0, true
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		workers++
+		if fail {
+			return enterpriseHookWorkerResponse{}, errors.New("worker for uid timed out: context deadline exceeded")
+		}
+		report := inventory.ScanUserHome(ctx, account.Home, account.User, account.UID, request.AIDiscovery.Options, request.AIDiscovery.Catalog)
+		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion, AIDiscovery: &report}, nil
+	}
+	pass := func() {
+		runEnterpriseHookAIDiscoveryPass(context.Background(), io.Discard, dir, []enterpriseHookReconcileRow{
+			{User: "alice", UserHome: alice, Connector: "codex", OK: true, UID: uid},
+		})
+	}
+	for range 4 {
+		pass()
+	}
+	if workers != 3 {
+		t.Fatalf("workers = %d, want 3: the fourth pass must skip the paused home", workers)
+	}
+	enterpriseHookAIDiscoveryBreaker.accounts[uid].until = time.Now().Add(-time.Second)
+	fail = false
+	pass()
+	pass()
+	if workers != 5 || len(enterpriseHookAIDiscoveryBreaker.accounts) != 0 {
+		t.Fatalf("workers = %d, breaker = %+v: after the pause a good scan closes the breaker", workers, enterpriseHookAIDiscoveryBreaker.accounts)
+	}
+}
+
 // A worker error ends with its cause. The remove-all report cut it at 256
 // bytes, in the middle of a path, so the uninstall never said why a
 // registration stayed. An oversized error keeps its start and its cause.
@@ -1434,5 +1479,154 @@ func TestRemoveAllReportKeepsTheWorkerErrorCause(t *testing.T) {
 	got := boundedWorkerError(cause)
 	if len(got) > workerErrorMaxBytes || !utf8.ValidString(got) || !strings.HasPrefix(got, "enterprise hooks: connector openhands") || !strings.HasSuffix(got, ": operation not permitted") {
 		t.Fatalf("bounded worker error = %q", got)
+	}
+}
+
+// A deployment that selects only machine-policy connectors has no manifest
+// rows; the guardian still writes identity records and per-user scans for
+// every eligible account the enumerator published (GAP-0021).
+func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
+	previous, previousConfig := enterpriseHookLoadEligibleAccounts, cfg
+	t.Cleanup(func() { enterpriseHookLoadEligibleAccounts, cfg = previous, previousConfig })
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	enterpriseHookLoadEligibleAccounts = func(path string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		if path != enterprisehooks.UnixEligibleAccountsPath("/etc/defenseclaw/hooks/manifest.json") {
+			t.Errorf("eligible accounts read from %q", path)
+		}
+		return []enterprisehooks.UnixEligibleAccount{
+			{User: "alice", UID: 1001, Home: "/home/alice"},
+			{User: "bob@corp.example", UID: 94401104, Home: "/home/bob@corp.example"},
+		}, nil
+	}
+	rows := enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+		Manifest: "/etc/defenseclaw/hooks/manifest.json",
+		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
+	})
+	if len(rows) != 2 || rows[0].Connector != "opencode" || rows[1].UID != 94401104 || rows[1].User != "bob@corp.example" || rows[1].UserHome != "/home/bob@corp.example" {
+		t.Fatalf("rows = %+v, want the manifest row and one row for the eligible account without one", rows)
+	}
+	cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
+	rows = enterpriseHookEnrolledAccountRows(io.Discard, enterpriseHookReconcileRun{
+		Manifest: "/etc/defenseclaw/hooks/manifest.json",
+		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
+	})
+	if len(rows) != 1 || rows[0].UID != 1001 {
+		t.Fatalf("manifest mode scanned stale eligible accounts: %+v", rows)
+	}
+	// Nor does it publish their identity records (GAP-0761): the record the
+	// last auto pass left still names bob, whom the manifest no longer
+	// enrolls; carol is enrolled by name and has no row yet.
+	previousIdentity := enterpriseHookLoadIdentityAccounts
+	t.Cleanup(func() { enterpriseHookLoadIdentityAccounts = previousIdentity })
+	enterpriseHookLoadIdentityAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{
+			{User: "alice", UID: 1001}, {User: "bob@corp.example", UID: 94401104}, {User: "carol", UID: 1003},
+		}, nil
+	}
+	alice := 1001
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+		Manifest: "/etc/defenseclaw/hooks/manifest.json",
+		Targets:  []enterprisehooks.ManifestTarget{{User: "alice", UID: &alice, Connector: "opencode"}, {User: "carol", Connector: "opencode"}},
+		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
+	})
+	if len(accounts) != 2 || accounts[0].UID != 1001 || accounts[1].UID != 1003 {
+		t.Fatalf("manifest mode published identity records for %+v, want alice and carol only", accounts)
+	}
+}
+
+// GAP-0775: a deleted local account may remain in the guardian state until
+// the enumerator drops it. An unavailable directory can give the same NSS
+// not-found answer for a logged-in account, so its failed row must stay red.
+func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
+	previousCfg, previousManifest := cfg, enterpriseHookManifest
+	previousLocal, previousDirectory := enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured
+	t.Cleanup(func() {
+		cfg, enterpriseHookManifest = previousCfg, previousManifest
+		enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured = previousLocal, previousDirectory
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+	}
+	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
+	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(enterpriseHookManifest),
+		&enterprisehooks.UnixEnumeratorState{Version: 1, Sources: map[string]string{"carol": "files"}}); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) {
+		return map[string]int{"alice": 4242}, nil
+	}
+	enterpriseHooksEnumerateDirectoryConfigured = func() bool { return true }
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: 4242, GID: 4242},
+	}})
+	state := enterpriseHookGuardianState{FailureCount: 1, Results: []enterpriseHookReconcileRow{
+		{User: "carol", Connector: "claudecode", Error: `enterprise hooks: target account "carol" does not exist: no such account`},
+	}}
+	if got := enterpriseHookRemovedAccountFailures(state); got != 1 {
+		t.Fatalf("deleted local account: excused = %d, want 1", got)
+	}
+	state.Results[0] = enterpriseHookReconcileRow{User: "okta-carol", Connector: "claudecode", Error: "enterprise hooks: hook config is group/other writable"}
+	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+		t.Fatalf("directory outage with failed hook: excused = %d, want 0", got)
+	}
+	state.Results[0].Error = `enterprise hooks: target account "okta-carol" does not exist: no such account`
+	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+		t.Fatalf("directory outage with missing-account error: excused = %d, want 0", got)
+	}
+	state.Results[0] = enterpriseHookReconcileRow{User: "alice", Connector: "codex", Error: "enterprise hooks: hook config is group/other writable"}
+	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+		t.Fatalf("account that resolves: excused = %d, want 0", got)
+	}
+}
+
+// A manifest alias is only an enrollment spelling. The spool must use the
+// account name returned for its UID, or a failed privileged refresh can erase
+// the previous verified UPN before the gateway expires it.
+func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
+	t.Cleanup(func() { enterprisehooks.SetStandaloneResolver(nil) })
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"canonical": {Name: "canonical", UID: 4242, GID: 4242},
+	}})
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{{UID: 4242, User: "accepted-alias", Connector: "codex", OK: true}},
+	})
+	if len(accounts) != 1 || accounts[0].User != "canonical" {
+		t.Fatalf("identity spool accounts = %+v; want canonical UID name", accounts)
+	}
+	dir := t.TempDir()
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+		Key: "4242", User: "canonical", UpdatedAt: time.Now().UTC(),
+		Facts: useridentity.DirectoryFacts{UPN: "alice@example.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "4242.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil)
+	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, "4242", nil)
+	if err != nil || record.Facts.UPN != "alice@example.test" {
+		t.Fatalf("failed refresh lost the verified UPN: record=%+v err=%v", record, err)
+	}
+}
+
+// A home-only manifest target has a verified uid after reconciliation but
+// no User field. The macOS identity collector needs the uid's account name.
+func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
+	t.Cleanup(func() { enterprisehooks.SetStandaloneResolver(nil) })
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: 4242, GID: 4242, Home: "/Users/alice"},
+	}})
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{{UID: 4242, UserHome: "/Users/alice", Connector: "codex", OK: true}},
+	})
+	if len(accounts) != 1 || accounts[0].UID != 4242 || accounts[0].User != "alice" {
+		t.Fatalf("identity spool accounts = %+v; want alice for uid 4242", accounts)
 	}
 }

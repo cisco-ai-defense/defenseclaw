@@ -24,7 +24,7 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -100,6 +100,11 @@ class AISignature:
     application_names: tuple[str, ...] = ()
     config_paths: tuple[str, ...] = ()
     extension_ids: tuple[str, ...] = ()
+    # IDE inventory AI flags (JetBrains plugin.xml ids, Zed extension ids,
+    # Vim/Neovim plugin folder names). Mirrors ai_catalog.go.
+    jetbrains_plugin_ids: tuple[str, ...] = ()
+    zed_extension_ids: tuple[str, ...] = ()
+    vim_plugins: tuple[str, ...] = ()
     mcp_paths: tuple[str, ...] = ()
     # SkillPaths / RulePaths / PluginPaths are directory globs whose
     # per-user existence + non-emptiness produce SignalSkill / SignalRule /
@@ -118,6 +123,35 @@ class AISignature:
     components: tuple[AISignatureComponent, ...] = ()
 
 
+# Builtin ids added in 1.0 that an operator pack installed by an older build
+# may already use; the operator's signature keeps precedence after the upgrade
+# (internal/inventory/ai_catalog.go keeps the same list). Remove once upgrades
+# from packs written by 0.8.x and early 1.0 builds are no longer supported.
+_OPERATOR_KEEPS_IDS = frozenset({"jetbrains-ai"})
+
+_POST_RELEASE_EXTENSION_IDS = {"codex": "openai.chatgpt", "claudecode": "anthropic.claude-code"}
+IDE_INVENTORY_FIELDS = frozenset({"jetbrains_plugin_ids", "zed_extension_ids", "vim_plugins"})
+
+
+def _secure_client_signatures(builtins: list[AISignature]) -> list[AISignature]:
+    """Keep the pre-1.0 Secure Client catalog, as the Go loader does."""
+    return [
+        replace(
+            sig,
+            extension_ids=tuple(
+                extension_id
+                for extension_id in sig.extension_ids
+                if extension_id != _POST_RELEASE_EXTENSION_IDS.get(sig.id)
+            ),
+            jetbrains_plugin_ids=(),
+            zed_extension_ids=(),
+            vim_plugins=(),
+        )
+        for sig in builtins
+        if sig.id not in _OPERATOR_KEEPS_IDS
+    ]
+
+
 def load_ai_signatures(
     *,
     data_dir: str | Path | None = None,
@@ -125,9 +159,12 @@ def load_ai_signatures(
     allow_workspace_signatures: bool = False,
     scan_roots: list[str] | tuple[str, ...] = (),
     disabled_signature_ids: list[str] | tuple[str, ...] = (),
+    secure_client: bool = False,
 ) -> list[AISignature]:
     """Load the built-in catalog plus configured operator signature packs."""
     builtins = _parse_catalog_text(_catalog_text(), source="builtin")
+    if secure_client:
+        builtins = _secure_client_signatures(builtins)
     disabled = {_normalize_id(s) for s in disabled_signature_ids if _normalize_id(s)}
     merged: list[AISignature] = []
     seen: dict[str, str] = {}
@@ -150,9 +187,16 @@ def load_ai_signatures(
             if sig.id in disabled:
                 continue
             if sig.id in seen:
-                raise SignaturePackError(
-                    f"duplicate signature id {sig.id!r} in {pack_path} (already defined in {seen[sig.id]})"
-                )
+                if sig.id not in _OPERATOR_KEEPS_IDS or seen[sig.id] != "builtin":
+                    raise SignaturePackError(
+                        f"duplicate signature id {sig.id!r} in {pack_path} (already defined in {seen[sig.id]})"
+                    )
+                # An id the 1.0 builtin catalog added that an older operator pack
+                # already used: the operator's signature replaces the builtin, as
+                # the gateway's loader does (GAP-0584).
+                merged = [sig if existing.id == sig.id else existing for existing in merged]
+                seen[sig.id] = sig.source
+                continue
             merged.append(sig)
             seen[sig.id] = sig.source
     return merged
@@ -274,6 +318,9 @@ def _signature_from_raw(raw: Any, *, source: str) -> AISignature:
         application_names=_tuple(raw.get("application_names", [])),
         config_paths=_tuple(raw.get("config_paths", [])),
         extension_ids=_tuple(raw.get("extension_ids", [])),
+        jetbrains_plugin_ids=_tuple(raw.get("jetbrains_plugin_ids", [])),
+        zed_extension_ids=_tuple(raw.get("zed_extension_ids", [])),
+        vim_plugins=_tuple(raw.get("vim_plugins", [])),
         mcp_paths=_tuple(raw.get("mcp_paths", [])),
         skill_paths=_tuple(raw.get("skill_paths", [])),
         rule_paths=_tuple(raw.get("rule_paths", [])),
@@ -334,6 +381,9 @@ def _validate_signature(sig: AISignature) -> None:
         "application_names",
         "config_paths",
         "extension_ids",
+        "jetbrains_plugin_ids",
+        "zed_extension_ids",
+        "vim_plugins",
         "mcp_paths",
         "skill_paths",
         "rule_paths",

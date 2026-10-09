@@ -207,7 +207,7 @@ def test_v8_status_uses_masked_plan_and_sanitized_health(tmp_path, monkeypatch) 
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["config_version"] == 8
+    assert "config_version" not in payload
     assert payload["signals"] == {"traces": True, "metrics": False, "logs": False}
     assert payload["health"] == {
         "state": "healthy",
@@ -254,7 +254,6 @@ def test_v8_status_text_is_readable_and_names_next_step_when_failing(tmp_path, m
     out = result.output
     assert "{" not in out and "True" not in out
     assert "Signals         traces" in out
-    assert "Config version  8" in out
     assert "Health          failing (circuit_open)" in out
     assert "Queue           0 / 2048 items, 0 dropped" in out
     assert "Last failure    2026-10-02T05:03:18Z (queue_rejected)" in out

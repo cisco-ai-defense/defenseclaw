@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 func TestGuardrailRuntimeActionBalanced(t *testing.T) {
@@ -129,8 +130,12 @@ func TestResolveHookBlockReason(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		if got := resolveHookBlockReason(tc.gc, tc.connector, tc.action, tc.reason); got != tc.want {
-			t.Errorf("%s: resolveHookBlockReason(%q,%q,%q)=%q want %q",
+		var cfg *config.Config
+		if tc.gc != nil {
+			cfg = &config.Config{Guardrail: *tc.gc}
+		}
+		if got, _ := resolveHookBlockReasonForConfig(cfg, tc.connector, tc.action, tc.reason, redaction.SinkPolicyDefault); got != tc.want {
+			t.Errorf("%s: resolveHookBlockReasonForConfig(%q,%q,%q)=%q want %q",
 				tc.name, tc.connector, tc.action, tc.reason, got, tc.want)
 		}
 	}

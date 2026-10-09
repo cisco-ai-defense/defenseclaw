@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/localobservability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	compatredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -620,9 +621,14 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 	}))
 	defer server.Close()
 
+	// The destination acknowledges the canary only when its two spans reach
+	// one export. A 10 ms batch delay let the batch timer fire between the
+	// child's and the root's End on a loaded runner, exporting them apart
+	// (canary_failed); the pair now leaves together when the batch of two is
+	// full, or at the canary's flush.
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	raw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nobservability:\n  destinations:\n    - name: %s\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n      batch:\n        max_export_batch_size: 2\n        scheduled_delay_ms: 10\n      send:\n        signals: [traces]\n        buckets: ['*']\n",
+		"config_version: 8\ndata_dir: %q\nobservability:\n  destinations:\n    - name: %s\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n      batch:\n        max_export_batch_size: 2\n        scheduled_delay_ms: 60000\n      send:\n        signals: [traces]\n        buckets: ['*']\n",
 		fixture.dataDir,
 		localobservability.DestinationName,
 		server.URL,
@@ -1999,10 +2005,17 @@ func TestObservabilityV8ShutdownFlushFitsTheGracefulStopWindow(t *testing.T) {
 }
 
 // GAP-2166: a shutdown flush timeout is a warning that names the bound and the
-// next step, not a "bootstrap failed" error.
+// next step, not a "bootstrap failed" error. GAP-1096: it names each
+// destination and how many records it lost.
 func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
-	got := observabilityV8ShutdownFlushWarning()
-	for _, want := range []string{"WARNING", "did not finish within 4s", "setup observability test", "stopped normally"} {
+	sidecar := &Sidecar{observabilityV8ShutdownLosses: []observabilityruntime.ShutdownLoss{
+		{Destination: "eoi-hec", Signal: observability.SignalLogs, Records: 150},
+	}}
+	got := sidecar.observabilityV8ShutdownFlushWarning()
+	for _, want := range []string{
+		"WARNING", "did not finish within 4s", "150 unsent telemetry records (eoi-hec logs 150)",
+		"setup observability test", "stopped normally",
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("warning %q is missing %q", got, want)
 		}
@@ -2010,6 +2023,49 @@ func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
 	for _, bad := range []string{"Error:", "bootstrap", "shutdown_degraded"} {
 		if strings.Contains(got, bad) {
 			t.Fatalf("warning %q must not contain %q", got, bad)
+		}
+	}
+}
+
+// GAP-0300: strict removes the personal identifiers, except under Secure
+// Client, which keeps every identifier under every profile as on main
+// (issue #1092).
+func TestObservabilityV8RedactionEngineSecureClientKeepsUserEmail(t *testing.T) {
+	key, err := observabilityredaction.LoadOrCreateCorrelationKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	email := observability.TelemetryAttributeDefenseClawUserEmail
+	record, err := observability.NewRecord(observability.RecordInput{
+		Timestamp: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC), RecordID: "gap-0300",
+		Identity: observability.EventIdentity{
+			Bucket: observability.BucketDiagnostic, Signal: observability.SignalLogs, Name: "diagnostic.message",
+		},
+		Source: observability.SourceGateway,
+		Provenance: observability.Provenance{
+			Producer: "gateway", BinaryVersion: "v8", RegistrySchemaVersion: 1, ConfigGeneration: 1,
+		},
+		Body:         map[string]any{email: "alice@corp.example"},
+		FieldClasses: map[string]observability.FieldClass{"/" + email: observability.FieldClassIdentifier},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, _ := observabilityredaction.BuiltInProfile(observabilityredaction.ProfileStrict)
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = profile
+		engine, err := newObservabilityV8RedactionEngine(cfg, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		projection, _, err := engine.Project(record, strict)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object, _ := projection.Payload().Object()
+		if _, kept := object[email]; kept != (profile == managed.ProfileSecureClient) {
+			t.Errorf("%s: strict kept %s = %v", profile, email, kept)
 		}
 	}
 }

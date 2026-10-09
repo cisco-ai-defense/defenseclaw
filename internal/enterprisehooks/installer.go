@@ -77,6 +77,10 @@ type InstallOptions struct {
 	// standalone Amp and OpenCode plugins run for the foreign-hook guard
 	// (see connector.SetupOpts). Empty everywhere else.
 	ForeignHookGuardBinary string
+	// ManagedHookBinary is the administrator-owned hook binary a standalone
+	// Unix shell hook runs for the session facts (see connector.SetupOpts).
+	// Empty everywhere else.
+	ManagedHookBinary string
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -202,6 +206,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// OpenCode plugins carry, so a plugin rendered without it (before
 		// the guard existed, or edited) fails and the guardian re-renders it.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
+		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
 	if standalonePerUserRepair(uid) {
 		// Install renders some hooks for the guardrail mode (Cursor's action
@@ -398,6 +403,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HookCredentialIdentity: strings.TrimSpace(opts.HookCredentialIdentity),
 		// Only the standalone guardian sets this, for Amp and OpenCode.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
+		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {
@@ -660,10 +666,24 @@ func validateActivationSurfaces(
 
 func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRepair bool) error {
 	if !allowMissing && !allowRepair {
+		if !standaloneProfileProcess() {
+			return validateExistingUserFile(home, path, uid, "hook config")
+		}
+		if err := validateExistingUserParentPrefix(home, path, uid, "hook config"); err != nil {
+			return err
+		}
+		if err := tightenLooseUserHookConfig(path, uid); err != nil {
+			return err
+		}
 		return validateExistingUserFile(home, path, uid, "hook config")
 	}
 	if err := validateOptionalUserPathPrefix(home, path, uid, "hook config", false); err != nil {
 		return err
+	}
+	if standaloneProfileProcess() {
+		if err := tightenLooseUserHookConfig(path, uid); err != nil {
+			return err
+		}
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -685,13 +705,20 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRe
 		return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", path)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		if allowRepair {
-			if ok, actual := fileOwnerMatches(path, uid); !ok {
-				return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
+		if !standaloneProfileProcess() {
+			if allowRepair {
+				if ok, actual := fileOwnerMatches(path, uid); !ok {
+					return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
+				}
+				return chmodOwnedPath(path, 0o600)
 			}
-			return chmodOwnedPath(path, 0o600)
+			return fmt.Errorf("enterprise hooks: hook config %s is group/other writable", path)
 		}
-		return fmt.Errorf("enterprise hooks: hook config %s is group/other writable", path)
+		// tightenLooseUserHookConfig already fixed a file the account owns.
+		if ok, actual := fileOwnerMatches(path, uid); !ok {
+			return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d; make the account own it (chown) and retry", path, actual, uid)
+		}
+		return fmt.Errorf("enterprise hooks: hook config %s is group/other writable; as that account, run: chmod go-w %s", path, path)
 	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
 		return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
@@ -730,11 +757,11 @@ func validateExistingUserFile(home, path string, uid int, label string) error {
 	if info.IsDir() {
 		return fmt.Errorf("enterprise hooks: %s path is a directory: %s", label, path)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("enterprise hooks: %s %s is group/other writable", label, path)
-	}
 	if ok, actual := fileOwnerMatches(path, uid); !ok {
-		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d", label, path, actual, uid)
+		return fmt.Errorf("enterprise hooks: %s %s owner uid=%d does not match target uid=%d; make the account own it (chown) and retry", label, path, actual, uid)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("enterprise hooks: %s %s is group/other writable; as that account, run: chmod go-w %s", label, path, path)
 	}
 	return nil
 }

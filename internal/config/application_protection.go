@@ -303,10 +303,14 @@ func (c *Config) appProtectionGuardrailOverride(connector string) (PerConnectorG
 	if c == nil || !c.ApplicationProtection.Enabled || c.manualConnectorConfigured(connector) {
 		return PerConnectorGuardrailConfig{}, false
 	}
+	overlay := c.ApplicationProtection.Guardrail
 	if pc, ok := c.ApplicationProtection.connectorOverride(connector); ok {
-		return pc.Guardrail, true
+		overlay = pc.Guardrail
 	}
-	return c.ApplicationProtection.Guardrail, true
+	// A profile's own connectors[c] entry wins over the automatic-protection
+	// overlay (see guardrail_profiles.go). Only derived configurations carry
+	// one.
+	return c.Guardrail.profileConnectorOverlay(connector, overlay), true
 }
 
 // EffectiveGuardrailModeForConnector resolves manual per-connector guardrail

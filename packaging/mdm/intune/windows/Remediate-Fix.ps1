@@ -249,6 +249,27 @@ function ConvertTo-DefenseClawResultJson {
 }
 # endregion DefenseClaw MDM shared helpers
 
+function Get-DefenseClawStoppedSideServices {
+    # From a failed verify result, the guardian and enumerator services that
+    # are not running while the gateway and sensor helper run. Starting just
+    # those repairs the drift; a full ensure re-applies the deployment and
+    # stops every service, so every user's hooks failed closed for well over
+    # a minute (GAP-0574). Any other failure returns nothing.
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Json)
+    try { $document = $Json | ConvertFrom-Json } catch { return @() }
+    $services = @($document.services)
+    $down = @($services | Where-Object { $_.required -and [string]$_.state -ne 'running' })
+    if ($down.Count -eq 0) { return @() }
+    foreach ($service in $down) {
+        if (@('guardian', 'enumerator') -notcontains [string]$service.kind -or
+            [string]$service.name -notmatch '^DefenseClaw[A-Za-z]+$') { return @() }
+    }
+    foreach ($kind in @('gateway', 'sensor_helper')) {
+        if (@($services | Where-Object { [string]$_.kind -eq $kind -and [string]$_.state -eq 'running' }).Count -eq 0) { return @() }
+    }
+    return @($down | ForEach-Object { [string]$_.name })
+}
+
 try {
     $deployment = Get-DefenseClawInstalledDeployment
 } catch {
@@ -259,6 +280,25 @@ if ($null -eq $deployment) {
     [Console]::Out.WriteLine('DefenseClaw: not installed (the Win32 app installs it)')
     exit 0
 }
+try {
+    $check = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 900 -ArgumentList @(
+        'enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
+    $stopped = @(Get-DefenseClawStoppedSideServices -Json ([string]$check.StdOut))
+    if ($check.ExitCode -ne 0 -and $stopped.Count -gt 0) {
+        $sc = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'sc.exe')
+        foreach ($name in $stopped) {
+            [void](Invoke-DefenseClawNative -FilePath $sc -TimeoutSeconds 60 -ArgumentList @('config', $name, 'start=', 'auto'))
+            [void](Invoke-DefenseClawNative -FilePath $sc -TimeoutSeconds 60 -ArgumentList @('start', $name))
+        }
+        Start-Sleep -Seconds 15
+        $after = Invoke-DefenseClawNative -FilePath $deployment.Cli -TimeoutSeconds 900 -ArgumentList @(
+            'enterprise', 'windows', 'verify', '--profile', 'standalone', '--json')
+        if ($after.ExitCode -eq 0) {
+            [Console]::Out.WriteLine("DefenseClaw $($deployment.Version): repaired (started $($stopped -join ', '))")
+            exit 0
+        }
+    }
+} catch { $null = $_ }
 try {
     $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -ArgumentList @(
         'enterprise', 'windows', 'ensure', '--profile', 'standalone', '--json')

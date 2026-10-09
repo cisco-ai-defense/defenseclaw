@@ -8,6 +8,9 @@ on:
   # their checks (incl. the Windows hook path) never execute until the
   # change reaches a main-targeting PR.
   pull_request:
+  # Runs every suite on one commit. A busy PR branch supersedes its
+  # pull_request run on each push, so its longest jobs never finish there.
+  workflow_dispatch:
 
 # Top-level permissions are intentionally read-only. Per-job
 # permissions overrides (none required at the moment) must remain
@@ -19,8 +22,9 @@ permissions:
 
 concurrency:
   # Supersede old commits within one PR, but never cancel a previous main
-  # merge's exact-SHA release canary when another merge lands.
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  # merge's exact-SHA release canary when another merge lands. A dispatched
+  # run is keyed by its commit, so later pushes to the branch do not cancel it.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -152,7 +156,10 @@ jobs:
             --package-dir internal/gateway \
             --shard-count "$GO_TEST_SHARDS" \
             --shard-index "$GO_TEST_SHARD")"
-          go test -race -count=1 -timeout 45m \
+          # -race also turns on checkptr in every package. In the transpiled
+          # SQLite (modernc.org) that every audit store runs, checkptr alone
+          # doubles the cost of a race shard; race detection stays on everywhere.
+          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
             -coverprofile="coverage-go-gateway-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
             ./internal/gateway
@@ -195,7 +202,8 @@ jobs:
             --package-dir internal/audit \
             --shard-count "$GO_TEST_SHARDS" \
             --shard-index "$GO_TEST_SHARD")"
-          go test -race -count=1 -timeout 45m \
+          # checkptr is off only in modernc.org: see Go Gateway Test.
+          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
             -coverprofile="coverage-go-audit-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
             ./internal/audit
@@ -247,7 +255,8 @@ jobs:
             fi
           done
           test "${#packages[@]}" -gt 0
-          go test -race -count=1 -timeout 45m \
+          # checkptr is off only in modernc.org: see Go Gateway Test.
+          go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 45m \
             -coverprofile="coverage-go-other-$GO_PACKAGE_SHARD.out" \
             "${packages[@]}"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
@@ -366,6 +375,8 @@ jobs:
             goarch: arm64
           - goos: darwin
             goarch: arm64
+          - goos: windows
+            goarch: amd64
     steps:
       - if: ${{ needs.changes.outputs.go == 'false' }}
         run: echo "No Go change in this pull request; the cross build is skipped."
@@ -731,6 +742,11 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.install != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # "|" falls back to direct on any proxy error; the default "," only
+      # falls back on 404/410, so a proxy.golang.org stream reset
+      # (INTERNAL_ERROR) failed the release build.
+      GOPROXY: https://proxy.golang.org|direct
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -738,6 +754,23 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+          # Every job shares the go.sum-only key, and the first job to save it
+          # stored a ~9 MB module cache, so this build downloaded most modules
+          # on every run. Adding this job's build script to the key gives it a
+          # cache with the full release module set.
+          cache-dependency-path: |
+            go.sum
+            scripts/build-release-assets.sh
+      - name: Download Go modules
+        run: |
+          for attempt in 1 2 3; do
+            if go mod download; then
+              exit 0
+            fi
+            echo "::warning::go mod download failed (attempt $attempt of 3)"
+            sleep $((attempt * 15))
+          done
+          exit 1
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "24"
@@ -877,7 +910,8 @@ jobs:
           ./internal/ipc/...
       - name: Go tests of the darwin paths in the agent-process, connector, gateway and CLI packages
         # The go-test jobs run these packages on Linux only. On macOS this runs
-        # the kern.proc agent-process lookup, every connector package
+        # the kern.proc agent-process lookup, the gethostuuid machine id behind
+        # agt- IDs, every connector package
         # (hookexec and the /etc/codex requirements path included) and, in
         # internal/gateway and internal/cli, the tests of their darwin, unix,
         # linux||darwin and !windows test files plus the foreign-hook guard,
@@ -892,7 +926,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-tmp"
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
-          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/gateway/connector/...
+          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/agentidentity/... ./internal/gateway/connector/...
           unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
             local file names=()
             for file in "$@"; do

@@ -134,7 +134,7 @@ share, and then the others by the names `--harness` takes:
   Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
     Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
     Codex (codex)         model credential ~/.codex/auth.json ✓
-  Other harnesses: agy, amp (not verified yet), copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
+  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
 ```
 
 On a Mac the gateway questions differ: instead of the mounts and telemetry
@@ -202,8 +202,10 @@ What setup does, in order:
    Linux. This edits `gateway.toml` with a timestamped backup and restarts
    the gateway. It lets whoever can call your local gateway (only you, over
    mTLS) ask for host mounts; agents cannot reach the gateway, and
-   DefenseClaw mounts only the folder you launch from. Say no, or pass
-   `--no-mounts`, and every run works on a copy instead.
+   DefenseClaw mounts only the folder you launch from and the read-only
+   settings Claude Code and Codex sandboxes need. Say no, or pass
+   `--no-mounts`, and no Claude Code or Codex sandbox can start, a `--copy`
+   run included; other harnesses run on a copy.
 
    On a Mac, setup asks instead whether to run sandboxes in OpenShell
    MicroVMs (the default answer is yes, which `--yes` and
@@ -268,7 +270,7 @@ What setup does, in order:
 | --- | --- |
 | `--harness NAME` | A harness to set up; repeat it for more. It is added to `openshell.harnesses`, which keeps the harnesses set up before. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
 | `--install-openshell` | Install OpenShell without asking. |
-| `--no-mounts` | Leave bind mounts off (Linux); every run works on a copy. A Mac always works on a copy. |
+| `--no-mounts` | Leave bind mounts off (Linux): no Claude Code or Codex sandbox can start, and other harnesses run on a copy. A Mac always works on a copy. |
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
 | `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. On macOS setup leaves it on either way. |
 | `--skip-images` | Don't build images now; the first run builds its image. |
@@ -397,10 +399,15 @@ Arguments after `--` go to the harness:
 defenseclaw sandbox run claude -- --model sonnet
 ```
 
-An option whose value holds a space is not recorded with the run, so a later
-`sandbox connect` starts the harness with the option and no value; the run warns when
-this happens. Write the value attached (`-- --append-system-prompt="be brief"`) to have
-it recorded.
+The run records its options for a later `sandbox connect`, up to the first
+word that is not an option, such as a prompt. An option followed by a word
+with a space ends the record: `sandbox connect` passes that option without
+the word, and none of the options after it, so with
+`-- --append-system-prompt "be brief" --model sonnet` it passes only
+`--append-system-prompt`. The run warns when this happens, and notes it in
+one line when that word is the last one, as a prompt after a switch is. Write the value
+attached (`-- --append-system-prompt="be brief"`) to have it recorded, and put
+a prompt after the options.
 
 `--prompt TEXT` (`-p`) runs the harness headless with one prompt and
 streams its output, so it works without a terminal too:
@@ -1566,6 +1573,8 @@ which runs NVIDIA's installer and sets up the service.
 | You see | Do this |
 | --- | --- |
 | ``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on`` | Run setup. |
+| `install OpenShell: Homebrew at /opt/homebrew belongs to …, and you (…) cannot write to …` (macOS) | Homebrew belongs to another account, and NVIDIA's installer runs it as you without `sudo`. Have its owner give you write access, or use a Homebrew of your own, then run `defenseclaw sandbox setup` again. See [a Homebrew that belongs to another account](/docs/sandboxes/macos#a-homebrew-that-belongs-to-another-account). |
+| `install OpenShell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it` (macOS) | Homebrew installed OpenShell and started its gateway; the installer then failed starting it or registering it with the OpenShell CLI. Setup shows the check that still fails and its fix (on a Homebrew outside `/opt/homebrew`, `openshell gateway add …` with `OPENSHELL_LOCAL_TLS_DIR` set). Run it, then run `defenseclaw sandbox setup` again. See [macOS](/docs/sandboxes/macos#common-problems). |
 | `install OpenShell: Homebrew could not install the nvidia/openshell formula` (macOS) | Read Homebrew's `Error:` line just above it. Most often your developer tools are older than Homebrew wants for your macOS release (`Your Xcode (26.2) … is too outdated`): update them as Homebrew says, then run `defenseclaw sandbox setup` again. Homebrew checks `/Applications/Xcode.app` even when `xcode-select` selects the Command Line Tools; setup then says ``Homebrew checks Xcode 26.2 at /Applications/Xcode.app even so``, and you update or delete that Xcode. See [developer tools](/docs/sandboxes/macos#developer-tools). |
 | On macOS, the doctor's **Landlock** check reports no Landlock, `sandbox run` refuses with ``no sandbox can start on this gateway: it runs sandboxes on the docker driver``, or a run or start ends with ``sandbox "<name>" is in error state`` and a next line ``→ this gateway runs sandboxes on the docker driver`` | The gateway still runs the Docker driver, and Docker Desktop's Linux VM kernel has no Landlock, which OpenShell needs. Switch it to MicroVMs: run `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`) and answer yes to the MicroVM question (see [macOS](#macos)). |
 | On macOS, a run ends with ``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: … does not resolve in <name>: its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves`` | The sandbox was made from a harness image built before DefenseClaw's images for MicroVMs answered `localhost`, and a sandbox keeps its image. Do what the next line says (``→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete <name>`) and run it again``): the new sandbox boots a rebuilt image. |

@@ -10,10 +10,10 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make cli-test` | Python `pytest` suite under `cli/tests/` |
 | `make cli-test-cov` | Python pytest coverage report |
 | `make tui-test` | Textual TUI suite under `cli/tests/tui/` |
-| `make gateway-test` | Race-enabled Go tests for gateway and `test/` |
+| `make gateway-test` | Race-enabled Go tests for gateway (as `GO_TEST_SHARDS` parallel shards, default 8) and `test/` |
 | `make security-suite-test` | Deterministic security + PII coverage suite (regex + stubbed judge); see [SECURITY-TEST-SUITE.md](SECURITY-TEST-SUITE.md) |
 | `make security-suite-eval` | Live LLM-judge scoring of the security + PII corpus (needs `DEFENSECLAW_LLM_KEY`) |
-| `make go-test-cov` | Race-enabled Go coverage across all packages |
+| `make go-test-cov` | Race-enabled Go coverage across all packages (gateway and audit as parallel shards) |
 | `make ts-test` | OpenClaw plugin Vitest suite |
 | `make rego-test` | OPA tests for `policies/rego/` |
 | `make check` | v7 parity, observability-v8, dashboard, provider, model-catalog, and guardrail-catalog gates |
@@ -27,6 +27,9 @@ make test-file FILE=test_cmd_plugin
 
 # One Go package or test
 go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
+
+# The whole gateway package runs past go test's default 10m deadline
+go test ./internal/gateway -count=1 -timeout 30m
 
 # One TypeScript plugin test
 cd extensions/defenseclaw
@@ -200,7 +203,7 @@ assets on every platform before publishing them. See the
 
 | Workflow | Purpose |
 |----------|---------|
-| `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR, and the enterprise install lanes (deb, rpm, macOS pkg and Windows services) |
+| `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR, and the enterprise install lanes (deb, rpm, macOS pkg and Windows services). Each push to a pull request cancels its running CI, so on a busy branch run `gh workflow run ci.yml --ref <branch>` (and `windows-native.yml`): a dispatch tests that commit to the end and later pushes do not cancel it |
 | `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | One manual build, sign, install-gate and publish pipeline for a reviewed `main` commit |

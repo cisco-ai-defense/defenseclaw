@@ -197,6 +197,25 @@ func TestConfiguredConnectorNameFallsBackToClawMode(t *testing.T) {
 	if got := configuredConnectorName(cfg); got != "codex" {
 		t.Fatalf("configuredConnectorName = %q, want codex", got)
 	}
+
+	// GAP-0361: guardrail.connectors names the connector; the claw.mode
+	// default must not add an openclaw connector nobody configured.
+	cfg.Claw.Mode = "openclaw"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
+	if got := guardrailConnectorName(cfg); got != "claudecode" {
+		t.Fatalf("guardrailConnectorName with guardrail.connectors only = %q, want claudecode", got)
+	}
+}
+
+func TestSecureClientGuardrailConnectorNameKeepsClawMode(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "secure_client"
+	cfg.Claw.Mode = "openclaw"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
+	if got := guardrailConnectorName(cfg); got != "openclaw" {
+		t.Fatalf("Secure Client connector = %q, want openclaw", got)
+	}
 }
 
 // TestResolveActiveConnector_KnownNameReturnsConnector covers the

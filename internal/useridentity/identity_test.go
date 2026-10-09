@@ -117,3 +117,51 @@ func TestForHomeOnNonDirectoryResolvesNothing(t *testing.T) {
 		}
 	}
 }
+
+// The Secure Client profile keeps passwd names as the system reports them
+// (GAP-0149, issue #1092); every other profile gets the bare account.
+func TestKeepQualifiedNamesKeepsThePasswdName(t *testing.T) {
+	t.Cleanup(func() { KeepQualifiedNames(false) })
+	if got := passwdAccountName(`CORP\alice`); got != "alice" {
+		t.Fatalf("bare name = %q, want alice", got)
+	}
+	KeepQualifiedNames(true)
+	if got := passwdAccountName(`CORP\alice`); got != `CORP\alice` {
+		t.Fatalf("Secure Client name = %q, want CORP\\alice", got)
+	}
+}
+
+// A qualified --user filter lists only the account of that domain; a bare
+// filter still lists every domain's account of the name, and a Windows row,
+// which keeps the bare name next to the SID, still matches DOMAIN\name
+// (GAP-0366, GAP-0079).
+// GAP-0366, GAP-1080: a qualified filter selects a row recorded with that
+// domain or the account the OS resolves it to, never a twin that shares the
+// bare name; a bare filter selects both twins.
+func TestAccountFilterSelectsOneTwinByQualifiedName(t *testing.T) {
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
+	for _, tc := range []struct {
+		filter   string
+		resolved []string
+		id, name string
+		want     bool
+	}{
+		{"eli-twin@dclab.test", nil, "94403922", "eli-twin@dclab.test", true},
+		{"eli-twin@dclab.test", nil, "1009", "eli-twin", false},
+		{"ELI-TWIN@DCLAB.TEST", []string{"94403922"}, "94403922", "eli-twin", true},
+		{`CORP\alice`, nil, "70001", `OTHER\alice`, false},
+		{`CORP\alice`, nil, "70002", `corp\alice`, true},
+		{"eli-twin", nil, "1009", "eli-twin", true},
+		{"eli-twin", nil, "94403922", "eli-twin@dclab.test", true},
+		{`DCLAB\dcad-o4wd`, []string{domainSID}, domainSID, "dcad-o4wd", true},
+		{`DCLAB\dcad-o4wd`, []string{domainSID}, localSID, "dcad-o4wd", false},
+		{`.\dcad-o4wd`, []string{localSID}, domainSID, "dcad-o4wd", false},
+		{`DCLAB\dcad-o4wd`, nil, domainSID, "dcad-o4wd", false},
+		{"dcad-o4wd", nil, localSID, "dcad-o4wd", true},
+		{localSID, nil, localSID, "dcad-o4wd", true},
+	} {
+		if got := NewAccountFilter(tc.filter, tc.resolved...).Matches(tc.id, tc.name); got != tc.want {
+			t.Errorf("filter %q (resolved %v) on %q %q = %v, want %v", tc.filter, tc.resolved, tc.id, tc.name, got, tc.want)
+		}
+	}
+}

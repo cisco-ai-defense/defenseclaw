@@ -102,6 +102,8 @@ Every canonical record belongs to one bucket:
 | `network.egress` | What outbound operation or egress policy decision occurred? |
 | `agent.lifecycle` | How did root agents, subagents, turns, workflows, phases, and executions progress? |
 | `ai.discovery` | What AI components and runtimes were discovered? |
+
+The ai.discovery bucket includes one ai.runtime.plane_health log per running plane per runtime poll (about once a minute by default). Remove this bucket from a destination route to omit those logs there; the route will also omit other discovery records.
 | `telemetry.ingest` | What inbound OTLP leaf was accepted, normalized, rejected, or re-exported? |
 | `platform.health` | Are gateway, storage, exporters, queues, guardrail, and sidecar healthy? |
 | `diagnostic` | What explicit debug/diagnostic fact does not belong to another product bucket? |
@@ -194,6 +196,31 @@ to that destination. Supported selectors are `buckets`, `sources`, `connectors`,
 Collection happens before routing and controls runtime cost. If a bucket has
 `collect.traces: false`, no destination route can recreate those traces.
 
+The `telemetry.ingest` bucket also carries `correlation.relationship.changed`,
+the links between a session's events, turns, tools and agents that Agent360
+draws. One is sent when a relationship is created or its status changes, not
+for every event that adds evidence to it. Lineage is still a large share of a
+busy session's export. To keep it out of a destination such as Splunk HEC,
+drop it with a route ahead of the routes that send:
+
+```yaml
+observability:
+  destinations:
+    - name: soc
+      kind: splunk_hec
+      endpoint: https://splunk.example.com:8088/services/collector/event
+      token_env: SPLUNK_HEC_TOKEN
+      routes:
+        - name: drop-relationship-changes
+          signals: [logs]
+          selector: {event_names: [correlation.relationship.changed]}
+          action: drop
+        - name: everything-else
+          signals: [logs]
+          selector: {buckets: ["*"]}
+          action: send
+```
+
 A small set of compliance events, the *mandatory floor*, is always written to
 local SQLite even when log collection for its bucket is turned off. These
 events carry no prompt or tool content, and they are never exported.
@@ -217,9 +244,13 @@ pull-based and rejects `batch`.
 If a queue count or byte limit would be exceeded, DefenseClaw drops the newest
 attempted enqueue, preserves older FIFO work and mandatory SQLite history, and
 records bounded health telemetry. Sibling destinations continue independently.
-Transient or ambiguous acknowledgement failures retry the exact immutable
-projection; a lost acknowledgement can create a duplicate, so consumers use the
-record ID for deduplication. See the generated
+Transient or ambiguous acknowledgement failures keep the exact immutable
+projection queued for at most 24 attempts, with exponential backoff beginning
+at 2 seconds and capped at 30 seconds. Each attempt has a bounded timeout.
+A batch still unacknowledged after that window is counted as dropped; queued
+records also vanish on gateway restart. Mandatory SQLite history remains, but
+optional destinations do not automatically backfill it. A lost acknowledgement
+can create a duplicate, so consumers use the record ID for deduplication. See the generated
 [configuration reference](/docs/reference/configuration) for kind-specific fields.
 
 ### Destination failure circuits
@@ -228,15 +259,28 @@ Each optional destination signal route (logs, traces, or metrics) has an
 independent in-memory delivery circuit. By default, three consecutive terminal
 transient or permanent-payload batches open that route for 30 seconds. A single
 payload rejection therefore does not suppress later valid telemetry.
-Authentication and unsafe-endpoint failures open the affected route
-immediately for 24 hours because retrying unchanged configuration would only
-repeat expensive or unsafe work.
+Authentication failures open the affected route immediately for five minutes;
+a half-open probe then retries it. Unsafe-endpoint failures open for 24 hours
+because retrying an unchanged unsafe endpoint would repeat unsafe work.
 
-While a circuit is open, new and already queued work for that route is rejected
-before adapter delivery and size-estimation work. Sibling signals,
-destinations, and mandatory local SQLite persistence continue. When cooldown
-expires, exactly one record is admitted as a half-open recovery probe. Success
-closes the circuit; another terminal failure reopens it.
+While a circuit is open, new and already queued work for that route remains
+in its bounded in-memory queue. When the queue fills, the newest record for
+that route is dropped and counted. Sibling signals, destinations, and mandatory
+local SQLite persistence continue. After cooldown, doctor and gateway health report half-open as a warning even
+if no producer has sent another record. The oldest queued batch is the
+half-open recovery probe. Success closes the circuit; another terminal
+failure reopens it. A gateway restart loses queued optional exports, and
+records permanently rejected by a collector or exhausted by the bounded retry
+window are not automatically replayed. The local SQLite event history retains
+them; export that history separately if backfill matters. Doctor shows dropped
+and rejected counts per destination. The `defenseclaw.queue.drops` delta
+metric reports those record losses per `destination.<name>.<signal>` queue,
+with `dropped` or `rejected` as the reason. `dropped` includes queue overflow,
+retry exhaustion, and records abandoned during shutdown. When the gateway stops
+before a destination takes its queued records, `gateway.log` names each
+destination signal and how many records it lost, and the next gateway start
+counts them in that destination's `dropped` counter and in
+`defenseclaw.queue.drops`.
 
 Gateway health and `defenseclaw doctor` expose the circuit state, consecutive
 failures, bounded failure class, and open deadline. Transient-open and
@@ -345,6 +389,18 @@ observability:
     retention_days: 7
 ```
 
+`observability.local.path` must resolve inside the DefenseClaw data directory
+(`~/.defenseclaw` for a per-user install). `defenseclaw doctor` reports an
+outside path as a custody failure; move the database under that directory.
+
+If a write to the local history fails, for example because the disk is full,
+the record still goes to the optional destinations and gateway health counts
+it as `dropped` on the `local-sqlite` destination. When writes resume, the
+gateway stores one `sqlite.write_failed` platform-health record that says how
+many records the local history is missing, so the gap in an audit export is
+not silent. Those records are not written to the local history afterwards;
+read them from the destinations that received them.
+
 Seven days is also the default when `retention_days` is omitted. The gateway
 runs the graph-aware SQLite reaper after startup readiness and every six hours;
 CLI-only writes are reaped the next time the gateway starts. Existing v8
@@ -354,8 +410,14 @@ must preserve a longer local window. `retention_days: 0` retains indefinitely
 and produces a capacity warning.
 
 The reaper removes eligible event, evidence, judge-body, and correlation rows
-in dependency order. SQLite can reuse the freed pages, but the database file
-does not shrink automatically. Raw judge-body capture is
+in dependency order. It deletes in small batches and pauses after each, so the
+hooks that write to the same database keep most of their speed while a large
+backlog is pruned. A run that stops at its time budget with rows left (five
+minutes for the correlation ledger) is followed by another a minute later
+instead of six hours later. A new `audit.db` returns the pages a prune freed to
+the file system in steps, until a tenth of the file is left free for the next
+inserts; a file created by an earlier release keeps its size, and SQLite
+reuses the freed pages. Raw judge-body capture is
 controlled separately by `guardrail.retain_judge_bodies`. Redaction profiles
 do not apply to it: while it is `true` (the default), `judge_bodies.db` keeps
 the raw LLM-judge request and response text, which can quote secrets from
@@ -372,10 +434,15 @@ survives a long shutdown. A large backlog is removed in small batches over
 several passes. Unlike `audit.db`, `inventory.db` returns freed space to the
 filesystem: new files use incremental auto-vacuum, and a file created by an
 earlier release is compacted once after its backlog is pruned when enough free
-disk space is available. `retention_days: 0` keeps inventory history
-indefinitely as well. While `ai_discovery.enabled` is `false` nothing
-maintains `inventory.db`; it only holds scan history, so it can be deleted with
-the gateway stopped. `defenseclaw doctor` warns
+disk space is available. The same sweep removes agent identities (the
+`agt-` ledger behind `defenseclaw agent identities`) that have not been seen
+within the window, so agents and accounts that were removed do not stay listed;
+an agent that runs again is listed again under the same id. `retention_days: 0`
+keeps inventory history and agent identities indefinitely as well. `inventory.db`
+also holds the agent identity and session ledger. When `ai_discovery.enabled` is
+`false`, hooks can still add identities and sessions, but the retention sweep
+does not run. Deleting the file loses every `agt-` listing and session count.
+`defenseclaw doctor` warns
 (`doctor.state.inventory-storage-size`) when `inventory.db` reaches 1 GiB.
 
 ## Choose an operator view

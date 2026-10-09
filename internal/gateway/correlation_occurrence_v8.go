@@ -100,7 +100,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 
 	now := time.Now().UTC()
 	lifecycle, hasLifecycle := spec.LifecycleForEvent(req.HookEventName)
-	cursor, hasCursor := correlationCursorForHook(ctx, repo, instance.ConnectorInstanceID, req, spec)
+	cursor, hasCursor := correlationCursorForHook(ctx, repo, instance.ConnectorInstanceID, req, spec, a.managedAIDOnly())
 	if hasCursor {
 		if req.AgentID == "" {
 			req.AgentID = cursor.AgentID
@@ -118,12 +118,21 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	// Mint only on a reviewed lifecycle boundary. UUIDv7 IDs are persisted in
 	// the same transaction as the occurrence so restart never falls back to a
 	// process-local "latest turn" map.
+	// The minted agent is the session's root agent, with the ID the hook
+	// model and lifecycle records derive for it (hookLLMEventMeta), so every
+	// row of one session carries the same agent_id. Secure Client keeps the
+	// UUIDv7 agent of main (issue #1092).
 	if req.SessionID != "" && req.AgentID == "" &&
 		(lifecycle == connector.CorrelationLifecycleSessionStart || lifecycle == connector.CorrelationLifecycleTurnStart) {
-		if id, idErr := audit.NewSemanticEventID(); idErr == nil {
+		req.AgentID = agentNodeID(req.AgentIdentityID, req.ConnectorName, req.SessionID, "root")
+		if a.managedAIDOnly() {
+			id, idErr := audit.NewSemanticEventID()
+			if idErr != nil {
+				return ctx, req, idErr
+			}
 			req.AgentID = string(id)
-			appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
 		}
+		appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
 	}
 	if req.TurnID == "" && lifecycle == connector.CorrelationLifecycleTurnStart &&
 		spec.Allows(connector.CorrelationInferencePromptBoundaryTurn) {
@@ -481,7 +490,7 @@ func (a *APIServer) finalizeHookCorrelationReceipt(
 	return repo.MarkOccurrenceCanonicalPersisted(ctx, *receipt, time.Now().UTC())
 }
 
-func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationRepository, instance audit.ConnectorInstanceID, req agentHookRequest, spec connector.CorrelationSpec) (audit.CorrelationCursor, bool) {
+func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationRepository, instance audit.ConnectorInstanceID, req agentHookRequest, spec connector.CorrelationSpec, secureClient bool) (audit.CorrelationCursor, bool) {
 	if req.SessionID == "" {
 		return audit.CorrelationCursor{}, false
 	}
@@ -490,6 +499,22 @@ func correlationCursorForHook(ctx context.Context, repo *audit.CorrelationReposi
 	if req.AgentID != "" {
 		cursor, err = repo.GetCursor(ctx, instance, req.SessionID, req.AgentID)
 	} else {
+		// Outside Secure Client, an identity-scoped agentless hook can
+		// restore only its own deterministic root cursor. This exact key
+		// lookup does not infer that an arbitrary agentless hook is main.
+		// The registry is process-local and cannot authorize a generic
+		// cursor after restart.
+		if req.AgentIdentityID != "" && !secureClient {
+			main := agentNodeID(req.AgentIdentityID, req.ConnectorName, req.SessionID, "root")
+			if own, getErr := repo.GetCursor(ctx, instance, req.SessionID, main); getErr == nil && own.Active {
+				return own, true
+			}
+			return audit.CorrelationCursor{}, false
+		}
+		if req.AgentIdentityID != "" &&
+			SharedAgentRegistry().SessionSharedWithOtherIdentity(ctx, req.SessionID, req.AgentIdentityID) {
+			return audit.CorrelationCursor{}, false
+		}
 		cursor, err = repo.FindActiveCursor(ctx, instance, req.SessionID)
 		if errors.Is(err, audit.ErrCorrelationConflict) && spec.Allows(connector.CorrelationInferenceAgentlessMainAgent) {
 			// A subagent's cursor is active next to the main agent's (a

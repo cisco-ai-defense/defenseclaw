@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -52,6 +53,9 @@ type localLogFactory struct {
 	signer         audit.ProjectionIntegritySigner
 	recordBuilder  *observability.RecordBuilder
 	healthReporter audit.EventHistoryHealthReporter
+	// lostWrites counts, across generations, the log records whose mandatory
+	// SQLite append failed and that no sqlite.write_failed record reported yet.
+	lostWrites *atomic.Uint64
 }
 
 func (factory *localLogFactory) Name() string { return LocalLogComponentName }
@@ -129,6 +133,7 @@ func (factory *localLogFactory) Prepare(
 		history:     writer,
 		digest:      input.Config.PlanDigest,
 		alertWriter: alertWriter,
+		lostWrites:  factory.lostWrites,
 	}, nil
 }
 
@@ -144,6 +149,62 @@ type localLogComponent struct {
 
 	active atomic.Bool
 	closed atomic.Bool
+
+	// writes are this generation's mandatory SQLite appends, reported as the
+	// local-sqlite destination's counters (GAP-1100).
+	writes     localWriteCounters
+	lostWrites *atomic.Uint64
+}
+
+type localWriteCounters struct {
+	accepted  atomic.Uint64
+	delivered atomic.Uint64
+	dropped   atomic.Uint64
+}
+
+func (counters *localWriteCounters) snapshot() delivery.Counters {
+	return delivery.Counters{
+		Accepted: counters.accepted.Load(), Delivered: counters.delivered.Load(), Dropped: counters.dropped.Load(),
+	}
+}
+
+// localWriteFailed reports a failed mandatory SQLite append (disk full,
+// read-only store), not a cancelled or rejected record.
+func localWriteFailed(err error) bool {
+	var pipelineErr *pipeline.Error
+	return errors.As(err, &pipelineErr) && pipelineErr.Code() == pipeline.ErrorLocalWrite &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+// countWrite counts one Process result: a persisted record is delivered, a
+// failed append is dropped. Records that never reached the append (dropped by
+// collection, managed-only, invalid) are not local-sqlite work.
+func (component *localLogComponent) countWrite(outcome pipeline.LocalLogOutcome, err error) {
+	switch {
+	case localWriteFailed(err):
+		component.writes.accepted.Add(1)
+		component.writes.dropped.Add(1)
+		if component.lostWrites != nil {
+			component.lostWrites.Add(1)
+		}
+	case err == nil && outcome.LocalPersisted():
+		component.writes.accepted.Add(1)
+		component.writes.delivered.Add(1)
+	}
+}
+
+// countBatch counts one atomic batch: when its commit fails every admitted
+// record of the batch is lost from local history.
+func (component *localLogComponent) countBatch(outcomes []pipeline.LocalLogOutcome, err error) {
+	failed := localWriteFailed(err)
+	for _, outcome := range outcomes {
+		switch {
+		case outcome.LocalPersisted():
+			component.countWrite(outcome, nil)
+		case failed && outcome.Admission() != router.AdmissionDrop && !outcome.ManagedOnly():
+			component.countWrite(outcome, err)
+		}
+	}
 }
 
 func (component *localLogComponent) applyAlertAcknowledgement(
@@ -178,7 +239,22 @@ func (component *localLogComponent) Process(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
-	return component.pipeline.Process(ctx, metadata, builder)
+	outcome, err := component.pipeline.Process(ctx, metadata, builder)
+	component.countWrite(outcome, err)
+	return outcome, err
+}
+
+func (component *localLogComponent) ProcessAtomicBatch(
+	ctx context.Context,
+	items []pipeline.AtomicBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	if component == nil || component.pipeline == nil || component.store == nil ||
+		!component.active.Load() || component.closed.Load() {
+		return nil, &localFactoryError{}
+	}
+	outcomes, err := component.pipeline.ProcessAtomicBatch(ctx, items)
+	component.countBatch(outcomes, err)
+	return outcomes, err
 }
 
 func (component *localLogComponent) ProcessLocalOnly(
@@ -190,7 +266,9 @@ func (component *localLogComponent) ProcessLocalOnly(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
-	return component.pipeline.ProcessLocalOnly(ctx, metadata, builder)
+	outcome, err := component.pipeline.ProcessLocalOnly(ctx, metadata, builder)
+	component.countWrite(outcome, err)
+	return outcome, err
 }
 
 func (component *localLogComponent) ProcessImported(
@@ -204,7 +282,9 @@ func (component *localLogComponent) ProcessImported(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
-	return component.pipeline.ProcessImported(ctx, metadata, originDestination, suppressAll, builder)
+	outcome, err := component.pipeline.ProcessImported(ctx, metadata, originDestination, suppressAll, builder)
+	component.countWrite(outcome, err)
+	return outcome, err
 }
 
 func (component *localLogComponent) ProcessManagedLogFallback(
@@ -216,7 +296,9 @@ func (component *localLogComponent) ProcessManagedLogFallback(
 		!component.active.Load() || component.closed.Load() {
 		return pipeline.LocalLogOutcome{}, &localFactoryError{}
 	}
-	return component.pipeline.ProcessManagedLogFallback(ctx, metadata, builder)
+	outcome, err := component.pipeline.ProcessManagedLogFallback(ctx, metadata, builder)
+	component.countWrite(outcome, err)
+	return outcome, err
 }
 
 func (component *localLogComponent) StopIntake(context.Context) error {

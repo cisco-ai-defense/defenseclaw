@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A per-user Linux or macOS gateway has no service unit, so after a reboot
@@ -44,7 +45,11 @@ if [ "$n" = 1 ]; then exit "${DC_COLD_FIRST_RC:-7}"; fi
 printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 `
 
+// The stub records only starts: the hook also asks the binary for session
+// facts (on macOS always, elsewhere when a credential cache can exist), and
+// that read never starts a gateway.
 const coldStartGatewayStub = `#!/bin/sh
+[ "$1" = hook ] && exit 0
 printf '%s|%s|%s|%s\n' "$HOME" "$*" "$(ulimit -S -t)" "$(ulimit -H -t)" >> "$DC_COLD_CAP/gateway.log"
 exit 0
 `
@@ -252,6 +257,24 @@ func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 		"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FIRST_RC=28")
 	if !strings.Contains(open.stdout, "the gateway is running but did not answer. Run `defenseclaw-gateway restart`") {
 		t.Errorf("fail-open stdout = %q, want the restart notice", open.stdout)
+	}
+}
+
+// GAP-0409: when the last start failed because config.yaml does not load, a
+// fail-closed hook says so instead of "run defenseclaw-gateway start".
+func TestShellHookNamesAConfigThatDoesNotLoad(t *testing.T) {
+	broken := func(dataDir string) {
+		past := time.Now().Add(-time.Hour)
+		_ = os.Chtimes(filepath.Join(dataDir, "config.yaml"), past, past)
+		_ = os.WriteFile(filepath.Join(dataDir, "gateway.cold-start-failed"), []byte("2026-10-07T00:00:00Z\nconfig-invalid\n"), 0o600)
+	}
+	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, broken,
+		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+	if !strings.Contains(run.stderr, "config.yaml does not load; run `defenseclaw config validate`") {
+		t.Fatalf("stderr = %q, want the config.yaml cause", run.stderr)
+	}
+	if code := exitCodeOf(run.err); code != 2 {
+		t.Fatalf("exit code = %d, want 2 (fail closed)", code)
 	}
 }
 

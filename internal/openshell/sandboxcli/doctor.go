@@ -51,14 +51,20 @@ type DoctorOptions struct {
 }
 
 func (a *App) defaultDoctor() *openshell.Doctor {
-	d := &openshell.Doctor{}
+	d := &openshell.Doctor{GatewayApplied: func(res *openshell.GatewayApplyResult) {
+		// A fix's gateway edit is DefenseClaw's, as setup's is: teardown
+		// restores the file only while it holds what DefenseClaw last wrote.
+		if err := a.recordGatewayApply(res); err != nil {
+			a.warnErr("could not record the gateway change for teardown: " + err.Error())
+		}
+	}}
 	if a.Cfg != nil {
 		o := a.Cfg.OpenShell
 		d.CLI = o.EffectiveBinary()
 		d.Discover = openshell.DiscoverOptions{Gateway: o.Gateway.Name}
 		want := o.UpstreamTelemetry
 		d.WantTelemetry = &want
-		d.BindMountsOptional = o.Workdir.Mode == config.OpenShellWorkdirCopy
+		d.BindMountsOptional = o.Workdir.Mode == config.OpenShellWorkdirCopy && len(mountedSettingsHarnesses(o.Harnesses)) == 0
 		// Every MicroVM gets the gateway-wide resources, which an
 		// organization's maximum must allow. The resolver refuses a
 		// malformed one on its own.

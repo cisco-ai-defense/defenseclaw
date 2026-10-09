@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -99,7 +100,13 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		msg, err := acp.ParseMessage(req.Payload)
+		// A guard forwards a null-id error response (GAP-0351); Secure
+		// Client keeps the parser of main.
+		parse := acp.ParseMessageAllowingNullIDErrors
+		if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+			parse = acp.ParseMessage
+		}
+		msg, err := parse(req.Payload)
 		if err != nil || msg.Method != req.Method || acp.Classify(msg, req.Direction) != req.Surface {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP envelope metadata does not match payload"})
 			return
@@ -115,32 +122,69 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP guard is not enabled"})
 		return
 	}
+	// refuse answers a guard whose editor entry the binding no longer
+	// admits. Outside Secure Client the answer says why and the refusal is
+	// audited: a guard of a profile moved from observe to action used to
+	// keep working unchecked, with nothing in the audit (GAP-0723).
+	refuse := func(message, code string, extra map[string]string) {
+		body := map[string]string{"error": message}
+		if !cfg.SecureClientIntegration() {
+			body["code"] = code
+			for key, value := range extra {
+				body[key] = value
+			}
+			reason := message
+			if extra["profile"] != "" {
+				reason += "; the pair now uses profile " + extra["profile"]
+			}
+			a.recordACPEvaluationV8(acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration()), req,
+				acp.Verdict{Action: "block", RawAction: "block", Severity: "MEDIUM", Reason: reason},
+				nil, nil, agent.ConnectorID, req.Profile, time.Since(started))
+		}
+		a.writeJSON(w, http.StatusForbidden, body)
+	}
 	profileName, profile, ok, matched := resolveACPProfileForPair(cfg.ACP, req.ClientID, req.AgentID, req.Profile)
+	if !matched && !cfg.SecureClientIntegration() {
+		// A pair switched off is reported as off, whatever profile it names
+		// now: the moved answer told the user to enroll and run setup for a
+		// pair that cannot run (GAP-0834).
+		if disabled := cfg.ACP.ACPPairDisabled(req.ClientID, req.AgentID); disabled != "" {
+			refuse("ACP pair is disabled centrally: "+disabled, acp.RefusalBinding, nil)
+			return
+		}
+	}
 	if !matched {
 		// Distinguishable on purpose: a stale guard argv and an undefined
 		// profile need different fixes, and "not configured" sent operators
 		// looking for a missing profiles: entry that was present all along.
-		a.writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "ACP profile does not match the configured binding for this client and agent; re-run acp setup",
-		})
+		current := cfg.ACP.ACPProfileForPair(req.ClientID, req.AgentID)
+		if current == "" {
+			current = "default"
+		}
+		refuse("ACP profile does not match the configured binding for this client and agent; re-run acp setup",
+			acp.RefusalProfileChanged, map[string]string{"profile": current, "mode": effectiveACPMode(cfg.ACP, current)})
 		return
 	}
 	if !ok {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP profile is not configured"})
+		refuse("ACP profile is not configured", acp.RefusalBinding, nil)
 		return
 	}
 	if !acpPairIsBound(cfg.ACP, req.ClientID, req.AgentID, profileName) {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP client or agent binding is disabled or pinned to another profile"})
+		refuse("ACP client or agent binding is disabled or pinned to another profile", acp.RefusalBinding, nil)
 		return
 	}
 	if !acpBindingAllowed(profile.AllowedClients, req.ClientID) || !acpBindingAllowed(profile.AllowedAgents, req.AgentID) {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP client or agent is outside the selected profile"})
+		refuse("ACP client or agent is outside the selected profile", acp.RefusalBinding, nil)
 		return
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		credential, ok := acpEnterpriseCredentialFromContext(r.Context())
 		if !ok || credential.ClientID != req.ClientID || credential.AgentID != req.AgentID || credential.Profile != profileName {
-			a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP enterprise credential is outside its enrolled binding"})
+			extra := map[string]string{}
+			if ok {
+				extra["credential_profile"] = credential.Profile
+			}
+			refuse("ACP enterprise credential is outside its enrolled binding", acp.RefusalCredentialBinding, extra)
 			return
 		}
 	}
@@ -151,7 +195,12 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID)
+	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration())
+	// Resolve the identity-based guardrail profile once, with the ACP
+	// agent's connector, as the hook, proxy and inspect paths do: resolved
+	// lazily, the request had no connector, so a connectors assignment never
+	// selected ACP traffic (GAP-0311).
+	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
 	if slices.Contains(profile.DeniedMethods, req.Method) {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile"}
 		if mode != string(acp.ModeAction) {
@@ -267,13 +316,15 @@ func acpWithheldOutputReason(reason string) string {
 // user's ACP token), to that user. The guard sends no identity headers, so
 // ACP finding, scan and span rows named no user or session and could not be
 // joined to the hook rows of the same session (GAP-1946).
-func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector string) context.Context {
+type acpUnboundAgentContextKey struct{}
+
+func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector string, secureClient bool) context.Context {
 	env := audit.EnvelopeFromContext(ctx)
 	changed := false
 	if env.Connector != connector {
 		env.Connector, changed = connector, true
 	}
-	if session := acpFrameSessionID(req); session != "" {
+	if session := acpFrameSessionID(req, secureClient); session != "" {
 		if SessionIDFromContext(ctx) == "" {
 			ctx = ContextWithSessionID(ctx, session)
 		}
@@ -285,21 +336,70 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	identity := AgentIdentityFromContext(ctx)
+	updated := false
 	if identity.UserID == "" && identity.UserName == "" && !gatewayRunsAsServiceAccount() {
 		if user := useridentity.Current(); !user.Empty() {
 			identity.UserID, identity.UserIDKind, identity.UserName = user.ID, user.IDKind, user.Name
-			ctx = ContextWithAgentIdentity(ctx, identity)
+			updated = true
 		}
+	}
+	// The agent an ACP client drives is the connector's install, so its
+	// records carry the agent identity the hook path derives for it.
+	var facts agentIdentityFacts
+	if identity.IdentityID == "" {
+		if facts = resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
+			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
+			updated = true
+		}
+	}
+	// An unbound managed credential must not adopt a hook agent merely
+	// because its caller supplied the same session ID.
+	if identity.IdentityID == "" && !ManagedEnterpriseActive() {
+		ctx = context.WithValue(ctx, acpUnboundAgentContextKey{}, true)
+	}
+	newSession := false
+	// And the instance (ais-) of the ACP session the frame belongs to,
+	// derived from that identity as the hook path derives one per session; a
+	// frame that names no session has none (GAP-0252). Secure Client ACP
+	// records carry no instance, as on main (issue #1092).
+	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && identity.IdentityID != "" && session != "" && !ManagedEnterpriseActive() {
+		if registry := SharedAgentRegistry(); registry != nil {
+			resolved, minted := registry.ResolveForAgentIdentity(ctx, identity.IdentityID, session, "")
+			newSession = minted
+			if resolved.AgentInstanceID != "" {
+				identity.AgentInstanceID = resolved.AgentInstanceID
+				updated = true
+			}
+		}
+	}
+	// Recorded for `defenseclaw agent identities` as the hook path and the
+	// LLM proxy record theirs, so an agent used only through ACP is listed
+	// and its ACP sessions are counted (GAP-0315).
+	sharedAgentIdentities.observe(facts, SessionIDFromContext(ctx), newSession)
+	if updated {
+		ctx = ContextWithAgentIdentity(ctx, identity)
 	}
 	return ctx
 }
 
 // acpFrameSessionID is the ACP sessionId a single frame names, or "".
-func acpFrameSessionID(req acp.Evaluation) string {
+func acpFrameSessionID(req acp.Evaluation, secureClient bool) string {
+	payload := req.Payload
 	if req.Aggregate {
-		return ""
+		// Main does not extract a session from completed-turn aggregates.
+		// Keep that record and trace shape for Secure Client (issue #1092).
+		if secureClient {
+			return ""
+		}
+		var turn struct {
+			Frames []json.RawMessage `json:"frames"`
+		}
+		if json.Unmarshal(payload, &turn) != nil || len(turn.Frames) == 0 {
+			return ""
+		}
+		payload = turn.Frames[0]
 	}
-	msg, err := acp.ParseMessage(req.Payload)
+	msg, err := acp.ParseMessage(payload)
 	if err != nil || len(msg.Params) == 0 {
 		return ""
 	}
@@ -417,7 +517,9 @@ func acpAgentInvokeInputV8(
 	caller := auditCallerIdentity(ctx)
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)))
+	caller.Identity.applyTo(&input)
 	return input
 }
 
@@ -510,18 +612,7 @@ func resolveACPProfileForPair(
 // at all, so disabling a client or an agent continues to disable every pair
 // that uses it.
 func acpPairIsBound(cfg config.ACPConfig, client, agent, profileName string) bool {
-	clientBinding, clientOK := cfg.Clients[client]
-	agentBinding, agentOK := cfg.Agents[agent]
-	if !clientOK || !clientBinding.Enabled || !agentOK || !agentBinding.Enabled {
-		return false
-	}
-	if pair, ok := cfg.ACPBindingFor(client, agent); ok {
-		if !pair.Enabled {
-			return false
-		}
-		return strings.TrimSpace(pair.Profile) == "" || strings.TrimSpace(pair.Profile) == profileName
-	}
-	return clientBinding.Profile == profileName && agentBinding.Profile == profileName
+	return len(cfg.ACPPairBindingRefusals(client, agent, profileName)) == 0
 }
 
 func effectiveACPMode(cfg config.ACPConfig, profileName string) string {
@@ -565,6 +656,57 @@ func withACPEnterpriseCredential(ctx context.Context, credential acp.EnterpriseC
 func acpEnterpriseCredentialFromContext(ctx context.Context) (acp.EnterpriseCredential, bool) {
 	credential, ok := ctx.Value(acpEnterpriseCredentialContextKey{}).(acp.EnterpriseCredential)
 	return credential, ok
+}
+
+// attachACPSubject names the account behind an authenticated ACP request.
+// A managed request carries the credential `enterprise acp enroll` issued
+// for one principal (uid:N or sid:S-...): the gateway keeps the record in
+// its protected state and only the bearer copy is in that user's private
+// ACP runtime, so presenting it proves the account as a per-user hook
+// credential does (GAP-0200, GAP-0206). A home: principal names no account
+// and binds none: the user the caller claimed is dropped too, so its records
+// name no one. A per-user gateway's caller is its own account. Under the
+// Secure Client integration identity facts are off and nothing changes.
+func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
+	ctx = PromoteSessionIfAuthenticated(ctx)
+	credential, enrolled := acpEnterpriseCredentialFromContext(ctx)
+	if !enrolled {
+		return a.attachProcessOwnerSubject(ctx)
+	}
+	if !identityFactsEnabled.Load() {
+		return ctx
+	}
+	identity := acpPrincipalIdentity(credential.Principal)
+	if identity == "" {
+		claimed := AgentIdentityFromContext(ctx)
+		claimed.UserID, claimed.UserIDKind, claimed.UserName = "", "", ""
+		return ContextWithAgentIdentity(ctx, claimed)
+	}
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	return attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity,
+		sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
+}
+
+// acpPrincipalIdentity is the canonical account of an enrollment principal
+// in this platform's kind: a uid (uid:1001) on Linux and macOS, a SID
+// (sid:S-1-5-21-...) on Windows. Those are the accounts enrollment proves
+// own the home the bearer is published to. Any other principal, such as the
+// home-directory fallback or the other platform's kind, names no account
+// and gives "".
+func acpPrincipalIdentity(principal string) string {
+	kind, value, _ := strings.Cut(strings.TrimSpace(principal), ":")
+	identity, ok := connector.CanonicalUserScopedIdentity(value)
+	if !ok {
+		return ""
+	}
+	want, wantKind := "uid", useridentity.KindPOSIXUID
+	if runtime.GOOS == "windows" {
+		want, wantKind = "sid", useridentity.KindWindowsSID
+	}
+	if kind != want || useridentity.KindForID(identity) != wantKind {
+		return ""
+	}
+	return identity
 }
 
 // authenticateACPToken applies different custody models without widening the
@@ -740,19 +882,34 @@ func (a *APIServer) acpScopedTokenReady() bool {
 	now := time.Now()
 	a.acpReadinessMu.Lock()
 	defer a.acpReadinessMu.Unlock()
-	if key == a.acpReadinessKey && now.Sub(a.acpReadinessCheckedAt) < 500*time.Millisecond {
+	window := a.acpReadinessWindow
+	if window < acpReadinessMinWindow {
+		window = acpReadinessMinWindow
+	}
+	if key == a.acpReadinessKey && now.Sub(a.acpReadinessCheckedAt) < window {
 		return a.acpReadinessValue
 	}
 	ready := a.acpScopedTokenReadyUncached()
 	a.acpReadinessKey = key
 	a.acpReadinessCheckedAt = now
 	a.acpReadinessValue = ready
+	// The managed check reads every enrollment record: keep its share of an
+	// unauthenticated /health poll at about 5% however large the inventory
+	// (GAP-0706).
+	a.acpReadinessWindow = min(max(20*time.Since(now), acpReadinessMinWindow), acpReadinessMaxWindow)
 	return ready
 }
 
+// The readiness answer is reused for 500 ms, or longer for a large managed
+// inventory, but never for more than 30 s.
+const (
+	acpReadinessMinWindow = 500 * time.Millisecond
+	acpReadinessMaxWindow = 30 * time.Second
+)
+
 func (a *APIServer) acpScopedTokenReadyUncached() bool {
 	if managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
-		return acp.EnterpriseCredentialsReady(a.scannerCfg.DataDir)
+		return acp.EnterpriseCredentialsReady(a.scannerCfg.DataDir, a.scannerCfg.SecureClientIntegration())
 	}
 	path := filepath.Join(a.scannerCfg.DataDir, "acp", ".token")
 	info, err := os.Lstat(path)

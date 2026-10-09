@@ -28,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -58,6 +59,10 @@ const codeGuardianTargetUserPath = "guardian_target_user_path"
 
 // guardianStateFile is the guardian state the gateway reads in DataDir.
 const guardianStateFile = "hook_guardian_state.json"
+
+// enumeratorStateFile is the hook enumerator's state beside targets.yaml:
+// its definitive misses per target and the source of each account.
+const enumeratorStateFile = ".targets-enumerator-state.json"
 
 var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
 
@@ -96,15 +101,33 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	}
 	var unverified, failed, removed, userPaths []string
 	stateFailed := map[string]bool{}
+	enumeration := enterprisehooks.LoadUnixEnumeratorState(env.P(filepath.Join(filepath.Dir(env.Layout.ManifestPath), enumeratorStateFile)))
 	for _, result := range state.Results {
 		if result.OK || strings.TrimSpace(result.Error) == "" {
 			continue
 		}
 		stateFailed[enterprisehooks.CredentialAttestationTarget{Connector: result.Connector, User: result.User, UserHome: result.UserHome}.Key()] = true
-		if targetAccountMissingError(result.Error) && l.accountAbsent(ctx, result.User) {
-			removed = append(removed, fmt.Sprintf(
-				"%s for user %s: the account no longer exists (the directory answers \"no such account\"); the enumerator removes this target after %d consecutive definitive misses, one per enumeration cycle",
-				result.Connector, result.User, enterprisehooks.UnixRevokeAfterMisses))
+		if (targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)) && l.accountAbsent(ctx, result.User) {
+			// An account that does not resolve, or whose home went with it, is
+			// not a protection failure.
+			// Say it is gone only when the enumerator confirmed it: a directory
+			// that does not answer gives the same "no such account", and then
+			// directory_lookups_failing says so and the target stays (GAP-0593).
+			// Even then it says the account does not resolve, not that it
+			// was deleted: while the directory is unreachable the lookup
+			// gives the same answer (GAP-0838).
+			if enterprisehooks.UnixMissConfirmed(enumeration, result.User, result.Connector) {
+				message := fmt.Sprintf("%s for user %s: the account does not resolve (the lookup answers \"no such account\"); "+
+					"if it was deleted, the enumerator removes this target after %d consecutive definitive misses, one per "+
+					"enumeration cycle; while the directory does not answer, nothing is removed",
+					result.Connector, result.User, enterprisehooks.UnixRevokeAfterMisses)
+				if directoryLookupsFailing(r.Warnings) {
+					message = fmt.Sprintf("%s for user %s: the account does not resolve while directory lookups are failing, "+
+						"so DefenseClaw cannot tell whether it was deleted; the target stays until the directory answers",
+						result.Connector, result.User)
+				}
+				removed = append(removed, message)
+			}
 			continue
 		}
 		if !unverifiedHookContractError(result.Error) {
@@ -169,7 +192,7 @@ const codeGuardianReportPending = "guardian_report_pending"
 func (l *lifecycle) awaitGuardianReport(ctx context.Context, since time.Time) bool {
 	env, r := l.env, l.result
 	targets := 0
-	if manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath)); err == nil {
+	if manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath)); err == nil {
 		targets = len(manifest.Targets)
 	}
 	deadline := env.Now().Add(env.GuardianReportTimeout)
@@ -370,7 +393,7 @@ const codeEnrolledAccountDeleted = "enrolled_account_deleted"
 // deletion (GAP-1867).
 func (l *lifecycle) describeDeletedEnrolledAccounts() {
 	env, r := l.env, l.result
-	manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath))
+	manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath))
 	if err != nil {
 		return
 	}
@@ -437,10 +460,16 @@ var targetAccountMissingPattern = regexp.MustCompile(`^enterprise hooks: target 
 // account" resolution error: `enterprise hooks: target account "<name>"
 // does not exist: no such account`, and nothing else. The match is on the
 // whole message, because other guardian errors can quote text from a
-// user's own files. A directory that cannot answer produces a different
-// error, which stays a guardian_target_failed.
+// user's own files.
 func targetAccountMissingError(message string) bool {
 	return targetAccountMissingPattern.MatchString(strings.TrimSpace(message))
+}
+
+// targetHomeUnavailableError matches the guardian's error for a home that
+// is not there (CheckUnixTargetHome): the home of a deleted account removed
+// with it, for one (GAP-0692).
+func targetHomeUnavailableError(message string) bool {
+	return strings.Contains(message, "user home ") && strings.Contains(message, " is not available yet")
 }
 
 // userHomePathRefusalPatterns are the whole of the per-user worker's
@@ -480,6 +509,16 @@ func userHomePathRefusal(reason, home string) bool {
 // account named user (getent passwd on Linux, the local directory node on
 // macOS). An account that still exists, a lookup that fails, or a name that
 // is not a plain account name keeps the target a guardian_target_failed.
+// directoryLookupsFailing reports the directory_lookups_failing warning.
+func directoryLookupsFailing(warnings []enterprisestatus.Message) bool {
+	for _, warning := range warnings {
+		if warning.Code == codeDirectoryLookups {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *lifecycle) accountAbsent(ctx context.Context, user string) bool {
 	user = strings.TrimSpace(user)
 	if l.env.Accounts == nil || !plainAccountName(user) {

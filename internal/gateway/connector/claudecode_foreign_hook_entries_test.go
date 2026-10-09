@@ -7,7 +7,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -28,13 +31,18 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
 
 	foreign := filepath.ToSlash(filepath.Join(dir, "other", ".defenseclaw", "hooks", "claude-code-hook.sh"))
+	foreignWithSpace := filepath.ToSlash(filepath.Join(dir, "Alice Smith", ".defenseclaw", "hooks", "claude-code-hook.sh"))
+	guardedForeign := claudeCodeMissingHookGuard(foreignWithSpace)
+	backslashForeign := strings.ReplaceAll(foreignWithSpace, "/", `\`)
+	guardedBackslashForeign := claudeCodeMissingHookGuard(backslashForeign)
+	escapedBackslashForeign := strings.ReplaceAll(backslashForeign, `\`, `\\`)
 	own := "/usr/local/bin/my-review-hook.sh"
 	handler := func(command string) map[string]interface{} {
 		return map[string]interface{}{"type": "command", "command": command}
 	}
 	data, err := json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
 		"PreToolUse": []interface{}{
-			map[string]interface{}{"matcher": "*", "hooks": []interface{}{handler(foreign), handler(own)}},
+			map[string]interface{}{"matcher": "*", "hooks": []interface{}{handler(foreign), handler(guardedForeign), handler(guardedBackslashForeign), handler(own)}},
 		},
 		"Stop": []interface{}{
 			map[string]interface{}{"hooks": []interface{}{handler(foreign)}},
@@ -61,24 +69,41 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 		t.Fatalf("Setup: %v", err)
 	}
 	after := mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreign) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) {
 		t.Fatalf("Setup kept the foreign DefenseClaw hook entries: %s", after)
 	}
 	if !strings.Contains(after, own) || !strings.Contains(after, filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))) {
 		t.Fatalf("Setup lost the user's hook or did not register its own: %s", after)
+	}
+	// A copied entry can also arrive after Setup; Teardown must remove it.
+	var copied map[string]interface{}
+	if err := json.Unmarshal([]byte(after), &copied); err != nil {
+		t.Fatal(err)
+	}
+	preToolUse := copied["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+	preToolUse[0].(map[string]interface{})["hooks"] = append(
+		preToolUse[0].(map[string]interface{})["hooks"].([]interface{}), handler(guardedBackslashForeign),
+	)
+	data, err = json.Marshal(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	after = mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreign) || !strings.Contains(after, own) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) || !strings.Contains(after, own) {
 		t.Fatalf("Teardown settings = %s, want the user's hook only", after)
 	}
 
 	for _, command := range []string{
 		"/opt/other/hooks/claude-code-hook.sh",
 		foreign + " --flag",
+		foreignWithSpace + " --flag",
 		"/home/u/.defenseclaw/hooks/other-hook.sh",
 		".defenseclaw/hooks/claude-code-hook.sh",
 	} {
@@ -95,4 +120,53 @@ func mustReadClaudeSettingsForTest(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// GAP-0542: after an account rename or a home move the registered hook path
+// is gone and the shell exits 127, which Claude Code treats as non-blocking,
+// so tool calls ran unguarded. The per-user command blocks (exit 2) with one
+// sentence when its script cannot start, passes the script exit through
+// otherwise, and an old-home guarded entry is still claimed for repair.
+func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "Alice Smith", ".defenseclaw", "hooks", "claude-code-hook.sh")
+	command, _ := claudeCodeHookInvocation(SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw")}, script)
+	if !strings.HasPrefix(command, shellSingleQuote(script)+" ") {
+		t.Fatalf("command %q does not start with the quoted hook script", command)
+	}
+	run := func() (int, string) {
+		cmd := exec.Command("/bin/sh", "-c", command)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode(), stderr.String()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return 0, stderr.String()
+	}
+	if code, stderr := run(); code != 2 || !strings.Contains(stderr, "Rerun the DefenseClaw installer") {
+		t.Fatalf("missing script: exit %d stderr %q, want a block (2) that names the repair", code, stderr)
+	}
+	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []int{0, 2, 3} {
+		if err := os.WriteFile(script, []byte(fmt.Sprintf("#!/bin/sh\nexit %d\n", want)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if code, stderr := run(); code != want || stderr != "" {
+			t.Fatalf("script exit %d: command exit %d stderr %q", want, code, stderr)
+		}
+	}
+	oldHome, _ := claudeCodeHookInvocation(SetupOpts{}, "/home/old/.defenseclaw/hooks/claude-code-hook.sh")
+	if !hookUsesForeignDefenseClawClaudeCodeScript(map[string]interface{}{"command": oldHome}) {
+		t.Fatalf("an old-home guarded entry %q is not claimed for repair", oldHome)
+	}
 }

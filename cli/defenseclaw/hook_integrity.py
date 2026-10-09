@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -51,23 +52,21 @@ def _hook_token_well_formed(path: Path) -> bool:
     return len(body) <= 4096 and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
-def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
-    """Return short descriptions of drifted hook files for *connector*."""
+def _locked_hook_scripts(cfg: Any, connector: str) -> tuple[list[Path], dict[str, str]]:
+    """The hook scripts setup sealed for *connector*, and their digests by file name."""
 
-    if os.name == "nt":
-        return []
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     lock_path = Path(data_dir, "hook_contract_lock.json")
     try:
         if not data_dir or lock_path.stat().st_size > _LOCK_LIMIT:
-            return []
+            return [], {}
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []  # the Hook contract row reports a missing or unreadable lock
+        return [], {}  # the Hook contract row reports a missing or unreadable lock
     connectors = lock.get("connectors") if isinstance(lock, dict) else None
     entry = connectors.get(connector) if isinstance(connectors, dict) else None
     if not isinstance(entry, dict):
-        return []
+        return [], {}
     locations = entry.get("locations")
     raw_paths = locations.get("hook_script_paths") if isinstance(locations, dict) else None
     scripts = [Path(str(p)) for p in raw_paths if str(p or "").strip()] if isinstance(raw_paths, list) else []
@@ -77,18 +76,105 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     for source in (entry.get("hook_script_digests"), lock.get("shared_hook_script_digests")):
         if isinstance(source, dict):
             digests.update({str(name): str(value) for name, value in source.items()})
+    return scripts, digests
+
+
+def non_executable_hook_scripts(cfg: Any, connector: str) -> list[Path]:
+    """Generated hook scripts of *connector* that lost their execute bit (GAP-0101).
+
+    Setup writes them 0o700. Without the owner execute bit the agent reports a
+    non-blocking hook error and runs every tool call unguarded. The sourced
+    helpers (``_hardening.sh``) are 0o600 by design and are not listed.
+    """
+
+    if os.name == "nt":
+        return []
+    found: list[Path] = []
+    for script in _locked_hook_scripts(cfg, connector)[0]:
+        if script.suffix != ".sh" or script.name.startswith("_"):
+            continue
+        try:
+            mode = script.stat().st_mode
+        except OSError:
+            continue
+        if stat.S_ISREG(mode) and not mode & stat.S_IXUSR:
+            found.append(script)
+    return found
+
+
+def _moved_install_root(script: Path, data_dir: str) -> str:
+    """The old DefenseClaw folder a sealed hook script names, when the install moved.
+
+    Setup seals absolute paths. After an account rename or a home move the
+    lock still names the old home, which no longer exists (GAP-0543).
+    """
+
+    if not data_dir:
+        return ""
+    old_root = script.parent.parent
+    try:
+        script.relative_to(Path(data_dir))
+        return ""
+    except ValueError:
+        pass
+    if os.path.lexists(old_root) or not Path(data_dir, "hooks", script.name).exists():
+        return ""
+    return str(old_root)
+
+
+def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
+    """Return short descriptions of drifted hook files for *connector*."""
+
+    if os.name == "nt":
+        return []
+    scripts, digests = _locked_hook_scripts(cfg, connector)
+    if not scripts:
+        return []
 
     from defenseclaw.fail_mode import _sha256_regular_file
 
     problems: list[str] = []
+    missing = [script for script in scripts if not os.path.lexists(script)]
+    if missing:
+        # The agent runs a hook it cannot find as a non-blocking error, so the
+        # call goes through even when the fail mode is closed (GAP-0542).
+        data_dir = str(getattr(cfg, "data_dir", "") or "")
+        moved_from = _moved_install_root(missing[0], data_dir)
+        if moved_from:
+            problems.append(
+                f"this install was set up in {moved_from} but now lives in {data_dir} "
+                "(the account was renamed or its home moved): the agent hooks run scripts that no longer exist, "
+                "so DefenseClaw is not guarding its tool calls"
+            )
+        else:
+            problems.append(
+                f"hook script {missing[0]} is missing, so the agent cannot run it and DefenseClaw is not "
+                "guarding its tool calls"
+            )
     for script in scripts:
+        if script in missing:
+            continue
         expected = digests.get(script.name)
+        if expected and not os.access(script, os.R_OK):
+            # chmod 000 (an antivirus quarantine, a restored backup): the
+            # agent cannot run it, which is not an edit (GAP-0403).
+            problems.append(
+                f"hook script {script} cannot be read, so the agent cannot run it and DefenseClaw is not "
+                "guarding its tool calls"
+            )
+            break
         if expected and _sha256_regular_file(script) != expected:
             problems.append(
                 f"hook script {script} changed since setup (an edit, or a copy from another build; "
                 "it does not match hook_contract_lock.json)"
             )
             break
+
+    for script in non_executable_hook_scripts(cfg, connector):
+        problems.append(
+            f"hook script {script} is not executable, so the agent cannot run it and its tool calls "
+            "run unguarded (`defenseclaw doctor --fix` restores mode 0700)"
+        )
 
     token_name = f".hook-{connector}.token"
     for script in scripts:
@@ -111,6 +197,20 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
             problems.append(f"hook token {token_path} is empty or damaged, so every hook call fails")
         break
     return problems
+
+
+def unrunnable_hook_problem(cfg: Any, connector: str) -> str:
+    """The first reason the agent cannot run the hooks of *connector*, or "".
+
+    A hook the agent cannot start (missing, unreadable, not executable, or
+    left at the old home after a move) is a non-blocking error to the agent,
+    so the fail mode never applies (GAP-0403, GAP-0542).
+    """
+
+    for problem in hook_runtime_problems(cfg, connector):
+        if "cannot run it" in problem or "no longer exist" in problem:
+            return problem
+    return ""
 
 
 _CONFIG_LIMIT = 2 * 1024 * 1024

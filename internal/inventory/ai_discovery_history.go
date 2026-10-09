@@ -154,8 +154,8 @@ func (s *ContinuousDiscoveryService) startHistoryRetention(ctx context.Context) 
 	}
 }
 
-// sweepHistoryIfDue prunes scan history older than the retention window and
-// compacts the file when a sweep is due. It never runs concurrently with
+// sweepHistoryIfDue prunes scan history and agent identities older than the
+// retention window and compacts the file when a sweep is due. It never runs concurrently with
 // itself and only reports failures to stderr: history is additive, so a
 // failed sweep must never fail or block scanning. Returns whether a sweep
 // ran.
@@ -177,6 +177,9 @@ func (s *ContinuousDiscoveryService) sweepHistoryIfDue(ctx context.Context) bool
 		return true
 	}
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+	// The identity ledger is small and not tied to a scan, so it is pruned
+	// first and a failed or partial scan prune cannot skip it.
+	pruneAgentLedger(ctx, s.invStore, cutoff, days, w, now, "ai-discovery")
 	pruned, err := s.invStore.PruneScanHistory(ctx, cutoff, inventoryHistorySweepBudget)
 	if err != nil {
 		if ctx.Err() == nil && w.allowDiagnostic("prune", now) {
@@ -207,5 +210,56 @@ func (s *ContinuousDiscoveryService) sweepHistoryIfDue(ctx context.Context) bool
 			fmt.Fprintf(os.Stderr, "[ai-discovery] inventory history compaction skipped: %s\n", compacted.Skipped)
 		}
 	}
+	return true
+}
+
+// pruneAgentLedger prunes the agent identities and the session ids they
+// counted that were last seen before cutoff, reporting failures to stderr
+// under tag.
+func pruneAgentLedger(ctx context.Context, store *InventoryStore, cutoff time.Time, days int,
+	w *inventoryHistorySweeper, now time.Time, tag string) {
+	if agents, err := store.PruneAgentIdentities(ctx, cutoff); err != nil {
+		if ctx.Err() == nil && w.allowDiagnostic("prune-agents", now) {
+			fmt.Fprintf(os.Stderr, "[%s] agent identity prune failed: %v\n", tag, err)
+		}
+	} else if agents > 0 {
+		fmt.Fprintf(os.Stderr, "[%s] inventory history: pruned %d agent identities not seen for %d days\n", tag, agents, days)
+	}
+	// So are the session ids the ledger remembers it counted.
+	if _, err := store.PruneAgentIdentitySessions(ctx, cutoff); err != nil {
+		if ctx.Err() == nil && w.allowDiagnostic("prune-agent-sessions", now) {
+			fmt.Fprintf(os.Stderr, "[%s] agent identity session prune failed: %v\n", tag, err)
+		}
+	}
+}
+
+// AgentLedgerSweeper prunes the agent identity ledger of an inventory.db
+// that no discovery service sweeps: the gateway records agent identities in
+// a store it opens itself while AI discovery is off (GAP-0289). It runs on
+// the scan-history cadence, shortly after the first call and then hourly.
+type AgentLedgerSweeper struct {
+	// Now is the clock; nil means time.Now.
+	Now func() time.Time
+	w   inventoryHistorySweeper
+}
+
+// SweepIfDue prunes the agent identities and sessions of store not seen for
+// days when a sweep is due; days <= 0 keeps them. It reports whether a
+// prune ran.
+func (a *AgentLedgerSweeper) SweepIfDue(ctx context.Context, store *InventoryStore, days int) bool {
+	if a == nil || store == nil {
+		return false
+	}
+	w := &a.w
+	if !w.running.CompareAndSwap(false, true) {
+		return false
+	}
+	defer w.running.Store(false)
+	w.now = a.Now
+	now := w.clock()
+	if !w.claimDue(now) || days <= 0 {
+		return false
+	}
+	pruneAgentLedger(ctx, store, now.Add(-time.Duration(days)*24*time.Hour), days, w, now, "sidecar")
 	return true
 }

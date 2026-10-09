@@ -34,10 +34,40 @@ func (a *APIServer) emitCorrelationRelationshipsV8(
 	if a == nil {
 		return nil
 	}
+	// Secure Client keeps its agentless relationship rows (issue #1092).
+	if ctx != nil && len(relationships) > 0 && !a.managedAIDOnly() {
+		ctx = a.contextWithSessionAgentV8(ctx, connector)
+	}
 	return emitCorrelationRelationshipsV8WithEmitter(
 		ctx, a.observabilityV8RuntimeEmitter(), source, connector,
 		semantic, logical, instance, relationships,
 	)
+}
+
+// contextWithSessionAgentV8 names the session's agent for an occurrence that
+// reported its session but no agent: Codex's native OTLP logs carry only
+// conversation.id. It takes the agent the canonical import of the same event
+// is stamped with (enrichInboundWithHookLifecycleV8): the live hook snapshot,
+// else the conversation's root agent. Without it, those occurrences'
+// relationship rows did not join the session agent (GAP-0087).
+func (a *APIServer) contextWithSessionAgentV8(ctx context.Context, connector string) context.Context {
+	envelope := audit.EnvelopeFromContext(ctx)
+	if envelope.AgentID != "" || envelope.SessionID == "" {
+		return ctx
+	}
+	scope := nativeSessionAgentScopeV8(ctx, connector, envelope.SessionID)
+	// Session IDs are supplied by agents and may overlap across users. Select
+	// only a hook snapshot owned by the authenticated caller's agent identity.
+	if scope != "" {
+		identity := llmEventMeta{AgentIdentityID: scope}
+		if snapshot, found := a.hookSessionStateSnapshotMatching(connector, envelope.SessionID, "", &identity); found && snapshot.meta.AgentID != "" {
+			envelope.AgentID = snapshot.meta.AgentID
+		}
+	}
+	if envelope.AgentID == "" {
+		envelope.AgentID = agentNodeID(scope, connector, envelope.SessionID, "root")
+	}
+	return audit.ContextWithEnvelope(ctx, envelope)
 }
 
 func emitCorrelationRelationshipsV8WithEmitter(
@@ -50,6 +80,19 @@ func emitCorrelationRelationshipsV8WithEmitter(
 	instance audit.ConnectorInstanceID,
 	relationships []audit.CorrelationRelationship,
 ) error {
+	if !ManagedEnterpriseActive() {
+		// A relationship is a change record: export it when it is created
+		// or its status changes, not for each occurrence that only adds
+		// evidence, which was almost half the exported bytes of a session
+		// (GAP-0423). Secure Client keeps one record per occurrence (#1092).
+		changed := relationships[:0:0]
+		for _, relationship := range relationships {
+			if !relationship.Unchanged {
+				changed = append(changed, relationship)
+			}
+		}
+		relationships = changed
+	}
 	if emitter == nil || len(relationships) == 0 {
 		return nil
 	}
@@ -59,12 +102,12 @@ func emitCorrelationRelationshipsV8WithEmitter(
 	if source != observability.SourceConnector && source != observability.SourceOTelReceiver {
 		return fmt.Errorf("correlation relationship export has invalid source")
 	}
-	for _, relationship := range relationships {
+	itemFor := func(relationship audit.CorrelationRelationship) (observabilityruntime.LogBatchItem, error) {
 		if relationship.RuleID == "" || relationship.RuleVersion == "" {
-			return fmt.Errorf("correlation relationship export requires rule identity")
+			return observabilityruntime.LogBatchItem{}, fmt.Errorf("correlation relationship export requires rule identity")
 		}
 		if relationship.EvidenceCount <= 0 {
-			return fmt.Errorf("correlation relationship export requires durable evidence count")
+			return observabilityruntime.LogBatchItem{}, fmt.Errorf("correlation relationship export requires durable evidence count")
 		}
 		classification := observability.ClassificationContext{
 			Bucket: observability.BucketTelemetryIngest,
@@ -82,9 +125,9 @@ func emitCorrelationRelationshipsV8WithEmitter(
 			observability.ProducerKey(observability.TelemetryEventCorrelationRelationshipChanged),
 		)
 		if err != nil {
-			return err
+			return observabilityruntime.LogBatchItem{}, err
 		}
-		_, err = emitter.Emit(ctx, metadata, func(
+		return observabilityruntime.LogBatchItem{Context: ctx, Metadata: metadata, Builder: func(
 			snapshot observabilityruntime.EmitContext,
 			admission router.Admission,
 		) (observability.Record, error) {
@@ -146,8 +189,29 @@ func emitCorrelationRelationshipsV8WithEmitter(
 					DefenseClawCorrelationRelationshipEvidenceCount: relationship.EvidenceCount,
 				},
 			)
-		})
+		}}, nil
+	}
+	// Outside Secure Client the rows of one occurrence commit together: one
+	// write-ahead-log sync instead of one per relationship (GAP-0246).
+	if batcher, ok := emitter.(sidecarRuntimeAtomicBatchEmitter); ok && !ManagedEnterpriseActive() &&
+		len(relationships) > 1 && len(relationships) <= observabilityruntime.MaxLogBatchItems {
+		items := make([]observabilityruntime.LogBatchItem, 0, len(relationships))
+		for _, relationship := range relationships {
+			item, err := itemFor(relationship)
+			if err != nil {
+				return err
+			}
+			items = append(items, item)
+		}
+		_, err := batcher.EmitAtomicBatch(ctx, items)
+		return err
+	}
+	for _, relationship := range relationships {
+		item, err := itemFor(relationship)
 		if err != nil {
+			return err
+		}
+		if _, err := emitter.Emit(item.Context, item.Metadata, item.Builder); err != nil {
 			return err
 		}
 	}

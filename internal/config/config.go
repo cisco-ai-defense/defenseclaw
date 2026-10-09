@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -182,6 +183,70 @@ func (c ACPConfig) ACPProfileForPair(client, agent string) string {
 		}
 	}
 	return strings.TrimSpace(c.DefaultProfile)
+}
+
+// ACPPairBindingRefusals says why a pair is not bound under profile: both
+// halves must be enabled; a per-pair binding, when present, must be enabled
+// and name profile (or none); without one, the client and agent pins must
+// both name profile. It is empty when the pair is bound. The gateway
+// evaluates by this rule and managed enrollment refuses by it, naming each
+// pin that disagrees (GAP-0357).
+func (c ACPConfig) ACPPairBindingRefusals(client, agent, profile string) []string {
+	var refusals []string
+	clientBinding, clientOK := c.Clients[client]
+	agentBinding, agentOK := c.Agents[agent]
+	switch {
+	case !clientOK:
+		refusals = append(refusals, fmt.Sprintf("acp.clients.%s is not configured", client))
+	case !clientBinding.Enabled:
+		refusals = append(refusals, fmt.Sprintf("acp.clients.%s is disabled", client))
+	}
+	switch {
+	case !agentOK:
+		refusals = append(refusals, fmt.Sprintf("acp.agents.%s is not configured", agent))
+	case !agentBinding.Enabled:
+		refusals = append(refusals, fmt.Sprintf("acp.agents.%s is disabled", agent))
+	}
+	if len(refusals) > 0 {
+		return refusals
+	}
+	key := ACPBindingKey(client, agent)
+	if pair, ok := c.ACPBindingFor(client, agent); ok {
+		if !pair.Enabled {
+			return []string{fmt.Sprintf("acp.bindings.%s is disabled", key)}
+		}
+		if named := strings.TrimSpace(pair.Profile); named != "" && named != profile {
+			return []string{fmt.Sprintf("acp.bindings.%s names profile %q", key, named)}
+		}
+		return nil
+	}
+	for _, pin := range []struct{ field, value string }{
+		{"acp.clients." + client + ".profile", clientBinding.Profile},
+		{"acp.agents." + agent + ".profile", agentBinding.Profile},
+	} {
+		if pin.value != profile {
+			refusals = append(refusals, fmt.Sprintf("%s is %q", pin.field, pin.value))
+		}
+	}
+	if len(refusals) > 0 {
+		refusals = append(refusals, fmt.Sprintf("set both to %q, or add acp.bindings.%s with profile %q", profile, key, profile))
+	}
+	return refusals
+}
+
+// ACPPairDisabled names the central switch that turns the pair off: a
+// disabled client, agent or per-pair binding. It is "" when none is off.
+func (c ACPConfig) ACPPairDisabled(client, agent string) string {
+	if binding, ok := c.Clients[client]; ok && !binding.Enabled {
+		return fmt.Sprintf("acp.clients.%s is disabled", client)
+	}
+	if binding, ok := c.Agents[agent]; ok && !binding.Enabled {
+		return fmt.Sprintf("acp.agents.%s is disabled", agent)
+	}
+	if pair, ok := c.ACPBindingFor(client, agent); ok && !pair.Enabled {
+		return fmt.Sprintf("acp.bindings.%s is disabled", ACPBindingKey(client, agent))
+	}
+	return ""
 }
 
 type ACPBinding struct {
@@ -464,6 +529,68 @@ type AIDiscoveryConfig struct {
 	// observes what actually ran, next to this block's inventory of what is
 	// present. Disabled by default; see AIRuntimeConfig.
 	Runtime AIRuntimeConfig `mapstructure:"runtime" yaml:"runtime,omitempty"`
+
+	// IncludeUserPrincipal adds the end-user directory principal (UPN) and
+	// the session's Kerberos principal to every record that carries
+	// identity: hook decisions, guardrail evaluations, tool activity, the
+	// agent, model, tool and guardrail spans, and the inventory records.
+	// Off by default for the same reason as IncludeUserEmail: the principal
+	// identifies a person across systems.
+	IncludeUserPrincipal bool `mapstructure:"include_user_principal" yaml:"include_user_principal,omitempty"`
+	// TrustedADChildDomains lists the child domains of the joined Active
+	// Directory realm whose SSSD accounts DefenseClaw verifies on Linux
+	// (emea.corp.example.com on a host joined to corp.example.com). An
+	// account of a child domain that is not listed gets no domain, realm,
+	// directory type or principal, so no users assignment or profile
+	// matches it: neither its name nor its SID proves a trusted child
+	// (GAP-1255). Empty trusts the joined domain only. Validated by
+	// ValidateTrustedADChildDomains.
+	TrustedADChildDomains []string `mapstructure:"trusted_ad_child_domains" yaml:"trusted_ad_child_domains,omitempty"`
+	// IDEInventory scopes the IDE extension and plugin inventory:
+	// IDEInventoryAll (the default, also when empty), IDEInventoryAIOnly
+	// or IDEInventoryOff. Resolve through EffectiveIDEInventory.
+	IDEInventory string `mapstructure:"ide_inventory" yaml:"ide_inventory,omitempty"`
+}
+
+// ValidateTrustedADChildDomains refuses an entry of
+// ai_discovery.trusted_ad_child_domains that is not a DNS domain of at least
+// two labels (a wildcard, a NetBIOS name, a name with @ or \), one listed
+// twice, and a list longer than useridentity.MaxTrustedADChildDomains.
+func (a AIDiscoveryConfig) ValidateTrustedADChildDomains() error {
+	if len(a.TrustedADChildDomains) > useridentity.MaxTrustedADChildDomains {
+		return fmt.Errorf("trusted_ad_child_domains lists %d domains, more than %d",
+			len(a.TrustedADChildDomains), useridentity.MaxTrustedADChildDomains)
+	}
+	seen := make(map[string]bool, len(a.TrustedADChildDomains))
+	for i, entry := range a.TrustedADChildDomains {
+		domain, err := useridentity.NormalizeTrustedADChildDomain(entry)
+		if err != nil {
+			return fmt.Errorf("trusted_ad_child_domains[%d]: %w", i, err)
+		}
+		if seen[domain] {
+			return fmt.Errorf("trusted_ad_child_domains[%d]: %q is listed twice", i, entry)
+		}
+		seen[domain] = true
+	}
+	return nil
+}
+
+// IDE inventory scopes for AIDiscoveryConfig.IDEInventory.
+const (
+	IDEInventoryAll    = "all"
+	IDEInventoryAIOnly = "ai_only"
+	IDEInventoryOff    = "off"
+)
+
+// EffectiveIDEInventory returns the IDE inventory scope, treating an empty
+// value as IDEInventoryAll.
+func (a AIDiscoveryConfig) EffectiveIDEInventory() string {
+	switch scope := strings.TrimSpace(strings.ToLower(a.IDEInventory)); scope {
+	case IDEInventoryAIOnly, IDEInventoryOff:
+		return scope
+	default:
+		return IDEInventoryAll
+	}
 }
 
 // AIRuntimeConfig controls the AI Discovery runtime planes.
@@ -1798,6 +1925,23 @@ type GuardrailConfig struct {
 	// leaf package); the "must implement HookEndpoint" guard lives in the
 	// gateway boot loop where the registry is available.
 	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+
+	// Profiles, ProfileAssignments and DefaultProfile configure
+	// identity-based guardrail profiles (see guardrail_profiles.go). All
+	// three are empty by default, which keeps the behaviour above, and
+	// ValidateGuardrailProfiles rejects them under the Secure Client
+	// integration.
+	Profiles           map[string]GuardrailProfile `mapstructure:"profiles"            yaml:"profiles,omitempty"`
+	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
+	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
+
+	// profileConnectors is set only on a configuration DerivedForProfile
+	// returns: the profile's own connectors map, keyed by normalized
+	// connector name. policyOverride layers it over Connectors so a profile
+	// can tune one connector without making it a member of
+	// guardrail.connectors. It is unexported, so it never reaches YAML,
+	// JSON or a cloned configuration.
+	profileConnectors map[string]PerConnectorGuardrailConfig
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -1911,7 +2055,7 @@ func (g *GuardrailConfig) EffectiveMode(connector string) string {
 	if g == nil {
 		return "observe"
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if m := strings.TrimSpace(pc.Mode); m != "" {
 			return m
 		}
@@ -1950,7 +2094,7 @@ func (g *GuardrailConfig) EffectiveHILT(connector string) HILTConfig {
 	if g == nil {
 		return HILTConfig{}
 	}
-	if pc, ok := g.connectorOverride(connector); ok && pc.HILT != nil {
+	if pc, ok := g.policyOverride(connector); ok && pc.HILT != nil {
 		return *pc.HILT
 	}
 	return g.HILT
@@ -1963,7 +2107,7 @@ func (g *GuardrailConfig) EffectiveBlockMessage(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if pc.BlockMessage != "" {
 			return pc.BlockMessage
 		}
@@ -1978,7 +2122,7 @@ func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if strings.TrimSpace(pc.RulePackDir) != "" {
 			return pc.RulePackDir
 		}
@@ -1997,7 +2141,7 @@ func (g *GuardrailConfig) EffectiveBlockAt(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if level := canonicalGuardrailLevel(pc.BlockAt); level != "" {
 			return level
 		}
@@ -2013,7 +2157,7 @@ func (g *GuardrailConfig) EffectiveAlertAt(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if level := canonicalGuardrailLevel(pc.AlertAt); level != "" {
 			return level
 		}
@@ -2656,35 +2800,18 @@ func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManag
 	return candidate, nil
 }
 
-// ResolveObservabilityV8ManagedAIDOptionsForInspection decodes only the
-// release-owned managed-destination inputs from one exact schema-v8 source.
-// It applies the same defaults and environment bindings as runtime decoding,
-// but never publishes provenance and returns no activatable Config. Managed
-// path trust is intentionally an activation concern: read-only plan/status
-// inspection compiles a private exact-byte snapshot whose temporary path is
-// not the authoritative service config path.
-func ResolveObservabilityV8ManagedAIDOptionsForInspection(
-	configFile string,
-	raw []byte,
-) (ObservabilityV8ManagedAIDOptions, error) {
-	candidate, err := loadConfigSource(
-		configFile,
-		false,
-		append([]byte(nil), raw...),
-		true,
-		false,
-		true,
-		false,
-	)
-	if err != nil {
-		return ObservabilityV8ManagedAIDOptions{}, err
-	}
+// ObservabilityV8ManagedAIDOptionsFromConfig returns the release-owned
+// managed-destination inputs of a runtime candidate decoded from raw (the
+// result of LoadRuntimeV8InspectionCandidateFromBytes or the strict loaders).
+// Reading them from that candidate keeps the source from being decoded a
+// second time for the same four values (GAP-0264).
+func ObservabilityV8ManagedAIDOptionsFromConfig(candidate *Config, raw []byte) ObservabilityV8ManagedAIDOptions {
 	return ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    candidate.DeploymentMode,
 		Profile:           candidate.EnterpriseProfile(),
 		Endpoint:          candidate.CiscoAIDefense.Endpoint,
 		SourceContentHash: ObservabilityV8SourceContentHash(raw),
-	}, nil
+	}
 }
 
 // ApplyRuntimeV8DataDirDefaultsFromBytes re-bases omitted path fields and an
@@ -2733,6 +2860,7 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 				// config, never a folder inside data_dir.
 				candidate.PolicyDir = layout.VendorPolicyDir
 			}
+			standalonePolicyDirDefault(candidate, dataDir, runtime.GOOS)
 		}
 	}
 	if !has("scanners", "codeguard") {
@@ -2934,9 +3062,14 @@ func loadConfigSourceChecked(
 		return nil, fmt.Errorf("config: unmarshal: %w", err)
 	}
 	if runtimeV8 {
-		if err := restoreRuntimeV8GuardrailConnectors(&cfg, sourceBytes); err != nil {
+		if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
 			return nil, err
 		}
+	} else if !resolvesToSecureClient(&cfg, pinnedDeploymentMode) {
+		restoreEmptyGuardrailConnectors(&cfg)
+	}
+	if !resolvesToSecureClient(&cfg, pinnedDeploymentMode) {
+		restoreEmptyGuardrailProfiles(&cfg)
 	}
 	cfg.ConfigFilePath = configFile
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
@@ -3114,11 +3247,23 @@ func loadConfigSourceChecked(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.ValidateGuardrailProfiles(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
 	if err := cfg.Routing.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "routing_invalid")
 		}
 		return nil, fmt.Errorf("config: routing: %w", err)
+	}
+	if err := cfg.AIDiscovery.ValidateTrustedADChildDomains(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "ai_discovery_invalid")
+		}
+		return nil, fmt.Errorf("config: ai_discovery: %w", err)
 	}
 	if err := cfg.ApplicationProtection.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3208,22 +3353,87 @@ func loadConfigSourceChecked(
 	return &cfg, nil
 }
 
+// restoreEmptyGuardrailProfiles preserves profile and connector override entries
+// whose only values are empty maps. Viper omits those entries during Unmarshal,
+// but they are valid named profiles and per-connector inheritance points.
+// Keep absent or empty HILT blocks nil so they inherit the global setting.
+func restoreEmptyGuardrailProfiles(cfg *Config) {
+	listed, ok := viper.Get("guardrail.profiles").(map[string]any)
+	if !ok {
+		return
+	}
+	if cfg.Guardrail.Profiles == nil {
+		cfg.Guardrail.Profiles = make(map[string]GuardrailProfile, len(listed))
+	}
+	for name, value := range listed {
+		profile := cfg.Guardrail.Profiles[name]
+		body, ok := value.(map[string]any)
+		if ok {
+			if connectors, ok := body["connectors"].(map[string]any); ok {
+				if profile.Connectors == nil {
+					profile.Connectors = make(map[string]PerConnectorGuardrailConfig, len(connectors))
+				}
+				for connector, override := range connectors {
+					if _, present := profile.Connectors[connector]; present {
+						continue
+					}
+					if fields, ok := override.(map[string]any); override != nil && (!ok || len(fields) != 0) {
+						continue
+					}
+					profile.Connectors[connector] = PerConnectorGuardrailConfig{}
+				}
+			}
+		}
+		cfg.Guardrail.Profiles[name] = profile
+	}
+}
+
 // restoreRuntimeV8GuardrailConnectors closes a Viper decode gap for connector
 // entries whose policy value is an empty mapping (for example, codex: {}).
 // Those entries are semantically meaningful roster members, but Viper omits
 // them while unmarshalling. Decode this one dynamic map from the same immutable
-// target-runtime bytes before migration/defaulting and validation continue.
-func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
-	var source struct {
-		Guardrail struct {
-			Connectors map[string]PerConnectorGuardrailConfig `yaml:"connectors"`
-		} `yaml:"guardrail"`
+// target-runtime bytes before migration/defaulting and validation continue. The
+// strict parse of those bytes is shared (ParseV8YAML), so this does not parse a
+// large source again (GAP-0264).
+func restoreRuntimeV8GuardrailConnectors(cfg *Config, configFile string, raw []byte) error {
+	document, err := ParseV8YAML(configFile, raw)
+	if err != nil {
+		return err
 	}
-	if err := yaml.Unmarshal(raw, &source); err != nil {
-		return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+	var connectors map[string]PerConnectorGuardrailConfig
+	if node := v8YAMLMapValue(v8YAMLMapValue(v8DocumentRoot(document.Document), "guardrail"), "connectors"); node != nil {
+		if err := node.Decode(&connectors); err != nil {
+			return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+		}
 	}
-	cfg.Guardrail.Connectors = source.Guardrail.Connectors
+	cfg.Guardrail.Connectors = connectors
 	return nil
+}
+
+// restoreEmptyGuardrailConnectors keeps the guardrail.connectors entries
+// Viper drops while unmarshalling because their value is empty (codex: {} or
+// a bare codex:). A listed connector with an empty value is enabled with the
+// defaults, as the runtime loader above and the Python CLI read it; without
+// this the Windows guardian, enumerator and Setup enrolled no one for the
+// documented enterprise configs (GAP-0221). The Secure Client profile keeps
+// the loader of main, which drops them.
+func restoreEmptyGuardrailConnectors(cfg *Config) {
+	listed, ok := viper.Get("guardrail.connectors").(map[string]any)
+	if !ok {
+		return
+	}
+	for name, value := range listed {
+		if body, isMap := value.(map[string]any); value != nil && (!isMap || len(body) != 0) {
+			continue
+		}
+		if _, present := cfg.Guardrail.Connectors[name]; present {
+			continue
+		}
+		if cfg.Guardrail.Connectors == nil {
+			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{}
+		}
+		cfg.Guardrail.Connectors[name] = PerConnectorGuardrailConfig{}
+	}
 }
 
 // validateManagedEnterpriseListenerBindings keeps every inbound enterprise
@@ -4191,6 +4401,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
 	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
 	viper.SetDefault("ai_discovery.trusted_binary_prefixes", []string{})
+	viper.SetDefault("ai_discovery.trusted_ad_child_domains", []string{})
 
 	viper.SetDefault("application_protection.enabled", false)
 	viper.SetDefault("application_protection.min_confidence", DefaultApplicationProtectionMinConfidence)

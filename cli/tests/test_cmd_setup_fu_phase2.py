@@ -3013,6 +3013,34 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 # SU-06 / SU-07 — interactive mode + judge prompts
 # ---------------------------------------------------------------------------
 class TestInteractiveModeJudgePrompts(_BaseSetup):
+    def test_scoped_hilt_prompt_changes_only_selected_connector(self):
+        self._seed_map("claudecode", "codex")
+        gc = self.app.cfg.guardrail
+        gc.hilt.enabled = False
+        confirms: list[str] = []
+        prompts: list[str] = []
+
+        def confirm(label, **_kwargs):
+            confirms.append(label)
+            return True
+
+        def prompt(label, **_kwargs):
+            prompts.append(label)
+            return "HIGH"
+
+        with patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=confirm), patch(
+            "defenseclaw.commands.cmd_setup.click.prompt", side_effect=prompt
+        ):
+            cmd_setup._configure_hilt_interactive(
+                gc, action_connectors=["claudecode"], target_connector="claudecode"
+            )
+
+        self.assertEqual(len(confirms), 1)
+        self.assertEqual(len(prompts), 1)
+        self.assertTrue(gc.effective_hilt("claudecode").enabled)
+        self.assertFalse(gc.effective_hilt("codex").enabled)
+        self.assertFalse(gc.hilt.enabled)
+
     def test_guardrail_multi_selectors_stay_key_driven_without_vt(self):
         self._seed_map("codex", "hermes")
         gc = self.app.cfg.guardrail

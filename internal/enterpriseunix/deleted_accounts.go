@@ -60,8 +60,10 @@ func (l *lifecycle) revokeDeletedAccounts(ctx context.Context) {
 		return
 	}
 	var report struct {
-		Revoked []string `json:"revoked"`
-		Kept    []string `json:"kept"`
+		Revoked    []string `json:"revoked"`
+		Kept       []string `json:"kept"`
+		ACPRevoked []string `json:"acp_revoked"`
+		ACPKept    []string `json:"acp_kept"`
 	}
 	if err := json.Unmarshal(line, &report); err != nil {
 		r.AddWarning(codeDeletedAccountsCheck, "could not read the deleted-account check's result: "+err.Error())
@@ -72,6 +74,15 @@ func (l *lifecycle) revokeDeletedAccounts(ctx context.Context) {
 		l.noteChange("removed the guardian targets of deleted accounts: %s", strings.Join(report.Revoked, ", "))
 	}
 	for _, kept := range report.Kept {
+		r.AddWarning(codeDeletedAccountsKept, kept)
+	}
+	// The same pass revokes the managed ACP enrollments of those accounts
+	// (GAP-0367).
+	if len(report.ACPRevoked) > 0 {
+		r.AddWarning(codeDeletedAccountsRevoked, "revoked the ACP enrollments of accounts that no longer exist: "+strings.Join(report.ACPRevoked, ", "))
+		l.noteChange("revoked the ACP enrollments of deleted accounts: %s", strings.Join(report.ACPRevoked, ", "))
+	}
+	for _, kept := range report.ACPKept {
 		r.AddWarning(codeDeletedAccountsKept, kept)
 	}
 }

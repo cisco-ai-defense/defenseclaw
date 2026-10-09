@@ -29,19 +29,23 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
-// inspectMode returns the operator-selected guardrail mode (action or
-// observe) that handleInspect{Request,Response,ToolResponse} use to
-// drive the ToolInspectVerdict.applyMode downgrade.
+// inspectMode returns the authenticated connector's guardrail mode for the
+// ToolInspectVerdict.applyMode downgrade. Secure Client keeps the legacy
+// global mode because its inspect decisions predate connector profiles.
 //
 // Mirroring evaluateCodexHook / evaluateClaudeCodeHook semantics:
 //   - nil/zero config → "observe" (fail-safe-for-the-user)
 //   - explicit "" or whitespace → "observe"
 //   - any value other than "action" → "observe" so the only path
 //     that actually blocks the agent is the explicit operator opt-in.
-func inspectMode(cfg *config.Config) string {
+func inspectMode(cfg *config.Config, connector string) string {
 	mode := ""
 	if cfg != nil {
-		mode = strings.TrimSpace(cfg.Guardrail.Mode)
+		mode = cfg.Guardrail.Mode
+		if !cfg.SecureClientIntegration() {
+			mode = cfg.Guardrail.EffectiveMode(connector)
+		}
+		mode = strings.TrimSpace(mode)
 	}
 	if mode != "action" {
 		return "observe"
@@ -70,7 +74,7 @@ func scanWithTimeout(ctx context.Context, text, toolName string, timeout time.Du
 
 	ch := make(chan []RuleFinding, 1)
 	go func() {
-		ch <- ScanAllRules(text, toolName)
+		ch <- scanAllRulesFor(ctx, text, toolName)
 	}()
 	select {
 	case findings := <-ch:
@@ -160,13 +164,13 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
-		verdict = a.buildVerdict(ruleFindings, "prompt", false)
+		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
 		// Apply the prompt-surface UX contract before mode handling so
 		// "action" mode operators see alert (instead of block) and "observe"
 		// mode operators see the same audit reason explaining the demotion.
 		clampPromptDirectionToolVerdict(verdict, "prompt")
 	}
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -245,9 +249,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
-		verdict = a.buildVerdict(ruleFindings, "completion", false)
+		verdict = a.buildVerdict(r.Context(), ruleFindings, "completion", false)
 	}
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -338,7 +342,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
-		verdict = a.buildVerdict(ruleFindings, "tool_response", false)
+		verdict = a.buildVerdict(r.Context(), ruleFindings, "tool_response", false)
 
 		// Judge lane (J3-3c/J3-3d): the generic /inspect/tool-response
 		// endpoint was regex-only. Forward the tool output to the LLM judge
@@ -359,7 +363,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -408,15 +412,23 @@ func buildVerdict(ruleFindings []RuleFinding, direction string) *ToolInspectVerd
 	return buildVerdictWithConfig(ruleFindings, direction, nil, false)
 }
 
-func (a *APIServer) buildVerdict(ruleFindings []RuleFinding, direction string, confirmable bool) *ToolInspectVerdict {
+func (a *APIServer) buildVerdict(ctx context.Context, ruleFindings []RuleFinding, direction string, confirmable bool) *ToolInspectVerdict {
 	cfg := (*config.Config)(nil)
 	if a != nil {
-		cfg = a.scannerCfg
+		cfg = a.decisionConfig(ctx)
 	}
-	return buildVerdictWithConfig(ruleFindings, direction, cfg, confirmable)
+	connector := ""
+	if cfg != nil && !cfg.SecureClientIntegration() {
+		connector = profileRequestConnector(ctx)
+	}
+	return buildVerdictWithConfigForConnector(ruleFindings, direction, cfg, connector, confirmable)
 }
 
 func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, confirmable bool) *ToolInspectVerdict {
+	return buildVerdictWithConfigForConnector(ruleFindings, direction, cfg, "", confirmable)
+}
+
+func buildVerdictWithConfigForConnector(ruleFindings []RuleFinding, direction string, cfg *config.Config, connector string, confirmable bool) *ToolInspectVerdict {
 	if len(ruleFindings) == 0 {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
@@ -425,7 +437,7 @@ func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *c
 	confidence := HighestConfidence(ruleFindings, severity)
 
 	action := guardrailRuntimeActionForFindings(
-		cfg, "", ruleFindings, confirmable,
+		cfg, connector, ruleFindings, confirmable,
 	)
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))

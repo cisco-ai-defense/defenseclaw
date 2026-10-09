@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions a focused catalog of 16 Grafana dashboards. Each board
+DefenseClaw provisions a focused catalog of 17 Grafana dashboards. Each board
 has one job: start broad, select a connector, agent, rule, or execution, and
 then move to the detail surface that owns that question. The catalog avoids
 duplicating the same analysis across several boards.
@@ -33,9 +33,10 @@ start the stack first with `defenseclaw setup local-observability up`.
 | **Overview** (`defenseclaw-overview`) | Is DefenseClaw healthy and enforcing as expected? | Operator, SOC, SRE | Prometheus, Loki | The landing board: KPIs, SLOs, guardrail outcomes, findings, errors, and links to owned detail views. |
 | **Agent Activity (Live)** (`defenseclaw-activity`) | What are agents doing across the selected time range? | Developer, incident responder | Prometheus, Loki | Cross-agent prompt → model → tool → destination flow and session correlation. Finding, discovery, topology, and pipeline duplicates intentionally live elsewhere. |
 | **Agent identity** (`defenseclaw-agent-identity`) | Which logical agents and instances have been observed? | AI platform, inventory owner | Prometheus, Loki | Runtime Agent Directory, identity confidence, instance churn, and the one-click entry into Agent360. |
+| **Identity & Users** (`defenseclaw-identity`) | Who runs which agents, with what identity assurance, and under which guardrail profile? | Security, identity owner, policy owner | Loki | Users by directory and domain, verified against claimed principals, SSH against local sessions, agent identities (`agt-`) per user and sessions (`ais-`) per agent, decisions by guardrail profile and match reason, the profile-digest timeline and `identity.observed` group counts. See [Identity & Users board](#identity--users-board). |
 | **Agent360** (`defenseclaw-agent-360`) | What happened inside this agent, execution, or full descendant tree? | Developer, SOC, AI platform | Prometheus, Loki, Tempo | The deepest correlated drill-down: lifecycle phases, initial/grouped follow-up prompts, decisions and recovery, tokens, cost, network activity, per-agent provider/model and tool-family summaries, and trace waterfall. |
 | **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, which rules drove it, and which events recur? | SOC, policy owner, incident responder | Prometheus, Loki | Enforced versus observe-mode decisions, all exported verdict rule IDs, projected tool context, exact recurring signatures, and correlation pivots into Agent360, Findings, and Policy Decisions. |
-| **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, and dependencies exist? | Asset owner, security | Prometheus, Loki, Tempo | Continuous discovery inventory, confidence, detector health, and scan traces. |
+| **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, IDE plugins, and dependencies exist? | Asset owner, security | Prometheus, Loki, Tempo | Continuous discovery inventory, confidence, detector health, the IDE plugin inventory (by IDE, AI against other, disabled, per user), and scan traces. |
 | **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What did those AI runtimes actually run on this host? | Security, incident responder | Prometheus, Loki | Runtime-plane coverage first, so a blind host is not read as clean, then runtime findings and host-level agent activity next to the discovery inventory. |
 | **Hook Connectors** (`defenseclaw-connectors`) | Which connectors are active, quiet, slow, or drifting? | Operator, integration owner | Prometheus, Loki | Cross-connector comparison and the route into Connector Detail. |
 | **Connector Detail** (`defenseclaw-connector-detail`) | Why is one connector behaving differently? | Integration owner | Prometheus, Loki | Connector-scoped hooks, latency, outcomes, tokens, findings, and recent events. |
@@ -46,6 +47,55 @@ start the stack first with `defenseclaw setup local-observability up`.
 | **Scanners (Ops)** (`defenseclaw-scanners`) | Are scanner executions healthy and producing expected findings? | Detection engineer, SRE | Prometheus | Sparse-safe rolling scan counts, duration, errors, quarantine actions, and operational finding trends. Queue depth is omitted because scanners currently execute synchronously and do not emit a durable queue series. |
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | What is happening on proxy/router deployments? | Proxy operator, SRE | Prometheus, Loki, Tempo | HTTP, tool, guardrail, GenAI, and trace telemetry that only exists when proxy/router mode is active. |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Is the local process, database, exporter, or destination delivery unhealthy? | SRE, operator | Prometheus, Loki | One truthful operations board for runtime, SQLite, exporter freshness/errors, destination delivery, and gateway errors. |
+
+## Filter by user
+
+Overview, Activity, Blocked Events, Policy decisions, Agent identity, Agent360,
+AI discovery and Identity & Users have a **User regex** box (`$user`). It
+narrows every Loki panel to records whose `user.id` (uid or SID), account name
+(`defenseclaw.user.name`) or directory principal matches, for example `1001`,
+`S-1-5-21-.*-1104`, `alice` or `alice@corp.example.com`. The principal is
+matched case-insensitively and is on records only when
+`ai_discovery.include_user_principal` is on. The regex must match the whole
+value, so use `alice.*` to match `alice@corp.example.com`. Records that carry no `user.id`, such as
+guardrail evaluations and discovery summaries, drop out once you narrow it.
+
+Some panels stay fleet-wide, and the box text on each board names the Loki ones:
+
+- **Metric panels** have no per-user label, so they never change.
+- **Records without a user** feed Discovery runs (Agent identity), AI discovery summary log (AI discovery), Relationship warnings observed and Relationship evidence and conflict chronology (Agent360), and the policy update stream inside Recent OPA + egress events (Policy decisions).
+
+## Identity & Users board
+
+The **Identity & Users** board (`defenseclaw-identity`) answers who runs which
+agents, how far the identity can be trusted, and which
+[guardrail profile](/docs/guardrail/user-and-group-policies) decided. It reads
+Loki only, from the hook decision, tool and `identity.observed` records, and
+has a **Connector** and a **User regex** (`$user`) box.
+
+| Row | Panels | Question |
+| --- | --- | --- |
+| Who runs agents | Users observed, Agent identities (`agt-`), Agent sessions (`ais-`), Verified principal share | How many people, agents and chats, and how much of the data is verified |
+| Directory and sessions | Users by directory and domain, Verified vs claimed identity, SSH vs local sessions | Which directories the users come from, and whether the facts are verified or claimed |
+| Agents | Agents per user, Sessions per agent | Which agent installs each user runs, and how many chats each has had |
+| Guardrail profiles | Decisions by guardrail profile and match reason, Profile selection audit, Profile digest timeline | Which profile decided each request and why, which group put a user in a profile, and when a profile's policy changed |
+| `identity.observed` | Directory group counts, Recent `identity.observed` records | How large each user's group list is (counts only, never names) |
+
+Things to know when you read it:
+
+- **Directory shows `unreported` for a Linux SSSD account** whose domain is
+  not a joined realm, such as a plain LDAP domain: SSSD does not say which
+  directory serves it, and realmd does not know it. The domain and the
+  assurance still show.
+- **Principals are blank unless you opt in.** The Agents per user table fills
+  the principal only when `ai_discovery.include_user_principal` is on.
+- **SSH vs local sessions** counts only sessions whose kind has the same
+  assurance as the directory facts. On Windows and macOS the session is
+  claimed, so those records carry no kind.
+- **A new digest series on the timeline marks a reload** where a profile's
+  effective policy changed. Compare it with the digest `defenseclaw guardrail
+  profile explain` reports.
+- **Records without a verified user drop out** when you narrow `$user`.
 
 ## How the drill-down works
 
@@ -117,9 +167,10 @@ DefenseClaw does not invent telemetry.
 If the Connector list is empty and every connector- or scanner-filtered panel
 shows no data while Loki and Tempo have events, check the destination name.
 The dashboards read the short `local-observability-v1` metric labels
-(`connector`, `scanner`, `target_type`), which the gateway exports only to the
-OTLP destination named `local-observability`. Any other name gets the canonical
-v8 labels (`defenseclaw_connector_source`, ...). See
+(`connector`, `scanner`, `target_type`, and `ide`, `ai`, `enabled` on the IDE
+plugin gauge), which the gateway exports only to the OTLP destination named
+`local-observability`. Any other name gets the canonical v8 labels
+(`defenseclaw_connector_source`, `defenseclaw_ide_product`, ...). See
 [Local observability](/docs/observability/local-observability) for pointing a
 gateway on another computer at the stack.
 

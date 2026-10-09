@@ -696,7 +696,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 				return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 			}
 			if cg := a.runCodeGuardOnArgsWithProvenance(req); len(cg.findings) > 0 {
-				return a.codeGuardOnlyVerdict(req, cg, true, action.EnforcementCapable)
+				return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
 			}
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
@@ -758,11 +758,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
 		runtimeAction := guardrailToolCallActionForFindings(
-			a.scannerCfg, req.Connector, ruleFindings, true,
+			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
 		)
 		if enforceableSeverity != "NONE" {
 			codeGuardAction := guardrailToolCallActionForConnector(
-				a.scannerCfg, req.Connector, enforceableSeverity, true,
+				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
@@ -1034,6 +1034,7 @@ const codeGuardBinaryConfidence = 1.0
 // rule/AID/judge scanning, but CodeGuard is retained (D2); severity and action
 // mirror the main inspectToolPolicy path with no rule findings.
 func (a *APIServer) codeGuardOnlyVerdict(
+	ctx context.Context,
 	req *ToolInspectRequest,
 	scan codeGuardArgsScan,
 	trustedBoundary bool,
@@ -1047,7 +1048,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
-		action = guardrailToolCallActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
+		action = guardrailToolCallActionForConnector(a.decisionConfig(ctx), req.Connector, enforceableSeverity, true)
 	}
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {
@@ -1158,14 +1159,15 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// its own rule pack (empty ⇒ process-global default set).
 	var ruleFindings []RuleFinding
 	if req.contentScope != ruleContentScopeAll {
-		ruleFindings = scanContentRulesForConnector(
+		ruleFindings = scanContentRulesForConnectorFor(
+			ctx,
 			req.Connector,
 			content,
 			"message",
 			req.contentScope,
 		)
 	} else {
-		ruleFindings = ScanAllRulesForConnector(req.Connector, content, "message")
+		ruleFindings = scanAllRulesForConnectorFor(ctx, req.Connector, content, "message")
 	}
 
 	var verdict *ToolInspectVerdict
@@ -1184,7 +1186,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		action := guardrailActionAllow
 		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
 			action = guardrailRuntimeActionForConnector(
-				a.scannerCfg,
+				a.decisionConfig(ctx),
 				req.Connector,
 				HighestSeverity(enforceable),
 				strings.EqualFold(req.Direction, "outbound"),
@@ -1483,7 +1485,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 
 	// Count the check against the authenticated connector so /health (and the

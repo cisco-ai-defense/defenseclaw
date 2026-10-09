@@ -278,3 +278,23 @@ def test_cli_webhook_list_disable_remove_connector(ctx):
     r = _inv(runner, webhook, ["remove", "cx-slack", "--connector", "codex", "--yes"], app)
     assert r.exit_code == 0, r.output
     assert not _read_yaml(tmp).get("observability", {}).get("connectors")
+
+
+
+def test_splunk_enterprise_private_endpoint_names_working_command(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from defenseclaw.commands.cmd_setup import _apply_enterprise_config
+
+    def reject(*_args, **_kwargs):
+        raise ValueError("set allow_private_networks for an intentional private collector")
+
+    monkeypatch.setattr("defenseclaw.commands.cmd_setup._apply_v8_observability_preset", reject)
+    with pytest.raises(SystemExit):
+        _apply_enterprise_config(
+            SimpleNamespace(), endpoint="http://127.0.0.1:8088/services/collector/event",
+            token="placeholder", index="test", source="test", sourcetype="_json",
+        )
+    output = capsys.readouterr().err
+    assert "setup observability add splunk-enterprise" in output
+    assert "--allow-private-networks" in output

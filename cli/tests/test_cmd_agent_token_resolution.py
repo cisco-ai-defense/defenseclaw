@@ -270,7 +270,7 @@ def test_operator_set_token_env_is_preserved_on_init():
     )
 
 
-def test_missing_token_error_message_includes_remediation():
+def test_missing_token_error_message_includes_remediation(tmp_path):
     """Phase 5 contract: the failure message must tell the operator how to fix it.
 
     Pre-fix the message was the 3-word string ``"gateway token
@@ -287,14 +287,17 @@ def test_missing_token_error_message_includes_remediation():
     """
     from defenseclaw.commands.cmd_agent import _format_missing_token_error
 
-    msg = _format_missing_token_error(_StubAppContext(_StubGateway(token_env="DEFENSECLAW_GATEWAY_TOKEN")))
+    config = tmp_path / "config.yaml"
+    config.touch()
+    with patch("defenseclaw.config.config_path", return_value=config):
+        msg = _format_missing_token_error(_StubAppContext(_StubGateway(token_env="DEFENSECLAW_GATEWAY_TOKEN")))
     assert "DEFENSECLAW_GATEWAY_TOKEN" in msg
     assert "~/.defenseclaw/.env" in msg
     assert "defenseclaw-gateway start" in msg
     assert "defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN" in msg
 
 
-def test_missing_token_error_includes_configured_env_when_set():
+def test_missing_token_error_includes_configured_env_when_set(tmp_path):
     """Surface the actual configured token_env in the error.
 
     When the operator has pinned a custom var (or the legacy
@@ -306,14 +309,17 @@ def test_missing_token_error_includes_configured_env_when_set():
     """
     from defenseclaw.commands.cmd_agent import _format_missing_token_error
 
-    msg = _format_missing_token_error(
-        _StubAppContext(_StubGateway(token_env="OPENCLAW_GATEWAY_TOKEN"))
-    )
+    config = tmp_path / "config.yaml"
+    config.touch()
+    with patch("defenseclaw.config.config_path", return_value=config):
+        msg = _format_missing_token_error(
+            _StubAppContext(_StubGateway(token_env="OPENCLAW_GATEWAY_TOKEN"))
+        )
     assert "OPENCLAW_GATEWAY_TOKEN" in msg
     assert "cfg.gateway.token_env" in msg
 
 
-def test_missing_token_error_handles_no_config():
+def test_missing_token_error_handles_no_config(tmp_path):
     """When app.cfg is None (early boot), the error still renders cleanly.
 
     No KeyError, no traceback, no NoneType crash — just the canonical
@@ -322,10 +328,10 @@ def test_missing_token_error_handles_no_config():
     """
     from defenseclaw.commands.cmd_agent import _format_missing_token_error
 
-    msg = _format_missing_token_error(_StubAppContext(None))
-    assert "DEFENSECLAW_GATEWAY_TOKEN" in msg
-    # No configured-env breadcrumb when we can't read cfg.
-    assert "cfg.gateway.token_env" not in msg
+    with patch("defenseclaw.config.config_path", return_value=tmp_path / "missing.yaml"):
+        msg = _format_missing_token_error(_StubAppContext(None))
+    assert "defenseclaw init" in msg
+    assert "gateway token" not in msg
 
 
 def test_cli_host_port_override_wins_over_config():

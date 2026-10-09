@@ -66,7 +66,12 @@ func TestEnsureReportsTheGuardianTargetsAfterTheChange(t *testing.T) {
 						"error": `enterprise hooks: connector devin agent version "3000.11.3" is not verified against a known hook contract: no hook contract matches normalized agent version`}})
 				}()
 			}}
+			// Wait only for a report the hook started: a run that fails
+			// before the guardian starts would otherwise block forever here.
 			t.Cleanup(func() {
+				if !started {
+					return
+				}
 				if err := <-reported; err != nil {
 					t.Error(err)
 				}
@@ -115,6 +120,9 @@ func TestInstallWaitsForTheGuardianWithoutTargets(t *testing.T) {
 		}()
 	}}
 	t.Cleanup(func() {
+		if !started {
+			return
+		}
 		if err := <-published; err != nil {
 			t.Error(err)
 		}
@@ -161,6 +169,9 @@ func TestInstallWaitsForTheFirstGuardianAttestation(t *testing.T) {
 		}()
 	}}
 	t.Cleanup(func() {
+		if !started {
+			return
+		}
 		if err := <-published; err != nil {
 			t.Error(err)
 		}
@@ -208,6 +219,11 @@ func TestGuardianReadinessNeedsTheCurrentAttestation(t *testing.T) {
 	// targets.yaml, and bind each credential to the one the key it names
 	// derives for that account; the next reconcile rewrites an older one.
 	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n  - user: alice\n    uid: 1001\n    connector: codex\n")
+	// targets.yaml changed long ago, so a guardian behind it is a failure.
+	settled := h.env.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(h.env.P(h.env.Layout.ManifestPath), settled, settled); err != nil {
+		t.Fatal(err)
+	}
 	key := strings.Repeat("a1", 32)
 	if err := os.MkdirAll(filepath.Dir(h.env.committedUserKeyPath()), 0o700); err != nil {
 		t.Fatal(err)
@@ -253,5 +269,17 @@ func TestGuardianReadinessNeedsTheCurrentAttestation(t *testing.T) {
 		if got := messagesOf(verify.Errors, codeVerify); verify.Readiness.Guardian != (tc.want == "") || tc.want != "" && !strings.Contains(got, tc.want) {
 			t.Fatalf("%s: guardian ready=%v errors=%s", tc.name, verify.Readiness.Guardian, got)
 		}
+	}
+	// GAP-0691: right after an apply rewrote targets.yaml, keep the
+	// catch-up guidance but report coverage incomplete until reconciliation.
+	now := h.env.Now()
+	if err := os.Chtimes(h.env.P(h.env.Layout.ManifestPath), now, now); err != nil {
+		t.Fatal(err)
+	}
+	verify = h.run(Options{Action: ActionVerify})
+	if verify.Readiness.Guardian || verify.CoverageComplete || verify.SecurityComplete ||
+		!hasWarning(verify, codeGuardianReconcilePending) ||
+		!strings.Contains(messagesOf(verify.Errors, codeVerify), guardianManifestNotReconciled) {
+		t.Fatalf("a just-changed targets.yaml: guardian ready=%v warnings=%+v errors=%+v", verify.Readiness.Guardian, verify.Warnings, verify.Errors)
 	}
 }

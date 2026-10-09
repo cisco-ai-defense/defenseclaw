@@ -71,61 +71,43 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	if !present {
 		return
 	}
-	hasDoctor := false
+	// The per-user `doctor` lives in the Python CLI, which a managed
+	// computer does not install, so it was an "unknown command" here.
+	addManagedWindowsAnswer(root, "doctor", func([]string) error {
+		return managedWindowsAdminCommandAnswer(where, "doctor")
+	})
+	// `upgrade` (GAP-1719) and `rollback` (GAP-0099) were bare "unknown
+	// command" errors here.
+	addManagedWindowsAnswer(root, "upgrade", func([]string) error {
+		return managedWindowsVersionChangeAnswer(where, "upgrade", "upgrades are installed")
+	})
+	addManagedWindowsAnswer(root, "rollback", func([]string) error {
+		return managedWindowsVersionChangeAnswer(where, "rollback", "rollbacks are done")
+	})
+	addManagedWindowsAnswer(root, "setup", func(args []string) error {
+		return managedWindowsSetupRefusal(where, args)
+	})
+}
+
+// addManagedWindowsAnswer adds a hidden root command name that only returns
+// answer, unless root already has that command. The answer needs no per-user
+// config: without the skip annotation the root pre-run tried to load
+// ~/.defenseclaw/config.yaml, which a managed computer never has, and printed
+// "failed to load config" instead.
+func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args []string) error) {
 	for _, command := range root.Commands() {
-		if command.Name() == "doctor" {
-			hasDoctor = true
-		}
-	}
-	if !hasDoctor {
-		// The per-user `doctor` lives in the Python CLI, which a managed
-		// computer does not install, so it was an "unknown command" here.
-		root.AddCommand(&cobra.Command{
-			Use:                "doctor",
-			Hidden:             true,
-			DisableFlagParsing: true,
-			SilenceUsage:       true,
-			Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
-			RunE: func(_ *cobra.Command, _ []string) error {
-				return managedWindowsAdminCommandAnswer(where, "doctor")
-			},
-		})
-	}
-	hasUpgrade := false
-	for _, command := range root.Commands() {
-		if command.Name() == "upgrade" {
-			hasUpgrade = true
-		}
-	}
-	if !hasUpgrade {
-		// `upgrade` was a bare "unknown command" rc 2 here (GAP-1719).
-		root.AddCommand(&cobra.Command{
-			Use:                "upgrade",
-			Hidden:             true,
-			DisableFlagParsing: true,
-			SilenceUsage:       true,
-			Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
-			RunE: func(_ *cobra.Command, _ []string) error {
-				return managedWindowsUpgradeAnswer(where)
-			},
-		})
-	}
-	for _, command := range root.Commands() {
-		if command.Name() == "setup" {
+		if command.Name() == name {
 			return
 		}
 	}
 	root.AddCommand(&cobra.Command{
-		Use:                "setup",
+		Use:                name,
 		Hidden:             true,
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
-		// The answer needs no per-user config. Without the skip the root
-		// pre-run tried to load ~/.defenseclaw/config.yaml, which a managed
-		// computer never has, and printed "failed to load config" instead.
-		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+		Annotations:        map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(_ *cobra.Command, args []string) error {
-			return managedWindowsSetupRefusal(where, args)
+			return answer(args)
 		},
 	})
 }
@@ -141,13 +123,14 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
 }
 
-// managedWindowsUpgradeAnswer tells a user on a managed Windows computer that
-// the organization installs DefenseClaw upgrades.
-func managedWindowsUpgradeAnswer(where string) error {
-	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so upgrades are installed "+
-		"by your organization, not with `upgrade`; there is nothing for you to do. Your administrator can check "+
+// managedWindowsVersionChangeAnswer tells a user on a managed Windows
+// computer that the organization installs DefenseClaw upgrades and does its
+// rollbacks; done says which, for command.
+func managedWindowsVersionChangeAnswer(where, command, done string) error {
+	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so %s "+
+		"by your organization, not with `%s`; there is nothing for you to do. Your administrator can check "+
 		"the installed version %s. Nothing was changed.",
-		where, managedWindowsAdminStatusHint())
+		where, done, command, managedWindowsAdminStatusHint())
 }
 
 // managedWindowsAdminCLI is the managed CLI an administrator runs on a

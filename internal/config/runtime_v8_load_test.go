@@ -4,10 +4,12 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -35,6 +37,11 @@ observability: {}
 		"inspection-candidate": func() (*Config, error) {
 			return LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", raw)
 		},
+		// LoadFromFile and LoadFromBytes, which the Windows guardian,
+		// enumerator and Setup use, dropped these entries (GAP-0221).
+		"file": func() (*Config, error) {
+			return LoadFromBytes("config.yaml", raw)
+		},
 	}
 	for name, load := range loaders {
 		t.Run(name, func(t *testing.T) {
@@ -47,6 +54,17 @@ observability: {}
 				t.Fatalf("target runtime connectors = %v, want %v", got, want)
 			}
 		})
+	}
+	// A Secure Client config keeps the file loader of main, which drops them.
+	if runtime.GOOS != "linux" {
+		secureClient := append([]byte("deployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"), raw...)
+		cfg, err := loadConfigSourceChecked("config.yaml", false, secureClient, true, false, false, false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Guardrail.Connectors) != 0 {
+			t.Fatalf("Secure Client file load kept the empty entries: %v", cfg.Guardrail.Connectors)
+		}
 	}
 }
 
@@ -305,14 +323,14 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 		}
 	}
 
-	// The inspection loader decodes without the YAML entrypoint, so it reaches
+	// The inspection decoder runs without the YAML entrypoint, so it reaches
 	// the runtime gate directly. The gate must report the declared version, not
 	// the v7 stamp the compatibility decoder applies to older sources.
-	_, err := ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 5\n"))
+	_, err := loadConfigSource("config.yaml", false, []byte("config_version: 5\n"), true, false, true, false)
 	if err == nil || !strings.Contains(err.Error(), "config_version 5 is older than 8") {
 		t.Fatalf("pre-v8 inspection error = %v, want declared-version migrate guidance", err)
 	}
-	_, err = ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 9\n"))
+	_, err = loadConfigSource("config.yaml", false, []byte("config_version: 9\n"), true, false, true, false)
 	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 9)") {
 		t.Fatalf("newer inspection error = %v, want newer-release guidance", err)
 	}
@@ -348,5 +366,69 @@ func TestRuntimeV8LoadersRetainManagedPathTrust(t *testing.T) {
 				t.Fatalf("managed runtime loader error = %v, want authoritative path trust refusal", err)
 			}
 		})
+	}
+}
+
+func TestRuntimeV8LoadersPreserveEmptyProfiles(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw-v8
+guardrail:
+  profiles:
+    baseline: {}
+    nested:
+      connectors:
+        codex: {}
+  profile_assignments:
+    - profile: baseline
+      match: {groups: [admins]}
+observability: {}
+`)
+	for name, load := range map[string]func() (*Config, error){
+		"runtime": func() (*Config, error) { return LoadRuntimeV8FromBytes("config.yaml", raw) },
+		"file":    func() (*Config, error) { return LoadFromBytes("config.yaml", raw) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := cfg.Guardrail.Profiles["baseline"]; !ok {
+				t.Fatal("empty baseline profile disappeared")
+			}
+			if _, ok := cfg.Guardrail.Profiles["nested"].Connectors["codex"]; !ok {
+				t.Fatal("empty connector override disappeared")
+			}
+		})
+	}
+}
+
+// The schema's per-list maximum must fit inside the strict parser's total
+// node budget even for a compact assignment document.
+func TestProfileAssignmentSchemaLimitFitsYAMLNodeBudget(t *testing.T) {
+	raw, err := os.ReadFile("../../schemas/config/v8/defenseclaw-config.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Defs struct {
+			Guardrail struct {
+				Properties struct {
+					ProfileAssignments struct {
+						MaxItems int `json:"maxItems"`
+					} `json:"profile_assignments"`
+				} `json:"properties"`
+			} `json:"guardrail"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	n := schema.Defs.Guardrail.Properties.ProfileAssignments.MaxItems
+	if n == 0 {
+		t.Fatal("missing profile assignment schema maximum")
+	}
+	doc := "config_version: 8\nguardrail:\n  profiles:\n    baseline: {}\n  profile_assignments:\n" + strings.Repeat("    - profile: baseline\n      match: {agents: [agt-0000000000000000]}\n", n)
+	if err := ValidateV8SchemaBytes("config.yaml", []byte(doc)); err != nil {
+		t.Fatalf("%d schema-permitted assignments rejected: %v", n, err)
 	}
 }

@@ -137,6 +137,20 @@ func (r lsofRunner) Run(ctx context.Context, name string, args ...string) (Comma
 // while another process holds the API port.
 const retryingAPIHealth = `{"api":{"state":"error","last_error":"listen tcp 127.0.0.1:18970: bind: address already in use","details":{"addr":"127.0.0.1:18970","tcp_bind_retrying":true}},"inspection":{"local":"active","ai_defense":"disabled"}}`
 
+func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"profile_assignment_warnings":["assignment 1: group missing is not known"],"telemetry":{"details":{"optional_destination_state":"degraded","optional_destination_failure_summary":"archive:failing:no_space"}}}`), nil
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if !hasWarning(result, codeProfileAssignments) || !hasWarning(result, codeOptionalDestination) {
+			t.Fatalf("%s warnings = %+v", action, result.Warnings)
+		}
+	}
+}
+
 // On Linux the gateway unit runs and serves its hook socket, but
 // another account holds 127.0.0.1:18970 and the gateway reports its API
 // listener as retrying. Status reported the gateway ready (a 200 was taken
@@ -288,16 +302,32 @@ func TestEarlierGatewayIsProbedOnTheAPIPort(t *testing.T) {
 }
 
 // Enabled AI Defense that fails (a rejected key) leaves the local engine
-// deciding, so status stays ok, but it must say so.
+// deciding, so status stays ok, but it must say so. So must directory lookups
+// that fail, which leave the accounts without cached facts on the default
+// guardrail profile (GAP-0216).
 func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
-		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"}}`), nil
+		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"unavailable:auth_failed"},` +
+			`"directory":{"failing":2,"since":"2026-10-07T00:05:54Z","stale":0,"accounts":["1001","1002"]},` +
+			`"profile_assignment_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"],` +
+			`"profile_warnings":["assignment 1: group \"dc-okta-ml\" is not known to this host, so it selects nobody"]}`), nil
 	}
 	status := h.run(Options{Action: ActionStatus})
 	if !status.OK || !strings.Contains(messagesOf(status.Warnings, codeAIDefenseUnavailable), "unavailable:auth_failed") {
 		t.Fatalf("an unavailable AI Defense must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
+	}
+	// The warning names the failing accounts (GAP-0696).
+	if got := messagesOf(status.Warnings, codeDirectoryLookups); !strings.Contains(got, "failing for 2 account(s) (uid 1001, uid 1002) since 2026-10-07T00:05:54Z") ||
+		!strings.Contains(got, "enterprise linux profile-explain --user") {
+		t.Fatalf("failing directory lookups must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
+	}
+	// An assignment group the host no longer knows selects nobody (GAP-0704).
+	// It is listed once, though /health repeats it in two lists (GAP-0928).
+	if got := messagesOf(status.Warnings, codeProfileAssignment); !strings.Contains(got, `group "dc-okta-ml" is not known to this host`) ||
+		strings.Count(got, "dc-okta-ml") != 1 {
+		t.Fatalf("an assignment that selects nobody must warn once: %+v", status.Warnings)
 	}
 }
 

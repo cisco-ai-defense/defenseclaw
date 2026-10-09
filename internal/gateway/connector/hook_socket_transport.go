@@ -11,6 +11,7 @@
 package connector
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -60,19 +61,51 @@ defenseclaw_hook_socket_trusted() {
 // managedPluginHookSocket). fail_unreachable is already defined at that
 // point and fails closed for managed hooks. The rendered TCP hook contains
 // none of this.
-const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `if ! defenseclaw_hook_socket_trusted; then
-  fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account"
+const shellHookSocketTransportBlock = shellHookSocketTrustFunctions + `if [ ! -e "$DEFENSECLAW_HOOK_SOCKET" ] && [ ! -L "$DEFENSECLAW_HOOK_SOCKET" ]; then
+  fail_unreachable "` + shellManagedGatewayStoppedText + `"
+fi
+if ! defenseclaw_hook_socket_trusted; then
+  fail_unreachable "the DefenseClaw hook socket or its directory is not owned by root or the gateway account (enterprise_managed_gateway_peer_unverified)"
 fi
 API_TOKEN=
-
+@FACTS@
 `
+
+// shellManagedGatewayStoppedText is what a standalone shell hook says when
+// its hook socket is missing (the gateway service and its socket unit are
+// stopped), in the words the native hook uses for a stopped gateway service.
+// The socket-ownership text is only for a socket that exists with the wrong
+// owner (GAP-0581).
+const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not running on this computer. " +
+	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+	"(enterprise_managed_gateway_not_running)"
 
 // shellHookSocketTransport renders shellHookSocketTransportBlock for the
 // socket path and the gateway service uid trusted beside root. The path is
 // emitted as one single-quoted shell word, so no character in it can end
-// the assignment.
-func shellHookSocketTransport(socket string, serviceUID int) string {
-	return renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID)
+// the assignment. factsBinary, when set, is the administrator-owned hook
+// binary the hook runs (hook session-facts) to read the user's Kerberos
+// credential cache, which a shell cannot read; see managedSessionFactsBinary.
+func shellHookSocketTransport(socket string, serviceUID int, factsBinary string) string {
+	facts := ""
+	if factsBinary != "" {
+		facts = "DEFENSECLAW_SESSION_FACTS_BIN=" + shellSingleQuote(factsBinary) + "\nexport DEFENSECLAW_SESSION_FACTS_BIN\n"
+	}
+	return strings.Replace(renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID), "@FACTS@", facts, 1)
+}
+
+// managedSessionFactsBinary is the administrator-owned hook binary a managed
+// standalone shell hook runs for the session facts, or "" when the install
+// has none. It is the install's hook binary, whatever the connector: it is
+// root-owned and serves `hook session-facts` like the per-user gateway
+// binary does (GAP-0194). It does not depend on the foreign-hook guard,
+// which only some connectors run.
+func managedSessionFactsBinary(opts SetupOpts) string {
+	binary := strings.TrimSpace(opts.ManagedHookBinary)
+	if !opts.ManagedEnterprise || binary == "" || !filepath.IsAbs(binary) || strings.ContainsAny(binary, "\x00\r\n") {
+		return ""
+	}
+	return filepath.Clean(binary)
 }
 
 // shellHookSocketTrust renders shellHookSocketTrustFunctions for scripts

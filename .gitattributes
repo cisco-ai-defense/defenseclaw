@@ -1,7 +1,6 @@
 # Release-candidate gates compare these reviewed sources byte-for-byte across
 # Linux, macOS, and Windows runners. Keep their checkout representation stable.
 scripts/defenseclaw-upgrade.sh text eol=lf
-scripts/install-openshell-sandbox.sh text eol=lf
 scripts/install.sh text eol=lf
 scripts/install.ps1 text eol=lf
 cli/defenseclaw/install_publish.py text eol=lf
@@ -29,6 +28,12 @@ policies/guardrail/** text eol=lf
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
 packaging/mdm/**/*.sh text eol=lf
 packaging/mdm/**/*.ps1 text eol=lf
+
+# The identity kit (packaging/identity and the Intune tenant helper) is copied
+# to tenant consoles and hosts as committed, and cli/tests/test_identity_kit.py
+# checks it stays LF; keep it LF on Windows checkouts too.
+packaging/identity/** text eol=lf
+packaging/mdm/intune/tenant/** text eol=lf
 
 # These pinned upstream snapshots are authenticated by SHA256 over their exact
 # bytes. Disable checkout-time newline conversion so Windows materializes the

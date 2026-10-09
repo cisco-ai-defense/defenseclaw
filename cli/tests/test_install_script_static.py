@@ -63,6 +63,23 @@ def test_scripts_parse_under_bash() -> None:
         subprocess.run([BASH, "-n", str(script)], check=True)
 
 
+def test_path_hint_is_copyable_with_spaced_home(tmp_path: Path) -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("ensure_path_hint() {")
+    function = text[start : text.index("\n}\n", start) + 3]
+    home = tmp_path / "a home with spaces"
+    home.mkdir()
+    bin_dir = home / ".local" / "bin"
+    result = subprocess.run(
+        [BASH, "-c", 'HOME="$1"; BIN_DIR="$2"; CALLER_PATH=/usr/bin; SHELL=/bin/zsh; '
+         "CYAN=; NC=; " + function + "\nensure_path_hint", "--", str(home), str(bin_dir)],
+        capture_output=True, text=True, check=True,
+    )
+    command = next(line.strip() for line in result.stdout.splitlines() if line.strip().startswith("echo "))
+    subprocess.run([BASH, "-c", command], check=True)
+    assert (home / ".zshrc").read_text().strip() == f'export PATH="{bin_dir}:$PATH"'
+
+
 @pytest.mark.skipif(not Path("/bin/bash").exists(), reason="system bash")
 def test_scripts_parse_under_system_bash() -> None:
     # macOS ships bash 3.2 as /bin/bash; the installer must stay compatible.
@@ -215,6 +232,30 @@ def test_openclaw_restart_reports_what_happened(tmp_path: Path, output: str, rc:
     assert len(completed.stdout.strip().splitlines()) == 1
 
 
+def test_install_makes_the_owned_bin_folders_private(tmp_path: Path) -> None:
+    # A user-private-group umask (002) left ~/.local and ~/.local/bin
+    # group-writable when another installer created them; the CLI then
+    # refused the gateway in them after install and init had succeeded.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("private_bin_dir() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir = tmp_path / "home" / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    for folder in (bin_dir.parent, bin_dir):
+        folder.chmod(0o775)
+    script = tmp_path / "private.sh"
+    script.write_text(
+        f"set -euo pipefail\nBIN_DIR=\"{bin_dir}\"\ninfo() {{ echo \"INFO $*\"; }}\n" + func + "private_bin_dir\nprivate_bin_dir\n",
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert [oct(folder.stat().st_mode & 0o777) for folder in (bin_dir.parent, bin_dir)] == ["0o755", "0o755"]
+    assert completed.stdout.count("INFO ") == 2, completed.stdout
+
+
 def _release(tmp_path: Path, script: str) -> Path:
     release = tmp_path / "release"
     release.mkdir()
@@ -298,48 +339,14 @@ def test_both_installers_bootstrap_the_same_pinned_uv() -> None:
     assert re.search(r'\$UvZipSha256 = "[0-9a-f]{64}"', windows)
 
 
-def test_sandbox_flag_is_a_deprecated_no_op() -> None:
-    """--sandbox keeps parsing for old automation but installs nothing.
-
-    The legacy openshell-sandbox installer was removed; the flag must never
-    fetch or execute a sandbox installer again, nor pass the flag on to
-    another release's installer.
-    """
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    assert "--sandbox) INSTALL_SANDBOX=true ;;" in text
-    assert "PASSTHROUGH+=(--sandbox)" not in text
-    assert "install-openshell-sandbox.sh" not in text
-    assert "install_openshell_sandbox" not in text
-    assert "SANDBOX_INSTALLER_ASSET_START_VERSION" not in text
-    notice = text.index('if [[ "${INSTALL_SANDBOX}" == true ]]; then')
-    assert "--sandbox is deprecated and ignored" in text[notice : notice + 600]
-    assert "defenseclaw sandbox legacy-cleanup --dry-run" in text[notice : notice + 600]
-    # OpenShell 0.1 sandboxes ship: the notice points at their setup.
-    assert "run 'defenseclaw sandbox setup'" in text[notice : notice + 600]
-    assert "being rebuilt" not in text
-
-
-def test_legacy_sandbox_installer_asset_is_an_inert_stub(tmp_path: Path) -> None:
-    """Cached installers from earlier releases still download this asset."""
-    stub = ROOT / "scripts" / "install-openshell-sandbox.sh"
-    payload = stub.read_bytes()
-    assert payload.splitlines()[-1] == b"# DefenseClaw OpenShell sandbox installer complete v1"
-    text = payload.decode("utf-8")
-    for forbidden in ("curl", "wget", "sudo", "tar ", "install -m", "chmod", "ghcr.io"):
-        assert forbidden not in text, forbidden
-    completed = subprocess.run(
-        [BASH, stub.as_posix(), "--install-dir", (tmp_path / "bin").as_posix()],
-        text=True,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "legacy openshell-sandbox (0.0.x) installer has been removed" in completed.stderr
-    assert "defenseclaw sandbox legacy-cleanup" in completed.stderr
+def test_removed_sandbox_flag_is_a_usage_error(tmp_path: Path) -> None:
+    """--sandbox went with the legacy openshell-sandbox installer: it stops before anything is installed."""
+    completed = _run([_stamped(tmp_path).as_posix(), "--sandbox"], tmp_path)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "--sandbox was removed with the legacy openshell-sandbox installer" in completed.stderr
     assert "defenseclaw sandbox setup" in completed.stderr
-    assert "once available" not in completed.stderr
-    assert not (tmp_path / "bin").exists()
+    assert not (tmp_path / "home" / ".defenseclaw").exists()
+    assert not (ROOT / "scripts" / "install-openshell-sandbox.sh").exists()
 
 
 def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: Path) -> None:
@@ -1033,6 +1040,57 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     kept = list((dc_home / "backups").glob("audit-history-0.8.10-*/audit.db"))
     assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "0.x history", out
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
+
+
+def _legacy_0_8_home(home: Path, receipt_age: int) -> tuple[Path, Path]:
+    """Lay out a 0.8.x install with uv and a temporary Cosign cache."""
+    bin_dir, dc_home = home / ".local" / "bin", home / ".defenseclaw"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "uv").write_text("#!/bin/sh\necho 'uv 0.12.24 (x86_64-unknown-linux-gnu)'\n", encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    (bin_dir / "uvx").write_text("uvx", encoding="utf-8")
+    receipt = home / ".config" / "uv" / "uv-receipt.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        f'{{"binaries":["uv","uvx"],"install_prefix":"{bin_dir}","version":"0.12.24"}}', encoding="utf-8"
+    )
+    python = home / ".local" / "share" / "uv" / "python" / "cpython-3.12.14-linux-x86_64-gnu"
+    (dc_home / ".venv").mkdir(parents=True)
+    cfg = dc_home / ".venv" / "pyvenv.cfg"
+    cfg.write_text(f"home = {python}/bin\nuv = 0.12.24\nversion_info = 3.12.14\n", encoding="utf-8")
+    tuf = home / ".sigstore" / "root" / "tuf-repo-cdn.sigstore.dev"
+    tuf.mkdir(parents=True)
+    (tuf / "root.json").write_text("{}", encoding="utf-8")
+    venv_t = 1_700_000_000
+    for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
+        os.utime(path, (venv_t - 5, venv_t - 5))
+    os.utime(receipt, (venv_t - receipt_age, venv_t - receipt_age))
+    os.utime(cfg, (venv_t, venv_t))
+    return bin_dir, dc_home
+
+
+def test_upgrade_from_0_8_does_not_claim_uv_from_recent_receipt(tmp_path: Path) -> None:
+    # A user-installed uv can have a receipt only seconds older than the
+    # 0.8.x venv: that installer reused uv instead of installing it.
+    home = tmp_path / "home"
+    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=7)
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "legacy.sh"
+    script.write_text(
+        'set -euo pipefail\nhas() { [[ "$1" != cosign ]] && command -v "$1" >/dev/null 2>&1; }\n'
+        + text[text.index("readonly LEGACY_WINDOW") : text.index("find_legacy_leftovers() {")].replace("readonly ", "")
+        + _install_sh_functions("find_legacy_leftovers", "record_legacy_leftovers")
+        + f'HOME="{home}" BIN_DIR="{bin_dir}" DEFENSECLAW_HOME="{dc_home}"\nunset XDG_CONFIG_HOME XDG_DATA_HOME\n'
+        + "find_legacy_leftovers\nrecord_legacy_leftovers\n",
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert not (bin_dir / "defenseclaw-uv.sha256").exists()
+    assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
+    assert (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8") == "sigstore\n"
 
 
 def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> None:

@@ -588,6 +588,8 @@ func (s *session) harnessName() string {
 // stop marked the run interrupted there meanwhile: a stop lets the harness
 // exit (SIGTERM) before the sandbox goes, and that status is not the run's
 // own ending.
+// Without setsid the runner ignores SIGHUP itself: nohup refuses to start
+// it where it cannot detach from a console (macOS outside a login session).
 const detachScript = `set -eu
 d=$1
 shift
@@ -600,7 +602,7 @@ runner='f=$1; shift; rc=0; "$@" || rc=$?; [ -s "$f" ] || printf "%s\n" "$rc" > "
 if command -v setsid >/dev/null 2>&1; then
   setsid nohup sh -c "$runner" sh "$d/latest.exit" "$@" >"$log" 2>&1 </dev/null &
 else
-  nohup sh -c "$runner" sh "$d/latest.exit" "$@" >"$log" 2>&1 </dev/null &
+  (trap '' HUP; exec sh -c "$runner" sh "$d/latest.exit" "$@") >"$log" 2>&1 </dev/null &
 fi
 printf '%s\n' "$!" > "$d/latest.pid"
 `

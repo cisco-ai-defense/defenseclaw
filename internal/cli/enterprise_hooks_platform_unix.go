@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/spf13/cobra"
 )
 
@@ -28,9 +30,37 @@ func enterpriseHookDeferredTargetSessionAvailable(
 	return false, fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
 }
 
-// enterpriseHookRemovedAccountRow is the Windows standalone deleted-account
-// check; no unix row is excused.
-var enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
+// enterpriseHookRemovedAccountRow excuses a failed standalone row only when
+// reconciliation itself found the target missing and local account evidence
+// makes that absence definitive. NSS also returns not-found for directory
+// users while their provider is unavailable, so it cannot prove deletion.
+var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
+	user := strings.TrimSpace(row.User)
+	if cfg == nil || !cfg.StandaloneEnterprise() || user == "" ||
+		!strings.HasPrefix(row.Error, "enterprise hooks: target account ") ||
+		!strings.HasSuffix(row.Error, ": "+errEnterpriseHookTargetNotFound.Error()) {
+		return false
+	}
+	if _, err := enterprisehooks.StandaloneResolver().LookupUser(user); !unixidentity.IsNotFound(err) {
+		return false
+	}
+	local, err := enterpriseHooksEnumerateLocalAccounts(context.Background())
+	if err != nil {
+		return false
+	}
+	if _, present := local[user]; present {
+		return false
+	}
+	if !enterpriseHooksEnumerateDirectoryConfigured() {
+		return true
+	}
+	state := enterprisehooks.LoadUnixEnumeratorState(enterpriseHookEnumeratorStatePath(enterpriseHookManifest))
+	return state.Sources[user] == "files"
+}
+
+// enterpriseHookRemovedAccountNote follows a failed row whose local account
+// was removed, while the enumerator has yet to drop its target.
+const enterpriseHookRemovedAccountNote = " (the local account was removed; the enumerator drops its targets after 3 enumeration cycles)"
 
 // enterpriseHookSignedOutAccount is the Windows standalone signed-out
 // account check; no unix row names one.
@@ -101,7 +131,7 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 		if bootstrap {
 			applyStandaloneHookGuardianDefaults(cmd)
 		}
-		configureEnterpriseHooksStandaloneUnix(cmd.Context())
+		configureEnterpriseHooksStandaloneUnix()
 	}
 	return err
 }
@@ -131,6 +161,13 @@ func refuseEnterpriseHooksForStandardUserOnManagedHost(cmd *cobra.Command) error
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s); "+
 		"`%s` reads the administrator-owned deployment, so an administrator runs it: `sudo %s %s`",
 		layout.DescriptorPath, command, managedHostGatewayCommand(), command)
+}
+
+// refuseEnterpriseIdentityViewForStandardUser gives the read-only identity
+// views (ide-plugins, agent-identities, profile-explain) the same answer for
+// a standard user on a standalone managed host.
+func refuseEnterpriseIdentityViewForStandardUser(cmd *cobra.Command) error {
+	return refuseEnterpriseHooksForStandardUserOnManagedHost(cmd)
 }
 
 // applyStandaloneHookGuardianDefaults fills in the guardian paths of this

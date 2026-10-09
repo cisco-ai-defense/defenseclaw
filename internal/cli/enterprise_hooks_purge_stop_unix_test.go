@@ -124,7 +124,11 @@ func TestEnterpriseHookWorkerPurgeStopsThePerUserGatewayFirst(t *testing.T) {
 // so the administrator knows whose data stays.
 func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	previousCheck := enterpriseHookCheckHome
-	t.Cleanup(func() { enterpriseHookCheckHome = previousCheck })
+	t.Cleanup(func() {
+		enterpriseHookCheckHome = previousCheck
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{})
 	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
 		if home == "/home/carol" {
 			return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending}
@@ -133,23 +137,23 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	}
 	uid := func(v int) *int { return &v }
 	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{
-		{User: "alice", UserHome: "/home/alice", UID: uid(1001), Connector: "codex"},
-		{User: "alice", UserHome: "/home/alice", UID: uid(1001), Connector: "cursor"},
-		{User: "bob", UserHome: "/home/bob", UID: uid(1002), Connector: "codex"},
-		{User: "carol", UserHome: "/home/carol", UID: uid(1003), Connector: "codex"},
-		{User: "dave", UserHome: "/home/dave", UID: uid(1004), Connector: "codex"},
+		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "codex"},
+		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "cursor"},
+		{User: "bob", UserHome: "/home/bob", UID: uid(1002), GID: uid(1002), Connector: "codex"},
+		{User: "carol", UserHome: "/home/carol", UID: uid(1003), GID: uid(1003), Connector: "codex"},
+		{User: "dave", UserHome: "/home/dave", UID: uid(1004), GID: uid(1004), Connector: "codex"},
 		{User: "erin", UserHome: "/home/erin", Connector: "codex"},
 	}}
 	jobs := map[int]*enterpriseHookWorkerJob{
 		1001: {Account: enterpriseHookWorkerAccount{UID: 1001, GID: 1001, User: "alice", Home: "/home/alice"}},
 		1004: {Account: enterpriseHookWorkerAccount{UID: 1004, GID: 1004, User: "dave", Home: "/home/dave"}},
 	}
-	notPurged := addEnterpriseHookStatePurges(jobs, manifest, map[int]bool{1004: true})
+	notPurged := addEnterpriseHookStatePurges(jobs, resolveEnterpriseHookRemoveRows(manifest), map[int]bool{1004: true})
 	want := []string{
 		"bob: its home is not trusted",
 		"carol: its home is not available; rerun the purge when it is",
 		"dave: its pending hook cleanup failed; the state stays for a retry",
-		"erin: its manifest row has no usable uid",
+		`erin: target account "erin" does not exist: no such account`,
 	}
 	if strings.Join(notPurged, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("not purged:\n%s\nwant:\n%s", strings.Join(notPurged, "\n"), strings.Join(want, "\n"))

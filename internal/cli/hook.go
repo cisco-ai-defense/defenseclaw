@@ -19,6 +19,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func init() {
@@ -143,8 +145,30 @@ func newHookCmd() *cobra.Command {
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, err)
 	})
+	cmd.AddCommand(newHookSessionFactsCmd())
 
 	return cmd
+}
+
+// newHookSessionFactsCmd is `hook session-facts`: it prints the calling
+// session's X-DefenseClaw-Session-Facts value, the Kerberos default
+// principal included. The Linux and macOS shell hooks run it because a
+// shell cannot read a credential cache; it caches the value in
+// ~/.defenseclaw/session-facts.json, which the hooks read without running
+// it for the next five minutes (30 seconds when a KCM read failed in
+// transit or the macOS klist timed out).
+func newHookSessionFactsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:         "session-facts",
+		Short:       "Print this session's claimed session facts (invoked by the shell hooks)",
+		Hidden:      true,
+		Annotations: map[string]string{secureClientAbsentAnnotation: "true"},
+		Args:        cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := io.WriteString(cmd.OutOrStdout(), useridentity.CurrentSessionFactsHeader())
+			return err
+		},
+	}
 }
 
 // hookProcessExit ends the hook process with hookexec's connector-native
@@ -343,6 +367,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			FailMode:              "closed",
 			StrictAvailability:    true,
 			ManagedEnterprise:     true,
+			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
 		// Marks a failed Unix standalone runtime as the standalone profile's
@@ -449,6 +474,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		AuthenticatedManagedToken: authenticatedManagedToken,
 		StrictAvailability:        hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
 		ManagedEnterprise:         enterpriseManaged,
+		SecureClient:              enterpriseManaged && secureClientHost(),
 		ManagedGatewayServiceName: managedGatewayService,
 		TraceParent: hookFirstNonEmpty(
 			os.Getenv("DEFENSECLAW_TRACEPARENT"),

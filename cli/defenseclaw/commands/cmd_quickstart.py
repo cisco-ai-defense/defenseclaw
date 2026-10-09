@@ -263,6 +263,12 @@ def quickstart_cmd(
 
     profile = mode or "observe"
 
+    from defenseclaw.inventory import agent_discovery
+
+    # From here on only the chosen connector's CLI runs as a probe (GAP-0901).
+    token = agent_discovery.restrict_probes([connector])
+    click.get_current_context().call_on_close(lambda: agent_discovery.end_probe_restriction(token))
+
     report = run_first_run(
         FirstRunOptions(
             connector=connector,

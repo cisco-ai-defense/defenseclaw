@@ -32,6 +32,7 @@ the same Setup and the same config.
 | Privileges | An elevated administrator token, or SYSTEM (for example an MDM agent). |
 | Disk space | Free space on the ProgramData volume for about three copies of the Setup payload plus 256 MB to install, upgrade, repair or ensure (one copy plus 256 MB for the other actions). Setup refuses at once, before it stages anything, and names the volume, its free space and the space it needs. |
 | Other profiles | No Secure Client DefenseClaw deployment. The two profiles share service names, so the lifecycle refuses with `profile_conflict`. |
+| User sessions | Users enroll while they are signed in to the desktop, at the console or over Remote Desktop. An account that only uses SSH, scheduled tasks or `runas` is never enrolled, and under `unenrolled_users: deny` its agents stay blocked. See [Enrollment on Windows](/docs/enterprise/enrollment#windows). |
 
 ## Layout
 
@@ -42,6 +43,7 @@ cannot change either tree.
 | --- | --- |
 | Binaries | `C:\Program Files\Cisco\DefenseClaw\bin` (`defenseclaw.exe`, `defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, `defenseclaw-acp.exe`, `defenseclaw-sensor-helper.exe`) |
 | Lifecycle scripts | `C:\Program Files\Cisco\DefenseClaw\libexec` (`install-enterprise.ps1`, `DefenseClawEnterprise.psm1`) |
+| Managed OpenCode plugin | `C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`. Users hold read and execute plus write attributes on this one file, because OpenCode's runtime opens every module with that right; its content, owner and access list stay administrator-only. See [Managed OpenCode plugin](/docs/enterprise/machine-policy#managed-opencode-plugin). |
 | Config | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` |
 | Secrets | `C:\ProgramData\Cisco\DefenseClaw\secrets` |
 | Target manifest | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml` (the enumerator writes it) |
@@ -168,8 +170,10 @@ guardrail:
     claudecode: {}
 ```
 
-Each key under `guardrail.connectors` turns on protection for that agent. A
-config with no connectors protects nothing. See
+Each key under `guardrail.connectors` turns on protection for that agent; an
+empty value (`{}`) enables it with the default settings. A config with no
+connectors protects nothing: `status` warns `no_connectors_enabled` and
+`verify` fails. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
@@ -189,6 +193,10 @@ New-Item -ItemType Directory -Path $Packs -Force | Out-Null
 icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
 Copy-Item -Recurse .\my-pack "$Packs\my-pack"
 ```
+
+For an Intune fleet, deliver a custom pack before the DefenseClaw app using a
+dependent Win32 app, or a pinned HTTPS download with a SHA-256 check; see
+[Intune on Windows](/docs/enterprise/mdm/intune-windows#6-change-the-config-upgrade-and-roll-back).
 
 Setup checks these permissions for the service account before it changes
 anything, and stops with exit code `1639` naming the folder and the
@@ -485,6 +493,15 @@ yet; it takes the permissions of its folder, so write it to a folder only
 administrators can read. Treat it as sensitive: it can hold prompt and tool
 content.
 
+A call refused because the account is excluded or not enrolled yet is in the
+export too: a `hook_decision` row and a `connector-hook` row with action
+`block`, the account's SID and name, the connector and event, and reason
+`enterprise_managed_sid_unregistered` (or
+`enterprise_managed_enrollment_pending`). The gateway takes the account from
+the Windows token of the refused process, not from anything the call sends.
+Repeated refusals of one account and agent are written as one row a minute;
+the `connector-hook` row names the tool and the number of attempts.
+
 ## Review AI Discovery
 
 With `ai_discovery.enabled: true` in the deployment config, the gateway
@@ -509,8 +526,13 @@ does not run the skill or MCP scanners. The `discovery` view names each
 skill and MCP server per user. Your observability destinations get the
 `ai_component.discovered`, `changed` and `removed` records with the user
 (`user.id`, `defenseclaw.user.name`) but without the skill or MCP server
-name: the per-entry `ai_component.observed` records stay in the local
-inventory, so read the names with `discovery --user <account> --json`. See
+name. Discovery does not emit per-entry `ai_component.observed` records;
+read the full inventory with `discovery --user <account> --json`. Skill and
+MCP names can still reach destinations through hook decision and asset-policy
+audit rows when assets are used, scanned, admitted or rejected. With
+`ai_discovery.include_user_email`
+on, one `ai_component.observed` record per account and connector carries the
+account's Claude Code or Codex address, without entry names. See
 [AI Discovery](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)
 for the folders the service may read in each profile.
 
@@ -712,7 +734,9 @@ each user remove their per-user install with
 `defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does
 not adopt a `%USERPROFILE%\.defenseclaw` folder that a per-user install left,
 and refuses that profile until the folder is gone (move it aside to keep its
-data). A per-user gateway that still runs holds the gateway API port, and
+data). A folder the account created itself without any per-user product (the
+refused hook of an account that was not enrolled writes one) is not such a
+folder: Setup takes it over. A per-user gateway that still runs holds the gateway API port, and
 Setup names it in its `api_port_held` error. See
 [Uninstall and preserved state](/docs/get-started/windows/install-lifecycle#uninstall-and-preserved-state).
 
@@ -808,8 +832,16 @@ It also removes the folders an interrupted elevated DefenseClaw command
 left: `C:\ProgramData\DefenseClaw-PowerShell-<32 hex>`,
 `C:\ProgramData\DefenseClaw-Installer-<32 hex>` and
 `C:\Windows\Temp\DefenseClaw-Bootstrap-<32 hex>`; every uninstall does this,
-not only a purge. The `machine_state_remaining` warning names any of these
-folders it could not remove, and why.
+not only a purge. A purge also removes the public policy summary
+`C:\ProgramData\Cisco\DefenseClaw-HookRuntime\machine-policy.json` and that
+folder once it is empty, the DefenseClaw Claude Code drop-ins
+(`90-defenseclaw.json`, its state and lock, `00-defenseclaw-version-floor.json`)
+and the hooks' runtime selectors that name this deployment's hook binary, even
+when the uninstall had no deployment record to tear down (for example after
+`C:\ProgramData\Cisco\DefenseClaw` was deleted), and then the lifecycle lock
+in `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`. Files that name another
+deployment's hook binary stay. The `machine_state_remaining` warning names
+anything it could not remove, and why.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes
@@ -974,7 +1006,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | The guardian registers an in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile). The [ACP guard](/docs/acp-guard) stays available |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's global `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.24.1 and later, Kiro IDE 1.0.182 and later). A kiro-cli that has never run is enrolled at 2.24.1 until its first run names its version. See [Kiro](/docs/connectors/kiro#enterprise-standalone-profile) |
 | OpenHands, OmniGent, OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them, so they are not protected. A target manifest row that names one is refused with a reason. |
 
 Windows handles machine policy differently from Linux and macOS. See

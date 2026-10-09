@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // Machine policy codes in the lifecycle result.
@@ -106,6 +107,16 @@ func (m *policyManager) enrolledHomes() []string {
 // eligible-accounts format: the enumerator's eligible accounts or the
 // guardian's VS Code Local accounts. An unreadable record is no homes.
 func (env *Env) accountHomes(recordPath string) []string {
+	homes := []string{}
+	for _, home := range env.canonicalAccountHomes(recordPath) {
+		homes = append(homes, env.P(home))
+	}
+	return homes
+}
+
+// canonicalAccountHomes is the homes of the accounts an eligible-accounts
+// record names, as the record spells them.
+func (env *Env) canonicalAccountHomes(recordPath string) []string {
 	data, err := readBounded(env.P(recordPath), maxInputBytes)
 	if err != nil {
 		return nil
@@ -118,10 +129,10 @@ func (env *Env) accountHomes(recordPath string) []string {
 	if json.Unmarshal(data, &record) != nil {
 		return nil
 	}
-	homes := []string{}
+	var homes []string
 	for _, account := range record.Accounts {
 		if home := strings.TrimSpace(account.Home); home != "" {
-			homes = append(homes, env.P(home))
+			homes = append(homes, home)
 		}
 	}
 	return homes
@@ -452,13 +463,15 @@ func firstPaths(paths []string) string {
 // connector although the enumerator found users to protect.
 const codeNoConnectorsEnabled = "no_connectors_enabled"
 
-// warnNoConnectorsEnabled reports a config without an enabled
-// guardrail.connectors entry on a host with eligible users: the enumerator
-// publishes no target for them, and status would otherwise read coverage and
-// security complete with 0 targets.
+// warnNoConnectorsEnabled reports a config that enrols no connector on a
+// host with eligible users: the enumerator publishes no target for them, and
+// status would otherwise read coverage and security complete with 0 targets.
+// verify fails on it (GAP-0221). The connectors counted are the enumerator's
+// own set, so the singular guardrail.connector the per-user CLI writes counts
+// unless guardrail.connectors disables it (GAP-0263).
 func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 	env, r := l.env, l.result
-	if len(validated.Connectors) > 0 {
+	if len(enterprisehooks.EffectiveUnixHookConnectors(validated.Loaded, connector.NewDefaultRegistry())) > 0 {
 		return
 	}
 	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
@@ -475,10 +488,47 @@ func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 	if len(record.Accounts) == 1 {
 		users = "user"
 	}
+	// Name what counts and what was ignored: an administrator with an
+	// openclaw entry read "enables no guardrail.connectors entry" as wrong
+	// (GAP-0272).
+	ignored := ""
+	if entries := ignoredConnectorEntries(validated.Loaded, env.GOOS); len(entries) > 0 {
+		ignored = " (ignored: " + strings.Join(entries, ", ") + ")"
+	}
 	r.AddWarning(codeNoConnectorsEnabled, fmt.Sprintf(
-		"the enumerator found %d eligible %s, but config.yaml enables no guardrail.connectors entry, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {enabled: true}) and run `%s`",
-		len(record.Accounts), users, env.lifecycleCommand("ensure")))
+		"the enumerator found %d eligible %s, but config.yaml enables no connector the managed deployment protects in guardrail.connector or guardrail.connectors%s, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {}) and run `%s`",
+		len(record.Accounts), users, ignored, env.lifecycleCommand("ensure")))
 	r.SecurityComplete = false
+}
+
+// ignoredConnectorEntries lists the guardrail.connector and
+// guardrail.connectors entries of a config whose effective connector set is
+// empty, each with why it does not count.
+func ignoredConnectorEntries(cfg *config.Config, goos string) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := []string{cfg.Guardrail.Connector}
+	for name := range cfg.Guardrail.Connectors {
+		names = append(names, name)
+	}
+	platform := map[string]string{"linux": "Linux", "darwin": "macOS"}[goos]
+	seen := map[string]bool{}
+	out := []string{}
+	for _, name := range names {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if !cfg.Guardrail.EffectiveEnabled(name) {
+			out = append(out, key+" (enabled: false)")
+		} else {
+			out = append(out, key+" (not supported by managed enterprise on "+platform+")")
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func intersectSorted(values, allowed []string) []string {

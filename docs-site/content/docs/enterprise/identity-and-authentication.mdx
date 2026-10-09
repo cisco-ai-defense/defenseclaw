@@ -1,0 +1,600 @@
+---
+title: Identity and authentication
+description: Which directory identities DefenseClaw attributes agent activity to on Linux, Windows and macOS, how agents get their own stable identity, and guides for joining a Linux host to AD, assigning a guardrail profile to a group, checking what DefenseClaw knows about a user, and turning the identity data off.
+keywords:
+  - DefenseClaw identity
+  - Active Directory Kerberos
+  - Entra ID
+  - Okta
+  - SSSD InfoPipe
+  - agent identity
+  - guardrail profiles
+  - IDE plugin inventory
+---
+
+DefenseClaw ties each agent action to the person who ran it and to the agent
+that did it. On a shared Linux host, for example an AD/Kerberos deployment
+where developers sign in over SSH, it records the directory principal and
+domain of the account, whether the login came over SSH, and a stable
+identity for each agent. Guardrail profiles can then give a group, a user, a
+connector or a single agent its own policy, and every decision records which
+profile applied and why.
+
+## What's new
+
+- **Who ran the agent.** Records carry the account's directory principal,
+  domain, directory type and an assurance level (`verified` or `claimed`),
+  plus the login session (SSH, remote desktop or console) and the Kerberos
+  principal. Read from the OS only. See
+  [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
+- **User- and group-based policies.** Assign a guardrail profile by directory
+  group, user, connector or agent, and check the result with
+  `defenseclaw guardrail profile list|show|explain`. See
+  [User- and group-based policies](/docs/guardrail/user-and-group-policies).
+- **Agent identity.** Every agent install gets a stable `agt-` ID, listed by
+  `defenseclaw agent identities` (one row per install, user and connector),
+  and every chat and sub-agent a stable `ais-` ID, which its records carry
+  with the lineage and the user's principal. See
+  [Agent identity](#agent-identity).
+- **IDE and plugin inventory.** Every extension and plugin in VS Code and its
+  forks, JetBrains IDEs, Visual Studio, Zed, Eclipse and Neovim, per user,
+  with enabled state and an AI flag, in `defenseclaw agent ide-plugins`, the
+  API, AIBOM, the TUI and Grafana. See
+  [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory).
+- **Observability.** A Grafana **Identity & Users** board, a `$user` filter on
+  the other boards, new identity, profile and IDE attributes and records, and
+  principal, domain, agent identity and profile name in Galileo spans. See
+  [Grafana dashboards](/docs/observability/grafana-dashboards).
+- **Managed hosts.** `enterprise linux|macos|windows profile-explain`,
+  `agent-identities` and `ide-plugins` give an administrator the same answers
+  where no `defenseclaw` CLI is installed. See
+  [Check what DefenseClaw knows about a user](#check-what-defenseclaw-knows-about-a-user).
+- **Doctor.** `defenseclaw doctor` fails and `doctor --fix` repairs a hook
+  script that lost its execute bit, reports one root
+  cause per problem, and names the guardrail profile that decides for the
+  account that runs it.
+
+## Attribution, not authentication
+
+DefenseClaw reads identity only from the operating system the agent runs on.
+
+- It never calls an identity provider (no Entra, Okta or LDAP API calls).
+- It holds no identity credentials: no passwords, tokens, tickets or keys.
+- It adds no new secrets and no sign-in step.
+- Okta and Entra ID appear only through what the OS already knows: a joined
+  device, Platform SSO, or a directory synced into AD or LDAP.
+
+Each fact has an assurance level, sent as
+`defenseclaw.user.principal.assurance`: `verified` when the gateway or the
+root guardian resolved it for a uid or SID the gateway took from how it
+authenticated the caller (the kernel's peer credentials, a per-user
+credential, or on a per-user install the account the gateway
+runs as),
+`claimed` when the hook reported it from the user's own session and the user
+could change it. The reference for what is read on each
+OS is [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
+
+<Callout type="warn" title="Do not grant access from these fields">
+Identity in DefenseClaw records answers "who ran this agent". It is not an
+authenticated assertion for another system. Only `verified` facts can select
+a guardrail profile; headers, hook payloads and `claimed` facts never do.
+</Callout>
+
+## Supported identity types
+
+Each cell names what DefenseClaw reads and the assurance it records.
+**Per-user** means the OSS install in the user's own home; **enterprise** means
+the standalone enterprise profile with its root guardian or SYSTEM enumerator.
+
+| Identity | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | uid, name and groups from Open Directory, reported as `local` (verified), also per-user |
+| LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name, the groups from `initgroups` and, for an SSSD account, the directory type of the realmd realm that serves its domain (verified), also per-user. Enterprise adds the UPN from SSSD InfoPipe (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified, enterprise) |
+| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@realm`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
+| Entra ID | With the `aad` NSS module or Himmelblau, reported as `entra_id` (verified), also per-user, with the UPN as principal (Himmelblau: with `cn_name_mapping = false`). The `aad` module gives no Entra groups; Himmelblau gives the user's Entra groups by name. Joined to Microsoft Entra Domain Services, the account is an AD account with the synced Entra groups (see the row above). Tested live: [Entra on Linux](/docs/enterprise/identity-entra-id#3-linux) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified), also per-user. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists (verified, enterprise only; see [Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)) | Platform SSO with Company Portal: an account registered with Platform SSO is `entra_id` with its login UPN from `AltSecurityIdentities` (verified, enterprise). No Entra groups reach the Mac (tested live: [Entra on macOS](/docs/enterprise/identity-entra-id#4-macos-platform-sso)) |
+| Okta | Through the Okta LDAP Interface and SSSD: the uid, name and Okta groups (verified), also per-user; standalone enterprise adds directory `ldap`, and the UPN when SSSD maps the Okta login to it. Tested live on RHEL 9. Or the AD account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: a registered account's SSO provider and login UPN (verified, enterprise; not tested live). As AD or LDAP when synced |
+
+What differs between platforms and installs, as exercised on real hosts:
+
+- **Kerberos ticket location on Linux.** RHEL 9 keeps the ticket in a `KCM:`
+  cache (`sssd-kcm`) and leaves `KRB5CCNAME` unset. Ubuntu 24.04 stores the
+  ticket that `ssh -K` delegates in a **file cache**,
+  `FILE:/tmp/krb5cc_<uid>_<random>`, named by `KRB5CCNAME`. DefenseClaw reads
+  the default principal from either one, directly, and never runs `klist`.
+- **Linux per-user and enterprise.** Both resolve the account, domain, groups
+  and source through NSS, and the directory type from realmd, which any
+  account may ask. Only enterprise adds the UPN from InfoPipe, so on a
+  per-user install an SSSD account's principal is `account@realm`. An SSSD
+  domain that no joined realm covers, such as plain LDAP or the Okta LDAP
+  Interface, has no `defenseclaw.user.directory` on a per-user install;
+  standalone enterprise reads its type, `ldap`, from InfoPipe.
+- **Windows per-user and managed.** A per-user install resolves the account,
+  the AD UPN and the Entra UPN and tenant itself, but has **no group list**:
+  `groups` assignments cannot match there. The managed host's SYSTEM
+  enumerator supplies the sign-in token groups.
+- **macOS per-user and enterprise.** A per-user install reports the account
+  and its groups as verified, directory `local`, source `macos_opendirectory`.
+  The directory, domain and SSO provider of a bound Mac need the enterprise
+  root enumerator. The session's Kerberos principal and the SSH session are
+  claimed. The principal comes from the default `API:` cache, which the hook
+  reads with macOS's own `/usr/bin/klist --json` at most once per 5 minutes,
+  or from a `FILE:` cache that `KRB5CCNAME` or `krb5.conf` names.
+- **Okta is never an Okta lookup.** On Linux and Windows an Okta user is
+  whatever AD or LDAP account the OS gets from Okta: an AD account Okta syncs
+  to, or an LDAP account SSSD reads from the Okta LDAP Interface. The `okta`
+  directory value comes only from a Mac's Platform SSO or Okta Device Access
+  provider.
+- **Okta through the Okta LDAP Interface and SSSD was tested live** on RHEL 9
+  with an Okta org; see
+  [Okta on Linux](/docs/enterprise/identity-okta).
+- **Entra ID was tested on a live tenant.** Per-user installs on an
+  Entra-joined Windows 11 computer and on Ubuntu with Entra ID SSH sign-in
+  report directory `entra_id`, the UPN as principal and, on Windows, the
+  tenant ID; a `users` assignment by UPN selected the profile on both. See
+  [Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields-as-seen-live).
+  Windows puts an Entra group into the sign-in token only when a built-in
+  local group lists it. On Linux, Entra groups reach the host only through
+  Himmelblau or Microsoft Entra Domain Services with SSSD, both tested live;
+  the `aad` module gives none. On macOS, Platform SSO gives no Entra groups
+  (tested live); a local group has to carry the membership. The Okta Device
+  Access and Okta Platform SSO readers were tested against recorded OS output,
+  not a live tenant. See the limits in
+  [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources#limits-stated-plainly).
+
+## Agent identity
+
+Each agent gets an identity of its own instead of only inheriting the
+person's. The identities are digests of facts the gateway already holds, so
+they need no credential and stay the same across sessions, gateway restarts
+and upgrades.
+
+<Flow
+  direction="TB"
+  caption="One person can run many agents, each agent many sessions, and each session sub-agents. A sub-agent shares its parent's agent ID and links to its parent and root. The agent ID is a hash of facts the gateway already holds."
+>
+  <Node id="h" kind="operator">{`Person\nuser.id, principal`}</Node>
+  <Node id="in" kind="generic">{`Machine ID, connector\nconfig root`}</Node>
+  <Node id="a" kind="agent" emphasis>{`Agent (agt-)\nper install and user`}</Node>
+  <Node id="s" kind="agent">{`Session (ais-)\none chat`}</Node>
+  <Node id="c" kind="agent">{`Sub-agent (ais-)\nparent, root, depth`}</Node>
+  <Edge from="h" to="a" label="runs" />
+  <Edge from="in" to="a" label="hashed with" />
+  <Edge from="a" to="s" label="starts" />
+  <Edge from="s" to="c" label="spawns" />
+</Flow>
+
+| Level | Attribute | How the ID is made |
+| --- | --- | --- |
+| Person | `user.id`, `defenseclaw.user.principal` | From the OS, as above |
+| Agent | `defenseclaw.agent.identity.id` | `agt-` and 16 hex digits of a SHA-256 over the machine ID, the verified user, the connector and the connector's config root in that user's home. On Linux and macOS the user is its uid and account name |
+| Session | `defenseclaw.agent.instance_id` | `ais-` and 16 hex digits of a SHA-256 over the agent ID and the session ID |
+| Sub-agent | `defenseclaw.agent.instance_id`, with the parent and root links below | `ais-` over the parent instance and the sub-agent ID. A sub-agent that runs in a session of its own gets the `ais-` of that session. It shares its parent's `agt-` |
+
+The machine ID comes from `/etc/machine-id`, the Windows `MachineGuid` or the
+macOS `IOPlatformUUID`. A config root the agent claims, such as a
+`CLAUDE_CONFIG_DIR` override, is recorded as a hint and never changes the ID.
+Linux and macOS give a removed account's uid to the next account created, so
+the account name, as `getent passwd` shows it for the uid, is part of the ID
+there: the new account gets agent IDs of its own, also in the removed
+account's home, and an `agents` profile assignment of the removed account
+never applies to it. Renaming the account starts new agent IDs too. The
+removed account's agent identities stay listed under its name, with
+`"retired": true`, and inventory records of its installs carry no agent ID.
+A Windows SID is never reused, so a renamed Windows account keeps its agent
+IDs. On a managed Linux, macOS or Windows host, a deleted account's agent
+identities are retired the same way once the hook guardian has dropped the
+account from its enrollment, and an account created again under the same
+name gets agent IDs of its own.
+Two users who reuse the same session ID get different `ais-` IDs and different
+agents: the main agent's ID is made from the user's `agt-`, the connector and
+the session ID, so `gen_ai.agent.id` and the lineage IDs below differ too. A
+chat that resumes after a gateway restart keeps its `ais-` ID and is not
+counted again in the Sessions column of `defenseclaw agent identities`, however
+many chats were open at the restart. The column counts chats: a sub-agent that
+runs in a session of its own, as a Codex 0.160 thread does, is not counted. The
+Secure Client profile keeps its existing agent IDs and gets no new attributes.
+
+A record carries an `ais-` ID only when its hook belongs to a session. Hermes
+sends `transform_terminal_output` without a session; the gateway gives it the
+session that the `pre_tool_call` of its task named or, when it names no task
+(Hermes 0.21), the session of the last `pre_tool_call` of the same agent within
+ten minutes, so it carries the same `ais-`. The OpenCode `defenseclaw.plugin.loaded`
+record is sent when the plugin loads, before any session exists, so it carries
+the `agt-` ID and no `ais-`. A denial of the foreign-hook guard (an unapproved
+plugin or hook) carries the `agt-` ID, and an `ais-` only when the hook named
+its session: the guard keys a block on the agent process, so the OpenCode
+plugin sends none with its `defenseclaw.plugin.loaded` and `tool.execute.before`
+denials.
+
+Claude Code and Codex name a sub-agent on every hook it makes, so each of those
+hooks carries the sub-agent's `ais-` at depth one with the main agent as its
+parent, also when the gateway restarted after the sub-agent started. Codex 0.160
+runs a spawned agent as a session of its own and sends no `SubagentStart`; the
+gateway links that session to the agent that created it, so it is a sub-agent
+at depth one with the parent session named, under the `ais-` of its own session.
+Copilot CLI also runs a task sub-agent, such as `explore`, as a session of its
+own, and that session's hooks name only the session. Its `subagentStart`
+arrives first, in the parent's session, and its `subagentStop` names the child
+session. The gateway links the session's first hook to the agent of the open
+`subagentStart` and does not count the session as a chat. When the same user
+has open sub-agent starts under two different chats, the gateway cannot tell
+which chat a new session belongs to. The link then waits for `subagentStop`,
+and the hooks before it stay at depth zero.
+
+A sub-agent has no `agt-` of its own: it runs in its parent's install, so it
+shares the parent's `agt-` and has its own `ais-`. The lineage attributes link
+it to its parent and hold the IDs the connector reports. A main agent that
+reports none, as Claude Code's and Codex's do, gets one DefenseClaw makes
+(`agent-` and 16 hex digits) from the `agt-`, the connector and the session ID.
+`defenseclaw.agent.parent.id` and `defenseclaw.agent.root.id` name the
+connector agent ID of the parent and the root (`gen_ai.agent.id` on their own
+records), and `defenseclaw.session.parent.id` and
+`defenseclaw.session.root.id` name their connector session ID
+(`gen_ai.conversation.id`). No attribute holds the parent's `ais-`, so join a
+sub-agent to its parent on those connector IDs and the shared `agt-`.
+
+List the identities the gateway has seen:
+
+```bash
+defenseclaw agent identities
+defenseclaw agent identities --user alice --connector codex --json
+```
+
+```text
+User                    Connector  Agent identity        Sessions  Last seen  Config root
+alice@corp.example.com  codex      agt-3f9c0a1b2c3d4e5f  4         2m ago     /home/alice@corp.example.com/.codex
+```
+
+The command lists every identity, most recently seen first. `--limit N` lists
+only the `N` most recent. When the list is cut short, the command says so on
+stderr and names the total; narrow a long list with `--user` or
+`--connector`. The gateway API returns 1000 identities a page (`limit` and
+`cursor`), and the TUI **Agents** tab shows the 1000 most recently seen as
+`Agents (1000+)`. Use the command to see them all.
+
+### Sandboxed agents
+
+An agent that runs in an OpenShell sandbox is attributed like a host agent,
+with four differences.
+
+- **The user is the host user on the sandbox binding**, the account that
+  started the sandbox. The binding is attribution, not proof of the calling
+  process, so it supplies no verified directory facts or groups. User, group
+  and agent identity selectors cannot match from that binding; the default
+  guardrail profile or a connector-only assignment applies. Identity headers
+  the sandbox sends are ignored.
+- **Each sandbox has its own `agt-`.** The agent's install is the sandbox, not
+  a config directory in the home, so a project run in two sandboxes is two
+  agents, and the `agt-` of the host install does not name a sandboxed run.
+  `defenseclaw agent identities` lists one per sandbox, and they stay listed
+  after the sandbox is gone.
+- **Its hooks always enforce.** A sandbox's hooks run in `action` mode
+  whatever `guardrail.mode` or the profile's `mode` says, because DefenseClaw
+  launched the harness and its hooks are the only gate on the tool calls. The
+  selected profile's thresholds and rule pack still apply.
+- **Its web egress follows the sandbox's network profile.** The egress proxy
+  decides each site by the sandbox's OpenShell profile (`open`, `balanced` or
+  `strict`) and its policy pack, not by a guardrail profile. See
+  [Network and egress](/docs/sandboxes/network).
+
+## Guides
+
+The guides below use Active Directory and Okta. For Microsoft Entra ID users on
+Entra-joined Windows and on Azure Linux VMs, see
+[Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
+
+### Join a Linux host to AD and see what DefenseClaw learns
+
+This guide uses RHEL 9 or Ubuntu 24.04, the domain `CORP.EXAMPLE.COM` and the
+user `alice`. DefenseClaw needs nothing from AD beyond what a normal domain
+join gives the host.
+
+<Steps>
+
+<Step>
+
+### Join the host with SSSD
+
+```bash title="RHEL 9"
+sudo dnf install realmd sssd sssd-tools sssd-dbus sssd-kcm adcli samba-common-tools krb5-workstation oddjob oddjob-mkhomedir
+```
+
+```bash title="Ubuntu 24.04"
+sudo apt-get install realmd sssd-ad sssd-tools sssd-dbus sssd-kcm libnss-sss libpam-sss adcli krb5-user
+sudo pam-auth-update --enable mkhomedir
+sudo hostnamectl set-hostname host.corp.example.com
+sudo grep -qxF 'includedir /etc/krb5.conf.d/' /etc/krb5.conf || sudo sed -i '1i includedir /etc/krb5.conf.d/' /etc/krb5.conf
+```
+
+On Ubuntu, `krb5-user` asks for the default Kerberos realm during package
+installation; enter `CORP.EXAMPLE.COM`. Set the host's FQDN before `realm join`
+so its keytab contains `host/host.corp.example.com`. Enabling `mkhomedir`
+creates an AD user's home at first sign-in.
+
+```bash
+sudo realm discover corp.example.com
+sudo realm join --membership-software=adcli --client-software=sssd -U administrator corp.example.com
+sudo realm permit alice@corp.example.com
+```
+
+On Ubuntu, the `includedir` line loads SSSD's `localauth` plugin; without it a
+GSSAPI sign-in maps the ticket to `alice` instead of
+`alice@corp.example.com` and SSH denies the login. Also enable GSSAPI in
+OpenSSH before testing the sign-in:
+
+```bash title="Ubuntu 24.04"
+printf 'GSSAPIAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/50-gssapi.conf
+sudo sshd -t
+sudo systemctl reload ssh
+```
+
+</Step>
+
+<Step>
+
+### Turn on InfoPipe
+
+DefenseClaw reads the UPN through SSSD's InfoPipe D-Bus service, from the
+root hook guardian (standalone enterprise). Enable the attribute in
+`/etc/sssd/sssd.conf`:
+
+```ini
+[sssd]
+services = ifp
+
+[ifp]
+user_attributes = +userPrincipalName
+```
+
+On Ubuntu 24.04, the NSS and PAM responders are socket activated. Listing
+them in `services` as well makes their sockets fail; list only `ifp` here.
+On RHEL 9, use `services = nss, pam, ifp`.
+
+If InfoPipe returns no `userPrincipalName`, also add
+`ldap_user_extra_attrs = userPrincipalName` to the `[domain/...]`
+section. `realm join` sets `use_fully_qualified_names = True`, which the
+examples in these docs assume.
+
+</Step>
+
+<Step>
+
+### Restart SSSD and check it answers
+
+```bash
+sudo sss_cache -E
+sudo systemctl restart sssd
+systemctl is-system-running
+getent passwd alice@corp.example.com
+id alice@corp.example.com
+realm list
+dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe org.freedesktop.sssd.infopipe.GetUserAttr string:alice@corp.example.com array:string:userPrincipalName
+```
+
+On Ubuntu, `systemctl is-system-running` should say `running`; if it says
+`degraded`, inspect `systemctl --failed` before continuing. `getent` and `id`
+must show the user and the groups. `realm list` must show
+the domain with `server-software: active-directory`: the directory type comes
+from it, on per-user installs too. The `dbus-send` call must return the UPN. Note the group spelling `id -Gn` prints (`ml-team@corp.example.com`):
+it is the name a `groups` assignment uses.
+
+</Step>
+
+<Step>
+
+### Sign in with a Kerberos ticket and run an agent
+
+From a client with a ticket, sign in with GSSAPI. `ssh -K` delegates the
+ticket, which needs a forwardable one, so use `kinit -f`:
+
+```bash
+kinit -f alice@CORP.EXAMPLE.COM
+ssh -K alice@corp.example.com@host.corp.example.com
+```
+
+On the host, install DefenseClaw for that user (or deploy the enterprise
+package), run an agent such as Claude Code or Codex for one prompt, and read
+what DefenseClaw recorded:
+
+```bash
+defenseclaw audit export --since 10m \
+  | jq -c 'select(.action=="hook_decision") | .structured
+      | {user: ."defenseclaw.user.name", domain: ."defenseclaw.user.domain",
+         directory: ."defenseclaw.user.directory", source: ."defenseclaw.user.identity.source",
+         principal: ."defenseclaw.user.principal",
+         kerberos_principal: ."defenseclaw.session.kerberos_principal",
+         assurance: ."defenseclaw.user.principal.assurance", session: ."defenseclaw.session.kind",
+         agent: ."defenseclaw.agent.identity.id"}' | sort -u
+```
+
+On a managed Linux host, export through the installed gateway as root and
+inspect the output file:
+
+```bash
+audit_file=$(mktemp)
+sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 10m -o "$audit_file" --force
+jq -c 'select(.action=="hook_decision") | .structured' "$audit_file"
+rm "$audit_file"
+```
+
+A per-user install shows `domain` `corp.example.com`, `directory`
+`active_directory`, `source` `sssd`, `assurance` `verified` and `session`
+`ssh`. The standalone enterprise profile reports `source` `sssd_infopipe`.
+The projected `principal` and `kerberos_principal` values are null until you
+turn on `ai_discovery.include_user_principal`. See
+[Turn off the principal or the IDE inventory](#turn-off-the-principal-or-the-ide-inventory).
+
+</Step>
+
+</Steps>
+
+### Assign a guardrail profile to an AD group
+
+Define a profile, assign it to the group, then ask the gateway who gets it:
+
+```yaml title="~/.defenseclaw/config.yaml"
+guardrail:
+  mode: observe
+  profiles:
+    contractors:
+      mode: action
+      block_at: MEDIUM
+  profile_assignments:
+    - profile: contractors
+      match: {groups: ["contractors@corp.example.com"]}
+  default_profile: ""        # "" keeps the global guardrail.* behaviour
+```
+
+```bash
+defenseclaw config validate
+defenseclaw guardrail profile list
+defenseclaw guardrail profile explain --user bob@corp.example.com --connector codex
+```
+
+```text
+  user:    bob@CORP.EXAMPLE.COM (2 group(s))
+  profile: contractors
+  match:   group (contractors@corp.example.com)
+  digest:  sha256:4f460f32fe21aa052aa524027ba08c9f89fe695cbe39cea2fb0252e5e0a738bd
+  applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
+```
+
+Users of a child domain of the joined domain (`bob@emea.corp.example.com` on a
+host joined to `corp.example.com`) match `users` assignments only when you list
+their domain in `ai_discovery.trusted_ad_child_domains`; an empty list trusts
+the joined domain only. See
+[Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm).
+
+Use the group name exactly as `id -Gn` prints it. A Windows group is
+`CORP\Contractors`, the bare name or its SID. The full guide, with precedence,
+worked scenarios, the audit record and delivery to managed hosts, is
+[User- and group-based policies](/docs/guardrail/user-and-group-policies).
+
+### Use Okta users on Linux through the Okta LDAP Interface
+
+DefenseClaw never calls Okta. On Linux, SSSD reads Okta users and groups through
+the Okta LDAP Interface, and DefenseClaw sees them as it sees any SSSD account:
+the uid, the name and the Okta groups are verified, on per-user installs and on
+the standalone enterprise profile, and an Okta group can choose a guardrail
+profile. This was run live on RHEL 9.8 against an Okta org. **SSSD 2.9, the
+version in RHEL 9, cannot bind to Okta**; the guide names the fix.
+
+The whole path, with the Okta setup, the SSSD build, starter scripts, what
+DefenseClaw records, and troubleshooting, is
+[Okta on Linux](/docs/enterprise/identity-okta).
+
+### Check what DefenseClaw knows about a user
+
+For a user on a host with the `defenseclaw` CLI (the OSS install):
+
+```bash
+defenseclaw guardrail profile explain --user alice@corp.example.com --json | jq .subject
+defenseclaw agent identities --user alice
+defenseclaw agent ide-plugins --user alice --ai-only
+```
+
+`subject` shows the user ID, the principal, the UPN and the groups as the
+gateway resolves them, the same way it does for a live request. `--user`
+takes the account name as `getent passwd` (or `id`) shows it, a uid or a SID,
+in any case.
+
+A managed install (the enterprise package, MDM or Setup) has no `defenseclaw`
+Python CLI. As root on a managed Linux or macOS host, read the same answers
+from the managed gateway, as JSON. The package does not put
+`defenseclaw-gateway` on root's `PATH`, so use its full path:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector codex
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux agent-identities --user alice@corp.example.com
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ide-plugins --user alice@corp.example.com --ai-only
+```
+
+On a Mac, run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise
+macos ...` instead. On a managed Windows computer, run them from an elevated
+PowerShell prompt (or as LocalSystem from an MDM script):
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user CORP\alice --connector codex
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows agent-identities
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows ide-plugins --user alice
+```
+
+After an account is deleted, `agent-identities --user` still finds its agent
+identities by the name they are listed under, by its uid or by its SID.
+
+`profile-explain` also lists every configured profile with its digest under
+`profiles`, in place of `profile list` and `profile show`. For fleet-wide
+views, use the Grafana **Identity & Users** board.
+
+### Turn off the principal or the IDE inventory
+
+Two settings decide how much personal data leaves the host:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `ai_discovery.include_user_principal` | `false` | Adds `defenseclaw.user.principal` and `defenseclaw.session.kerberos_principal` to every record that carries identity: hook decisions, tool activity, agent, model and tool spans, and `identity.observed`. Off by default, like `include_user_email`, because a principal names a person across systems. |
+| `ai_discovery.ide_inventory` | `all` | `all`, `ai_only` or `off`. Plugin lists can reveal personal tooling; `ai_only` keeps only AI plugins and `off` collects no IDE inventory. |
+
+```yaml title="~/.defenseclaw/config.yaml"
+config_version: 8
+ai_discovery:
+  include_user_principal: false   # the default; true sends the principal
+  ide_inventory: ai_only          # all | ai_only | off
+```
+
+Then check the file with `defenseclaw config validate`. A running gateway
+applies the change on its next reload; on a managed host, edit the
+[machine configuration](/docs/enterprise/configuration#where-the-config-lives)
+instead. Confirm with the audit export in the first guide: the `principal`
+and `kerberos_principal` keys are absent while the setting is off. A home-directory
+path can still contain the UPN on SSSD hosts with fully qualified names; see
+[End-user identity](/docs/observability/end-user-identity#optional-principal).
+
+What stays on in either case: `user.id`, the account name, the domain, the
+directory type, the assurance, the session kind and the client address. There
+is no separate switch for them, so choose destinations accordingly. The
+principal, the Kerberos principal, the client address and the tenant ID are
+marked sensitive. Unlike `user.id`, nothing joins records on them, so the `strict`
+redaction profile (and a custom profile that extends it) removes them from what a
+destination receives, while `none`, `sensitive` and `content` keep them. See
+[Redaction](/docs/observability/redaction). The `identity.observed` record
+carries a group count, never group names. The Secure Client profile collects
+none of these facts.
+
+### Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| No principal, only `user.id` | `ai_discovery.include_user_principal` is off, which is the default; the domain and directory still appear when they resolved. With it on, the account is local or the directory lookup failed. On Linux run `getent passwd alice@corp.example.com`; on SSSD, check InfoPipe as in the AD guide. |
+| No UPN, the principal reads `account@realm` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
+| No `defenseclaw.user.directory` for an SSSD account | The directory type comes from realmd: run `realm list` as that user. It is expected to be missing when the account's domain is not a joined realm or a child domain of one (a plain LDAP domain, for example), or when the host has several realms and the account name carries no DNS domain. The gateway refreshes directory facts every 15 minutes. The domain and groups are still verified. |
+| First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
+| `doctor` or `guardrail status` warns "directory lookups are failing" (on a managed host, `enterprise linux status` and `verify` warn `directory_lookups_failing`) | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Users without cached facts get the default profile (`default_lookup_failed`); users with cached facts keep them for at most an hour, then fall back the same way. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Their audit rows carry no principal or directory but always `user.id`; on a managed Linux or macOS host `defenseclaw.user.name` is the name the guardian recorded for the uid when the account lookup itself failed (a record up to an hour old). Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |
+| No Kerberos principal, or an old one | The principal is read from the credential cache as a claim: it is the cache's default principal, and its tickets are not checked, so an expired TGT still reports it (`klist` shows the end time). With KCM the caches belong to the uid, not to one login: `kdestroy` removes the session's own cache, and another cache of the same uid (another login) becomes the default, so the record keeps naming a principal; `kdestroy -A` empties the uid's collection. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. The OpenCode plugin, the Amp plugin and the Omnigent bridge never send it: they do not read the ticket cache. |
+| `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |
+| `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
+| Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
+| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice@corp.example.com --json` and compare `subject.groups` with your spelling. If the group was renamed or deleted in the directory, `explain`, `profile list`, `status` and `doctor` warn `group "..." is not known to this host`, and so does the gateway log at start and reload. Use the SID to avoid name ambiguity. On managed Windows, group assignments require an active desktop session; after sign-out they use the default profile until the next desktop sign-in, including for SSH and scheduled-task agents. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
+| A user's new group has no effect, or `explain` shows it and the audit rows do not yet | Three layers sit between the directory and a decision. SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. The gateway keeps the user's directory facts for 15 minutes from the user's first request. The first request after those 15 minutes still uses the old facts while one background lookup replaces them. `guardrail profile explain` asks the operating system directly, so it shows the profile requests get after the next refresh. The per-user CLI's `cache:` line gives the age of the facts requests use now; managed `enterprise linux profile-explain` does not print that age. Restart the gateway to drop its cache and use the new group at once. |
+| A new session ID after a restart | Expected only for a new chat. A resumed chat keeps its `ais-` ID and the agent ID (`agt-`) stays the same; if the agent ID changed, the connector's config root moved. |
+| `profile explain --user alice` answers `default_lookup_failed` | With SSSD fully qualified names the short name `alice` is not an account on the host. Pass the name `getent passwd` shows (`alice@corp.example.com`, in any case, so the upper-case realm form Kerberos reports works too) or the uid. |
+| `profile explain` says the gateway did not answer within 35 s (status and doctor: "running but did not answer in time"; on a managed host `enterprise linux profile-explain` says the gateway "took the connection but did not answer within 35 s") | The gateway is running and still resolving the user, which a cold SSSD or a slow domain controller causes (an account in several hundred groups can need about 20 seconds the first time). Time `getent initgroups alice@corp.example.com` on the host, then ask again: the answer is quick once SSSD has the groups. Only `Could not ask the gateway ... Start it with` (on a managed host, `did not answer; check the deployment with`) means the gateway is not running. |
+
+## IDE plugin inventory
+
+DefenseClaw also lists every extension and plugin in each user's IDEs, with
+its enabled state and an AI flag. That inventory is part of AI discovery, and
+each row carries the verified user it belongs to. See
+[IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory) for the IDE
+families, where the enabled state comes from, what is and is not collected,
+and the CLI, API, AIBOM, TUI and Grafana views.
+
+## Next steps
+
+<Cards>
+  <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity-sources" description="What the OS tells us, where it is read, and the limits." />
+  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write assignments, read the audit record, ship to managed hosts." />
+  <Card title="End-user identity" href="/docs/observability/end-user-identity" description="Every identity attribute and how to join records." />
+  <Card title="Grafana dashboards" href="/docs/observability/grafana-dashboards" description="The Identity & Users board and the $user filter." />
+  <Card title="Deploy with Microsoft Entra ID" href="/docs/enterprise/identity-entra-id" description="Entra-joined Windows and Azure Linux VMs: setup, scripts and profiles." />
+</Cards>

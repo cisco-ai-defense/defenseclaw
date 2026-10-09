@@ -135,10 +135,8 @@ func normalizeProfilePath(path string) string {
 	return strings.ToLower(cleaned)
 }
 
-// accountNameForSID resolves the bare account name. The domain is dropped so
-// the value cannot be mistaken for a qualified principal or an email, and an
-// unresolvable SID yields an empty name rather than a synthesized one.
-// nameForID resolves a SID's account name.
+// nameForID resolves a SID's account name. The LSA returns the domain
+// separately, so an @ in the account itself must remain literal.
 func nameForID(id string) string {
 	if KindForID(id) != KindWindowsSID {
 		return ""
@@ -156,8 +154,12 @@ func accountNameForSID(sid string) string {
 		return ""
 	}
 	name := strings.TrimSpace(account)
-	if idx := strings.LastIndexAny(name, `\/`); idx >= 0 && idx+1 < len(name) {
-		name = name[idx+1:]
+	if keepQualifiedNames.Load() {
+		// Secure Client retains the pre-1.0 account-name projection.
+		if idx := strings.LastIndexAny(name, `\/`); idx >= 0 && idx+1 < len(name) {
+			name = name[idx+1:]
+		}
+		return BareAccountName(name)
 	}
 	return name
 }

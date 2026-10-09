@@ -263,6 +263,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
     requested_connectors.extend(_parse_connector_list(action_connectors))
+    if connector:
+        # Run only the CLIs of the connectors being set up (GAP-0901).
+        token = agent_discovery.restrict_probes([c for c in requested_connectors if c != "none"])
+        click.get_current_context().call_on_close(lambda: agent_discovery.end_probe_restriction(token))
     installer_copilot = native_setup_copilot and _native_setup_copilot_invocation_allowed(
         connector=connector,
         requested_connectors=requested_connectors,
@@ -1218,10 +1222,14 @@ def _prompt_connector_selection(
             )
             return names
     disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
-    if disc.cache_hit and _active_not_installed(_with_config_state(disc, data_dir)):
+    if disc.cache_hit:
+        cached = _with_config_state(disc, data_dir)
         # GAP-1869: an agent installed after the cache was written showed as
         # not installed, was not offered, and init removed its connector.
-        disc = agent_discovery.discover_agents(refresh=True, data_dir=data_dir)
+        # GAP-0092: a cache with no hook connector at all (written before the
+        # agents were on PATH) is as stale, and rescanning it costs little.
+        if _active_not_installed(cached) or not _installed_hook_connectors(cached):
+            disc = agent_discovery.discover_agents(refresh=True, data_dir=data_dir)
     disc = _prompt_trust_discovery_prefixes(
         disc,
         data_dir=data_dir,
@@ -1462,9 +1470,10 @@ def _prompt_action_policy(
     enforces, so we ask them a single time after the action subset is known
     rather than per connector. Pre-supplied flags skip the matching prompt."""
     # Hook fail-mode: surface the choice so first-run operators don't have to
-    # discover `defenseclaw guardrail fail-mode` later. Default is "open"
-    # because silently bricking the agent on a transient delivery or response
-    # error is worse than leaking a single tool call.
+    # discover `defenseclaw guardrail fail-mode` later. Default is "closed",
+    # the same posture quickstart and the non-interactive init give an action
+    # connector: an action connector whose hooks fail open lets every blocked
+    # call run while the gateway is down.
     if fail_mode is None:
         terminal_checkbox.restore_line_prompt_mode()
         ux.section("Hook fail-mode (delivery and response failures)")
@@ -1477,7 +1486,7 @@ def _prompt_action_policy(
         fail_mode = click.prompt(
             "  " + ux.bold("Fail mode"),
             type=click.Choice(["open", "closed"], case_sensitive=False),
-            default="open",
+            default="closed",
             show_choices=True,
         )
     # Human-In-the-Loop (HITL) only fires in action mode, so it is only asked
@@ -1753,6 +1762,30 @@ def _report_unselectable_connectors(report, problems: dict[str, str]) -> None:
     report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
 
+def _record_agent_discovery(
+    connector: str | None,
+    *,
+    rescan_agents: bool,
+    data_dir: str | os.PathLike[str] | None,
+) -> None:
+    """Write agent_discovery.json for a scripted ``--connector`` run (GAP-0185).
+
+    The interactive wizard and the discovery-backed default scan the machine,
+    which persists the cache. A named connector skipped that scan, so the
+    gateway had no record of whether the agent exists and dialled the fleet
+    uplink every 15 s for a ZeptoClaw that is not installed. A cache that is
+    already there is reused unless ``--rescan-agents`` asks for a fresh scan.
+    """
+    names = _parse_connector_list(connector) if connector else []
+    if platform_support.host_os() == "windows" and "opencode" in {connector_paths.normalize(n) for n in names}:
+        # The exact SST image gates native-Windows OpenCode; no generic result is published first.
+        return
+    try:
+        agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
+    except Exception:  # noqa: BLE001 - the cache only speeds the gateway's decisions up
+        pass
+
+
 def _build_noninteractive_connector_settings(
     *,
     connector: str | None,
@@ -1781,6 +1814,8 @@ def _build_noninteractive_connector_settings(
     action_list = _parse_connector_list(action_connectors)
 
     def _single(connector_name: str | None, *, discover: bool) -> list[dict]:
+        if not discover:
+            _record_agent_discovery(connector_name, rescan_agents=rescan_agents, data_dir=data_dir)
         return [
             {
                 "connector": _normalize_connector_arg(

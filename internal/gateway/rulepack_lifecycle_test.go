@@ -68,7 +68,7 @@ func TestNewSidecarJudgePreparationClosesClientOnlyOnFailure(t *testing.T) {
 	if err == nil || judge != nil {
 		t.Fatalf("failed judge preparation = judge:%v error:%v", judge, err)
 	}
-	if !failedClient.closed {
+	if !failedClient.closed.Load() {
 		t.Fatal("failed judge preparation left the construction-owned client open")
 	}
 	select {
@@ -84,7 +84,7 @@ func TestNewSidecarJudgePreparationClosesClientOnlyOnFailure(t *testing.T) {
 	if err != nil || judge == nil {
 		t.Fatalf("successful judge preparation = judge:%v error:%v", judge, err)
 	}
-	if successClient.closed {
+	if successClient.closed.Load() {
 		t.Fatal("successful judge preparation closed the client before Sidecar ownership transfer")
 	}
 	select {
@@ -206,7 +206,7 @@ func TestColdStartDefersMultiConnectorRulePacksToIsolatedSetup(t *testing.T) {
 		"claudecode": {RulePackDir: invalidRulePackDir(t)},
 	}
 
-	rp, err := loadInitialSidecarRulePack(cfg)
+	rp, _, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		t.Fatalf("multi-connector cold-start global preflight: %v", err)
 	}

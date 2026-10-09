@@ -63,6 +63,7 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-connectors",
     "defenseclaw-findings",
     "defenseclaw-hitl",
+    "defenseclaw-identity",
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
     "defenseclaw-runtime",
@@ -152,6 +153,8 @@ LOKI_BUILTIN_FIELDS = {
     # `defenseclaw.event.name` as structured metadata. Loki normalizes dots
     # to underscores, so it is queryable before `| json` under this spelling.
     "defenseclaw_event_name",
+    # OTLP host.name is exposed by Loki as the normalized resource field.
+    "host_name",
     "level",
     "severity_text",
     "service_name",

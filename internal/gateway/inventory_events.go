@@ -411,6 +411,17 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	return owner
 }
 
+// discoveryUserEmail is the connector account address of a discovery
+// signal's owner, read from that owner's own profile, while
+// ai_discovery.include_user_email is on. A signal without an owner never
+// carries one: the address would then name nobody on this endpoint.
+func discoveryUserEmail(signal inventory.AISignal) string {
+	if signal.UserID == "" || !UserEmailCollectionEnabled() {
+		return ""
+	}
+	return signal.UserEmail
+}
+
 // discoveryUserIDKind is the id namespace of the account a signal belongs
 // to: a uid from a Unix per-user scan, or the profile's SID from a managed
 // Windows scan.
@@ -422,6 +433,22 @@ func discoveryUserIDKind(userID string) string {
 		return useridentity.KindWindowsSID
 	}
 	return useridentity.KindPOSIXUID
+}
+
+// inventoryIdentity is the directory attribution of the account an inventory
+// record names. The gateway resolved that account itself (the scan's process
+// owner or a profile directory's owner), never from anything a client sent,
+// so its directory facts are reported as verified.
+func inventoryIdentity(userID string) *llmEventIdentity {
+	if userID == "" || !identityFactsEnabled.Load() {
+		return nil
+	}
+	facts, _ := verifiedIdentityDirectory(userID, true)
+	if facts.Empty() {
+		return nil
+	}
+	facts.Assurance = useridentity.AssuranceVerified
+	return &llmEventIdentity{Directory: facts}
 }
 
 // daemonHomeForInventoryAttribution returns the profile the sidecar itself
@@ -954,7 +981,7 @@ func emitEndpointInventoryComponent(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		return builder.BuildLogAIComponentObserved(observability.LogAIComponentObservedInput{
+		input := observability.LogAIComponentObservedInput{
 			Envelope:                                        endpointInventoryEmitEnvelope(ctx, snapshot, recordSource, action, phase),
 			Severity:                                        observability.Present(observability.SeverityInfo),
 			LogLevel:                                        observability.Present(observability.LogLevelInfo),
@@ -970,7 +997,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
 			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
 			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
-			DefenseClawUserName:                             aiDiscoveryV8OptionalText(component.userName),
+			DefenseClawUserName:                             v8UserName(component.userName, aiDiscoveryV8OptionalText),
 			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),
@@ -991,7 +1018,10 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryVersion:                aiDiscoveryV8OptionalText(component.agentVersion),
 			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
-		})
+			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
+		}
+		inventoryIdentity(component.userID).applyTo(&input)
+		return builder.BuildLogAIComponentObserved(input)
 	})
 	return err
 }
@@ -1271,6 +1301,7 @@ func discoveredEntriesFromReport(
 				userID:          signal.UserID,
 				userIDKind:      discoveryUserIDKind(signal.UserID),
 				userName:        signal.UserName,
+				userEmail:       discoveryUserEmail(signal),
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
@@ -1323,6 +1354,7 @@ func discoveredMCPEntriesFromReport(
 				userID:         signal.UserID,
 				userIDKind:     discoveryUserIDKind(signal.UserID),
 				userName:       signal.UserName,
+				userEmail:      discoveryUserEmail(signal),
 			})
 		}
 	}

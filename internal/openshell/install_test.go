@@ -108,6 +108,9 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 		Candidates: []string{f.cliPath},
 		PackageCLI: f.cliPath,
 		GOOS:       "linux",
+		// A Mac's checks do not depend on the machine the tests run on.
+		BrewPrefix: "/opt/homebrew",
+		Writable:   func(string) bool { return true },
 		Out:        &f.out,
 		Consent: func(p *openshell.InstallPlan) (bool, error) {
 			if !strings.Contains(f.out.String(), p.SHA256) {
@@ -430,6 +433,153 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 		if err == nil || errors.Is(err, openshell.ErrHomebrewInstall) != homebrew || !strings.Contains(err.Error(), "exit status 1") {
 			t.Fatalf("%s: Install = %v", goos, err)
 		}
+	}
+}
+
+func TestInstallOnMacTMUXHandlesBrewServicesRefusal(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/test-tmux")
+	for _, running := range []bool{false, true} {
+		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f.inst.GOOS = "darwin"
+		f.runner.OnFunc("/bin/sh", func(context.Context, openshell.Command) ([]byte, error) {
+			writeExecutable(t, f.cliPath)
+			return []byte("Usage: brew services restart (formula)\nError: Invalid usage: `brew services` cannot run under tmux!\n"), nil
+		})
+		f.runner.On(f.cliPath+" --version", "openshell 0.1.1", nil)
+		f.inst.VerifyGateway = func(context.Context) error {
+			f.verified++
+			if running {
+				return nil
+			}
+			return errors.New("gateway not registered")
+		}
+		res, err := f.inst.Install(context.Background())
+		if f.verified != 1 || strings.Contains(f.out.String(), "Usage: brew services") {
+			t.Fatalf("running=%v: probe count=%d output=%q", running, f.verified, f.out.String())
+		}
+		if running && (err != nil || res == nil || !res.Installed) {
+			t.Fatalf("running gateway fallback = %+v, %v", res, err)
+		}
+		if !running && !errors.Is(err, openshell.ErrBrewNeedsTerminal) {
+			t.Fatalf("stopped gateway error = %v", err)
+		}
+	}
+}
+
+// TestInstallInAHomebrewOfYourOwn: with Homebrew outside /opt/homebrew and
+// /usr/local (a standard user's own, GAP-0110) the formula installed and
+// the gateway ran, then NVIDIA's script failed registering it ("mTLS
+// certificates for gateway 'openshell' were not found": the CLI looks for
+// them only under those two prefixes), and the error blamed Homebrew and
+// Xcode. The script now gets OPENSHELL_LOCAL_TLS_DIR, the plan says so, and
+// a failure after the formula is installed says that instead of blaming it.
+func TestInstallInAHomebrewOfYourOwn(t *testing.T) {
+	prefix := filepath.Join(t.TempDir(), "homebrew")
+	tls := filepath.Join(prefix, "var", "openshell", "tls")
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
+	res, err := f.inst.Install(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := openshell.EnvLocalTLSDir + "=" + tls
+	if !slices.Contains(f.scriptRun().Env, want) || !slices.Contains(res.Plan.Env, want) || !strings.Contains(f.out.String(), "Command     OPENSHELL_VERSION=v0.1.1 "+want+" ") ||
+		!strings.Contains(f.out.String(), "Homebrew has no prebuilt packages for that prefix") {
+		t.Fatalf("env %v; plan:\n%s", f.scriptRun().Env, f.out.String())
+	}
+	// The prefixes the CLI searches need nothing.
+	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS = "darwin"
+	if _, err := f.inst.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range f.scriptRun().Env {
+		if strings.HasPrefix(kv, openshell.EnvLocalTLSDir+"=") {
+			t.Fatalf("env %v under /opt/homebrew", f.scriptRun().Env)
+		}
+	}
+	// An old keg must not make a failed upgrade look like installation
+	// finished. A new keg written before a later failure still counts.
+	for _, scenario := range []struct {
+		name, before, during string
+		installed            bool
+	}{
+		{"no keg", "", "", false},
+		{"old keg", "0.1.0", "", false},
+		{"new keg", "0.1.0", "0.1.1", true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			prefix := filepath.Join(t.TempDir(), "homebrew")
+			keg := filepath.Join(prefix, "Cellar", "openshell")
+			link := filepath.Join(prefix, "opt", "openshell")
+			linkKeg := func(version string) {
+				t.Helper()
+				target := filepath.Join(keg, version)
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario.before != "" {
+				linkKeg(scenario.before)
+			}
+			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
+			f.runner.OnFunc("/bin/sh", func(context.Context, openshell.Command) ([]byte, error) {
+				if scenario.during != "" {
+					linkKeg(scenario.during)
+				}
+				return nil, errors.New("exit status 1")
+			})
+			_, err := f.inst.Install(context.Background())
+			var hb *openshell.HomebrewInstallError
+			if !errors.As(err, &hb) || hb.FormulaInstalled != scenario.installed ||
+				strings.Contains(err.Error(), "formula is installed, but") != scenario.installed {
+				t.Fatalf("%s: Install = %v", scenario.name, err)
+			}
+		})
+	}
+}
+
+// TestInstallRefusesAHomebrewThisUserCannotWrite: NVIDIA's script runs
+// Homebrew as you, without sudo. On a Mac whose Homebrew belongs to an
+// administrator, a standard user's install failed halfway with "Permission
+// denied @ dir_s_mkdir - /opt/homebrew/Library/Taps/nvidia" and a hint
+// about Xcode (GAP-0109). The installer refuses first, before it downloads
+// or runs anything, and names the owner and the directory.
+func TestInstallRefusesAHomebrewThisUserCannotWrite(t *testing.T) {
+	prefix := t.TempDir()
+	taps := filepath.Join(prefix, "Library", "Taps")
+	if err := os.MkdirAll(taps, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
+	f.inst.Writable = func(dir string) bool { return dir != taps }
+	_, err := f.inst.Install(context.Background())
+	var hw *openshell.HomebrewNotWritableError
+	if !errors.Is(err, openshell.ErrHomebrewNotWritable) || !errors.As(err, &hw) || hw.Prefix != prefix || hw.Dir != taps || f.hits.Load() != 0 || f.ran() {
+		t.Fatalf("Install = %v (downloads %d, ran %t)", err, f.hits.Load(), f.ran())
+	}
+	if !strings.Contains(hw.Problem(), "cannot write to "+taps) || !strings.Contains(hw.Fix(), "a Homebrew of your own") {
+		t.Fatalf("problem %q, fix %q", hw.Problem(), hw.Fix())
+	}
+	// The e2fsprogs install runs Homebrew in the same prefix.
+	if err := f.inst.InstallE2fsprogs(context.Background()); !errors.Is(err, openshell.ErrHomebrewNotWritable) || f.runner.Called("brew") {
+		t.Fatalf("InstallE2fsprogs = %v; calls %v", err, f.runner.Calls())
+	}
+	// A prefix this user can write installs.
+	f.inst.Writable = func(string) bool { return true }
+	if _, err := f.inst.Install(context.Background()); err != nil || !f.ran() {
+		t.Fatalf("Install = %v (ran %t)", err, f.ran())
 	}
 }
 

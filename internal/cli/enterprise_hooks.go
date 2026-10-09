@@ -465,6 +465,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		// reconcile verifies with it, so an install without it would be
 		// re-rendered on the next pass.
 		ForeignHookGuardBinary: standaloneForeignHookGuardBinary(enterpriseHookConnector),
+		ManagedHookBinary:      standaloneManagedHookBinary(),
 	}
 	// A single-target install renders the shared machine policy from the
 	// same deployment contract the guardian uses, so the next reconcile does
@@ -524,8 +525,12 @@ type enterpriseHookReconcileRow struct {
 }
 
 type enterpriseHookReconcileRun struct {
-	Manifest            string
-	ManifestSHA256      string
+	Manifest       string
+	ManifestSHA256 string
+	// Targets are the targets of the manifest the run reconciled (standalone
+	// Unix only): under manifest enrollment they, not the eligible-accounts
+	// record, say who is enrolled (GAP-0761).
+	Targets             []enterprisehooks.ManifestTarget
 	Rows                []enterpriseHookReconcileRow
 	Failures            int
 	Pending             int
@@ -971,16 +976,11 @@ func enterpriseHookManifestActivationIssue(
 		activation.ManifestSHA256, manifestSHA256), false
 }
 
-// enterpriseHookRemovedAccountNote follows each failure status and verify
-// report as a warning for a deleted account whose profile folder was removed.
-const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
-
 // enterpriseHookRemovedAccountFailures is the number of failed rows in the
-// last reconcile when every one of them belongs to a deleted account whose
-// profile folder was removed (enterpriseHookRemovedAccountRow), and 0
-// otherwise. The enumerator drops such an account's rows at its next pass;
-// until then status reports them for that account instead of failing the
-// whole host.
+// last reconcile when every one of them belongs to an account confirmed
+// removed by the platform (enterpriseHookRemovedAccountRow), and 0
+// otherwise. The enumerator eventually drops these rows; until then
+// status reports them as warnings instead of failing the whole host.
 func enterpriseHookRemovedAccountFailures(state enterpriseHookGuardianState) int {
 	failed := 0
 	for _, row := range state.Results {
@@ -1323,9 +1323,9 @@ type enterpriseHookVerifyRun struct {
 	Rows     []enterpriseHookReconcileRow
 	Failures int
 	Pending  int
-	// Excused are the failed rows of a deleted account whose profile folder
-	// was removed, when every failed row of the guardian's last reconcile is
-	// one (enterpriseHookRemovedAccountFailures). They count in Failures, so
+	// Excused are the failed rows of a confirmed removed account, when
+	// every failed row of the last guardian reconcile qualifies
+	// (enterpriseHookRemovedAccountFailures). They count in Failures, so
 	// the dispositions still match the guardian's records, and verify
 	// reports them as warnings, as status does.
 	Excused          []enterpriseHookReconcileRow
@@ -1736,6 +1736,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				Registry:      registry,
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
+				ManagedHookBinary:      standaloneManagedHookBinary(),
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
@@ -2066,6 +2067,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
+				ManagedHookBinary:       standaloneManagedHookBinary(),
 				MachinePolicyContractID: enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 			}
 			if err == nil {
@@ -3605,27 +3607,50 @@ func resolveEnterpriseHookTarget() (enterpriseHookTarget, error) {
 	return resolveEnterpriseHookTargetValues(enterpriseHookUser, enterpriseHookUserHome, enterpriseHookUID, enterpriseHookGID, enterpriseHookSID, enterpriseHookDataDir)
 }
 
+var enterpriseHookLookupUser = user.Lookup
+
 func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, sid, dataDir string) (enterpriseHookTarget, error) {
+	return resolveEnterpriseHookTargetValuesForPlatform(userName, userHome, uid, gid, sid, dataDir, runtime.GOOS == "windows")
+}
+
+func resolveEnterpriseHookTargetValuesForPlatform(userName, userHome string, uid, gid int, sid, dataDir string, windows bool) (enterpriseHookTarget, error) {
 	target := enterpriseHookTarget{
 		home: strings.TrimSpace(userHome),
 		uid:  uid,
 		gid:  gid,
 		sid:  strings.TrimSpace(sid),
 	}
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
 	if name := strings.TrimSpace(userName); name != "" &&
-		!(runtime.GOOS == "windows" && target.home != "") {
-		u, err := user.Lookup(name)
+		!(windows && target.home != "" && secureClient) {
+		u, err := enterpriseHookLookupUser(name)
 		if err != nil {
 			u, err = enterpriseHookStandaloneLookupFallback(name, err)
 		}
 		if err != nil {
 			return target, fmt.Errorf("enterprise hooks: lookup user %q: %w", name, err)
 		}
+		if windows && !secureClient {
+			resolvedSID := strings.TrimSpace(u.Uid)
+			if target.sid != "" && !strings.EqualFold(target.sid, resolvedSID) {
+				return target, fmt.Errorf("enterprise hooks: --user and --sid name different accounts")
+			}
+			target.sid = resolvedSID
+			if target.home != "" && !secureClient {
+				profileHome, err := enterpriseHookSIDProfilePath(target.sid)
+				if err != nil {
+					return target, fmt.Errorf("enterprise hooks: resolve profile for user %q: %w", name, err)
+				}
+				if !sameEnterpriseHookPath(profileHome, target.home) {
+					return target, fmt.Errorf("enterprise hooks: --user-home does not belong to --user %q", name)
+				}
+			}
+		}
 		if target.home == "" {
 			target.home = u.HomeDir
 		}
 		if target.uid < 0 {
-			if runtime.GOOS == "windows" {
+			if windows {
 				if target.sid == "" {
 					target.sid = strings.TrimSpace(u.Uid)
 				}
@@ -3638,7 +3663,7 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 			}
 		}
 		if target.gid < 0 {
-			if runtime.GOOS != "windows" {
+			if !windows {
 				gid, err := strconv.Atoi(u.Gid)
 				if err != nil {
 					return target, fmt.Errorf("enterprise hooks: parse gid for %q: %w", name, err)

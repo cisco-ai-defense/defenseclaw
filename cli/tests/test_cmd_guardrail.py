@@ -18,6 +18,7 @@ connector.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -175,6 +176,37 @@ class StatusCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn('"fail_mode": "open"', result.output)
         self.assertNotIn('"fail_mode": "closed"', result.output)
+
+    def test_secure_client_status_keeps_main_enabled_and_warnings(self):
+        from defenseclaw.commands import cmd_status
+
+        app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+        app.cfg.guardrail.mode = "action"
+        app.cfg.guardrail.effective_enabled = lambda name: False
+        with (
+            patch.object(cmd_status, "_enterprise_profile", return_value="secure_client"),
+            patch("defenseclaw.gateway.current_user_guardrail_profile", side_effect=AssertionError("profile queried")),
+        ):
+            result = CliRunner().invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertIs(payload["enabled"], True)
+            self.assertEqual(payload["warnings"], [])
+            self.assertNotIn("profile", payload)
+
+            text = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+            self.assertEqual(text.exit_code, 0, msg=text.output)
+            self.assertIn("enabled:    yes", text.output)
+            self.assertNotIn("action mode with fail mode open", text.output)
+
+    def test_status_flags_action_connector_on_fail_open(self):
+        # GAP-0415: an upgrade keeps the fail mode an older setup chose.
+        app = make_ctx(enabled=True, connector="kiro", hook_fail_mode="open")
+        app.cfg.guardrail.mode = "action"
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("action mode with fail mode open", result.output)
+        self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
 
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block
@@ -781,6 +813,24 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertIn("claudecode", result.output)
         self.assertIn("disabled", result.output)
         self.assertIn("enabled", result.output)
+
+    def test_status_all_connectors_disabled_uses_enable_hint(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": False})
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("enabled:    no", result.output)
+        self.assertIn("Enable with", result.output)
+        self.assertNotIn("Disable with", result.output)
+        machine = runner.invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
+        self.assertFalse(json.loads(machine.output)["enabled"])
+
+    def test_status_global_off_suggests_global_enable(self):
+        app = make_multi_ctx({"codex": True, "claudecode": None}, enabled=False)
+        result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("defenseclaw guardrail enable\n", result.output)
+        self.assertNotIn("guardrail enable --connector", result.output)
 
     def test_status_roster_shows_per_connector_rule_pack_and_hilt(self):
         # Each connector can scan against its OWN rule pack AND HILT policy; the
@@ -1478,7 +1528,8 @@ class CommandRegistrationTests(unittest.TestCase):
         # protection packs on and off per scope. block-at / alert-at set the
         # tool-call block and alert levels, globally or per connector.
         # allow-private-upstream records private upstream hosts the
-        # gateway may reach (guardrail.allow_private_upstreams).
+        # gateway may reach (guardrail.allow_private_upstreams). profile
+        # lists and explains the identity-based guardrail profiles.
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1496,6 +1547,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "judge",
                 "list-packs",
                 "mode",
+                "profile",
                 "protection",
                 "use-pack",
                 "validate-pack",
@@ -1615,6 +1667,17 @@ class StatusConnectorScopeTests(unittest.TestCase):
         self.assertIn("hermes", result.output)
         self.assertNotIn("Codex", result.output)
         self.assertNotIn("codex", result.output)
+
+    def test_scoped_summary_matches_json(self):
+        app = self._multi()
+        app.cfg.guardrail.effective_enabled = lambda name: name == "hermes"
+        runner = CliRunner()
+        text = runner.invoke(cmd_guardrail.status_cmd, ["--connector", "codex"], obj=app)
+        machine = runner.invoke(cmd_guardrail.status_cmd, ["--connector", "codex", "--json"], obj=app)
+        self.assertEqual(text.exit_code, 0, text.output)
+        self.assertEqual(machine.exit_code, 0, machine.output)
+        self.assertIn("enabled:    no", text.output)
+        self.assertFalse(json.loads(machine.output)["enabled"])
 
     def test_scopes_case_insensitively(self):
         app = self._multi()

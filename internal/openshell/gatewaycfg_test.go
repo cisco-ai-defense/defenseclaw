@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -921,6 +922,70 @@ func TestGatewayServiceState(t *testing.T) {
 		}
 		if err := f.cfg.Restart(context.Background()); err != nil || !f.runner.Called("brew services restart nvidia/openshell/openshell") {
 			t.Fatalf("restart: %v", err)
+		}
+		// GAP-0111: run through sudo (an administrator who switched to the
+		// user), Homebrew prints its warning and hints around the JSON, and
+		// setup failed on "unexpected output" though the service ran.
+		f.runner.On("brew services info nvidia/openshell/openshell --json", "Warning: running through sudo, using user/* instead of gui/* domain!\n"+
+			"Hide this warning by setting `HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1`.\n[\n  {\"running\": true, \"loaded\": true, \"status\": \"started\", \"file\": \"/x.plist\"}\n]\nHint: more\n", nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Active || !st.Installed {
+			t.Fatalf("state around a warning = %+v, %v", st, err)
+		}
+		var env []string
+		for _, c := range f.runner.Calls() {
+			if c.Name == "brew" && c.Args[0] == "services" && c.Args[1] == "info" {
+				env = c.Env
+			}
+		}
+		if !slices.Contains(env, "HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1") || !slices.Contains(env, "HOMEBREW_NO_ENV_HINTS=1") {
+			t.Fatalf("brew services info ran with env %v", env)
+		}
+	})
+	// GAP-0274: Homebrew refuses `brew services` under tmux and prints its
+	// whole usage after the error; the check says one line instead.
+	t.Run("homebrew under tmux", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
+		f.runner.On("brew services info nvidia/openshell/openshell --json",
+			"Error: Invalid usage: brew services cannot run under tmux!\nUsage: brew services [subcommand]\n\nManage background services.\n", errors.New("exit status 1"))
+		_, err := f.cfg.ServiceState(context.Background())
+		if !errors.Is(err, openshell.ErrBrewNeedsTerminal) || strings.Contains(err.Error(), "Usage") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	// GAP-0286: a per-user Homebrew whose brew the shell has not loaded is
+	// still the prefix the OpenShell CLI (openshell.binary) lives in; its
+	// service and gateway.toml are asked there.
+	t.Run("homebrew prefix of the CLI that is not on PATH", func(t *testing.T) {
+		prefix := filepath.Join(realTempDir(t), "homebrew")
+		for _, dir := range []string{filepath.Join(prefix, "opt", "openshell"), filepath.Join(prefix, "bin")} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, name := range []string{"openshell", "brew"} {
+			if err := os.WriteFile(filepath.Join(prefix, "bin", name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("HOMEBREW_PREFIX", "")
+		t.Setenv("PATH", t.TempDir())
+		f := newGatewayFixture(t)
+		f.cfg.GOOS, f.cfg.BrewPrefix, f.cfg.CLI = "darwin", "", filepath.Join(prefix, "bin", "openshell")
+		f.cfg.LookPath = func(name string) (string, error) {
+			if filepath.IsAbs(name) {
+				return name, nil
+			}
+			if name == "brew" {
+				return "/opt/homebrew/bin/brew", nil
+			}
+			return "", exec.ErrNotFound
+		}
+		f.runner.On(filepath.Join(prefix, "bin", "brew")+" services info nvidia/openshell/openshell --json",
+			`[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Installed || !st.Active || f.cfg.BrewPrefix != prefix {
+			t.Fatalf("state = %+v, %v; prefix %q, want %q", st, err, f.cfg.BrewPrefix, prefix)
 		}
 	})
 	// Without the formula there is no service to ask brew about, and brew

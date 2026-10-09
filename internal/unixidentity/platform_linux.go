@@ -18,13 +18,31 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+// DirectoryFactsFunc returns a uid's verified directory facts through NSS,
+// for LookupAccountSpelling, or nil without a trusted getent.
+func DirectoryFactsFunc(ctx context.Context) func(uid int) (useridentity.DirectoryFacts, bool) {
+	nss, err := NewNSSResolver(ctx)
+	if err != nil {
+		return nil
+	}
+	return func(uid int) (useridentity.DirectoryFacts, bool) {
+		facts, err := nss.DirectoryFactsWithoutGroupsForUID(uid, time.Now().UTC())
+		return facts, err == nil
+	}
+}
 
 const loginDefsPath = "/etc/login.defs"
 
 var (
 	localPasswdPath = "/etc/passwd"
+	localGroupPath  = "/etc/group"
 	nsswitchPath    = "/etc/nsswitch.conf"
+	sambaConfPath   = "/etc/samba/smb.conf"
 )
 
 // platformLocalAccounts reads /etc/passwd, the files backend itself.

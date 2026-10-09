@@ -407,6 +407,20 @@ func (c *Config) SecureClientIntegration() bool {
 	return managed.IsSecureClientProfile(c.EnterpriseProfile())
 }
 
+// resolvesToSecureClient reports whether a config the loader has just
+// decoded resolves to the Secure Client profile, from the inputs
+// resolveEnterpriseConfig reads later in the same load: the deployment mode
+// and its pin, the profile pin, enterprise.profile and the OS default. A
+// config whose profile does not resolve fails there.
+func resolvesToSecureClient(cfg *Config, pinnedDeploymentMode string) bool {
+	mode := normalizeDeploymentMode(cfg.DeploymentMode)
+	if pinnedDeploymentMode != "" {
+		mode = pinnedDeploymentMode
+	}
+	profile, err := managed.ResolveEnterpriseProfile(runtime.GOOS, mode, os.Getenv(managed.EnterpriseProfileEnv), cfg.Enterprise.Profile)
+	return err == nil && managed.IsSecureClientProfile(profile)
+}
+
 // StandaloneEnterprise reports a managed deployment on the standalone
 // profile, where the local policy engine decides.
 func (c *Config) StandaloneEnterprise() bool {
@@ -455,6 +469,7 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		gatewayconnector.SetStrictHookContractResolution(true)
 	}
 	if cfg.StandaloneEnterprise() {
+		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}
 	return validateEnterpriseConfig(cfg)
@@ -534,6 +549,25 @@ func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
 		}
 	}
 	cfg.Guardrail.RulePackDir = path.Join(layout.VendorPolicyDir, "guardrail", "default")
+}
+
+// standalonePolicyDirDefault clears a Windows standalone policy_dir that
+// names the data_dir policies folder. The Setup ships no Rego bundle and the
+// gateway service can write data_dir, so that folder never holds
+// administrator policy: the gateway uses its built-in policy instead of
+// reporting a missing data.json on every start. Like rule_pack_dir, an
+// explicit value equal to the implicit path is treated the same way.
+func standalonePolicyDirDefault(cfg *Config, dataDir, goos string) {
+	if goos != "windows" || strings.TrimSpace(dataDir) == "" {
+		return
+	}
+	if _, onLayout := standaloneUnixLayoutForConfig(cfg.ConfigFilePath); onLayout {
+		return
+	}
+	if policyDir := strings.TrimSpace(cfg.PolicyDir); policyDir != "" &&
+		filepath.Clean(policyDir) == filepath.Join(dataDir, "policies") {
+		cfg.PolicyDir = ""
+	}
 }
 
 // standaloneUnixLayoutForConfig returns the Linux or macOS standalone layout
@@ -926,16 +960,8 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 	if err := check("policy_dir", cfg.PolicyDir); err != nil {
 		return err
 	}
-	if err := check("guardrail.rule_pack_dir", cfg.Guardrail.RulePackDir); err != nil {
-		return err
-	}
-	names := make([]string, 0, len(cfg.Guardrail.Connectors))
-	for name := range cfg.Guardrail.Connectors {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := check("guardrail.connectors."+name+".rule_pack_dir", cfg.EffectiveRulePackDirForConnector(name)); err != nil {
+	for _, setting := range cfg.RulePackSettings() {
+		if err := check(setting.Key, setting.Dir); err != nil {
 			return err
 		}
 	}

@@ -20,12 +20,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/spf13/cobra"
 )
 
 // GAP-1144: an administrator had no command to read the AI Discovery
@@ -52,7 +55,7 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 		502: {{Name: "Codex CLI", Category: "agent_cli", SupportedConnector: "codex", State: "active", LastSeen: scanned}},
 	} {
 		user := map[int]string{501: "dcm-std1", 502: "dcm-std2"}[uid]
-		record := inventory.UserScanRecord{Version: 1, UID: uid, User: user, UpdatedAt: scanned,
+		record := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: uid, User: user, UpdatedAt: scanned,
 			Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: signals}}
 		data, _ := json.Marshal(record)
 		if err := os.WriteFile(filepath.Join(dir, filepath.Base(user)+".tmp"), nil, 0o600); err != nil {
@@ -93,7 +96,29 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 		t.Fatalf("--json --user 502 = %s (%v)", asJSON.String(), err)
 	}
 
-	if err := writeEnterpriseDiscovery(&bytes.Buffer{}, dir, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery record for account "nobody"`) {
+	// GAP-1081: an SSSD account recorded as id prints it is selected by the
+	// bare name the records and boards carry, in any case, and by
+	// DOMAIN\name as NSS resolves it; a name that selects nothing lists the
+	// spellings --user takes instead of saying the account is not enrolled.
+	sssd := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: 94403992, User: "dcad-o4u1@dclab.test", UpdatedAt: scanned,
+		Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: []inventory.AISignal{{Name: "Continue", Category: "editor_extension"}}}}
+	data, _ := json.Marshal(sssd)
+	if err := os.WriteFile(filepath.Join(dir, "94403992.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousIDs := enterpriseDiscoveryAccountIDs
+	t.Cleanup(func() { enterpriseDiscoveryAccountIDs = previousIDs })
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\dcad-o4u1`: {"94403992"}}[user]
+	}
+	for _, spelling := range []string{"dcad-o4u1", "DCAD-O4U1@DCLAB.TEST", `DCLAB\dcad-o4u1`, "94403992"} {
+		var picked bytes.Buffer
+		if err := writeEnterpriseDiscovery(&picked, dir, spelling, false); err != nil || !strings.Contains(picked.String(), "dcad-o4u1@dclab.test (uid 94403992)") {
+			t.Fatalf("--user %s = %v:\n%s", spelling, err, picked.String())
+		}
+	}
+	if err := writeEnterpriseDiscovery(&bytes.Buffer{}, dir, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery record for account "nobody"`) ||
+		!strings.Contains(err.Error(), "user@domain as id prints it") {
 		t.Fatalf("an unknown account = %v", err)
 	}
 	var empty bytes.Buffer
@@ -163,6 +188,18 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	const token = "dc-test-discovery-token"
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/guardrail/profiles/resolve" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"unknown connector \"bogus\"; valid connectors: claudecode, codex"}`))
+			return
+		}
+		if r.URL.Path == "/api/v1/slow" {
+			select { // a gateway still resolving a user
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
 		if r.URL.Path != "/api/v1/ai-usage/runtime" || r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -201,6 +238,46 @@ func TestEnterpriseDiscoveryRuntimeReadsTheManagedDeployment(t *testing.T) {
 	if view.Gateway != "127.0.0.1:"+port || !view.Enabled || len(view.Planes) != 1 || view.Planes[0].Mechanism != "ps(1)" {
 		t.Fatalf("runtime view = %+v", view)
 	}
+	var bad json.RawMessage
+	if _, err := enterpriseGatewayGet("/api/v1/guardrail/profiles/resolve?connector=bogus", &bad); err == nil ||
+		commandExitCode(err) != enterprisestatus.InvalidArgsExitCode(runtime.GOOS) || !strings.Contains(err.Error(), `unknown connector "bogus"`) ||
+		!strings.Contains(err.Error(), "claudecode, codex") {
+		t.Fatalf("unknown connector = %v", err)
+	}
+
+	// GAP-0215: a gateway that took the connection and is still resolving a
+	// user is running, so a timeout blames the directory lookup; only a
+	// connection that fails sends the administrator to the deployment status.
+	previousWait := enterpriseGatewayWait
+	enterpriseGatewayWait = 100 * time.Millisecond
+	t.Cleanup(func() { enterpriseGatewayWait = previousWait })
+	var answer json.RawMessage
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil ||
+		!strings.Contains(err.Error(), "took the connection but did not answer within 0.1 s") ||
+		strings.Contains(err.Error(), "check the deployment") {
+		t.Fatalf("slow gateway error = %v, want the directory lookup blamed", err)
+	}
+	// Secure Client keeps the 5 s wait and the error of main (GAP-0303,
+	// issue #1092).
+	previousLoad, previousSecureClientWait := enterpriseDiscoveryLoadConfig, secureClientGatewayWait
+	t.Cleanup(func() {
+		enterpriseDiscoveryLoadConfig, secureClientGatewayWait = previousLoad, previousSecureClientWait
+	})
+	secureClientGatewayWait = 100 * time.Millisecond
+	enterpriseDiscoveryLoadConfig = func(*cobra.Command) error {
+		cfg = &config.Config{DeploymentMode: "managed_enterprise", Gateway: config.GatewayConfig{
+			APIBind: "127.0.0.1", APIPort: gateway.Listener.Addr().(*net.TCPAddr).Port,
+		}}
+		return nil
+	}
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "did not answer; check the deployment") {
+		t.Fatalf("Secure Client slow gateway error = %v, want the error of main", err)
+	}
+	enterpriseDiscoveryLoadConfig = previousLoad
+	gateway.Close()
+	if _, err := enterpriseGatewayGet("/api/v1/slow", &answer); err == nil || !strings.Contains(err.Error(), "check the deployment") {
+		t.Fatalf("stopped gateway error = %v, want the deployment status hint", err)
+	}
 }
 
 // GAP-1964: managed Windows had no `enterprise windows discovery`. The
@@ -214,16 +291,16 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{ScannedAt: scanned, Result: "ok"}, Signals: []inventory.AISignal{
 			{Name: "Amp", Category: "supported_connector", SupportedConnector: "amp", Detector: "config", UserName: "dcw-std2", UserID: "S-1-5-21-2", LastSeen: scanned},
-			{Name: "Cursor", Category: "mcp_server", SupportedConnector: "cursor", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Cursor", Category: "mcp_server", SupportedConnector: "cursor", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"dccert-mcp", "mcp.json"}, Evidence: []inventory.AIEvidence{
 					{Type: "mcp", Basename: "mcp.json"}, {Type: "mcp_server", Basename: "dccert-mcp"}}},
 			// GAP-2337: a config file that declares no server is no MCP server.
-			{Name: "Antigravity", Category: "mcp_server", SupportedConnector: "antigravity", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Antigravity", Category: "mcp_server", SupportedConnector: "antigravity", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"mcp_config.json"}, Evidence: []inventory.AIEvidence{{Type: "mcp", Basename: "mcp_config.json"}}},
-			{Name: "Hermes Agent", Category: "skill", SupportedConnector: "hermes", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Hermes Agent", Category: "skill", SupportedConnector: "hermes", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"skills"}, Evidence: []inventory.AIEvidence{{Type: "skill", Basename: "skills"}},
 				Partial: true, CoverageReason: "read_error"},
-			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "dccert-skill", Category: "skill", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"skills", "ewr6-hello2"}, Evidence: []inventory.AIEvidence{
 					{Type: "skill", Basename: "skills"}, {Type: "skill_entry", Basename: "ewr6-hello2"}}},
 			{Name: "Ollama", Category: "local_ai_app", LastSeen: scanned},
@@ -292,7 +369,9 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 		t.Fatalf("--json --user <sid> = %s (%v)", asJSON.String(), err)
 	}
 
-	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery signal for account "nobody"`) {
+	// GAP-0079: the bare name selects the DOMAIN\name rows above; an
+	// unknown account says what the scan did find.
+	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), "found signals for 2 other account(s)") {
 		t.Fatalf("an unknown account = %v", err)
 	}
 
@@ -310,5 +389,153 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	if commandExitCode(err) != 5 || json.Unmarshal(refused.Bytes(), &refusal) != nil || refusal.OK || refusal.ExitCode != 5 ||
 		len(refusal.Errors) != 1 || refusal.Errors[0].Code != "elevation_required" || refusal.Errors[0].Message != "ask your administrator" {
 		t.Fatalf("--json refusal = %q (%v)", refused.String(), err)
+	}
+}
+
+// GAP-1091: a domain account and a local account of one name are two
+// entries, each under its own SID and named DOMAIN\name or COMPUTER\name;
+// a qualified --user lists only the account it names, the bare name both.
+func TestWindowsEnterpriseDiscoveryKeepsSameNameAccountsApart(t *testing.T) {
+	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
+	previous, previousIDs, previousName := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, enterpriseDiscoveryAccountName
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, enterpriseDiscoveryAccountName = previous, previousIDs, previousName
+	})
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: []inventory.AISignal{
+			{Name: "Claude Code", Category: "supported_connector", UserName: "dcad-o4wd", UserID: domainSID},
+			{Name: "Continue", Category: "editor_extension", UserName: "dcad-o4wd", UserID: localSID},
+			{Name: "GitHub Copilot", Category: "editor_extension", UserName: "dcad-o4wd", UserID: localSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\dcad-o4wd`: {domainSID}, `DCFC-WIN2-RS2\dcad-o4wd`: {localSID}, `.\dcad-o4wd`: {localSID}}[user]
+	}
+	enterpriseDiscoveryAccountName = func(sid string) string {
+		return map[string]string{domainSID: `DCLAB\dcad-o4wd`, localSID: `DCFC-WIN2-RS2\dcad-o4wd`}[sid]
+	}
+	var summary bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&summary, "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`DCLAB\dcad-o4wd (SID ` + domainSID + `): scanned`, `DCFC-WIN2-RS2\dcad-o4wd (SID ` + localSID + `): scanned`} {
+		if !strings.Contains(summary.String(), want) {
+			t.Fatalf("summary lacks %q:\n%s", want, summary.String())
+		}
+	}
+	for user, want := range map[string]string{`DCFC-WIN2-RS2\dcad-o4wd`: localSID, `.\dcad-o4wd`: localSID, `DCLAB\dcad-o4wd`: domainSID} {
+		var one bytes.Buffer
+		var report enterpriseDiscoveryReport
+		if err := writeWindowsEnterpriseDiscovery(&one, user, true); err != nil || json.Unmarshal(one.Bytes(), &report) != nil ||
+			len(report.Accounts) != 1 || report.Accounts[0].SID != want {
+			t.Fatalf("--json --user %s = %v:\n%s", user, err, one.String())
+		}
+		for _, signal := range report.Accounts[0].Signals {
+			if signal.UserID != want {
+				t.Fatalf("--user %s lists a signal of %s", user, signal.UserID)
+			}
+		}
+	}
+	var both bytes.Buffer
+	var report enterpriseDiscoveryReport
+	if err := writeWindowsEnterpriseDiscovery(&both, "dcad-o4wd", true); err != nil || json.Unmarshal(both.Bytes(), &report) != nil || len(report.Accounts) != 2 {
+		t.Fatalf("--json --user <bare name> = %v:\n%s", err, both.String())
+	}
+}
+
+// A qualified account selection must not attribute a bare runtime finding
+// to one of two accounts with the same name (GAP-1250).
+func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(t *testing.T) {
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
+	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
+	})
+	cfg = nil
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Claude Code", Category: "supported_connector", UserName: "alice", UserID: domainSID},
+			{Name: "Codex", Category: "supported_connector", UserName: "alice", UserID: localSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		if user == `DCLAB\alice` {
+			return []string{domainSID}
+		}
+		return nil
+	}
+	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+		{PID: 41, User: "alice", Process: "node"},
+		{PID: 42, User: `DCLAB\alice`, Process: "python3"},
+		{PID: 43, User: `LOCAL\alice`, Process: "codex"},
+	}}, nil)
+
+	var out bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&out, `DCLAB\alice`, true); err != nil {
+		t.Fatal(err)
+	}
+	var report enterpriseDiscoveryReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Accounts) != 1 || report.Accounts[0].SID != domainSID ||
+		report.Runtime == nil || len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != 42 {
+		t.Fatalf("qualified account runtime findings: %s", out.String())
+	}
+}
+
+// A Secure Client computer keeps the enterprise groups and the discovery
+// --user match it had before the identity views (GAP-0138, issue #1092).
+func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
+	previousHost, previousCfg, previousReport := secureClientHost, cfg, enterpriseDiscoveryGatewayReport
+	t.Cleanup(func() {
+		secureClientHost, cfg, enterpriseDiscoveryGatewayReport = previousHost, previousCfg, previousReport
+	})
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	enterprise := &cobra.Command{Use: "enterprise"}
+	group := &cobra.Command{Use: "windows"}
+	discovery := &cobra.Command{Use: "discovery"}
+	var discoveryUser string
+	addWindowsDiscoveryUserFlag(discovery, &discoveryUser)
+	group.AddCommand(discovery)
+	group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
+	// Nor does it have enterprise acp setup or its help line (GAP-0302).
+	acpGroup := &cobra.Command{Use: "acp", Long: enterpriseACPCmd.Long, Annotations: enterpriseACPCmd.Annotations}
+	acpGroup.AddCommand(&cobra.Command{Use: "enroll"}, &cobra.Command{Use: "setup", Annotations: enterpriseACPSetupCmd.Annotations})
+	enterprise.AddCommand(group, acpGroup)
+	root.AddCommand(enterprise)
+	hook := newHookCmd()
+	root.AddCommand(hook)
+	secureClientHost = func() bool { return false }
+	keepCommandTreeOfMainOnSecureClient(root)
+	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || hook.Commands()[0].Name() != "session-facts" {
+		t.Fatalf("standalone groups have %d and %d commands, want the identity views and setup too", got, len(acpGroup.Commands()))
+	}
+	secureClientHost = func() bool { return true }
+	keepCommandTreeOfMainOnSecureClient(root)
+	if got := group.Commands(); len(got) != 1 || got[0].Name() != "discovery" ||
+		discovery.Flag("user").Usage != "list one account's signals (account name or SID)" {
+		t.Fatalf("Secure Client group = %v, --user %q, want discovery only with the usage of main", got, discovery.Flag("user").Usage)
+	}
+	if len(hook.Commands()) != 0 {
+		t.Fatal("Secure Client retained hook session-facts")
+	}
+	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
+		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
+		t.Fatalf("Secure Client acp group = %v, help %q, want the ones of main", got, acpGroup.Long)
+	}
+
+	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Codex CLI", Category: "supported_connector", UserName: "alice", UserID: "S-1-5-21-7"},
+		}}, "127.0.0.1:18970", nil
+	}
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	user := `DCLAB\alice`
+	want := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
+	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, user, false); err == nil || err.Error() != want {
+		t.Fatalf("Secure Client --user %s = %v, want %q", user, err, want)
 	}
 }

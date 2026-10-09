@@ -694,11 +694,22 @@ func scanContentRuleCategoryForConnector(
 	if ManagedEnterpriseActive() {
 		return nil
 	}
+	return scanContentRuleCategoryWithGeneration(snapshotRulePackGeneration(connector), text, toolName, scope, category)
+}
+
+// scanContentRuleCategoryWithGeneration is scanContentRuleCategoryForConnector
+// over an already selected rule generation.
+func scanContentRuleCategoryWithGeneration(
+	generation *compiledRulePackCategories,
+	text, toolName string,
+	scope ruleContentScope,
+	category string,
+) []RuleFinding {
 	if scope == ruleContentScopeSource {
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
 	findings := scanRuleGeneration(
-		snapshotRulePackGeneration(connector),
+		generation,
 		text,
 		toolName,
 		ruleScanOptions{contentScope: scope, onlyCategory: category},

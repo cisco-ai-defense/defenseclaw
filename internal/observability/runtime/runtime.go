@@ -21,6 +21,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -76,6 +77,7 @@ func (err *Error) Code() ErrorCode {
 // EventHistoryHealthReporter when they need that degraded state bridged into
 // mandatory health telemetry.
 type Options struct {
+	SecureClient               bool
 	Store                      *audit.Store
 	Engine                     *redaction.Engine
 	Signer                     audit.ProjectionIntegritySigner
@@ -114,6 +116,32 @@ type Runtime struct {
 	retention           *RetentionController
 	destinationObserver *safeDeliveryObserver
 	lifecycleMu         sync.Mutex
+	secureClient        bool
+	// shutdownLosses is what the first Close that found an active graph
+	// dropped or left unsent (GAP-1096); carried holds such losses of an
+	// earlier process, reported for the generation they were carried into.
+	shutdownLosses        []ShutdownLoss
+	shutdownLossesCounted bool
+	carried               carriedShutdownLosses
+	localWriteLost        *atomic.Uint64
+}
+
+// TakeLocalWriteLosses returns, and clears, how many log records failed their
+// mandatory SQLite append since the last call, so the gateway can store one
+// sqlite.write_failed record for them once writes resume (GAP-1100).
+func (runtime *Runtime) TakeLocalWriteLosses() uint64 {
+	if runtime == nil || runtime.localWriteLost == nil {
+		return 0
+	}
+	return runtime.localWriteLost.Swap(0)
+}
+
+// ReturnLocalWriteLosses gives back a count TakeLocalWriteLosses returned
+// when its sqlite.write_failed record could not be stored.
+func (runtime *Runtime) ReturnLocalWriteLosses(records uint64) {
+	if runtime != nil && runtime.localWriteLost != nil && records != 0 {
+		runtime.localWriteLost.Add(records)
+	}
 }
 
 // EmitContext is the exact immutable graph snapshot pinned for one Emit call.
@@ -216,17 +244,20 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 		graphOptions = *options.GraphOptions
 		graphOptions.Reporter = options.Reporter
 	}
+	lostWrites := &atomic.Uint64{}
 	factory := &localLogFactory{
 		store: options.Store, storePath: storePath,
 		engine: options.Engine, signer: options.Signer,
 		recordBuilder:  options.RecordBuilder,
 		healthReporter: options.EventHistoryHealthReporter,
+		lostWrites:     lostWrites,
 	}
 	destinationObserver := newSafeDeliveryObserver(options.DestinationObserver)
 	dispatchFactory := &destinationDispatchFactory{
-		adapters:  options.DestinationAdapterFactory,
-		resources: options.TelemetryProviderFactory,
-		observer:  destinationObserver,
+		adapters:     options.DestinationAdapterFactory,
+		resources:    options.TelemetryProviderFactory,
+		observer:     destinationObserver,
+		secureClient: options.SecureClient,
 	}
 	factories := []runtimegraph.ComponentFactory{
 		&retentionPolicyFactory{controller: options.RetentionController},
@@ -265,7 +296,8 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	owned = true
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
-		destinationObserver: destinationObserver,
+		destinationObserver: destinationObserver, secureClient: options.SecureClient,
+		localWriteLost: lostWrites,
 	}, nil
 }
 
@@ -416,44 +448,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 	baseSnapshot := EmitContext{
 		plan: graph.Plan(), digest: graph.Digest(), generation: graph.Generation(),
 	}
-	processBuilder := func(admission router.Admission) (observability.Record, error) {
-		snapshot := baseSnapshot
-		if inbound {
-			provider, providerOK := telemetry.V8ProviderFromLease(lease)
-			if !providerOK {
-				return observability.Record{}, &emitBuilderError{}
-			}
-			resource, resourceOK := provider.V8ResourceContext()
-			if !resourceOK {
-				return observability.Record{}, &emitBuilderError{}
-			}
-			snapshot.inboundBinaryVersion = resource.ServiceVersion()
-			snapshot.inboundInstanceID = resource.TraceResourceFields().DefenseClawInstanceID
-			if snapshot.inboundBinaryVersion == "" || snapshot.inboundInstanceID == "" {
-				return observability.Record{}, &emitBuilderError{}
-			}
-		}
-		record, err := builder(snapshot, admission)
-		if err != nil {
-			return observability.Record{}, err
-		}
-		defaultMode := correlationDefaultsGenerated
-		if inbound {
-			defaultMode = correlationDefaultsImported
-		}
-		record, err = stampRuntimeCorrelation(
-			record, correlationDefaultsFromContext(ctx, defaultMode),
-		)
-		if err != nil {
-			return observability.Record{}, &emitBuilderError{}
-		}
-		provenance := record.Provenance()
-		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
-			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
-			return observability.Record{}, &emitBuilderError{}
-		}
-		return record, nil
-	}
+	processBuilder := leaseRecordBuilder(ctx, lease, baseSnapshot, builder, inbound)
 	var outcome pipeline.LocalLogOutcome
 	var processErr error
 	switch {
@@ -500,6 +495,118 @@ func (runtime *Runtime) emitWithLeaseControls(
 	}
 	runtime.dispatchOptional(lease, graph, outcome)
 	return outcome, nil
+}
+
+// leaseRecordBuilder builds one occurrence's record on the pinned generation:
+// it stamps the runtime correlation and checks the record names that
+// generation. Emit and EmitAtomicBatch share it.
+func leaseRecordBuilder(
+	ctx context.Context,
+	lease *runtimegraph.Lease,
+	baseSnapshot EmitContext,
+	builder EmitBuilder,
+	inbound bool,
+) router.RecordBuilder {
+	return func(admission router.Admission) (observability.Record, error) {
+		snapshot := baseSnapshot
+		if inbound {
+			provider, providerOK := telemetry.V8ProviderFromLease(lease)
+			if !providerOK {
+				return observability.Record{}, &emitBuilderError{}
+			}
+			resource, resourceOK := provider.V8ResourceContext()
+			if !resourceOK {
+				return observability.Record{}, &emitBuilderError{}
+			}
+			snapshot.inboundBinaryVersion = resource.ServiceVersion()
+			snapshot.inboundInstanceID = resource.TraceResourceFields().DefenseClawInstanceID
+			if snapshot.inboundBinaryVersion == "" || snapshot.inboundInstanceID == "" {
+				return observability.Record{}, &emitBuilderError{}
+			}
+		}
+		record, err := builder(snapshot, admission)
+		if err != nil {
+			return observability.Record{}, err
+		}
+		defaultMode := correlationDefaultsGenerated
+		if inbound {
+			defaultMode = correlationDefaultsImported
+		}
+		record, err = stampRuntimeCorrelation(
+			record, correlationDefaultsFromContext(ctx, defaultMode),
+		)
+		if err != nil {
+			return observability.Record{}, &emitBuilderError{}
+		}
+		provenance := record.Provenance()
+		if provenance.ConfigDigest != snapshot.Digest() || provenance.ConfigGeneration < 0 ||
+			uint64(provenance.ConfigGeneration) != snapshot.Generation() {
+			return observability.Record{}, &emitBuilderError{}
+		}
+		return record, nil
+	}
+}
+
+// EmitAtomicBatch persists a bounded group of this gateway's related log
+// occurrences on one pinned generation with one SQLite commit (GAP-0246), then
+// hands each persisted record's optional work to that generation's
+// dispatchers, as Emit does for one. A dropped item takes Emit's
+// managed-destination fallback. When the commit fails nothing is persisted and
+// the remote projections are dispatched, as Emit does on a failed write.
+func (runtime *Runtime) EmitAtomicBatch(
+	ctx context.Context,
+	items []LogBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	if runtime == nil || runtime.manager == nil || ctx == nil || len(items) == 0 ||
+		len(items) > MaxLogBatchItems {
+		return nil, &Error{code: ErrorInvalidDependency}
+	}
+	for index := range items {
+		if items[index].Context == nil || items[index].Builder == nil {
+			return nil, &Error{code: ErrorInvalidDependency}
+		}
+	}
+	lease, err := runtime.manager.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release()
+	graph := lease.Graph()
+	component, ok := lease.Component(LocalLogComponentName)
+	if graph == nil || !ok {
+		return nil, &Error{code: ErrorComponentUnavailable}
+	}
+	local, ok := component.(*localLogComponent)
+	if !ok || local.digest != graph.Digest() {
+		return nil, &Error{code: ErrorComponentUnavailable}
+	}
+	baseSnapshot := EmitContext{
+		plan: graph.Plan(), digest: graph.Digest(), generation: graph.Generation(),
+	}
+	builders := make([]router.RecordBuilder, len(items))
+	batch := make([]pipeline.AtomicBatchItem, len(items))
+	for index := range items {
+		builders[index] = leaseRecordBuilder(items[index].Context, lease, baseSnapshot, items[index].Builder, false)
+		batch[index] = pipeline.AtomicBatchItem{Metadata: items[index].Metadata, Builder: builders[index]}
+	}
+	outcomes, processErr := local.ProcessAtomicBatch(ctx, batch)
+	for index := range outcomes {
+		if outcomes[index].Admission() == router.AdmissionDrop {
+			fallback, fallbackErr := local.ProcessManagedLogFallback(
+				items[index].Context, items[index].Metadata, builders[index],
+			)
+			if fallbackErr != nil {
+				return outcomes, fallbackErr
+			}
+			outcomes[index] = fallback
+		}
+		outcome := outcomes[index]
+		if outcome.LocalPersisted() || outcome.ManagedOnly() ||
+			(processErr != nil && len(outcome.OptionalWork()) > 0) {
+			runtime.dispatchOptional(lease, graph, outcome)
+		}
+	}
+	return outcomes, processErr
 }
 
 // dispatchOptional enqueues a log outcome's optional-destination work and
@@ -563,6 +670,10 @@ func (runtime *Runtime) Close(ctx context.Context) error {
 	}
 	runtime.lifecycleMu.Lock()
 	defer runtime.lifecycleMu.Unlock()
+	var lossSources []shutdownLossSource
+	if !runtime.shutdownLossesCounted {
+		lossSources = runtime.beginShutdownLossCount(ctx)
+	}
 	var first error
 	if runtime.retention != nil {
 		if err := runtime.retention.stopRuntime(ctx); err != nil {
@@ -585,6 +696,10 @@ func (runtime *Runtime) Close(ctx context.Context) error {
 		if err := runtime.destinationObserver.Close(ctx); first == nil && err != nil {
 			first = &Error{code: ErrorShutdown}
 		}
+	}
+	if lossSources != nil {
+		runtime.shutdownLosses = countShutdownLosses(lossSources, shutdownLossSettle)
+		runtime.shutdownLossesCounted = true
 	}
 	return first
 }

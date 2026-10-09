@@ -314,7 +314,10 @@ func (c *OmnigentConnector) renderPolicyModule(opts SetupOpts) ([]byte, error) {
 	// the gateway's peer-authorized hook socket, like every other per-user
 	// hook there; everywhere else the socket is empty and TCP is kept.
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
-	return []byte(renderOmnigentPolicyWithTransport(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID)), nil
+	// A standalone managed install reads the Kerberos principal through its
+	// administrator-owned hook binary; a per-user one has its own gateway.
+	return []byte(renderOmnigentPolicyFull(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID,
+		managedSessionFactsBinary(opts), shellHookSecureClientProfile(opts))), nil
 }
 
 func prepareOmnigentManagedBackup(dataDir, connectorName, logicalName, targetPath string) error {
@@ -968,10 +971,21 @@ func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string 
 // and the gateway service uid trusted beside root as its owner; an empty
 // socket keeps the bridge on the TCP transport with its scoped credential.
 func renderOmnigentPolicyWithTransport(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int) string {
+	return renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket, serviceUID, "", false)
+}
+
+// renderOmnigentPolicyFull also names the administrator-owned hook binary
+// that reads the user's Kerberos credential cache for a standalone managed
+// install; empty uses the per-user gateway binary.
+func renderOmnigentPolicyFull(template, apiAddr, tokenFile, failMode, hookSocket string, serviceUID int, factsBinary string, secureClient bool) string {
 	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
 	uid := ""
 	if hookSocket != "" && serviceUID > 0 {
 		uid = strconv.Itoa(serviceUID)
+	}
+	secureClientFlag := ""
+	if secureClient {
+		secureClientFlag = "1"
 	}
 	replacer := strings.NewReplacer(
 		"{{API_ADDR_B64}}", encode(strings.TrimSpace(apiAddr)),
@@ -979,6 +993,8 @@ func renderOmnigentPolicyWithTransport(template, apiAddr, tokenFile, failMode, h
 		"{{FAIL_MODE_B64}}", encode(normalizeHookFailMode(failMode)),
 		"{{HOOK_SOCKET_B64}}", encode(hookSocket),
 		"{{SERVICE_UID_B64}}", encode(uid),
+		"{{SESSION_FACTS_BIN_B64}}", encode(factsBinary),
+		"{{SECURE_CLIENT_B64}}", encode(secureClientFlag),
 	)
 	return replacer.Replace(template)
 }
@@ -1030,38 +1046,84 @@ func patchOmnigentConfig(path string) error {
 }
 
 func removeOmnigentConfigEntries(path string) error {
-	cfg, err := readYAMLObject(path)
+	data, err := readHookConfigFile(path)
+	if os.IsNotExist(err) || len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	modules, err := yamlStringList(cfg["policy_modules"])
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("parse YAML %s: %w", path, err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("parse YAML %s: expected a mapping", path)
+	}
+	root := document.Content[0]
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key, value := root.Content[i], root.Content[i+1]
+		switch key.Value {
+		case "policy_modules":
+			if value.Kind != yaml.SequenceNode {
+				if value.Kind == yaml.ScalarNode && value.Value == omnigentPolicyModuleName {
+					root.Content = append(root.Content[:i], root.Content[i+2:]...)
+					i -= 2
+					changed = true
+				}
+				continue
+			}
+			kept := value.Content[:0]
+			removedModule := false
+			for _, module := range value.Content {
+				if module.Kind == yaml.ScalarNode && module.Value == omnigentPolicyModuleName {
+					changed = true
+					removedModule = true
+					continue
+				}
+				kept = append(kept, module)
+			}
+			value.Content = kept
+			if removedModule && len(kept) == 0 {
+				root.Content = append(root.Content[:i], root.Content[i+2:]...)
+				i -= 2
+			}
+		case "policies":
+			if value.Kind != yaml.MappingNode {
+				continue
+			}
+			removedPolicy := false
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				if value.Content[j].Value != omnigentPolicyConfigKey || value.Content[j+1].Kind != yaml.MappingNode {
+					continue
+				}
+				entry := value.Content[j+1]
+				owned := false
+				for k := 0; k+1 < len(entry.Content); k += 2 {
+					owned = owned || (entry.Content[k].Value == "handler" && entry.Content[k+1].Value == omnigentPolicyHandler)
+				}
+				if owned {
+					value.Content = append(value.Content[:j], value.Content[j+2:]...)
+					changed = true
+					removedPolicy = true
+				}
+				break
+			}
+			if removedPolicy && len(value.Content) == 0 {
+				root.Content = append(root.Content[:i], root.Content[i+2:]...)
+				i -= 2
+			}
+		}
+	}
+	if !changed {
+		return nil
+	}
+	updated, err := yaml.Marshal(&document)
 	if err != nil {
 		return err
 	}
-	filtered := modules[:0]
-	for _, module := range modules {
-		if module != omnigentPolicyModuleName {
-			filtered = append(filtered, module)
-		}
-	}
-	if len(filtered) == 0 {
-		delete(cfg, "policy_modules")
-	} else {
-		cfg["policy_modules"] = filtered
-	}
-	if policies, ok := cfg["policies"].(map[string]interface{}); ok {
-		if entry, ok := policies[omnigentPolicyConfigKey].(map[string]interface{}); ok && fmt.Sprint(entry["handler"]) == omnigentPolicyHandler {
-			delete(policies, omnigentPolicyConfigKey)
-		}
-		if len(policies) == 0 {
-			delete(cfg, "policies")
-		}
-	}
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-	return atomicWriteFile(path, data, 0o600)
+	return atomicWriteFile(path, updated, 0o600)
 }
 
 func yamlStringList(raw interface{}) ([]string, error) {

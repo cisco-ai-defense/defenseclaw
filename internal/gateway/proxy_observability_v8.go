@@ -131,6 +131,12 @@ func (p *GuardrailProxy) observabilityV8TraceRuntime() lifecycleV8Runtime {
 	return p.observabilityV8Trace
 }
 
+// observabilityV8Emitter is the proxy's runtime as a record emitter, or nil.
+func (p *GuardrailProxy) observabilityV8Emitter() sidecarRuntimeEmitter {
+	emitter, _ := p.observabilityV8TraceRuntime().(sidecarRuntimeEmitter)
+	return emitter
+}
+
 func (p *GuardrailProxy) startProxyV8RequestTrace(
 	ctx context.Context,
 	req *ChatRequest,
@@ -411,8 +417,11 @@ type proxyV8Facts struct {
 	agentID        string
 	agentName      string
 	agentInstance  string
+	agentIdentity  string
 	policyID       string
 	destination    string
+	// caller supplies the user fields and correlation.identity from one verified source.
+	caller auditCaller
 }
 
 func (p *GuardrailProxy) proxyV8Envelope(
@@ -426,8 +435,10 @@ func (p *GuardrailProxy) proxyV8Envelope(
 		sessionID: proxyV8StableID(firstNonEmpty(auditEnvelope.SessionID, SessionIDFromContext(ctx))),
 		turnID:    proxyV8StableID(auditEnvelope.TurnID), agentID: proxyV8StableID(auditEnvelope.AgentID),
 		agentName: proxyV8StableID(auditEnvelope.AgentName), agentInstance: proxyV8StableID(auditEnvelope.AgentInstanceID),
-		policyID:    proxyV8StableID(firstNonEmpty(auditEnvelope.PolicyID, p.defaultPolicyID)),
-		destination: proxyV8StableID(auditEnvelope.DestinationApp),
+		policyID:      proxyV8StableID(firstNonEmpty(auditEnvelope.PolicyID, p.defaultPolicyID)),
+		destination:   proxyV8StableID(auditEnvelope.DestinationApp),
+		agentIdentity: agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
+		caller:        auditCallerIdentity(ctx),
 	}
 	facts.connectorKnown = facts.connector != "" && facts.connector != "unknown"
 	return observability.FamilyEnvelopeInput{
@@ -457,6 +468,7 @@ func inheritProxyV8AgentIdentity(
 		model.DefenseClawAgentType = observability.Present(value)
 	}
 	model.DefenseClawAgentInstanceID = agent.DefenseClawAgentInstanceID
+	model.DefenseClawAgentIdentityID = agent.DefenseClawAgentIdentityID
 	model.DefenseClawAgentRootID = agent.DefenseClawAgentRootID
 	model.DefenseClawAgentParentID = agent.DefenseClawAgentParentID
 	model.DefenseClawAgentLineageProvenance = agent.DefenseClawAgentLineageProvenance
@@ -478,6 +490,13 @@ func applyProxyV8FactsToAgent(input *observability.SpanAgentInvokeInput, facts p
 	input.GenAIAgentID = proxyV8OptionalID(facts.agentID)
 	input.GenAIAgentName = proxyV8OptionalID(facts.agentName)
 	input.DefenseClawAgentInstanceID = proxyV8OptionalID(facts.agentInstance)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(facts.agentIdentity)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(facts.caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(facts.caller.IDKind)
+		input.DefenseClawUserName = v8UserName(facts.caller.Name, hookV8OptionalIdentifier)
+	}
+	facts.caller.Identity.applyTo(input)
 	input.DefenseClawAgentRootID = proxyV8OptionalID(facts.agentID)
 	input.DefenseClawSessionRootID = proxyV8OptionalID(facts.sessionID)
 	if facts.agentID != "" {
@@ -502,6 +521,13 @@ func applyProxyV8FactsToModel(input *observability.SpanModelChatInput, facts pro
 	input.GenAIAgentID = proxyV8OptionalID(facts.agentID)
 	input.GenAIAgentName = proxyV8OptionalID(facts.agentName)
 	input.DefenseClawAgentInstanceID = proxyV8OptionalID(facts.agentInstance)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(facts.agentIdentity)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(facts.caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(facts.caller.IDKind)
+		input.DefenseClawUserName = v8UserName(facts.caller.Name, hookV8OptionalIdentifier)
+	}
+	facts.caller.Identity.applyTo(input)
 	input.DefenseClawAgentRootID = proxyV8OptionalID(facts.agentID)
 	input.DefenseClawSessionRootID = proxyV8OptionalID(facts.sessionID)
 	if facts.agentID != "" {

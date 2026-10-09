@@ -582,7 +582,9 @@ def _initialize_setup_runtime(app: AppContext | None, ctx: click.Context) -> Non
         app.store = Store(app.cfg.audit_db)
         app.store.init()
     except Exception as exc:
-        ux.echo(f"Failed to open audit store: {exc}", err=True)
+        from defenseclaw.audit_capacity import audit_open_failure_notice
+
+        ux.echo(audit_open_failure_notice(app.cfg.audit_db, exc), err=True)
         ctx.exit(1)
     app.logger = Logger.from_config(app.cfg)
 
@@ -5940,6 +5942,7 @@ def _configure_hilt_interactive(
     gc,
     *,
     action_connectors: list[str] | None = None,
+    target_connector: str | None = None,
     flag_enabled: bool | None = None,
     flag_min_severity: str | None = None,
 ) -> None:
@@ -5965,19 +5968,26 @@ def _configure_hilt_interactive(
         connector = gc.connector or "openclaw"
     ux.subhead(_hilt_support_note(connector))
     ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
+    hilt = gc.hilt
+    if target_connector and target_connector in (getattr(gc, "connectors", None) or {}):
+        override = gc.connectors[target_connector]
+        if override.hilt is None:
+            current = gc.effective_hilt(target_connector)
+            override.hilt = HILTConfig(enabled=current.enabled, min_severity=current.min_severity)
+        hilt = override.hilt
     enabled = click.confirm(
         "  Human approval for risky actions?",
-        default=gc.hilt.enabled if flag_enabled is None else flag_enabled,
+        default=hilt.enabled if flag_enabled is None else flag_enabled,
     )
-    gc.hilt.enabled = enabled
+    hilt.enabled = enabled
     if not enabled:
-        gc.hilt.min_severity = gc.hilt.min_severity or "HIGH"
+        hilt.min_severity = hilt.min_severity or "HIGH"
         return
 
-    default_min = (flag_min_severity or gc.hilt.min_severity or "HIGH").upper()
+    default_min = (flag_min_severity or hilt.min_severity or "HIGH").upper()
     if default_min not in _HILT_MIN_SEVERITIES:
         default_min = "HIGH"
-    gc.hilt.min_severity = click.prompt(
+    hilt.min_severity = click.prompt(
         "  Approval minimum severity",
         type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False),
         default=default_min,
@@ -13417,13 +13427,16 @@ def _prompt_hook_fail_mode(gc) -> None:
     ux.subhead("How hooks behave when delivery/authentication fails or")
     ux.subhead("the gateway returns 4xx, malformed JSON, or no action.")
     click.echo()
+    ux.echo("    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure")
+    click.echo("                 " + ux.dim("A stopped gateway lets calls that policy blocks run."))
     ux.echo(
-        "    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure " + ux.dim("(recommended)")
+        "    "
+        + ux.bold("[2] closed")
+        + " — block supported events when inspection is unavailable "
+        + ux.dim("(recommended)")
     )
-    click.echo("                 " + ux.dim("A misbehaving gateway won't brick your agent."))
-    ux.echo("    " + ux.bold("[2] closed") + " — block supported events when inspection is unavailable")
-    click.echo("                 " + ux.dim("Choose for regulated workflows where every"))
-    click.echo("                 " + ux.dim("prompt MUST be inspected."))
+    click.echo("                 " + ux.dim("The default on a new install: action mode keeps"))
+    click.echo("                 " + ux.dim("blocking while the gateway is down."))
     click.echo()
     click.echo(
         "  "
@@ -13433,12 +13446,12 @@ def _prompt_hook_fail_mode(gc) -> None:
             "choice is open."
         )
     )
-    current_fail = (getattr(gc, "hook_fail_mode", "") or "open").lower()
-    fail_default = "2" if current_fail == "closed" else "1"
-    if fail_default == "2":
+    current_fail = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
+    fail_default = "1" if current_fail == "open" else "2"
+    if fail_default == "1":
         # The default keeps the saved value, which can differ from the
-        # recommended choice; say so instead of leaving [2] unexplained.
-        click.echo("  " + ux.dim("Current setting: closed. Press Enter to keep it, or type 1 for open."))
+        # recommended choice; say so instead of leaving [1] unexplained.
+        click.echo("  " + ux.dim("Current setting: open. Press Enter to keep it, or type 2 for closed."))
     fail_choice = click.prompt(
         "  Select hook fail mode",
         type=click.Choice(["1", "2"]),
@@ -13807,6 +13820,8 @@ def _interactive_guardrail_setup(
     # to the singular mode for the bootstrap/single-connector path.
     if is_multi:
         hilt_action_connectors = [c for c in active_connectors if (gc.effective_mode(c) or "").strip() == "action"]
+        if agent_name:
+            hilt_action_connectors = [c for c in hilt_action_connectors if c == agent_name]
         hilt_applicable = bool(hilt_action_connectors)
     else:
         hilt_action_connectors = None
@@ -13815,6 +13830,7 @@ def _interactive_guardrail_setup(
         _configure_hilt_interactive(
             gc,
             action_connectors=hilt_action_connectors,
+            target_connector=agent_name,
             flag_enabled=human_approval,
             flag_min_severity=hilt_min_severity,
         )
@@ -17709,7 +17725,14 @@ def _apply_enterprise_config(
             secret_value=token or None,
         )
     except ValueError as exc:
-        click.echo(f"  error: {exc}", err=True)
+        message = str(exc)
+        if "set allow_private_networks" in message:
+            message = (
+                "Private HEC collector: use defenseclaw setup observability add "
+                "splunk-enterprise --endpoint <url> --allow-private-networks "
+                "(plus your index and token options)."
+            )
+        click.echo(f"  error: {message}", err=True)
         raise SystemExit(2) from exc
     _reload_cfg_from_data_dir(app)
     return name

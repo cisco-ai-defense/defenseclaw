@@ -36,6 +36,8 @@ func TestEmailPIIContextSeparatesRecordsFromOperationalAddresses(t *testing.T) {
 		{"email command", `Send email with attachment to "backup@email.com"`, "backup@email.com", false},
 		{"literal search", `Find files containing string literal 'spammer@spammy.com'`, "spammer@spammy.com", false},
 		{"schema example", `A common format is {"email":"user@example.com"}`, "user@example.com", false},
+		{"git identity hint", "Run\n\n  git config --global user.email \"you@example.com\"\n  git config --global user.name \"Your Name\"", "you@example.com", false},
+		{"git identity hint in tool JSON", `{"stderr":"Run\n\n  git config --global user.email \"you@example.com\"\n"}`, "you@example.com", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

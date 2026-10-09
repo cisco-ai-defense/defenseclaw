@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -85,6 +86,12 @@ type AISignature struct {
 	ApplicationNames   []string `json:"application_names,omitempty"`
 	ConfigPaths        []string `json:"config_paths,omitempty"`
 	ExtensionIDs       []string `json:"extension_ids,omitempty"`
+	// JetBrainsPluginIDs, ZedExtensionIDs and VimPlugins flag the AI
+	// plugins of the IDE inventory: JetBrains plugin.xml ids, Zed
+	// extension ids and Vim/Neovim plugin folder (repository) names.
+	JetBrainsPluginIDs []string `json:"jetbrains_plugin_ids,omitempty"`
+	ZedExtensionIDs    []string `json:"zed_extension_ids,omitempty"`
+	VimPlugins         []string `json:"vim_plugins,omitempty"`
 	MCPPaths           []string `json:"mcp_paths,omitempty"`
 	// SkillPaths / RulePaths / PluginPaths are directory globs whose
 	// per-user existence + non-emptiness produce SignalSkill / SignalRule /
@@ -177,6 +184,9 @@ type AISignatureLoadOptions struct {
 	WorkingDir               string
 	MaxPacks                 int
 	MaxPackBytes             int64
+	// SecureClient loads the embedded catalog as 1.0.0 shipped it
+	// (secureClientSignatures).
+	SecureClient bool
 }
 
 // LoadAISignaturesForConfig loads the embedded catalog plus any configured
@@ -196,7 +206,34 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 		DisabledSignatureIDs:     append([]string{}, cfg.AIDiscovery.DisabledSignatureIDs...),
 		HomeDir:                  home,
 		WorkingDir:               wd,
+		SecureClient:             cfg.SecureClientIntegration(),
 	})
+}
+
+// Signature data added to the embedded catalog after 1.0.0. The Secure Client
+// profile keeps the catalog of 1.0.0 (issue #1092), so secureClientSignatures
+// removes it there.
+var (
+	postReleaseSignatureIDs = map[string]bool{"jetbrains-ai": true}
+	postReleaseExtensionIDs = map[string]string{"codex": "openai.chatgpt", "claudecode": "anthropic.claude-code"}
+)
+
+// secureClientSignatures returns the embedded catalog as 1.0.0 shipped it:
+// without the signatures and VS Code extension ids added since, and without
+// the JetBrains, Zed and Vim plugin ids, which only the IDE inventory reads.
+func secureClientSignatures(base []AISignature) []AISignature {
+	out := make([]AISignature, 0, len(base))
+	for _, sig := range base {
+		if postReleaseSignatureIDs[sig.ID] {
+			continue
+		}
+		if added := postReleaseExtensionIDs[sig.ID]; added != "" {
+			sig.ExtensionIDs = slices.DeleteFunc(slices.Clone(sig.ExtensionIDs), func(id string) bool { return id == added })
+		}
+		sig.JetBrainsPluginIDs, sig.ZedExtensionIDs, sig.VimPlugins = nil, nil, nil
+		out = append(out, sig)
+	}
+	return out
 }
 
 // LoadAISignaturesWithOptions merges all configured catalog sources and
@@ -205,6 +242,9 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	base, err := LoadAISignatures()
 	if err != nil {
 		return nil, err
+	}
+	if opts.SecureClient {
+		base = secureClientSignatures(base)
 	}
 	disabled := normalizedSignatureIDSet(opts.DisabledSignatureIDs)
 	merged := make([]AISignature, 0, len(base))
@@ -242,7 +282,19 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 				continue
 			}
 			if prev := seen[sig.ID]; prev != "" {
-				return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				// This ID was introduced in the 1.0 builtin catalog. An older
+				// operator pack with the same ID keeps its configured signature.
+				if sig.ID != "jetbrains-ai" || prev != "builtin" || opts.SecureClient {
+					return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				}
+				for i := range merged {
+					if merged[i].ID == sig.ID {
+						merged[i] = sig
+						break
+					}
+				}
+				seen[sig.ID] = packPath
+				continue
 			}
 			merged = append(merged, sig)
 			seen[sig.ID] = packPath
@@ -492,20 +544,23 @@ func validateAISignature(sig AISignature) error {
 		return fmt.Errorf("ai signature catalog: %s: unsupported category %q", sig.ID, sig.Category)
 	}
 	for field, values := range map[string][]string{
-		"binary_names":      sig.BinaryNames,
-		"process_names":     sig.ProcessNames,
-		"application_names": sig.ApplicationNames,
-		"config_paths":      sig.ConfigPaths,
-		"extension_ids":     sig.ExtensionIDs,
-		"mcp_paths":         sig.MCPPaths,
-		"skill_paths":       sig.SkillPaths,
-		"rule_paths":        sig.RulePaths,
-		"plugin_paths":      sig.PluginPaths,
-		"package_names":     sig.PackageNames,
-		"env_var_names":     sig.EnvVarNames,
-		"domain_patterns":   sig.DomainPatterns,
-		"history_patterns":  sig.HistoryPatterns,
-		"local_endpoints":   sig.LocalEndpoints,
+		"binary_names":         sig.BinaryNames,
+		"process_names":        sig.ProcessNames,
+		"application_names":    sig.ApplicationNames,
+		"config_paths":         sig.ConfigPaths,
+		"extension_ids":        sig.ExtensionIDs,
+		"jetbrains_plugin_ids": sig.JetBrainsPluginIDs,
+		"zed_extension_ids":    sig.ZedExtensionIDs,
+		"vim_plugins":          sig.VimPlugins,
+		"mcp_paths":            sig.MCPPaths,
+		"skill_paths":          sig.SkillPaths,
+		"rule_paths":           sig.RulePaths,
+		"plugin_paths":         sig.PluginPaths,
+		"package_names":        sig.PackageNames,
+		"env_var_names":        sig.EnvVarNames,
+		"domain_patterns":      sig.DomainPatterns,
+		"history_patterns":     sig.HistoryPatterns,
+		"local_endpoints":      sig.LocalEndpoints,
 	} {
 		if err := validateSignatureValues(sig.ID, field, values); err != nil {
 			return err

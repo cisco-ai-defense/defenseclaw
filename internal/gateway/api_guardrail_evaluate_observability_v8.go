@@ -292,7 +292,10 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 		)
 		envelope.ObservedAt = observability.Present(facts.completedAt)
 		envelope.Correlation.EvaluationID = facts.request.EvaluationID
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		profileTelemetry := guardrailProfileTelemetryFor(ctx)
+		input := observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
 			GenAIConversationID:                 optionalJudgeMetricText(facts.meta.SessionID),
@@ -300,6 +303,7 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 			GenAIAgentName:                      inspectTraceV8AgentName(facts.meta.AgentName),
 			DefenseClawAgentType:                hookV8OptionalText(facts.identity.AgentType, 4096),
 			DefenseClawAgentInstanceID:          optionalJudgeMetricText(facts.identity.AgentInstanceID),
+			DefenseClawAgentIdentityID:          agentIdentityV8(agentIdentityIDForTraffic(ctx, facts.identity)),
 			DefenseClawAgentRootID:              optionalJudgeMetricText(facts.meta.RootAgentID),
 			DefenseClawAgentParentID:            optionalJudgeMetricText(facts.meta.ParentAgentID),
 			DefenseClawAgentLineageProvenance:   hookV8OptionalLineageProvenance(facts.meta.LineageProvenance),
@@ -336,7 +340,15 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 			DefenseClawGuardrailReason:          facts.reason,
 			GenAIRequestModel:                   facts.model,
 			ConditionSecuritySeverityAvailable:  true,
-		})
+		}
+		caller := auditCallerIdentity(ctx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
 }
@@ -387,9 +399,11 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 	correlation := gatewayGeneratedCorrelation(ctx, facts.routeConnector())
 	correlation.EvaluationID = facts.request.EvaluationID
 	events := make([]observability.TraceEventInput, 0, 1)
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	decisionEvent, err := observability.NewSpanGuardrailApplyGuardrailDecisionEvent(
 		observability.SpanGuardrailApplyGuardrailDecisionEventInput{
 			TimeUnixNano:                        uint64(facts.completedAt.UnixNano()),
+			DefenseClawGuardrailProfileName:     profileTelemetry.Name,
 			DefenseClawEvaluationID:             observability.Present(facts.request.EvaluationID),
 			DefenseClawGuardrailDecision:        observability.Present(facts.decision),
 			DefenseClawGuardrailEffectiveAction: observability.Present(facts.effectiveAction),
@@ -400,7 +414,9 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		return observability.SpanGuardrailApplyInput{}, false
 	}
 	events = append(events, decisionEvent)
-	return observability.SpanGuardrailApplyInput{
+	input := observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(facts.completedAt),
 			Source:     observability.SourceGateway, Connector: facts.routeConnector(),
@@ -422,6 +438,7 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		GenAIAgentName:                      inspectTraceV8AgentName(facts.meta.AgentName),
 		DefenseClawAgentType:                hookV8OptionalText(facts.identity.AgentType, 4096),
 		DefenseClawAgentInstanceID:          optionalJudgeMetricText(facts.identity.AgentInstanceID),
+		DefenseClawAgentIdentityID:          agentIdentityV8(agentIdentityIDForTraffic(ctx, facts.identity)),
 		DefenseClawAgentRootID:              optionalJudgeMetricText(facts.meta.RootAgentID),
 		DefenseClawAgentParentID:            optionalJudgeMetricText(facts.meta.ParentAgentID),
 		DefenseClawAgentLineageProvenance:   hookV8OptionalLineageProvenance(facts.meta.LineageProvenance),
@@ -458,5 +475,13 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		DefenseClawGuardrailReason:          facts.reason,
 		ConditionConnectorKnown:             facts.routeConnector() != "",
 		ConditionOperationTerminal:          true,
-	}, true
+	}
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	}
+	caller.Identity.applyTo(&input)
+	return input, true
 }

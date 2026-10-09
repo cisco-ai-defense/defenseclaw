@@ -13,9 +13,35 @@ import (
 )
 
 // A service-context scan (managed Windows) attributes what it finds in a
-// profile, and the agent processes started from one, to that profile's
-// account, and finds agents whose folders a per-user variable names
+// profile to that profile's account, and uses process session SIDs to
+// attribute agents. It finds agents whose folders a per-user variable names
 // ($LOCALAPPDATA/hermes) in every profile rather than the service's own.
+func TestProcessOwnerUsesSessionSIDBeforeImageProfile(t *testing.T) {
+	root := t.TempDir()
+	alice := filepath.Join(root, "Users", "alice")
+	bob := filepath.Join(root, "Users", "bob")
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{homeOwners: []discoveryHomeOwner{
+		{Home: alice, UserID: "S-1-5-21-1001", UserName: "alice"},
+		{Home: bob, UserID: "S-1-5-21-1002", UserName: "bob"},
+	}}}
+	procs := []processInfo{
+		{PID: 10, Comm: "codex.exe", Connector: "codex",
+			Image: filepath.Join(alice, "bin", "codex.exe"), SessionOwnerID: "S-1-5-21-1002"},
+		{PID: 11, Comm: "codex.exe", Connector: "codex",
+			Image: filepath.Join(alice, "bin", "codex.exe")},
+	}
+	svc.attributeProcessOwners(procs)
+	if procs[0].OwnerID != "S-1-5-21-1002" || procs[1].OwnerID != "" {
+		t.Fatalf("process owners = %q/%q, want token owner SID and unknown",
+			procs[0].OwnerID, procs[1].OwnerID)
+	}
+	svc.opts.SecureClient = true
+	svc.attributeProcessOwners(procs[1:])
+	if procs[1].OwnerID != "S-1-5-21-1001" {
+		t.Fatalf("Secure Client process owner = %q, want legacy image profile", procs[1].OwnerID)
+	}
+}
+
 func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	root := t.TempDir()
 	alice := filepath.Join(root, "Users", "alice")
@@ -98,9 +124,9 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	}
 
 	procs := []processInfo{
-		{PID: 10, PPID: 1, Comm: "codex.exe", Image: strings.ToUpper(filepath.Join(alice, ".codex", "bin", "codex.exe")), Windows: true},
+		{PID: 10, PPID: 1, Comm: "codex.exe", Image: strings.ToUpper(filepath.Join(alice, ".codex", "bin", "codex.exe")), Windows: true, SessionOwnerID: "S-1-5-21-1-2-3-1001"},
 		{PID: 11, PPID: 10, Comm: "node.exe", Image: filepath.Join(root, "Program Files", "nodejs", "node.exe"), Windows: true},
-		{PID: 20, PPID: 1, Comm: "claude.exe", Image: filepath.Join(bob, ".local", "bin", "claude.exe"), Windows: true},
+		{PID: 20, PPID: 1, Comm: "claude.exe", Image: filepath.Join(bob, ".local", "bin", "claude.exe"), Windows: true, SessionOwnerID: "S-1-5-21-1-2-3-1002"},
 		{PID: 30, PPID: 1, Comm: "pwsh.exe", Image: filepath.Join(root, "Program Files", "PowerShell", "pwsh.exe"), Windows: true, SessionOwnerID: "S-1-5-21-1-2-3-500"},
 		// A machine-wide install is owned by its session account (GAP-2043).
 		{PID: 40, PPID: 1, Comm: "copilot-runtime.exe", Image: filepath.Join(root, "Program Files", "Microsoft VS Code", "copilot-runtime.exe"), Windows: true, SessionOwnerID: "s-1-5-21-1-2-3-1002"},
@@ -114,6 +140,21 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	signal := s.signalFromProcess(AISignature{ID: "claude-code"}, procs[2], procs[2].StartedAt, MatchKindExact, 1)
 	if signal.UserID != "S-1-5-21-1-2-3-1002" || signal.UserName != "bob" || signal.Runtime.User != "bob" {
 		t.Fatalf("process signal user = %q/%q runtime %q", signal.UserID, signal.UserName, signal.Runtime.User)
+	}
+
+	// A renamed account is named by its new name at the next scan
+	// (GAP-0702).
+	previous := discoveryAccountName
+	discoveryAccountName = func(sid, _ string) string {
+		if sid == "S-1-5-21-1-2-3-1002" {
+			return "bób"
+		}
+		return ""
+	}
+	t.Cleanup(func() { discoveryAccountName = previous })
+	s.refreshHomeOwnerNames()
+	if owner, ok := s.homeOwnerForSID("S-1-5-21-1-2-3-1002"); !ok || owner.UserName != "bób" {
+		t.Fatalf("owner after a rename = %+v, %v; want the new name", owner, ok)
 	}
 
 	denied := &fs.PathError{Op: "open", Path: alice, Err: fs.ErrPermission}
@@ -256,5 +297,35 @@ func TestServiceContextSkillRowsNameSkillsOnly(t *testing.T) {
 	// The Codex marker sits inside .system, one level below the skills root.
 	if got := entries(s.signalFromDirectoryChildren(AISignature{ID: "codex", Name: "Codex"}, SignalSkill, "skill", codex)); got != "imagegen" {
 		t.Fatalf("Codex skill entries = %q, want imagegen", got)
+	}
+}
+
+// An excluded domain account with no session SID must not become an
+// enrolled local account just because the two share a short name.
+func TestExcludedBrokeredAccountDoesNotBecomeLocalOwner(t *testing.T) {
+	root := t.TempDir()
+	local := discoveryHomeOwner{Home: filepath.Join(root, "local"), UserID: "S-1-5-21-1001", UserName: "alice", Domain: "HOST"}
+	domain := discoveryHomeOwner{Home: filepath.Join(root, "domain"), UserID: "S-1-5-21-2001", UserName: "alice", Domain: "AD"}
+	opts := AIDiscoveryOptions{ExcludeUsers: []string{`AD\alice`}}
+	opts.applyPlatformHomeOwners([]discoveryHomeOwner{local, domain})
+	svc := &ContinuousDiscoveryService{opts: opts}
+	clear := SetProcessAccountLookup(func() map[int]ProcessAccount {
+		return map[int]ProcessAccount{
+			42: {Name: "codex.exe", User: `AD\alice`},
+			43: {Name: "codex.exe", User: `HOST\alice`},
+		}
+	})
+	defer clear()
+	procs := []processInfo{
+		{PID: 42, Comm: "codex.exe", Connector: "codex", Windows: true},
+		{PID: 43, Comm: "codex.exe", Connector: "codex", Windows: true},
+	}
+	svc.attributeProcessOwners(procs)
+	if procs[0].OwnerID != "" || procs[1].OwnerID != local.UserID {
+		t.Fatalf("brokered owners = %+v, want only the local account attributed", procs)
+	}
+	procs = svc.withoutExcludedAccounts(procs)
+	if len(procs) != 1 || procs[0].PID != 43 {
+		t.Fatalf("filtered processes = %+v, want only the local account", procs)
 	}
 }

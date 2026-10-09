@@ -5,7 +5,10 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -13,11 +16,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -58,6 +63,50 @@ func TestACPEvaluateDeniedMethodHonorsProfileMode(t *testing.T) {
 				t.Fatalf("observe verdict=%+v", verdict)
 			}
 		})
+	}
+}
+
+// An ACP decision resolves the guardrail profile with the ACP agent's
+// connector, as the hook, proxy and inspect paths do, so a connectors
+// assignment selects ACP traffic and the record names that profile
+// (GAP-0311).
+func TestACPEvaluateResolvesTheGuardrailProfileForItsConnector(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
+	cfg := &config.Config{ACP: config.ACPConfig{
+		Enabled: true, Mode: "action", DefaultProfile: "default",
+		Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "default"}},
+		Agents:  map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "default"}},
+		Profiles: map[string]config.ACPProfile{"default": {
+			Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"},
+			DeniedMethods: []string{"terminal/create"},
+		}},
+	}}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"acp-kiro": {Mode: "action"}, "watch": {Mode: "observe"}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "acp-kiro", Match: config.ProfileMatch{Connectors: []string{"kiro"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	api.scannerCfg = cfg
+	api.initGuardrailProfiles(cfg, nil)
+	payload := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"terminal/create","params":{"sessionId":"s","command":"false","args":[]}}`)
+	body, err := json.Marshal(acp.Evaluation{Profile: "default", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed", Direction: acp.AgentToClient, Surface: acp.SurfaceTerminal, Method: "terminal/create", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	api.handleACPEvaluate(response, httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(events) != 1 {
+		t.Fatalf("stored events = %d, want 1", len(events))
+	}
+	if name, match := events[0].Body["defenseclaw.guardrail.profile.name"], events[0].Body["defenseclaw.guardrail.profile.match"]; name != "acp-kiro" || match != profileMatchConnector {
+		t.Fatalf("ACP record profile=%v match=%v, want acp-kiro by connector (body=%v)", name, match, events[0].Body)
 	}
 }
 
@@ -326,6 +375,37 @@ func TestACPAuthenticatedTransportRejectsSignedPlaintext(t *testing.T) {
 	}
 }
 
+func TestACPHomeCredentialRequiresItsHomeOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix home ownership and loopback peer UID")
+	}
+	home := t.TempDir()
+	owner := os.Getuid()
+	principal := fmt.Sprintf("home:%x", sha256.Sum256([]byte(home)))
+	cfg := acpGatewayTestConfig(t.TempDir(), "managed_enterprise")
+	cfg.Enterprise.Profile = "standalone"
+	api := &APIServer{scannerCfg: cfg}
+	credential := acp.EnterpriseCredential{Principal: principal, UserDataDir: filepath.Join(home, ".defenseclaw")}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", nil)
+	req = req.WithContext(withACPEnterpriseCredential(req.Context(), credential))
+	previous := acpLoopbackPeerUID
+	peer := owner + 1
+	acpLoopbackPeerUID = func(*http.Request) (int, error) { return peer, nil }
+	t.Cleanup(func() { acpLoopbackPeerUID = previous })
+	if got := api.acpCallerAccountRefusal(req); got != acpCallerAccountMismatchReason {
+		t.Fatalf("copied home credential refusal = %q, want account mismatch", got)
+	}
+	peer = owner
+	if got := api.acpCallerAccountRefusal(req); got != "" {
+		t.Fatalf("home owner refusal = %q, want none", got)
+	}
+	credential.UserDataDir = ""
+	req = req.WithContext(withACPEnterpriseCredential(req.Context(), credential))
+	if got := api.acpCallerAccountRefusal(req); got != acpCallerAccountUnverifiedReason {
+		t.Fatalf("home without a recorded directory refusal = %q, want unverified", got)
+	}
+}
+
 func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
@@ -348,6 +428,243 @@ func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 	}
 	if verdict.Action != "block" {
 		t.Fatalf("verdict = %+v, want block", verdict)
+	}
+}
+
+// A managed gateway runs as a service account, and a managed ACP request is
+// attributed to the account its enrollment credential belongs to (uid:N,
+// sid:S-...), as a per-user hook credential binds its uid: the evaluation
+// gets that verified user and the user's guardrail profile, and a forged
+// X-DefenseClaw-User-* pair names no one (GAP-0200, GAP-0206). The
+// home-directory fallback principal names no account, and with identity
+// facts off (Secure Client) nothing is bound.
+func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
+	// Only the account kind of this platform names who holds the bearer.
+	uidWant, sidWant := "7", ""
+	if runtime.GOOS == "windows" {
+		uidWant, sidWant = "", "S-1-5-21-1-2-3-1001"
+	}
+	for principal, want := range map[string]string{
+		"uid:7": uidWant, "sid:S-1-5-21-1-2-3-1001": sidWant, "home:abc": "", "uid:x": "",
+		"uid:S-1-5-21-1-2-3-1001": "", "sid:7": "",
+	} {
+		if got := acpPrincipalIdentity(principal); got != want {
+			t.Fatalf("acpPrincipalIdentity(%q) = %q, want %q", principal, got, want)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
+	}
+	// The in-process guard must not write a session cache in the real home.
+	t.Setenv("HOME", t.TempDir())
+	setIdentityFactsEnabled(true)
+	priorHosted := managedServiceHosted.Load()
+	setManagedServiceHosted(true)
+	restoreName := userScopedIdentityName
+	userScopedIdentityName = func(id string) string {
+		if id == "4301" {
+			return "dcad-acp"
+		}
+		return ""
+	}
+	// The kernel names the account of the loopback caller; the guard here is
+	// the test process, so the test says which account it runs as.
+	restorePeer, peer := acpLoopbackPeerUID, 4301
+	acpLoopbackPeerUID = func(*http.Request) (int, error) { return peer, nil }
+	t.Cleanup(func() {
+		setIdentityFactsEnabled(false)
+		setManagedServiceHosted(priorHosted)
+		userScopedIdentityName = restoreName
+		acpLoopbackPeerUID = restorePeer
+		liveGuardrailProfiles.Store(nil)
+	})
+	dataDir := t.TempDir()
+	cfg := acpGatewayTestConfig(dataDir, "managed_enterprise")
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"acp-user": {Mode: "action"}, "watch": {Mode: "observe"}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "acp-user", Match: config.ProfileMatch{Users: []string{"4301"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	api := &APIServer{scannerCfg: cfg}
+	api.initGuardrailProfiles(cfg, nil)
+
+	type seen struct {
+		subject  VerifiedSubject
+		verified bool
+		caller   string
+		agent    string
+		profile  profileDecision
+	}
+	got := make(chan seen, 1)
+	chain := CorrelationMiddleware(NewAgentRegistry("", ""))(api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/acp/evaluate" {
+			subject, ok := verifiedSubjectFromContext(r.Context())
+			got <- seen{subject, ok, auditCallerIdentity(r.Context()).ID, AgentIdentityFromContext(r.Context()).UserID, api.resolveProfile(r.Context())}
+			api.handleACPEvaluate(w, r)
+			return
+		}
+		api.handleACPChallenge(w, r)
+	}))))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The standalone TCP listener marks every request as served by a
+		// service account (BaseContext).
+		r = r.WithContext(withServiceAccountGateway(r.Context()))
+		r.Header.Set(llmEventUserIDHeader, "4242")
+		r.Header.Set(llmEventUserNameHeader, "forged")
+		chain.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	evaluate := func(principal string) seen {
+		t.Helper()
+		credential, err := acp.EnsureEnterpriseCredential(dataDir, principal, "zed", "kiro", "locked")
+		if err != nil {
+			t.Fatal(err)
+		}
+		evaluator, err := acp.NewHTTPEvaluator(server.URL, credential.Token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := evaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err != nil {
+			t.Fatal(err)
+		}
+		return <-got
+	}
+
+	bound := evaluate("uid:4301")
+	if !bound.verified || bound.subject.UserID != "4301" || bound.subject.UserName != "dcad-acp" ||
+		bound.subject.Source != subjectSourceUserCredential || bound.caller != "4301" {
+		t.Fatalf("enrolled uid: subject=%+v verified=%v caller=%q, want verified 4301 dcad-acp", bound.subject, bound.verified, bound.caller)
+	}
+	if bound.profile.Name != "acp-user" || bound.profile.Match != profileMatchUser {
+		t.Fatalf("enrolled uid: profile = %+v, want acp-user by user", bound.profile)
+	}
+	// Another account presenting a copy of the bearer is refused, not
+	// recorded as the token owner with the owner's profile (GAP-0348).
+	peer = 4302
+	copied, err := acp.EnsureEnterpriseCredential(dataDir, "uid:4301", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	copiedEvaluator, err := acp.NewHTTPEvaluator(server.URL, copied.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copiedEvaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); !errors.Is(err, acp.ErrCredentialOtherAccount) {
+		// The borrower is told whose credential it is, not "revoked"
+		// (GAP-0690).
+		t.Fatalf("a bearer presented by another account: err = %v, want ErrCredentialOtherAccount", err)
+	}
+	home := t.TempDir()
+	peer = os.Getuid()
+	homePrincipal := fmt.Sprintf("home:%x", sha256.Sum256([]byte(home)))
+	homeCredential, err := acp.EnsureEnterpriseCredential(dataDir, homePrincipal, "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := acp.SetEnterpriseCredentialUserDataDir(dataDir, homePrincipal, "zed", "kiro", "locked", filepath.Join(home, ".defenseclaw")); err != nil {
+		t.Fatal(err)
+	}
+	homeEvaluator, err := acp.NewHTTPEvaluator(server.URL, homeCredential.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := homeEvaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err != nil {
+		t.Fatal(err)
+	}
+	unbound := <-got
+	if unbound.verified || unbound.caller != "" || unbound.agent != "" || unbound.profile.Match != profileMatchDefaultUnverified {
+		t.Fatalf("home: credential: verified=%v caller=%q agent user=%q profile=%+v, want unverified and no claimed user",
+			unbound.verified, unbound.caller, unbound.agent, unbound.profile)
+	}
+	peer = 4301
+	setIdentityFactsEnabled(false)
+	if off := evaluate("uid:4301"); off.verified || off.caller != "" {
+		t.Fatalf("identity facts off: verified=%v caller=%q, want nothing bound", off.verified, off.caller)
+	}
+}
+
+// An ACP frame names the ACP session it belongs to, and its records carry the
+// agent instance (ais-) the hook path derives for a session of the connector's
+// agent: stable for the session, different for another one, absent for a
+// frame that names none (GAP-0252).
+func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	instance := func(sessionParams string) string {
+		req := deniedACPTestEvaluation()
+		req.Payload = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":` + sessionParams + `}`)
+		return AgentIdentityFromContext(acpEvaluationContext(t.Context(), req, "kiro", false)).AgentInstanceID
+	}
+	first := instance(`{"sessionId":"acp-session-1"}`)
+	if first == "" || first != instance(`{"sessionId":"acp-session-1"}`) {
+		t.Fatalf("the instance of one ACP session is not stable: %q", first)
+	}
+	if other := instance(`{"sessionId":"acp-session-2"}`); other == "" || other == first {
+		t.Fatalf("another ACP session shares the instance: %q and %q", first, other)
+	}
+	if none := instance(`{}`); none != "" {
+		t.Fatalf("a frame without a session got the instance %q", none)
+	}
+	// The agent and its ACP session are in the agent identity ledger, as a
+	// hook session is (GAP-0315).
+	if agent := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "kiro"}).ID; agent != "" {
+		pending, _ := sharedAgentIdentities.snapshot()
+		before := pending[agent].SessionsSeen
+		instance(`{"sessionId":"acp-session-ledger"}`)
+		instance(`{"sessionId":"acp-session-ledger"}`)
+		pending, _ = sharedAgentIdentities.snapshot()
+		if got := pending[agent]; got.AgentID != agent || got.SessionsSeen != before+1 || got.LastSessionID != "acp-session-ledger" {
+			t.Fatalf("agent identity ledger row = %+v, want %s with one more session (acp-session-ledger)", got, agent)
+		}
+	}
+	restore := ManagedEnterpriseActive()
+	t.Cleanup(func() { SetManagedEnterpriseActive(restore) })
+	SetManagedEnterpriseActive(true)
+	if sc := instance(`{"sessionId":"acp-session-3"}`); sc != "" {
+		t.Fatalf("a Secure Client ACP frame got the instance %q; main records none (issue #1092)", sc)
+	}
+}
+
+func TestACPUnboundFrameDoesNotJoinAnotherAgentSession(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	priorHosted := managedServiceHosted.Load()
+	setManagedServiceHosted(true)
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setManagedServiceHosted(priorHosted); setIdentityFactsEnabled(false) })
+	const session = "shared-acp-session"
+	const agent = "agt-0123456789abcdef"
+	hook, _ := SharedAgentRegistry().ResolveForAgentIdentity(t.Context(), agent, session, "")
+	req := deniedACPTestEvaluation()
+	req.Payload = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"shared-acp-session"}}`)
+	ctx := acpEvaluationContext(t.Context(), req, "kiro", false)
+	identity := AgentIdentityFromContext(ctx)
+	if identity.AgentInstanceID != "" || agentIdentityIDForTraffic(ctx, identity) != "" {
+		t.Fatalf("unbound ACP frame joined hook agent %q: %+v", hook.AgentInstanceID, identity)
+	}
+}
+
+func TestACPAggregateCarriesTheTurnSession(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	frame := json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"turn-session-1","update":{"content":{"text":"safe"}}}}`)
+	payload, err := acp.BuildTurnEvaluationPayload([]json.RawMessage{frame})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := deniedACPTestEvaluation()
+	req.Payload, req.Aggregate = payload, true
+	ctx := acpEvaluationContext(t.Context(), req, "kiro", false)
+	if got := SessionIDFromContext(ctx); got != "turn-session-1" {
+		t.Fatalf("aggregate session = %q", got)
+	}
+	if got := AgentIdentityFromContext(ctx).AgentInstanceID; got == "" {
+		t.Fatal("aggregate omitted its agent instance")
+	}
+	secureClientContext := acpEvaluationContext(t.Context(), req, "kiro", true)
+	if session := SessionIDFromContext(secureClientContext); session != "" {
+		t.Fatalf("Secure Client aggregate session = %q, want none", session)
+	}
+	if session := audit.EnvelopeFromContext(secureClientContext).SessionID; session != "" {
+		t.Fatalf("Secure Client aggregate audit session = %q, want none", session)
 	}
 }
 
@@ -695,6 +1012,36 @@ func TestACPManagedCredentialMustMatchThePairsResolvedProfile(t *testing.T) {
 	cfg.ACP.Bindings["zed/kiro"] = config.ACPBinding{Enabled: true, Profile: "watch"}
 	if code := evaluate("watch"); code != http.StatusForbidden {
 		t.Errorf("credential outside the pair's resolved profile = %d, want 403", code)
+	}
+	// The guard of the old profile is told where the pair went, so it can
+	// end the session with the setup command (GAP-0723). Secure Client keeps
+	// the answer of main.
+	cfg.Enterprise.Profile = "standalone"
+	body, _ := json.Marshal(acp.Evaluation{
+		Profile: "locked", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed",
+		Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt",
+		Payload: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+	request = request.WithContext(withACPEnterpriseCredential(request.Context(), credential))
+	response := httptest.NewRecorder()
+	(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+	var refusal map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &refusal); err != nil || response.Code != http.StatusForbidden ||
+		refusal["code"] != acp.RefusalProfileChanged || refusal["profile"] != "watch" || refusal["mode"] != "action" {
+		t.Errorf("stale guard refusal = %d %s, want 403 naming profile watch", response.Code, response.Body.String())
+	}
+	// Moved and switched off: the answer says it is off, not where it went
+	// (GAP-0834).
+	cfg.ACP.Bindings["zed/kiro"] = config.ACPBinding{Enabled: false, Profile: "watch"}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+	request = request.WithContext(withACPEnterpriseCredential(request.Context(), credential))
+	response = httptest.NewRecorder()
+	(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+	refusal = nil
+	if err := json.Unmarshal(response.Body.Bytes(), &refusal); err != nil || response.Code != http.StatusForbidden ||
+		refusal["code"] != acp.RefusalBinding || !strings.Contains(refusal["error"], "acp.bindings.zed/kiro is disabled") {
+		t.Errorf("moved and disabled pair refusal = %d %s, want the disabled binding", response.Code, response.Body.String())
 	}
 }
 

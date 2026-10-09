@@ -676,9 +676,25 @@ from types import SimpleNamespace
 # The Go-only Windows lane does not install PyYAML. The isolated fixture writes
 # its trust block as JSON (a YAML subset), so the standard-library parser is
 # sufficient; all path, ACL, digest, product, contract, app-server, and
-# managed-hook validation remains production code.
+# managed-hook validation remains production code. config.py picks its loader
+# at import (yaml.CSafeLoader, else yaml.SafeLoader), derives a subclass from it
+# with a rebuilt yaml_implicit_resolvers table, and reads with yaml.load.
+class SafeLoader:
+    yaml_implicit_resolvers = {}
+
+    @classmethod
+    def add_implicit_resolver(cls, tag, regexp, first):
+        pass
+
+
+def yaml_load(stream, Loader=None):
+    return json.loads(stream) if isinstance(stream, str) else json.load(stream)
+
+
 yaml_fixture = types.ModuleType("yaml")
-yaml_fixture.safe_load = json.load
+yaml_fixture.safe_load = yaml_load
+yaml_fixture.SafeLoader = SafeLoader
+yaml_fixture.load = yaml_load
 sys.modules["yaml"] = yaml_fixture
 
 from defenseclaw import config as dcconfig

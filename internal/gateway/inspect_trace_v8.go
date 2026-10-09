@@ -113,7 +113,10 @@ func (a *APIServer) guardrailApplyTraceV8Input(
 		targetType = "tool_call"
 	}
 
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			Source: observability.SourceGateway, Connector: envelopeConnector,
 			Action: "inspect", Phase: "finalize",
@@ -189,7 +192,24 @@ func (a *APIServer) guardrailApplyTraceV8Input(
 	caller := auditCallerIdentity(ctx)
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
-	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	// A session id comes from the caller and can collide across users. Resolve
+	// the connector install for the verified caller instead of joining a
+	// session-only registry entry that another account registered.
+	agentID := identity.IdentityID
+	if agentID == "" && !ManagedEnterpriseActive() {
+		if hookAgentIdentityUser(ctx).Verified {
+			if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
+				agentID = facts.ID
+			}
+		}
+	}
+	if ManagedEnterpriseActive() {
+		// Secure Client keeps its pre-identity record projection.
+		agentID = agentIdentityIDForTraffic(ctx, identity)
+	}
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentID)
+	caller.Identity.applyTo(&input)
 	if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evaluation.RuleIDs); ok {
 		applyGuardrailApplyOutcome(&input, outcome, caller, envelopeConnector, finishedAt)
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
@@ -165,7 +166,7 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	// alice is enrolled per user for Codex only.
 	perUser := map[string]map[string]bool{"alice": {"codex": true}}
-	if removed := runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now, perUser); removed != 2 {
+	if removed := runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now, enterprisehooks.Manifest{}, perUser); removed != 2 {
 		t.Fatalf("removed %d, log:\n%s", removed, log.String())
 	}
 	if loadedFrom != "/etc/defenseclaw/hook-guardian/"+enterprisehooks.UnixEligibleAccountsFileName {
@@ -209,12 +210,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	}
 
 	// Within the interval nothing runs again; a new account does.
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute), perUser)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute), enterprisehooks.Manifest{}, perUser)
 	if len(requests) != 1 {
 		t.Fatal("cleanup must be throttled")
 	}
 	accounts = append(accounts, enterprisehooks.UnixEligibleAccount{User: "bob", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7})
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), perUser)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), enterprisehooks.Manifest{}, perUser)
 	if len(requests) != 3 {
 		t.Fatalf("a changed account list must run at once, got %d requests", len(requests))
 	}
@@ -246,38 +247,66 @@ func TestStandaloneForeignCleanupSkipsRecreatedHomes(t *testing.T) {
 		t.Fatal("no worker may run for a home recreated since enumeration")
 		return enterpriseHookWorkerResponse{}, nil
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, time.Now(), nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, time.Now(), enterprisehooks.Manifest{}, nil)
 }
 
+// GAP-1101: rows written as enrollment.mdx documents (user, or user_home,
+// with the connector) carry no uid, gid or home. remove-all failed them, so
+// uninstall stopped halfway; it now resolves them as reconcile does, and a
+// row it cannot resolve is failed under a name, never an empty one.
 func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 	previousCheck := enterpriseHookCheckHome
-	t.Cleanup(func() { enterpriseHookCheckHome = previousCheck })
+	t.Cleanup(func() {
+		enterpriseHookCheckHome = previousCheck
+		enterprisehooks.SetStandaloneResolver(nil)
+	})
 	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
 		if home == "/home/pending" {
 			return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending}
 		}
 		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
 	}
+	ownHome := t.TempDir()
+	accounts := map[string]unixidentity.Account{"bob": {Name: "bob", UID: 41002, GID: 20, Home: "/home/bob"}}
+	if os.Getuid() > 0 {
+		accounts["dana"] = unixidentity.Account{Name: "dana", UID: os.Getuid(), GID: os.Getgid(), Home: ownHome}
+	}
+	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: accounts})
 	uid := func(value int) *int { return &value }
+	missingHome := filepath.Join(ownHome, "gone")
 	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
-		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "codex"},
-		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "devin", DataDir: "/home/alice/.dc"},
-		{User: "carol", UserHome: "/home/pending", UID: uid(1003), GID: uid(1003), Connector: "codex"},
+		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "codex"},
+		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "devin", DataDir: "/home/alice/.dc"},
+		{User: "carol", UserHome: "/home/pending", UID: uid(41003), GID: uid(41003), Connector: "codex"},
 		{User: "legacy", UserHome: "/home/legacy", Connector: "codex"},
+		{User: "bob", Connector: "claudecode", AgentVersion: "2.1.0"},
+		{UserHome: ownHome, Connector: "claudecode"},
+		{UserHome: missingHome, Connector: "claudecode"},
 	}}
-	jobs, pending, failed := enterpriseHookRemoveJobs(manifest)
-	if len(jobs) != 1 || len(jobs[1001].Request.Targets) != 2 {
+	jobs, pending, failed := enterpriseHookRemoveJobs(resolveEnterpriseHookRemoveRows(manifest))
+	if len(jobs[41001].Request.Targets) != 2 {
 		t.Fatalf("jobs %+v", jobs)
 	}
-	for _, target := range jobs[1001].Request.Targets {
+	for _, target := range jobs[41001].Request.Targets {
 		if target.Mode != enterpriseHookWorkerModeRemove || target.Options.UserHome != "/home/alice" {
 			t.Fatalf("target %+v", target)
 		}
 	}
-	if jobs[1001].Request.Targets[1].Options.DataDir != "/home/alice/.dc" || jobs[1001].Request.Targets[0].Options.DataDir != "/home/alice/.defenseclaw" {
-		t.Fatalf("data dirs %+v", jobs[1001].Request.Targets)
+	if jobs[41001].Request.Targets[1].Options.DataDir != "/home/alice/.dc" || jobs[41001].Request.Targets[0].Options.DataDir != "/home/alice/.defenseclaw" {
+		t.Fatalf("data dirs %+v", jobs[41001].Request.Targets)
 	}
-	if strings.Join(pending, ",") != "carol/codex" || len(failed) != 1 || !strings.HasPrefix(failed[0], "legacy/codex") {
+	if bob := jobs[41002]; bob == nil || bob.Account != (enterpriseHookWorkerAccount{UID: 41002, GID: 20, User: "bob", Home: "/home/bob"}) ||
+		len(bob.Request.Targets) != 1 || bob.Request.Targets[0].Options.ConnectorName != "claudecode" {
+		t.Fatalf("the user-only row did not resolve to bob's account: %+v", bob)
+	}
+	if os.Getuid() > 0 {
+		if dana := jobs[os.Getuid()]; dana == nil || dana.Account.User != "dana" || dana.Account.Home != ownHome {
+			t.Fatalf("the home-only row did not resolve to the home's owner: %+v", dana)
+		}
+	}
+	if strings.Join(pending, ",") != "carol/codex" || len(failed) != 2 ||
+		!strings.HasPrefix(failed[0], "legacy/codex: target account \"legacy\" does not exist") ||
+		!strings.HasPrefix(failed[1], missingHome+"/claudecode: user home "+missingHome+" is not available") {
 		t.Fatalf("pending %v failed %v", pending, failed)
 	}
 }
@@ -351,16 +380,16 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 		return enterpriseHookWorkerResponse{CopilotVSCode: runEnterpriseHookWorkerCopilotVSCode(request)}, nil
 	}
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now, enterprisehooks.Manifest{}, nil)
 	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(time.Minute), nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(time.Minute), enterprisehooks.Manifest{}, nil)
 	if _, err := os.Stat(hookFile); err != nil || runs != 1 {
 		t.Fatalf("first pass must place the file and the next stay idle: runs=%d err=%v", runs, err)
 	}
 	if err := os.Remove(hookFile); err != nil {
 		t.Fatal(err)
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(2*time.Minute), nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(2*time.Minute), enterprisehooks.Manifest{}, nil)
 	if _, err := os.Stat(hookFile); err != nil || runs != 2 {
 		t.Fatalf("a deleted hook file must be rewritten on the next pass: runs=%d err=%v", runs, err)
 	}
@@ -372,8 +401,8 @@ func TestStandaloneForeignCleanupRewritesADeletedCopilotLocalHookFileAtOnce(t *t
 	if err := os.Remove(hookFile); err != nil {
 		t.Fatal(err)
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(3*time.Minute), nil)
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(4*time.Minute), nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(3*time.Minute), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, now.Add(4*time.Minute), enterprisehooks.Manifest{}, nil)
 	if runs != 3 {
 		t.Fatalf("an unrepaired hook file must not re-run the cleanup every pass: runs=%d", runs)
 	}
@@ -448,7 +477,7 @@ func TestStandaloneForeignCleanupRemovesVSCodeHooksOfAccountsNoLongerEligible(t 
 		return response, nil
 	}
 	var log bytes.Buffer
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC), enterprisehooks.Manifest{}, nil)
 	if got := requests["dave"].CopilotVSCode; got == nil || len(got.RemoveDirs) != 2 {
 		t.Fatalf("dave's removal %+v, want the folders the guardian created in his home", got)
 	}

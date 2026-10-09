@@ -118,6 +118,20 @@ type Message struct {
 	Message string `json:"message"`
 }
 
+// Destination is one observability destination the installed config.yaml
+// compiles to, as status reports it (GAP-1105).
+type Destination struct {
+	Name    string   `json:"name"`
+	Kind    string   `json:"kind"`
+	Enabled bool     `json:"enabled"`
+	Preset  string   `json:"preset,omitempty"`
+	Signals []string `json:"signals"`
+	// RedactionProfiles are the distinct effective profiles of the
+	// destination's send routes; empty for a destination that sends only
+	// metrics.
+	RedactionProfiles []string `json:"redaction_profiles"`
+}
+
 // Result is the lifecycle result document.
 type Result struct {
 	SchemaVersion      int                           `json:"schema_version"`
@@ -147,8 +161,15 @@ type Result struct {
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
-	LogPath        string       `json:"log_path,omitempty"`
-	ExitCode       int          `json:"exit_code"`
+	// Destinations lists, for status, the observability destinations of the
+	// installed config.yaml with their effective redaction profiles, from the
+	// compiler `defenseclaw observability plan` uses (GAP-1105).
+	Destinations []Destination `json:"destinations,omitempty"`
+	LogPath      string        `json:"log_path,omitempty"`
+	ExitCode     int           `json:"exit_code"`
+	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
+	// shape for an unelevated macOS lifecycle command.
+	PreserveNotRootDeploymentState bool `json:"-"`
 }
 
 // New returns a result with the schema version and empty collections set,
@@ -211,6 +232,28 @@ func InvalidArgsExitCode(goos string) int {
 	return UnixExitInvalidArgs
 }
 
+// notRootCode is the refusal of a Linux or macOS action run without root.
+const notRootCode = "not_root"
+
+// deploymentStateFields report the deployment. A not_root result checked
+// nothing (a standard user cannot read the root-only deployment record), so
+// it leaves them out instead of reporting installed: false, no services and
+// every readiness flag false, which a script that ignores the error code read
+// as "not installed" (GAP-0279).
+var deploymentStateFields = []string{
+	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
+	"destinations",
+}
+
+func (r Result) refusedNotRoot() bool {
+	for _, e := range r.Errors {
+		if e.Code == notRootCode {
+			return true
+		}
+	}
+	return false
+}
+
 // MarshalJSON renders services in a stable order.
 func (r Result) MarshalJSON() ([]byte, error) {
 	type plain Result
@@ -233,6 +276,20 @@ func (r Result) MarshalJSON() ([]byte, error) {
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(sorted); err != nil {
+		return nil, err
+	}
+	if !r.refusedNotRoot() || r.PreserveNotRootDeploymentState {
+		return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(buf.Bytes(), &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range deploymentStateFields {
+		delete(fields, name)
+	}
+	buf.Reset()
+	if err := encoder.Encode(fields); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil

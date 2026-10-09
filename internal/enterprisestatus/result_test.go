@@ -54,7 +54,46 @@ func TestResultExitCodesAndJSON(t *testing.T) {
 
 // GAP-2504: the PowerShell call operator in a message stays a literal & when
 // the CLI encodes a Result with SetEscapeHTML(false).
+// A standard user cannot read the root-only deployment record, so a not_root
+// result checked nothing. It reported installed: false, no services and every
+// readiness flag false, which reads as "not installed" (GAP-0279).
+func TestNotRootResultLeavesOutTheDeploymentState(t *testing.T) {
+	r := New("ensure", "standalone", "linux", "1.4.0")
+	r.AddError("not_root", "run this command as root (sudo or the MDM agent)")
+	r.Finish("linux", 0)
+	document, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(document, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"installed", "services", "readiness", "enrollment"} {
+		if _, ok := fields[name]; ok {
+			t.Errorf("a not_root result reports %s: %s", name, document)
+		}
+	}
+	if fields["ok"] != false || fields["errors"] == nil {
+		t.Fatalf("the refusal itself is missing: %s", document)
+	}
+	r.PreserveNotRootDeploymentState = true
+	document, err = json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(document, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"installed", "services", "readiness", "enrollment"} {
+		if _, ok := fields[name]; !ok {
+			t.Errorf("Secure Client not_root result lacks %s: %s", name, document)
+		}
+	}
+}
+
 func TestResultMarshalJSONKeepsAmpersandLiteral(t *testing.T) {
+
 	r := New("status", "standalone", "windows", "1.0.0")
 	r.AddError("elevation_required", "run `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows status`")
 	var buf bytes.Buffer

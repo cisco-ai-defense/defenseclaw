@@ -308,11 +308,11 @@ func TestWindowsStandalonePerUserConnectorMappings(t *testing.T) {
 		},
 	}}
 	pinWindowsStandaloneProfileForTest(t, false)
-	if got := effectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"codex"}) {
+	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"codex"}) {
 		t.Fatalf("Secure Client connectors = %v", got)
 	}
 	pinWindowsStandaloneProfileForTest(t, true)
-	if got := effectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
+	if got := EffectiveWindowsHookConnectors(cfg); !reflect.DeepEqual(got, []string{"amp", "codex", "copilot"}) {
 		t.Fatalf("standalone connectors = %v", got)
 	}
 

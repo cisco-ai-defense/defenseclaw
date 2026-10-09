@@ -27,12 +27,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // stubRT is an injectable http.RoundTripper returning a canned response (or a
@@ -622,6 +626,27 @@ func TestDecisionGolden(t *testing.T) {
 	}
 }
 
+// GAP-0205: a 429 from a busy gateway is retried, so a burst the gateway
+// clears in seconds does not fail the tool call.
+func TestRunRetriesAfterTheGatewayAnswers429(t *testing.T) {
+	rt := &stubRT{onRequest: func(s *stubRT, _ *http.Request) (*http.Response, error) {
+		status, body := http.StatusTooManyRequests, `{"error":"rate_limited","reason":"enterprise_managed_overloaded"}`
+		if s.requests > 2 {
+			status, body = http.StatusOK, `{"action":"allow"}`
+		}
+		header := make(http.Header)
+		header.Set("Retry-After", "1")
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
+	}}
+	result := run(t, "claudecode", rt, func(opts *Options) { opts.FailMode = "closed" })
+	if result.code != 0 || rt.requests != 3 {
+		t.Fatalf("code %d after %d requests, want an allow on the third; stderr=%q", result.code, rt.requests, result.stderr)
+	}
+	if got := retryAfterDelay("90"); got != 3*time.Second {
+		t.Fatalf("a long Retry-After was kept at %s", got)
+	}
+}
+
 func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
 	for _, connector := range []string{
 		"amp",
@@ -856,8 +881,17 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		// GAP-0480: Claude Code hides the stderr of a hook that exits 0, so a
+		// per-user fail-open hook says on screen that nothing is checked.
+		if !strings.HasPrefix(r.stdout, `{"systemMessage":"DefenseClaw is not checking this session`) ||
+			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
+			t.Errorf("stdout = %q, want the gateway-down systemMessage", r.stdout)
+		}
+		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
+			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
+		})
+		if managed.stdout != "" {
+			t.Errorf("socket hook stdout = %q, want no per-user notice", managed.stdout)
 		}
 	})
 
@@ -1951,8 +1985,21 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if !strings.Contains(errb.String(), "this account is not enrolled") || strings.Contains(errb.String(), "gateway unreachable") {
 		t.Fatalf("stderr = %q, want the enrollment explanation", errb.String())
 	}
+	// GAP-0388: an SSH-only account waited for an enrollment that cannot happen.
+	if !strings.Contains(errb.String(), "Remote Desktop") || !strings.Contains(errb.String(), "SSH") {
+		t.Fatalf("stderr = %q, want the desktop sign-in requirement", errb.String())
+	}
 	// Codex shows its structured denial, not stderr, so the denial names
 	// the reason too instead of the generic failed-closed text.
+	// GAP-1242: the refusal is reported to the gateway's refusal pipe, which
+	// writes the audit row; the denial does not change.
+	var reports []refusalpipe.Report
+	restoreSend := sendUnenrolledRefusal
+	sendUnenrolledRefusal = func(_ context.Context, report refusalpipe.Report) error {
+		reports = append(reports, report)
+		return nil
+	}
+	t.Cleanup(func() { sendUnenrolledRefusal = restoreSend })
 	out.Reset()
 	errb.Reset()
 	code = Run(context.Background(), Options{
@@ -1965,7 +2012,7 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 		ManagedEnterprise:        true,
 		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
 		ExplainUnenrolledAccount: true,
-		Stdin:                    strings.NewReader("{}"),
+		Stdin:                    strings.NewReader(`{"tool_name":"shell","tool_input":{"command":"echo marker"}}`),
 		Stdout:                   &out,
 		Stderr:                   &errb,
 		HTTPClient:               &http.Client{Transport: rt},
@@ -1973,6 +2020,11 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if code != 0 || !strings.Contains(out.String(), `"permissionDecision":"deny"`) ||
 		!strings.Contains(out.String(), "this account is not enrolled") || strings.Contains(out.String(), failedClosed) {
 		t.Fatalf("codex denial: code = %d stdout = %q, want a deny that names the enrollment", code, out.String())
+	}
+	if len(reports) != 1 || reports[0] != (refusalpipe.Report{
+		Connector: "codex", Reason: "enterprise_managed_sid_unregistered", Event: "PreToolUse", Tool: "shell",
+	}) {
+		t.Fatalf("refusal reports = %+v, want one codex PreToolUse shell refusal", reports)
 	}
 	// Hermes has no fail-closed contract: the same refusal allows, so the
 	// hook must not claim to block.
@@ -2575,6 +2627,13 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 	if code := failUnreachable(opts, sp, "closed", "x"); code != 0 || stdout.Len() != 0 {
 		t.Fatalf("sessionStart = %d %q", code, stdout.String())
 	}
+	// GAP-0578: a stopped gateway service is named, not a vague outage.
+	stdout.Reset()
+	opts.Event = "preToolUse"
+	if code := failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason); code != 0 ||
+		!strings.Contains(stdout.String(), "ask your administrator to start the DefenseClaw gateway service") {
+		t.Fatalf("stopped gateway preToolUse = %d %q", code, stdout.String())
+	}
 }
 
 // A per-user hook names the next step after "gateway unreachable" instead of
@@ -2594,5 +2653,61 @@ func TestUnreachableDetailNamesTheNextStep(t *testing.T) {
 		if got := unreachableDetail(tc.opts, tc.reason); got != tc.want {
 			t.Errorf("unreachableDetail(%+v, %q) = %q, want %q", tc.opts, tc.reason, got, tc.want)
 		}
+	}
+}
+
+// A Secure Client hook sends no session facts (GAP-0148, issue #1092): it
+// runs no klist and writes no session-facts cache in the home of the user,
+// while a per-user hook in the same SSH session sends them.
+func TestSecureClientHookSendsNoSessionFacts(t *testing.T) {
+	// useridentity computes the session facts once per process, so any
+	// earlier hook test fixes them without the SSH session set here. The
+	// checks run in a fresh test process.
+	if os.Getenv("DC_TEST_SESSION_FACTS_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestSecureClientHookSendsNoSessionFacts$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "DC_TEST_SESSION_FACTS_CHILD=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("session facts checks in a fresh test process: %v\n%s", err, out)
+		}
+		return
+	}
+	t.Cleanup(func() { useridentity.KeepQualifiedNames(false) })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
+	t.Setenv("SSH_TTY", "/dev/pts/9")
+	secureClient := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/", nil)
+	setUserIdentityHeaders(secureClient, Options{ManagedEnterprise: true})
+	if got := secureClient.Header.Get(useridentity.SessionFactsHeader); got != "" {
+		t.Fatalf("Secure Client hook sent session facts %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client hook wrote in the home of the user: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	perUser := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/", nil)
+	setUserIdentityHeaders(perUser, Options{})
+	if perUser.Header.Get(useridentity.SessionFactsHeader) == "" {
+		t.Fatal("per-user hook in an SSH session sent no session facts")
+	}
+}
+
+// GAP-0756: Secure Client handles the first 429 as the pre-1.0 hook did.
+func TestSecureClientHookDoesNotRetry429(t *testing.T) {
+	rt := &stubRT{onRequest: func(s *stubRT, _ *http.Request) (*http.Response, error) {
+		status, body := http.StatusTooManyRequests, `{"error":"rate_limited"}`
+		if s.requests > 1 {
+			status, body = http.StatusOK, `{"action":"allow"}`
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	}}
+	result := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.SecureClient = true
+	})
+	if rt.requests != 1 || result.code != blockExit {
+		t.Fatalf("Secure Client: %d requests, code %d, stdout %q, stderr %q", rt.requests, result.code, result.stdout, result.stderr)
 	}
 }

@@ -117,6 +117,17 @@ def test_systemd_root_hook_units_keep_setid_capabilities_under_a_syscall_filter(
         assert "User=root" in lines and "NoNewPrivileges=true" in lines, name
 
 
+def test_tmpfiles_touches_no_path_the_apply_trigger_watches():
+    # rpm runs systemd-tmpfiles on the package entry at the end of every
+    # transaction; it relabels each existing directory it lists, and a
+    # watched one started an unrequested apply run after every upgrade, which
+    # applied a rolled-back upgrade anyway (GAP-0984).
+    watched = {line.split("=", 1)[1] for line in _unit("defenseclaw-enterprise-apply.path") if line.startswith("PathChanged=")}
+    listed = {line.split()[1] for line in _unit("defenseclaw.conf") if line and not line.startswith("#")}
+    assert "/etc/defenseclaw/policies" in watched
+    assert not watched & listed
+
+
 def test_systemd_enumerator_can_publish_refused_surfaces():
     # The enumerator writes refused-surfaces.json into the guardian data dir;
     # under ProtectSystem=strict that dir must be writable or every cycle
@@ -124,6 +135,8 @@ def test_systemd_enumerator_can_publish_refused_surfaces():
     lines = _unit("defenseclaw-hook-enumerator.service")
     assert "ProtectSystem=strict" in lines
     assert "/var/lib/defenseclaw-hook-guardian" in _unit_values(lines, "ReadWritePaths")
+    # It revokes the ACP enrollments of deleted accounts (GAP-0697).
+    assert "-/var/lib/defenseclaw/acp" in _unit_values(lines, "ReadWritePaths")
     assert "Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian" in lines
     # The file is chowned root:defenseclaw so the gateway can read it; without
     # CAP_CHOWN the chown fails and every hook call is refused 503 (GAP-1760).
@@ -683,6 +696,7 @@ case "$1" in
     stop) rm -f '{self.active}' ;;
     start) : >'{self.active}' ;;
 esac""")
+        _write_stub(self.bin, "systemd-run", f"""echo "systemd-run $*" >>'{self.log}'""")
         for tool in ("systemd-sysusers", "systemd-tmpfiles"):
             _write_stub(self.bin, tool, f"""echo "{tool} $*" >>'{self.log}'""")
         _write_stub(self.tmp, "defenseclaw-gateway", f"""echo "gateway $*" >>'{self.log}'
@@ -737,19 +751,26 @@ def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(
     result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
     assert result.returncode == 0  # a package install never fails on the lifecycle
     assert message in result.stderr
-    assert host.calls()[-1] == f"systemctl start {APPLY_PATH}"
+    calls = host.calls()
+    assert f"systemctl start {APPLY_PATH}" in calls
+    assert calls.index(f"systemctl start {APPLY_PATH}") < calls.index(
+        "systemctl stop defenseclaw-enterprise-apply-recovery.timer"
+    )
 
 
 # GAP-1744: dnf printed only "run verify"; the cause (a missing protected
 # credential) was only in last-package-result.json.
 # `ensure --json` writes indented JSON (Go SetIndent), so the
 # cause must be found in the multi-line form too, not only a compact line.
-@pytest.mark.parametrize("indent", [None, 2])
-def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path, indent: int | None) -> None:
+# GAP-0176: a refused config leaves the previous deployment running, but the
+# scriptlet said "no deployment is active".
+@pytest.mark.parametrize(("indent", "running"), [(None, ""), (2, ""), (2, "1.0.46-SNAPSHOT-84d98d524")])
+def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_path: Path, indent: int | None, running: str) -> None:
     document = {
         "schema_version": 2,
         "ok": False,
         "action": "ensure",
+        **({"installed": True, "installed_version": running} if running else {}),
         "errors": [
             {
                 "code": "config_invalid",
@@ -768,7 +789,111 @@ def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_pat
         'config_invalid: protected credential "galileo-api-key" is not stored; store it with '
         "`enterprise secret set --name galileo-api-key`"
     ) in result.stderr
-    assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
+    if running:
+        assert f"installed but not applied; the previous deployment ({running}) keeps running unchanged" in result.stderr
+        assert "no deployment is active" not in result.stderr
+        assert f"apply this package with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
+    else:
+        assert f"finish the install with: sudo {host.gateway} enterprise linux ensure --from-package" in result.stderr
+
+
+
+# GAP-0268: MDM writes config.yaml and then installs the package. The config
+# write started the apply unit, whose ensure ran the old binary while the
+# package replaced the files under it; it rolled back and marked the config
+# rejected, and the package ensure kept the previous config and said only
+# "active". The preinstall now holds the trigger and waits for that run, the
+# postinstall puts the trigger back, and a rejected config.yaml is named.
+def test_linux_preinstall_holds_the_apply_trigger_until_the_postinstall(tmp_path: Path) -> None:
+    rejected = {"code": "config_rejected", "message": "config.yaml was rejected; the last applied config is running"}
+    host = _Host(tmp_path, apply_path_active=True, gateway_out=json.dumps({"schema_version": 2, "ok": True, "warnings": [rejected]}))
+    held = tmp_path / "apply-path.held"
+    host.state.mkdir()
+    (host.state / "lifecycle.lock").write_text("", encoding="utf-8")
+    _write_stub(host.bin, "flock", f"echo \"flock $*\" >>'{host.log}'")
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(held),
+    }
+    pre = host.run(_rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting), "2")
+    assert pre.returncode == 0, pre.stderr
+    calls = host.calls()
+    assert calls[0] == f"systemctl is-active --quiet {APPLY_PATH}"
+    assert calls[1] == "systemctl stop defenseclaw-enterprise-apply-recovery.timer"
+    assert calls[2].startswith(
+        "systemd-run --quiet --unit=defenseclaw-enterprise-apply-recovery --on-active=30m "
+    )
+    assert calls[3:] == [
+        f"systemctl stop {APPLY_PATH}",
+        f"flock -w 600 {host.state}/lifecycle.lock true",
+    ]
+    assert held.exists()
+    post = host.run(_linux_scriptlet(host, "postinstall.sh").replace("/run/defenseclaw-enterprise-apply-path.held", str(held)), "configure")
+    assert post.returncode == 0, post.stderr
+    calls = host.calls()
+    ensure = next(i for i, call in enumerate(calls) if call.startswith("gateway "))
+    assert calls.index(f"systemctl start {APPLY_PATH}") > ensure, calls
+    assert not held.exists()
+    assert f"config.yaml was not applied: {rejected['message']}" in post.stderr
+
+
+# GAP-0392: a package older than the administrator config replaced every
+# file and then failed its ensure, leaving new binaries next to the old
+# deployment. The preinstall refuses it before anything changes, and its
+# limit is the gateway MaxSupportedConfigVersion.
+def test_linux_preinstall_refuses_a_config_newer_than_the_package(tmp_path: Path) -> None:
+    script = (LINUX / "preinstall.sh").read_text(encoding="utf-8")
+    limit = re.search(r"^max_config_version=(\d+)$", script, re.M)
+    go_limit = re.search(
+        r"const MaxSupportedConfigVersion = (\d+)",
+        (ROOT / "internal" / "config" / "observability_v8_types.go").read_text(encoding="utf-8"),
+    )
+    assert limit and go_limit and limit.group(1) == go_limit.group(1)
+    host = _Host(tmp_path, apply_path_active=True)
+    config = tmp_path / "config.yaml"
+    config.write_text(f"config_version: {int(limit.group(1)) + 1}\nguardrail: {{}}\n", encoding="utf-8")
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "config=/etc/defenseclaw/config.yaml": f"config={config}",
+    }
+    result = host.run(_rooted(script, rooting), "2")
+    assert result.returncode == 1
+    assert "Nothing was changed" in result.stderr
+    assert host.calls() == []
+
+
+# GAP-1115: dnf downgrade replaced every binary before the postinstall ensure
+# refused the downgrade, which left the older binaries under the newer
+# deployment (verify_failed, a failed apply unit). The stamped preinstall now
+# refuses an older package before anything changes, unless the root-owned
+# rollback marker exists; the postinstall then applies it with
+# --allow-downgrade and deletes the marker.
+def test_linux_preinstall_refuses_a_downgrade_without_the_rollback_marker(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    (host.state / "deployment.json").write_text('{\n  "product_version": "1.0.7101-SNAPSHOT-37ba9cdbb"\n}\n', encoding="utf-8")
+    _write_stub(host.bin, "stat", "echo 0")  # the record and the marker are root-owned
+    rooting = {
+        "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
+        "/run/systemd/system": str(host.run_systemd),
+        "/run/defenseclaw-enterprise-apply-path.held": str(tmp_path / "held"),
+    }
+    script = _rooted((LINUX / "preinstall.sh").read_text(encoding="utf-8"), rooting)
+    older, deployed = "1.0.7100-SNAPSHOT-37ba9cdbb", "1.0.7101-SNAPSHOT-37ba9cdbb"
+    refused = host.run(script.replace("@DC_PKG_VERSION@", older), "2")
+    assert refused.returncode == 1
+    assert "Nothing was changed" in refused.stderr and "--allow-downgrade" in refused.stderr
+    assert host.calls() == []
+    assert host.run(script.replace("@DC_PKG_VERSION@", deployed), "2").returncode == 0
+    marker = host.state / "allow-downgrade"
+    marker.write_text("", encoding="utf-8")
+    assert host.run(script.replace("@DC_PKG_VERSION@", older), "2").returncode == 0
+    post = host.run(_linux_scriptlet(host, "postinstall.sh").replace("/run/defenseclaw-enterprise-apply-path.held", str(tmp_path / "held")), "2")
+    assert post.returncode == 0, post.stderr
+    assert "gateway enterprise linux ensure --from-package --allow-downgrade --reason package" in "\n".join(host.calls())
+    assert not marker.exists()
 
 
 # Preremove ran uninstall with the 5 s default and exited 0

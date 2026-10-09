@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
@@ -67,6 +68,10 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// exemptAuditAt is when each exempt account and connector last got an
+	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
+	exemptAuditMu sync.Mutex
+	exemptAuditAt map[string]time.Time
 	// foreignHookSessionLocks serializes foreign-hook session exchanges per
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
@@ -80,6 +85,9 @@ type APIServer struct {
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// hermesTasks gives a Hermes hook that names only its task the session
+	// of that task.
+	hermesTasks hermesTaskSessions
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -122,6 +130,7 @@ type APIServer struct {
 	acpReadinessCheckedAt time.Time
 	acpReadinessKey       string
 	acpReadinessValue     bool
+	acpReadinessWindow    time.Duration
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -156,6 +165,10 @@ type APIServer struct {
 	configReloader func(context.Context, string) error
 	configSnapshot func() *config.Config
 	configWriteMu  sync.Mutex
+
+	// guardrailProfiles holds the identity-based guardrail profiles derived
+	// at load and on every reload (guardrail_profile.go).
+	guardrailProfiles guardrailProfileHolder
 
 	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
 	// per-source OTLP credentials loaded from
@@ -248,6 +261,10 @@ type APIServer struct {
 	hookSpawnLineageMu                sync.Mutex
 	hookSpawnIntents                  map[string]hookSpawnIntent
 	hookSpawnIntentOrder              []string
+	hookChildThreads                  map[string]hookChildThread
+	hookChildThreadOrder              []string
+	copilotSubagents                  []copilotPendingSubagent
+	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState
@@ -706,9 +723,10 @@ func (a *APIServer) SetWebhookSource(source func() *WebhookDispatcher) {
 // cooldown filters. The redacted reason alone did not say which rule fired
 // (GAP-1351), so the details also carry rule=<ids> and the generic payload
 // names the rules the way the agent message does ("rule ID: Title", titles
-// only from the compiled-in catalog or a loaded rule pack). A managed
-// deployment keeps the historical payload.
-func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
+// only from the compiled-in catalog or a loaded rule pack). The payload also
+// names the account, agent identity and profile of the request (GAP-0144). A
+// managed deployment keeps the historical payload.
+func (a *APIServer) dispatchHookBlockWebhook(ctx context.Context, connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
 	if a == nil || a.webhookSource == nil {
 		return
 	}
@@ -733,8 +751,9 @@ func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent,
 		if ids := webhookRuleIDs(ruleIDs); ids != "" {
 			event.Details = fmt.Sprintf("connector=%s event=%s rule=%s reason=%s", connectorName, hookEvent, ids, reason)
 		}
+		event.Structured = map[string]any{webhookAttributionKey: webhookAttributionFor(ctx)}
 		if rules := agentMatchedRules(reason); rules != "" {
-			event.Structured = map[string]any{webhookRuleKey: rules}
+			event.Structured[webhookRuleKey] = rules
 		}
 	}
 	webhooks.Dispatch(event)
@@ -875,6 +894,12 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 
 // NewAPIServer creates the REST API server bound to the given address.
 func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
+	return newAPIServer(nil, addr, health, client, store, logger, cfg...)
+}
+
+// newAPIServer is NewAPIServer with the rule packs the sidecar already loaded
+// and validated for its guardrail profile set; nil loads them again.
+func newAPIServer(rulePacks *guardrail.RulePackCache, addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
 	s := &APIServer{
 		addr:   addr,
 		health: health,
@@ -884,6 +909,7 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	}
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
+		s.initGuardrailProfiles(s.scannerCfg, rulePacks)
 	}
 	return s
 }
@@ -1018,6 +1044,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	// Secure Client serves none of the identity routes (issue #1092).
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
 	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
@@ -1038,7 +1068,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	inspectMux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
 	inspectMux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
-	mux.Handle("/api/v1/inspect/", hookLimiter(inspectMux))
+	mux.Handle("/api/v1/inspect/", hookLimiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
@@ -1058,10 +1088,16 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
 	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
 	mux.HandleFunc("/api/v1/agents/discovery", a.handleAgentDiscovery)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
+	}
 	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
+	}
 	// Runtime planes. Registered under the ai-usage prefix so the whole of AI
 	// discovery -- presence and behaviour -- reads as one surface.
 	mux.HandleFunc("/api/v1/ai-usage/runtime", a.handleAIRuntime)
@@ -1131,6 +1167,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		BaseContext: func(_ net.Listener) context.Context {
 			return baseCtx
 		},
+		ConnContext: acpPeerConnContext,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During
@@ -1169,6 +1206,13 @@ func (a *APIServer) Run(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket unavailable: %v\n", hookErr)
 		apiDetails["hook_socket_error"] = hookErr.Error()
 	}
+
+	// The Windows standalone hook reports the calls it refuses for an
+	// unenrolled account here (GAP-1242); a no-op on every other profile.
+	// It stops with this run of the API server.
+	refusalCtx, stopRefusals := context.WithCancel(ctx)
+	defer stopRefusals()
+	go a.serveUnenrolledRefusals(refusalCtx)
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
@@ -1359,7 +1403,15 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if ledger := agentIdentityLedgerHealth(); ledger != nil {
+		body["agent_identities"] = ledger
+	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		if !cfg.SecureClientIntegration() {
+			if set := a.guardrailProfileSet(); set != nil {
+				body["profile_assignment_warnings"] = set.assignmentWarnings(true)
+			}
+		}
 		body["acp"] = map[string]interface{}{
 			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
 			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
@@ -1368,6 +1420,18 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
+			peer, viaHookSocket := managedHookPeerFromContext(r.Context())
+			if directory := directoryHealthSummary(directoryCacheHealth(), viaHookSocket && peer.UID == 0); directory != nil {
+				body["directory"] = directory
+			}
+			// An assignment group the host does not know (renamed, deleted,
+			// or spelled another way after an SSSD naming switch) selects
+			// nobody, and the whole team falls to the default profile:
+			// status and verify report it (GAP-0704). The last check is
+			// served; a stale one is refreshed in the background.
+			if warnings := liveGuardrailProfiles.Load().unknownGroupWarnings(0); len(warnings) > 0 {
+				body["profile_warnings"] = warnings
+			}
 			// Non-secret fingerprints of the per-user credential keys that
 			// authenticate right now (a rotation's staged key included).
 			body["user_scoped_credentials"] = map[string]interface{}{
@@ -1497,8 +1561,13 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// connector_modes fans the same shape out across every active
 		// connector so multi-connector status can show each one's
 		// enforcement/observability posture, not just the primary's.
-		"connector_mode":  a.connectorModeSummary(),
-		"connector_modes": a.connectorModesSummary(),
+		"connector_mode":  a.connectorModeSummary(r.Context()),
+		"connector_modes": a.connectorModesSummary(r.Context()),
+	}
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
+		if set := a.guardrailProfileSet(); set != nil {
+			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
+		}
 	}
 
 	if a.client != nil && a.client.Hello() != nil {
@@ -1601,7 +1670,7 @@ func sameRuntimeDataDir(left, right string) bool {
 // This is the singular (active-connector) view kept for back-compat;
 // connectorModesSummary fans the same shape out across every active
 // connector for the multi-connector status surface.
-func (a *APIServer) connectorModeSummary() map[string]interface{} {
+func (a *APIServer) connectorModeSummary(ctx context.Context) map[string]interface{} {
 	cfg := a.runtimeConfigSnapshot()
 	if cfg != nil && !cfg.HasConnectorConfigured() {
 		return map[string]interface{}{
@@ -1613,7 +1682,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 			"proxy_intercept":     false,
 		}
 	}
-	return connectorModeForConfig(cfg, connectorNameForConfig(cfg))
+	return connectorModeForDecision(cfg, a.decisionConfigFrom(ctx, cfg), connectorNameForConfig(cfg))
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -1623,8 +1692,9 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 // returns a single name on a single-connector install — so the shape is
 // identical regardless of count. Falls back to the singular active
 // connector when the config is unavailable.
-func (a *APIServer) connectorModesSummary() []map[string]interface{} {
+func (a *APIServer) connectorModesSummary(ctx context.Context) []map[string]interface{} {
 	cfg := a.runtimeConfigSnapshot()
+	decisionCfg := a.decisionConfigFrom(ctx, cfg)
 	var names []string
 	if cfg != nil {
 		names = cfg.ActiveConnectors()
@@ -1637,7 +1707,7 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		out = append(out, connectorModeForConfig(cfg, strings.ToLower(strings.TrimSpace(name))))
+		out = append(out, connectorModeForDecision(cfg, decisionCfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -1707,11 +1777,21 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 }
 
 func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
+	return connectorModeForDecision(cfg, cfg, name)
+}
+
+// connectorModeForDecision reports the guardrail mode decisionCfg (the
+// caller's guardrail profile, or cfg) applies, while the hook fail mode and
+// enablement, which are baked into the installed hooks, stay cfg's.
+func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[string]interface{} {
 	guardrailMode := "observe"
 	hookFailMode := "closed"
 	enabled := false
 	if cfg != nil {
 		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+		if decisionCfg != nil {
+			guardrailMode = decisionCfg.EffectiveGuardrailModeForConnector(name)
+		}
 		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
@@ -2989,7 +3069,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 	// requests routed through this endpoint.
 	if a.scannerCfg != nil {
 		a.cfgMu.RLock()
-		hilt := a.scannerCfg.Guardrail.HILT
+		hilt := a.decisionConfig(r.Context()).Guardrail.HILT
 		a.cfgMu.RUnlock()
 		minSev := strings.ToUpper(strings.TrimSpace(hilt.MinSeverity))
 		if minSev == "" {
@@ -3560,11 +3640,27 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
-				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-			authenticated = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
+				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
+				if reason == acpCallerAccountMismatchReason {
+					// The caller holds the credential, so the refusal can be
+					// signed and the guard can tell the borrower whose it is
+					// instead of "revoked" (GAP-0690).
+					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
+					return
+				}
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			// The ACP credential that signed the request names who sent it:
+			// the principal it was enrolled for on a managed gateway, the
+			// gateway's own account on a per-user one. Identity headers the
+			// caller sent stay claims.
+			authenticated = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
 			return
 		}
@@ -3683,7 +3779,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedHookConnector(
-					PromoteSessionIfAuthenticated(r.Context()),
+					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -3692,7 +3788,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
 			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -3719,7 +3815,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if registered && !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedInspectConnector(
-					PromoteSessionIfAuthenticated(r.Context()),
+					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -3742,7 +3838,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// succeeded, upgrade the previously peeked agent identity
 		// to a fully minted entry so authenticated traffic still
 		// gets a stable agent_instance_id on its emissions.
-		ctx = PromoteSessionIfAuthenticated(r.Context())
+		ctx = a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})

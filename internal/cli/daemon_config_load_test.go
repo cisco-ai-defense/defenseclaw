@@ -72,11 +72,34 @@ func TestDaemonConfigLoadErrorNamesTheConfig(t *testing.T) {
 	if err := daemonConfigLoadError("start", nil); err != nil {
 		t.Fatalf("nil load error = %v, want nil", err)
 	}
+	if err := daemonConfigLoadError("start", os.ErrNotExist); err == nil ||
+		!strings.Contains(err.Error(), "run defenseclaw init first") {
+		t.Fatalf("missing config refusal = %v", err)
+	}
+	if err := os.WriteFile(config.ConfigPath(), []byte("config_version: 8\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	err := daemonConfigLoadError("start", os.ErrInvalid)
 	if err == nil || !strings.Contains(err.Error(), "cannot start the gateway") ||
 		!strings.Contains(err.Error(), "then run: defenseclaw-gateway start") ||
 		strings.Contains(err.Error(), "Nothing was stopped") {
 		t.Fatalf("start refusal = %v", err)
+	}
+}
+
+// Secure Client keeps the config load failure from main when its config is absent.
+func TestDaemonConfigLoadErrorMissingSecureClientConfigMatchesMain(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	previous := secureClientHost
+	secureClientHost = func() bool { return true }
+	t.Cleanup(func() { secureClientHost = previous })
+
+	loadErr := os.ErrNotExist
+	want := "cannot start the gateway: " + config.ConfigPath() +
+		" does not load: " + loadErr.Error() +
+		". Fix the file (check it with: defenseclaw config validate), then run: defenseclaw-gateway start"
+	if got := daemonConfigLoadError("start", loadErr).Error(); got != want {
+		t.Fatalf("Secure Client missing-config error = %q, want %q", got, want)
 	}
 }
 
@@ -130,6 +153,14 @@ func TestGatewayConfigLoadErrorsCallAnEmptyConfigEmpty(t *testing.T) {
 	}
 	if err := daemonConfigLoadError("start", loadErr); strings.Contains(err.Error(), "is empty") {
 		t.Fatalf("a non-empty config was called empty: %v", err)
+	}
+	// GAP-0482: a file cut off before config_version is incomplete, not old.
+	if err := os.WriteFile(config.ConfigPath(), []byte("guardrail:\n  enabled: true\n  conn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg := gatewayStatusConfigLoadError(loadErr).Error(); !strings.Contains(msg, "is incomplete") ||
+		strings.Contains(msg, "migrate") {
+		t.Fatalf("cut-short config: %q", msg)
 	}
 }
 
@@ -213,5 +244,24 @@ func TestGatewayEmptyConfigMessageNamesTheNewestBackup(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
+	}
+}
+
+// A sparse source larger than the loader limit must not be hashed before the
+// loader rejects it; hashing it used to read the entire source into memory.
+func TestConfigSourceDigestRejectsOversizedSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(int64(config.V8YAMLMaxSourceBytes) + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := configSourceDigest(path); got != nil {
+		t.Fatal("oversized source was hashed")
 	}
 }

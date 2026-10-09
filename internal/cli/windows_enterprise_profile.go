@@ -126,6 +126,13 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
 		configured, err := readWindowsEnterpriseConfigProfile(path)
+		var syntax *windowsEnterpriseConfigSyntaxError
+		if err != nil && requested == managed.ProfileStandalone && errors.As(err, &syntax) {
+			// A config the gateway cannot load is refused like every other
+			// one, with the line and the reason (GAP-0607): 1639, which MDMs
+			// do not retry, not the 1603 a failed install returns.
+			return windowsEnterpriseInvalidArguments("%s; nothing was changed", err)
+		}
 		if err != nil {
 			return err
 		}
@@ -437,6 +444,13 @@ func sameWindowsEnterpriseSignerSet(left, right []string) bool {
 	return true
 }
 
+// windowsEnterpriseConfigSyntaxError is a managed config that is not valid
+// YAML. Its text is the parse error, unchanged.
+type windowsEnterpriseConfigSyntaxError struct{ err error }
+
+func (e *windowsEnterpriseConfigSyntaxError) Error() string { return e.err.Error() }
+func (e *windowsEnterpriseConfigSyntaxError) Unwrap() error { return e.err }
+
 // readWindowsEnterpriseConfigProfile reads enterprise.profile from an
 // administrator-supplied config. The lifecycle validates the whole file
 // later; this only chooses which lifecycle validates it.
@@ -459,7 +473,7 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		} `yaml:"enterprise"`
 	}
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
-		return "", fmt.Errorf("parse managed config %s: %w", path, err)
+		return "", &windowsEnterpriseConfigSyntaxError{err: fmt.Errorf("parse managed config %s: %w", path, err)}
 	}
 	profile := managed.NormalizeEnterpriseProfile(document.Enterprise.Profile)
 	if profile != "" && profile != managed.ProfileSecureClient && profile != managed.ProfileStandalone {

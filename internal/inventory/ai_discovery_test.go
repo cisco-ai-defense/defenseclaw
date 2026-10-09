@@ -35,6 +35,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -442,6 +443,37 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	}
 	if seen["codex"] {
 		t.Fatalf("disabled built-in signature still present")
+	}
+}
+
+// GAP-0170: the Secure Client profile keeps the embedded catalog of 1.0.0
+// (issue #1092); every other profile gets the signatures added since.
+func TestLoadAISignaturesSecureClientKeepsReleaseCatalog(t *testing.T) {
+	load := func(profile string) map[string]AISignature {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = profile
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		byID := map[string]AISignature{}
+		for _, sig := range sigs {
+			byID[sig.ID] = sig
+		}
+		return byID
+	}
+	secureClient, standalone := load(managed.ProfileSecureClient), load(managed.ProfileStandalone)
+	if _, ok := standalone["jetbrains-ai"]; !ok || len(standalone["codex"].ExtensionIDs) == 0 {
+		t.Fatalf("standalone catalog lacks the post-1.0.0 signatures")
+	}
+	if _, ok := secureClient["jetbrains-ai"]; ok || len(secureClient) != len(standalone)-1 {
+		t.Fatalf("Secure Client catalog has %d signatures (jetbrains-ai %t), want %d", len(secureClient), ok, len(standalone)-1)
+	}
+	for id, sig := range secureClient {
+		if (id == "codex" || id == "claudecode") && len(sig.ExtensionIDs) != 0 ||
+			len(sig.JetBrainsPluginIDs)+len(sig.ZedExtensionIDs)+len(sig.VimPlugins) != 0 {
+			t.Fatalf("Secure Client signature %s keeps post-1.0.0 ids: %+v", id, sig)
+		}
 	}
 }
 
@@ -1087,14 +1119,19 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 // processes. It ingests the guardian's per-user scans instead: each signal
 // belongs to the account the guardian's record names (not to anything the
 // scan reported), identical files of two users stay distinct, and the
-// gateway's own process detector is reported as covered, not failed.
+// gateway's own process detector is reported as covered, not failed. A
+// record's IDE inventory is attributed the same way.
 func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
+	withoutMachineIDEs(t)
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "alice")
 	mustWrite(t, filepath.Join(home, ".shadowai", "config.json"), "{}")
+	mustWrite(t, filepath.Join(home, ".vscode-server", "extensions", "extensions.json"),
+		`[{"identifier":{"id":"example.shadowai"},"version":"1.0.0","relativeLocation":"example.shadowai-1.0.0"}]`)
 	mustWrite(t, filepath.Join(home, ".lmstudio", "models", "example", "tiny", "tiny.gguf"), "GGUF\x03\x00\x00\x00"+strings.Repeat("\x00", 4096))
 	signature := testAISignature()
 	signature.ProcessNames = []string{"shadowai"}
+	signature.ExtensionIDs = []string{"example.shadowai"}
 	catalog := []AISignature{signature}
 	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
 		return []processInfo{{PID: 10, User: "alice", Comm: "shadowai"}, {PID: 11, User: "bob", Comm: "shadowai"}}, nil
@@ -1103,12 +1140,21 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	for i := range report.Signals {
 		report.Signals[i].UserName = "mallory"
 	}
-	if err := SanitizeUserScanReport(&report, catalog, false); err != nil {
+	if err := SanitizeUserScanReport(&report, catalog, false, false); err != nil {
 		t.Fatalf("SanitizeUserScanReport: %v", err)
 	}
+	if report.IDEInventory == nil || len(report.IDEInventory.Plugins) != 1 || report.IDEInventory.Plugins[0].UserName != "" {
+		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
+	}
 	spool := filepath.Join(tmp, "spool")
-	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
-		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: report})
+	// The guardian names an SSSD account as NSS does; its records carry the
+	// bare name, as its hook records do (GAP-0447).
+	for uid, user := range map[int]string{1001: "alice@corp.example.com", 1002: "bob"} {
+		userReport := report
+		if uid == 1002 {
+			userReport.IDEInventory = nil
+		}
+		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1150,8 +1196,13 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		}
 		fingerprints[sig.Fingerprint] = sig.UserName
 	}
-	if processes != 2 || len(got.Signals) != 6 {
-		t.Fatalf("signals = %+v, want a config, a process and a model file signal per user", got.Signals)
+	if processes != 2 || len(got.Signals) != 8 {
+		t.Fatalf("signals = %+v, want a config, a process, an editor extension and a model file signal per user", got.Signals)
+	}
+	ide := svc.IDEInventory()
+	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice" ||
+		ide.Plugins[0].Enabled != "client_side_unknown" || !ide.Plugins[0].IsAI {
+		t.Fatalf("IDE inventory = %+v, want alice's remote-server plugin", ide)
 	}
 	if raw, _ := json.Marshal(got); strings.Contains(string(raw), tmp) {
 		t.Fatalf("report leaked a raw path: %s", raw)
@@ -1165,7 +1216,7 @@ func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
 	spool := t.TempDir()
 	now := time.Now().UTC()
 	report := ScanUserHome(context.Background(), t.TempDir(), "alice", 1001, UserScanOptions{}, nil)
-	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+	if err := SanitizeUserScanReport(&report, nil, false, false); err != nil {
 		t.Fatal(err)
 	}
 	report.Summary.FilesScanned = 7
@@ -1180,7 +1231,7 @@ func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
 	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{UserScanDir: spool, ScanInterval: 5 * time.Minute}}
 	current := func() bool {
 		t.Helper()
-		_, files, errs := svc.detectUserScans(now)
+		_, files, _, errs := svc.detectUserScans(now)
 		if len(errs) > 0 {
 			t.Fatalf("errors = %v", errs)
 		}
@@ -2200,6 +2251,81 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	}
 }
 
+// Without Full Disk Access the scans never open a folder that makes macOS
+// prompt the user, so an employee is not asked about "defenseclaw-gateway"
+// (GAP-0128); with it, or elsewhere, they walk them like any other folder.
+func TestScansSkipMacOSPromptFoldersWithoutFullDiskAccess(t *testing.T) {
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	fullDiskAccess := false
+	macOSFullDiskAccess = func() bool { return fullDiskAccess }
+
+	home := t.TempDir()
+	for _, dir := range []string{"Desktop/app", "Documents/app", "Downloads/app", "work/app"} {
+		mustWrite(t, filepath.Join(home, dir, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+	}
+	mustWrite(t, filepath.Join(home, "Documents", "models", "m.gguf"), "gguf")
+	mustWrite(t, filepath.Join(home, "work", "models", "m.gguf"), "gguf")
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	newService := func(roots ...string) *ContinuousDiscoveryService {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: roots, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		return svc
+	}
+	manifestProjects := func() int {
+		signals, _, err := newService(home).detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatalf("detectPackageManifests: %v", err)
+		}
+		count := 0
+		for _, sig := range signals {
+			if sig.Component != nil && sig.Component.Name == "ai" {
+				count++
+			}
+		}
+		return count
+	}
+	modelRoots := func() int {
+		count := 0
+		for _, root := range newService(filepath.Join(home, "Documents", "models"), filepath.Join(home, "work", "models")).modelFileScanRoots() {
+			if strings.HasPrefix(root.path, home+string(filepath.Separator)) && !strings.HasPrefix(root.path, filepath.Join(home, "data")) {
+				count++
+			}
+		}
+		return count
+	}
+	if projects, roots := manifestProjects(), modelRoots(); projects != 1 || roots != 1 {
+		t.Fatalf("without Full Disk Access: %d manifest projects and %d model roots, want only work/ (1 and 1)", projects, roots)
+	}
+	fullDiskAccess = true
+	if projects, roots := manifestProjects(), modelRoots(); projects != 4 || roots != 2 {
+		t.Fatalf("with Full Disk Access: %d manifest projects and %d model roots, want every folder (4 and 2)", projects, roots)
+	}
+	discoveryGOOS, fullDiskAccess = "linux", false
+	if projects := manifestProjects(); projects != 4 {
+		t.Fatalf("off macOS: %d manifest projects, want 4", projects)
+	}
+
+	for rel, want := range map[string]bool{
+		"Desktop": true, "documents/app": true, "Library/Containers": true,
+		"Library/Group Containers/group.example": true, "Library/Mobile Documents/com~apple~CloudDocs": true,
+		"Library/Application Support/AddressBook/Sources": true,
+		"Library": false, "Library/Application Support/Slack": false, "Library/Containers2": false,
+		"work/Documents": false, ".claude": false, "Desktops": false,
+	} {
+		if got := macOSTCCProtectedPath(filepath.Join(home, rel), []string{home}); got != want {
+			t.Errorf("macOSTCCProtectedPath(~/%s) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
 // TestRunScan_SingleFlight (H-1) verifies that concurrent scans serialize on
 // the per-service mutex instead of racing on the state store / detector
 // fanout. It uses the single-flight boundary directly so the assertion does
@@ -2578,5 +2704,46 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 					opts.ProcessInterval, tc.want, tc.managed, tc.input)
 			}
 		})
+	}
+}
+
+func TestSecureClientPackageManifestFollowsSymlink(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	manifest := filepath.Join(project, "package.json")
+	mustWrite(t, filepath.Join(home, "shared", "manifest.json"), `{"dependencies":{"openai":"^4.0.0"}}`)
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "shared", "manifest.json"), manifest); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := func(secureClient bool) bool {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", SecureClient: secureClient,
+			DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: []string{project}, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		signals, _, err := svc.detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, signal := range signals {
+			if signal.Component != nil && signal.Component.Name == "openai" {
+				return true
+			}
+		}
+		return false
+	}
+	if !scan(true) {
+		t.Fatal("Secure Client lost the symlinked package dependency")
+	}
+	if scan(false) {
+		t.Fatal("standalone scan followed a package manifest symlink")
 	}
 }

@@ -352,7 +352,7 @@ guardrail:
   connector: claudecode        # actively enforced connector
   mode: action                 # observe | action (default observe)
   scanner_mode: local          # local | remote | both (default both)
-  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default  # path; --rule-pack picks the bundled profile dir
+  rule_pack_dir: /home/<you>/.defenseclaw/policies/guardrail/default  # absolute path (~ is not expanded); --rule-pack picks the bundled profile dir
   block_at: ""                 # CRITICAL | HIGH | MEDIUM | LOW; empty -> the rule pack's level
   alert_at: ""                 # same values; never above block_at
   port: 4000                   # guardrail proxy port
@@ -395,13 +395,30 @@ guardrail:
       mode: action             # observe | action; inherits guardrail.mode when unset
       hook_fail_mode: closed   # open | closed; inherits guardrail.hook_fail_mode
       block_message: ""        # custom; inherits guardrail.block_message
-      rule_pack_dir: ~/.defenseclaw/policies/guardrail/strict  # inherits guardrail.rule_pack_dir
+      rule_pack_dir: /home/<you>/.defenseclaw/policies/guardrail/strict  # absolute; inherits guardrail.rule_pack_dir
       block_at: HIGH           # inherits guardrail.block_at, then the rule pack's level
       hilt:
         enabled: true
         min_severity: HIGH
     claudecode:
       mode: observe            # only logs; everything else inherits the global default
+
+  # Identity-based guardrail profiles (see "Guardrail profiles and identity
+  # keys" below). Assignments are ordered: the first match wins.
+  profiles:
+    contractors:
+      mode: action
+      block_at: MEDIUM
+      hilt: {enabled: true, min_severity: HIGH}
+  profile_assignments:        # ordered: the first match wins; keys AND, values OR
+    - profile: contractors
+      match: {groups: ["contractors@corp.example.com"]}   # or "CORP\\Contractors" on Windows
+  default_profile: ""          # "" keeps the guardrail.* settings above
+
+ai_discovery:
+  ide_inventory: all           # all | ai_only | off
+  include_user_principal: false
+  trusted_ad_child_domains: []   # child AD domains whose users are verified on Linux
 
 # Notifier webhooks remain separate from telemetry routing.
 webhooks:
@@ -423,6 +440,32 @@ the literal `localhost`): the management API inherits `guardrail.host` until
 
 The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 [OpenShell sandbox settings](#openshell-sandbox-settings) below.
+
+### Guardrail profiles and identity keys
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `guardrail.profiles.<name>` | none | A named set of guardrail overrides. `<name>` is lower case, at most 64 characters. Allowed keys: `description`, `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack_dir`, `block_message` and `connectors`. Each `connectors.<connector>` entry allows `mode`, `hilt`, `block_message`, `rule_pack_dir`, `block_at` and `alert_at`. `enabled` and `hook_fail_mode` are rejected at both levels. |
+| `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR, and the first matching assignment wins. `agents` entries are `agt-` followed by 16 hex digits. At most 4,096 assignments fit the schema; the whole config also has a 65,536 YAML node limit. |
+| `guardrail.default_profile` | `""` | The profile for subjects no assignment matches. Empty keeps the `guardrail.*` settings. |
+| `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). |
+| `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity (hook decisions, tool activity, agent, model and tool spans, `identity.observed`). Off, records keep the domain, directory, assurance, session kind and client address but no principal. |
+| `ai_discovery.trusted_ad_child_domains` | `[]` | Child domains of the joined Active Directory realm whose SSSD accounts are verified on Linux (`emea.corp.example.com`). An account of a child domain that is not listed gets no domain, realm, directory or principal, so no `users` assignment matches it. Empty trusts the joined domain only. See [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). |
+
+Within a profile, the precedence for one connector is the profile's
+`connectors.<connector>` entry, then the profile field, then
+`guardrail.connectors.<connector>`, then the application protection overlay,
+then the global `guardrail.*` value. `hilt.min_severity` is stored in upper
+case (`HIGH`), and `block_at` and `alert_at` take `CRITICAL`, `HIGH`, `MEDIUM`
+or `LOW`. A profile `mode` is `observe` or `action`. Profile names are lower
+case letters, digits, `-` and `_`. Only verified users and groups select a
+profile, and the Secure Client profile rejects all three guardrail keys.
+`defenseclaw config validate` reports an unknown profile name, an empty
+`match`, a malformed agent identity and a forbidden key. See
+[User- and group-based policies](/docs/guardrail/user-and-group-policies) for
+examples, the match reasons and auditing, and
+[Identity and authentication](/docs/enterprise/identity-and-authentication#turn-off-the-principal-or-the-ide-inventory)
+for the two privacy keys.
 
 ### OpenClaw fleet link
 
@@ -873,7 +916,7 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 | `mode` | `observe` \| `action` | `guardrail.mode` |
 | `hook_fail_mode` | `open` \| `closed` | `guardrail.hook_fail_mode` |
 | `block_message` | string | `guardrail.block_message` |
-| `rule_pack_dir` | path | `guardrail.rule_pack_dir` |
+| `rule_pack_dir` | absolute path (`~` is not expanded) | `guardrail.rule_pack_dir` |
 | `block_at` | `CRITICAL` \| `HIGH` \| `MEDIUM` \| `LOW` (any case) — lowest severity that blocks | `guardrail.block_at`, then the rule pack's level |
 | `alert_at` | same values — lowest severity that alerts; never above the block level | `guardrail.alert_at`, then the rule pack's level |
 | `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
@@ -899,7 +942,7 @@ and examples, see the [enterprise settings reference](/docs/enterprise/configura
 | `enterprise.enrollment.mode` | `auto` \| `manifest` (`auto`) | all | With `manifest` you publish `targets.yaml` and the enumerator does nothing. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`) |
 | `enterprise.enrollment.include_users` | list | all | Linux and macOS: also enrolls these accounts, bypassing the uid range and the login-shell check. Windows: accepted, but every profile is already a candidate, so it changes nothing |
 | `enterprise.enrollment.exclude_users` | list | all | Never enrolled; wins over every include. Linux and macOS also match a numeric uid |
-| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local, Active Directory and Microsoft Entra ID groups by name or SID, decided from session tokens (cached for signed-out users) and the local account database |
+| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local and Active Directory groups by name or SID, and the Microsoft Entra ID groups that a built-in local group lists, by SID ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)); decided from session tokens (cached for signed-out users) and the local account database |
 | `enterprise.enrollment.exempt_users` | list | all | Linux and macOS: inspected but not enrolled. Windows: machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows |
 | `enterprise.enrollment.unenrolled_users` | `inspect` \| `deny` (`inspect`) | Linux, macOS | How machine-policy connectors treat users who are not enrolled. On Windows an unenrolled user always fails closed |
 | `enterprise.enrollment.root` | `inspect` \| `deny` \| `exempt` (`inspect`) | Linux, macOS | root is never enrolled. `deny` refuses root's hook calls. `exempt` currently behaves like `inspect` |

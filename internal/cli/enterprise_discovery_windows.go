@@ -12,16 +12,32 @@
 
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"strings"
+
+	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+)
 
 func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsDiscoveryCommand())
+	enterpriseWindowsCmd.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
 }
 
 // pinEnterpriseDiscoveryEnv points an elevated administrator's (or
 // LocalSystem's) discovery view at the standalone managed deployment; a
 // standard account cannot read its config or gateway token.
 func pinEnterpriseDiscoveryEnv() error {
+	if runtimeCommand != nil && runtimeCommand.Name() != "discovery" {
+		// An identity view (enterprise_identity_views.go).
+		view := "enterprise windows " + runtimeCommand.Name()
+		return pinManagedAdministratorEnvironment(view, func() string {
+			return windowsManagedStandardUserViewAnswer("the identity views", view)
+		})
+	}
 	return pinManagedAdministratorEnvironment("enterprise windows discovery", func() string {
 		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
 			"enterprise windows discovery --user "+managedHostCurrentAccountName())
@@ -58,7 +74,36 @@ deployment does not run the skill or MCP scanners.`,
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&user, "user", "", "list one account's signals (account name or SID)")
+	addWindowsDiscoveryUserFlag(cmd, &user)
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print every record as JSON")
 	return cmd
+}
+
+// platformDiscoveryAccountIDs resolves a qualified --user (DOMAIN\name,
+// .\name, COMPUTER\name, a UPN) to the SID the LSA names it, as
+// profile-explain and policy show do.
+func platformDiscoveryAccountIDs(user string) []string {
+	user = strings.TrimSpace(user)
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	sid, _, err := gateway.LookupWindowsAccount(user)
+	if err != nil || sid == "" {
+		return nil
+	}
+	return []string{sid}
+}
+
+// platformDiscoveryAccountName is DOMAIN\name of sid as the LSA names it
+// (COMPUTER\name for a local account), or "".
+func platformDiscoveryAccountName(sid string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || strings.TrimSpace(account) == "" || strings.TrimSpace(domain) == "" {
+		return ""
+	}
+	return strings.TrimSpace(domain) + `\` + strings.TrimSpace(account)
 }

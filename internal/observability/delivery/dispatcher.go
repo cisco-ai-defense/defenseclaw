@@ -222,20 +222,22 @@ func (dispatcher *Dispatcher) Enqueue(payload Payload) EnqueueResult {
 		}
 		return EnqueueResult{Disposition: EnqueueDropped, Reason: reason}
 	}
-	admitted, halfOpen := dispatcher.admitCircuit(dispatcher.nowUTC())
-	if !admitted {
-		dispatcher.queueMu.Unlock()
-		dispatcher.lifecycleMu.Unlock()
-		dispatcher.counters.rejected.Add(1)
-		return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonCircuitOpen}
+	if dispatcher.config.LegacyCircuit {
+		admitted, halfOpen := dispatcher.admitCircuit(dispatcher.nowUTC())
+		if !admitted {
+			dispatcher.queueMu.Unlock()
+			dispatcher.lifecycleMu.Unlock()
+			dispatcher.counters.rejected.Add(1)
+			return EnqueueResult{Disposition: EnqueueRejected, Reason: ReasonCircuitOpen}
+		}
+		if halfOpen {
+			dispatcher.setOperationalHealth(HealthDegraded, HealthReasonCircuitHalfOpen)
+		}
 	}
 	dispatcher.pending = append(dispatcher.pending, payload)
 	dispatcher.chargedItems++
 	dispatcher.chargedBytes += payload.Size()
 	dispatcher.counters.accepted.Add(1)
-	if halfOpen {
-		dispatcher.setOperationalHealth(HealthDegraded, HealthReasonCircuitHalfOpen)
-	}
 	dispatcher.queueMu.Unlock()
 	dispatcher.lifecycleMu.Unlock()
 	dispatcher.signalWorker()
@@ -415,6 +417,14 @@ func (dispatcher *Dispatcher) DeliveryHealthSnapshot() HealthSnapshot {
 	lastSuccess := dispatcher.lastSuccess
 	lastFailure := dispatcher.lastFailure
 	dispatcher.healthMu.Unlock()
+	if !dispatcher.config.LegacyCircuit && state != HealthStopped && circuitState == CircuitOpen &&
+		!dispatcher.nowUTC().Before(circuitOpenUntil) {
+		// The cooldown expired, but no producer has supplied a recovery batch.
+		// Surface the pending half-open state rather than a stale failed check.
+		circuitState = CircuitHalfOpen
+		state = HealthDegraded
+		reason = HealthReasonCircuitHalfOpen
+	}
 	items, bytes, inFlightItems, inFlightBytes := dispatcher.QueueUsage()
 	return HealthSnapshot{
 		Destination:         dispatcher.config.Destination,
@@ -470,9 +480,7 @@ const (
 	circuitDeliveryProbe
 )
 
-// admitCircuit runs while Enqueue owns the lifecycle and queue locks. This
-// makes the first post-cooldown record the sole half-open probe without
-// reserving a slot that can subsequently fail the queue-capacity check.
+// admitCircuit preserves the pre-1.0 producer admission rule for Secure Client.
 func (dispatcher *Dispatcher) admitCircuit(now time.Time) (admitted, halfOpen bool) {
 	dispatcher.healthMu.Lock()
 	defer dispatcher.healthMu.Unlock()
@@ -568,11 +576,18 @@ func (dispatcher *Dispatcher) run() {
 		if enteredHalfOpen {
 			dispatcher.setOperationalHealth(HealthDegraded, HealthReasonCircuitHalfOpen)
 		}
-		if mode == circuitDeliveryBlocked {
+		if mode == circuitDeliveryBlocked && dispatcher.config.LegacyCircuit {
 			payloads := dispatcher.takeCircuitRejectedBatch()
 			if len(payloads) > 0 {
 				dispatcher.counters.rejected.Add(uint64(len(payloads)))
 				dispatcher.release(payloads)
+			}
+			continue
+		}
+		if mode == circuitDeliveryBlocked {
+			if !dispatcher.waitCircuitCooldown() {
+				dispatcher.abandonPending()
+				return
 			}
 			continue
 		}
@@ -657,9 +672,10 @@ func (dispatcher *Dispatcher) flushPending() bool {
 	return dispatcher.completed.Load() < dispatcher.flushTarget.Load()
 }
 
-// takeCircuitRejectedBatch removes already-accepted work without consulting
-// the adapter's estimator. Open-circuit suppression therefore cannot block on
-// destination code and does not increment the failed-operation counter.
+// waitCircuitCooldown keeps accepted work charged and queued until the route
+// may probe again. New records can fill the bounded queue; capacity drops are
+// counted while mandatory local persistence continues.
+// takeCircuitRejectedBatch releases accepted work while the legacy circuit is open.
 func (dispatcher *Dispatcher) takeCircuitRejectedBatch() []Payload {
 	dispatcher.queueMu.Lock()
 	defer dispatcher.queueMu.Unlock()
@@ -683,6 +699,26 @@ func (dispatcher *Dispatcher) takeCircuitRejectedBatch() []Payload {
 		dispatcher.inFlightBytes += payload.Size()
 	}
 	return payloads
+}
+
+func (dispatcher *Dispatcher) waitCircuitCooldown() bool {
+	dispatcher.healthMu.Lock()
+	until := dispatcher.circuitOpenUntil
+	dispatcher.healthMu.Unlock()
+	delay := until.Sub(dispatcher.nowUTC())
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-dispatcher.rootContext.Done():
+		return false
+	case <-dispatcher.wake:
+		return true
+	case <-timer.C:
+		return true
+	}
 }
 
 func (dispatcher *Dispatcher) takeBatch() (
@@ -809,7 +845,11 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 			now := dispatcher.nowUTC()
 			dispatcher.recordFailure(now, failureCode)
 			if attempt == maxAttempts {
-				dispatcher.counters.rejected.Add(uint64(len(payloads)))
+				if dispatcher.config.LegacyCircuit {
+					dispatcher.counters.rejected.Add(uint64(len(payloads)))
+				} else {
+					dispatcher.counters.dropped.Add(uint64(len(payloads)))
+				}
 				reason := HealthReasonDeliveryFailed
 				if dispatcher.recordCircuitFailure(FailureClassTransient, now) {
 					reason = HealthReasonCircuitOpen
@@ -964,9 +1004,12 @@ func boundedBackoff(policy RetryPolicy, attempt int) time.Duration {
 	}
 	if policy.Jitter != nil {
 		delay = safeJitter(policy.Jitter, delay, attempt)
-	} else if delay > 0 {
-		// Full jitter avoids synchronized retry waves and is still bounded.
+	} else if delay > 0 && policy.LegacyJitter {
 		delay = time.Duration(rand.Float64() * float64(delay))
+	} else if delay > 0 {
+		// Keep at least half the exponential delay. Full jitter could retry a
+		// busy collector immediately and amplify an outage.
+		delay = delay/2 + time.Duration(rand.Float64()*float64(delay-delay/2))
 	}
 	if delay < 0 {
 		return 0
@@ -1001,6 +1044,10 @@ func (dispatcher *Dispatcher) release(payloads []Payload) {
 func (dispatcher *Dispatcher) abandonPending() {
 	dispatcher.queueMu.Lock()
 	dropped := len(dispatcher.pending)
+	// Count the drop before the queue charge falls, as release requires: a
+	// reader that finds the queue empty then also finds every abandoned record
+	// counted, which the shutdown loss count relies on (GAP-1096).
+	dispatcher.counters.dropped.Add(uint64(dropped))
 	for _, payload := range dispatcher.pending {
 		dispatcher.chargedItems--
 		dispatcher.chargedBytes -= payload.Size()
@@ -1008,7 +1055,6 @@ func (dispatcher *Dispatcher) abandonPending() {
 	dispatcher.pending = nil
 	dispatcher.queueMu.Unlock()
 	if dropped > 0 {
-		dispatcher.counters.dropped.Add(uint64(dropped))
 		dispatcher.completed.Add(uint64(dropped))
 		dispatcher.signalFlush()
 	}

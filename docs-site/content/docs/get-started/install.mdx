@@ -61,7 +61,6 @@ which runs the latest release's installer for you.
 | `--quickstart-mode MODE` / `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies `--quickstart`) |
 | `-NoPersistPath` | Windows only: do not change the user `PATH` in the registry |
 | `-CosignPath FILE` | Windows only: the `cosign` to check the release signature with |
-| `--sandbox` | macOS/Linux only: deprecated, has no effect |
 
 The installers exit with one of these codes (`install.ps1` when run as a file;
 `irm | iex` reports a failure as an error instead):
@@ -250,8 +249,15 @@ agent calls, and fail-open hooks (the observe default) let them through with a
 `gateway unreachable` line on stderr. On Windows a hook also starts a stopped
 gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
 
+When the watchdog runs (`gateway.watchdog.enabled`) and the gateway process
+stops on its own (a crash, or `kill -9`), the watchdog starts it again after
+`gateway.watchdog.debounce` failed health checks, under the same rules as a
+hook start. That covers an account with no connector hooks, whose IDE and agent
+inventory would otherwise stay dark until someone ran `defenseclaw-gateway
+start`.
+
 A gateway that is running but does not answer (frozen or hung) is not
-restarted by a hook. The hook's line says the gateway did not answer and names
+restarted by a hook or by the watchdog. The hook's line says the gateway did not answer and names
 the next step: check `defenseclaw-gateway status`, or run
 `defenseclaw-gateway restart`.
 
@@ -323,7 +329,16 @@ changes stay. Use `--all` and `--binaries` to remove everything. On macOS and
 Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
 `defenseclaw-acp` and the scanner launchers (`skill-scanner`,
 `skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
-`mcp-scanner-api` and `litellm`) from `~/.local/bin`.
+`mcp-scanner-api` and `litellm`) from `~/.local/bin`, and the `uv` and `uvx`
+an installer added there while they are unchanged; with `--all`, what that uv
+downloaded goes too. The 0.8.x installer kept no record of
+the uv, the uv cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, so
+the upgrade from 0.8.x records them only when the evidence shows that
+installer put them there: uv's install receipt names `~/.local/bin` and the
+uv version there, and was written at most ten minutes before the 0.8.x
+install, and `~/.sigstore` holds only the public Sigstore cache, unused since,
+with no `cosign` on your `PATH`. A `uv`, uv cache or `~/.sigstore` of your
+own stays.
 
 Uninstall also removes DefenseClaw's OpenShell sandboxes and images. When
 Docker or OpenShell is gone or broken, add `--skip-sandbox-teardown` to leave

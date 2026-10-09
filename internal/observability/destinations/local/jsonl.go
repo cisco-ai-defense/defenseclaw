@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -48,6 +49,9 @@ type JSONLConfig struct {
 	MaxBackups int
 	MaxAgeDays int
 	Compress   bool
+	// FailOnOpenError preserves Secure Client's startup refusal on an
+	// ordinary file-open failure.
+	FailOnOpenError bool
 }
 
 // DefaultJSONLConfig returns the documented v8 rotation defaults for path.
@@ -71,6 +75,15 @@ type JSONL struct {
 	size     int64
 	closed   bool
 	sequence atomic.Uint64
+	// openDeferred records that the file could not be opened when the
+	// destination was prepared.
+	openDeferred bool
+}
+
+// OpenDeferred reports that the file could not be opened when the
+// destination was prepared; deliveries retry it.
+func (adapter *JSONL) OpenDeferred() bool {
+	return adapter != nil && adapter.openDeferred
 }
 
 // NewJSONL performs path preparation, secure owner-only open, and bounded
@@ -92,13 +105,24 @@ func NewJSONL(config JSONLConfig) (*JSONL, error) {
 		if isUnsafeFailure(err) {
 			return nil, newError(ErrorUnsafePath)
 		}
-		return nil, newError(ErrorOpenFailed)
+		if config.FailOnOpenError {
+			return nil, newError(ErrorOpenFailed)
+		}
 	}
+	// A file the gateway cannot open yet (an access list without write for
+	// its account, a full or offline volume) disables only this destination:
+	// every delivery reopens it and fails transiently until it can be
+	// written. Refusing here stopped the whole gateway at start, so every
+	// hook failed closed (GAP-0703).
 	adapter := &JSONL{
 		config: config, maxBytes: int64(config.MaxSizeMB) * 1024 * 1024,
 		gate: make(chan struct{}, 1), file: file, identity: identity, size: size,
+		openDeferred: err != nil,
 	}
 	adapter.gate <- struct{}{}
+	if adapter.openDeferred {
+		return adapter, nil
+	}
 	if err := adapter.cleanupBackups(context.Background(), time.Now().UTC()); err != nil {
 		_ = file.Close()
 		if isUnsafeFailure(err) {
@@ -184,9 +208,9 @@ func (adapter *JSONL) Deliver(ctx context.Context, batch delivery.Batch) deliver
 			// all make final delivery ambiguous. A successfully removed first
 			// fragment is a clean pre-delivery transient failure.
 			if wroteAny || n == len(line) || n > 0 && !rolledBack {
-				return localResult(delivery.OutcomeAmbiguous)
+				return delivery.DeliveryResult{Outcome: delivery.OutcomeAmbiguous, FailureCode: jsonlWriteFailureCode(writeErr)}
 			}
-			return localResult(delivery.OutcomeTransient)
+			return delivery.DeliveryResult{Outcome: delivery.OutcomeTransient, FailureCode: jsonlWriteFailureCode(writeErr)}
 		}
 		wroteAny = true
 	}
@@ -596,11 +620,19 @@ func compressSecureFile(ctx context.Context, sourcePath string) error {
 }
 
 func localFileFailure(err error, wroteAny bool) delivery.DeliveryResult {
+	code := jsonlWriteFailureCode(err)
 	if wroteAny {
-		return localResult(delivery.OutcomeAmbiguous)
+		return delivery.DeliveryResult{Outcome: delivery.OutcomeAmbiguous, FailureCode: code}
 	}
 	if isUnsafeFailure(err) {
-		return localResult(delivery.OutcomePermanentPayload)
+		return delivery.DeliveryResult{Outcome: delivery.OutcomePermanentPayload, FailureCode: code}
 	}
-	return localResult(delivery.OutcomeTransient)
+	return delivery.DeliveryResult{Outcome: delivery.OutcomeTransient, FailureCode: code}
+}
+
+func jsonlWriteFailureCode(err error) delivery.FailureCode {
+	if errors.Is(err, syscall.ENOSPC) {
+		return delivery.FailureCodeNoSpace
+	}
+	return delivery.FailureCodeFileWriteFailed
 }

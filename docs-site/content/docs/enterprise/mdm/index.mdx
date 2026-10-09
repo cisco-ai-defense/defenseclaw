@@ -30,8 +30,12 @@ to enterprise deployment? Start with
 | Anything else: start at [What you deliver](#what-you-deliver) | Windows, Linux, macOS | The release file and the kit wrapper, run as SYSTEM or root |
 
 The recipes are templates, checked by simulating each MDM's execution context
-(see [Simulate your MDM](#simulate-your-mdm)). They have not been run in a live
-tenant.
+(see [Simulate your MDM](#simulate-your-mdm)). They have not delivered DefenseClaw
+in a live tenant yet. For Intune, the tenant setup, Windows and Linux enrollment
+and compliance they depend on were run on a test tenant: see
+[Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant), which also has a Graph
+helper that checks the tenant. Its create and assign commands have not run on a live
+tenant yet.
 
 ## The contract every recipe follows
 
@@ -478,8 +482,10 @@ marker's other values: `Profile`, `InstallRoot`, `StateRoot`, `TrustMode`,
 
 With Claude Code enabled, a Windows host reports `security_complete: false`
 until an administrator attests that Claude Code runs DefenseClaw's managed
-hooks there: check it with `enterprise policy verify --live` in an enrolled
-user's session, then run Setup `/repair JSON=1 ATTESTCLAUDEEFFECTIVEPOLICY=1`
+hooks there: in an enrolled user's own session, have Claude Code make a tool
+call, then from an elevated prompt export the gateway's record with
+`defenseclaw audit export --connector claudecode -o <file>`. Once the record
+shows that call, run Setup `/repair JSON=1 ATTESTCLAUDEEFFECTIVEPOLICY=1`
 (see [Verify the install](/docs/enterprise/windows#verify-the-install)). The
 record is bound to the hashes of the installed Claude Code policy and hook
 binary, so every DefenseClaw upgrade makes it stale. Computers that run the

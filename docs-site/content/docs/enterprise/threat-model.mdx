@@ -157,7 +157,7 @@ identity it runs as.
 | Z0 | The Service Control Manager, and the MDM agent or an administrator running Setup (`DefenseClawSetup-Enterprise-Standalone-x64.exe`) or `defenseclaw.exe enterprise windows` | SYSTEM or an elevated administrator |
 | Z1 | The `DefenseClawHookGuardian`, `DefenseClawHookEnumerator` and `DefenseClawSensorHelper` services | LocalSystem. The sensor helper keeps only `SeChangeNotifyPrivilege`. |
 | Z2 | The `DefenseClawGateway` service, listening on `127.0.0.1:18970`. It writes only `runtime` and `logs\gateway` under `C:\ProgramData\Cisco\DefenseClaw`, and its IPC directory `C:\Program Files\Cisco\DefenseClaw\ipc`. | `NT SERVICE\DefenseClawGateway` |
-| Z3 | Binaries in `C:\Program Files\Cisco\DefenseClaw\bin`. Under `C:\ProgramData\Cisco\DefenseClaw`: `etc\config.yaml`, `secrets`, `hook-guardian\targets.yaml` (target manifest), `hook-guardian-state` (authorization ledger) and `install` (lifecycle state). Hook runtime state in `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Vendor machine policy in `%ProgramData%\OpenAI\Codex\requirements.toml`, `C:\Program Files\ClaudeCode\managed-settings.d`, `%ProgramData%\Cursor\hooks.json`, `%ProgramData%\GitHub\Copilot\policy.d` and `%ProgramData%\opencode`. | Written only by Administrators and SYSTEM |
+| Z3 | Binaries in `C:\Program Files\Cisco\DefenseClaw\bin`. Under `C:\ProgramData\Cisco\DefenseClaw`: `etc\config.yaml`, `secrets`, `hook-guardian\targets.yaml` (target manifest), `hook-guardian-state` (authorization ledger) and `install` (lifecycle state). Hook runtime state in `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Vendor machine policy in `%ProgramData%\OpenAI\Codex\requirements.toml`, `C:\Program Files\ClaudeCode\managed-settings.d`, `%ProgramData%\Cursor\hooks.json`, `%ProgramData%\GitHub\Copilot\policy.d` and `%ProgramData%\opencode`. | Written only by Administrators and SYSTEM. One exception: Users hold write attributes (timestamps and basic attributes, never content) on `share\opencode\defenseclaw.js`, which OpenCode needs to load it; the guardian undoes a read-only flag or reparse point set with it. |
 | Z4 | The AI agent; `defenseclaw-hook.exe`, an administrator-owned binary that runs as the user; the user's agent config and DefenseClaw hook registrations | The signed-in user |
 | Z5 | Cisco AI Defense | External |
 
@@ -313,7 +313,7 @@ writes when you supply none lists no agents. On Windows you supply the config. S
 | Devin, Antigravity, Hermes | Hook registration in each user's config | Yes | Yes | Yes |
 | Amp | Plugin in each user's config | Yes | Yes | Yes |
 | OpenHands, OmniGent | Registration in each user's config | Not supported | Yes | Yes |
-| Kiro | Hook registration in each user's global `~/.kiro/hooks` and the CLI 2.x `defenseclaw` agent, on every OS; the [ACP guard](/docs/acp-guard) for editors that start Kiro over ACP | Yes | Yes | Yes |
+| Kiro | Hook registration in each user's global `~/.kiro/hooks` and the CLI 2.x `defenseclaw` agent, on every OS | Yes | Yes | Yes |
 | OpenClaw, ZeptoClaw | Not supported: they need DefenseClaw's model-traffic proxy, which the enterprise profile does not run | No | No | No |
 
 Which users are protected is set by enrollment. See
@@ -508,7 +508,7 @@ The Kiro IDE is discovered on every OS but its use of the global hook file is no
 
 **Where:** Kiro IDE, every OS.
 
-**What reduces it:** Keep Kiro IDE at 1.0.182 or later; use the ACP guard for editors that start Kiro over ACP.
+**What reduces it:** Keep Kiro IDE at 1.0.182 or later.
 
 #### Kiro per-user hooks are advisory
 
@@ -516,7 +516,7 @@ Only Kiro IDE 1.0.182 and later and `kiro-cli --v3` read the global `~/.kiro/hoo
 
 **Where:** Kiro, Linux, macOS and Windows.
 
-**What reduces it:** Keep kiro-cli at 2.24.1 or later. Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console. Use the ACP guard for editors that start Kiro over ACP.
+**What reduces it:** Keep kiro-cli at 2.24.1 or later. Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console.
 
 #### Kiro on Windows before its first run
 
@@ -588,7 +588,7 @@ A user can hold the gateway's address while the gateway is stopped. `defenseclaw
 
 #### A hook flood slows other accounts
 
-Each account has its own hook budget (see `enterprise_managed_rate_limited` in [Troubleshooting](/docs/enterprise/troubleshooting)) and runs at most half as many requests at once as the gateway has processors, so one account's flood is refused or queued without stopping other accounts' hooks. It still makes their hooks slower: the gateway accepts and refuses the flood's connections, and the flooding account's own processes compete for the host's CPU, which DefenseClaw does not control.
+Each account has its own hook budget (see `enterprise_managed_rate_limited` in [Troubleshooting](/docs/enterprise/troubleshooting)) and runs at most half as many requests at once as the gateway has processors, so one account's flood is refused or queued without stopping other accounts' hooks. The gateway also bounds the requests it holds at once for all accounts together (`enterprise_managed_overloaded`): past that bound the next hook is refused at once instead of every hook waiting past its deadline. A flood still makes their hooks slower: the gateway accepts and refuses the flood's connections, and the flooding account's own processes compete for the host's CPU, which DefenseClaw does not control.
 
 **Where:** Standalone profile, every OS.
 

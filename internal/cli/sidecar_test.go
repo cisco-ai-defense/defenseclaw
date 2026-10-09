@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestMaterializeSidecarGatewayTokenUsesResolvedPrecedence(t *testing.T) {
@@ -174,5 +175,26 @@ func TestGuardrailBannerLinesShowJudgeNotBlankProxyRows(t *testing.T) {
 	cfg.Guardrail.Model = "openai/gpt"
 	if got := strings.Join(guardrailBannerLines(cfg), "\n"); !strings.Contains(got, "Model:      openai/gpt") {
 		t.Fatalf("proxy model row missing:\n%s", got)
+	}
+}
+
+// GAP-0077: a standalone managed service runs no watcher and dials no
+// OpenClaw fleet, so its banner must not advertise either. Secure Client
+// keeps the banner of main (GAP-0105, issue #1092).
+func TestSidecarBannerManagedShowsNoWatcherOrFleet(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
+	cfg.Gateway.Host, cfg.Gateway.Port = "127.0.0.1", 18789
+	cfg.Gateway.Watcher.Enabled, cfg.Gateway.Watcher.Skill.Enabled = true, true
+	got := fleetBannerLine(cfg) + "\n" + strings.Join(watcherBannerLines(cfg), "\n")
+	if strings.Contains(got, "18789") || strings.Contains(got, "Skill dirs") || !strings.Contains(got, "idle (no directories to watch)") {
+		t.Fatalf("standalone banner:\n%s", got)
+	}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	got = fleetBannerLine(cfg) + "\n" + strings.Join(watcherBannerLines(cfg), "\n")
+	want := "  Gateway:      127.0.0.1:18789\n  Watcher:      true\n    Skill:      enabled=true take_action=false\n    Skill dirs: autodiscover (from claw mode)"
+	if got != want {
+		t.Fatalf("Secure Client banner:\n%s\nwant:\n%s", got, want)
 	}
 }

@@ -198,7 +198,9 @@ def test_inventory_fast_scan_preset_stability_and_order_independent_check() -> N
 
     panel.set_category_scope(["mcp", "skills", "plugins"])
     assert panel.is_fast_scan() is True
-    assert INVENTORY_CATEGORIES == ("skills", "plugins", "mcp", "agents", "tools", "models", "memory")
+    assert INVENTORY_CATEGORIES == (
+        "skills", "plugins", "mcp", "agents", "tools", "models", "memory", "ide_plugins"
+    )
 
 
 def test_inventory_apply_json_summary_source_and_load_errors() -> None:
@@ -279,6 +281,28 @@ def test_inventory_skill_and_plugin_filters_clamp_cursor_and_detail() -> None:
     assert ("Status", "disabled") in detail.fields
 
 
+def test_inventory_reload_keeps_selected_row_and_open_card() -> None:
+    # GAP-0106: the 60 s background reload must not move the cursor or close
+    # the card; only a row that is gone closes it.
+    panel = InventoryPanelModel()
+    panel.apply_loaded(_inventory())
+    panel.set_active_subtab("skills")
+    panel.set_cursor(2)
+    panel.toggle_detail()
+
+    payload = _inventory_payload()
+    payload["skills"] = payload["skills"][1:]
+    panel.apply_json(json.dumps(payload))
+    assert panel.cursor_at() == 1
+    assert panel.detail_open is True
+    assert panel.detail_info().title == "SKILL: gamma"
+
+    payload["skills"] = payload["skills"][:1]
+    panel.apply_json(json.dumps(payload))
+    assert panel.cursor_at() == 0
+    assert panel.detail_open is False
+
+
 def test_inventory_detail_info_for_all_non_summary_tabs_and_command_intent() -> None:
     panel = InventoryPanelModel()
     panel.apply_loaded(_inventory())
@@ -317,6 +341,7 @@ def test_inventory_subtab_scope_and_summary_metadata_match_go_labels() -> None:
         "Tools (1)",
         "Models (1)",
         "Memory (1)",
+        "IDE plugins",
     ]
     assert tabs[0].active is True
 
@@ -531,3 +556,144 @@ def test_inventory_hermes_plugin_rows_show_origin_and_status() -> None:
     assert (off.origin, off.status) == ("user", "disabled")
     assert (fs.origin, fs.status) == ("/p", "loaded")
     assert _verdict_summary({"clean": "1", "discovery-only": "5"}) == "1 clean  5 discovery-only"
+
+
+def test_inventory_ide_plugins_users_and_agent_identities() -> None:
+    def ide(user: str, plugin: str, **extra: object) -> dict[str, object]:
+        return {"fingerprint": f"{user}/{plugin}", "user": user, "ide_product": "vscode",
+                "plugin_id": plugin, "version": "1.0.0", **extra}
+
+    payload = {
+        "connector": "codex",
+        "agents": [{"id": "default", "source": "codex"}],
+        "plugins": [{"id": "p1", "user": "alice"}, {"id": "p2", "user": "alice"}],
+        "ide_plugins": [
+            ide("alice", "github.copilot", enabled="enabled", is_ai=True),
+            ide("bob", "ms-python.python", enabled="disabled"),
+        ],
+    }
+    panel = InventoryPanelModel()
+    panel.show_connector_column = True
+    panel.apply_merged([("codex", json.dumps(payload)), ("amp", json.dumps({**payload, "connector": "amp"}))])
+    panel.set_connector_filter("codex")
+
+    # One row per plugin across connector scans; the connector filter keeps them.
+    panel.set_active_subtab("ide_plugins")
+    assert panel.data_table_columns() == ("User", "IDE", "Plugin", "Version", "Enabled", "AI")
+    assert panel.data_table_rows() == (
+        ("alice", "vscode", "github.copilot", "1.0.0", "yes", "yes"),
+        ("bob", "vscode", "ms-python.python", "1.0.0", "no", ""),
+    )
+    assert dict(panel.summary_table_rows())["IDE plugins"] == "2 (1 AI, 1 disabled, 2 users)"
+    versioned = InventoryPanelModel()
+    versioned.apply_json(json.dumps({"ide_plugins": [ide("alice", "com.tabnine", ide_version="2025.2")]}))
+    versioned.set_active_subtab("ide_plugins")
+    assert versioned.data_table_rows()[0][0] == "vscode 2025.2"
+    versioned.set_cursor(0)
+    assert dict(versioned.detail_info().fields)["IDE version"] == "2025.2"
+
+
+    # At 80 columns long cells give way while Enabled and AI stay whole, a
+    # remote install is marked (GAP-0055), and the detail leads with what the
+    # row does not show (GAP-0098).
+    remote = InventoryPanelModel()
+    remote.set_size(80, 24)
+    long_id = "ms-vscode-remote.remote-ssh-edit-nightly"
+    remote.apply_merged([("codex", json.dumps({"ide_plugins": [
+        ide("dcad-alice@dclab.test", long_id, version="2026.10.100500", enabled="client_side_unknown",
+            is_ai=True, remote_kind="ssh_server", scope="remote"),
+    ]}))])
+    remote.set_active_subtab("ide_plugins")
+    assert remote.data_table_columns() == ("IDE", "Plugin", "Version", "Enabled", "AI")
+    (row,) = remote.data_table_rows()
+    assert row[0] == "vscode (ssh)" and row[1].endswith("…") and row[3:] == ("client side", "yes")
+    assert sum(len(cell) + 2 for cell in row) <= 72
+    remote.set_cursor(0)
+    assert [name for name, _ in remote.detail_info().fields] == ["User", "Scope", "Enabled", "AI", "IDE", "Version"]
+
+    # One user on Plugins: no User column.
+    panel.set_active_subtab("plugins")
+    assert "User" not in panel.data_table_columns()
+
+    # Identities join the Agents rows; a second user adds the User column.
+    def identity(agent_id: str, user: str, connector: str = "codex") -> dict[str, object]:
+        return {"agent_id": agent_id, "user_id": "1001", "user_name": user, "connector": connector,
+                "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-05T00:00:00Z", "sessions_seen": 3}
+
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [
+        identity("agt-0123456789abcdef", "bob"),
+        identity("agt-fedcba9876543210", "alice"),
+        identity("agt-1111111111111111", "carol", connector="amp"),
+    ]}))
+    panel.set_active_subtab("agents")
+    assert panel.data_table_columns() == ("Connector", "User", "ID", "Source", "Model", "Workspace", "Default")
+    assert len(panel.data_table_rows()) == 3
+    assert panel.data_table_rows()[1] == ("codex", "bob", "agt-0123456789abcdef", "agent identity", "", "", "")
+    long_user = "A" * 300
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [
+        identity("agt-long", long_user), identity("agt-short", "bob"),
+    ]}))
+    assert any(row[1] == "A" * 29 + "..." for row in panel.data_table_rows())
+
+    panel.set_cursor(1)
+    assert dict(panel.detail_info().fields)["Sessions"] == "3"
+    # GAP-0152: a list cut at its bound says so on the sub-tab.
+    panel.apply_agent_identities(json.dumps({"enabled": True, "total": 9, "next_cursor": "3", "identities": [
+        identity("agt-0123456789abcdef", "bob"),
+    ]}))
+    assert next(info for info in panel.subtab_info() if info.subtab == "agents").display_label == "Agents (2+)"
+    assert "newest 1 of 9" in panel.handle_key("h").hint + panel.handle_key("l").hint
+
+    # A missing or failing `agent identities` command leaves only inventory rows.
+    panel.apply_agent_identities("Error: No such command 'identities'.")
+    assert len(panel.filtered_agents()) == 1
+    assert "User" not in panel.data_table_columns()
+
+
+def test_inventory_long_agent_list_jumps_and_does_not_rescan_users_per_row() -> None:
+    """GAP-0184: page/end jumps work, and building the rows reads the items once."""
+
+    panel = InventoryPanelModel(connector="codex")
+    panel.apply_loaded(_inventory())
+    rows = [
+        {"agent_id": f"agt-{index:016x}", "user_id": str(1000 + index % 2), "user_name": f"user{index % 2}",
+         "connector": "codex", "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-05T00:00:00Z",
+         "sessions_seen": 1}
+        for index in range(1300)
+    ]
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": rows}))
+    panel.set_active_subtab("agents")
+    panel.set_size(80, 24)
+
+    calls = 0
+    original = InventoryPanelModel._multi_user
+
+    def counted(items):  # noqa: ANN001 - wraps the staticmethod for the test
+        nonlocal calls
+        calls += 1
+        return original(items)
+
+    InventoryPanelModel._multi_user = staticmethod(counted)  # type: ignore[method-assign]
+    try:
+        assert len(panel.data_table_rows()) == len(panel.filtered_agents())
+    finally:
+        InventoryPanelModel._multi_user = staticmethod(original)  # type: ignore[method-assign]
+    assert calls <= 2, f"the user column was recomputed {calls} times for one table"
+
+    total = panel.current_list_len()
+    assert panel.handle_key("end").handled and panel.cursor == total - 1
+    assert panel.handle_key("home").handled and panel.cursor == 0
+    assert panel.handle_key("pagedown").handled and panel.cursor == 16
+    assert panel.handle_key("pageup").handled and panel.cursor == 0
+    assert panel.handle_key("G").handled and panel.cursor == total - 1
+
+
+def test_ide_table_fits_wide_unicode_cells() -> None:
+    from defenseclaw.tui.services.inventory_state import _fit_cells
+    from rich.cells import cell_len
+
+    columns = ("User", "IDE", "Plugin", "Version", "Enabled", "AI")
+    row = ("alice", "vim", "漢" * 40, "1", "yes", "yes")
+    fitted, = _fit_cells(columns, (row,), 80, keep=("Enabled", "AI"))
+    assert sum(cell_len(cell) for cell in fitted) <= 80 - 8 - 2 * len(columns)
+    assert fitted[4:] == ("yes", "yes")

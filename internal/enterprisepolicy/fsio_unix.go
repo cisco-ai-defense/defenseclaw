@@ -174,6 +174,8 @@ func displaceUntrustedPolicyFiles(Options, string, string, *State) {}
 
 func displaceUntrustedPolicyFile(Options, string, *State) bool { return false }
 
+func displaceUntrustedEntries(Options, string, *State) {}
+
 // validatePolicyLeafDir is covered on unix by the ancestor walk, which
 // already applies the strict rules to every directory.
 func validatePolicyLeafDir(Options, string) error { return nil }

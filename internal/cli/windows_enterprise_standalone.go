@@ -18,11 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -241,6 +243,11 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
+	if action == "upgrade" || action == "repair" {
+		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+	}
 	if action == "uninstall" {
 		present, err := windowsEnterpriseStandaloneFootprint()
 		if err == nil && !present {
@@ -282,8 +289,33 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	if (action == "status" || action == "verify") && report.Installed {
+		if report.CursorTargetEnabled {
+			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
+		}
+		if report.GatewayReady {
+			if body, err := windowsStandaloneGatewayHealth(); err == nil {
+				appendStandaloneGatewayWarnings(result, body)
+			}
+		}
+	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// The standalone gateway's machine API uses the default loopback port. This
+// advisory read is bounded; the installer has already established readiness.
+func windowsStandaloneGatewayHealth() ([]byte, error) {
+	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", config.DefaultGatewayAPIPort))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gateway health returned %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 // addWindowsEnterpriseNothingInstalledError fails an install or upgrade
@@ -487,6 +519,9 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 	result.CoverageComplete = report.Installed && report.GuardianReady && !report.TransactionPending
 	result.SecurityComplete = report.SecurityComplete
+	if report.Installed && result.Action == "status" {
+		result.Destinations = readWindowsEnterpriseStandaloneDestinations()
+	}
 	if report.Installed {
 		enrollment, err := readWindowsEnterpriseStandaloneEnrollment()
 		if err == nil {
@@ -500,8 +535,10 @@ func applyWindowsEnterpriseInstallerReport(
 			}
 		}
 		applyWindowsEnterpriseUnprotectedAgents(result)
+		applyWindowsEnterpriseEnrolledConnectors(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
 		applyWindowsEnterpriseAccountFolders(result)
+		applyWindowsEnterpriseDiscoveryHomeDirs(result)
 	}
 	applyWindowsEnterpriseGatewayStartFailure(result, report)
 	applyWindowsEnterpriseAPIPortHolders(result, report)
@@ -1095,9 +1132,10 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 		switch {
 		case windowsEnterpriseAccountDeleted(account.SID):
 			result.AddWarning("deleted_account_rows", fmt.Sprintf(
-				"the account %s no longer exists, but its profile folder %s does, so DefenseClaw keeps its %d enrollment row(s) "+
-					"until the profile is removed; remove it under System Properties > Advanced > User Profiles to revoke them",
-				label, account.Home, account.Rows))
+				"the account %s no longer exists; the enumerator drops its %d enrollment row(s) at its next pass although its "+
+					"profile folder %s remains (remove it under System Properties > Advanced > User Profiles), and until then "+
+					"the guardian reports them for this account only",
+				label, account.Rows, account.Home))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
 				"the account %s created %s itself, so it has no DefenseClaw runtime (for example when an agent it ran before enrollment "+
@@ -1106,6 +1144,156 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 				label, filepath.Join(account.Home, ".defenseclaw")))
 		}
 	}
+}
+
+// windowsEnterpriseDiscoveryHomeDirs reads ai_discovery.home_dirs of the
+// installed config; tests replace it.
+var windowsEnterpriseDiscoveryHomeDirs = func() ([]string, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	body, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseConfigProfileLimit)
+	if err != nil {
+		return nil, err
+	}
+	var document struct {
+		AIDiscovery struct {
+			HomeDirs []string `yaml:"home_dirs"`
+		} `yaml:"ai_discovery"`
+	}
+	if err := yaml.Unmarshal(body, &document); err != nil {
+		return nil, err
+	}
+	return document.AIDiscovery.HomeDirs, nil
+}
+
+// applyWindowsEnterpriseDiscoveryHomeDirs warns about each
+// ai_discovery.home_dirs entry that is neither an enrolled account's profile
+// nor a folder inside one. The gateway scans every enrolled profile without
+// it; an entry only adds a folder, whose findings name no user, and an
+// excluded account's profile is never scanned (GAP-0969).
+func applyWindowsEnterpriseDiscoveryHomeDirs(result *enterprisestatus.Result) {
+	homes, err := windowsEnterpriseDiscoveryHomeDirs()
+	if err != nil || len(homes) == 0 {
+		return
+	}
+	accounts, err := windowsEnterpriseManifestAccounts()
+	if err != nil {
+		return
+	}
+	for _, home := range homes {
+		home = strings.TrimSpace(home)
+		if home == "" || windowsEnterpriseInsideEnrolledProfile(accounts, home) {
+			continue
+		}
+		result.AddWarning("ai_discovery_home_dir_not_enrolled", fmt.Sprintf(
+			"ai_discovery.home_dirs names %s, which is not the profile of an enrolled account; AI Discovery scans every "+
+				"enrolled profile without home_dirs, so this entry only adds a folder whose findings name no user, and the "+
+				"profile of an account enterprise.enrollment.exclude_users names is never scanned: remove the entry unless "+
+				"the folder is meant as an extra scan root", home))
+	}
+}
+
+func windowsEnterpriseInsideEnrolledProfile(accounts []windowsEnterpriseManifestAccount, path string) bool {
+	path = filepath.Clean(path)
+	for _, account := range accounts {
+		profile := filepath.Clean(strings.TrimSpace(account.Home))
+		if profile == "." {
+			continue
+		}
+		if strings.EqualFold(path, profile) || strings.HasPrefix(strings.ToLower(path), strings.ToLower(profile)+`\`) {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsEnterpriseEnrolledConnectors returns the hook connectors the
+// installed config enrols, loaded as the guardian loads it; replaceable in
+// tests.
+var windowsEnterpriseEnrolledConnectors = func() ([]string, error) {
+	return windowsEnterpriseConfigConnectors("")
+}
+
+// windowsEnterpriseStagedConnectors returns the hook connectors a config
+// handed to ensure enrols; replaceable in tests.
+var windowsEnterpriseStagedConnectors = windowsEnterpriseConfigConnectors
+
+// windowsEnterpriseConfigConnectors loads path (the installed config when
+// empty) as the guardian loads the installed one and returns the hook
+// connectors it enrols.
+func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(path) == "" {
+		path = layout.ConfigPath
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	restore := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv:            path,
+		"DEFENSECLAW_HOME":               layout.DataDir,
+		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
+		managed.WindowsServiceAccountEnv: layout.ServiceUser,
+	})
+	defer restore()
+	cfg, err := config.LoadManagedFileForLifecycleRecovery(path)
+	if err != nil {
+		return nil, err
+	}
+	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+}
+
+// refuseWindowsEnterpriseConnectorlessConfig refuses, before anything
+// changes, a config that enrols no connector for a deployment whose
+// installed config enrols at least one: applying it took DefenseClaw off
+// every agent of every user while the lifecycle and the MDM reported
+// success (GAP-0602). A config that cannot be read here is left to the
+// lifecycle's own validation. Standalone only.
+func refuseWindowsEnterpriseConnectorlessConfig(opts *windowsEnterpriseLifecycleOptions) error {
+	path := strings.TrimSpace(opts.configPath)
+	if !windowsEnterpriseStandalone(opts) || path == "" {
+		return nil
+	}
+	staged, err := windowsEnterpriseStagedConnectors(path)
+	if err != nil || len(staged) != 0 {
+		return nil
+	}
+	installed, err := windowsEnterpriseEnrolledConnectors()
+	if err != nil || len(installed) == 0 {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"%s enrols no connector under guardrail.connectors, so applying it would stop protecting %s for every user; nothing was changed. "+
+			"List the agents to protect (for example guardrail.connectors.claudecode: {}), or uninstall DefenseClaw to remove it",
+		path, strings.Join(installed, ", "))
+}
+
+// applyWindowsEnterpriseEnrolledConnectors reports an installed config that
+// enrols no connector: the enumerator then writes no target, so DefenseClaw
+// protects no agent while every service reads healthy. verify fails on it;
+// the other actions warn and report the deployment security-incomplete
+// (GAP-0221). A config this token cannot load is left to the checks that
+// report it.
+func applyWindowsEnterpriseEnrolledConnectors(result *enterprisestatus.Result) {
+	connectors, err := windowsEnterpriseEnrolledConnectors()
+	if err != nil || len(connectors) != 0 {
+		return
+	}
+	const code = "no_connectors_enabled"
+	message := "config.yaml enrols no connector under guardrail.connectors, so DefenseClaw protects no agent; " +
+		"list the agents to protect (for example guardrail.connectors.claudecode: {}) and run ensure"
+	if result.Action == "verify" {
+		result.AddError(code, message)
+	} else {
+		result.AddWarning(code, message)
+	}
+	result.SecurityComplete = false
 }
 
 // applyWindowsEnterpriseAmpMachineFolder reports an Amp machine folder a
@@ -1243,6 +1431,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
 	}
+	enterprisestatus.WriteDestinations(output, result.Destinations)
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
 	}
@@ -1477,6 +1666,27 @@ func windowsEnterpriseFootprintUserCreated(path string) bool {
 
 // readWindowsEnterpriseStandaloneEnrollment summarizes the installed
 // guardian manifest when this token can read it.
+// readWindowsEnterpriseStandaloneDestinations lists, for status, the
+// observability destinations the installed config.yaml compiles to with each
+// one's effective redaction profiles. `defenseclaw observability plan` is a
+// per-user command managed Windows does not offer (GAP-1105). A config that
+// does not compile leaves the list out.
+func readWindowsEnterpriseStandaloneDestinations() []enterprisestatus.Destination {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, 8<<20)
+	if err != nil {
+		return nil
+	}
+	summaries, err := config.SummarizeObservabilityV8Destinations(layout.ConfigPath, raw, layout.DataDir)
+	if err != nil {
+		return nil
+	}
+	return enterprisestatus.DestinationsFromSummaries(summaries)
+}
+
 func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, error) {
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {
@@ -1797,6 +2007,11 @@ func planWindowsEnterpriseEnsure(
 	if status.TransactionPending {
 		return windowsEnterpriseEnsurePlan{Action: "repair", Reason: "transaction_pending"}, nil
 	}
+	if status.Installed {
+		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
+			return windowsEnterpriseEnsurePlan{}, err
+		}
+	}
 	if !status.Installed {
 		if strings.TrimSpace(opts.configPath) == "" && strings.TrimSpace(opts.mode) == "" {
 			return windowsEnterpriseEnsurePlan{}, windowsEnterpriseInvalidArguments("ensure must install and requires --config (or --mode/--connector)")
@@ -1821,6 +2036,14 @@ func planWindowsEnterpriseEnsure(
 	}
 	if drift != "" {
 		if missing := missingWindowsEnterpriseSources(opts); len(missing) != 0 {
+			if windowsEnterpriseStandalone(opts) && len(missing) == len(missingWindowsEnterpriseSources(&windowsEnterpriseLifecycleOptions{})) {
+				// The installed CLI carries no payload, so it can never pass
+				// the binary flags; naming them sent administrators the wrong
+				// way (GAP-0682). Setup is the command that applies a config.
+				return windowsEnterpriseEnsurePlan{}, windowsEnterpriseInvalidArguments(
+					"the installed CLI cannot apply a changed %s on Windows; nothing was changed. Run the installed release's Setup as LocalSystem or from an elevated prompt: "+
+						"DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<absolute path of an administrator-only config> JSON=1", drift)
+			}
 			return windowsEnterpriseEnsurePlan{}, windowsEnterpriseInvalidArguments("ensure must reapply %s and requires %s", drift, strings.Join(missing, ", "))
 		}
 		return windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:" + drift}, nil

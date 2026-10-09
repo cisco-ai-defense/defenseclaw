@@ -2774,3 +2774,22 @@ def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
     removed = ad.discover_agents()
     assert removed.agents["copilot"].configured is False
     assert removed.agents["copilot"].config_path == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX job control")
+def test_version_probe_never_reads_the_terminal(monkeypatch, tmp_path):
+    # GAP-0376: a vendor CLI that reads stdin was stopped by SIGTTIN when
+    # discovery ran in a background job, and the upgrade hung there.
+    seen: dict = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, b"tool 1.2.3\n", b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    binary = tmp_path / "tool"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    ad._version_for_binary(str(binary), ("--version",), require_trusted_binary_paths=False)
+    assert seen.get("stdin") is subprocess.DEVNULL
+    assert seen.get("start_new_session") is True

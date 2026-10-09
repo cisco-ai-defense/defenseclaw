@@ -65,8 +65,9 @@ type validatedConfig struct {
 	NoProxy                string
 	SelfUpdateDisabled     bool
 	MachinePolicyOwnership map[string]string
-	// RulePacks maps each rule-pack setting (guardrail.rule_pack_dir and
-	// every connector's) to the pack the config resolves it to. An unset
+	// RulePacks maps each rule-pack setting (guardrail.rule_pack_dir, every
+	// connector's and every guardrail profile's) to the pack the config
+	// resolves it to. An unset
 	// rule_pack_dir follows <policy_dir>/guardrail/default once that folder
 	// exists, which changes no config byte, so the record keeps the resolved
 	// packs and ensure applies (and restarts the gateway) when they change.
@@ -226,9 +227,16 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 			v.RulePacks[label] = filepath.Clean(dir)
 		}
 	}
+	// The singular guardrail.connector (the shape the per-user CLI writes)
+	// enrols its connector too unless guardrail.connectors disables it, as
+	// in the enumerator (GAP-0263).
+	names := []string{cfg.Guardrail.Connector}
 	for name := range cfg.Guardrail.Connectors {
+		names = append(names, name)
+	}
+	for _, name := range names {
 		connector := strings.ToLower(strings.TrimSpace(name))
-		if connector == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+		if connector == "" || contains(v.Connectors, connector) || !cfg.Guardrail.EffectiveEnabled(name) {
 			continue
 		}
 		v.Connectors = append(v.Connectors, connector)
@@ -270,6 +278,13 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 			// there (GAP-1429): the source release has the same packs.
 			shipped := filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default")
 			return fmt.Errorf("config %s %q does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release (installed hosts also have it at %s), or set it to %s, which the deployment installs", label, dir, shipped, shipped)
+		}
+		// The gateway loads every pack, profile packs included, only from an
+		// administrator-controlled directory and refuses to start otherwise.
+		// Refuse here, before anything is activated, instead of failing the
+		// activation and rolling back (GAP-0301).
+		if err := e.Trust(e.P(clean), TrustRuntimeDir); err != nil {
+			return fmt.Errorf("config %s %q is not administrator-controlled, so the gateway would refuse to start with it: %w; make the directory and its parents owned by root and not writable by group or others, then retry", label, dir, err)
 		}
 	}
 	return nil
@@ -383,12 +398,12 @@ func rulePackCheckOrder(dirs map[string]string) []string {
 	return order
 }
 
-// effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the
-// gateway loads for it.
+// effectiveRulePackDirs maps each rule-pack setting of cfg, guardrail
+// profiles included, to the pack the gateway loads for it.
 func effectiveRulePackDirs(cfg *config.Config) map[string]string {
-	dirs := map[string]string{"guardrail.rule_pack_dir": cfg.Guardrail.RulePackDir}
-	for name := range cfg.Guardrail.Connectors {
-		dirs["guardrail.connectors."+name+".rule_pack_dir"] = cfg.EffectiveRulePackDirForConnector(name)
+	dirs := map[string]string{}
+	for _, setting := range cfg.RulePackSettings() {
+		dirs[setting.Key] = setting.Dir
 	}
 	return dirs
 }

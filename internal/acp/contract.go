@@ -4,6 +4,7 @@
 package acp
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,11 +16,82 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const MaxContractLockBytes = 64 << 10
+
+// EntryDigestPrefix marks a contract lock that pins the guarded editor
+// entry rather than the whole editor settings file. An editor that rewrote
+// its settings (Zed on a theme change) stopped every guarded entry until
+// setup ran again (GAP-0708). enterprise acp setup writes it; an older
+// guard reads such a lock as a changed settings file and asks for setup.
+const EntryDigestPrefix = "entry-sha256:"
+
+// maxClientConfigBytes bounds an editor settings file the guard reads.
+const maxClientConfigBytes = 4 << 20
+
+// ManagedEntryName is the editor entry name of an agent's guarded entry.
+func ManagedEntryName(agent string) string {
+	if agent == "" {
+		return "DefenseClaw"
+	}
+	return "DefenseClaw · " + strings.ToUpper(agent[:1]) + strings.ToLower(agent[1:])
+}
+
+// editorOwnedEntryKeys are the keys an editor stores in an agent entry for
+// choices made in its own UI. Zed keeps the session mode, model and config
+// options picked in the agent panel there and sends them to the agent over
+// ACP (session/set_mode, session/set_model, session/set_config_option), where
+// the guard checks them like any other request; they cannot change what the
+// editor launches. Choosing "Accept Edits" stored default_mode in the guarded
+// entry, and the next start refused the entry as changed (GAP-0900). The
+// command, args, env and type, and every key not named here, stay pinned.
+var editorOwnedEntryKeys = map[string]map[string]bool{
+	"zed": {
+		"default_mode": true, "default_model": true, "favorite_models": true,
+		"default_config_options": true, "favorite_config_option_values": true,
+	},
+}
+
+// ClientEntrySHA256 is the digest of agent's guarded entry in the editor
+// settings file at path: its JSON with sorted keys, so that the editor
+// rewriting the file around it, or reformatting it, leaves it unchanged. The
+// keys the editor owns for client are left out.
+func ClientEntrySHA256(path, clientID, agentID string) (string, error) {
+	body, err := safefile.ReadRegularFileBounded(path, maxClientConfigBytes)
+	if err != nil {
+		return "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(jsonc.Strip(bytes.TrimPrefix(body, []byte("\xef\xbb\xbf")))))
+	decoder.UseNumber()
+	var document map[string]any
+	if err := decoder.Decode(&document); err != nil {
+		return "", err
+	}
+	servers, _ := document["agent_servers"].(map[string]any)
+	entry, ok := servers[ManagedEntryName(agentID)]
+	if !ok {
+		return "", fmt.Errorf("%s has no %s entry", path, ManagedEntryName(agentID))
+	}
+	if fields, isObject := entry.(map[string]any); isObject && len(editorOwnedEntryKeys[clientID]) > 0 {
+		pinned := make(map[string]any, len(fields))
+		for key, value := range fields {
+			if !editorOwnedEntryKeys[clientID][key] {
+				pinned[key] = value
+			}
+		}
+		entry = pinned
+	}
+	canonical, err := json.Marshal(entry)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(canonical)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 // ErrRuntimeContractMissing means the binding's contract lock file does not
 // exist: the editor entry outlived `defenseclaw acp remove` (or was copied
@@ -110,8 +182,22 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 		{clientConfigPath, lock.Client.ConfigSHA256, "client configuration"},
 		{agentPath, lock.Agent.SHA256, "agent"},
 	} {
+		if pinned, entry := strings.CutPrefix(item.expected, EntryDigestPrefix); entry && item.label == "client configuration" && !secureClientHost() {
+			observed, digestErr := ClientEntrySHA256(item.path, clientID, agentID)
+			if digestErr != nil || !strings.EqualFold(observed, pinned) {
+				return fmt.Errorf("the %s entry in the editor settings file %s changed after setup (the contract lock pins it), "+
+					"so it must be set up again", ManagedEntryName(agentID), clientConfigPath)
+			}
+			continue
+		}
 		observed, digestErr := fileSHA256(item.path)
 		if digestErr != nil || !strings.EqualFold(observed, item.expected) {
+			if item.label == "client configuration" && !secureClientHost() {
+				// The lock pins the whole settings file, and "executable
+				// digest" sent users looking for a changed binary (GAP-0391).
+				return fmt.Errorf("the editor settings file %s changed after setup (the contract lock pins its digest, "+
+					"so any edit needs setup again)", clientConfigPath)
+			}
 			return fmt.Errorf("ACP %s executable digest does not match the runtime contract", item.label)
 		}
 	}
@@ -128,6 +214,10 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	}
 	return nil
 }
+
+// SecureClientHost reports a Secure Client install, whose guard keeps the
+// behaviour of main (issue #1092).
+func SecureClientHost() bool { return secureClientHost() }
 
 func samePath(left, right string) bool {
 	if runtime.GOOS == "windows" {

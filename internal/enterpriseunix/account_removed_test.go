@@ -63,6 +63,9 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 				t.Fatalf("the test host must start security-complete: %+v %+v", before.Readiness, before.Warnings)
 			}
 			bob := map[string]any{"user": "bob", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`}
+			// The enumerator last saw bob in the local account database, so
+			// "no such account" is definitive for him.
+			writeEnumeratorState(t, h, map[string]string{"bob": "files"}, nil)
 			writeState := func(ampPath string, deleted ...map[string]any) {
 				results := append([]map[string]any{{"user": "alice", "connector": "codex", "ok": true}}, deleted...)
 				results = append(results, map[string]any{"user": "carol", "user_home": "/home/carol", "connector": "amp", "ok": false, "error": "enterprise hooks: hook config parent is not a directory: " + ampPath})
@@ -80,7 +83,7 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 			if hasWarning(status, codeGuardianTargetFailed) {
 				t.Fatalf("one account's target is reported as a protection failure: %+v", status.Warnings)
 			}
-			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user bob: the account no longer exists") || !strings.Contains(got, "after 3 consecutive definitive misses") {
+			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user bob: the account does not resolve") || !strings.Contains(got, "after 3 consecutive definitive misses") {
 				t.Fatalf("status does not report the deleted account's target: %+v", status.Warnings)
 			}
 			if got := messagesOf(status.Warnings, codeGuardianTargetUserPath); !strings.Contains(got, "amp for user carol is not protected: hook config parent is not a directory: /home/carol/.config/amp/plugins") {
@@ -146,24 +149,31 @@ func TestGuardianCleanupPendingIsReported(t *testing.T) {
 	}
 }
 
-// The deleted-account warning must not hide a real failure. The guardian's
-// per-target error can quote text from a user's own files (a TOML parser
-// reports a duplicated quoted key verbatim), so a failure of an account that
-// still exists was reported as "account removed" when it merely contained
-// the text. The message must now be exactly the guardian's "no such
-// account" error, and the host's own lookup must also find no account.
-func TestAccountRemovedWarningNeedsTheWholeErrorAndAMissingAccount(t *testing.T) {
+// The deleted-account warning must not hide a real failure, and must not
+// blame a deleted account for a directory outage. A failure of an account
+// that still exists stays a failure, whatever its text. An account that
+// does not resolve is not a protection failure; it is reported as removed
+// only when the enumerator confirmed it is gone: a local account, or a
+// counted definitive miss. A directory account the enumerator could not
+// confirm (the directory does not answer, GAP-0593) is neither, and whatever
+// the reconcile error (a removed home, GAP-0692) it never fails the host.
+func TestAccountRemovedWarningNeedsAConfirmedMiss(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	h.accounts.accounts["alice"] = Account{Name: "alice", UID: 1500, GID: 1500}
+	writeEnumeratorState(t, h,
+		map[string]string{"gone1": "files", "gone2": "directory", "gone3": "directory"},
+		map[string]int{"gone3\x00codex": 1})
 	quoted := `parse Codex config for hook guardian: toml: key does not exist: no such account is already defined`
 	for _, tc := range []struct {
 		name, user, message string
-		removed             bool
+		removed, failed     bool
 	}{
-		{"a user's file text for an existing account", "alice", quoted, false},
-		{"the exact error for an account that still exists", "alice", `enterprise hooks: target account "alice" does not exist: no such account`, false},
-		{"the exact error for a missing account", "gone1", `enterprise hooks: target account "gone1" does not exist: no such account`, true},
+		{"a user's file text for an existing account", "alice", quoted, false, true},
+		{"the exact error for an account that still exists", "alice", `enterprise hooks: target account "alice" does not exist: no such account`, false, true},
+		{"a missing local account", "gone1", `enterprise hooks: target account "gone1" does not exist: no such account`, true, false},
+		{"a missing directory account not confirmed", "gone2", `enterprise hooks: target account "gone2" does not exist: no such account`, false, false},
+		{"a confirmed directory account whose home is gone", "gone3", "user home /home/gone3 is not available yet: no such file or directory", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state, _ := json.Marshal(map[string]any{"results": []map[string]any{
@@ -176,9 +186,22 @@ func TestAccountRemovedWarningNeedsTheWholeErrorAndAMissingAccount(t *testing.T)
 			if got := hasWarning(status, codeGuardianTargetAccountRemoved); got != tc.removed {
 				t.Fatalf("account-removed warning = %v, want %v: %+v", got, tc.removed, status.Warnings)
 			}
-			if got := hasWarning(status, codeGuardianTargetFailed); got == tc.removed {
-				t.Fatalf("target-failed warning = %v, want %v: %+v", got, !tc.removed, status.Warnings)
+			if got := hasWarning(status, codeGuardianTargetFailed); got != tc.failed {
+				t.Fatalf("target-failed warning = %v, want %v: %+v", got, tc.failed, status.Warnings)
 			}
 		})
+	}
+}
+
+// writeEnumeratorState writes the hook enumerator state beside targets.yaml.
+func writeEnumeratorState(t *testing.T, h *testHost, sources map[string]string, misses map[string]int) {
+	t.Helper()
+	data, _ := json.Marshal(map[string]any{"version": 1, "sources": sources, "misses": misses})
+	path := h.env.P(filepath.Join(filepath.Dir(h.env.Layout.ManifestPath), enumeratorStateFile))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		t.Fatal(err)
 	}
 }

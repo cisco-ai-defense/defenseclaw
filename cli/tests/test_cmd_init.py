@@ -658,6 +658,31 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
 
+    def test_scripted_connector_leaves_the_discovery_cache_the_gateway_reads(self):
+        # GAP-0185: --connector skipped discovery, so no agent_discovery.json
+        # recorded that ZeptoClaw is absent and the gateway dialled a fleet
+        # uplink nothing listens on, every 15 s.
+        from defenseclaw.commands import cmd_init
+
+        def absent(name, **_kwargs):
+            return AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+
+        with patch.object(agent_discovery, "_scan_agent", side_effect=absent):
+            cmd_init._build_noninteractive_connector_settings(
+                connector="zeptoclaw",
+                profile=None,
+                observe_all=False,
+                action_connectors="",
+                fail_mode=None,
+                human_approval=None,
+                hilt_min_severity=None,
+                rescan_agents=False,
+                data_dir=self.tmp_dir,
+            )
+
+        cache = json.loads(Path(self.tmp_dir, "agent_discovery.json").read_text(encoding="utf-8"))
+        self.assertIs(cache["agents"]["zeptoclaw"]["installed"], False)
+
     def test_windows_opencode_is_provisional_in_noninteractive_action_filter(self):
         from defenseclaw.commands import cmd_init
 
@@ -1509,8 +1534,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(cfg["guardrail"]["connector"], "claudecode")
 
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_explicit_connector_wins_without_discovery(self, mock_discover):
-        mock_discover.side_effect = AssertionError("explicit connector should not discover")
+    def test_explicit_connector_wins_over_discovery(self, mock_discover):
+        # Discovery runs to leave the cache the gateway reads (GAP-0185) but
+        # never decides the connector.
+        mock_discover.return_value = self._discovery({"claudecode"})
 
         result = self._invoke([
             "--non-interactive",
@@ -1530,7 +1557,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
-        mock_discover.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
     def test_rescan_agents_passes_refresh_to_discovery(self, mock_discover):
@@ -1879,7 +1905,10 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         mock_path.return_value = Path(self.tmp_dir)
 
         app = AppContext()
-        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        # A gateway already on the host's default API port moved init to the
+        # next free port, which then appeared in the written config.
+        with patch("defenseclaw.bootstrap._api_port_free", return_value=True):
+            result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
 
         config_file = os.path.join(self.tmp_dir, "config.yaml")
@@ -4261,6 +4290,22 @@ class TestMultiConnectorInit(unittest.TestCase):
             cmd_init._prompt_connector_selection(None, False)
         self.assertTrue(discover.call_args.kwargs["refresh"])
         self.assertEqual(selector.call_args.kwargs["default_selected"], ["claudecode", "opencode"])
+
+    def test_connector_selection_rescans_a_cache_that_found_no_hook_connector(self):
+        # GAP-0092: a cache written before the agents were on PATH kept init
+        # saying "No hook connectors were detected" on the next run.
+        from defenseclaw.commands import cmd_init
+
+        cached = self._disc(set())
+        cached.cache_hit = True
+        fresh = self._disc({"claudecode", "codex"})
+        with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[cached, fresh]) as discover, \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init, "_with_config_state", side_effect=lambda found, _data_dir: found), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["codex"]) as selector:
+            cmd_init._prompt_connector_selection(None, False)
+        self.assertTrue(discover.call_args.kwargs["refresh"])
+        self.assertEqual(set(selector.call_args.kwargs["default_selected"]), {"claudecode", "codex"})
 
     def _select_after_unchecking_hermes(self, confirm: bool):
         from defenseclaw.commands import cmd_init

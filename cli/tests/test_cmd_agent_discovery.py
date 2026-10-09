@@ -781,10 +781,9 @@ class TriggerPostEnableScanTests(unittest.TestCase):
                 pass
 
             def scan_ai_usage(self):
-                # Every call fails with 503 — sidecar is mid-restart and
-                # never finishes binding. We expect the helper to retry
-                # the configured number of times, then surface a single
-                # warning instead of crashing the enable flow.
+                # Every call fails with 503: the restarted gateway has AI
+                # discovery off. The helper retries, then warns once and
+                # points at discovery status instead of a slow sidecar.
                 attempts["n"] += 1
                 resp = MagicMock(status_code=503)
                 exc = requests.HTTPError("boot")
@@ -810,6 +809,44 @@ class TriggerPostEnableScanTests(unittest.TestCase):
         # but we MUST never silently swallow without warning.
         self.assertGreaterEqual(attempts["n"], 2)
         self.assertIn("Could not run an initial scan", output)
+        self.assertIn("agent discovery status", output)
+        self.assertNotIn("once the sidecar is up", output)
+
+
+
+    def test_503_then_connection_failure_reports_unreachable_sidecar(self):
+        app = _make_ctx(enabled=True)
+        attempts = {"n": 0}
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def scan_ai_usage(self):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    exc = requests.HTTPError("discovery loading")
+                    exc.response = MagicMock(status_code=503)
+                    raise exc
+                raise requests.ConnectionError("connection refused")
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient), \
+                patch("defenseclaw.commands.cmd_agent.time.sleep"):
+            runner = CliRunner()
+            with runner.isolation() as (out, _err, _input):
+                cmd_agent._trigger_post_enable_scan(
+                    app,
+                    gateway_host=None,
+                    gateway_port=None,
+                    gateway_token_env=None,
+                )
+                output = out.getvalue().decode()
+
+        self.assertGreaterEqual(attempts["n"], 2)
+        self.assertIn("agent usage --refresh", output)
+        self.assertNotIn("agent discovery status", output)
 
 
 class RequireLoadedConfigTests(unittest.TestCase):

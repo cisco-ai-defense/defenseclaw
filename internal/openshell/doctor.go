@@ -327,6 +327,10 @@ type Doctor struct {
 	// Gateway reads the gateway configuration and service; it defaults to
 	// a configurator over Discover.ConfigDir, Runner and GOOS.
 	Gateway *GatewayConfigurator
+	// GatewayApplied hears of each gateway change a fix applied, rolled
+	// back or not, so the caller can record the files it wrote (setup's
+	// receipt, which teardown restores them from).
+	GatewayApplied func(*GatewayApplyResult)
 	// CLI is the openshell binary (default DefaultBinary).
 	CLI string
 
@@ -338,7 +342,8 @@ type Doctor struct {
 	// WantTelemetry is openshell.upstream_telemetry; nil only reports.
 	WantTelemetry *bool
 	// BindMountsOptional downgrades disabled bind mounts to a warning
-	// (copy-only workdir mode).
+	// (copy-only workdir mode, and no configured harness whose per-run
+	// settings are mounted).
 	BindMountsOptional bool
 	// MaxCPUMillis and MaxMemoryBytes are openshell.admin.max_resources (0:
 	// no maximum). The MicroVM driver gives every sandbox the gateway-wide
@@ -858,6 +863,9 @@ func (r *doctorRun) dockerAccessFix(msg string) *Fix {
 		}
 		return &Fix{Summary: "start the Docker daemon", Command: "sudo systemctl enable --now docker", Sudo: true}
 	}
+	if r.GOOS == "darwin" {
+		return &Fix{Summary: "Docker Desktop denied access to its socket; start Docker Desktop as this account and check the Docker context and socket permissions, then retry"}
+	}
 	member, inSession, err := r.DockerGroup()
 	if err == nil && member && !inSession {
 		return &Fix{Summary: "you are in the docker group, but this login session predates it; log out and back in (or run `newgrp docker`)"}
@@ -1005,6 +1013,9 @@ func (r *doctorRun) checkService(ctx context.Context) {
 		if r.GOOS == "linux" {
 			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}
 		}
+		if errors.Is(err, ErrBrewNeedsTerminal) {
+			c.Fix = &Fix{Summary: "run this command again from a normal terminal (Terminal.app, or an ssh login), not tmux"}
+		}
 		return
 	}
 	r.service, r.report.Service = st, st
@@ -1040,7 +1051,7 @@ func (r *doctorRun) checkService(ctx context.Context) {
 
 func (r *doctorRun) startCommand() serviceCommand {
 	if r.GOOS == "darwin" {
-		return serviceCommand{"brew", []string{"services", "start", GatewayFormula}}
+		return serviceCommand{r.Gateway.BrewCommand(), []string{"services", "start", GatewayFormula}}
 	}
 	return serviceCommand{"systemctl", []string{"--user", "enable", "--now", GatewayService}}
 }
@@ -1413,6 +1424,17 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 	c.Status, c.Detail = StatusPass, fmt.Sprintf("%s at %s", v, path)
 }
 
+// brewPrefix is the Homebrew prefix on a Mac ("" elsewhere).
+func (r *doctorRun) brewPrefix() string {
+	switch {
+	case r.GOOS != "darwin":
+		return ""
+	case r.Gateway.BrewPrefix != "":
+		return r.Gateway.BrewPrefix
+	}
+	return homebrewPrefix()
+}
+
 func (r *doctorRun) checkRegistration() {
 	c := Check{ID: CheckIDRegistration, Title: "Gateway registration"}
 	m := Check{ID: CheckIDMTLS, Title: "Gateway mTLS files"}
@@ -1442,10 +1464,10 @@ func (r *doctorRun) checkRegistration() {
 	case errors.Is(err, ErrUnauthenticatedGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "serve the local gateway over mTLS (the OpenShell package default; remove OPENSHELL_DISABLE_TLS from gateway.env) and register it with its client certificate",
-			Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
+			Command: registerGatewayCommand(r.brewPrefix())}
 	case errors.Is(err, ErrNoGateway), errors.Is(err, ErrGatewayNotFound):
 		c.Status, c.Detail = StatusFail, err.Error()
-		c.Fix = &Fix{Summary: "register the local gateway", Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
+		c.Fix = &Fix{Summary: "register the local gateway", Command: registerGatewayCommand(r.brewPrefix())}
 	case errors.Is(err, ErrRemoteGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "select the local gateway with openshell.gateway.name, or `openshell gateway select " + DefaultGatewayName + "`"}
@@ -1704,7 +1726,8 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		if r.BindMountsOptional {
 			mounts.Status = StatusWarn
 		}
-		mounts.Detail = fmt.Sprintf("disabled in %s; only --copy sandboxes work", st.TOMLPath)
+		mounts.Detail = fmt.Sprintf("disabled in %s: no Claude Code or Codex sandbox can start (DefenseClaw mounts their per-run settings read-only), "+
+			"and other harnesses run only on a copy", st.TOMLPath)
 		switch why := errors.Join(blocked, unverified); {
 		case why == nil && r.serviceMissing():
 			// A gateway run another way, which DefenseClaw cannot restart
@@ -1957,7 +1980,10 @@ func (r *doctorRun) applyGateway(ch GatewayChanges) func(context.Context) error 
 		if err != nil {
 			return err
 		}
-		_, err = r.Gateway.Apply(ctx, plan)
+		res, err := r.Gateway.Apply(ctx, plan)
+		if res != nil && r.GatewayApplied != nil {
+			r.GatewayApplied(res)
+		}
 		return err
 	}
 }

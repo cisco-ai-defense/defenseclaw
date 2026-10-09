@@ -61,7 +61,7 @@ to filter.
 | `4` | MCPs | Scanned MCP servers |
 | `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others) |
 | `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
-| `6` | Inventory | Combined inventory view |
+| `6` | Inventory | Combined inventory view, with sub-tabs for skills, plugins, MCPs, agents (including agent identities), tools, models, memory and [IDE plugins](#ide-plugins) |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
 | `9` | Audit | Audit trail. `3` (Blocks) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
@@ -77,6 +77,37 @@ rows so a large model cache cannot hide agent activity. Open **AI Discovery**
 with `V` for the full model inventory; model rows add Model, Model status, and
 Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
+
+### IDE plugins
+
+On Inventory (`6`), move to the **IDE plugins** sub-tab with `l` or Right
+(`h` or Left goes back). It lists every IDE extension and plugin the gateway's
+last full scan found, one row each: IDE, Plugin, Version, Enabled and AI. When
+more than one user is present a User column comes first.
+
+- **Enabled** is `yes`, `no`, `client side` (a remote IDE server, whose client
+  keeps that state) or `unknown`. A Remote-SSH server's IDE cell reads
+  `vscode (ssh)`, so a local and a server copy of the same extension look
+  different.
+- **AI** is `yes` for plugins the signature catalog flags as AI.
+- At 80 columns the Enabled and AI columns stay whole and the wider text
+  columns shrink.
+
+Press `Enter` for the detail card: Enabled, AI, IDE, Version, User, Name,
+Publisher, where the enabled state came from, the scope, the matched AI
+signature, and the installed and last-seen times. At 80x24 the card shows its
+first lines only; scroll it with `PageUp` and `PageDown`. The periodic refresh
+keeps the open card and your cursor.
+
+The list matches `defenseclaw agent ide-plugins`; see
+[IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). When AI
+discovery is off, or `ai_discovery.ide_inventory` is `off`, the tab says so
+instead of showing an empty list.
+
+The Plugins, Agents and MCPs sub-tabs add a User column too when more than one
+user is present. Agents lists the agent identities (`agt-`) that
+`defenseclaw agent identities` shows, up to the 1,000 most recently seen. A
+`+` after its count means there are more; the command lists them all.
 
 ### Doctor status and cache
 
@@ -345,7 +376,7 @@ rather than a finished setup.
 | Credentials | none | Names the model key `defenseclaw sandbox run` would share with each harness, never its value. It follows `openshell.llm`, as a run without `--llm` does. Under `auto` (the default) that is `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code, and `OPENAI_API_KEY`, `CODEX_API_KEY` or the API key a `codex login --with-api-key` stored in `auth.json` (in `$CODEX_HOME`, else `~/.codex`) for Codex; each list ends with `AWS_BEARER_TOKEN_BEDROCK` for Amazon Bedrock. A ChatGPT login is not shared, so it is not counted. With `none` nothing is shared; with a provider only its key counts, and without it runs are refused |
 | This machine | none | Docker, Landlock, OpenShell and bind-mount status, one per line, from a `sandbox doctor` check that runs when the form opens. When the gateway runs (or is set to run) OpenShell's MicroVM driver, Landlock reads `Landlock (MicroVM)`, and the MicroVM driver's own check (e2fsprogs, the driver's signature) takes the place of the bind-mount line |
 | Install OpenShell | `--install-openshell` | On when OpenShell is missing, its gateway needs attention, or the MicroVM driver's check fails: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` on Linux and installs the `nvidia/openshell` Homebrew formula on macOS. On macOS it also lets setup install e2fsprogs, which the MicroVM driver needs |
-| Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw only ever mounts the folder you launch from. Off: every run works on a copy. Turning bind mounts on restarts the OpenShell gateway (see below). Not shown on macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no host folders, and the form says so under **MicroVMs** |
+| Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw mounts only the folder you launch from and the read-only settings Claude Code and Codex sandboxes need. Off: no Claude Code or Codex sandbox can start, and other harnesses run on a copy. Turning bind mounts on restarts the OpenShell gateway (see below). Not shown on macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no host folders, and the form says so under **MicroVMs** |
 | Disable OpenShell Telemetry | `--upstream-telemetry` when off | On. Changing it restarts the OpenShell gateway (see below). Not shown on macOS: the Homebrew gateway does not read `gateway.env`, so setup cannot turn OpenShell's telemetry off there |
 | Shell Wrappers | `--wrappers` or `--no-wrappers` | Off. On makes the chosen harnesses' commands (`claude`, `codex`, ...) run sandboxed when you type them |
 | Build Images Now | `--skip-images` when off | On. The first build downloads about 3 GB; off leaves it to the first run |

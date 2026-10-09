@@ -211,7 +211,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
-	mode := sandboxHookMode(ctx, "codex", a.codexMode())
+	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
@@ -261,15 +261,21 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
+		actionInput := actionfacts.Input{
+			Tool:                     actionTool,
+			Args:                     toolArgs,
+			CWD:                      req.CWD,
+			ActiveHome:               hookActiveHome(ctx),
+			ToolResourceIdentity:     resourceIdentity,
+			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
+		}
+		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) {
+			actionInput.DialectHint = codexWindowsShellDialect(
+				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
+			)
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                     actionTool,
-				Args:                     toolArgs,
-				CWD:                      req.CWD,
-				ActiveHome:               hookActiveHome(ctx),
-				ToolResourceIdentity:     resourceIdentity,
-				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
-			},
+			Input:                     actionInput,
 			LegacyText:                string(toolArgs),
 			Connector:                 "codex",
 			EnforcementCapable:        true,
@@ -355,13 +361,18 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+		a.dispatchCodexHookNotification(ctx, req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := codexResponseFor(
-		req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
-		sinkPolicyFor(ctx, verdict.RedactionEnabled),
-	)
+	// A configured block message replaces the agent-facing reason on blocks,
+	// as on the generic hook path. Secure Client keeps the verdict reason
+	// (issue #1092).
+	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
+	if !a.managedAIDOnly() {
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "codex", action, reason, policy)
+	}
+	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	resp.SourceReason = verdict.Reason
 	if mode != "action" && resp.AdditionalContext != "" {
 		eligible := assetContextEligible || codexObserveContextEnforcementEligible(verdict)
 		if !eligible || !a.codexAdditionalContextFirstInWindow(req, rawAction, verdict, time.Now()) {
@@ -381,9 +392,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 // dispatchCodexHookNotification follows the same routing contract
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
-func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+func (a *APIServer) dispatchCodexHookNotification(ctx context.Context, req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook("codex", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+		a.dispatchHookBlockWebhook(ctx, "codex", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return
@@ -466,16 +477,10 @@ func (a *APIServer) codexEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "codex")
 }
 
-func (a *APIServer) codexMode() string {
-	mode := "observe"
-	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
-		mode = strings.TrimSpace(cfg.ConnectorHookConfig("codex").Mode)
-		if mode == "" || mode == "inherit" {
-			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("codex"))
-		}
-	}
-	return normalizeAgentHookMode(mode)
+func (a *APIServer) codexMode(ctx context.Context) string {
+	// The request's guardrail profile, when one applies, replaces the live
+	// configuration (see guardrail_profile.go).
+	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "codex")
 }
 
 func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) codexHookResponse {
@@ -755,6 +760,29 @@ func reasonOrDefault(reason string) string {
 
 func normalizeCodexAction(action string) string {
 	return normalizedGuardrailAction(action)
+}
+
+// codexWindowsShellDialect is the grammar of a Codex shell call on native
+// Windows. Codex names its shell tool Bash everywhere, but on Windows it runs
+// the command in PowerShell, so a PowerShell command such as
+// `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
+// and ran with no finding (GAP-0912), and so was the POSIX-looking
+// `echo k >> $HOME\.ssh\authorized_keys` (GAP-1134). A complete PowerShell
+// reading therefore decides. The PowerShell model leaves an unqualified
+// native program such as curl incomplete, because Windows PowerShell aliases
+// it; such a command keeps its inferred grammar, as before GAP-1134, so its
+// POSIX reading can still enforce instead of every finding turning into
+// detection-only.
+func codexWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
+	if !strings.EqualFold(strings.TrimSpace(tool), "bash") || command == "" {
+		return ""
+	}
+	input.DialectHint = actionfacts.DialectPowerShell
+	if actionfacts.Analyze(input).Authoritative() ||
+		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
+		return actionfacts.DialectPowerShell
+	}
+	return ""
 }
 
 func codexToolName(req codexHookRequest) string {

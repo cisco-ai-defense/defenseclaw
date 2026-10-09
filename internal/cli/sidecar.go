@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -90,24 +91,26 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	fmt.Println("║       DefenseClaw Gateway Sidecar            ║")
 	fmt.Println("╚══════════════════════════════════════════════╝")
 	fmt.Println()
-	fmt.Printf("  Gateway:      %s:%d\n", cfg.Gateway.Host, cfg.Gateway.Port)
+	fmt.Println(fleetBannerLine(cfg))
 	fmt.Printf("  Auto-approve: %v\n", cfg.Gateway.AutoApprove)
 	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg.Gateway.Token))
 	fmt.Printf("  API port:     %d\n", cfg.Gateway.APIPort)
-	fmt.Printf("  Watcher:      %v\n", cfg.Gateway.Watcher.Enabled)
-	if cfg.Gateway.Watcher.Enabled {
-		fmt.Printf("    Skill:      enabled=%v take_action=%v\n",
-			cfg.Gateway.Watcher.Skill.Enabled, cfg.Gateway.Watcher.Skill.TakeAction)
-		if len(cfg.Gateway.Watcher.Skill.Dirs) > 0 {
-			fmt.Printf("    Skill dirs: %v\n", cfg.Gateway.Watcher.Skill.Dirs)
-		} else {
-			fmt.Printf("    Skill dirs: autodiscover (from claw mode)\n")
-		}
+	for _, line := range watcherBannerLines(cfg) {
+		fmt.Println(line)
 	}
 	for _, line := range guardrailBannerLines(cfg) {
 		fmt.Println(line)
 	}
 	fmt.Println()
+
+	// A per-user gateway keeps the connector config roots its setup bound,
+	// whatever the shell that started it has set (GAP-0433). A managed
+	// gateway sets up no user hooks.
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		for _, note := range connector.PinConnectorConfigRootsToSetup(cfg.DataDir) {
+			fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+note)
+		}
+	}
 
 	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog)
 	if err != nil {
@@ -343,6 +346,47 @@ func tokenStatus(token string) string {
 		return token[:4] + "..." + token[len(token)-4:]
 	}
 	return "***"
+}
+
+// fleetBannerLine names the OpenClaw gateway the sidecar dials, or says it
+// dials none: a hook-only or managed install never connects to
+// gateway.host:port, so the default 127.0.0.1:18789 misled (GAP-0077).
+func fleetBannerLine(cfg *config.Config) string {
+	// Secure Client keeps the banner of its service log (issue #1092).
+	if !cfg.SecureClientIntegration() && !gateway.RequiresFleetGateway(cfg) {
+		return "  Gateway:      none (no OpenClaw fleet to connect to)"
+	}
+	return fmt.Sprintf("  Gateway:      %s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
+}
+
+// watcherBannerLines reports the install watcher as it will run: idle when
+// it has no folder to watch, as on a managed service, which never watches
+// its own profile's agent folders (GAP-0026, GAP-0077).
+func watcherBannerLines(cfg *config.Config) []string {
+	w := cfg.Gateway.Watcher
+	secureClient := cfg.SecureClientIntegration()
+	var lines []string
+	switch {
+	case secureClient:
+		// Secure Client keeps the banner of its service log (issue #1092).
+		if lines = []string{fmt.Sprintf("  Watcher:      %v", w.Enabled)}; !w.Enabled {
+			return lines
+		}
+	case !w.Enabled:
+		return []string{"  Watcher:      disabled"}
+	case !gateway.WatcherWatchesDirs(cfg):
+		return []string{"  Watcher:      idle (no directories to watch)"}
+	default:
+		lines = []string{"  Watcher:      enabled"}
+	}
+	lines = append(lines, fmt.Sprintf("    Skill:      enabled=%v take_action=%v", w.Skill.Enabled, w.Skill.TakeAction))
+	if len(w.Skill.Dirs) > 0 {
+		return append(lines, fmt.Sprintf("    Skill dirs: %v", w.Skill.Dirs))
+	}
+	if secureClient {
+		return append(lines, "    Skill dirs: autodiscover (from claw mode)")
+	}
+	return append(lines, "    Skill dirs: autodiscover (from the connector)")
 }
 
 // guardrailBannerLines is the guardrail part of the sidecar start banner.

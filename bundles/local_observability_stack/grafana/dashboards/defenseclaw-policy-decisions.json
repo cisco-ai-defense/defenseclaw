@@ -161,6 +161,26 @@
         ],
         "skipUrlSync": false,
         "hide": 2
+      },
+      {
+        "name": "user",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows every Loki panel on this board to records that carry that user, except the policy update stream inside Recent OPA + egress events: policy updates carry no user. Prometheus metric panels have no per-user label and stay fleet-wide.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
       }
     ]
   },
@@ -248,7 +268,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" |~ \"https?://\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" [$__range])) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -486,7 +506,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
+          "expr": "topk(10, sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__range])))",
           "instant": true,
           "format": "table",
           "refId": "A",
@@ -543,7 +563,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__interval]))",
+          "expr": "sum by (host) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" |~ \"https?://\" | regexp \"https?://(?P<host>[a-zA-Z0-9._-]+)\" | host!=\"\" | host!~\"localhost|127\\\\..*\" [$__interval]))",
           "legendFormat": "{{host}}",
           "refId": "A",
           "datasource": {
@@ -687,7 +707,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (tool_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=\"tool.invocation.completed\" | label_format tool_name=\"{{.body_gen_ai_tool_name}}\" [$__range])))",
+          "expr": "topk(20, sum by (tool_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=\"tool.invocation.completed\" | label_format tool_name=\"{{.body_gen_ai_tool_name}}\" [$__range])))",
           "instant": true,
           "refId": "A",
           "format": "table",
@@ -739,7 +759,7 @@
     {
       "type": "logs",
       "title": "Recent OPA + egress events",
-      "description": "Connector-scoped tool, finding, failure, and guardrail-evaluation events follow the Connector selection. Policy update and reload-rejection events are process-global control-plane records without a connector, so they remain visible for every Connector selection.",
+      "description": "Connector-scoped tool, finding, failure, and guardrail-evaluation events follow the Connector selection. Policy update and reload-rejection events are process-global control-plane records without a connector or a user, so they remain visible for every Connector and User selection.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -753,7 +773,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"tool[.]invocation[.].*|finding[.](observed|correlated)|.*failed\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=~\"tool[.]invocation[.].*|finding[.](observed|correlated)|.*failed\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -761,7 +781,7 @@
           }
         },
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)|hook_decision\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)|hook_decision\"",
           "refId": "B",
           "datasource": {
             "type": "loki",

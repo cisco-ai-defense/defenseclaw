@@ -27,10 +27,12 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
@@ -477,12 +479,20 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return readMCPFromClaudeSettings(path)
 }
 
-// ReadMCPFromClaudeJSONProjects is the exported wrapper around the
-// per-project local-scope Claude Code MCP reader; input is a path to
-// ~/.claude.json, and the returned entries flatten every
-// projects.<path>.mcpServers subtree.
-func ReadMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
-	return readMCPFromClaudeJSONProjects(path)
+// ReadMCPFromJSONCPaths reads the MCP servers found at each key chain of
+// paths in a JSON or JSONC file (union). AI discovery uses it for the agent
+// files whose servers are not a top-level mcpServers map: Amp's
+// amp.mcpServers and OpenClaw's and ZeptoClaw's mcp.servers (GAP-1062).
+func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(jsonc.Strip(data), &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, paths...)
 }
 
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
@@ -702,6 +712,12 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 			return expandPath(configHome)
 		}
 		return filepath.Join(home, ".omnigent")
+	case "kiro":
+		// Kiro IDE and Kiro CLI share ~/.kiro; matches
+		// connector_paths.connector_home("kiro") on the Python side. It used to
+		// fall through to OpenClaw's home_dir, so Kiro's agent identity was
+		// keyed on ~/.openclaw.
+		return filepath.Join(home, ".kiro")
 	default:
 		if c == nil {
 			return expandPath("~/.openclaw")
@@ -1019,22 +1035,6 @@ func sameClaudeWorkspace(left, right string) bool {
 	return left == right
 }
 
-// readMCPFromClaudeJSONProjects extracts per-project local-scope MCP servers
-// from the projects.<path>.mcpServers subtrees of ~/.claude.json. Each
-// project's servers ship as a single flat list — the parent-path prefix is
-// intentionally not appended so downstream de-dup by name works across scopes.
-func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	_, projectEntries, err := parseClaudeJSONScopes(data)
-	if err != nil {
-		return nil, err
-	}
-	return projectEntries, nil
-}
-
 // claudeJSONScopes is the union shape of ~/.claude.json we care about: the
 // user-scope `mcpServers` block and the per-project local-scope
 // `projects.<path>.mcpServers` blocks. Split out so one read+unmarshal of the
@@ -1097,7 +1097,7 @@ func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err er
 // ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
 // each read and decode the (often multi-megabyte) conversation-state file.
 func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxClaudeJSONConfigBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1156,6 +1156,44 @@ func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 }
 
 const maxCodexInventoryConfigBytes = 1 << 20
+
+// Bounds of one MCP config read. Claude Code's ~/.claude.json carries its
+// conversation state and runs to tens of MiB; the other files are small.
+const (
+	maxMCPConfigFileBytes    = 16 << 20
+	maxClaudeJSONConfigBytes = 256 << 20
+)
+
+// readMCPConfigFile reads one agent MCP config. A link is followed, as
+// dotfile managers link these files, but only a regular file within limit is
+// read and a FIFO never blocks the open: AI discovery reads these files in
+// every user's home, and a config linked to /dev/zero would grow the scan
+// until the host ran out of memory (GAP-0694).
+func readMCPConfigFile(path string, limit int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- agent MCP config path
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("MCP config %s is not a regular file", path)
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("MCP config %s exceeds %d bytes", path, limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("MCP config %s exceeds %d bytes", path, limit)
+	}
+	return data, nil
+}
 
 // readMCPFromCodexConfigTOML parses the [mcp_servers] table out of
 // ~/.codex/config.toml. Codex's documented schema is:
@@ -1391,7 +1429,7 @@ func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, erro
 }
 
 func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1445,7 +1483,7 @@ func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
 }
 
 func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1688,8 +1726,7 @@ func readJSONObjectJSONC(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data = stripJSONCComments(data)
-	data = stripJSONCTrailingCommas(data)
+	data = jsonc.Strip(data)
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
@@ -1698,7 +1735,7 @@ func readJSONObjectJSONC(path string) (map[string]any, error) {
 }
 
 func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1799,6 +1836,19 @@ func ReadMCPServersAMPUnderHome(home string) ([]MCPServerEntry, error) {
 	)
 }
 
+// ReadMCPFromAmpSettings reads the MCP servers of one Amp settings file
+// (settings.json, settings.jsonc or managed-settings.json). Amp keeps them
+// under the flat key amp.mcpServers, where `amp mcp add` writes them; AI
+// Discovery read these files with the Claude Code reader, which looks for a
+// top-level mcpServers, and so listed none of them (GAP-1062).
+func ReadMCPFromAmpSettings(path string) ([]MCPServerEntry, error) {
+	doc, err := readJSONObjectJSONC(path)
+	if err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, []string{"amp.mcpServers"})
+}
+
 func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSettingsPaths []string) ([]MCPServerEntry, error) {
 	var entries []MCPServerEntry
 
@@ -1869,89 +1919,6 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("Amp settings source changed during inspection")
 	}
 	return data, nil
-}
-
-func stripJSONCComments(data []byte) []byte {
-	out := make([]byte, 0, len(data))
-	inString := false
-	escaped := false
-	for i := 0; i < len(data); {
-		b := data[i]
-		if inString {
-			out = append(out, b)
-			if escaped {
-				escaped = false
-			} else if b == '\\' {
-				escaped = true
-			} else if b == '"' {
-				inString = false
-			}
-			i++
-			continue
-		}
-		if b == '"' {
-			inString = true
-			out = append(out, b)
-			i++
-			continue
-		}
-		if b == '/' && i+1 < len(data) && data[i+1] == '/' {
-			i += 2
-			for i < len(data) && data[i] != '\n' && data[i] != '\r' {
-				i++
-			}
-			continue
-		}
-		if b == '/' && i+1 < len(data) && data[i+1] == '*' {
-			i += 2
-			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(data) {
-				i += 2
-			}
-			continue
-		}
-		out = append(out, b)
-		i++
-	}
-	return out
-}
-
-func stripJSONCTrailingCommas(data []byte) []byte {
-	out := make([]byte, 0, len(data))
-	inString := false
-	escaped := false
-	for i := 0; i < len(data); i++ {
-		b := data[i]
-		if inString {
-			out = append(out, b)
-			if escaped {
-				escaped = false
-			} else if b == '\\' {
-				escaped = true
-			} else if b == '"' {
-				inString = false
-			}
-			continue
-		}
-		if b == '"' {
-			inString = true
-			out = append(out, b)
-			continue
-		}
-		if b == ',' {
-			j := i + 1
-			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\n' || data[j] == '\r') {
-				j++
-			}
-			if j < len(data) && (data[j] == '}' || data[j] == ']') {
-				continue
-			}
-		}
-		out = append(out, b)
-	}
-	return out
 }
 
 func dedupMCPEntries(entries []MCPServerEntry) []MCPServerEntry {

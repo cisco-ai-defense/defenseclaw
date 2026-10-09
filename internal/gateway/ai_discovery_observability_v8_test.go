@@ -8,11 +8,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -516,10 +519,262 @@ func TestContinuousAIDiscoveryV8CarriesModelProvenanceAcrossLifecycleFamilies(t 
 	}
 }
 
+// The owner's connector address reaches the per-cycle observation while
+// ai_discovery.include_user_email is on, and never a record without an owner
+// (GAP-0961, GAP-1025).
+func TestContinuousAIDiscoveryV8ObservationCarriesTheOwnerEmail(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Cleanup(func() { SetUserEmailCollectionEnabled(false) })
+	for _, enabled := range []bool{true, false} {
+		SetUserEmailCollectionEnabled(enabled)
+		capture := &endpointInventoryCapture{}
+		adapter := &aiDiscoveryV8Adapter{runtime: capture}
+		signal := func(id, user string) inventory.AISignal {
+			return inventory.AISignal{
+				SignalID: id, SignatureID: "codex", Category: inventory.SignalPackageDependency, Vendor: "OpenAI",
+				Product: "Codex", Confidence: .9, State: inventory.AIStateSeen, Detector: "config",
+				SupportedConnector: "codex", UserID: user, UserName: user, UserEmail: "rs4a@example.test",
+			}
+		}
+		report := inventory.AIDiscoveryReport{
+			Summary: inventory.AIDiscoverySummary{ScanID: "scan-email", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok", TotalSignals: 2, ActiveSignals: 2},
+			Signals: []inventory.AISignal{signal("owned", "1001"), signal("unowned", "")},
+		}
+		if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+			t.Fatal(err)
+		}
+		observed := 0
+		for _, record := range capture.snapshot() {
+			if record.EventName() != "ai_component.observed" {
+				continue
+			}
+			observed++
+			body := canonicalBody(t, record)
+			want := ""
+			if enabled && body[observability.TelemetryAttributeDefenseClawAIComponentID] == "owned" {
+				want = "rs4a@example.test"
+			}
+			if got, _ := body[observability.TelemetryAttributeDefenseClawUserEmail].(string); got != want {
+				t.Errorf("enabled=%t %v email=%q want %q", enabled, body[observability.TelemetryAttributeDefenseClawAIComponentID], got, want)
+			}
+		}
+		if observed != 2 {
+			t.Fatalf("enabled=%t: %d ai_component.observed records, want 2", enabled, observed)
+		}
+	}
+}
+
+// The standalone profile exports only lifecycle deltas, so the owner's
+// address rides one ai_component.observed record per account and connector
+// each cycle: the owner's own, never one without a user, and the strict
+// profile drops it (GAP-0961, GAP-1099).
+func TestStandaloneAIDiscoveryV8DeliversTheOwnerEmail(t *testing.T) {
+	withManagedEnterprise(t, false)
+	previous := standaloneEnterpriseActive.Load()
+	setStandaloneEnterpriseActive(true)
+	t.Cleanup(func() { setStandaloneEnterpriseActive(previous) })
+	withUserEmailCollection(t, true)
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	signal := func(id, user, category, state string) inventory.AISignal {
+		return inventory.AISignal{
+			SignalID: id, SignatureID: "codex", Category: category, Vendor: "OpenAI", Product: "Codex",
+			Confidence: .9, State: state, Detector: "config", SupportedConnector: "codex",
+			UserID: user, UserName: user, UserEmail: "rs4a@example.test",
+		}
+	}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScanID: "scan-email", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok", TotalSignals: 3, ActiveSignals: 3},
+		Signals: []inventory.AISignal{
+			signal("owned-mcp", "1001", inventory.SignalMCPServer, inventory.AIStateSeen),
+			signal("owned", "1001", inventory.SignalSupportedConnector, inventory.AIStateNew),
+			signal("unowned", "", inventory.SignalSupportedConnector, inventory.AIStateSeen),
+		},
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	var observed []observability.Record
+	for _, record := range capture.snapshot() {
+		if record.EventName() == "ai_component.observed" {
+			observed = append(observed, record)
+		}
+	}
+	if len(observed) != 1 {
+		t.Fatalf("%d ai_component.observed records, want one for the owner", len(observed))
+	}
+	body := canonicalBody(t, observed[0])
+	email := observability.TelemetryAttributeDefenseClawUserEmail
+	if body[observability.TelemetryAttributeDefenseClawAIComponentID] != "owned" || body[email] != "rs4a@example.test" {
+		t.Fatalf("observed record = %v", body)
+	}
+	key, err := observabilityredaction.LoadOrCreateCorrelationKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	engine, err := newObservabilityV8RedactionEngine(cfg, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, _ := observabilityredaction.BuiltInProfile(observabilityredaction.ProfileStrict)
+	projection, _, err := engine.Project(observed[0], strict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object, _ := projection.Payload().Object(); object[email] != nil {
+		t.Fatalf("strict kept %s", email)
+	}
+}
+
 func asSidecarObservabilityError(err error, target **sidecarObservabilityError) bool {
 	value, ok := err.(*sidecarObservabilityError)
 	if ok {
 		*target = value
 	}
 	return ok
+}
+
+// The IDE inventory's lifecycle reaches the generated ide.plugin.* logs
+// and the per-product gauge, carrying plugin ids but no paths.
+func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
+	fixture := newOTLPV8MetricFixture(t)
+	runtime := &discoveryMetricFailureRuntime{aiDiscoveryV8Runtime: fixture.runtime}
+	adapter := &aiDiscoveryV8Adapter{runtime: runtime}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScanID: "scan-ide", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok"},
+		IDEInventory: &inventory.IDEInventory{
+			Plugins: []inventory.IDEPlugin{
+				{PluginID: "anthropic.claude-code", Product: "vscode", Version: "2.0.1", Enabled: "enabled", IsAI: true, UserID: "1001", UserName: "alice@realm", PathHash: "sha256:" + strings.Repeat("a", 64), State: inventory.AIStateNew},
+				{PluginID: "ms-python.python", Product: "vscode", Enabled: "disabled", State: inventory.AIStateSeen},
+			},
+			Removed: []inventory.IDEPlugin{{PluginID: "com.github.copilot", Product: "pycharm", Enabled: "enabled", IsAI: true, State: inventory.AIStateGone}},
+		},
+	}
+	// JetBrains ids are free text and may contain spaces and Unicode.
+	report.IDEInventory.Plugins = append(report.IDEInventory.Plugins,
+		inventory.IDEPlugin{PluginID: "String Manipulation", Product: "pycharm", Enabled: "disabled", State: inventory.AIStateNew},
+		inventory.IDEPlugin{PluginID: "outil-équipe", Product: "pycharm", Enabled: "enabled", State: inventory.AIStateNew})
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatalf("EmitReport: %v", err)
+	}
+	var events []string
+	for _, row := range readStoredContinuousDiscoveryV8(t, fixture.path) {
+		events = append(events, row.eventName)
+		if raw, _ := json.Marshal(row.body); strings.Contains(string(raw), "sha256:aaaa") {
+			t.Fatalf("ide record carried a path hash: %s", raw)
+		}
+	}
+	if strings.Join(events, ",") != "ai.discovery.completed,ide.plugin.discovered,ide.plugin.discovered,ide.plugin.discovered,ide.plugin.removed" {
+		t.Fatalf("events = %v", events)
+	}
+	var unicodeIDFound bool
+	for _, row := range readStoredContinuousDiscoveryV8(t, fixture.path) {
+		if row.eventName == "ide.plugin.discovered" && row.body["defenseclaw.ide.plugin.id"] == "anthropic.claude-code" {
+			if got := row.body["defenseclaw.user.name"]; got != "alice@realm" {
+				t.Errorf("qualified plugin account name = %v, want alice@realm", got)
+			}
+		}
+		if row.eventName == "ide.plugin.discovered" && row.body["defenseclaw.ide.plugin.id"] == "outil-équipe" {
+			unicodeIDFound = true
+		}
+	}
+	if !unicodeIDFound {
+		t.Fatal("Unicode plugin id missing from ide.plugin.discovered record")
+	}
+	gauges := 0
+	for _, family := range runtime.snapshot() {
+		if family == observability.EventName(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins) {
+			gauges++
+		}
+	}
+	// Every (enabled, ai) series of each IDE is recorded, zeros included, so
+	// pycharm, whose only plugin was removed, drops to 0 instead of keeping
+	// its last value (GAP-0014). One unlabeled series carries the current total.
+	if gauges != 1+2*len(ideGaugeEnabledStates)*2 {
+		t.Fatalf("ide_plugins gauge records = %d, want the total and every (enabled, ai) series of vscode and pycharm", gauges)
+	}
+	_, counts := ideGaugePoints(report.IDEInventory)
+	if counts[ideGaugeKey{"pycharm", "enabled", true}] != 0 || counts[ideGaugeKey{"vscode", "enabled", true}] != 1 ||
+		counts[ideGaugeKey{"vscode", "disabled", false}] != 1 {
+		t.Fatalf("ide_plugins gauge points = %v", counts)
+	}
+}
+
+func TestIDEPluginTotalGaugeCoversEmptyAndOffScans(t *testing.T) {
+	fixture := newOTLPV8MetricFixture(t)
+	runtime := &discoveryMetricFailureRuntime{aiDiscoveryV8Runtime: fixture.runtime}
+	adapter := &aiDiscoveryV8Adapter{runtime: runtime}
+	report := inventory.AIDiscoveryReport{
+		Summary:      inventory.AIDiscoverySummary{ScanID: "scan-empty", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok"},
+		IDEInventory: &inventory.IDEInventory{},
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		n := 0
+		for _, family := range runtime.snapshot() {
+			if family == observability.EventName(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins) {
+				n++
+			}
+		}
+		return n
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("empty scan gauge samples = %d, want one total zero", got)
+	}
+	report.IDEInventory.Scope = "off"
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(); got != 2 {
+		t.Fatalf("off scan gauge samples = %d, want a fresh total zero", got)
+	}
+
+	dashboard, err := os.ReadFile("../../bundles/local_observability_stack/grafana/dashboards/defenseclaw-ai-discovery.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal(dashboard, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	breakdowns := map[string]bool{
+		"AI plugins": false, "Disabled plugins": false, "Plugins by IDE": false,
+		"AI vs other plugins by IDE": false, "AI vs other plugins": false,
+		"Plugins by enabled state": false,
+	}
+	installed := false
+	for _, panel := range parsed.Panels {
+		if panel.Title == "IDE plugins installed" {
+			if len(panel.Targets) != 1 || panel.Targets[0].Expr != `sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=""})` {
+				t.Fatalf("installed panel does not select only the current total: %+v", panel.Targets)
+			}
+			installed = true
+		}
+		if _, ok := breakdowns[panel.Title]; ok {
+			if len(panel.Targets) != 1 ||
+				!strings.Contains(panel.Targets[0].Expr, `and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=""} > 0)`) {
+				t.Errorf("%s does not filter stale plugin series by its gateway total: %+v", panel.Title, panel.Targets)
+			}
+			breakdowns[panel.Title] = true
+		}
+	}
+	if !installed {
+		t.Error("IDE plugins installed panel missing")
+	}
+	for title, found := range breakdowns {
+		if !found {
+			t.Errorf("%s panel missing", title)
+		}
+	}
 }

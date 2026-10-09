@@ -1845,8 +1845,9 @@ compromised hook shows:
 
 - **Hook silence** (`hook_silence`): the harness is active (OCSF process or
   network events of the harness's own binaries under its install root,
-  their connections to the egress proxy included, native OTLP) for
-  `HookSilence` without a single hook request. Commands the harness did not
+  their connections to the egress proxy included) for `HookSilence` without
+  a single hook request. The native OTLP an idle harness exports at its prompt
+  is not activity. Commands the harness did not
   start, such as the CLI's probe, a copy-mode upload or pull, or your own
   `sandbox exec`, do not count, and neither do the egress proxy's own
   events, which cannot tell the harness's requests from theirs.

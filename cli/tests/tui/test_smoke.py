@@ -51,7 +51,10 @@ def _panel_params() -> list[object]:
     for name, key, _label in PANELS:
         reason = KNOWN_BELOW_FOLD.get(name)
         marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
-        params.append(pytest.param(name, key, id=name, marks=marks))
+        params.append(pytest.param(name, key, "", id=name, marks=marks))
+        if name == "inventory":
+            # The widest sub-tab row: the IDE plugin table must fit too.
+            params.append(pytest.param(name, key, "ide_plugins", id="inventory-ide-plugins"))
     return params
 
 
@@ -95,9 +98,11 @@ async def _wait_for_panel_render(pilot, app: DefenseClawTUI, panel: str) -> None
     await pilot.pause()
 
 
-@pytest.mark.parametrize(("name", "key"), _panel_params())
-async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: str) -> None:
+@pytest.mark.parametrize(("name", "key", "subtab"), _panel_params())
+async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: str, subtab: str) -> None:
     app = fixtures.snapshot_app(tmp_path)
+    if subtab:
+        app.inventory_model.set_active_subtab(subtab)  # type: ignore[arg-type]
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         if name != app.active_panel:
@@ -112,6 +117,23 @@ async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: 
 
         fold = app.size.height - FOOTER_ROWS
         table = app.query_one("#panel-table", DataTable)
+        if subtab:
+            assert app.inventory_model.active_sub == subtab
+            assert table.row_count > 0, f"{subtab}: the fixture rows are not in the table"
+            # The active sub-tab button is scrolled into view (GAP-0020).
+            await pilot.pause()
+            bar = app.query_one("#inventory-controls")
+            button = app.query_one(f"#inventory-tab-{subtab}").region
+            assert button.width > 0 and bar.region.contains_region(button), f"{subtab}: its button is off the bar"
+        if subtab == "ide_plugins":
+            # The card shows two of its lines here; PgDn reads the rest (GAP-0090).
+            await pilot.press("enter")
+            await pilot.pause()
+            detail = app.query_one("#detail-panel")
+            assert detail.max_scroll_y > 0 and "PgUp/PgDn scroll detail" in app.hint_text
+            await pilot.press("pagedown")
+            await pilot.pause()
+            assert detail.scroll_y > 0 and app.inventory_model.detail_open
         if table.row_count > 0:
             assert table.display, f"{name}: table has rows but is hidden"
             assert table.region.height > 0, f"{name}: table has no height"

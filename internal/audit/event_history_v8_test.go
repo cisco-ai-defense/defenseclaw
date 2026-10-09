@@ -475,11 +475,51 @@ func TestV8EventHistoryMigrationIsAdditiveAndIdempotent(t *testing.T) {
 	if err := store.Init(); err != nil {
 		t.Fatalf("Init after migration replay: %v", err)
 	}
+	// GAP-0246: the indexes no query reads are dropped, except on a Secure
+	// Client store, whose schema stays main's (#1092).
+	countIndex := func(db *sql.DB, name string) int {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secureClient, err := NewStore(store.dbPath, WithSecureClientSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secureClient.Init(); err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range unreadAuditIndexes {
+		if countIndex(secureClient.db, index.name) != 1 {
+			t.Fatalf("Secure Client store lost index %s", index.name)
+		}
+	}
+	if err := secureClient.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = NewStore(store.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range unreadAuditIndexes {
+		if countIndex(store.db, index.name) != 0 {
+			t.Fatalf("unread index %s kept", index.name)
+		}
+	}
 
 	for _, index := range []string{
 		"idx_audit_bucket_timestamp", "idx_audit_event_name_timestamp", "idx_audit_source_timestamp",
 		"idx_audit_turn_id", "idx_audit_evaluation_id", "idx_audit_scan_id",
-		"idx_audit_finding_id", "idx_audit_enforcement_action_id",
+		"idx_audit_enforcement_action_id",
 	} {
 		var count int
 		if err := store.db.QueryRow(
@@ -1490,6 +1530,8 @@ func TestEventHistoryCompatibilityColumnsFollowTheLocalProfile(t *testing.T) {
 				Severity:   "INFO",
 				Connector:  "claudecode",
 				Structured: map[string]any{"reason": "judge-exfil: quoted " + rawMarker},
+				// GAP-0131: a path-class field of the projection, so the column follows it.
+				RulePackDir: "/home/alice@corp.example/.defenseclaw/policies/guardrail/default",
 			}
 			stampAuditEventEnvelope(&event)
 			record, err := buildCompatibilityAuditV8Record(
@@ -1507,12 +1549,20 @@ func TestEventHistoryCompatibilityColumnsFollowTheLocalProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			row := loadV8HistoryRow(t, store, record.RecordID())
+			var rulePackDir string
+			if err := store.db.QueryRow(`SELECT COALESCE(rule_pack_dir,'') FROM audit_events WHERE id = ?`,
+				record.RecordID()).Scan(&rulePackDir); err != nil {
+				t.Fatal(err)
+			}
 			if profileName == observabilityredaction.ProfileNone {
 				if row.Details != event.Details || row.Target != event.Target ||
-					!strings.Contains(row.StructuredJSON, rawMarker) {
-					t.Fatalf("profile none changed the compatibility columns: %#v", row)
+					!strings.Contains(row.StructuredJSON, rawMarker) || rulePackDir != event.RulePackDir {
+					t.Fatalf("profile none changed the compatibility columns: %#v %q", row, rulePackDir)
 				}
 				return
+			}
+			if rulePackDir != "" {
+				t.Fatalf("rule_pack_dir kept the path the %s profile removed: %q", profileName, rulePackDir)
 			}
 			for field, value := range map[string]string{
 				"target": row.Target, "details": row.Details, "structured_json": row.StructuredJSON,

@@ -33,6 +33,7 @@ from defenseclaw.config import CONFIG_PATH_ENV
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
+from tests.environment import source_package_env
 from tests.permissions import assert_owner_only_file
 
 
@@ -338,6 +339,7 @@ with locked_file_update(lock_base):
                     os.fspath(holder_release),
                 ],
                 cwd=Path(__file__).resolve().parents[2],
+                env=source_package_env(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

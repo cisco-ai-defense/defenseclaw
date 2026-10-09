@@ -499,6 +499,76 @@ func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspecto
 	}
 }
 
+// SetSecureClientIntegration preserves the existing judge prompt for Secure Client.
+// The sidecar calls this before serving proxy requests.
+func (p *GuardrailProxy) SetSecureClientIntegration(enabled bool) {
+	if p == nil {
+		return
+	}
+	if g, ok := p.inspector.(*GuardrailInspector); ok && g.judge != nil {
+		g.judge.secureClient = enabled
+	}
+}
+
+// servedConnector is the connector this proxy serves: the wired connector
+// (guardrail.connector may be empty for OpenClaw), never the /c/<name>/ path
+// prefix or a header.
+func (p *GuardrailProxy) servedConnector() string {
+	p.rtMu.RLock()
+	defer p.rtMu.RUnlock()
+	if p.connector != nil {
+		return p.connector.Name()
+	}
+	if p.cfg != nil {
+		return p.cfg.Connector
+	}
+	return ""
+}
+
+// withProxyAgent attributes an authenticated proxy request to the agent
+// install the proxy serves, as acpEvaluationContext does for ACP: the agent
+// identity the hook path derives for the proxy's connector and the verified
+// user, recorded for `defenseclaw agent identities`. It then resolves the
+// request's guardrail profile with that connector and agent, so connectors
+// and agents assignments decide proxy traffic as explain says they do.
+type unverifiedProxyCallerKey struct{}
+
+func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
+	ctx := r.Context()
+	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) {
+		// A provider key admits model traffic but says nothing about who sent it.
+		// Keep the proxy's base guardrail and leave the owner's agent unclaimed.
+		return r.WithContext(context.WithValue(ctx, unverifiedProxyCallerKey{}, true))
+	}
+	connectorName := p.servedConnector()
+	if identity := AgentIdentityFromContext(ctx); identity.IdentityID == "" {
+		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
+			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
+			ctx = ContextWithAgentIdentity(ctx, identity)
+			sharedAgentIdentities.observe(facts, "", false)
+		}
+	}
+	return r.WithContext(withGuardrailProfile(ctx, liveGuardrailProfiles.Load(), connectorName))
+}
+
+// profileModeFor applies the request's identity-based guardrail profile to
+// the proxy's mode and block message. It changes them only for a request
+// with a verified user-scoped identity (profileProxyOverride) and never for
+// a disabled ("passthrough") guardrail.
+func (p *GuardrailProxy) profileModeFor(ctx context.Context, mode, blockMessage string) (string, string) {
+	if mode == "passthrough" {
+		return mode, blockMessage
+	}
+	profileMode, profileMessage, ok := profileProxyOverride(ctx, p.servedConnector())
+	if !ok {
+		return mode, blockMessage
+	}
+	if profileMessage != "" {
+		blockMessage = profileMessage
+	}
+	return normalizeAgentHookMode(profileMode), blockMessage
+}
+
 // ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
 // the live proxy without rereading any side files.
 func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
@@ -653,7 +723,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	//   trace context → requestID → correlation → requestLogger → rate → mux
 	// which we construct by wrapping inside-out.
 	withCorr := CorrelationMiddleware(SharedAgentRegistry())(logged)
-	withRequestID := p.requestIDMiddleware(withCorr)
+	withRequestID := p.requestIDMiddleware(dropProxyUserClaims(withCorr))
 	handler := inboundTraceContextMiddleware(withRequestID)
 	srv := &http.Server{Addr: addr, Handler: handler}
 
@@ -848,7 +918,8 @@ func setPassthroughUpstreamAuth(h http.Header, provider, upstreamAuth string) {
 // X-DC-Target-URL. Such a request has no body to inspect, so it is sent on
 // as is. An empty 200 made OpenClaw fail to parse the model list (GAP-2213).
 func (p *GuardrailProxy) handleReadOnlyPassthrough(w http.ResponseWriter, r *http.Request) {
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid API key")
 		return
 	}
@@ -911,7 +982,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
@@ -925,6 +997,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.handleChatCompletion(w, r)
 		return
 	}
+	r = p.withProxyAgent(r)
 
 	// Peek the body once so the shape classifier can run even when the
 	// URL is unknown. 10 MiB cap matches the original io.Copy budget.
@@ -1093,6 +1166,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	mode := p.mode
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
+	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
 
 	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
@@ -2595,12 +2669,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
+	r = p.withProxyAgent(r)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
@@ -2741,6 +2817,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	mode := p.mode
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
+	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
 
 	// Hot-disabled: guardrail was turned off without sidecar restart.
 	// Return 503 so the fetch interceptor stops routing through the proxy.
@@ -4196,7 +4273,59 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 //   - For non-loopback (sandbox / bridge deployments), authentication is always
 //     required via X-DC-Auth or the master key.
 
-func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Request) bool {
+// authenticateRequest returns r with its verified subject bound when the
+// caller proved an owner credential (presentsOwnerCredential).
+func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bool) {
+	if !p.credentialsAccepted(r) {
+		return r, false
+	}
+	if p.presentsOwnerCredential(r) {
+		// The correlation middleware took the user from the loopback
+		// X-DefenseClaw-User-* headers; the gateway's own account replaces
+		// that claim, as on the hook and ACP routes.
+		r = r.WithContext(attachProcessOwner(r.Context(), p.observabilityV8Emitter()))
+	}
+	return r, true
+}
+
+// dropProxyUserClaims prevents proxy user headers from becoming correlation
+// identity. Generic X-User-* headers remain on the request for the configured
+// custom-header forwarding path; DefenseClaw headers are internal-only.
+type proxyUserClaimsIgnoredKey struct{}
+
+func dropProxyUserClaims(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if identityFactsEnabled.Load() {
+			r.Header.Del(llmEventUserIDHeader)
+			r.Header.Del(llmEventUserNameHeader)
+			r = r.WithContext(context.WithValue(r.Context(), proxyUserClaimsIgnoredKey{}, true))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// presentsOwnerCredential reports whether r carries a credential only the
+// gateway's account can read: the gateway token or the master key derived
+// from its device key. Connectors also admit loopback callers without one
+// (legacy hook installs) or with a provider key, which prove nothing about
+// who sent the request.
+func (p *GuardrailProxy) presentsOwnerCredential(r *http.Request) bool {
+	if p.matchesRefreshedGatewayToken(r) {
+		return true
+	}
+	for _, presented := range []string{
+		strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer "),
+		connector.ExtractBearerKey(r.Header.Get("Authorization")),
+	} {
+		if presented != "" && ((p.gatewayToken != "" && constantTimeStringMatch(presented, p.gatewayToken)) ||
+			(p.masterKey != "" && constantTimeStringMatch(presented, p.masterKey))) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	// Test-only fast path: legacy proxy_test.go fixtures construct
 	// a GuardrailProxy directly without the NewGuardrailProxy boot
 	// path that synthesizes the gateway token. The bypass is set
@@ -4264,11 +4393,9 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 	// and client-controlled values out of metric cardinality. Target v8 startup
 	// guarantees this capability; a missing/detached runtime or failed canonical
 	// emission must never revive the legacy gateway log or Provider counter.
-	runtime := p.observabilityV8TraceRuntime()
-	emitter, _ := runtime.(sidecarRuntimeEmitter)
 	emitProtectedBoundaryAuthenticationFailureV8(
 		r.Context(),
-		emitter,
+		p.observabilityV8Emitter(),
 		observability.SourceGateway,
 		proxyAuthenticationLogV8Producer,
 		proxyAuthenticationMetricV8Producer,

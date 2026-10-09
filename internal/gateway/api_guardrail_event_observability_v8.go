@@ -159,7 +159,10 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 		)
 		envelope.ObservedAt = observability.Present(facts.observedAt)
 		envelope.Correlation.EvaluationID = facts.request.EvaluationID
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		profileTelemetry := guardrailProfileTelemetryFor(ctx)
+		input := observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
 			GenAIConversationID:                 optionalJudgeMetricText(facts.meta.SessionID),
@@ -167,6 +170,7 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 			GenAIAgentName:                      inspectTraceV8AgentName(facts.meta.AgentName),
 			DefenseClawAgentType:                hookV8OptionalText(facts.identity.AgentType, 4096),
 			DefenseClawAgentInstanceID:          optionalJudgeMetricText(facts.identity.AgentInstanceID),
+			DefenseClawAgentIdentityID:          agentIdentityV8(agentIdentityIDForTraffic(ctx, facts.identity)),
 			DefenseClawEvaluationID:             facts.request.EvaluationID,
 			DefenseClawPolicyID:                 optionalJudgeMetricText(facts.meta.PolicyID),
 			DefenseClawGuardrailName:            observability.Present("guardrail-event-api"),
@@ -193,7 +197,19 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 			DefenseClawAcpSurface:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.surface }),
 			DefenseClawAcpProfile:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.profile }),
 			DefenseClawAcpProtocolVersion:       optionalACPFact(facts.acp, func(_ *acpEvaluationV8Context) string { return acp.SchemaVersion }),
-		})
+		}
+		// The verified account behind the evaluation, as the hook decision
+		// and tool rows of the same user carry it: without it a record that
+		// says the principal is verified names nobody (GAP-0252). Secure
+		// Client keeps the family of main, which names no user (issue #1092).
+		caller := auditCallerIdentity(ctx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	facts.recordMetrics(ctx, metricRuntime)
 	return logErr

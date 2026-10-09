@@ -22,10 +22,15 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // confidencePolicyMaxRequestBytes caps the body of
@@ -42,14 +47,16 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 	discovery, releaseDiscovery := a.leaseAIDiscovery()
 	defer releaseDiscovery()
 	if discovery == nil {
-		a.writeJSON(w, http.StatusOK, map[string]any{
+		body := map[string]any{
 			"enabled":                        false,
 			"lookup_model_provenance_online": false,
 			"summary": map[string]any{
 				"result": "disabled",
 			},
 			"signals": []any{},
-		})
+		}
+		a.addAIUsageIDEPluginCounts(body, nil)
+		a.writeJSON(w, http.StatusOK, body)
 		return
 	}
 	report := discovery.Snapshot()
@@ -62,12 +69,169 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 	// safe and never touches the persistent state file.
 	inventory.EnrichSignalsWithComponentConfidence(report.Signals, discovery.ConfidenceParams())
 	report = a.sanitizeAIUsageReportForResponse(report)
-	a.writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"enabled":                        true,
 		"lookup_model_provenance_online": discovery.LookupModelProvenanceOnline(),
 		"summary":                        report.Summary,
 		"signals":                        report.Signals,
-	})
+	}
+	a.addAIUsageIDEPluginCounts(body, discovery.IDEInventory())
+	a.writeJSON(w, http.StatusOK, body)
+}
+
+// addAIUsageIDEPluginCounts adds the machine-wide IDE plugin counts to the
+// GET /api/v1/ai-usage body. Secure Client keeps the body without them
+// (issue #1092).
+func (a *APIServer) addAIUsageIDEPluginCounts(body map[string]any, inv *inventory.IDEInventory) {
+	if !a.managedAIDOnly() {
+		body["ide_plugins"] = inv.Counts()
+	}
+}
+
+const (
+	idePluginsDefaultLimit = 500
+	idePluginsMaxLimit     = 1000
+)
+
+// ideFamilyNamesProduct lists the IDE families whose name is also a product
+// token: a filter on one of these names that product, not its forks (--ide
+// vscode is VS Code, not Cursor).
+var ideFamilyNamesProduct = map[string]bool{
+	ideplugins.FamilyVSCode:  true,
+	ideplugins.FamilyVim:     true,
+	ideplugins.FamilyZed:     true,
+	ideplugins.FamilyEclipse: true,
+}
+
+// ideFilterMatches reports whether an IDE filter (a product token or a
+// family such as jetbrains) selects a row.
+func ideFilterMatches(ide, family, product string) bool {
+	if ide == "" || ide == product {
+		return true
+	}
+	return ide == family && !ideFamilyNamesProduct[family]
+}
+
+// handleAIUsageIDEPlugins serves GET /api/v1/ai-usage/ide-plugins: the
+// last full scan's IDE extensions and plugins, filtered by user (account
+// name or id), IDE product or family, and ai_only, a page at a time
+// (cursor is the opaque next_cursor of the previous page). counts
+// summarizes the filtered rows across all pages; GET /api/v1/ai-usage
+// carries the whole-machine counts. Paths appear only as hashes.
+func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	limit := idePluginsDefaultLimit
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = min(n, idePluginsMaxLimit)
+	}
+	offset := 0
+	if raw := strings.TrimSpace(q.Get("cursor")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cursor"})
+			return
+		}
+		offset = n
+	}
+	aiOnly := false
+	if raw := strings.TrimSpace(q.Get("ai_only")); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ai_only must be true or false"})
+			return
+		}
+		aiOnly = v
+	}
+	user := strings.TrimSpace(q.Get("user"))
+	ide := strings.ToLower(strings.TrimSpace(q.Get("ide")))
+
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	scope := config.IDEInventoryAll
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		scope = cfg.AIDiscovery.EffectiveIDEInventory()
+	}
+	var inv *inventory.IDEInventory
+	if discovery != nil {
+		inv = discovery.IDEInventory()
+	}
+	resp := map[string]any{
+		"enabled":       discovery != nil,
+		"scope":         scope,
+		"total":         0,
+		"next_cursor":   "",
+		"counts":        (*inventory.IDEInventory)(nil).Counts(),
+		"installations": []inventory.IDEInstallation{},
+		"plugins":       []inventory.IDEPlugin{},
+	}
+	if inv == nil {
+		resp["reason"] = ideInventoryEmptyReason(discovery != nil, scope)
+		a.writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	resp["scope"] = inv.Scope
+	resp["partial"] = inv.Partial
+	resp["scan_id"] = ""
+	resp["scanned_at"] = inv.ScannedAt
+	plugins := []inventory.IDEPlugin{}
+	withPlugin := map[string]bool{}
+	account := useridentity.NewAccountFilter(user, adminViewAccountIDs(user)...)
+	for _, p := range inv.Plugins {
+		if account.Matches(p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
+			plugins = append(plugins, p)
+			withPlugin[p.InstallID] = true
+		}
+	}
+	// ai_only keeps only the installations that hold a selected plugin
+	// (GAP-0104); the user and ide filters keep plugin-less installations.
+	installs := []inventory.IDEInstallation{}
+	for _, inst := range inv.Installations {
+		if account.Matches(inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) && (!aiOnly || withPlugin[inst.InstallID]) {
+			installs = append(installs, inst)
+		}
+	}
+	total := len(plugins)
+	if offset > total {
+		offset = total
+	}
+	end := min(offset+limit, total)
+	if end < total {
+		resp["next_cursor"] = strconv.Itoa(end)
+	}
+	resp["total"] = total
+	resp["counts"] = (&inventory.IDEInventory{Installations: installs, Plugins: plugins}).Counts()
+	nameIDERows(plugins[offset:end], installs)
+	resp["installations"] = installs
+	resp["plugins"] = plugins[offset:end]
+	resp["scan_id"] = inv.ScanID
+	a.writeJSON(w, http.StatusOK, resp)
+}
+
+// ideInventoryEmptyReason says why an IDE plugin answer has no inventory and
+// what turns it on. A standalone managed computer has no per-user CLI, so its
+// hint is the administrator config key (GAP-0611). A Secure Client gateway
+// does not mount this route (GAP-0143), so the managed case is the standalone
+// profile.
+func ideInventoryEmptyReason(enabled bool, scope string) string {
+	switch {
+	case !enabled && standaloneEnterpriseActive.Load():
+		return "AI discovery is off on this computer; an administrator sets ai_discovery.enabled: true in the managed DefenseClaw config to collect the IDE plugin inventory"
+	case !enabled:
+		return "AI discovery is off; turn it on with: defenseclaw agent discovery enable"
+	case scope == config.IDEInventoryOff:
+		return "the IDE plugin inventory is turned off (ai_discovery.ide_inventory: off)"
+	default:
+		return "the first full AI discovery scan has not finished yet"
+	}
 }
 
 func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {
@@ -580,7 +744,19 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 	var report inventory.AIDiscoveryReport
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&report); err != nil {
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.SecureClientIntegration() {
+		// Decode the pre-1.0 request shape so Secure Client still rejects
+		// ide_inventory as an unknown field.
+		var legacy struct {
+			Summary inventory.AIDiscoverySummary `json:"summary"`
+			Signals []inventory.AISignal         `json:"signals"`
+		}
+		if err := dec.Decode(&legacy); err != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		report.Summary, report.Signals = legacy.Summary, legacy.Signals
+	} else if err := dec.Decode(&report); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
@@ -595,4 +771,23 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// nameIDERows names the account of each row as agent identities do, so one
+// user reads the same in both lists and their TUI tabs (GAP-0278). The rows
+// are the handler's copies; the inventory keeps the bare name its telemetry
+// carries. A row of an account whose uid another account holds now keeps
+// the name it was scanned with (GAP-0947).
+func nameIDERows(plugins []inventory.IDEPlugin, installs []inventory.IDEInstallation) {
+	name := hostAccountNamer()
+	for i := range plugins {
+		if n := name(plugins[i].UserID); n != "" && !agentidentity.UIDReassigned(plugins[i].UserID, plugins[i].UserName, n) {
+			plugins[i].UserName = n
+		}
+	}
+	for i := range installs {
+		if n := name(installs[i].UserID); n != "" && !agentidentity.UIDReassigned(installs[i].UserID, installs[i].UserName, n) {
+			installs[i].UserName = n
+		}
+	}
 }

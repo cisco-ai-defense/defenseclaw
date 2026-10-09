@@ -137,6 +137,7 @@ class V8DestinationHealth:
     queue_max_items: int | None = None
     queue_max_bytes: int | None = None
     dropped: int | None = None
+    rejected: int | None = None
     last_success: str = ""
     last_failure: str = ""
     last_error_class: str = ""
@@ -160,6 +161,9 @@ class V8DestinationHealth:
 
     @property
     def queue_label(self) -> str:
+        return self.queue_label_for(secure_client=False)
+
+    def queue_label_for(self, *, secure_client: bool) -> str:
         parts: list[str] = []
         if self.queue_items is not None:
             value = str(self.queue_items)
@@ -175,6 +179,8 @@ class V8DestinationHealth:
             parts.append(value)
         if self.dropped is not None:
             parts.append(f"{self.dropped} dropped")
+        if not secure_client and self.rejected is not None:
+            parts.append(f"{self.rejected} rejected")
         return ", ".join(parts) or "unavailable"
 
     @property
@@ -498,6 +504,7 @@ def destination_health_from_gateway(health: Mapping[str, Any] | None) -> dict[st
                 queue.get("max_bytes", item.get("queue_max_bytes", item.get("max_queue_bytes")))
             ),
             dropped=_nonnegative_int(queue.get("dropped", item.get("queue_dropped", counters.get("dropped")))),
+            rejected=_nonnegative_int(counters.get("rejected")),
             last_success=last_success,
             last_failure=last_failure,
             last_error_class=last_error_class,

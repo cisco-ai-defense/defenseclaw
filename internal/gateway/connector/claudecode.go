@@ -1099,7 +1099,7 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		"claudecode",
 		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
 	)
-	return command == expected
+	return claudeCodeUnguardedHookCommand(command) == expected
 }
 
 // patchClaudeCodeHooks reads ~/.claude/settings.json, backs up the original
@@ -1115,7 +1115,59 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		}
 		return executable, []string{"hook", "--connector", "claudecode"}
 	}
-	return hookCommand, nil
+	if shellHookSecureClientProfile(opts) {
+		return hookCommand, nil
+	}
+	return claudeCodeMissingHookGuard(hookCommand), nil
+}
+
+// claudeCodeMissingHookGuardSeparator starts the clause that
+// claudeCodeMissingHookGuard appends to a Unix hook command.
+const claudeCodeMissingHookGuardSeparator = " || { rc=$?; "
+
+// claudeCodeMissingHookGuardMessage is what Claude Code shows when its
+// hook script cannot start. It must not name the script file:
+// doctor finds the registered script by that name in the command.
+const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook could not start " +
+	"(the script is missing; was this account renamed or its home moved?). " +
+	"Rerun the DefenseClaw installer to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json."
+
+// claudeCodeMissingHookGuard makes a Unix hook command fail closed
+// when the shell cannot start its script. Claude Code treats any exit other
+// than 2 as a non-blocking error, so after an account rename or a home move
+// the shell's 127 for the old path let every tool call run unguarded
+// (GAP-0542). The script's own exits pass through unchanged; only 126 and
+// 127, "cannot run" and "not found", become a block with one plain sentence.
+// Quote the path as a single shell word; home directories may contain spaces
+// or shell metacharacters. Ownership checks and doctor unwrap this exact guard
+// before comparing the path.
+func claudeCodeMissingHookGuard(command string) string {
+	return shellSingleQuote(command) + claudeCodeMissingHookGuardClause()
+}
+
+func claudeCodeMissingHookGuardClause() string {
+	return claudeCodeMissingHookGuardSeparator +
+		`[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; ` +
+		"echo '" + claudeCodeMissingHookGuardMessage + "' >&2; exit 2; }"
+}
+
+// claudeCodeUnguardedHookCommand removes only the exact generated guard,
+// including the older unquoted form, so existing registrations remain owned.
+// A modified clause that changes a blocking hook exit into success stays foreign.
+func claudeCodeUnguardedHookCommand(command string) string {
+	index := strings.Index(command, claudeCodeMissingHookGuardSeparator)
+	if index <= 0 || command[index:] != claudeCodeMissingHookGuardClause() {
+		return command
+	}
+	prefix := command[:index]
+	if len(prefix) >= 2 && prefix[0] == '\'' && prefix[len(prefix)-1] == '\'' {
+		path := strings.ReplaceAll(prefix[1:len(prefix)-1], `'"'"'`, "'")
+		if shellSingleQuote(path) == prefix {
+			return path
+		}
+	}
+	// Before paths were quoted, the generated guard used the raw path.
+	return prefix
 }
 
 func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string, []string) {
@@ -1292,7 +1344,17 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
-				exactBackupSafe = false
+				// Claude Code writes its own keys to settings.json (onboarding,
+				// trust, model choice), so the record drifts in normal use.
+				// Re-record the current bytes, as Codex does (GAP-2300): restore
+				// passes even exact bytes through the ownership-aware cleanup, so
+				// the outside edit survives teardown, and one setup leaves a
+				// record doctor can check instead of needing a second run
+				// (GAP-0043).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "settings.json", settingsPath, data, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			settings := map[string]interface{}{}
 			if len(data) > 0 {
@@ -1652,7 +1714,17 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
-				exactBackupSafe = false
+				// Claude Code writes its own keys to settings.json (onboarding,
+				// trust, model choice), so the record drifts in normal use.
+				// Re-record the current bytes, as Codex does (GAP-2300): restore
+				// passes even exact bytes through the ownership-aware cleanup, so
+				// the outside edit survives teardown, and one setup leaves a
+				// record doctor can check instead of needing a second run
+				// (GAP-0043).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "settings.json", settingsPath, data, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			settings := map[string]interface{}{}
 			if len(data) > 0 {
@@ -2341,6 +2413,7 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if command == "" {
 		return false
 	}
+	command = claudeCodeUnguardedHookCommand(command)
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}
@@ -2654,12 +2727,32 @@ func hookUsesForeignDefenseClawClaudeCodeScript(rawHook interface{}) bool {
 		return false
 	}
 	command, _ := hook["command"].(string)
-	if command == "" || strings.ContainsAny(command, " \t\"'") {
+	unguarded := claudeCodeUnguardedHookCommand(command)
+	if unguarded == "" {
 		return false
 	}
-	command = filepath.ToSlash(command)
+	if unguarded == command {
+		// Bare commands must be a single unquoted path, never a path plus argv.
+		if strings.ContainsAny(unguarded, " \t\"'\\") {
+			return false
+		}
+	} else {
+		// Accept only the generated quoted guard or its old bare-path form.
+		// An old bare command containing spaces could have shell arguments.
+		if strings.ContainsAny(unguarded, "\r\n") ||
+			(command != claudeCodeMissingHookGuard(unguarded) &&
+				(command != unguarded+claudeCodeMissingHookGuardClause() || strings.ContainsAny(unguarded, " \t"))) {
+			return false
+		}
+	}
+	// An exact generated guard quotes the whole path, so spaces are safe.
+	// Normalize copied Unix and Windows settings on either host OS.
+	command = strings.ReplaceAll(unguarded, `\`, "/")
 	hooksDir := path.Dir(command)
-	return path.IsAbs(command) && path.Clean(command) == command &&
+	absolute := path.IsAbs(command) ||
+		(len(command) >= 3 && ((command[0] >= 'A' && command[0] <= 'Z') ||
+			(command[0] >= 'a' && command[0] <= 'z')) && command[1] == ':' && command[2] == '/')
+	return absolute && path.Clean(command) == command &&
 		path.Base(command) == "claude-code-hook.sh" &&
 		path.Base(hooksDir) == "hooks" &&
 		path.Base(path.Dir(hooksDir)) == ".defenseclaw"
