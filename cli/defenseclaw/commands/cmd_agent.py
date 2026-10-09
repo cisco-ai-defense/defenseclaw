@@ -324,7 +324,7 @@ def usage(
             # does, instead of an empty table (GAP-0386).
             from defenseclaw.commands.cmd_sandbox import UNSUPPORTED_EXIT_CODE, UNSUPPORTED_PLATFORM_MESSAGE
 
-            click.echo(f"✗ --sandbox: {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
+            ux.echo(f"✗ --sandbox: {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
             raise SystemExit(UNSUPPORTED_EXIT_CODE)
 
     client = _usage_client(

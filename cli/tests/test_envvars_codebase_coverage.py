@@ -201,7 +201,6 @@ _NON_ENVVAR_TOKENS = frozenset(
 _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_CLAWHUB_ARG_": frozenset({"cli/defenseclaw/commands/cmd_skill.py"}),
     "DEFENSECLAW_FAIL_MODE_": frozenset({"internal/cli/hook.go"}),
-    "DEFENSECLAW_LOCAL_": frozenset({"internal/cli/daemon.go"}),
     "DEFENSECLAW_MIGRATED_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",
