@@ -23,6 +23,16 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+
+def test_enrollment_docs_use_windows_status_for_managed_accounts() -> None:
+    enrollment = (ROOT / "docs-site/content/docs/enterprise/enrollment.mdx").read_text()
+    operations = (ROOT / "docs-site/content/docs/enterprise/operations.mdx").read_text()
+    sections = (enrollment.split("## Supported agent versions", 1)[1],
+                operations.split("## Review activity from the CLI", 1)[1])
+    for section in sections:
+        assert "enterprise windows status --profile standalone --json" in section
+        assert "enrollment.accounts" in section
+
 # Checked-in source fixtures and published documentation share one release
 # identity so native repair/upgrade comparisons remain monotonic.
 CURRENT_RELEASE = "1.0.0"

@@ -541,5 +541,8 @@ the hook contract for that version. Check the versions DefenseClaw
 supports on each agent's page, for example [Codex](/docs/connectors/codex)
 or [Claude Code](/docs/connectors/claudecode), and in the
 [compatibility table](/docs/connectors/compatibility).
-`defenseclaw-gateway enterprise hooks status` shows each row, including
-rows that are deferred or pending and rows that failed to install.
+On Linux and macOS, `defenseclaw-gateway enterprise hooks status` shows each
+row, including deferred, pending and failed installs. On managed Windows,
+run `defenseclaw enterprise windows status --profile standalone --json` from
+an elevated administrator prompt. Its `enrollment.accounts` field lists
+each account and connector as enrolled, pending or failed.
