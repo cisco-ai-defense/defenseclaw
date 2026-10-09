@@ -684,6 +684,9 @@ func ensureContainedDirectory(path, root string) error {
 }
 
 func validateExistingAncestors(path string) error {
+	if existingPathIsLinkFree(path) {
+		return nil
+	}
 	current := filepath.Clean(path)
 	for {
 		info, err := os.Lstat(current)
