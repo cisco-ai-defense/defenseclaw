@@ -86,6 +86,18 @@ AUDIT_WRITE_FAILURE_CAUSES = {
 }
 
 
+# The gateway cannot write its local-write loss journal (GAP-1129).
+AUDIT_LOSS_JOURNAL_FAILING = (
+    "the gateway cannot write its audit loss journal (local-write-losses.journal in its data directory), "
+    "so a restart before audit writes recover loses the count of audit events missing from the local history"
+)
+
+
+def audit_loss_journal_failing(details: object) -> bool:
+    """True when the gateway reports its local-write loss journal failing (GAP-1129)."""
+    return isinstance(details, dict) and details.get("local_write_loss_journal") == "failing"
+
+
 def audit_write_failure_reason(details: object, audit_db: str = "") -> str:
     """Plain words for a gateway telemetry snapshot whose audit writes fail, else "".
 
@@ -94,13 +106,16 @@ def audit_write_failure_reason(details: object, audit_db: str = "") -> str:
     """
     if not isinstance(details, dict):
         return ""
+    journal = AUDIT_LOSS_JOURNAL_FAILING if audit_loss_journal_failing(details) else ""
     if details.get("event_history_failure") != "sqlite_write_failed":
-        return ""
+        return journal
     sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
     if sqlite_class == "full" and audit_disk_freed(audit_db):
-        return (
+        reason = (
             "audit events could not be written while the disk holding the audit database was full; "
             "it has room again, and this clears with the next audit event"
         )
-    cause = AUDIT_WRITE_FAILURE_CAUSES.get(sqlite_class, "the audit database rejects writes")
-    return f"audit events cannot be written: {cause}"
+    else:
+        cause = AUDIT_WRITE_FAILURE_CAUSES.get(sqlite_class, "the audit database rejects writes")
+        reason = f"audit events cannot be written: {cause}"
+    return f"{reason}; {journal}" if journal else reason

@@ -1935,6 +1935,14 @@ func renderObservabilityV8Health(
 	if eventHistory.activeCode != "" {
 		aggregate = StateError
 	}
+	// While the loss journal cannot be written, records missing from the
+	// local history are counted in memory only and a restart would lose
+	// that count (GAP-1129).
+	if journal := snapshot.LocalWriteLossJournal; journal.State == observabilityruntime.LocalWriteLossJournalFailing {
+		details["local_write_loss_journal"] = journal.State
+		details["local_write_loss_journal_failed_writes"] = journal.FailedWrites
+		aggregate = StateError
+	}
 	appendObservabilityV8EventHistoryDetails(details, eventHistory)
 	return SubsystemHealth{State: aggregate, Since: since, Details: details}
 }

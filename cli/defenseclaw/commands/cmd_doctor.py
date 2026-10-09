@@ -6120,6 +6120,14 @@ def _audit_write_failure(live_health, audit_db: str = "") -> tuple[str, str, boo
         return "", "", False
     if _audit_disk_freed(details, audit_db):
         return reason, "", True
+    if details.get("event_history_failure") != "sqlite_write_failed":
+        # Only the loss journal fails (GAP-1129); the gateway retries it.
+        return (
+            reason,
+            "free space on, or restore write access to, the gateway data directory; "
+            "the gateway writes the journal again once it can",
+            False,
+        )
     sqlite_class = str(details.get("event_history_last_sqlite_class") or "")
     remediation = _EVENT_HISTORY_SQLITE_REMEDIATION.get(
         sqlite_class,

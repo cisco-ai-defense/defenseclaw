@@ -21,7 +21,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
-	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -104,6 +104,10 @@ type Options struct {
 	// the process-stable Reporter above so one runtime cannot split reporting
 	// across inconsistent owners.
 	GraphOptions *runtimegraph.Options
+	// LocalWriteLossJournalPath is the reserved loss journal in the gateway
+	// data directory (LocalWriteLossJournalFile). Empty counts failed local
+	// writes in memory only; Secure Client never uses a journal (#1092).
+	LocalWriteLossJournalPath string
 }
 
 // Runtime owns the immutable runtimegraph manager and the lifecycle of the
@@ -123,24 +127,26 @@ type Runtime struct {
 	shutdownLosses        []ShutdownLoss
 	shutdownLossesCounted bool
 	carried               carriedShutdownLosses
-	localWriteLost        *atomic.Uint64
+	localWriteLosses      *localWriteLossJournal
 }
 
-// TakeLocalWriteLosses returns, and clears, how many log records failed their
-// mandatory SQLite append since the last call, so the gateway can store one
-// sqlite.write_failed record for them once writes resume (GAP-1100).
-func (runtime *Runtime) TakeLocalWriteLosses() uint64 {
-	if runtime == nil || runtime.localWriteLost == nil {
-		return 0
+// PendingLocalWriteLosses returns the log records whose mandatory SQLite
+// append failed and that no sqlite.write_failed record has reported yet,
+// including those an earlier gateway process left in the loss journal
+// (GAP-1100, GAP-1129).
+func (runtime *Runtime) PendingLocalWriteLosses() LocalWriteLosses {
+	if runtime == nil {
+		return LocalWriteLosses{}
 	}
-	return runtime.localWriteLost.Swap(0)
+	return runtime.localWriteLosses.pending()
 }
 
-// ReturnLocalWriteLosses gives back a count TakeLocalWriteLosses returned
-// when its sqlite.write_failed record could not be stored.
-func (runtime *Runtime) ReturnLocalWriteLosses(records uint64) {
-	if runtime != nil && runtime.localWriteLost != nil && records != 0 {
-		runtime.localWriteLost.Add(records)
+// ConsumeLocalWriteLosses marks losses PendingLocalWriteLosses returned as
+// reported, once their sqlite.write_failed record is stored, so neither this
+// process nor a restarted one reports them again.
+func (runtime *Runtime) ConsumeLocalWriteLosses(losses LocalWriteLosses) {
+	if runtime != nil {
+		runtime.localWriteLosses.consume(losses)
 	}
 }
 
@@ -244,7 +250,16 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 		graphOptions = *options.GraphOptions
 		graphOptions.Reporter = options.Reporter
 	}
-	lostWrites := &atomic.Uint64{}
+	journalPath := options.LocalWriteLossJournalPath
+	if options.SecureClient {
+		journalPath = ""
+	}
+	lostWrites := newLocalWriteLossJournal(journalPath, time.Now)
+	defer func() {
+		if !owned {
+			lostWrites.close()
+		}
+	}()
 	factory := &localLogFactory{
 		store: options.Store, storePath: storePath,
 		engine: options.Engine, signer: options.Signer,
@@ -297,7 +312,7 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
 		destinationObserver: destinationObserver, secureClient: options.SecureClient,
-		localWriteLost: lostWrites,
+		localWriteLosses: lostWrites,
 	}, nil
 }
 
@@ -701,6 +716,8 @@ func (runtime *Runtime) Close(ctx context.Context) error {
 		runtime.shutdownLosses = countShutdownLosses(lossSources, shutdownLossSettle)
 		runtime.shutdownLossesCounted = true
 	}
+	// Last, after the drained writers: keep every failed local write counted.
+	runtime.localWriteLosses.close()
 	return first
 }
 

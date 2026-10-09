@@ -69,7 +69,15 @@ type sidecarV8BootstrapFixture struct {
 
 func newSidecarV8BootstrapFixture(t *testing.T, configVersion int, storePath string) sidecarV8BootstrapFixture {
 	t.Helper()
-	dataDir := t.TempDir()
+	return newSidecarV8BootstrapFixtureIn(t, configVersion, storePath, t.TempDir())
+}
+
+// newSidecarV8BootstrapFixtureIn starts a gateway on an existing data
+// directory, as a restart does.
+func newSidecarV8BootstrapFixtureIn(
+	t *testing.T, configVersion int, storePath, dataDir string,
+) sidecarV8BootstrapFixture {
+	t.Helper()
 	// Some self-hosted Linux runners create testing.TempDir children under a
 	// permissive process umask. The production audit store correctly rejects an
 	// immediately group-writable database directory, so make the shared success
@@ -78,7 +86,9 @@ func newSidecarV8BootstrapFixture(t *testing.T, configVersion int, storePath str
 	if err := os.Chmod(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	installDefaultRulePackForDataDir(t, dataDir)
+	if _, err := os.Stat(filepath.Join(dataDir, "policies")); err != nil {
+		installDefaultRulePackForDataDir(t, dataDir)
+	}
 	if storePath == "" {
 		storePath = filepath.Join(dataDir, config.DefaultAuditDBName)
 	}

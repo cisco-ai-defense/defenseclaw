@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	v8redaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -76,6 +77,9 @@ const (
 type Error struct {
 	code         ErrorCode
 	contextCause error
+	// sqliteClass is the coarse SQLite class of a failed local write; the
+	// driver error itself never leaves this package.
+	sqliteClass audit.EventHistorySQLiteClass
 }
 
 func (err *Error) Error() string {
@@ -90,6 +94,14 @@ func (err *Error) Code() ErrorCode {
 		return ""
 	}
 	return err.code
+}
+
+// SQLiteClass is the coarse SQLite class of an ErrorLocalWrite, or "".
+func (err *Error) SQLiteClass() audit.EventHistorySQLiteClass {
+	if err == nil {
+		return ""
+	}
+	return err.sqliteClass
 }
 
 func (err *Error) Is(target error) bool {
@@ -681,6 +693,9 @@ func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
 
 func boundedPipelineError(code ErrorCode, err error) *Error {
 	result := &Error{code: code}
+	if code == ErrorLocalWrite {
+		result.sqliteClass = audit.ClassifyEventHistoryWriteFailure(err)
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		result.contextCause = context.Canceled

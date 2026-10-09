@@ -97,7 +97,7 @@ func TestRuntimeLocalWriteFailureIsCountedOnLocalSQLite(t *testing.T) {
 	if counters.Accepted != 2 || counters.Delivered != 1 || counters.Dropped != 1 {
 		t.Fatalf("local-sqlite counters = %+v, want accepted 2 delivered 1 dropped 1", counters)
 	}
-	if lost := runtime.TakeLocalWriteLosses(); lost != 1 {
+	if lost := runtime.PendingLocalWriteLosses().Records; lost != 1 {
 		t.Fatalf("pending local write losses = %d, want 1", lost)
 	}
 }

@@ -159,6 +159,9 @@ type Sidecar struct {
 	// left unsent, for the shutdown warning (GAP-1096).
 	observabilityV8ShutdownLosses      []observabilityruntime.ShutdownLoss
 	observabilityV8ShutdownLossesNoted bool
+	// localWriteGapV8Mu serializes the sqlite.write_failed loss reports
+	// (GAP-1129).
+	localWriteGapV8Mu sync.Mutex
 	// bootConfigSourceName and bootConfigSource are the config.yaml bytes
 	// the observability runtime was bootstrapped from, the source the
 	// gateway runs (GAP-0264).
@@ -981,6 +984,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	s.carryObservabilityV8ShutdownDrops()
+	// Report the records an earlier run lost from the local history; the loss
+	// journal kept them across the restart (GAP-1129).
+	go s.recordLocalWriteGapV8()
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
