@@ -24,27 +24,27 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// An inspect scan must use the authenticated connector profile override.
-func TestInspectScanUsesAuthenticatedConnectorProfilePack(t *testing.T) {
+// An inspect verdict must use the authenticated connector profile settings.
+func TestInspectVerdictUsesAuthenticatedConnectorProfile(t *testing.T) {
 	stubProfileSources(t)
 	resetConnectorRuleCategories(t)
 	withLocalPatternsRestored(t)
-	packDir := filepath.Join(t.TempDir(), "codex-pack")
+	packDir := filepath.Join(t.TempDir(), "strict")
 	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
 category: secret
 rules:
   - id: INSPECT-CONNECTOR-MARKER
     pattern: "inspect_connector_marker_token"
     title: inspect connector fixture
-    severity: HIGH
+    severity: MEDIUM
     confidence: 0.99
     tags: [test]
 `)
 	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
 		"strict": {Connectors: map[string]config.PerConnectorGuardrailConfig{
-			"codex": {RulePackDir: packDir},
+			"codex": {Mode: "action", RulePackDir: packDir},
 		}},
 	}
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
@@ -59,6 +59,22 @@ rules:
 	}
 	if ids := findingIDs(findings); !containsRuleID(ids, "INSPECT-CONNECTOR-MARKER") {
 		t.Fatalf("authenticated connector pack not used: %v", ids)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/response",
+		strings.NewReader(`{"content":"inspect_connector_marker_token"}`))
+	req = req.WithContext(withAuthenticatedInspectConnector(req.Context(), "codex"))
+	rec := httptest.NewRecorder()
+	api.guardrailProfileInspectMiddleware(http.HandlerFunc(api.handleInspectResponse)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inspect status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var verdict ToolInspectVerdict
+	if err := json.Unmarshal(rec.Body.Bytes(), &verdict); err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Action != "block" || verdict.Mode != "action" || verdict.Severity != "MEDIUM" {
+		t.Fatalf("authenticated Codex profile verdict = action %q, mode %q, severity %q; want block, action, MEDIUM",
+			verdict.Action, verdict.Mode, verdict.Severity)
 	}
 }
 

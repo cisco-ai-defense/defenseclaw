@@ -1485,7 +1485,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 
 	// Count the check against the authenticated connector so /health (and the
