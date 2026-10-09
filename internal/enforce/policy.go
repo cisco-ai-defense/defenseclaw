@@ -262,6 +262,32 @@ func (e *PolicyEngine) GetAction(targetType, name string) (*audit.ActionEntry, e
 	return e.store.GetAction(targetType, name)
 }
 
+// SecureClient reports whether the config is a Secure Client integration,
+// whose callers keep the operator rows and messages of main (issue #1092).
+func (e *PolicyEngine) SecureClient() bool { return e.legacyOperatorRows() }
+
+// RuntimeDisableReason is IsDisabledForConnector with the reason the journal
+// entry that decides records.
+func (e *PolicyEngine) RuntimeDisableReason(targetType, name, connector string) (string, bool, error) {
+	if e.store == nil {
+		return "", false, nil
+	}
+	if connector != "" {
+		entry, err := e.store.GetActionForConnector(targetType, name, connector)
+		if err != nil {
+			return "", false, err
+		}
+		if entry != nil && entry.Actions.Runtime != "" {
+			return entry.Reason, entry.Actions.Runtime == "disable", nil
+		}
+	}
+	entry, err := e.store.GetActionForConnector(targetType, name, "")
+	if err != nil || entry == nil || entry.Actions.Runtime != "disable" {
+		return "", false, err
+	}
+	return entry.Reason, true, nil
+}
+
 // IsDisabledForConnector reports whether name is runtime-disabled for
 // connector, checking the connector-scoped journal row first and then the
 // bare global row.

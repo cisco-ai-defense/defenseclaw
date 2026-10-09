@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -163,6 +164,22 @@ func TestMCPServerRuntimeBlock_NonMCPAndUnblocked(t *testing.T) {
 	// MCP tool for the blocked server.
 	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__jira__createIssue", "", ""); !deny || server != "jira" {
 		t.Errorf("blocked mcp server: deny=%v server=%q, want deny=true server=jira", deny, server)
+	}
+	// GAP-0963: a server its install admission disabled says so, with the
+	// journal's reason, so it is not read as an asset_policy decision.
+	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "claudecode", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if deny, _, reason := mcpServerRuntimeBlock(pe, "mcp__wiki-rogue__count_words", "claudecode", ""); !deny ||
+		!strings.Contains(reason, "install admission rejected it (scanner failure (fail-closed): loopback)") {
+		t.Errorf("disabled mcp server: deny=%v reason=%q, want the admission verdict named", deny, reason)
+	}
+	// Codex passes the configured name its hook resolved (GAP-0939).
+	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "codex", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__wiki_rogue__count_words", "codex", "wiki-rogue"); !deny || server != "wiki-rogue" {
+		t.Errorf("codex disabled mcp server: deny=%v server=%q, want it refused as in Claude Code", deny, server)
 	}
 }
 
