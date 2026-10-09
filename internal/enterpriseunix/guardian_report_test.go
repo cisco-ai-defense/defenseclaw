@@ -66,7 +66,12 @@ func TestEnsureReportsTheGuardianTargetsAfterTheChange(t *testing.T) {
 						"error": `enterprise hooks: connector devin agent version "3000.11.3" is not verified against a known hook contract: no hook contract matches normalized agent version`}})
 				}()
 			}}
+			// Wait only for a report the hook started: a run that fails
+			// before the guardian starts would otherwise block forever here.
 			t.Cleanup(func() {
+				if !started {
+					return
+				}
 				if err := <-reported; err != nil {
 					t.Error(err)
 				}
@@ -115,6 +120,9 @@ func TestInstallWaitsForTheGuardianWithoutTargets(t *testing.T) {
 		}()
 	}}
 	t.Cleanup(func() {
+		if !started {
+			return
+		}
 		if err := <-published; err != nil {
 			t.Error(err)
 		}
@@ -161,6 +169,9 @@ func TestInstallWaitsForTheFirstGuardianAttestation(t *testing.T) {
 		}()
 	}}
 	t.Cleanup(func() {
+		if !started {
+			return
+		}
 		if err := <-published; err != nil {
 			t.Error(err)
 		}
