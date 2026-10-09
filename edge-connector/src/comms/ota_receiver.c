@@ -819,6 +819,8 @@ void dclaw_emergency_persist(void) {
     if (hal_flash_write(EMERGENCY_FLASH_OFFSET, buf, EMERGENCY_FLASH_SIZE) != 0) {
         fprintf(stderr, "[DCLAW] WARNING: Failed to persist emergency state to flash.\n");
     }
+    /* H-1 fix: Sync after emergency persist to ensure lockdown survives power loss */
+    hal_flash_sync();
 }
 
 void dclaw_emergency_load_from_flash(void) {

@@ -214,10 +214,15 @@ static void test_ac09(void) {
     dclaw_verdict_t v = dclaw_evaluate(&req);
     uint64_t elapsed = clock_ns() - start;
 
+    /* BLK-1: In production (DEV_MODE=OFF), strict mode blocks by default */
+#if DCLAW_DEV_MODE
     assert(v.mode == DCLAW_VERDICT_PENDING);
+    printf("  AC-09 PASS: speculative PENDING in %llu ns (dev mode)\n", (unsigned long long)elapsed);
+#else
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    printf("  AC-09 PASS: strict-mode BLOCK in %llu ns (production)\n", (unsigned long long)elapsed);
+#endif
     (void)v;
-    printf("  AC-09 PASS: speculative PENDING returned in %llu ns (target: <10000)\n",
-           (unsigned long long)elapsed);
 }
 
 /* AC-10: Policy compiler size validation (tested via Python — structural here) */

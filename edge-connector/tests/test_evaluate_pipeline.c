@@ -22,13 +22,16 @@ static dclaw_tool_request_t make_request(const char *name, uint8_t caps, const c
 static void test_allowed_local_decision(void) {
     dclaw_tool_request_t req = make_request("read-sensor", DCLAW_CAP_SENSOR_READ, NULL);
     dclaw_verdict_t v = dclaw_evaluate(&req);
-#if DCLAW_SPECULATIVE_EXECUTION
+    /* BLK-1: In production builds (DEV_MODE=OFF), strict mode is default,
+     * so even speculative-capable profiles return BLOCK (sync). In dev builds,
+     * speculative exec returns PENDING. Both are correct behavior. */
+#if DCLAW_SPECULATIVE_EXECUTION && DCLAW_DEV_MODE
     assert(v.mode == DCLAW_VERDICT_PENDING);
-    printf("  PASS: sensor_read with no local rule -> PENDING (speculative)\n");
+    printf("  PASS: sensor_read with no local rule -> PENDING (speculative, dev)\n");
 #else
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
-    printf("  PASS: sensor_read with no cloud -> BLOCK (no speculative)\n");
+    printf("  PASS: sensor_read with no cloud -> BLOCK (strict/no-spec)\n");
 #endif
     (void)v;
 }
@@ -56,13 +59,13 @@ static void test_destination_deny(void) {
 static void test_allowed_destination(void) {
     dclaw_tool_request_t req = make_request("api-call", DCLAW_CAP_NET_FETCH, "api.openai.com");
     dclaw_verdict_t v = dclaw_evaluate(&req);
-#if DCLAW_SPECULATIVE_EXECUTION
+#if DCLAW_SPECULATIVE_EXECUTION && DCLAW_DEV_MODE
     assert(v.mode == DCLAW_VERDICT_PENDING);
-    printf("  PASS: allowed destination + speculative cap -> PENDING\n");
+    printf("  PASS: allowed destination + speculative cap -> PENDING (dev)\n");
 #else
     assert(v.action == DCLAW_ACTION_BLOCK);
     assert(v.reason == DCLAW_REASON_CLOUD_TIMEOUT);
-    printf("  PASS: allowed destination + no cloud -> BLOCK (no speculative)\n");
+    printf("  PASS: allowed destination + no cloud -> BLOCK (strict/no-spec)\n");
 #endif
     (void)v;
 }

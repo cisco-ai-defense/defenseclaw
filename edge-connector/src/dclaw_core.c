@@ -123,15 +123,26 @@ int dclaw_init(const dclaw_device_info_t *info) {
      * so that HMAC validation during old-format migration works. */
     dclaw_audit_ring_init();
 
-    /* H-3 fix: Check for DCLAW_STRICT_MODE once at init. When set to "1",
-     * all capabilities are treated as sync_block — speculative execution is
-     * disabled and every tool call requires cloud approval before proceeding. */
+    /* BLK-1 fix: In production builds, strict mode (sync-block for all
+     * capabilities) is the DEFAULT. Speculative execution is opt-in via
+     * DCLAW_STRICT_MODE=0. This prevents NET_FETCH/SEND_MSG from exfiltrating
+     * data before the cloud has a chance to block.
+     * In dev builds, speculative exec is default (for latency). */
     {
+#if !DCLAW_DEV_MODE
+        g_strict_mode = true; /* production: sync-block by default */
+        const char *strict = getenv("DCLAW_STRICT_MODE");
+        if (strict && strcmp(strict, "0") == 0) {
+            g_strict_mode = false;
+            fprintf(stderr, "[DCLAW] Speculative execution enabled (DCLAW_STRICT_MODE=0).\n");
+        }
+#else
         const char *strict = getenv("DCLAW_STRICT_MODE");
         if (strict && strcmp(strict, "1") == 0) {
             g_strict_mode = true;
             fprintf(stderr, "[DCLAW] Strict mode enabled — all capabilities require sync cloud approval.\n");
         }
+#endif
     }
 
     return 0;

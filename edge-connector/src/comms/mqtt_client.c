@@ -51,7 +51,7 @@ extern bool dclaw_verdict_is_key_provisioned(void);
 
 #define MQTT_DEFAULT_PORT    1883
 #define MQTT_KEEPALIVE_SEC   60
-#define MQTT_RECV_BUF_SIZE   512
+#define MQTT_RECV_BUF_SIZE   4224  /* 4096 (max OTA blob) + 128 (MQTT header overhead) */
 
 typedef enum {
     MQTT_STATE_DISCONNECTED,
