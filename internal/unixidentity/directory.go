@@ -757,6 +757,46 @@ func QualifiedUserName(ctx context.Context, r Resolver, name string) string {
 	return ""
 }
 
+// SameNameAccounts lists the other accounts the host holds under the bare
+// name of account: the account NSS answers that bare name with, and the
+// directory account of each joined realm that it answers name@domain or
+// NETBIOS\name with. A local and a directory account of one name are two
+// accounts (twins); an answer counts only when its own bare name is that
+// name and its uid is not account's (GAP-1087).
+func SameNameAccounts(ctx context.Context, r Resolver, account Account) []Account {
+	bare, _ := useridentity.SplitQualifiedName(account.Name)
+	if r == nil || bare == "" {
+		return nil
+	}
+	candidates := []string{bare}
+	if realms, err := hostRealms(ctx); err == nil {
+		for _, realm := range realms {
+			if realm.Domain != "" {
+				candidates = append(candidates, bare+"@"+realm.Domain)
+			}
+			if realm.NetBIOS != "" {
+				candidates = append(candidates, realm.NetBIOS+`\`+bare)
+			}
+		}
+	}
+	seen := map[int]bool{account.UID: true}
+	var twins []Account
+	for _, candidate := range candidates {
+		found, err := r.LookupUser(candidate)
+		var mismatch *NameMismatchError
+		if errors.As(err, &mismatch) {
+			found, err = mismatch.Answered, nil
+		}
+		foundBare, _ := useridentity.SplitQualifiedName(found.Name)
+		if err != nil || seen[found.UID] || !useridentity.EqualFold(foundBare, bare) {
+			continue
+		}
+		seen[found.UID] = true
+		twins = append(twins, found)
+	}
+	return twins
+}
+
 // parseGroupName reads the name and gid of a group(5) line. Unlike
 // ParseGroupLine it accepts the spaces directory group names carry ("domain
 // users@corp.example.com"): the name is only reported, never used to

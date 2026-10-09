@@ -4,6 +4,7 @@
 package useridentity
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -208,6 +209,34 @@ func (f AccountFilter) Matches(id, name string) bool {
 		return false
 	}
 	return f.domain == "" || rowDomain != "" && EqualFold(f.domain, rowDomain)
+}
+
+// AccountRef names one account of an AmbiguousAccountError.
+type AccountRef struct {
+	ID   string `json:"user_id"`
+	Name string `json:"user_name"`
+}
+
+// AmbiguousAccountError refuses a bare account name that names more than one
+// account on the host, a local account and a directory account of the same
+// name: profile-explain and policy show explain one account, so the
+// administrator names it by its qualified name or its id (GAP-1087).
+type AmbiguousAccountError struct {
+	Name     string
+	Accounts []AccountRef
+}
+
+func (e *AmbiguousAccountError) Error() string {
+	named := make([]string, 0, len(e.Accounts))
+	for _, account := range e.Accounts {
+		kind := "uid"
+		if KindForID(account.ID) == KindWindowsSID {
+			kind = "SID"
+		}
+		named = append(named, fmt.Sprintf("%s (%s %s)", account.Name, kind, account.ID))
+	}
+	return fmt.Sprintf("%d accounts are named %q on this host: %s; name the one you mean by its qualified name "+
+		"(user@domain or DOMAIN\\name) or its uid", len(e.Accounts), e.Name, strings.Join(named, ", "))
 }
 
 func plausiblePrincipal(value string) bool {
