@@ -21,7 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
+func secureOpenAppend(path string, checkReadACL bool) (*os.File, os.FileInfo, int64, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, 0, err
 	}
@@ -77,11 +77,14 @@ func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
 	if after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
 		return nil, nil, 0, unsafeFailure()
 	}
+	if checkReadACL && jsonlACLProblem(path) != "" {
+		return nil, nil, 0, unsafeFailure()
+	}
 	failed = false
 	return file, opened, opened.Size(), nil
 }
 
-func secureOpenRead(path string) (*os.File, os.FileInfo, error) {
+func secureOpenRead(path string, checkReadACL bool) (*os.File, os.FileInfo, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, err
 	}
@@ -102,6 +105,10 @@ func secureOpenRead(path string) (*os.File, os.FileInfo, error) {
 	if err := validateSecureFileInfo(info); err != nil {
 		_ = file.Close()
 		return nil, nil, err
+	}
+	if checkReadACL && jsonlACLProblem(path) != "" {
+		_ = file.Close()
+		return nil, nil, unsafeFailure()
 	}
 	pathInfo, err := os.Lstat(path)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, pathInfo) {
@@ -163,7 +170,7 @@ func validateSecureFileInfo(info os.FileInfo) error {
 	return nil
 }
 
-func validateSecureOpenFile(file *os.File) error {
+func validateSecureOpenFile(file *os.File, checkReadACL bool) error {
 	if file == nil {
 		return unsafeFailure()
 	}
@@ -171,7 +178,13 @@ func validateSecureOpenFile(file *os.File) error {
 	if err != nil {
 		return ioFailure()
 	}
-	return validateSecureFileInfo(info)
+	if err := validateSecureFileInfo(info); err != nil {
+		return err
+	}
+	if checkReadACL && jsonlACLProblem(file.Name()) != "" {
+		return unsafeFailure()
+	}
+	return nil
 }
 
 func validateSecureDirectory(_ string, info os.FileInfo) error {

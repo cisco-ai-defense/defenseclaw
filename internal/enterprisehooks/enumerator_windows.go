@@ -306,13 +306,12 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
 		}
-		if standalone && windowsDisabledLocalAccount(profile.SID, lookupAccount) {
-			// No one can sign in as a disabled account, so no agent in its
-			// profile can run: an offboarded account whose profile still held
-			// a never-started Claude Code kept agent_unprotected, and
-			// security_complete false, for good (GAP-1034).
+		if standalone && !sessionActive && windowsDisabledLocalAccount(profile.SID, lookupAccount) {
+			// A disabled account cannot start a new session, but an existing
+			// session can still run its agents. Suppress the stale warning
+			// only after the account has signed out (GAP-1034).
 			logfSafely(opts.Logger, profile.SID,
-				"the local account is disabled; agents installed in its profile cannot run and are not reported as unprotected")
+				"the local account is disabled and has no active session; its installed agents are not reported as unprotected")
 			rowContext.report = nil
 		}
 		for _, conn := range connectors {
