@@ -446,6 +446,11 @@ func structuredNativeExecHookReferences(entry map[string]interface{}, needles []
 	if runtime.GOOS != "windows" {
 		return false
 	}
+	// A per-user Claude Code handler runs the launcher through the cmd.exe
+	// guard (GAP-1091); an exact generated guard reads as the exec form it runs.
+	if view, ok := claudeCodeExecView(entry).(map[string]interface{}); ok {
+		entry = view
+	}
 	command := strings.TrimSpace(stringValue(entry["command"]))
 	if command == "" || !isDefenseClawManagedHookExecutable(command) {
 		return false
