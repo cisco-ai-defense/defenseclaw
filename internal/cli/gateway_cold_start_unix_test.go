@@ -76,6 +76,41 @@ func TestStopRecordsTheStopAndHookStartHonorsIt(t *testing.T) {
 	}
 }
 
+// An operator stop must wait for an in-flight watchdog cold start before it
+// checks whether there is a gateway to stop or writes the final stop marker.
+func TestStopWaitsForWatchdogColdStartLock(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	release, err := acquireGatewayStartLock(dataDir, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runStop(stopCmd, nil) }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("stop returned while a cold start held the start lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// A cold start that passed its initial marker check can clear a marker
+	// written before it finishes. Stop must publish its marker afterward.
+	clearGatewayColdStartState(dataDir)
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("stop after cold start: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("stop did not finish after the cold start released its lock")
+	}
+	if _, err := os.Stat(gatewayStoppedMarkerPath(dataDir)); err != nil {
+		t.Fatalf("stop marker after cold start: %v", err)
+	}
+}
+
 func TestStartLockRunsUnlockedWithoutADataDirectory(t *testing.T) {
 	release, err := acquireGatewayStartLock(filepath.Join(t.TempDir(), "missing"), time.Second)
 	if err != nil {
