@@ -1602,3 +1602,28 @@ func TestWindowsNumericGroupNameMatchesResolvedSID(t *testing.T) {
 		t.Fatalf("resolved numeric group selected %+v, want tooling group assignment", got)
 	}
 }
+
+func TestWindowsSIDGroupAssignmentIgnoresSIDShapedNames(t *testing.T) {
+	const assignedSID = "S-1-5-32-544"
+	assignments := []config.ProfileAssignment{
+		{Profile: "tooling", Match: config.ProfileMatch{Groups: []string{assignedSID}}},
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "strict", assignments: assignments,
+		profiles: map[string]config.DerivedGuardrailProfile{"strict": {}, "tooling": {}},
+		groupSIDs: newProfileGroupSIDs(assignments, func(string) (string, error) {
+			t.Fatal("a SID assignment must not be looked up as a name")
+			return "", nil
+		}, time.Second),
+	}
+	other := &profileSubject{UserID: "S-1-5-21-860-1-2-1001", IDKind: useridentity.KindWindowsSID,
+		Groups: []string{`OTHER\S-1-5-32-544`, `DOMAIN\S-1-5-32-544`, "S-1-5-21-999-1-2-1234"}}
+	if got := set.match(other, profileSubjectVerified, "codex", ""); got.Name != "strict" {
+		t.Fatalf("another group's SID-shaped name selected %+v, want strict default", got)
+	}
+	member := &profileSubject{UserID: other.UserID, IDKind: other.IDKind,
+		Groups: []string{assignedSID}}
+	if got := set.match(member, profileSubjectVerified, "codex", ""); got.Name != "tooling" || got.Match != profileMatchGroup {
+		t.Fatalf("assigned SID selected %+v, want tooling group assignment", got)
+	}
+}

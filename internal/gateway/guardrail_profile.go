@@ -984,12 +984,17 @@ func (g *subjectGroups) has(want string) bool {
 	if !g.built {
 		g.build()
 	}
-	if g.sids != nil && profileGroupNeedsSID(want) {
-		sid, ok := g.sids.sid(want)
-		if !ok {
-			return false
+	if g.sids != nil {
+		if profileGroupNeedsSID(want) {
+			sid, ok := g.sids.sid(want)
+			if !ok {
+				return false
+			}
+			_, ok = g.exact[foldKey(sid)]
+			return ok
 		}
-		_, ok = g.exact[foldKey(sid)]
+		// A SID names only that group, never another group's SID-shaped name.
+		_, ok := g.exact[foldKey(want)]
 		return ok
 	}
 	key := foldKey(want)
