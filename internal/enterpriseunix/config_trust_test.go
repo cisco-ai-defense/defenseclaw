@@ -95,3 +95,24 @@ func TestEnsureRefusesAConfigWithAWriteACLEntry(t *testing.T) {
 		t.Fatal("the config with a write ACL entry was installed")
 	}
 }
+
+// GAP-1139, GAP-1141: a macOS ACL grants write without changing mode bits.
+// An apply run must not commit a policy edit made through that ACL.
+func TestEnsureRefusesAnEditedInstalledConfigWithWriteACL(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: writeChangedConfig(t, h, "mode: observe", "mode: action")}))
+	applied := h.read(h.env.Layout.ConfigPath)
+	edited := editConfigInPlace(t, h, "mode: action", "mode: observe")
+	h.runner.acls = map[string][]string{
+		h.env.P(h.env.Layout.ConfigPath): {"user:standard allow write,append"},
+	}
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireError(t, r, codeConfig)
+	if msg := messagesOf(r.Errors, codeConfig); !strings.Contains(msg, "ACL") {
+		t.Fatalf("config refusal did not identify the write ACL: %s", msg)
+	}
+	if got := h.read(h.env.Layout.ConfigPath); got == edited || got != applied {
+		t.Fatal("the policy edit made through the ACL was accepted")
+	}
+}

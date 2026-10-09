@@ -302,12 +302,13 @@ func SkillFolderRefs(input any, home, cwd string) []FolderRef {
 	var refs []FolderRef
 	for _, value := range values {
 		for _, token := range commandPathTokens(value) {
-			ref, ok := skillFolderRef(token, home, cwd)
-			if !ok || seen[ref.Dir] {
-				continue
+			for _, ref := range skillFolderRefs(token, home, cwd) {
+				if seen[ref.Dir] {
+					continue
+				}
+				seen[ref.Dir] = true
+				refs = append(refs, ref)
 			}
-			seen[ref.Dir] = true
-			refs = append(refs, ref)
 		}
 	}
 	return refs
@@ -386,9 +387,9 @@ func commandPathTokens(value string) []string {
 	return tokens
 }
 
-func skillFolderRef(token, home, cwd string) (FolderRef, bool) {
+func skillFolderRefs(token, home, cwd string) []FolderRef {
 	if !strings.ContainsAny(token, "/\\") {
-		return FolderRef{}, false
+		return nil
 	}
 	path := strings.ReplaceAll(token, "\\", "/")
 	for _, prefix := range []string{"~/", "$HOME/", "${HOME}/"} {
@@ -397,14 +398,15 @@ func skillFolderRef(token, home, cwd string) (FolderRef, bool) {
 			break
 		}
 	}
-	// Resolve the entire path before selecting a skills/<name> pair. A
-	// parent segment after the first pair can otherwise name another skill.
+	// Resolve the entire path before selecting skills/<name> pairs. A
+	// parent segment can otherwise change which skill folders are reached.
 	dir := filepath.FromSlash(path)
 	if !filepath.IsAbs(dir) && strings.TrimSpace(cwd) != "" {
 		dir = filepath.Join(cwd, dir)
 	}
 	dir = filepath.Clean(dir)
 	parts := strings.Split(filepath.ToSlash(dir), "/")
+	var refs []FolderRef
 	for i := 0; i+1 < len(parts); i++ {
 		if !strings.EqualFold(parts[i], "skills") {
 			continue
@@ -414,7 +416,7 @@ func skillFolderRef(token, home, cwd string) (FolderRef, bool) {
 			continue
 		}
 		skillDir := filepath.FromSlash(strings.Join(parts[:i+2], "/"))
-		return FolderRef{Dir: skillDir, Name: name}, true
+		refs = append(refs, FolderRef{Dir: skillDir, Name: name})
 	}
-	return FolderRef{}, false
+	return refs
 }

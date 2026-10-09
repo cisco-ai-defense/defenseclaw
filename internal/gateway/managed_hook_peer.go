@@ -261,11 +261,6 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		}
 		return allowManagedHook()
 	}
-	if z.exempt(peer) {
-		decision := allowManagedHook()
-		decision.Exempt = true
-		return decision
-	}
 	refuse := z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse
 	if refuse && connector.SurfaceRefused(connectorName, surface, config.EnterpriseUnverifiedRefuse) {
 		return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
@@ -278,6 +273,11 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		if refused.refused(peer, connectorName) {
 			return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
 		}
+	}
+	if z.exempt(peer) {
+		decision := allowManagedHook()
+		decision.Exempt = true
+		return decision
 	}
 	machine := z.machinePolicy[connectorName]
 	strict := strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)

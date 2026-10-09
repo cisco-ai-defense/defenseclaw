@@ -67,7 +67,8 @@ func TestEnterpriseHookStandaloneConfigRefreshTakesAChangedConfig(t *testing.T) 
 	write("exclude_users: [a]\n")
 	cfg = standalone("a")
 	var loadErr error
-	enterpriseHookWindowsConfigLoader = func(string) (*config.Config, error) { return standalone("a", "b"), loadErr }
+	nextExclude := []string{"a", "b"}
+	enterpriseHookWindowsConfigLoader = func(string) (*config.Config, error) { return standalone(nextExclude...), loadErr }
 	enterpriseHookStandaloneConfigFingerprint()
 
 	enterpriseHookStandaloneConfigRefresh(io.Discard)
@@ -84,5 +85,12 @@ func TestEnterpriseHookStandaloneConfigRefreshTakesAChangedConfig(t *testing.T) 
 	enterpriseHookStandaloneConfigRefresh(io.Discard)
 	if len(cfg.Enterprise.Enrollment.ExcludeUsers) != 2 {
 		t.Fatalf("a config that does not load replaced the running one: %v", cfg.Enterprise.Enrollment.ExcludeUsers)
+	}
+	// A transient read failure must not permanently suppress the same digest.
+	loadErr = nil
+	nextExclude = []string{"a", "b", "c"}
+	enterpriseHookStandaloneConfigRefresh(io.Discard)
+	if len(cfg.Enterprise.Enrollment.ExcludeUsers) != 3 {
+		t.Fatalf("unchanged digest was not retried after load recovered: %v", cfg.Enterprise.Enrollment.ExcludeUsers)
 	}
 }

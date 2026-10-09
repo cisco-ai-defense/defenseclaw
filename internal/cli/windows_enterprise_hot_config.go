@@ -210,6 +210,7 @@ func windowsEnterpriseHotConfigApply(
 	_, generationErr := os.Stat(generationPath)
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
 	recordedBefore := stateErr == nil && strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(previous))
+	connectorChangeStartedAt := time.Now().UTC()
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, "enterprise windows ensure", configwrite.SHA256Hex(previous)); err != nil {
 		return false, nil
 	}
@@ -251,6 +252,9 @@ func windowsEnterpriseHotConfigApply(
 		return false, nil
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
+	if refreshTargets {
+		warnWindowsEnterpriseHotAgentSessions(result, previous, next, connectorChangeStartedAt)
+	}
 	result.Changes = append(result.Changes, "applied the config change in the running gateway; it was not restarted")
 	if kept != "" {
 		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+kept)

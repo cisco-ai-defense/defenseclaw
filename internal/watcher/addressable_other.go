@@ -18,3 +18,5 @@ func addressableQuarantinePaths(path string, roots []string, quarantineRoot stri
 }
 
 func physicalAssetName(path string) string { return filepath.Base(path) }
+
+func sameAddressableWatcherPath(left, right string) bool { return false }

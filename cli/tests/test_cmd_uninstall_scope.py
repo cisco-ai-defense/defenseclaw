@@ -281,16 +281,21 @@ def test_native_windows_setup_keeps_binaries_flag(tmp_path: Path) -> None:
 
 
 @posix_only
-def test_all_binaries_removes_the_installer_uv_cache_and_python(per_user_install) -> None:
+def test_all_binaries_preserves_shared_uv_cache_and_python_after_legacy_upgrade(per_user_install) -> None:
     home, data_dir = per_user_install.home, per_user_install.data_dir
     cache = home / ".cache" / "uv"
     (cache / "archive-v0").mkdir(parents=True)
     (cache / "archive-v0" / "wheel").write_bytes(b"w")
+    (cache / "other-project").write_bytes(b"shared cache")
     python_root = home / ".local" / "share" / "uv" / "python"
     base = python_root / "cpython-3.12.0-linux-x86_64-gnu"
     (base / "bin").mkdir(parents=True)
     (base / "bin" / "python3").write_bytes(b"py")
     (python_root / ".lock").write_bytes(b"")
+    other_venv = home / "other-project" / ".venv" / "bin"
+    other_venv.mkdir(parents=True)
+    (other_venv / "python").symlink_to(base / "bin" / "python3")
+    (data_dir / "legacy-install-leftovers").write_text("uv-cache\nuv-python cpython-3.12.0-linux-x86_64-gnu\n")
     (data_dir / ".venv" / "pyvenv.cfg").write_text(f"home = {base / 'bin'}\n", encoding="utf-8")
     env = {"PATH": str(per_user_install.bin_dir), "XDG_CACHE_HOME": "", "XDG_DATA_HOME": ""}
     with patch.dict(os.environ, env):
@@ -299,8 +304,9 @@ def test_all_binaries_removes_the_installer_uv_cache_and_python(per_user_install
         result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert not cache.exists() and not (home / ".cache").exists()
-    assert not (home / ".local" / "share").exists()
+    assert (cache / "other-project").read_bytes() == b"shared cache"
+    assert (other_venv / "python").resolve() == base / "bin" / "python3"
+    assert (base / "bin" / "python3").read_bytes() == b"py"
     assert _entries(per_user_install.bin_dir) == ["rg"]
 
 
@@ -311,8 +317,8 @@ def test_all_binaries_after_an_upgrade_from_0_8_removes_only_recorded_leftovers(
 ) -> None:
     # GAP-0908: a 0.8.x install upgraded to 1.0 (uv's cache now in
     # data_dir/.uv) left the 0.8.x installer's uv, uvx, uv's receipt,
-    # ~/.cache/uv and ~/.sigstore. Only what the upgrade recorded goes;
-    # without its record they are the user's and stay.
+    # ~/.cache/uv and ~/.sigstore. Shared uv cache data stays even with the
+    # upgrade record; the recorded receipt and Sigstore cache can go.
     home, data_dir, bin_dir = per_user_install.home, per_user_install.data_dir, per_user_install.bin_dir
     (data_dir / ".uv" / "cache").mkdir(parents=True)
     cache = home / ".cache" / "uv"
@@ -337,7 +343,7 @@ def test_all_binaries_after_an_upgrade_from_0_8_removes_only_recorded_leftovers(
     assert result.exit_code == 0, result.output
     left = [name for name in ("uv", "uvx") if (bin_dir / name).exists()]
     assert left == ([] if recorded else ["uv", "uvx"])
-    assert cache.exists() is not recorded
+    assert cache.exists()
     assert receipt.exists() is not recorded
     assert (home / ".sigstore").exists() is not recorded
 

@@ -2864,14 +2864,26 @@ func (m *v9Migrator) addAssetRule(root *yaml.Node, origin, from string, row v9Ac
 			yamlScalarValue(v8YAMLMapValue(existing, "connector")) != connector {
 			continue
 		}
-		// An allow pinned to another path is a distinct rule. A name-only
-		// comparison would drop it and then clear its audit install action.
-		if list == "allowed" && row.targetType != AdmissionTypeTool {
-			paths := v9SeqItems(v8YAMLMapValue(existing, "source_path_contains"))
-			if row.sourcePath == "" && len(paths) != 0 {
+		// An audit deny is name-wide. Do not discard it beside a narrower
+		// config rule; commit cleanup would then remove the only broad block.
+		// Audit allows can carry a source path, but no other constraints.
+		if row.targetType != AdmissionTypeTool {
+			constrained := false
+			for _, key := range []string{"url", "command", "transport"} {
+				constrained = constrained || yamlScalarValue(v8YAMLMapValue(existing, key)) != ""
+			}
+			constrained = constrained || len(v9SeqItems(v8YAMLMapValue(existing, "args_prefix"))) != 0
+			if constrained {
 				continue
 			}
-			if row.sourcePath != "" && (len(paths) != 1 || yamlScalarValue(paths[0]) != row.sourcePath) {
+			paths := v9SeqItems(v8YAMLMapValue(existing, "source_path_contains"))
+			if list == "denied" && len(paths) != 0 {
+				continue
+			}
+			if list == "allowed" && row.sourcePath == "" && len(paths) != 0 {
+				continue
+			}
+			if list == "allowed" && row.sourcePath != "" && (len(paths) != 1 || yamlScalarValue(paths[0]) != row.sourcePath) {
 				continue
 			}
 		}
