@@ -5,10 +5,12 @@ package guardrail
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -154,6 +156,37 @@ def save(note):
 	}
 	if unrelated := scanArtifactText(pack.artifactRules(), `open(other, "w"); print("MEMORY.md")`, "unrelated.py"); len(unrelated) != 0 {
 		t.Fatalf("unrelated write became a path write: %+v", unrelated)
+	}
+}
+
+// GAP-0488: install admission and `defenseclaw skill scan` agree on a skill
+// whose example key sits only in a Python docstring and a comment. The same
+// fixture and expected set are checked on the Python side in
+// cli/tests/test_rulepack_overlay_python_source.py.
+func TestArtifactScanAgreesWithSkillScanOnPythonComments(t *testing.T) {
+	root := filepath.Join("..", "..", "testdata", "rulepack_artifact_parity")
+	raw, err := os.ReadFile(filepath.Join(root, "expected.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want struct {
+		Findings [][3]string `json:"findings"`
+	}
+	if err := json.Unmarshal(raw, &want); err != nil {
+		t.Fatal(err)
+	}
+	pack := mustLoadRulePack(t, filepath.Join("..", "..", "policies", "guardrail", "default"))
+	findings, err := pack.ScanArtifact(context.Background(), filepath.Join(root, "skill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got [][3]string
+	for _, f := range findings {
+		got = append(got, [3]string{f.RuleID, string(f.Severity), filepath.ToSlash(f.Location)})
+	}
+	slices.SortFunc(got, func(a, b [3]string) int { return strings.Compare(strings.Join(a[:], " "), strings.Join(b[:], " ")) })
+	if !slices.Equal(got, want.Findings) {
+		t.Fatalf("install admission findings = %v, want %v (the skill scan set)", got, want.Findings)
 	}
 }
 

@@ -180,11 +180,13 @@ class RulePack:
     def scan_text(self, text: str, *, location: str = "", python: bool = False) -> list[Finding]:
         """Return one finding per matching rule (first hit), with line number.
 
-        With *python* set, a hit is confirmed on the source with comments
-        and docstrings blanked, the same view the plugin scanner's source
-        rules use (GAP-1877); ``path_write`` rules also need the matched
-        value to reach a write call (GAP-2069, GAP-2124). The view is built
-        only when a rule hits.
+        Python source is matched raw, comments and docstrings included, as
+        the gateway's install watcher matches it, so ``skill scan`` and
+        install admission report the same hits (GAP-0488). With *python*
+        set, only a ``path_write`` rule reads the source with comments and
+        docstrings blanked: its matched value must reach a write call
+        (GAP-2069, GAP-2124), which the watcher checks too. The view is
+        built only when such a rule hits.
         """
         if not text:
             return []
@@ -208,12 +210,12 @@ class RulePack:
             else:
                 m = _search(rule, text, folded)
                 match_start = m.start() if m is not None else None
-            if match_start is not None and python:
+            if match_start is not None and python and rule.path_write:
                 if py is False:
                     py = python_source(text)
                     code = text if py is None else "\n".join(py.code)
-                source = code
-                if rule.path_write and py is not None:
+                if py is not None:
+                    source = code
                     m = next(
                         (
                             hit
@@ -222,11 +224,6 @@ class RulePack:
                         ),
                         None,
                     )
-                    match_start = m.start() if m is not None else None
-                elif rule.category == _COMMAND_CATEGORY:
-                    match_start = _first_line_match(rule.pattern, source)
-                else:
-                    m = _search(rule, source, _fold(source))
                     match_start = m.start() if m is not None else None
             if match_start is None:
                 continue
