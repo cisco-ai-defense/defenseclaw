@@ -78,6 +78,12 @@ try {
   if ($connector -cne 'codex' -or $signer -cne 'OpenAI OpCo, LLC') { exit 1 }
   if (-not [string]::IsNullOrWhiteSpace($identity.ProductName) -and $identity.ProductName -cnotin @('Codex','Codex CLI')) { exit 1 }
   if (-not [string]::IsNullOrWhiteSpace($identity.OriginalFilename) -and $identity.OriginalFilename -cnotin @('codex.exe','codex-x86_64-pc-windows-msvc.exe')) { exit 1 }
+  if (-not [string]::IsNullOrWhiteSpace($identity.FileVersion)) {
+    $fileMatch=[regex]::Match([string]$identity.FileVersion,'^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.0)?$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
+    if (-not $fileMatch.Success) { exit 1 }
+    [Console]::Out.WriteLine($fileMatch.Groups[1].Value+'.'+$fileMatch.Groups[2].Value+'.'+$fileMatch.Groups[3].Value)
+    exit 0
+  }
   $stream.Position=0
   $decoder=[Text.Encoding]::ASCII
   $buffer=[byte[]]::new(65536)
@@ -94,12 +100,6 @@ try {
   if ($versions.Count -ne 1) { exit 1 }
   $version=''
   foreach ($item in $versions) { $version=[string]$item; break }
-  if (-not [string]::IsNullOrWhiteSpace($identity.FileVersion)) {
-    $fileMatch=[regex]::Match([string]$identity.FileVersion,'^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\.0)?$',[Text.RegularExpressions.RegexOptions]::CultureInvariant)
-    if (-not $fileMatch.Success) { exit 1 }
-    $fileVersion=$fileMatch.Groups[1].Value+'.'+$fileMatch.Groups[2].Value+'.'+$fileMatch.Groups[3].Value
-    if ($fileVersion -cne $version) { exit 1 }
-  }
   [Console]::Out.WriteLine($version)
 } finally {
   if ($null -ne $stream) { $stream.Dispose() }
