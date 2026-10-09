@@ -682,13 +682,33 @@ func TestIDEPluginTotalGaugeCoversEmptyAndOffScans(t *testing.T) {
 	if err := json.Unmarshal(dashboard, &parsed); err != nil {
 		t.Fatal(err)
 	}
+	breakdowns := map[string]bool{
+		"AI plugins": false, "Disabled plugins": false, "Plugins by IDE": false,
+		"AI vs other plugins by IDE": false, "AI vs other plugins": false,
+		"Plugins by enabled state": false,
+	}
+	installed := false
 	for _, panel := range parsed.Panels {
 		if panel.Title == "IDE plugins installed" {
 			if len(panel.Targets) != 1 || panel.Targets[0].Expr != `sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=""})` {
 				t.Fatalf("installed panel does not select only the current total: %+v", panel.Targets)
 			}
-			return
+			installed = true
+		}
+		if _, ok := breakdowns[panel.Title]; ok {
+			if len(panel.Targets) != 1 ||
+				!strings.Contains(panel.Targets[0].Expr, `and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=""} > 0)`) {
+				t.Errorf("%s does not filter stale plugin series by its gateway total: %+v", panel.Title, panel.Targets)
+			}
+			breakdowns[panel.Title] = true
 		}
 	}
-	t.Fatal("IDE plugins installed panel missing")
+	if !installed {
+		t.Error("IDE plugins installed panel missing")
+	}
+	for title, found := range breakdowns {
+		if !found {
+			t.Errorf("%s panel missing", title)
+		}
+	}
 }
