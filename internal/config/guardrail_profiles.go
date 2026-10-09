@@ -438,6 +438,35 @@ func digestConnectors(in map[string]PerConnectorGuardrailConfig) map[string]PerC
 	return out
 }
 
+// HILTBlockedByThreshold reports a valid but inert approval setting. Blocking
+// takes precedence over confirmation, so no finding at or above min_severity
+// can reach an approval prompt when the block threshold is at or below it.
+// Callers pass the resolved block level, including the selected pack default.
+func HILTBlockedByThreshold(hilt HILTConfig, blockAt string) bool {
+	if !hilt.Enabled {
+		return false
+	}
+	rank := func(level string) int {
+		switch canonicalGuardrailLevel(level) {
+		case "LOW":
+			return 1
+		case "MEDIUM":
+			return 2
+		case "HIGH":
+			return 3
+		case "CRITICAL":
+			return 4
+		default:
+			return 0
+		}
+	}
+	minimum := rank(hilt.MinSeverity)
+	if minimum == 0 {
+		minimum = rank("HIGH")
+	}
+	return rank(blockAt) > 0 && minimum >= rank(blockAt)
+}
+
 // policyFields returns the profile's policy fields in the per-connector
 // shape the overlay helpers take.
 func (p GuardrailProfile) policyFields() PerConnectorGuardrailConfig {

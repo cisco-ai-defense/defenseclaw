@@ -650,6 +650,8 @@ def _print_guardrail_profile(cfg) -> None:
     result = current_user_guardrail_profile(cfg)
     if result is not None:
         _status_row("Profile", profile_status_text(cfg, result))
+        for note in result.get("warnings") or []:
+            ux.warn(str(note))
 
 
 def _guardrail_turned_off(gc) -> bool:

@@ -1422,6 +1422,27 @@ def hilt_label(hilt: object) -> str:
     return "HIGH+" if label == "none" else label
 
 
+def inert_hilt_warning(hilt: str, block_at: str) -> str:
+    """Explain an approval floor that blocking consumes before it can ask."""
+    minimum = level_value(hilt.rstrip("+"))
+    block = level_value(block_at.rstrip("+"))
+    if not minimum or not block or _SEVERITY_RANK[minimum] < _SEVERITY_RANK[block]:
+        return ""
+    return (
+        f"human approval at {minimum} cannot ask: block_at {block} blocks those findings first; "
+        "lower hilt.min_severity or raise block_at"
+    )
+
+
+def configured_hilt_warnings(cfg: Any) -> list[str]:
+    """Warnings for the configured global and connector postures."""
+    return [
+        f"{row.scope}: {note}"
+        for row in scope_postures(cfg)
+        if (note := inert_hilt_warning(row.hilt, row.block_at))
+    ]
+
+
 def _connector_block(gc: Any, connector: str) -> Any:
     getter = getattr(gc, "_connector_override", None)
     if callable(getter):

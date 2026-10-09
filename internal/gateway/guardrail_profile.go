@@ -1475,6 +1475,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["profile"] = ""
 		out["match"] = ""
 		out["effective"] = profileEffectiveView(base, connectorName)
+		if note := inertHILTWarning(base, connectorName); note != "" {
+			out["warnings"] = []string{note}
+		}
 		a.writeJSON(w, http.StatusOK, out)
 		return
 	}
@@ -1513,6 +1516,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if note := set.pendingRulePackNote(decision.Name, effective, connectorName); note != "" {
 		warnings = append(warnings, note)
 	}
+	if note := inertHILTWarning(effective, connectorName); note != "" {
+		warnings = append(warnings, note)
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
@@ -1529,11 +1535,15 @@ func profileEffectiveView(cfg *config.Config, connectorName string) map[string]a
 		return map[string]any{}
 	}
 	hilt := cfg.EffectiveHILTForConnector(connectorName)
-	return map[string]any{
+	view := map[string]any{
 		"mode":          hookModeForConfig(cfg, connectorName),
 		"block_at":      cfg.Guardrail.EffectiveBlockAt(connectorName),
 		"alert_at":      cfg.Guardrail.EffectiveAlertAt(connectorName),
 		"rule_pack_dir": cfg.EffectiveRulePackDirForConnector(connectorName),
 		"hilt":          map[string]any{"enabled": hilt.Enabled, "min_severity": hilt.MinSeverity},
 	}
+	if !cfg.SecureClientIntegration() {
+		view["resolved_block_at"] = resolveThresholds(cfg, connectorName).Block
+	}
+	return view
 }

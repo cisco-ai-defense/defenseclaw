@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
@@ -47,6 +48,7 @@ type configV8WireResponse struct {
 	PlanDigest        string          `json:"plan_digest"`
 	NetworkValidation string          `json:"network_validation"`
 	Valid             *bool           `json:"valid,omitempty"`
+	Warnings          []string        `json:"warnings,omitempty"`
 	Effective         json.RawMessage `json:"effective,omitempty"`
 }
 
@@ -106,6 +108,7 @@ var configV8ValidateCmd = &cobra.Command{
 			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
+			Warnings:          gateway.ConfigHILTWarnings(loaded.runtime),
 		}
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)

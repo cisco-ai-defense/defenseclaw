@@ -5,6 +5,7 @@ package cli
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -15,6 +16,7 @@ import (
 func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body []byte) {
 	var health struct {
 		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
+		ProfileWarnings           []string `json:"profile_warnings"`
 		Telemetry                 struct {
 			Details struct {
 				OptionalState  string `json:"optional_destination_state"`
@@ -31,6 +33,11 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body []byt
 	for _, warning := range health.ProfileAssignmentWarnings {
 		if strings.TrimSpace(warning) != "" {
 			result.AddWarning("profile_assignment_unmatched", warning)
+		}
+	}
+	for _, warning := range health.ProfileWarnings {
+		if strings.TrimSpace(warning) != "" && !slices.Contains(health.ProfileAssignmentWarnings, warning) {
+			result.AddWarning("guardrail_profile", warning)
 		}
 	}
 	// A rejected judge key made every judge call fail while status and

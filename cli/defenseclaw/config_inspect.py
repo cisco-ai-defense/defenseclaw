@@ -85,6 +85,7 @@ class ConfigV8WireResult:
     gateway_api_port: int = 18970
     valid: bool | None = None
     effective: dict[str, Any] | None = None
+    warnings: tuple[str, ...] = ()
 
 
 def inspect_v8_config(
@@ -341,6 +342,10 @@ def _decode_wire(payload: dict[str, Any], operation: str) -> ConfigV8WireResult:
         gateway_api_port=gateway_api_port,
         valid=valid if isinstance(valid, bool) else None,
         effective=effective,
+        warnings=tuple(
+            item for item in payload.get("warnings", [])
+            if isinstance(item, str) and len(item) <= 1024 and _DIAGNOSTIC_CONTROL_CHARACTERS.search(item) is None
+        ) if isinstance(payload.get("warnings", []), list) else (),
     )
 
 

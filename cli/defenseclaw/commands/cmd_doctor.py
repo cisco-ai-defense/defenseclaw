@@ -1915,6 +1915,9 @@ def _check_hilt_support(
     hilt_enabled = bool(getattr(hilt, "enabled", False))
     min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
     mode = mode_src.lower()
+    from defenseclaw import policy_catalog
+
+    block_at = policy_catalog.scope_levels(cfg, connector).block_at
     if getattr(guardrail, "profiles", None):
         from defenseclaw.gateway import current_user_guardrail_profile
 
@@ -1939,6 +1942,7 @@ def _check_hilt_support(
         hilt_enabled = bool(profile_hilt["enabled"])
         min_sev = str(profile_hilt.get("min_severity") or "HIGH").upper()
         mode = str(effective["mode"]).lower()
+        block_at = str(effective.get("resolved_block_at") or effective.get("block_at") or block_at)
     if not hilt_enabled:
         _emit("pass", "Human approval", "disabled (default)", r=r)
         return
@@ -1948,6 +1952,10 @@ def _check_hilt_support(
             observe_only.append((connector, min_sev))
             return
         _emit("warn", "Human approval", f"enabled at {min_sev}, but {connector} mode is observe", r=r)
+        return
+
+    if note := policy_catalog.inert_hilt_warning(min_sev, block_at):
+        _emit("warn", "Human approval", f"{connector}: {note}", r=r)
         return
 
     if connector == "openclaw":

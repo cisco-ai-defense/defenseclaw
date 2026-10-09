@@ -24,6 +24,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+func TestInertHILTValidationWarningUsesProfileAndConnectorThresholds(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"team": {
+			BlockAt: "MEDIUM", HILT: &config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
+			Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {BlockAt: "CRITICAL"}},
+		},
+	}
+	warnings := ConfigHILTWarnings(cfg)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "guardrail.profiles.team:") ||
+		!strings.Contains(warnings[0], "block_at MEDIUM blocks") {
+		t.Fatalf("warnings = %v, want only the inert profile scope", warnings)
+	}
+	if !config.HILTBlockedByThreshold(config.HILTConfig{Enabled: true, MinSeverity: "HIGH"}, "HIGH") ||
+		config.HILTBlockedByThreshold(config.HILTConfig{Enabled: true, MinSeverity: "HIGH"}, "CRITICAL") {
+		t.Fatal("HILT threshold ordering is wrong")
+	}
+}
+
 // An inspect verdict must use the authenticated connector profile settings.
 func TestInspectVerdictUsesAuthenticatedConnectorProfile(t *testing.T) {
 	stubProfileSources(t)

@@ -311,11 +311,15 @@ def list_policies(app: AppContext, json_out: bool) -> None:
     """List all available policies (built-in and custom)."""
     policies = policy_catalog.list_named_policies(_policies_dir(app), app.cfg)
     active = policy_catalog.active_policy_name(_policies_dir(app), app.cfg)
+    warnings = [] if asset_lists.is_secure_client(app.cfg) else policy_catalog.configured_hilt_warnings(app.cfg)
 
     if json_out:
+        payload = {"version": 1, "active": active, "policies": [p.to_json() for p in policies]}
+        if warnings:
+            payload["warnings"] = warnings
         click.echo(
             json.dumps(
-                {"version": 1, "active": active, "policies": [p.to_json() for p in policies]},
+                payload,
                 indent=2,
             )
         )
@@ -327,6 +331,8 @@ def list_policies(app: AppContext, json_out: bool) -> None:
 
     click.echo(f"{ux.bold('Available policies:')}")
     click.echo()
+    for warning in warnings:
+        ux.warn(warning)
     for summary in policies:
         prefix = "  * " if summary.active else "    "
         label = ux.bold(summary.name)

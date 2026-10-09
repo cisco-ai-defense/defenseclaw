@@ -1271,6 +1271,7 @@ def validate_config() -> ValidationResult:
             return res
         if inspected.valid is not True:
             res.errors.append("the configuration validator returned no validity decision")
+        res.warnings.extend(inspected.warnings)
         if os.name == "nt" and res.ok:
             source = load_masked_v8(_bounded_source(cfg_path) or b"", source_name=cfg_path)
             res.warnings.extend(_per_user_windows_group_warnings(source))

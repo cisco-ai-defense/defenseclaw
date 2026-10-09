@@ -1790,6 +1790,10 @@ class PoliciesPanelModel:
             "",
             self._pack_line(row),
         ]
+        from defenseclaw.policy_catalog import inert_hilt_warning
+
+        if note := inert_hilt_warning(hilt, block):
+            lines.insert(1, "Warning: " + note)
         protection = self.scope_protection(row)
         if protection:
             titles = [str(_attr(self.protection_pack(name), "title")) or name for name in protection]

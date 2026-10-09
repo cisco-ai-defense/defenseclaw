@@ -976,6 +976,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     profile = None
     if not secure_client:
         profile = current_user_guardrail_profile(app.cfg)
+        posture_rows.extend(policy_catalog.configured_hilt_warnings(app.cfg))
     if as_json:
         _echo_status_json(
             gc, rows, posture_rows + runtime_drift_rows + runtime_limit_rows, profile,
