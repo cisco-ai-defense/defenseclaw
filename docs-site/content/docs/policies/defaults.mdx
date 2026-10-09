@@ -83,14 +83,15 @@ The rule pack directory (`policies/guardrail/<name>/`) holds the regex YAMLs, ju
 
 The counts are what `defenseclaw guardrail validate-pack` reports for the packs shipped with this release. Each pack also sets its default [block and alert levels](/docs/policies/thresholds#rule-pack-default-posture) through its posture.
 
-In the default and permissive packs, a remote `curl` response piped to a shell,
-a world-writable `chmod`, and a Windows Run-key addition produce HIGH alerts;
-these findings do not block the tool call. Writes to the active user's
-`authorized_keys` file are blocked when a direct command, a file tool, or a
-supported literal interpreter form proves the target. Arbitrary computed
-interpreter paths are outside that proof. A symlink already present in the
-gateway's local filesystem is resolved for write targets; sandbox filesystems
-are evaluated without local symlink resolution.
+In the default and permissive packs, a world-writable `chmod` and a Windows
+Run-key addition produce HIGH alerts; these findings do not block the tool call.
+Writes to the active user's `authorized_keys` file are blocked when a direct
+command, a file tool, or a supported literal interpreter form proves the target.
+Arbitrary computed interpreter paths are outside that proof. A symlink already
+present in the gateway's local filesystem is resolved for write targets; sandbox
+filesystems are evaluated without local symlink resolution.
+
+The `default` and `permissive` packs ship the `curl ... | bash` rule `CMD-PIPE-CURL` off; `strict` enables it. See [Download piped into a shell](/docs/policies/deterministic-detection#download-piped-into-a-shell).
 
 All three packs share the same [severity rubric](/docs/policies#shared-severity-rubric) and the same `signal_strength` output schema — only the per-category thresholds and suppression scope differ between packs. Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.
 
