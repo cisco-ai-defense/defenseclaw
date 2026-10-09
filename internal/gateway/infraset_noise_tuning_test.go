@@ -238,6 +238,8 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"assigned path", `D=~/.ssh; echo dccert-block-marker >> "$D/authorized_keys"`, "", "", true},
 		{"nested shell", `sh -c 'echo dccert-block-marker >> "$HOME/.ssh/authorized_keys"'`, "", "", true},
 		{"normalized path", `echo dccert-block-marker >> ~//.ssh//authorized_keys`, "", "", true},
+		{"apostrophe home tilde", `echo dccert-block-marker >> ~/.ssh/authorized_keys`, "/home/o'brien/proj", "/home/o'brien", true},
+		{"apostrophe home variable", `echo dccert-block-marker >> $HOME/.ssh/authorized_keys`, "/home/o'brien/proj", "/home/o'brien", true},
 		{"glob path", `echo dccert-block-marker | tee -a ~/.ssh/authorized_k*`, "", "", true},
 		{"python write", `python3 -c 'import pathlib; p = pathlib.Path.home() / ".ssh" / "authorized_keys"; p.write_text(p.read_text() + "dccert-block-marker\n")'`, "", "", true},
 		{"perl write", `perl -e 'open(F, ">>", "$ENV{HOME}/.ssh/authorized_keys"); print F "dccert-block-marker\n"; close(F)'`, "", "", true},
