@@ -2306,8 +2306,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	gatewayPresent := exists(filepath.Join(env.P(env.Layout.BinDir), binGateway))
-	enrollmentKept := exists(env.P(env.Layout.ManifestPath)) && exists(env.P(env.Layout.ConfigPath))
-	removePerUser := gatewayPresent && (record != nil || enrollmentKept)
+	// Rollback of a first package install may remove config.yaml after
+	// enrollment, while leaving the manifest and hook registrations. The
+	// remove-all command has a cleanup-only config-free path for this case.
+	removePerUser := gatewayPresent && (record != nil || exists(env.P(env.Layout.ManifestPath)))
 	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
 		return 0
 	}
