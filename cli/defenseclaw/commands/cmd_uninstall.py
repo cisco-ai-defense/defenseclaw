@@ -1323,9 +1323,23 @@ def _remove_probe_created_state(data_dir: str) -> None:
     home = os.path.abspath(os.path.expanduser("~"))
     removed: list[str] = []
     for path, fingerprint in sorted((paths or {}).items() if isinstance(paths, dict) else (), reverse=True):
-        if not isinstance(path, str) or not os.path.isabs(path) or not _below(home, path):
+        if not isinstance(path, str) or not os.path.isabs(path):
             continue
-        if not _real_dir_chain(home, os.path.dirname(path)) or os.path.islink(path):
+        try:
+            path_info = os.lstat(path)
+        except OSError:
+            continue
+        cursor_tmp = (
+            os.name != "nt"
+            and path == f"/var/tmp/cursor-agent-logs-{os.getuid()}"
+            and stat.S_ISDIR(path_info.st_mode)
+            and path_info.st_uid == os.getuid()
+        )
+        if not cursor_tmp and not _below(home, path):
+            continue
+        if not cursor_tmp and not _real_dir_chain(home, os.path.dirname(path)):
+            continue
+        if os.path.islink(path):
             continue
         if agent_discovery.probe_state_fingerprint(path) != fingerprint:
             continue  # used since: the agent's own state now
