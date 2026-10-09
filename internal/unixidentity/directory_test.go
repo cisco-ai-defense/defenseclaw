@@ -268,3 +268,21 @@ func TestDirectoryFactsWithoutGroupsSkipsNaming(t *testing.T) {
 		t.Fatalf("spool facts = %+v, %v", facts, err)
 	}
 }
+
+func TestDirectoryFactsRejectsUnreadableNSSConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	oldPasswd, oldNSS := localPasswdPath, nsswitchPath
+	t.Cleanup(func() { localPasswdPath, nsswitchPath = oldPasswd, oldNSS })
+	localPasswdPath, nsswitchPath = filepath.Join(dir, "passwd"), filepath.Join(dir, "nsswitch.conf")
+	if err := os.WriteFile(localPasswdPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nsswitchPath, []byte("passwd: files sss\n"+strings.Repeat("x", 1<<20)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	account := "alice:x:1001:1001::/home/alice:/bin/bash\n"
+	f := &fakeRun{results: map[string]commandResult{"passwd 1001": {stdout: []byte(account)}}}
+	if facts, err := newFakeNSS(f).DirectoryFactsWithoutGroupsForUID(1001, time.Now()); err == nil {
+		t.Fatalf("unreadable NSS configuration returned verified facts: %+v", facts)
+	}
+}

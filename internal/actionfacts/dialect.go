@@ -72,6 +72,17 @@ func genericRawExecutionTool(name string) bool {
 	}
 }
 
+// InferredRawCommandDialect is the dialect inferRawCommandDialect reads from
+// the grammar of source, as for a generic execution tool, or DialectNone when
+// its signals are mixed.
+func InferredRawCommandDialect(source string) Dialect {
+	dialect, ambiguous := inferRawCommandDialect(source)
+	if ambiguous {
+		return DialectNone
+	}
+	return dialect
+}
+
 func inferRawCommandDialect(source string) (Dialect, bool) {
 	rawFirst := strings.ToLower(rawFirstWord(source))
 	if rawFirst == "" {

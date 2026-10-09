@@ -621,9 +621,14 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 	}))
 	defer server.Close()
 
+	// The destination acknowledges the canary only when its two spans reach
+	// one export. A 10 ms batch delay let the batch timer fire between the
+	// child's and the root's End on a loaded runner, exporting them apart
+	// (canary_failed); the pair now leaves together when the batch of two is
+	// full, or at the canary's flush.
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	raw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nobservability:\n  destinations:\n    - name: %s\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n      batch:\n        max_export_batch_size: 2\n        scheduled_delay_ms: 10\n      send:\n        signals: [traces]\n        buckets: ['*']\n",
+		"config_version: 8\ndata_dir: %q\nobservability:\n  destinations:\n    - name: %s\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n      batch:\n        max_export_batch_size: 2\n        scheduled_delay_ms: 60000\n      send:\n        signals: [traces]\n        buckets: ['*']\n",
 		fixture.dataDir,
 		localobservability.DestinationName,
 		server.URL,
