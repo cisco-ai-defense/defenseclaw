@@ -36,9 +36,34 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+import warnings as _warnings
 from urllib.parse import urlparse
 
 logger = logging.getLogger("defenseclaw")
+
+
+def check_http_production(url: str, context: str = "adapter") -> None:
+    """M-4 fix: Warn when a non-loopback URL uses plain HTTP in production.
+
+    External endpoints MUST use HTTPS when DCLAW_PRODUCTION is set.
+    Loopback addresses (127.0.0.1, localhost, ::1) are exempt since
+    they never leave the device.
+    """
+    if not os.environ.get("DCLAW_PRODUCTION"):
+        return
+    if not url.startswith("http://"):
+        return
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        return
+    if host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        return
+    _warnings.warn(
+        f"[DefenseClaw] M-4: {context} uses plain HTTP for non-loopback "
+        f"endpoint '{url}'. Use HTTPS in production (DCLAW_PRODUCTION is set).",
+        stacklevel=2,
+    )
 
 # ---------------------------------------------------------------------------
 # Capability flags (must match defenseclaw.h)

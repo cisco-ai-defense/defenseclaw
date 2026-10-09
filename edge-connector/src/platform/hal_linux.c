@@ -28,14 +28,18 @@ uint64_t hal_tick_ms(void) {
 
 int hal_flash_read(uint32_t offset, void *buf, size_t len) {
     if (flash_fd < 0) return -1;
-    if (offset + len > FLASH_TOTAL_SIZE) return -1;
+    /* L-2 fix: Cast to size_t before addition to prevent integer overflow
+     * on 32-bit platforms where uint32_t + size_t could wrap. */
+    if ((size_t)offset + len > FLASH_TOTAL_SIZE) return -1;
     if (pread(flash_fd, buf, len, (off_t)offset) != (ssize_t)len) return -1;
     return 0;
 }
 
 int hal_flash_write(uint32_t offset, const void *buf, size_t len) {
     if (flash_fd < 0) return -1;
-    if (offset + len > FLASH_TOTAL_SIZE) return -1;
+    /* L-2 fix: Cast to size_t before addition to prevent integer overflow
+     * on 32-bit platforms where uint32_t + size_t could wrap. */
+    if ((size_t)offset + len > FLASH_TOTAL_SIZE) return -1;
     if (pwrite(flash_fd, buf, len, (off_t)offset) != (ssize_t)len) return -1;
     return 0;
 }
@@ -253,14 +257,22 @@ int hal_init(void) {
             struct stat st;
             if (stat(dir, &st) != 0) {
                 if (mkdir_p(dir, 0700) != 0) {
-                    /* M-12 fix: /tmp is world-readable and other processes can
-                     * tamper with the flash file. Log a WARNING so operators
-                     * notice the fallback in production. */
+#if !DCLAW_DEV_MODE
+                    /* H-5 fix: In production, refuse to use /tmp/ — it's
+                     * world-writable and any local user can tamper with
+                     * policy, audit, and emergency state. */
+                    fprintf(stderr, "[DCLAW] ERROR: cannot create %s (%s) and "
+                            "/tmp fallback is disabled in production. "
+                            "Create the directory with: sudo mkdir -p %s && sudo chown $(id -u) %s\n",
+                            dir, strerror(errno), dir, dir);
+                    free(dir);
+                    return -1;
+#else
                     fprintf(stderr, "[DCLAW] WARNING: cannot create %s (%s); "
-                            "falling back to /tmp/ for flash storage — "
-                            "/tmp is insecure, fix directory permissions for production use\n",
+                            "falling back to /tmp/ — insecure, for dev only\n",
                             dir, strerror(errno));
                     flash_path = "/tmp/defenseclaw-flash.bin";
+#endif
                 }
             }
         }

@@ -851,12 +851,19 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
     # with the dev stub rather than a real Ed25519 key.
     os.environ["DCLAW_BLOB_UNSIGNED"] = "1"
 
-    # Dev stub: 64 bytes = 0xED marker + SHA-256(blob) (32 bytes) + zero padding (31 bytes).
+    # M-5 fix: Dev stub signature format (64 bytes):
+    #   byte 0:     0xDE  — "dev" marker byte (M-5: added so Go signing path
+    #                        can detect unsigned blobs at sig[0] without hashing)
+    #   byte 1:     0xED  — legacy marker (kept for backward compat)
+    #   bytes 2-33: SHA-256(blob) (32 bytes)
+    #   bytes 34-63: zero padding (30 bytes)
+    #
     # The Go policy service (policy.go) detects this stub by checking:
-    #   blob[-64] == 0xED and blob[-63:-31] == SHA-256(unsigned)[:32]
+    #   sig[0] == 0xDE (fast first-byte check)
+    #   sig[1] == 0xED and sig[2:34] == SHA-256(unsigned)
     # and strips it before appending the real HMAC signature.
     digest = hashlib.sha256(blob).digest()  # 32 bytes
-    sig = b'\xED' + digest + b'\x00' * (63 - len(digest))
+    sig = b'\xDE\xED' + digest + b'\x00' * (62 - len(digest))
     return sig
 
 

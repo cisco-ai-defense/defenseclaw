@@ -245,10 +245,13 @@ class _HttpUpstream:
 
     async def send(self, msg: Dict) -> Dict:
         assert self._session is not None
+        # L-5 fix: Disable redirects to prevent bearer tokens / credentials
+        # from being forwarded to redirect targets.
         async with self._session.post(
             self._url,
             json=msg,
             headers={"Content-Type": "application/json"},
+            allow_redirects=False,
         ) as resp:
             return await resp.json()
 
@@ -432,10 +435,12 @@ class MCPProxy:
         elif isinstance(self._upstream, _HttpUpstream):
             session = self._upstream._session
             if session:
+                # L-5 fix: Disable redirects for notification path too
                 async with session.post(
                     self._upstream._url,
                     json=msg,
                     headers={"Content-Type": "application/json"},
+                    allow_redirects=False,
                 ) as resp:
                     pass  # discard response if server sends one
         else:

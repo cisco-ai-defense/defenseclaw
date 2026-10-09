@@ -414,17 +414,9 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
                             DCLAW_VERDICT_PENDING);
     }
 #else
-    /* MQTT not enabled — no cloud path available */
-#if DCLAW_SPECULATIVE_EXECUTION
-    /* H-3 fix: When strict mode is active, skip speculative execution. */
-    if (!g_strict_mode && !is_sync_block_required(req->cap_flags)) {
-        dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
-                          target_hash, req->session_id);
-        g_state.eval_escalated_count++;
-        return make_verdict(DCLAW_ACTION_ALLOW, DCLAW_REASON_CLOUD_BLOCK,
-                            DCLAW_VERDICT_PENDING);
-    }
-#endif
+    /* MQTT not enabled — no cloud path available.
+     * H-1 fix: Without MQTT, speculative ALLOW is pointless because no cloud
+     * will ever respond. All uncached tools BLOCK with CLOUD_TIMEOUT. */
     dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT,
                       target_hash, req->session_id);
     g_state.eval_denied_count++;

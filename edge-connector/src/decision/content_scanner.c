@@ -3,11 +3,24 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
-#if defined(DCLAW_DNS_CHECK) && DCLAW_DNS_CHECK
+#if DCLAW_MQTT_ENABLED
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <unistd.h>
+#include <signal.h>
+#include <setjmp.h>
+
+/* M-1 fix: Non-blocking DNS timeout via SIGALRM.
+ * getaddrinfo() is blocking; on slow/dead DNS servers it can stall the
+ * event loop indefinitely.  We set a 2-second alarm to bound the wait. */
+static volatile sig_atomic_t dns_timed_out = 0;
+static void dns_alarm_handler(int sig) {
+    (void)sig;
+    dns_timed_out = 1;
+}
 #endif
 
 /* === Helper Functions === */
@@ -792,20 +805,42 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
         return DCLAW_ACTION_BLOCK;
     }
 
-    /* H-2 fix: DNS rebinding check — resolve the hostname and verify the
-     * resolved IP is not in a private range. This catches DNS rebinding where
-     * evil.com resolves to 192.168.1.1. Guarded by DCLAW_NO_DNS_CHECK so
-     * embedded targets without DNS resolution can disable this check. */
-#if defined(DCLAW_DNS_CHECK) && DCLAW_DNS_CHECK
+    /* M-1 fix: DNS rebinding check — resolve the hostname and verify the
+     * resolved IP is not in a private range.  This catches DNS rebinding
+     * where evil.com resolves to 192.168.1.1.
+     *
+     * Enabled by default for STANDARD and EDGE profiles (which have
+     * DCLAW_MQTT_ENABLED=1 and therefore have networking / getaddrinfo).
+     * MINIMAL profiles lack networking and skip this check.
+     *
+     * A 2-second SIGALRM timeout prevents getaddrinfo() from stalling the
+     * event loop on slow/dead DNS servers. */
+#if DCLAW_MQTT_ENABLED
     if (!starts_with_digit(host)) {
         struct addrinfo hints, *result;
         memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
 
+        /* M-1 fix: Install a 2-second alarm to bound getaddrinfo() */
+        dns_timed_out = 0;
+        struct sigaction new_sa, old_sa;
+        memset(&new_sa, 0, sizeof(new_sa));
+        new_sa.sa_handler = dns_alarm_handler;
+        sigemptyset(&new_sa.sa_mask);
+        new_sa.sa_flags = 0;
+        sigaction(SIGALRM, &new_sa, &old_sa);
+        unsigned int prev_alarm = alarm(2);
+
         int dns_rc = getaddrinfo(host, NULL, &hints, &result);
-        if (dns_rc != 0) {
-            /* DNS resolution failed — block to be safe */
+
+        /* Restore previous alarm and signal handler */
+        alarm(0);
+        sigaction(SIGALRM, &old_sa, NULL);
+        if (prev_alarm > 0) alarm(prev_alarm);
+
+        if (dns_timed_out || dns_rc != 0) {
+            /* DNS resolution failed or timed out — block to be safe */
             return DCLAW_ACTION_BLOCK;
         }
 
@@ -833,18 +868,17 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
         /* Resolved to a public IP — allow */
         return DCLAW_ACTION_ALLOW;
     }
-#endif /* DCLAW_DNS_CHECK */
+#endif /* DCLAW_MQTT_ENABLED */
 
     /* If not starting with digit, assume it's a hostname — pass through.
      *
-     * M-1 tradeoff: When DCLAW_DNS_CHECK is not defined (embedded targets
-     * without getaddrinfo), hostname-only destinations bypass the private-IP
-     * detection above.  DNS resolution is opt-in to avoid blocking the event
-     * loop on constrained devices.  The cloud escalation path provides a
-     * second check: escalated requests are re-evaluated server-side where
-     * DNS resolution IS performed, catching any hostname that resolves to a
-     * private range.  Deployments that need full SSRF coverage without cloud
-     * should compile with -DDCLAW_DNS_CHECK=1. */
+     * M-1 tradeoff: When DCLAW_MQTT_ENABLED is 0 (MINIMAL profile without
+     * networking/getaddrinfo), hostname-only destinations bypass the
+     * private-IP detection above.  STANDARD and EDGE profiles always perform
+     * the DNS check.  The cloud escalation path provides a second check for
+     * MINIMAL: escalated requests are re-evaluated server-side where DNS
+     * resolution IS performed, catching any hostname that resolves to a
+     * private range. */
     if (!starts_with_digit(host)) {
         return DCLAW_ACTION_ALLOW;
     }

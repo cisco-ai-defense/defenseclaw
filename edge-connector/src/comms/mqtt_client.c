@@ -782,9 +782,8 @@ int dclaw_mqtt_connect(void) {
     }
 #endif
 
-    /* DCLAW_REQUIRE_TLS guard: In production builds, if the operator has set
-     * DCLAW_REQUIRE_TLS=1 (or "true"), refuse to connect over plaintext mqtt://.
-     * This lets operators enforce TLS without code changes. */
+    /* H-4 fix: In production builds, warn loudly about plaintext MQTT.
+     * If DCLAW_REQUIRE_TLS=1, refuse to connect. Otherwise warn but proceed. */
 #if !DCLAW_DEV_MODE
     if (!is_tls) {
         const char *require_tls = getenv("DCLAW_REQUIRE_TLS");
@@ -795,6 +794,8 @@ int dclaw_mqtt_connect(void) {
             mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
             return -1;
         }
+        fprintf(stderr, "[DCLAW-MQTT] WARNING: Using plaintext MQTT in production build. "
+                "Set DCLAW_REQUIRE_TLS=1 to enforce TLS or use mqtts:// URL.\n");
     }
 #endif
 

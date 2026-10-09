@@ -87,6 +87,13 @@ int main(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    /* L-3 fix: Ignore SIGPIPE to prevent the process from being killed when
+     * writing to a broken IPC socket.  A broken socket write (e.g., client
+     * disconnected mid-response) generates SIGPIPE whose default action is
+     * process termination.  Ignoring it causes write() to return EPIPE
+     * instead, which our write loop already handles gracefully. */
+    signal(SIGPIPE, SIG_IGN);
+
     const char *env_tenant = getenv("DCLAW_TENANT_ID");
     const char *env_fleet  = getenv("DCLAW_FLEET_ID");
     const char *env_device = getenv("DCLAW_DEVICE_ID");

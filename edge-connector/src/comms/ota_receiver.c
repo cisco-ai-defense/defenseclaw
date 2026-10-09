@@ -448,24 +448,20 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
             return -2;
         }
 
-        /* REQ-31: Jump attack detection — reject delta > 100 (M-7: reduced
-         * from 1000 to shrink the window for sequence gap attacks).
+        /* REQ-31: Jump attack detection — reject delta > 10.
          *
-         * M-10 tradeoff: A threshold of 100 means up to 100 emergency messages
-         * can be missed during a network outage before the device refuses to
-         * accept new emergencies (requiring a re-bootstrap). This is a balance
-         * between security (smaller window = harder to exploit) and resilience
-         * (larger window = tolerates longer disconnects). At 1 msg/min, 100
-         * covers ~1.5 hours of downtime. Reduce further only if fleet
-         * reconnect times are consistently under 30 minutes.
+         * M-3 fix: Reduced from 100 to 10 to tighten the window for sequence
+         * gap attacks.  An attacker who compromises the OTA signing key can
+         * forge at most 10 forward-sequence emergency messages before the
+         * device rejects further jumps.  Without the signing key, the gap is
+         * unexploitable because verify_signature() rejects unsigned messages
+         * before the sequence check runs.
          *
-         * M-3 note: The gap of 100 is bounded by the OTA emergency signing
-         * key compromise requirement — an attacker who gains access to the
-         * signing key can forge at most 100 forward-sequence emergency
-         * messages before the device rejects further jumps.  Without the
-         * signing key, the gap is unexploitable because verify_signature()
-         * rejects unsigned messages before the sequence check runs. */
-        if (seq - s->emergency.last_seen_seq > 100) {
+         * Tradeoff: At 1 msg/min, a gap of 10 covers ~10 minutes of missed
+         * messages during a network outage before the device requires a
+         * re-bootstrap.  Fleet reconnect times under 10 minutes are expected
+         * for STANDARD/EDGE profiles with MQTT keepalive. */
+        if (seq - s->emergency.last_seen_seq > 10) {
             return -3;
         }
     }

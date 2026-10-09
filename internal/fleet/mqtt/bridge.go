@@ -760,7 +760,13 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	// store-backed provider can find keys stored during registration.
 	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 	deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
-	// NEW-6 fix: HMAC covers all response fields, not just action+request_id+hash prefix.
+	// CRT-1 fix: Refuse to compute HMAC with nil key — nil produces a
+	// deterministic zero-length-key HMAC that an attacker can forge.
+	if deviceKey == nil {
+		b.logger.Printf("[mqtt-bridge] ERROR: cannot sign verdict response for device %d — nil key (store error or unprovisioned)", parts.DeviceID)
+		b.incErrors()
+		return
+	}
 	resp.HMACTag = computeVerdictHMACFull(deviceKey, sessionID,
 		vr.RequestID, resp.Action, resp.Severity, resp.TTL,
 		resp.Reason, resp.Flags, resp.ServerTS, vr.ToolHash)
@@ -821,6 +827,10 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte)
 	sessionID := fmt.Sprintf("%d", parts.DeviceID)
 	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 	deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
+	if deviceKey == nil {
+		b.logger.Printf("[mqtt-bridge] ERROR: cannot sign lockdown response for device %d — nil key", parts.DeviceID)
+		return
+	}
 	resp.HMACTag = computeVerdictHMACFull(deviceKey, sessionID,
 		resp.RequestID, resp.Action, resp.Severity, resp.TTL,
 		resp.Reason, resp.Flags, resp.ServerTS, toolHash)

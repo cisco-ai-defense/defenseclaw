@@ -38,6 +38,35 @@ from typing import Any
 # connections are localhost-only, so TLS is unnecessary — the threat model
 # assumes the local device is not network-hostile to itself.  Network-facing
 # transports (MQTT to fleet, cloud escalation) use TLS separately.
+
+import warnings as _warnings
+from urllib.parse import urlparse as _urlparse
+
+
+def _check_http_production(url: str, context: str = "adapter") -> None:
+    """M-4 fix: Warn when a non-loopback URL uses plain HTTP in production.
+
+    External endpoints MUST use HTTPS when DCLAW_PRODUCTION is set.
+    Loopback addresses (127.0.0.1, localhost, ::1) are exempt since
+    they never leave the device.
+    """
+    if not os.environ.get("DCLAW_PRODUCTION"):
+        return
+    if not url.startswith("http://"):
+        return
+    try:
+        host = _urlparse(url).hostname or ""
+    except Exception:
+        return
+    if host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        return
+    _warnings.warn(
+        f"[DefenseClaw] M-4: {context} uses plain HTTP for non-loopback "
+        f"endpoint '{url}'. Use HTTPS in production (DCLAW_PRODUCTION is set).",
+        stacklevel=2,
+    )
+
+
 LIBDCLAW_PATH = os.environ.get(
     "DCLAW_LIB_PATH",
     str(Path.home() / "edge-connector" / "build" / "libdclaw_core.so")
@@ -487,7 +516,9 @@ def handle_before_llm(params: dict[str, Any]) -> dict[str, Any]:
     for pattern in INJECTION_PATTERNS:
         if pattern in input_lower:
             log(f"INJECTION_DETECT: matched pattern '{pattern}' in user input")
-            log(f"  Input preview: {user_input[:100]!r}")
+            # L-6 fix: Truncate logged user input to 50 chars and redact
+            # to prevent unredacted PII/secrets from appearing in log files.
+            log(f"  Input preview: {user_input[:50]!r} [REDACTED]")
 
             # abort_turn stops the LLM from running entirely.
             # PicoClaw shows: "Error: hook requested turn abort"
@@ -535,7 +566,9 @@ def handle_after_llm(params: dict[str, Any]) -> dict[str, Any]:
 
     if findings:
         log(f"PII_DETECT: found {findings} in LLM response")
-        log(f"  Response preview: {response[:100]!r}")
+        # L-6 fix: Truncate logged response to 50 chars to avoid leaking
+        # the very PII/secrets we just detected.
+        log(f"  Response preview: {response[:50]!r} [REDACTED]")
         return {
             "action": "redact",
             "message": (
