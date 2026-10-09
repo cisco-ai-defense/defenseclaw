@@ -886,6 +886,7 @@ func applyWindowsEnterpriseInstallerReport(
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
 		messages = append(messages, report.Error)
 	}
+	messages = windowsEnterpriseNoStartMessages(result, opts, report, messages)
 	// A failed lifecycle tells the administrator what failed in plain terms
 	// and what to run next; internal security-descriptor detail stays in a
 	// lifecycle_diagnostic warning for support.
@@ -982,6 +983,46 @@ func applyWindowsEnterpriseInstallerReport(
 	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
 	}
+}
+
+// windowsEnterpriseNoStartGuardianIssues are what the guardian status says
+// of a deployment whose guardian has never run.
+var windowsEnterpriseNoStartGuardianIssues = map[string]bool{
+	"guardian status: hook guardian has not completed a reconcile":      true,
+	"guardian status: protected hook guardian authorization is missing": true,
+	"guardian status: protected hook guardian activation is missing":    true,
+}
+
+// windowsEnterpriseNoStartMessages drops the guardian status issues of an
+// install, upgrade or repair that completed with --no-start (NOSTART=1): its
+// services stay stopped and disabled as asked, so the guardian has not run
+// yet. They made Setup /ensure NOSTART=1 exit 1603 on a deployment installed
+// as documented (GAP-1214). One warning names the next step instead; every
+// other error stays.
+func windowsEnterpriseNoStartMessages(
+	result *enterprisestatus.Result,
+	opts *windowsEnterpriseLifecycleOptions,
+	report *windowsEnterpriseInstallerReport,
+	messages []string,
+) []string {
+	if opts == nil || !opts.noStart || !report.OK || !report.Installed || report.TransactionPending {
+		return messages
+	}
+	switch report.Action {
+	case "install", "upgrade", "repair":
+	default:
+		return messages
+	}
+	kept := make([]string, 0, len(messages))
+	for _, message := range messages {
+		if !windowsEnterpriseNoStartGuardianIssues[strings.TrimSpace(message)] {
+			kept = append(kept, message)
+		}
+	}
+	// The code Linux and macOS use for a --no-start install.
+	result.AddWarning("not_started", "installed with the services stopped and disabled (NOSTART=1, --no-start), so agents are not protected yet; "+
+		"run Setup /repair, or /ensure without NOSTART=1, to start them")
+	return kept
 }
 
 // addWindowsEnterpriseUserStateWarning names each enrolled account whose

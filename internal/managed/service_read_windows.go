@@ -96,13 +96,13 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 
 // ValidateServiceCanWriteFile reports a file the gateway NT SERVICE virtual
 // account could not write: a folder it cannot create files in, list or read
-// the permissions of or rotate and prune files in, or an existing file it cannot append to. Setup runs
-// its preflight as LocalSystem or an administrator, who write everywhere, so
-// a kind: jsonl destination in a folder only administrators can write
-// passed it; the gateway then could not open the file and did not start,
-// and the install failed after the readiness wait and rolled back
-// (GAP-1118). For a missing folder, the nearest existing parent must
-// permit the service to create a subfolder.
+// the permissions of or rotate and prune files in, or an existing file it
+// cannot append to or rotate. Setup runs its preflight as LocalSystem or an
+// administrator, who write everywhere, so a kind: jsonl destination in a
+// folder only administrators can write passed it; the gateway then could not
+// open the file and did not start, and the install failed after the
+// readiness wait and rolled back (GAP-1118). For a missing folder, the
+// nearest existing parent must permit the service to create a subfolder.
 func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
 	if err != nil {
@@ -147,10 +147,25 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	if !serviceHasAccess(folder, sids, serviceFolderWriteAccess) {
 		return fmt.Errorf("the gateway service account %s cannot create files in %s", serviceAccount, folder)
 	}
+	info, statErr := os.Lstat(path)
+	existing := statErr == nil && info.Mode().IsRegular()
+	// Rotation renames the active file and pruning removes old backups:
+	// Windows permits both with FILE_DELETE_CHILD on the folder or DELETE on
+	// the file. The documented grant, Modify with (OI)(CI), gives DELETE on
+	// every file in the folder and not FILE_DELETE_CHILD, so requiring the
+	// folder right refused it (GAP-1123). The gateway creates the next active
+	// file after each rotation, so the folder must pass DELETE on to new
+	// files, and an existing file must grant it as well.
 	if !serviceHasAccess(folder, sids, serviceFolderDeleteChildAccess) {
-		return fmt.Errorf("the gateway service account %s cannot rotate or prune files in %s", serviceAccount, folder)
+		if !serviceDACLGrants(folder, sids, windows.DELETE, windows.OBJECT_INHERIT_ACE, 0) {
+			return fmt.Errorf("the gateway service account %s cannot rotate or prune files in %s", serviceAccount, folder)
+		}
+		if existing && !serviceHasAccess(path, sids, windows.DELETE) {
+			return fmt.Errorf("the gateway service account %s cannot rotate %s, which does not grant it Delete; "+
+				"let the file inherit the folder permissions, for example: icacls \"%s\" /reset", serviceAccount, path, path)
+		}
 	}
-	if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() && !serviceHasAccess(path, sids, serviceFileAppendAccess) {
+	if existing && !serviceHasAccess(path, sids, serviceFileAppendAccess) {
 		return fmt.Errorf("the gateway service account %s cannot write %s", serviceAccount, path)
 	}
 	return nil
@@ -215,7 +230,7 @@ const (
 	// FILE_ADD_SUBDIRECTORY lets MkdirAll create the first missing folder.
 	serviceFolderCreateChildAccess = serviceTreeAccess | windows.ACCESS_MASK(0x0004|0x0080) | windows.READ_CONTROL
 	// FILE_DELETE_CHILD permits renaming the active file and removing old
-	// backups even when an existing file does not grant DELETE.
+	// backups even when a file does not grant DELETE.
 	serviceFolderDeleteChildAccess = windows.ACCESS_MASK(0x0040)
 	// serviceFileAppendAccess is what the gateway opens an existing
 	// destination file with (FILE_APPEND_DATA).
@@ -234,6 +249,13 @@ var serviceFileGenericMapping = [...]struct{ generic, specific windows.ACCESS_MA
 // want to one of sids, evaluating allow and deny entries in order as
 // Windows does.
 func serviceHasAccess(path string, sids []*windows.SID, want windows.ACCESS_MASK) bool {
+	return serviceDACLGrants(path, sids, want, 0, windows.INHERIT_ONLY_ACE)
+}
+
+// serviceDACLGrants is serviceHasAccess over the entries of the DACL of path
+// that carry every flag in require and none in skip: skip INHERIT_ONLY_ACE
+// for path itself, require OBJECT_INHERIT_ACE for a file created in it.
+func serviceDACLGrants(path string, sids []*windows.SID, want windows.ACCESS_MASK, require, skip uint8) bool {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return true
@@ -249,7 +271,7 @@ func serviceHasAccess(path string, sids []*windows.SID, want windows.ACCESS_MASK
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil ||
-			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			ace.Header.AceFlags&require != require || ace.Header.AceFlags&skip != 0 {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))

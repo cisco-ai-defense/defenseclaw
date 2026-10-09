@@ -345,7 +345,7 @@ dashes, so `ALLOWEDSIGNERS=` and `allowed-signers=` are the same.
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record that Claude Code runs DefenseClaw's managed hooks on this computer. See [Verify the install](#verify-the-install). |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accept only these Authenticode signer certificates (SHA-256 thumbprints). Applies to a signed Setup. |
 | `JSON=1` | Print the result document on standard output |
-| `NOSTART=1` | Install or update with the services stopped and disabled. A later `/repair` starts them. |
+| `NOSTART=1` | Install or update with the services stopped and disabled. Setup exits `0` with a `not_started` warning; a later `/repair` starts them. |
 | `PURGE=1` | With `/uninstall`, also remove each enrolled account's `%USERPROFILE%\.defenseclaw`, and the DefenseClaw files of a per-user install in `%USERPROFILE%\.local\bin` with that folder's user `Path` entry once it is empty. The result names each account |
 | `FORCE=1` | With `/uninstall`, the last resort: remove the deployment without recovering a pending transaction. See [Recover a pending transaction](#recover-a-pending-transaction) |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. The default is 1800. |
