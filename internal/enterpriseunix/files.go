@@ -21,7 +21,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // maxInputBytes bounds every file the lifecycle reads into memory (config,
@@ -268,11 +271,26 @@ func removeDirIfEmpty(path string) error {
 	return os.Remove(path)
 }
 
+// inputPathACL rejects an ACL entry that lets another account write path
+// (replaceable by tests).
+var inputPathACL = managed.ValidatePathACL
+
+// aclRemoveCommand is the command that removes the ACL of path.
+func aclRemoveCommand(path string) string {
+	if runtime.GOOS == "darwin" {
+		return "chmod -N " + path
+	}
+	return "setfacl -b " + path
+}
+
 // trustedInputFile refuses an administrator input (--config) that another
 // account could have changed before the run read it, as the MDM wrapper
 // does (mdm_untrusted_input): the file must be owned by root (or the
 // account running the lifecycle) and not writable by group or other, and
-// so must each of its folders, except a sticky one such as /tmp.
+// so must each of its folders, except a sticky one such as /tmp. An ACL
+// entry that grants another account write counts as writable: macOS keeps
+// the mode bits when one is added, and ensure --config applied a file a
+// standard user had appended to (GAP-0937).
 func trustedInputFile(path, label string) error {
 	uid, _, mode, err := statOwnerMode(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -291,6 +309,9 @@ func trustedInputFile(path, label string) error {
 	if !owned(uid) {
 		return fmt.Errorf("%s %s is owned by uid %d, so that account could have changed it; make it root-owned (chown 0 %s), then rerun", label, path, uid, path)
 	}
+	if err := inputPathACL(path); err != nil {
+		return fmt.Errorf("%s %s has an ACL entry that lets another account write it (%v), so that account could have changed it although the mode bits do not allow it; remove the ACL (%s), then rerun", label, path, err, aclRemoveCommand(path))
+	}
 	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
 		return err
@@ -302,6 +323,9 @@ func trustedInputFile(path, label string) error {
 		}
 		if !owned(uid) || (mode.Perm()&0o022 != 0 && mode&os.ModeSticky == 0) {
 			return fmt.Errorf("%s %s is in %s, which another account can write (uid %d, %04o); stage it in a root-owned folder that only root can write, then rerun", label, path, dir, uid, mode.Perm())
+		}
+		if err := inputPathACL(dir); err != nil && mode&os.ModeSticky == 0 {
+			return fmt.Errorf("%s %s is in %s, which has an ACL entry that lets another account write it (%v), so that account could have swapped the file; remove the ACL (%s), then rerun", label, path, dir, err, aclRemoveCommand(dir))
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
