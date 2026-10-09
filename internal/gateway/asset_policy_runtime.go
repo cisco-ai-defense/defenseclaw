@@ -138,53 +138,43 @@ func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
-	// Two configured servers that share the tool segment: the call is
-	// judged as each of them and refused if any one is refused.
-	for _, name := range a.codexMCPServerCandidates(ctx, req) {
-		probe := mcpProbeFromFields(name, req.ToolName, req.ToolInput)
-		probe.WorkspaceDir = req.CWD
-		if decision, blocked := a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe); blocked {
-			return decision, true
+	if a.codexMCPServerAmbiguous(ctx, req) {
+		name := serverFromMCPToolName(req.ToolName)
+		decision := config.AssetPolicyDecision{
+			Enabled: true, Mode: config.AssetPolicyModeAction, Action: "block", RawAction: "block",
+			Source: "mcp-server-ambiguous", RegistryStatus: "unknown",
+			TargetType: "mcp", TargetName: name, Connector: "codex", RuntimeSurface: "hook",
+			Reason: fmt.Sprintf("mcp %q: multiple configured Codex servers use this tool name; the server cannot be identified", name),
 		}
-		// The runtime check after this one sees one name only, so a
-		// server install admission blocked must not hide behind its clean
-		// twin (GAP-0662).
-		if a.store != nil {
-			if deny, _, reason := mcpServerRuntimeBlock(enforce.NewPolicyEngine(a.store), req.ToolName, "codex", name); deny {
-				decision := runtimeAssetDisableBlockDecision("mcp", name, "codex", "hook", reason, "runtime-disable")
-				a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "codex", req.HookEventName)
-				return decision, true
-			}
-		}
+		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "codex", req.HookEventName)
+		a.logAssetPolicyAudit(ctx, "codex", "mcp:"+name, "action=block source=mcp-server-ambiguous")
+		return decision, true
 	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
-// codexMCPServerCandidates are the configured Codex servers a tool call
-// could belong to when the hook names no server and distinct names share
-// its tool segment (Codex normalizes punctuation); nil otherwise.
-func (a *APIServer) codexMCPServerCandidates(ctx context.Context, req codexHookRequest) []string {
+// codexMCPServerAmbiguous applies only when the hook did not provide an
+// explicit server name. Codex normalizes punctuation in MCP tool names, so
+// an exact configured name is not enough to identify a server on collision.
+func (a *APIServer) codexMCPServerAmbiguous(ctx context.Context, req codexHookRequest) bool {
 	if strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name"))) != "" {
-		return nil
+		return false
 	}
 	cfg := a.liveConfig()
 	if cfg == nil || cfg.SecureClientIntegration() {
-		return nil
+		return false
 	}
 	toolServer := serverFromMCPToolName(req.ToolName)
 	if toolServer == "" {
-		return nil
+		return false
 	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount {
-		return cfg.CodexMCPToolServerCandidates(req.CWD, toolServer)
+		return cfg.CodexMCPToolServerAmbiguous(req.CWD, toolServer)
 	}
-	if home == "" {
-		return nil
-	}
-	return config.CodexMCPToolServerCandidatesUnderHome(home, req.CWD, toolServer)
+	return home != "" && config.CodexMCPToolServerAmbiguousUnderHome(home, req.CWD, toolServer)
 }
 
 // codexMCPServerName is the MCP server a Codex tool call names, spelled as
@@ -512,9 +502,10 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 	}
 	policy, _ := cfg.EffectiveAssetTypePolicy(connector, "mcp")
 	mode := config.AssetPolicyModeAction
-	if !rulesPinEndpoint(cfg.AssetPolicy.MCP.Denied) {
+	if !rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
 		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
-		if !gated || !(rulesPinEndpoint(cfg.AssetPolicy.MCP.Allowed) || rulesPinEndpoint(policy.Registry)) {
+		if !gated || !(rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) ||
+			rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
 			return config.AssetPolicyDecision{}, false
 		}
 		mode = cfg.EffectiveAssetPolicyModeForConnector(connector)
@@ -537,6 +528,25 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 func rulesPinEndpoint(rules []config.AssetPolicyRule) bool {
 	for _, rule := range rules {
 		if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// rulesPinEndpointForServer checks only constraints that remain provable when
+// the command-line definition is unavailable. An unrelated name or connector
+// cannot make this call fail closed.
+func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server string) bool {
+	for _, rule := range rules {
+		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
+			!config.SameMCPToolServer(connector, rule.Name, server) {
+			continue
+		}
+		if rule.Connector != "" && !config.SameConnector(rule.Connector, connector) {
+			continue
+		}
+		if rulesPinEndpoint([]config.AssetPolicyRule{rule}) {
 			return true
 		}
 	}

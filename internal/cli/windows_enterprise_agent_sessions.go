@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -143,4 +145,58 @@ func windowsServiceIdentity(user string) bool {
 		return true
 	}
 	return false
+}
+
+// warnWindowsEnterpriseHotAgentSessions names sessions that opened before a
+// newly enabled connector got hooks. The deployment activation record cannot
+// catch sessions opened after the original install.
+func warnWindowsEnterpriseHotAgentSessions(result *enterprisestatus.Result, previous, next []byte, changedAt time.Time) {
+	type connectorDocument struct {
+		Guardrail struct {
+			Connectors map[string]struct {
+				Enabled *bool `yaml:"enabled"`
+			} `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	var before, after connectorDocument
+	if yaml.Unmarshal(previous, &before) != nil || yaml.Unmarshal(next, &after) != nil {
+		return
+	}
+	enabled := map[string]bool{}
+	for name, target := range after.Guardrail.Connectors {
+		if target.Enabled != nil && !*target.Enabled {
+			continue
+		}
+		prior, existed := before.Guardrail.Connectors[name]
+		if !existed || (prior.Enabled != nil && !*prior.Enabled) {
+			enabled[strings.ToLower(name)] = true
+		}
+	}
+	if len(enabled) == 0 {
+		return
+	}
+	processes, err := windowsEnterpriseAgentProcesses()
+	if err != nil {
+		return
+	}
+	byUser := map[string][]string{}
+	for _, process := range processes {
+		user := strings.TrimSpace(process.User)
+		if user == "" || windowsServiceIdentity(user) || process.StartedAt.IsZero() ||
+			!process.StartedAt.Before(changedAt) || !enabled[strings.ToLower(process.Connector)] {
+			continue
+		}
+		byUser[user] = append(byUser[user], fmt.Sprintf("%s (pid %d)", process.Connector, process.PID))
+	}
+	users := make([]string, 0, len(byUser))
+	for user := range byUser {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	for _, user := range users {
+		sort.Strings(byUser[user])
+		result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+			"user %s runs %s, started before its connector was enabled at %s; an agent reads its hooks when it starts, so ask that user to restart these sessions",
+			user, strings.Join(byUser[user], ", "), changedAt.Format(time.RFC3339)))
+	}
 }

@@ -73,3 +73,16 @@ func TestSkillFolderRefsResolvesParentBeforeSelectingSkill(t *testing.T) {
 		t.Fatalf("skill path selected before normalization: %#v", refs)
 	}
 }
+
+// A read inside a nested skill reaches both skill folders, including the
+// inner folder whose own runtime policy may deny access.
+func TestSkillFolderRefsIncludesNestedSkill(t *testing.T) {
+	home := t.TempDir()
+	outer := filepath.Join(home, "skills", "parent")
+	inner := filepath.Join(outer, ".agents", "skills", "denied")
+	refs := SkillFolderRefs(filepath.Join(inner, "SKILL.md"), home, home)
+	if len(refs) != 2 || refs[0].Dir != outer || refs[0].Name != "parent" ||
+		refs[1].Dir != inner || refs[1].Name != "denied" {
+		t.Fatalf("nested skill folders = %#v", refs)
+	}
+}

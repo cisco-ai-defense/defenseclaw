@@ -963,6 +963,24 @@ func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
 	}
 }
 
+func TestLoadRulePackRejectsInvalidManifestPosture(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":`)
+	if _, err := LoadRulePack(dir); err == nil {
+		t.Fatal("invalid manifest accepted and strict posture lost")
+	}
+	if _, err := LoadRulePackForSecureClient(dir); err != nil {
+		t.Fatalf("Secure Client legacy manifest handling changed: %v", err)
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"unknown"}`)
+	if _, err := LoadRulePack(dir); err == nil {
+		t.Fatal("unknown manifest posture accepted")
+	}
+}
+
 // GAP-0431: the manifest's posture sets the levels the gateway enforces, so
 // adding or editing defenseclaw-pack.json changes the pin and the summary
 // digest; a pack without a manifest keeps both.

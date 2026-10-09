@@ -2760,7 +2760,8 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 			strings.HasPrefix(entry.Reason, scanFailureReason) {
 			return false
 		}
-		if entry.SourcePath != "" && sameWatcherPath(entry.SourcePath, evt.Path) {
+		if entry.SourcePath != "" && (sameWatcherPath(entry.SourcePath, evt.Path) ||
+			(!w.secureClientActive() && sameAddressableWatcherPath(entry.SourcePath, evt.Path))) {
 			restored = true
 		}
 	}

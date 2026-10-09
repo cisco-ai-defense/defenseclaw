@@ -299,6 +299,16 @@ type rulePackInventory struct {
 // present unreadable, malformed, unsupported, or invalid component fails
 // closed. At least one recognized component must be present.
 func LoadRulePack(dir string) (*RulePack, error) {
+	return loadRulePack(dir, true)
+}
+
+// LoadRulePackForSecureClient preserves the pre-v9 Secure Client loader's
+// treatment of optional manifests until that profile adopts v9 (#1092).
+func LoadRulePackForSecureClient(dir string) (*RulePack, error) {
+	return loadRulePack(dir, false)
+}
+
+func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 	rp, err := loadEmbeddedRulePack()
 	if err != nil {
 		return nil, err
@@ -396,6 +406,19 @@ func LoadRulePack(dir string) (*RulePack, error) {
 		data, err := readRulePackFile(*manifest)
 		if err != nil {
 			return nil, err
+		}
+		if validateManifest {
+			var parsed struct {
+				Posture string `json:"posture"`
+			}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must be valid JSON with a known posture")
+			}
+			switch strings.ToLower(strings.TrimSpace(parsed.Posture)) {
+			case "default", "strict", "permissive":
+			default:
+				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must name default, strict or permissive posture")
+			}
 		}
 		sum := sha256.Sum256(data)
 		rp.manifestDigest = hex.EncodeToString(sum[:])

@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -305,49 +304,45 @@ func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name s
 	return MCPServerEntry{}, false
 }
 
-// CodexMCPToolServerCandidates lists the distinct servers in the caller's
-// effective Codex configuration whose names produce the hook tool segment
-// toolServer, or nil when at most one does. Codex turns punctuation into "_",
-// so acme-notes and acme_notes both arrive as mcp__acme_notes__<tool>, and a
-// hook without an explicit server name cannot tell them apart.
-func (c *Config) CodexMCPToolServerCandidates(workspaceDir, toolServer string) []string {
+// CodexMCPToolServerAmbiguous reports whether the caller's effective Codex
+// configuration has distinct server names that produce the same hook tool
+// segment. A hook without an explicit server name cannot distinguish them.
+func (c *Config) CodexMCPToolServerAmbiguous(workspaceDir, toolServer string) bool {
 	workspaceDir = strings.TrimSpace(workspaceDir)
 	if workspaceDir == "" && c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
 	entries, err := c.readMCPServersForConnectorIn("codex", workspaceDir)
-	if err != nil {
-		return nil
-	}
-	return codexMCPToolServerCandidates(entries, toolServer)
+	return err == nil && codexMCPToolServerAmbiguous(entries, toolServer)
 }
 
-// CodexMCPToolServerCandidatesUnderHome reads the managed caller's Codex
-// configuration instead of the gateway service account's.
-func CodexMCPToolServerCandidatesUnderHome(home, workspaceDir, toolServer string) []string {
+// CodexMCPToolServerAmbiguousUnderHome uses the managed caller's Codex
+// configuration instead of the gateway service account's configuration.
+func CodexMCPToolServerAmbiguousUnderHome(home, workspaceDir, toolServer string) bool {
 	home = strings.TrimSpace(home)
 	if !filepath.IsAbs(home) {
-		return nil
+		return false
 	}
 	entries := readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
-	return codexMCPToolServerCandidates(entries, toolServer)
+	return codexMCPToolServerAmbiguous(entries, toolServer)
 }
 
-func codexMCPToolServerCandidates(entries []MCPServerEntry, toolServer string) []string {
+func codexMCPToolServerAmbiguous(entries []MCPServerEntry, toolServer string) bool {
 	toolServer = strings.TrimSpace(toolServer)
 	if toolServer == "" {
-		return nil
+		return false
 	}
-	var names []string
+	first := ""
 	for _, entry := range entries {
-		if MCPToolServerName("codex", entry.Name) == toolServer && !slices.Contains(names, entry.Name) {
-			names = append(names, entry.Name)
+		if MCPToolServerName("codex", entry.Name) != toolServer {
+			continue
 		}
+		if first != "" && first != entry.Name {
+			return true
+		}
+		first = entry.Name
 	}
-	if len(names) < 2 {
-		return nil
-	}
-	return names
+	return false
 }
 
 // MCPToolServerName is the server segment an agent puts in the MCP tool
