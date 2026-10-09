@@ -40,21 +40,6 @@ func TestCodexOwnedEditPreservesUserTextAndBOM(t *testing.T) {
 	}
 }
 
-func TestCodexOwnedEditAppendsAfterMissingFinalNewline(t *testing.T) {
-	before := []byte("model = \"gpt-5\"")
-	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg map[string]interface{}
-	if err := parseCodexTOML(after, &cfg); err != nil {
-		t.Fatalf("invalid rendered config %q: %v", after, err)
-	}
-	if cfg["model"] != "gpt-5" || cfg["notify"] == nil {
-		t.Fatalf("rendered config = %#v", cfg)
-	}
-}
-
 func TestCodexOwnedEditPreservesMultilineInstructions(t *testing.T) {
 	before := []byte("developer_instructions = \"\"\"Keep this example:\nnotify = [\\\"personal\\\"]\n\"\"\"\nmodel = \"gpt-5\"\n")
 	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}})
@@ -73,6 +58,21 @@ func TestCodexOwnedEditPreservesMultilineInstructions(t *testing.T) {
 	}
 }
 
+func TestCodexOwnedEditAppendsAfterMissingFinalNewline(t *testing.T) {
+	before := []byte("model = \"gpt-5\"")
+	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := parseCodexTOML(after, &cfg); err != nil {
+		t.Fatalf("invalid rendered config %q: %v", after, err)
+	}
+	if cfg["model"] != "gpt-5" || cfg["notify"] == nil {
+		t.Fatalf("rendered config = %#v", cfg)
+	}
+}
+
 func TestCodexOwnedEditIgnoresCommentBracketsInNotify(t *testing.T) {
 	before := []byte("notify = [\n  \"personal\", # [ example\n]\nmodel = \"gpt-5\"\napproval_policy = \"on-request\"\n")
 	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}})
@@ -85,5 +85,20 @@ func TestCodexOwnedEditIgnoresCommentBracketsInNotify(t *testing.T) {
 	}
 	if cfg["model"] != "gpt-5" || cfg["approval_policy"] != "on-request" {
 		t.Fatalf("user settings lost: %#v", cfg)
+	}
+}
+
+func TestCodexOwnedEditRecognizesCommentedTableHeader(t *testing.T) {
+	before := []byte("[otel] # company telemetry\nenvironment = \"old\"\n")
+	after, err := editCodexOwnedTOML(before, map[string]interface{}{"notify": []string{"owned"}, "otel": map[string]interface{}{"environment": "new"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := parseCodexTOML(after, &cfg); err != nil {
+		t.Fatalf("invalid rendered config %q: %v", after, err)
+	}
+	if cfg["otel"].(map[string]interface{})["environment"] != "new" {
+		t.Fatalf("otel = %#v", cfg["otel"])
 	}
 }

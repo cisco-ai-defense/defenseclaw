@@ -69,10 +69,9 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 			}
 			continue
 		}
-		rawTrimmed := strings.TrimSpace(line)
-		if !inMultiline && !inArray && strings.HasPrefix(rawTrimmed, "[") {
+		if !inMultiline && !inArray && strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			writeRoot()
-			name := strings.TrimLeft(strings.TrimRight(rawTrimmed, "]"), "[")
+			name := strings.TrimSpace(strings.Trim(trimmed, "[]"))
 			section = strings.SplitN(name, ".", 2)[0]
 		}
 		if section == "hooks" || section == "otel" {
