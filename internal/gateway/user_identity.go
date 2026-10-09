@@ -189,7 +189,7 @@ func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	if trustedID && identityFactsEnabled.Load() {
 		// New identity records use a bare account name. Secure Client keeps
 		// the qualified passwd name that main reports.
-		userName = useridentity.BareAccountName(userName)
+		userName = verifiedAccountName(userID, userName)
 	}
 	if userID == "" && userName == "" {
 		userID, userName = localProcessUser()
