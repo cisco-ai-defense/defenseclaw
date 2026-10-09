@@ -38,15 +38,20 @@ import (
 )
 
 // Automatic scan reasons have fixed formats. Operator reasons are arbitrary
-// text, so a shared prefix alone cannot identify a scan verdict.
+// text, so match the watcher's complete stem and its known suffix separators.
+// Scanner and quarantine failure reasons carry an arbitrary error after their
+// distinctive prefixes; these are also automatic journal rows.
 var v9AutomaticReasonPattern = regexp.MustCompile(`^(?:post-scan: |post-install scan: |scan: )[0-9]+ findings, max=[A-Z]+$`)
-var v9WatchReasonPattern = regexp.MustCompile(`^auto-block: watch detected [A-Z]+ findings(?: \(scanner=[^)]+\))?$`)
+var v9WatchReasonPattern = regexp.MustCompile(`^auto-block: watch detected [A-Z]+ findings(?: \(scanner=[^)]+\))?(?:$|: |; )`)
 
 func v9AutomaticInstallReason(reason string) bool {
 	reason = strings.TrimSpace(reason)
 	return reason == "scan clean or within policy" ||
 		v9AutomaticReasonPattern.MatchString(reason) ||
-		v9WatchReasonPattern.MatchString(reason)
+		v9WatchReasonPattern.MatchString(reason) ||
+		strings.HasPrefix(reason, "scanner failure (fail-closed): ") ||
+		strings.HasPrefix(reason, "quarantine failed: ") ||
+		strings.HasPrefix(reason, "link removed: ")
 }
 
 // auditDBDSN is the file: URI of the audit database. The path goes through
