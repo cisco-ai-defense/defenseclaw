@@ -78,15 +78,19 @@ func connectorRulePackScope(cfg *config.Config, connector string) rulePackScope 
 	return rulePackScope{ref: ref, dir: cfg.ResolveRulePackDir(ref), layers: cfg.EffectiveRulesForConnector(connector)}
 }
 
-// key identifies the composed pack of a scope: the directory plus the rules
-// layers, so scopes sharing both share one composed pack.
+// key identifies the composed pack of a scope. Include the named reference:
+// two names can resolve to one directory but carry different digest pins.
 func (s rulePackScope) key() string {
-	if len(s.layers) == 0 {
-		return profileRulePackKey(s.dir)
+	if s.dir == "" && s.ref.Name == "" && len(s.layers) == 0 {
+		return ""
 	}
-	raw, _ := json.Marshal(s.layers)
+	raw, _ := json.Marshal(struct {
+		Dir    string                        `json:"dir"`
+		Ref    string                        `json:"ref"`
+		Layers []config.GuardrailRulesConfig `json:"layers,omitempty"`
+	}{profileRulePackKey(s.dir), s.ref.Key(), s.layers})
 	sum := sha256.Sum256(raw)
-	return profileRulePackKey(s.dir) + "#rules=" + hex.EncodeToString(sum[:8])
+	return "scope:" + hex.EncodeToString(sum[:])
 }
 
 // effectiveRulePackKey is the composed-pack key of connector's scope in cfg.

@@ -21,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -1636,5 +1637,44 @@ func TestWindowsGroupAssignmentsMatchOnResolvedSIDs(t *testing.T) {
 	named := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind, Groups: []string{`CORP\gap0860-devs`}}
 	if got := set.match(named, profileSubjectVerified, "codex", ""); got.Name != "default" {
 		t.Fatalf("a group name without its SID matched: %+v", got)
+	}
+}
+
+// A stale pin for one name must not suppress a different, valid name that
+// resolves to the same pack directory.
+func TestProfilePackPinIsValidatedPerName(t *testing.T) {
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: PROFILE-PIN-MARKER
+    pattern: "profile_pin_marker_token"
+    title: pinned pack fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	digest, err := guardrail.RulePackDigest(packDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
+		"a-stale": {Path: packDir, Digest: "sha256:" + strings.Repeat("0", 64)},
+		"b-valid": {Path: packDir, Digest: "sha256:" + digest},
+	}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a-stale": {RulePack: "a-stale"},
+		"b-valid": {RulePack: "b-valid"},
+	}
+	set, err := newGuardrailProfileSet(cfg, guardrail.NewRulePackCache(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badKey := effectiveRulePackKey(set.profiles["a-stale"].Config, "")
+	goodKey := effectiveRulePackKey(set.profiles["b-valid"].Config, "")
+	if badKey == goodKey || set.missing[badKey] == nil || set.rules[goodKey] == nil {
+		t.Fatalf("shared directory did not validate each pin: bad=%q good=%q missing=%v valid rules=%v",
+			badKey, goodKey, set.missing[badKey] != nil, set.rules[goodKey] != nil)
 	}
 }
