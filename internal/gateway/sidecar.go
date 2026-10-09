@@ -1999,7 +1999,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	current := s.currentConfig()
 
 	apiRestart := apiNeedsRestart(oldCfg, newCfg)
-	fleetEnable := !gatewayShouldConnectForConfiguredConnector(oldCfg) && gatewayShouldConnectForConfiguredConnector(newCfg)
+	fleetAccessChanged := gatewayShouldConnectForConfiguredConnector(oldCfg) != gatewayShouldConnectForConfiguredConnector(newCfg)
 	// A connector added, removed, enabled or disabled re-runs the connector
 	// setup in-process and restarts the install watcher, which watches the
 	// skill and plugin dirs of the connectors. Secure Client never gets here
@@ -2067,7 +2067,11 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if previousGen != nil && previousGen.active != nil {
 		rulePackChanged = previousGen.active.Summary().Digest != rulePackCandidate.active.Summary().Digest
 	}
-	judgeChanged := judgeNeedsRebuild(oldCfg, newCfg, rulePackChanged)
+	var oldProviders *generationProviders
+	if previousGen != nil {
+		oldProviders = previousGen.Providers
+	}
+	judgeChanged := judgeNeedsRebuild(oldCfg, newCfg, rulePackChanged, oldProviders, nextGen.Providers)
 
 	var nextJudge *LLMJudge
 	var nextJudgeUnavailable string
@@ -2342,7 +2346,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if apiRestart {
 		signalRestart(s.apiRestartCh)
 	}
-	if fleetEnable {
+	if fleetAccessChanged {
 		signalRestart(s.fleetReloadCh)
 	}
 	if aiRestart {
@@ -2485,8 +2489,9 @@ func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailCon
 	return out
 }
 
-func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool) bool {
+func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool, oldProviders, newProviders *generationProviders) bool {
 	return rulePackChanged ||
+		oldProviders.digest() != newProviders.digest() ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
 		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
@@ -3232,66 +3237,96 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 // a real upstream, or set gateway.fleet_mode=enabled — those cases fall
 // through to the dial loop below.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
-	for !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
-		connName := configuredConnectorName(s.currentConfig())
-		details := map[string]interface{}{
-			"summary": "no OpenClaw fleet configured (standalone mode)",
-			"host":    s.currentConfig().Gateway.Host,
-			"port":    s.currentConfig().Gateway.Port,
-			"hint":    "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
-		}
-		// The fleet uplink is a single process-global WebSocket dial
-		// (gateway.host:port / gateway.fleet_mode) — NOT a per-connector
-		// setting. Every active connector runs hook-only against its own
-		// native upstream and shares this one uplink decision, so we state
-		// the global scope by count for EVERY install — one connector or N
-		// — rather than naming an arbitrary connector when there is exactly
-		// one. The wording is identical regardless of count so operators
-		// never see a "single vs multi" distinction. The authoritative
-		// per-connector roster is the status command's "Agents" section, so
-		// we deliberately do NOT re-enumerate connector names here.
-		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
-		why := "no OpenClaw fleet to dial"
-		if s.currentConfig().StandaloneEnterprise() {
-			details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
-			details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
-			connName = "managed standalone"
-		} else if openClawImpliedButNotInstalled(s.currentConfig()) {
-			details["summary"] = fleetOffSummaryOpenClawNotInstalled
-			details["hint"] = fleetOffHintOpenClawNotInstalled
-			details["reason"] = fleetOffReasonOpenClawNotInstalled
-			why = "OpenClaw is not installed (claw.mode defaults to openclaw, no openclaw.json or openclaw binary found)"
-		} else if connName == "openclaw" && openClawNotInstalledLocally(s.currentConfig()) {
-			details["summary"] = "OpenClaw is not installed (standalone mode)"
-			details["hint"] = "hooks and the local audit continue; after installing OpenClaw, run 'defenseclaw setup openclaw' to connect to its gateway"
-		}
-		s.health.SetGateway(StateDisabled, "", details)
-		fmt.Fprintf(os.Stderr,
-			"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — %s. Hooks + local audit continue normally.\n",
-			connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode, why)
-		select {
-		case <-ctx.Done():
-			s.health.SetGateway(StateStopped, "", nil)
-			return nil
-		case <-s.fleetReloadCh:
-			continue
-		}
-	}
-	// Initial connect is the process-boot path, not a reconnect. Only
-	// subsequent successful connects should increment the reconnection
-	// counter so `defenseclaw.watcher.restarts` reflects true recoveries
-	// (transient WS drops, upstream gateway restarts) and not boot churn.
+	// Keep the boot-versus-reconnect distinction across fleet disable/enable.
 	firstConnect := true
 	for {
+		for !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+			connName := configuredConnectorName(s.currentConfig())
+			details := map[string]interface{}{
+				"summary": "no OpenClaw fleet configured (standalone mode)",
+				"host":    s.currentConfig().Gateway.Host,
+				"port":    s.currentConfig().Gateway.Port,
+				"hint":    "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
+			}
+			// The fleet uplink is a single process-global WebSocket dial
+			// (gateway.host:port / gateway.fleet_mode) — NOT a per-connector
+			// setting. Every active connector runs hook-only against its own
+			// native upstream and shares this one uplink decision, so we state
+			// the global scope by count for EVERY install — one connector or N
+			// — rather than naming an arbitrary connector when there is exactly
+			// one. The wording is identical regardless of count so operators
+			// never see a "single vs multi" distinction. The authoritative
+			// per-connector roster is the status command's "Agents" section, so
+			// we deliberately do NOT re-enumerate connector names here.
+			details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
+			why := "no OpenClaw fleet to dial"
+			if s.currentConfig().StandaloneEnterprise() {
+				details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
+				details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
+				connName = "managed standalone"
+			} else if openClawImpliedButNotInstalled(s.currentConfig()) {
+				details["summary"] = fleetOffSummaryOpenClawNotInstalled
+				details["hint"] = fleetOffHintOpenClawNotInstalled
+				details["reason"] = fleetOffReasonOpenClawNotInstalled
+				why = "OpenClaw is not installed (claw.mode defaults to openclaw, no openclaw.json or openclaw binary found)"
+			} else if connName == "openclaw" && openClawNotInstalledLocally(s.currentConfig()) {
+				details["summary"] = "OpenClaw is not installed (standalone mode)"
+				details["hint"] = "hooks and the local audit continue; after installing OpenClaw, run 'defenseclaw setup openclaw' to connect to its gateway"
+			}
+			s.health.SetGateway(StateDisabled, "", details)
+			fmt.Fprintf(os.Stderr,
+				"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — %s. Hooks + local audit continue normally.\n",
+				connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode, why)
+			select {
+			case <-ctx.Done():
+				s.health.SetGateway(StateStopped, "", nil)
+				return nil
+			case <-s.fleetReloadCh:
+				continue
+			}
+		}
+		// Initial connect is the process-boot path, not a reconnect. Only
+		// subsequent successful connects should increment the reconnection
+		// counter so `defenseclaw.watcher.restarts` reflects true recoveries
+		// (transient WS drops, upstream gateway restarts) and not boot churn.
 		s.health.SetGateway(StateReconnecting, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] connecting to %s:%d ...\n", s.currentConfig().Gateway.Host, s.currentConfig().Gateway.Port)
 
-		err := s.client.ConnectWithRetry(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				s.health.SetGateway(StateStopped, "", nil)
-				return nil
+		// A reload can disable the fleet while ConnectWithRetry is in its
+		// backoff loop. Cancel that attempt promptly and recheck the live
+		// configuration before recording a connection or trying again.
+		connectCtx, cancelConnect := context.WithCancel(ctx)
+		connectDone := make(chan struct{})
+		watcherDone := make(chan struct{})
+		go func() {
+			defer close(watcherDone)
+			select {
+			case <-s.fleetReloadCh:
+				cancelConnect()
+			case <-connectDone:
+			case <-ctx.Done():
+				cancelConnect()
 			}
+		}()
+		err := s.client.ConnectWithRetry(connectCtx)
+		close(connectDone)
+		<-watcherDone
+		cancelConnect()
+		if ctx.Err() != nil {
+			s.health.SetGateway(StateStopped, "", nil)
+			return nil
+		}
+		if !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+			if err == nil {
+				select {
+				case <-s.client.disconnectForReload():
+				case <-ctx.Done():
+					return nil
+				}
+			}
+			continue
+		}
+		if err != nil {
 			s.health.SetGateway(StateError, err.Error(), nil)
 			fmt.Fprintf(os.Stderr, "[sidecar] connect failed: %v (will keep retrying)\n", err)
 			continue
@@ -3333,19 +3368,32 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 
 		fmt.Fprintf(os.Stderr, "[sidecar] event loop running, waiting for events ...\n")
 
-		select {
-		case <-ctx.Done():
-			s.health.SetGateway(StateStopped, "", nil)
-			return nil
-		case <-s.client.Disconnected():
-			fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
-			_ = s.logger.LogAction(string(audit.ActionSidecarDisconnected), "", "connection lost, reconnecting")
-			s.health.SetGateway(StateReconnecting, "connection lost", nil)
-			if s.osNotifier != nil {
-				s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
-					State:  notifier.ServiceStateDisconnected,
-					Reason: "connection lost, reconnecting",
-				})
+	connectedLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				s.health.SetGateway(StateStopped, "", nil)
+				return nil
+			case <-s.fleetReloadCh:
+				if !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+					select {
+					case <-s.client.disconnectForReload():
+					case <-ctx.Done():
+						return nil
+					}
+					break connectedLoop
+				}
+			case <-s.client.Disconnected():
+				fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
+				_ = s.logger.LogAction(string(audit.ActionSidecarDisconnected), "", "connection lost, reconnecting")
+				s.health.SetGateway(StateReconnecting, "connection lost", nil)
+				if s.osNotifier != nil {
+					s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
+						State:  notifier.ServiceStateDisconnected,
+						Reason: "connection lost, reconnecting",
+					})
+				}
+				break connectedLoop
 			}
 		}
 	}
