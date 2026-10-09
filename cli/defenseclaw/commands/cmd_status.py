@@ -893,6 +893,8 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
 
 def _policy_status(health: dict | None) -> dict | None:
     """The applied effective policy from /status, or None when not reported."""
+    from defenseclaw.gateway import policy_reload_rejection
+
     policy = (health or {}).get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
         return None
@@ -900,7 +902,8 @@ def _policy_status(health: dict | None) -> dict | None:
         "effective_digest": policy.get("effective_digest"),
         "generation": policy.get("generation"),
         "config_generation": policy.get("config_generation"),
-        "last_reload_error": policy.get("last_reload_error") or "",
+        "last_reload_error": policy_reload_rejection(policy),
+        "opa_unavailable": policy.get("opa_unavailable") or "",
     }
 
 
@@ -913,6 +916,11 @@ def _print_policy(health: dict | None) -> None:
     value = f"generation {policy['generation']}, {short}"
     if policy["last_reload_error"]:
         _status_row("Policy", ux._style(f"{value}; the last change was rejected (see defenseclaw doctor)", fg="yellow"))
+        return
+    if policy["opa_unavailable"]:
+        # Applied without the Rego modules, not rejected (GAP-1033).
+        note = "the Rego modules did not load, config.yaml decides (see defenseclaw doctor)"
+        _status_row("Policy", ux._style(f"{value}; {note}", fg="yellow"))
         return
     _status_row("Policy", value)
 

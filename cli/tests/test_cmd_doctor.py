@@ -108,6 +108,16 @@ class DoctorPolicyStateTests(unittest.TestCase):
                                        live_health={"policy": policy})
         self.assertIn(os.path.join(os.path.expanduser("~"), "team-policies"), result.checks[0]["remediation"])
 
+        # A generation applied without its Rego modules is a warning, not a rejected change (GAP-1033).
+        policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
+                  "config_generation_recorded": True, "opa_unavailable": "policy: admission.rego reads data.config",
+                  "last_reload_error": "opa: policy: admission.rego reads data.config"}
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": applied}):
+            cmd_doctor._check_policy_state(SimpleNamespace(policy_dir="/srv/team-policies"), result,
+                                           live_health={"policy": policy})
+        self.assertEqual([c["status"] for c in result.checks], ["warn", "pass"], result.checks)
+
         # A digest the gateway holds back for a restart-only key is a pending
         # restart (warn), not a stale gateway (fail) (GAP-0072).
         policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,

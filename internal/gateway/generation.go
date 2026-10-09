@@ -131,6 +131,11 @@ type PolicyHealth struct {
 	ConfigGenerationRecorded bool   `json:"config_generation_recorded"`
 	BuiltAt                  string `json:"built_at"`
 	LastReloadError          string `json:"last_reload_error,omitempty"`
+	// OPAUnavailable says why the live generation runs without Rego, so the
+	// config-driven admission and thresholds apply. The generation was built
+	// and applied: a LastReloadError of "opa: " + OPAUnavailable is this
+	// fallback, not a rejected change (GAP-1033).
+	OPAUnavailable string `json:"opa_unavailable,omitempty"`
 	// PendingRestart lists the changed config keys that apply only after a
 	// gateway restart.
 	PendingRestart []string `json:"pending_restart,omitempty"`

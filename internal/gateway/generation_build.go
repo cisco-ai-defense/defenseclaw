@@ -437,5 +437,6 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 	} else if g.scannerPinError != "" {
 		health.LastReloadError = g.scannerPinError
 	}
+	health.OPAUnavailable = g.opaError
 	return health, true
 }

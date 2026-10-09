@@ -444,8 +444,7 @@ func checkNoLegacyData(modules map[string]*ast.Module) error {
 		refs, legacy := moduleDataRefs(modules[name])
 		if legacy != "" {
 			return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
-				"(the data.json values moved into config.yaml); replace it with the shipped module "+
-				"(defenseclaw-gateway config migrate --to 9 refreshes it)", name, legacy)
+				"(the data.json values moved into config.yaml); replace it with this release's module", name, legacy)
 		}
 		for _, other := range names {
 			if reached[other] {

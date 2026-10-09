@@ -105,6 +105,19 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
     return {**result, "user": label, "overrides": overrides}
 
 
+def policy_reload_rejection(policy: dict) -> str:
+    """``policy.last_reload_error`` when the gateway rejected a reload, or "".
+
+    A generation built without its Rego modules (``policy.opa_unavailable``)
+    was applied, with config.yaml deciding admission and levels; the gateway
+    reports it as ``last_reload_error`` "opa: ..." too, but no change was
+    rejected (GAP-1033).
+    """
+    error = str(policy.get("last_reload_error") or "").strip()
+    fallback = str(policy.get("opa_unavailable") or "").strip()
+    return "" if fallback and error == f"opa: {fallback}" else error
+
+
 def gateway_reload_notice(cfg: Any, *, timeout: float = 3) -> str:
     """Say when the running gateway has not applied config.yaml as written, or "".
 
@@ -142,7 +155,7 @@ def _gateway_reload_notice(cfg: Any, timeout: float) -> str:
     policy = health.get("policy") if isinstance(health, dict) else None
     if not isinstance(policy, dict):
         return ""
-    error = str(policy.get("last_reload_error") or "").strip()
+    error = policy_reload_rejection(policy)
     if error:
         return (
             f"The running gateway has NOT applied this config.yaml: it rejected the last reload ({error}) "
