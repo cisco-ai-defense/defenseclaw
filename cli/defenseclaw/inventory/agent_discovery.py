@@ -949,6 +949,29 @@ _FRESH_SCANS: ContextVar[dict[tuple, AgentDiscovery] | None] = ContextVar("_FRES
 _PROBE_ONLY: ContextVar[frozenset[str] | None] = ContextVar("_PROBE_ONLY", default=None)
 
 
+def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozenset[str]:
+    """Avoid starting unrelated agent CLIs during passive discovery."""
+    try:
+        path = config_path_for_data_dir(data_dir)
+        with open(path, "rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return frozenset()
+        document = yaml.safe_load(raw) or {}
+        guardrail = document.get("guardrail", {})
+        connectors = guardrail.get("connectors", {})
+        names = {
+            str(name).lower() for name, entry in connectors.items()
+            if isinstance(entry, dict) and entry.get("enabled") is not False
+        } if isinstance(connectors, dict) else set()
+        primary = guardrail.get("connector")
+        if guardrail.get("enabled") and isinstance(primary, str) and primary:
+            names.add(primary.lower())
+        return frozenset(names)
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        return frozenset()
+
+
 def restrict_probes(connectors: list[str]) -> Any:
     """Run only the CLIs of ``connectors`` in this command's discovery scans.
 
@@ -967,11 +990,23 @@ def end_probe_restriction(token: Any) -> None:
     _PROBE_ONLY.reset(token)
 
 
+def discover_with_probes(connectors: list[str], **kwargs: Any) -> AgentDiscovery:
+    """Probe only connectors explicitly selected by the current setup flow."""
+    token = restrict_probes(connectors)
+    try:
+        return discover_agents(**kwargs)
+    finally:
+        end_probe_restriction(token)
+
+
 #: What an agent CLI's ``--version`` creates in a home that never ran it
 #: ("~" is the home, "$XDG_*" the XDG base folder) (GAP-0901).
 _PROBE_STATE_PATHS: dict[str, tuple[str, ...]] = {
     "codex": ("~/.codex",),
-    "cursor": ("~/.cursor", "~/.cursor/cli-config.json", "$XDG_CACHE_HOME/cursor-compile-cache"),
+    "cursor": (
+        "~/.cursor", "~/.cursor/cli-config.json", "$XDG_CACHE_HOME/cursor-compile-cache",
+        "/var/tmp/cursor-agent-logs-{uid}",
+    ),
     "opencode": (
         "$XDG_CONFIG_HOME/opencode",
         "$XDG_DATA_HOME/opencode",
@@ -998,7 +1033,9 @@ def _probe_state_paths(name: str) -> list[str]:
     home = os.path.expanduser("~")
     out = []
     for raw in _PROBE_STATE_PATHS.get(name, ()):
-        if raw.startswith("$"):
+        if raw.startswith("/") and os.name != "nt":
+            out.append(raw.format(uid=os.getuid()))
+        elif raw.startswith("$"):
             var, _, rest = raw[1:].partition("/")
             base = os.environ.get(var) or os.path.join(home, _XDG_DEFAULTS[var])
             out.append(os.path.join(base, rest))
@@ -1139,6 +1176,8 @@ def discover_agents(
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
     probe_only = _PROBE_ONLY.get()
+    if probe_only is None:
+        probe_only = _configured_probe_names(data_dir)
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),

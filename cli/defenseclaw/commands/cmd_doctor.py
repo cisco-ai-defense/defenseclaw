@@ -5655,6 +5655,16 @@ def _is_disabled_hook_tombstone(path: str) -> bool:
     return _DISABLED_HOOK_TOMBSTONE_MARKER in head
 
 
+def _codex_effective_config_path(cfg) -> str:
+    """Use the current Codex home, or the home setup recorded when unset."""
+    if os.environ.get("CODEX_HOME"):
+        return os.path.join(codex_home(), "config.toml")
+    for path in _hook_health_paths_from_lock(cfg, "codex"):
+        if os.path.basename(path).lower() == "config.toml":
+            return path
+    return os.path.join(codex_home(), "config.toml")
+
+
 def _check_codex_hooks(
     cfg,
     r: _DoctorResult,
@@ -5665,6 +5675,7 @@ def _check_codex_hooks(
     search_path: str | None = None,
     pathext: str | None = None,
 ) -> None:
+    config_path = config_path or _codex_effective_config_path(cfg)
     switched_off = _agent_hook_switch_problem(cfg, "codex")
     if (platform_name or os.name) == "nt":
         _check_windows_native_hooks(
@@ -5695,9 +5706,22 @@ def _check_codex_hooks(
     elif os.path.isfile(hook_script) and switched_off:
         _emit("fail", "Codex hooks", switched_off, r=r, remediation=switched_off.repair)
     elif os.path.isfile(hook_script):
-        _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
-        config_toml = config_path or os.path.join(codex_home(), "config.toml")
+        try:
+            with open(config_path, "rb") as stream:
+                document = tomllib.loads(stream.read(1024 * 1024 + 1).decode("utf-8-sig"))
+            hooks = document.get("hooks", {})
+            wired = isinstance(hooks, dict) and "defenseclaw" in str(hooks).lower()
+        except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
+            wired = False
+        if not wired:
+            _emit(
+                "fail", "Codex hooks", f"DefenseClaw hooks are missing in {config_path}", r=r,
+                remediation="run defenseclaw setup codex --yes for this CODEX_HOME",
+            )
+            return
+        _emit("pass", "Codex hooks", f"hook script at {hook_script}; registered in {config_path}", r=r)
+        config_toml = config_path
         live, broken = _foreign_defenseclaw_codex_hook_scripts(config_toml, hook_script)
         if live or broken:
             details = []
@@ -5763,7 +5787,7 @@ def _foreign_defenseclaw_codex_hook_scripts(
             raw = fh.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             return [], []
-        document = tomllib.loads(raw.decode("utf-8"))
+        document = tomllib.loads(raw.decode("utf-8-sig"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         return [], []
     hooks = document.get("hooks") if isinstance(document, dict) else None
@@ -5925,13 +5949,13 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     cannot report those two distinct environments as one healthy setup.
     """
     expected = str(getattr(cfg, "environment", "") or "").strip()
-    config_path = os.path.join(codex_home(), "config.toml")
+    config_path = _codex_effective_config_path(cfg)
     try:
         with open(config_path, "rb") as fh:
             raw = fh.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise ValueError("config.toml exceeds the 1 MiB Doctor limit")
-        document = tomllib.loads(raw.decode("utf-8"))
+        document = tomllib.loads(raw.decode("utf-8-sig"))
         otel = document.get("otel", {}) if isinstance(document, dict) else {}
         actual = otel.get("environment", "") if isinstance(otel, dict) else ""
         if not isinstance(actual, str):
@@ -10631,6 +10655,7 @@ def _check_observability(cfg, r: _DoctorResult, *, live_health: dict | None = No
         ),
         r,
         configured=_otlp_configured_connectors(cfg),
+        gateway_addr=gateway_api_addr(cfg),
     )
     _check_galileo_trace_canaries(
         status,
@@ -10669,7 +10694,28 @@ def _otlp_configured_connectors(cfg) -> set[str] | None:
     return None
 
 
-def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set[str] | None = None) -> None:
+def _claude_exporter_reaches_gateway(gateway_addr: str) -> bool:
+    """Check the effective user exporter before describing its custody."""
+    from urllib.parse import urlsplit
+
+    from defenseclaw.connector_paths import claude_settings_paths
+
+    if not gateway_addr:
+        return False
+    try:
+        path = claude_settings_paths()[0]
+        with open(path, "rb") as stream:
+            settings = json.loads(stream.read(1024 * 1024 + 1))
+        endpoint = settings.get("env", {}).get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+        url = urlsplit(endpoint)
+        return url.scheme == "http" and url.netloc == gateway_addr and url.path.rstrip("/") in {"", "/v1/logs"}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def _check_connector_export_custody(
+    report, r: _DoctorResult, *, configured: set[str] | None = None, gateway_addr: str = ""
+) -> None:
     """Render per-instance custody and bounded native-ingest evidence.
 
     This is intentionally diagnostic only. In particular, doctor never edits
@@ -10721,6 +10767,15 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             idle[item.connector] = idle.get(item.connector, 0) + 1
             continue
         if item.custody == "external":
+            if item.connector == "claudecode" and _claude_exporter_reaches_gateway(gateway_addr):
+                tag = "fail" if item.credential_state == "invalid" else "pass"
+                _emit(
+                    tag, label,
+                    "native exporter points at this gateway; " + delivery.detail,
+                    r=r,
+                    remediation="rerun defenseclaw setup claude-code" if tag == "fail" else "",
+                )
+                continue
             tag = "warn"
             if delivery.state == "unmapped_only":
                 # The exporter does reach this gateway; custody turns to

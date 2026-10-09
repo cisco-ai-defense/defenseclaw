@@ -5584,7 +5584,7 @@ def _check_connector_version_supported_for_setup(
     action_mode = (mode or "").strip().lower() == "action"
     allow_drift = envvars.lookup("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
     try:
-        disc = agent_discovery.discover_agents(
+        disc = agent_discovery.discover_with_probes([connector],
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
@@ -11222,7 +11222,7 @@ def _prompt_batch_trusted_prefixes(
         return cache
 
     try:
-        disc = agent_discovery.discover_agents(
+        disc = agent_discovery.discover_with_probes(list(connector_modes),
             use_cache=False,
             refresh=True,
             data_dir=getattr(app.cfg, "data_dir", None),

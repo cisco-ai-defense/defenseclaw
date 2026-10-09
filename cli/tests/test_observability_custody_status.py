@@ -10,7 +10,11 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from defenseclaw.commands.cmd_doctor import _check_connector_export_custody, _DoctorResult
+from defenseclaw.commands.cmd_doctor import (
+    _check_connector_export_custody,
+    _claude_exporter_reaches_gateway,
+    _DoctorResult,
+)
 from defenseclaw.commands.cmd_status import _print_native_delivery_status
 from defenseclaw.observability.custody_status import (
     ConnectorCustodyReport,
@@ -20,6 +24,16 @@ from defenseclaw.observability.custody_status import (
 )
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def test_claude_exporter_at_own_gateway_is_not_external(tmp_path, monkeypatch) -> None:
+    from defenseclaw import connector_paths
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:18970"}}))
+    monkeypatch.setattr(connector_paths, "claude_settings_paths", lambda: [str(settings)])
+    assert _claude_exporter_reaches_gateway("127.0.0.1:18970")
+    assert not _claude_exporter_reaches_gateway("127.0.0.1:18971")
 
 
 def _database(path: Path) -> sqlite3.Connection:

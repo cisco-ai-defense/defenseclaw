@@ -481,6 +481,25 @@ def test_reset_keeps_the_installer_uv() -> None:
     assert ".uv" in cmd_uninstall._RESET_PRESERVED_ENTRIES
 
 
+def test_passive_discovery_never_starts_unconfigured_agent_clis(tmp_path, monkeypatch) -> None:
+    from defenseclaw.inventory import agent_discovery as ad
+
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        "guardrail:\n  connectors:\n    claudecode: {}\n    amp:\n      enabled: false\n",
+        encoding="utf-8",
+    )
+    probed: list[str] = []
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (f"/opt/bin/{name}",))
+    monkeypatch.setattr(
+        ad, "_version_for_agent_binary",
+        lambda name, _path, _args, **_kwargs: (probed.append(name) or f"{name} 1.0", ""),
+    )
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+    assert probed == ["claudecode"]
+
+
 @posix_only
 def test_all_binaries_removes_uv_editable_builds_of_defenseclaw(per_user_install) -> None:
     # GAP-1873: `uv cache clean defenseclaw` leaves the editable build a

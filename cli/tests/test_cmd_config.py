@@ -34,6 +34,19 @@ from defenseclaw.config import default_config
 from defenseclaw.config_inspect import ConfigInspectError
 
 
+def test_config_set_hilt_false_names_connector_override(monkeypatch) -> None:
+    guardrail = SimpleNamespace(
+        _connector_override=lambda _name: SimpleNamespace(hilt=SimpleNamespace(enabled=True))
+    )
+    cfg = SimpleNamespace(active_connectors=lambda: ["codex"], guardrail=guardrail)
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: cfg)
+    notes = cmd_config._shadowed_hilt_notes(  # noqa: SLF001 - config message regression.
+        [SimpleNamespace(path="guardrail.hilt.enabled", value=False)]
+    )
+    assert "HILT remains on for codex" in notes[0]
+    assert "guardrail hilt off" in notes[0]
+
+
 class _IsolatedHome:
     """Context manager that redirects ``DEFENSECLAW_HOME`` to a tmpdir.
 

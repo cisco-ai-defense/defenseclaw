@@ -319,7 +319,7 @@ These rules hold on every OS:
 DefenseClaw inspects the hook events that supported agents send: tool calls,
 and for some agents prompts and session events. It protects only the agents
 listed in the config. On Linux and macOS, listing a machine-policy agent
-publishes its policy even with `enabled: false`, and the config the lifecycle
+publishes its policy while enabled; `enabled: false` removes its policy and hooks. The config the lifecycle
 writes when you supply none lists no agents. On Windows you supply the config. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 

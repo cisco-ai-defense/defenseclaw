@@ -512,6 +512,9 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector reconcile: no data directory configured")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		connector.PinConnectorConfigRootsToSetup(dataDir)
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector reconcile: %w", err)
@@ -863,6 +866,9 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector teardown: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		connector.PinConnectorConfigRootsToSetup(dataDir)
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector teardown: %w", err)
@@ -933,6 +939,9 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector verify: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		connector.PinConnectorConfigRootsToSetup(dataDir)
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector verify: %w", err)

@@ -5349,6 +5349,47 @@ env_key = "OPENAI_API_KEY"
 	}
 }
 
+func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	original := []byte("# personal\nmodel = \"gpt-5\"\n[profiles.review]\nmodel = \"gpt-5.1\"\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = path
+	defer func() { CodexConfigPathOverride = "" }()
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := bytes.ReplaceAll(installed, []byte("/hooks/codex-hook.sh"), []byte("/xhooks/codex-hook.sh"))
+	if bytes.Equal(edited, installed) {
+		t.Fatal("test did not edit a hook registration")
+	}
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("heal: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "xhooks") || strings.Contains(string(got), "hooks.state") ||
+		!bytes.Contains(got, []byte("# personal")) {
+		t.Fatalf("edited hooks or trust state survived teardown: %s", got)
+	}
+}
+
 func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

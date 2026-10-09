@@ -12,6 +12,52 @@ import (
 	"testing"
 )
 
+func TestCodexNotifyBridgeChainsUserProgramWithoutGateway(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Bash bridge runs on Unix")
+	}
+	dataDir := t.TempDir()
+	output := filepath.Join(dataDir, "user-notify.log")
+	program := filepath.Join(dataDir, "my notify.sh")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf '%s' \"$2\" > \"$1\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeCodexNotifyBridge(
+		SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"},
+		[]string{program, output},
+	); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"type":"agent-turn-complete"}`
+	if out, err := exec.Command("/bin/bash", filepath.Join(dataDir, "notify-bridge.sh"), payload).CombinedOutput(); err != nil {
+		t.Fatalf("bridge: %v: %s", err, out)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil || string(got) != payload {
+		t.Fatalf("user notifier received %q, err=%v", got, err)
+	}
+}
+
+func TestCodexNotifyBridgeKeepsSecureClientRendering(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Bash bridge runs on Unix")
+	}
+	dataDir := t.TempDir()
+	if err := writeCodexNotifyBridge(
+		SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true},
+		[]string{"/bin/user-notify"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dataDir, "notify-bridge.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "user-notify") {
+		t.Fatal("Secure Client bridge unexpectedly invokes a user notifier")
+	}
+}
+
 func TestCodexNotifyBridgeKeepsCredentialAndPayloadOutOfCurlProcessState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Bash notify bridge is not installed on Windows")

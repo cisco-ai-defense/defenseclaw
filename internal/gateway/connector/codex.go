@@ -497,7 +497,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 	configPath := codexConfigPath()
 	if data, err := os.ReadFile(configPath); err == nil {
 		cfg := map[string]interface{}{}
-		if err := toml.Unmarshal(data, &cfg); err != nil {
+		if err := parseCodexTOML(data, &cfg); err != nil {
 			return fmt.Errorf("parse codex config while verifying cleanup: %w", err)
 		} else {
 			hooksDir := filepath.Join(opts.DataDir, "hooks")
@@ -527,7 +527,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 		managedPath := codexManagedConfigPath()
 		if data, err := os.ReadFile(managedPath); err == nil {
 			cfg := map[string]interface{}{}
-			if err := toml.Unmarshal(data, &cfg); err != nil {
+			if err := parseCodexTOML(data, &cfg); err != nil {
 				return fmt.Errorf("parse Codex managed config while verifying cleanup: %w", err)
 			}
 			if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
@@ -1030,7 +1030,7 @@ func codexProjectRootMarkers() []string {
 		return []string{".git"}
 	}
 	var config map[string]interface{}
-	if err := toml.Unmarshal(raw, &config); err != nil {
+	if err := parseCodexTOML(raw, &config); err != nil {
 		return []string{".git"}
 	}
 	value, ok := config["project_root_markers"]
@@ -1289,7 +1289,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		}
 	} else {
 		cfg := map[string]interface{}{}
-		if err := toml.Unmarshal(data, &cfg); err != nil {
+		if err := parseCodexTOML(data, &cfg); err != nil {
 			return false, fmt.Errorf("parse Codex config for hook guardian: %w", err)
 		}
 		if rawFeatures, exists := cfg["features"]; exists {
@@ -1326,7 +1326,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		return false, err
 	}
 	cfg := map[string]interface{}{}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	if err := parseCodexTOML(data, &cfg); err != nil {
 		return false, fmt.Errorf("parse Codex hook config for guardian: %w", err)
 	}
 	if rawFeatures, exists := cfg["features"]; exists {
@@ -1550,7 +1550,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	render := func(raw []byte) error {
 		cfg := map[string]interface{}{}
 		if len(raw) > 0 {
-			if err := toml.Unmarshal(raw, &cfg); err != nil {
+			if err := parseCodexTOML(raw, &cfg); err != nil {
 				return fmt.Errorf("parse codex config: %w", err)
 			}
 		}
@@ -1682,22 +1682,29 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			// referenced and contains a baked gateway token.
 			_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
 		} else {
-			if err := writeCodexNotifyBridge(opts); err != nil {
+			original := backupToSave
+			if backupExists {
+				original, err = c.loadConfigBackup(opts.DataDir)
+				if err != nil {
+					return fmt.Errorf("load original Codex notifier: %w", err)
+				}
+			}
+			if err := writeCodexNotifyBridge(opts, codexOriginalNotifyCommand(original, opts)); err != nil {
 				return fmt.Errorf("write codex notify bridge: %w", err)
 			}
 			cfg["notify"] = codexShellNotifyCommand(opts)
 		}
 
-		out, err := toml.Marshal(cfg)
+		out, err := editCodexOwnedTOML(raw, cfg)
 		if err != nil {
-			return fmt.Errorf("marshal codex config: %w", err)
+			return fmt.Errorf("edit codex config: %w", err)
 		}
 		// Verify the exact representation that Codex will parse, not just the
 		// pre-marshalling Go maps. This catches schema/key normalization drift that
 		// would otherwise leave Setup successful while Codex reports the hooks as
 		// untrusted or silently omits part of the required event matrix.
 		rendered := map[string]interface{}{}
-		if err := toml.Unmarshal(out, &rendered); err != nil {
+		if err := parseCodexTOML(out, &rendered); err != nil {
 			return fmt.Errorf("verify rendered codex config: %w", err)
 		}
 		if !codexUsesManagedHookLayer(opts) {
@@ -1744,12 +1751,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, raw, exists) {
-				// Codex writes its own entries (folder trust, model choice) to
-				// config.toml, so the record drifts in normal use. Re-record the
-				// current bytes instead of dropping the record: teardown filters
-				// DefenseClaw's fields out of an exact restore, so the outside
-				// edit survives either way, and doctor keeps drift detection
-				// after a plain gateway restart (GAP-2300).
+				// Codex may have written user settings since setup. Record its
+				// current bytes; teardown filters every owned hook and trust
+				// entry even if its path was edited before guardian repaired it.
 				managedBackup = recaptureManagedFileBackup(
 					opts.DataDir, c.Name(), "config.toml", configPath, raw, exists,
 				)
@@ -1786,7 +1790,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			return fmt.Errorf("read persisted codex config for trust verification: %w", err)
 		}
 		persistedConfig := map[string]interface{}{}
-		if err := toml.Unmarshal(persisted, &persistedConfig); err != nil {
+		if err := parseCodexTOML(persisted, &persistedConfig); err != nil {
 			return fmt.Errorf("parse persisted codex config for trust verification: %w", err)
 		}
 		if !codexUsesManagedHookLayer(opts) {
@@ -2399,7 +2403,19 @@ func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, op
 // caller by its kernel-verified uid), and drops the event without sending
 // anything when the socket or its directory is not owned by root or the
 // gateway account.
-func writeCodexNotifyBridge(opts SetupOpts) error {
+func codexOriginalNotifyCommand(backup codexConfigBackup, opts SetupOpts) []string {
+	if !backup.HadNotify || len(backup.OriginalNotify) == 0 {
+		return nil
+	}
+	var command []string
+	if err := json.Unmarshal(backup.OriginalNotify, &command); err != nil || len(command) == 0 ||
+		strings.TrimSpace(command[0]) == "" || codexNotifyLooksManaged(command, opts) {
+		return nil
+	}
+	return command
+}
+
+func writeCodexNotifyBridge(opts SetupOpts, chained ...[]string) error {
 	scriptPath := filepath.Join(opts.DataDir, "notify-bridge.sh")
 	endpoint := "http://" + opts.APIAddr + "/api/v1/codex/notify"
 	tokenPath, err := HookAPITokenFilePath(opts.DataDir, "codex")
@@ -2452,6 +2468,14 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 			"if [ \"${SESSION_FACTS}\" != v1 ]; then IDENTITY_HEADERS+=(--header \"X-DefenseClaw-Session-Facts: ${SESSION_FACTS}\"); fi\n" +
 			"unset SF_CA SF_TTY SF_LS SESSION_FACTS\n"
 	}
+	userNotify := ""
+	if !shellHookSecureClientProfile(opts) && len(chained) > 0 && len(chained[0]) > 0 {
+		var words []string
+		for _, part := range chained[0] {
+			words = append(words, shellSingleQuote(part))
+		}
+		userNotify = strings.Join(words, " ") + " \"${JSON}\" || true\n"
+	}
 	body := "#!/usr/bin/env bash\n" +
 		"# Auto-generated by defenseclaw setup guardrail. DO NOT EDIT.\n" +
 		"# Codex invokes this bridge on agent-turn-complete with a single\n" +
@@ -2465,6 +2489,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"if [ -z \"${JSON}\" ]; then\n" +
 		"  exit 0\n" +
 		"fi\n" +
+		userNotify +
 		credential +
 		"TRACE_HEADERS=()\n" +
 		"TP=\"${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-}}\"\n" +
@@ -2612,7 +2637,7 @@ func restoreOwnedCodexConfigFromTOML(
 	}
 	cfg := map[string]interface{}{}
 	if len(raw) > 0 {
-		if err := toml.Unmarshal(raw, &cfg); err != nil {
+		if err := parseCodexTOML(raw, &cfg); err != nil {
 			return atomicTransformResult{}, fmt.Errorf("parse codex config: %w", err)
 		}
 	}
@@ -2642,7 +2667,9 @@ func restoreOwnedCodexConfigFromTOML(
 				return atomicTransformResult{}, fmt.Errorf("restore Codex hooks.%s: unsupported type %T", eventType, val)
 			}
 			before := codexHookEntryCount(val)
-			remaining := removeOwnedHooks(val, hooksDir)
+			remaining := removeMatchingHookHandlers(val, func(rawHook interface{}) bool {
+				return isOwnedCodexHookHandler(rawHook, hooksDir)
+			})
 			if before != len(remaining) || !codexValueMatches(val, remaining) {
 				removedOwnedHooks = true
 			}
@@ -2698,9 +2725,9 @@ func restoreOwnedCodexConfigFromTOML(
 	if len(cfg) == 0 {
 		return atomicTransformResult{Remove: true}, nil
 	}
-	out, err := toml.Marshal(cfg)
+	out, err := editCodexOwnedTOML(raw, cfg)
 	if err != nil {
-		return atomicTransformResult{}, fmt.Errorf("marshal restored codex config: %w", err)
+		return atomicTransformResult{}, fmt.Errorf("edit restored codex config: %w", err)
 	}
 	return atomicTransformResult{Data: out}, nil
 }
@@ -2871,7 +2898,7 @@ func removeOwnedCodexHooksAndState(hooks map[string]interface{}, configPath, hoo
 func removeOwnedCodexHooksFromTOML(raw []byte, configPath, hooksDir string) ([]byte, bool, error) {
 	cfg := map[string]interface{}{}
 	if len(raw) > 0 {
-		if err := toml.Unmarshal(raw, &cfg); err != nil {
+		if err := parseCodexTOML(raw, &cfg); err != nil {
 			return nil, false, fmt.Errorf("parse Codex config: %w", err)
 		}
 	}
@@ -3533,13 +3560,14 @@ func verifyNoOwnedCodexHooks(document map[string]interface{}, hooksDir string) e
 func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hooksDir string) (bool, error) {
 	return removeCodexHookStateMatching(hooks, configPath, func(rawHook interface{}) bool {
 		return isOwnedCodexHookHandler(rawHook, hooksDir)
-	})
+	}, true)
 }
 
 func removeCodexHookStateMatching(
 	hooks map[string]interface{},
 	configPath string,
 	isManaged func(interface{}) bool,
+	removeEditedState ...bool,
 ) (bool, error) {
 	state, stateExists := hooks["state"].(map[string]interface{})
 	if rawState, present := hooks["state"]; present && !stateExists {
@@ -3572,7 +3600,8 @@ func removeCodexHookStateMatching(
 			}
 			trustedHash, _ := entry["trusted_hash"].(string)
 			legacyHash := legacyHashForOwnedCodexLocation(eventKey, location)
-			if trustedHash != location.currentHash && (legacyHash == "" || trustedHash != legacyHash) {
+			if trustedHash != location.currentHash && (legacyHash == "" || trustedHash != legacyHash) &&
+				(len(removeEditedState) == 0 || !removeEditedState[0]) {
 				continue
 			}
 			delete(state, key)
@@ -3769,6 +3798,15 @@ func isOwnedCodexHookHandler(rawHook interface{}, hooksDir string) bool {
 	handler, ok := rawHook.(map[string]interface{})
 	if !ok {
 		return false
+	}
+	// A user edit that moves our generated script to xhooks is still a
+	// DefenseClaw registration. Teardown must not strand its positional
+	// trust state after guardian repairs it (GAP-1032).
+	editedScript := filepath.ToSlash(filepath.Join(filepath.Dir(hooksDir), "xhooks", "codex-hook.sh"))
+	for _, key := range []string{"command", "commandWindows", "command_windows"} {
+		if command, ok := handler[key].(string); ok && strings.Contains(filepath.ToSlash(command), editedScript) {
+			return true
+		}
 	}
 	for _, key := range []string{"commandWindows", "command_windows"} {
 		candidate, ok := handler[key].(string)
@@ -4483,7 +4521,7 @@ func codexConfigHasManagedOTLPEndpoint(configPath string, opts SetupOpts) (bool,
 		return false, err
 	}
 	cfg := map[string]interface{}{}
-	if err := toml.Unmarshal(raw, &cfg); err != nil {
+	if err := parseCodexTOML(raw, &cfg); err != nil {
 		return false, err
 	}
 	return codexOtelBlockLooksManaged(cfg["otel"], opts), nil

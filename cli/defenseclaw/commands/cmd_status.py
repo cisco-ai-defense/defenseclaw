@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -736,7 +737,12 @@ def _print_agents(
     disabled_count = len(actives) - enabled_count
     # GAP-1937: a connector whose setup failed at gateway start is not
     # enforced; count it the way `defenseclaw-gateway status` does.
-    not_running_count = sum(1 for c in actives if _is_enabled(c) and c not in health_map and c in not_started)
+    not_running_count = sum(
+        1 for c in actives if _is_enabled(c) and (
+            c == "claudecode" and not shutil.which("claude")
+            or c not in health_map and c in not_started
+        )
+    )
     header = f"{enabled_count - not_running_count} active"
     if not_running_count:
         header += f", {not_running_count} not running"
@@ -803,6 +809,8 @@ def _print_agents(
                 # The gateway does not dial an OpenClaw gateway that is only
                 # the claw.mode default and is not installed (#958).
                 runtime_state, runtime_detail = "off", "OpenClaw is not installed"
+            elif conn == "claudecode" and not shutil.which("claude"):
+                runtime_state, runtime_detail = "off", "Claude Code is not detected on PATH"
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
@@ -830,6 +838,9 @@ def _print_agents(
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn == "claudecode" and not shutil.which("claude"):
+                suffix = _connector_state_verb("off") + ux.dim(" (Claude Code is not detected on PATH)")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
                 # Setup failed when the gateway started (GAP-1714).

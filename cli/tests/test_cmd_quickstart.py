@@ -23,8 +23,8 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner, Result
-from defenseclaw.bootstrap import StepResult
-from defenseclaw.commands.cmd_quickstart import quickstart_cmd
+from defenseclaw.bootstrap import FirstRunReport, StepResult
+from defenseclaw.commands.cmd_quickstart import _require_operational_success, quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
@@ -32,6 +32,19 @@ from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 from tests.helpers import record_test_setup_agent_selections
 from tests.permissions import set_known_windows_directory_acl
+
+
+def test_unwritable_claude_settings_has_actionable_quickstart_failure() -> None:
+    report = FirstRunReport(
+        status="needs_attention", config_file="", data_dir="", connector="claudecode", profile="observe",
+        setup=[StepResult("Sidecar", "warn", "settings.json tombstone replacement failed")],
+        readiness=[StepResult("Sidecar", "warn", "not answering yet", "check it in a minute")],
+    )
+    _require_operational_success(report, gateway_requested=True)
+    for step in (report.setup[0], report.readiness[0]):
+        assert step.status == "fail"
+        assert ".claude" in step.detail and "cannot be written" in step.detail
+        assert "tombstone" not in step.detail and not step.next_command
 
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):

@@ -9472,6 +9472,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             keys_color = TOKENS.accent_amber
             keys_dot = "●"
         scanner_rows.append(("keys", keys_label, keys_color, keys_dot))
+        admission_overrides = self.overview_model.scanner_overrides_summary()
+        if admission_overrides:
+            scanner_rows.append(("overrides", admission_overrides, TOKENS.accent_cyan, "●"))
         # 8.13: scanner *binaries* are machine-wide (same for every connector),
         # so the rows above don't change with the filter. What IS per-connector
         # is the enforcement policy the scanners apply — surface that as a
