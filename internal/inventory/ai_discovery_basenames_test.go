@@ -185,6 +185,38 @@ func TestDetectMCPPaths_EnumeratesServerNames_MCPJSON(t *testing.T) {
 	}
 }
 
+func TestDetectMCPPathsClaudeStateScopesAreBoundedAndPrivate(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".claude.json")
+	raw := `{"mcpServers":{"user-server":{"env":{"API_KEY":"private-value"}}},"projects":{"` +
+		filepath.ToSlash(filepath.Join(home, "project")) + `":{"mcpServers":{"local-server":{"headers":{"Authorization":"private-value"}}}}}}`
+	if err := os.WriteFile(state, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home, HomeDirs: []string{home}},
+		catalog: []AISignature{{ID: "claudecode", SupportedConnector: "claudecode", MCPPaths: []string{"~/.claude.json"}}}}
+	signals := svc.detectMCPPaths()
+	if len(signals) != 1 || signals[0].Partial {
+		t.Fatalf("Claude MCP signals = %+v", signals)
+	}
+	for _, name := range []string{"user-server", "local-server"} {
+		if !slices.Contains(signals[0].Basenames, name) {
+			t.Fatalf("missing %q from %v", name, signals[0].Basenames)
+		}
+	}
+	for _, evidence := range signals[0].Evidence {
+		if strings.Contains(evidence.Basename, "private-value") {
+			t.Fatal("MCP credential reached inventory evidence")
+		}
+	}
+	if err := os.WriteFile(state, make([]byte, maxClaudeDiscoveryStateBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.detectMCPPaths(); len(got) != 1 || !got[0].Partial {
+		t.Fatalf("oversized Claude state did not mark coverage partial: %+v", got)
+	}
+}
+
 // TestDetectMCPPaths_MalformedFileStillEmitsFileSignal ensures a
 // malformed MCP config never *suppresses* the discovery signal —
 // the endpoint has an MCP surface even if the parser can't crack

@@ -261,6 +261,10 @@ func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T)
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	claudeState := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(claudeState, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(home, ".claude"), outside).CombinedOutput(); err != nil {
 		t.Fatalf("mklink /J: %v: %s", err, out)
 	}
@@ -283,6 +287,10 @@ func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T)
 			if err != nil || result != inventoryDACLGranted {
 				t.Fatalf(".codex = %v, %v; want granted", result, err)
 			}
+		case ".claude.json":
+			if err != nil || result != inventoryDACLGranted {
+				t.Fatalf(".claude.json = %v, %v; want granted", result, err)
+			}
 		}
 	}
 	if hasACE(outside) {
@@ -290,6 +298,9 @@ func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T)
 	}
 	if !hasACE(filepath.Join(home, ".codex")) {
 		t.Fatal("a plain agent folder lost its grant")
+	}
+	if !hasACE(claudeState) || hasACE(home) {
+		t.Fatal("Claude state grant did not stay on the file")
 	}
 }
 
