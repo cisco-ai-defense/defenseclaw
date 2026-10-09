@@ -249,7 +249,12 @@ The enumerator applies these checks to each account, in this order:
 
 1. `exclude_users`, then `exempt_users`: the account is skipped. Both match
    an account name or its numeric uid (for example `"1234401103"`), the
-   spelling the gateway uses for directory accounts it cannot name.
+   spelling the gateway uses for directory accounts it cannot name. The
+   name is compared as `getent passwd` prints it: with fully qualified SSSD
+   names, `alice` is the local account and `alice@corp.example.com` the
+   directory one. Where a local and a directory account are both named
+   `alice` (SSSD short names), `alice` matches both; write the uid to
+   select one.
 2. uid 0, uid 65534 and the `nobody` account are never enrolled.
 3. The uid must be in the interactive range (below). On Linux, systemd's
    dynamic service uids (61184 to 65519) are never enrolled. Accounts in
@@ -381,7 +386,11 @@ with `defenseclaw-gateway enterprise linux reconcile` or
   desktop once.
 - **`include_users`, `exclude_users` and `exempt_users`.** Each entry
   matches the account name, `DOMAIN\user`, the SID, or the profile folder
-  name, ignoring case. `exclude_users` wins. When the account name cannot be
+  name, ignoring case. `exclude_users` wins. A bare account name matches
+  every account of that name: with a domain account `CORP\alice` and a
+  local account `alice` on the same computer, `exclude_users: [alice]`
+  excludes both. Write `DOMAIN\user` (the computer name for a local
+  account, for example `PC01\alice`) or the SID to select one. When the account name cannot be
   looked up (for example during a domain controller outage), the profile
   keeps its existing rows and gets no new ones; a failed lookup never
   revokes a user.
