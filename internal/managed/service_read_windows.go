@@ -95,8 +95,8 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 // a kind: jsonl destination in a folder only administrators can write
 // passed it; the gateway then could not open the file and did not start,
 // and the install failed after the readiness wait and rolled back
-// (GAP-1118). A folder that does not exist yet is created by the gateway
-// and is not checked.
+// (GAP-1118). For a missing folder, the nearest existing parent must
+// permit the service to create a subfolder.
 func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
 	if err != nil {
@@ -109,12 +109,34 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 		return nil
 	}
 	folder := filepath.Dir(filepath.Clean(path))
-	if info, err := os.Lstat(folder); err != nil || !info.IsDir() {
-		return nil
+	missingFolder := false
+	for {
+		info, statErr := os.Lstat(folder)
+		if statErr == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("JSONL destination parent %s is not a folder", folder)
+			}
+			break
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect JSONL destination parent %s: %w", folder, statErr)
+		}
+		parent := filepath.Dir(folder)
+		if parent == folder {
+			return fmt.Errorf("JSONL destination has no existing parent folder: %s", path)
+		}
+		folder = parent
+		missingFolder = true
 	}
 	sids, err := serviceTokenSIDs(serviceSID)
 	if err != nil {
 		return err
+	}
+	if missingFolder {
+		if !serviceHasAccess(folder, sids, serviceFolderCreateChildAccess) {
+			return fmt.Errorf("the gateway service account %s cannot create a folder in %s", serviceAccount, folder)
+		}
+		return nil
 	}
 	if !serviceHasAccess(folder, sids, serviceFolderWriteAccess) {
 		return fmt.Errorf("the gateway service account %s cannot create files in %s", serviceAccount, folder)
@@ -184,6 +206,8 @@ const (
 	// them to prune, and read the attributes and permissions the gateway
 	// checks before every open.
 	serviceFolderWriteAccess = serviceTreeAccess | windows.ACCESS_MASK(0x0002|0x0080) | windows.READ_CONTROL
+	// FILE_ADD_SUBDIRECTORY lets MkdirAll create the first missing folder.
+	serviceFolderCreateChildAccess = serviceTreeAccess | windows.ACCESS_MASK(0x0004|0x0080) | windows.READ_CONTROL
 	// FILE_DELETE_CHILD permits renaming the active file and removing old
 	// backups even when an existing file does not grant DELETE.
 	serviceFolderDeleteChildAccess = windows.ACCESS_MASK(0x0040)
