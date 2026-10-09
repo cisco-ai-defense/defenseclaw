@@ -100,7 +100,8 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 }
 
 // A service may append and create files but still be unable to rotate or
-// prune them when its folder lacks FILE_DELETE_CHILD (GAP-1123).
+// prune them (GAP-1123). Rotation needs FILE_DELETE_CHILD on the folder or
+// DELETE on the files, which the documented Modify (OI)(CI) grant gives.
 func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
 	folder := t.TempDir()
 	path := filepath.Join(folder, "audit.jsonl")
@@ -129,6 +130,25 @@ func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
 	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20084;;;BU)")
 	if err := ValidateServiceCanWriteFile(path, account); err == nil {
 		t.Fatal("accepted a JSONL destination that cannot rotate")
+	}
+	// Modify (0x1301bf, no FILE_DELETE_CHILD) with (OI)(CI) on the folder.
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;0x1301bf;;;BU)")
+	if err := ValidateServiceCanWriteFile(path, account); err == nil || !strings.Contains(err.Error(), "cannot rotate "+path) {
+		t.Fatalf("pre-created file without Delete in a Modify folder: %v", err)
+	}
+	setDACL(path, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)")
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("Modify folder with a pre-created file: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("Modify folder without a file: %v", err)
+	}
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;0x20083;;;BU)")
+	if err := ValidateServiceCanWriteFile(path, account); err == nil {
+		t.Fatal("accepted a create-only folder")
 	}
 	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x200c3;;;BU)")
 	if err := ValidateServiceCanWriteFile(path, account); err != nil {
