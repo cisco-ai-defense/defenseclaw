@@ -4,6 +4,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,10 +147,17 @@ func TestHealthyNoopEnsureFromPackageClearsTheFailedPackageResult(t *testing.T) 
 	if !r.Noop {
 		t.Fatalf("ensure --from-package on a healthy host was not a no-op: %+v", r.Changes)
 	}
-	for _, path := range leftovers {
+	for _, path := range leftovers[1:] {
 		if exists(path) {
 			t.Fatalf("a healthy no-op ensure --from-package left %s", filepath.Base(path))
 		}
+	}
+	// The run records its own result in place of the failure (GAP-1116).
+	var recorded struct {
+		OK bool `json:"ok"`
+	}
+	if raw, err := os.ReadFile(leftovers[0]); err != nil || json.Unmarshal(raw, &recorded) != nil || !recorded.OK {
+		t.Fatalf("last-package-result.json after a healthy no-op ensure --from-package = %q (%v), want the ok result of this run", raw, err)
 	}
 }
 
