@@ -2727,13 +2727,32 @@ func hookUsesForeignDefenseClawClaudeCodeScript(rawHook interface{}) bool {
 		return false
 	}
 	command, _ := hook["command"].(string)
-	command = claudeCodeUnguardedHookCommand(command)
-	if command == "" || strings.ContainsAny(command, " \t\"'") {
+	unguarded := claudeCodeUnguardedHookCommand(command)
+	if unguarded == "" {
 		return false
 	}
-	command = filepath.ToSlash(command)
+	if unguarded == command {
+		// Bare commands must be a single unquoted path, never a path plus argv.
+		if strings.ContainsAny(unguarded, " \t\"'\\") {
+			return false
+		}
+	} else {
+		// Accept only the generated quoted guard or its old bare-path form.
+		// An old bare command containing spaces could have shell arguments.
+		if strings.ContainsAny(unguarded, "\r\n") ||
+			(command != claudeCodeMissingHookGuard(unguarded) &&
+				(command != unguarded+claudeCodeMissingHookGuardClause() || strings.ContainsAny(unguarded, " \t"))) {
+			return false
+		}
+	}
+	// An exact generated guard quotes the whole path, so spaces are safe.
+	// Normalize copied Unix and Windows settings on either host OS.
+	command = strings.ReplaceAll(unguarded, `\`, "/")
 	hooksDir := path.Dir(command)
-	return path.IsAbs(command) && path.Clean(command) == command &&
+	absolute := path.IsAbs(command) ||
+		(len(command) >= 3 && ((command[0] >= 'A' && command[0] <= 'Z') ||
+			(command[0] >= 'a' && command[0] <= 'z')) && command[1] == ':' && command[2] == '/')
+	return absolute && path.Clean(command) == command &&
 		path.Base(command) == "claude-code-hook.sh" &&
 		path.Base(hooksDir) == "hooks" &&
 		path.Base(path.Dir(hooksDir)) == ".defenseclaw"

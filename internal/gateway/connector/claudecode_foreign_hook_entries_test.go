@@ -31,13 +31,18 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
 
 	foreign := filepath.ToSlash(filepath.Join(dir, "other", ".defenseclaw", "hooks", "claude-code-hook.sh"))
+	foreignWithSpace := filepath.ToSlash(filepath.Join(dir, "Alice Smith", ".defenseclaw", "hooks", "claude-code-hook.sh"))
+	guardedForeign := claudeCodeMissingHookGuard(foreignWithSpace)
+	backslashForeign := strings.ReplaceAll(foreignWithSpace, "/", `\`)
+	guardedBackslashForeign := claudeCodeMissingHookGuard(backslashForeign)
+	escapedBackslashForeign := strings.ReplaceAll(backslashForeign, `\`, `\\`)
 	own := "/usr/local/bin/my-review-hook.sh"
 	handler := func(command string) map[string]interface{} {
 		return map[string]interface{}{"type": "command", "command": command}
 	}
 	data, err := json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
 		"PreToolUse": []interface{}{
-			map[string]interface{}{"matcher": "*", "hooks": []interface{}{handler(foreign), handler(own)}},
+			map[string]interface{}{"matcher": "*", "hooks": []interface{}{handler(foreign), handler(guardedForeign), handler(guardedBackslashForeign), handler(own)}},
 		},
 		"Stop": []interface{}{
 			map[string]interface{}{"hooks": []interface{}{handler(foreign)}},
@@ -64,24 +69,41 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 		t.Fatalf("Setup: %v", err)
 	}
 	after := mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreign) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) {
 		t.Fatalf("Setup kept the foreign DefenseClaw hook entries: %s", after)
 	}
 	if !strings.Contains(after, own) || !strings.Contains(after, filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))) {
 		t.Fatalf("Setup lost the user's hook or did not register its own: %s", after)
+	}
+	// A copied entry can also arrive after Setup; Teardown must remove it.
+	var copied map[string]interface{}
+	if err := json.Unmarshal([]byte(after), &copied); err != nil {
+		t.Fatal(err)
+	}
+	preToolUse := copied["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+	preToolUse[0].(map[string]interface{})["hooks"] = append(
+		preToolUse[0].(map[string]interface{})["hooks"].([]interface{}), handler(guardedBackslashForeign),
+	)
+	data, err = json.Marshal(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	after = mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(after, foreign) || !strings.Contains(after, own) {
+	if strings.Contains(after, foreignWithSpace) || strings.Contains(after, escapedBackslashForeign) || strings.Contains(after, foreign) || !strings.Contains(after, own) {
 		t.Fatalf("Teardown settings = %s, want the user's hook only", after)
 	}
 
 	for _, command := range []string{
 		"/opt/other/hooks/claude-code-hook.sh",
 		foreign + " --flag",
+		foreignWithSpace + " --flag",
 		"/home/u/.defenseclaw/hooks/other-hook.sh",
 		".defenseclaw/hooks/claude-code-hook.sh",
 	} {
