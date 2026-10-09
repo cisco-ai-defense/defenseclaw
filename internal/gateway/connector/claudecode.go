@@ -1138,23 +1138,36 @@ const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude 
 // the shell's 127 for the old path let every tool call run unguarded
 // (GAP-0542). The script's own exits pass through unchanged; only 126 and
 // 127, "cannot run" and "not found", become a block with one plain sentence.
-// The script path stays the first shell word, so ownership checks and doctor
-// still find it.
+// Quote the path as a single shell word; home directories may contain spaces
+// or shell metacharacters. Ownership checks and doctor unwrap this exact guard
+// before comparing the path.
 func claudeCodeMissingHookGuard(command string) string {
-	return command + claudeCodeMissingHookGuardSeparator +
+	return shellSingleQuote(command) + claudeCodeMissingHookGuardClause()
+}
+
+func claudeCodeMissingHookGuardClause() string {
+	return claudeCodeMissingHookGuardSeparator +
 		`[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; ` +
 		"echo '" + claudeCodeMissingHookGuardMessage + "' >&2; exit 2; }"
 }
 
 // claudeCodeUnguardedHookCommand removes only the exact generated guard,
-// so an old data directory is recognized without accepting a modified clause
-// that changes a blocking hook exit into success.
+// including the older unquoted form, so existing registrations remain owned.
+// A modified clause that changes a blocking hook exit into success stays foreign.
 func claudeCodeUnguardedHookCommand(command string) string {
 	index := strings.Index(command, claudeCodeMissingHookGuardSeparator)
-	if index <= 0 || command != claudeCodeMissingHookGuard(command[:index]) {
+	if index <= 0 || command[index:] != claudeCodeMissingHookGuardClause() {
 		return command
 	}
-	return command[:index]
+	prefix := command[:index]
+	if len(prefix) >= 2 && prefix[0] == '\'' && prefix[len(prefix)-1] == '\'' {
+		path := strings.ReplaceAll(prefix[1:len(prefix)-1], `'"'"'`, "'")
+		if shellSingleQuote(path) == prefix {
+			return path
+		}
+	}
+	// Before paths were quoted, the generated guard used the raw path.
+	return prefix
 }
 
 func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string, []string) {
