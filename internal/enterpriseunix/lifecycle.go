@@ -365,6 +365,11 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		restored := l.restoreTamperedHookBinary(ctx, record)
 		l.restoreUnchangedConfigMetadata(ctx, record)
 		restored = l.restoreTamperedMachinePolicy(record) || restored
+		if problems, _ := l.unitDropIns(ctx, record); len(problems) > 0 {
+			r.AddError(codeVerify, strings.Join(problems, "; "))
+			l.describe(ctx, record, false)
+			return 0
+		}
 		noop, reason := l.ensureNoop(ctx, record)
 		// Configuration management that installs the same config.yaml
 		// again while this run checks (two installs seconds apart) replaced

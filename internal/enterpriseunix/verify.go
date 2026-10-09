@@ -442,6 +442,24 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		add("config: %v", err)
 	} else if sha256Bytes(raw) != record.ConfigSHA256 && !inputsChanged {
 		add("config.yaml changed since it was applied; run ensure")
+	} else if env.GOOS == "darwin" && !inputsChanged {
+		// Custom JSONL files are not in record.Files or the managed ACL walk.
+		// Check the destinations of the applied config on every status/verify.
+		compiled, err := config.ParseCompileObservabilityV8(env.Layout.ConfigPath, raw, config.ObservabilityV8CompileOptions{
+			DefaultDataDir: env.Layout.DataDir, CredentialsDir: env.P(env.Layout.SecretsDir),
+		})
+		if err == nil && compiled != nil && compiled.Plan != nil {
+			for _, destination := range compiled.Plan.Destinations() {
+				if destination.Kind != config.ObservabilityV8DestinationJSONL || !destination.Enabled || destination.Generated {
+					continue
+				}
+				if problem, err := env.jsonlACLProblem(ctx, filepath.Clean(destination.Transport.Path)); err != nil {
+					add("inspect macOS ACL of observability destination %q: %v", destination.Name, err)
+				} else if problem != "" {
+					add("observability destination %q writes %s, which %s", destination.Name, filepath.Clean(destination.Transport.Path), problem)
+				}
+			}
+		}
 	}
 	if err := env.Trust(env.P(env.Layout.DescriptorPath), TrustAdminFile); err != nil {
 		add("runtime descriptor trust: %v", err)

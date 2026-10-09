@@ -269,3 +269,36 @@ func TestManagedConfigRefusesUnsafeJSONLDestinations(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1196: mode 0600 does not exclude a macOS ACL reader on a custom
+// JSONL output. The config and the installed destination must both reject it.
+func TestMacJSONLDestinationReadACL(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	payload := h.payload("1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: payload}))
+	path := filepath.Join(h.env.Layout.LogDir, "custom-audit.jsonl")
+	if err := os.WriteFile(h.env.P(path), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account := h.accounts.accounts[h.env.Layout.ServiceUser]
+	h.owners[h.env.P(path)] = [2]int{account.UID, account.GID}
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: custom-audit\n      kind: jsonl\n      path: " + path + "\n"
+	if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.runner.acls = map[string][]string{h.env.P(path): {"user:standard allow read,readattr"}}
+	result := h.run(Options{Action: ActionEnsure, ConfigFile: cfg})
+	if result.OK || !strings.Contains(messagesOf(result.Errors, codeConfig), "ACL") {
+		t.Fatalf("ensure accepted the JSONL read ACL: %+v", result)
+	}
+	delete(h.runner.acls, h.env.P(path))
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg}))
+	h.runner.acls[h.env.P(path)] = []string{"user:standard allow read,readattr"}
+	for _, action := range []string{ActionStatus, ActionVerify, ActionEnsure} {
+		result := h.run(Options{Action: action})
+		if result.OK || !strings.Contains(messagesOf(result.Errors, codeVerify)+messagesOf(result.Errors, codeConfig), "ACL") {
+			t.Fatalf("%s missed the JSONL read ACL: %+v", action, result)
+		}
+	}
+}

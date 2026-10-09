@@ -27,8 +27,9 @@ import (
 
 // On Windows the SYSTEM enumerator writes one identity record per user in
 // its token-group cache: the directory facts it resolves as SYSTEM (the
-// identity store, the join state, TranslateNameW) and the user's groups,
-// each SID followed by its DOMAIN\name where the name resolves. The
+// identity store, the join state, TranslateNameW) and, only while the user
+// has an active desktop session, its token groups. Each SID is followed by
+// its DOMAIN\name where the name resolves. The
 // gateway's service account cannot read the SYSTEM-only group cache itself.
 
 const (
@@ -72,20 +73,22 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, e
 		keep[strings.ToLower(name)] = true
 		now := time.Now().UTC()
 		facts := useridentity.WindowsDirectoryFacts(key, 0)
-		groupSIDs := cache.Users[sid]
-		names := useridentity.WindowsGroupNames(groupSIDs, windowsIdentityGroupNameLimit, windowsIdentityGroupNameBudget)
-		groups := make([]string, 0, 2*len(groupSIDs))
-		for i, groupSID := range groupSIDs {
-			groups = append(groups, groupSID)
-			if i < len(names) && names[i] != groupSID {
-				groups = append(groups, names[i])
-			}
-		}
-		facts.Groups = groups
-		// Without an active session this cycle the groups are the last
-		// session token, which can miss a group the account has gained
-		// since (an Entra group after a restart, GAP-0243).
+		// The enrollment cache retains last-session groups for enrollment
+		// decisions, but they cannot verify the membership of a new SSH or
+		// task token. Publish groups only from an active session this cycle.
 		facts.GroupsPartial = !cache.SignedIn[sid]
+		if !facts.GroupsPartial {
+			groupSIDs := cache.Users[sid]
+			names := useridentity.WindowsGroupNames(groupSIDs, windowsIdentityGroupNameLimit, windowsIdentityGroupNameBudget)
+			groups := make([]string, 0, 2*len(groupSIDs))
+			for i, groupSID := range groupSIDs {
+				groups = append(groups, groupSID)
+				if i < len(names) && names[i] != groupSID {
+					groups = append(groups, names[i])
+				}
+			}
+			facts.Groups = groups
+		}
 		if facts.ResolvedAt.IsZero() {
 			facts.ResolvedAt = now
 		}

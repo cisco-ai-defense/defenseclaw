@@ -134,8 +134,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
 	// that installs one records its activation (GAP-0967).
-	activationStartedAt time.Time
-	installedBeforeRun  bool
+	activationStartedAt     time.Time
+	installedBeforeRun      bool
+	previousConnectors      []string
+	previousConnectorsKnown bool
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -401,6 +403,10 @@ func runWindowsEnterpriseLifecycle(
 		if action == "install" || action == "upgrade" || action == "repair" || action == "ensure" {
 			opts.activationStartedAt = time.Now().UTC()
 			opts.installedBeforeRun = windowsEnterpriseStandaloneInstalled()
+			if opts.installedBeforeRun {
+				connectors, connectorErr := windowsEnterpriseEnrolledConnectors()
+				opts.previousConnectors, opts.previousConnectorsKnown = connectors, connectorErr == nil
+			}
 		}
 	}
 	// The Secure Client profile keeps its historical preflight text exactly;

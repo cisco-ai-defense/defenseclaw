@@ -50,12 +50,14 @@ const aclListBatch = 200
 
 // aclTarget is a rooted path whose macOS ACL the deployment checks. On a
 // private one any allow entry is wrong; on a published directory a deny
-// entry that hides policy is also wrong; elsewhere an entry that grants write.
+// entry that hides policy is also wrong; on a published policy file a deny-read
+// entry is wrong; elsewhere an entry that grants write.
 type aclTarget struct {
-	path         string
-	private      bool
-	publishedDir bool
-	requireList  bool
+	path          string
+	private       bool
+	publishedDir  bool
+	publishedFile bool
+	requireList   bool
 }
 
 // aclFinding is a path with the ACL entries that are wrong for it; write is
@@ -78,11 +80,10 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 		return nil
 	}
 	seen := map[string]bool{}
-	publishedDirs := map[string]bool{}
-	for _, connector := range connectors {
-		for _, dir := range machinePolicyDirs(e.GOOS, connector) {
-			publishedDirs[e.P(dir)] = true
-		}
+	policyPaths := e.machinePolicyACLPaths(connectors)
+	published := make(map[string]bool, len(policyPaths))
+	for _, path := range policyPaths {
+		published[path] = true
 	}
 	var targets []aclTarget
 	// private is nil to take it from the current mode.
@@ -100,7 +101,8 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			closed = *private
 		}
 		targets = append(targets, aclTarget{
-			path: rooted, private: closed, publishedDir: info.IsDir() && publishedDirs[rooted],
+			path: rooted, private: closed,
+			publishedDir: info.IsDir() && published[rooted], publishedFile: info.Mode().IsRegular() && published[rooted],
 			requireList: filepath.Base(rooted) == "managed-settings.d" || filepath.Base(rooted) == "policy.d",
 		})
 	}
@@ -114,7 +116,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	for _, file := range files {
 		add(e.P(file), nil)
 	}
-	for _, path := range e.machinePolicyACLPaths(connectors) {
+	for _, path := range policyPaths {
 		add(path, nil)
 	}
 	for _, dir := range []string{e.Layout.DataDir, filepath.Dir(e.Layout.ManifestPath), e.Layout.GuardianAuthDir, e.Layout.SecretsDir, e.Layout.LifecycleDir} {
@@ -189,7 +191,8 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 		for _, target := range batch {
 			finding := aclFinding{path: e.canonical(target.path), rooted: target.path}
 			for _, entry := range listed[target.path] {
-				deny := target.publishedDir && entry.DeniesDirectoryAccess(target.requireList)
+				deny := (target.publishedDir && entry.DeniesDirectoryAccess(target.requireList)) ||
+					(target.publishedFile && entry.DeniesFileRead())
 				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
 					finding.entries = append(finding.entries, entry.Text)
 					finding.write = finding.write || entry.GrantsWrite()
@@ -238,7 +241,7 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	}
 	if len(deny) > 0 {
 		problems = append(problems, fmt.Sprintf(
-			"macOS ACL entries deny users access to published machine-policy directories, so their agents cannot load DefenseClaw hooks: %s; run `%s` to remove them",
+			"macOS ACL entries deny users access to published machine-policy directories or files, so their agents cannot load DefenseClaw hooks: %s; run `%s` to remove them",
 			describeACLFindings(deny), e.lifecycleCommand(ActionRepair)))
 	}
 	if len(read) > 0 {
@@ -334,4 +337,31 @@ func aclConnectors(p *plan, record *Deployment) []string {
 		connectors = append(connectors, record.MachinePolicyConnectors...)
 	}
 	return connectors
+}
+
+// jsonlACLProblem checks a custom output file, which is outside the
+// deployment's managed trees. Its mode is private even in a traversable log
+// directory, so any allow ACL entry grants access the mode excludes.
+func (e *Env) jsonlACLProblem(ctx context.Context, path string) (string, error) {
+	if e.GOOS != "darwin" {
+		return "", nil
+	}
+	info, err := os.Lstat(e.P(path))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil
+	}
+	findings, err := e.aclFindings(ctx, []aclTarget{{path: e.P(path), private: true}})
+	if err != nil {
+		return "", err
+	}
+	if len(findings) > 0 {
+		return fmt.Sprintf("has a macOS ACL entry that lets another account read or write the JSONL output: %s; remove it with `chmod -N %s`", describeACLFindings(findings), path), nil
+	}
+	return "", nil
 }

@@ -136,6 +136,9 @@ func claudeCodeSettingsParseable(path string) error {
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return fmt.Errorf("Claude Code settings file %s is not valid JSON (%s); fix the file, then run: defenseclaw-gateway restart", path, jsonErrorPosition(data, err))
 	}
+	if settings == nil {
+		return fmt.Errorf("Claude Code settings file %s must contain a JSON object; fix the file, then run: defenseclaw-gateway restart", path)
+	}
 	return nil
 }
 
@@ -1423,6 +1426,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 					return atomicTransformResult{}, fmt.Errorf("parse claude settings: %w", err)
 				}
 			}
+			if settings == nil {
+				return atomicTransformResult{}, fmt.Errorf("Claude Code settings file %s must contain a JSON object", settingsPath)
+			}
 
 			backup := baseBackup
 			backup.ManagedHookCommands = append([]string(nil), baseBackup.ManagedHookCommands...)
@@ -1795,6 +1801,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				if err := json.Unmarshal(data, &settings); err != nil {
 					return atomicTransformResult{}, fmt.Errorf("parse claude settings: %w", err)
 				}
+			}
+			if settings == nil {
+				return atomicTransformResult{}, fmt.Errorf("Claude Code settings file %s must contain a JSON object", settingsPath)
 			}
 
 			existing := map[string]interface{}{}

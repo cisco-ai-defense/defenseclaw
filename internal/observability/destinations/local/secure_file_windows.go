@@ -21,7 +21,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
+func secureOpenAppend(path string, _ bool) (*os.File, os.FileInfo, int64, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, 0, err
 	}
@@ -41,7 +41,7 @@ func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
 	return file, info, info.Size(), nil
 }
 
-func secureOpenRead(path string) (*os.File, os.FileInfo, error) {
+func secureOpenRead(path string, _ bool) (*os.File, os.FileInfo, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, err
 	}
@@ -138,7 +138,7 @@ func validateSecureFileInfo(info os.FileInfo) error {
 	return nil
 }
 
-func validateSecureOpenFile(file *os.File) error {
+func validateSecureOpenFile(file *os.File, _ bool) error {
 	if file == nil {
 		return unsafeFailure()
 	}

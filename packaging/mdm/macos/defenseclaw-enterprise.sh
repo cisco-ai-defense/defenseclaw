@@ -98,6 +98,7 @@ DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
 DC_INSTALL_ROOT=""     # the install tree whose volume the package fills
+DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
 DC_PACKAGE_RESULT=""   # the result the macOS package's own scripts write
 
 dc_platform() {
@@ -425,14 +426,36 @@ dc_validate_args() {
     fi
 }
 
-# dc_binaries_damaged: a missing or empty required binary means the
-# installed package needs repair even when its version already matches.
+# The lifecycle record pins the installed bytes. A missing or unreadable
+# digest is not proof that a same-version package is healthy.
+dc_recorded_binary_sha256() {
+    [ -f "$DC_DEPLOYMENT_RECORD" ] && [ ! -L "$DC_DEPLOYMENT_RECORD" ] || return 1
+    recorded_digest=$(awk -v key="\"$1\":" '
+        {
+            line = $0
+            sub(/^[[:space:]]*/, "", line)
+            if (index(line, key) != 1) next
+            line = substr(line, length(key) + 1)
+            sub(/^[[:space:]]*"/, "", line)
+            sub(/"[,]?[[:space:]]*$/, "", line)
+            print line
+            exit
+        }
+    ' "$DC_DEPLOYMENT_RECORD") || return 1
+    dc_is_sha256 "$recorded_digest" || return 1
+    printf '%s\n' "$recorded_digest"
+}
+
+# Reinstall a same-version package when a required binary is absent, cannot
+# execute, or differs from the committed deployment.
 dc_binaries_damaged() {
     bin_dir=$(dirname "$DC_GATEWAY")
     for name in defenseclaw-gateway defenseclaw-hook defenseclaw-sensor-helper; do
-        if [ ! -s "$bin_dir/$name" ]; then
-            return 0
-        fi
+        binary="$bin_dir/$name"
+        [ -s "$binary" ] && [ -x "$binary" ] || return 0
+        expected=$(dc_recorded_binary_sha256 "$binary") || return 0
+        actual=$(dc_sha256 "$binary" 2>/dev/null) || return 0
+        [ "$actual" = "$expected" ] || return 0
     done
     return 1
 }
@@ -441,12 +464,14 @@ dc_layout() {
     if [ "$DC_SCRIPT_OS" = darwin ]; then
         DC_GATEWAY=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
         DC_INSTALL_ROOT=/opt/cisco/defenseclaw
+        DC_DEPLOYMENT_RECORD=/opt/cisco/defenseclaw/lifecycle/deployment.json
         DC_PACKAGE_RESULT=/opt/cisco/defenseclaw/lifecycle/last-package-result.json
         DC_OS_GROUP=macos
         [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
     else
         DC_GATEWAY=/opt/defenseclaw/bin/defenseclaw-gateway
         DC_INSTALL_ROOT=/opt/defenseclaw
+        DC_DEPLOYMENT_RECORD=/var/lib/defenseclaw-enterprise/deployment.json
         DC_OS_GROUP=linux
         [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
     fi
@@ -892,7 +917,7 @@ dc_main() {
     elif ! dc_trusted_path "$gateway"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned"
     elif dc_binaries_damaged; then
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "a required installed DefenseClaw binary is missing or empty; run this script with the package as --source, or reinstall the package"
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "a required installed DefenseClaw binary is missing, not executable, or differs from its deployment record; run this script with the package as --source, or reinstall the package"
     fi
 
     # The credential is stored first: a config that references it (the AI

@@ -11,6 +11,7 @@ optional release signing helpers.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -123,24 +124,49 @@ def test_unix_scripts_parse_and_lint(os_dir: str, name: str) -> None:
 @pytest.mark.parametrize("os_dir", ["linux", "macos"])
 def test_same_version_package_reinstalls_when_a_required_binary_is_damaged(tmp_path: Path, os_dir: str) -> None:
     wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
-    check = _shell_function(wrapper, "dc_binaries_damaged")
+    helpers = ["dc_is_sha256", "dc_sha256"]
+    if "dc_recorded_binary_sha256()" in wrapper:
+        helpers.append("dc_recorded_binary_sha256")
+    helpers.append("dc_binaries_damaged")
+    functions = "\n".join(_shell_function(wrapper, name) for name in helpers)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     names = ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper")
     for name in names:
-        (bin_dir / name).write_bytes(b"binary")
+        path = bin_dir / name
+        path.write_bytes(b"binary")
+        path.chmod(0o755)
+    record = tmp_path / "deployment.json"
+    record.write_text(json.dumps({
+        "files": {str(bin_dir / name): hashlib.sha256(b"binary").hexdigest() for name in names}
+    }, indent=2), encoding="utf-8")
+
+    def damaged() -> bool:
+        script = (
+            f"DC_SCRIPT_OS={'darwin' if os_dir == 'macos' else 'linux'}\n"
+            f"DC_GATEWAY='{bin_dir / 'defenseclaw-gateway'}'\n"
+            f"DC_DEPLOYMENT_RECORD='{record}'\n"
+            f"{functions}\ndc_binaries_damaged"
+        )
+        result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode in (0, 1), result.stderr
+        return result.returncode == 0
+
+    assert not damaged(), os_dir
+    hook = bin_dir / "defenseclaw-hook"
+    for contents, mode in ((b"replaced", 0o755), (b"binary", 0o644), (b"", 0o755)):
+        hook.write_bytes(contents)
+        hook.chmod(mode)
+        assert damaged(), (os_dir, contents, mode)
     for name in names:
         path = bin_dir / name
-        for damaged in (None, b""):
-            path.unlink()
-            if damaged is not None:
-                path.write_bytes(damaged)
-            script = f"DC_GATEWAY='{bin_dir / 'defenseclaw-gateway'}'\n{check}\ndc_binaries_damaged"
-            result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
-            assert result.returncode == 0, (os_dir, name, damaged, result.stderr)
-            path.write_bytes(b"binary")
-    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
-    assert result.returncode == 1, os_dir
+        path.write_bytes(b"")
+        path.chmod(0o755)
+        assert damaged(), (os_dir, name, "empty")
+        path.unlink()
+        assert damaged(), (os_dir, name, "missing")
+        path.write_bytes(b"binary")
+        path.chmod(0o755)
 
 
 def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
