@@ -253,6 +253,10 @@ changes nothing, and the running gateway keeps its last good policy. Setup check
 gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
+A `kind: jsonl` destination needs a folder that only SYSTEM, Administrators
+and the gateway service account `NT SERVICE\DefenseClawGateway` can write, and
+that this account can create files in (Modify); Setup refuses any other folder
+with `1639` and prints the `icacls` grant.
 
 Setup accepts the config only from an absolute local path that standard
 users cannot change. Stage it in a folder that Administrators own and that
@@ -1113,9 +1117,12 @@ file of an installed one. That takes from seconds to a few minutes, longer on
 a disk that has not been read since the computer was cloned, and at most 15
 minutes. Setup prints `[scanners]` lines meanwhile, with the time elapsed and
 the bound.
-At the bound it stops the prepare and reports a `scanner_runtime_unavailable`
-warning that says `timed out after 15m0s`; `verify` then fails until a
-`/repair` prepares the runtime.
+At the bound it stops the prepare and Setup fails (`1603`) with a
+`scanner_runtime_unavailable` error that says `timed out after 15m0s` and
+names `/repair`: DefenseClaw is installed and its services run, but every
+skill, MCP server and plugin install stays blocked and `verify` fails until a
+`/repair` prepares the runtime. That run continues the unpack where the stopped
+one ended instead of starting over.
 
 ## Per-user installs
 

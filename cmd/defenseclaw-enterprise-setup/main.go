@@ -735,16 +735,25 @@ func (err enterpriseSetupLifecycleTimeout) Unwrap() error { return err.error }
 // standaloneEnterpriseSetupTimeout names what a stopped run may have left
 // and the command that recovers it: a run stopped mid-transaction leaves it
 // pending with the services stopped, which only an ensure run as
-// LocalSystem recovers (GAP-0509).
+// LocalSystem recovers (GAP-0509). The recovery run gets the longest limit:
+// leaving TIMEOUTSECONDS out, as the hint said, keeps the default, which a
+// run that hit it would hit again (GAP-1063).
 func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) error {
 	config := opts.Config
 	if strings.TrimSpace(config) == "" {
 		config = "<config.yaml>"
 	}
+	limit := int(opts.LifecycleTimeout / time.Second)
+	maximum := int(maximumLifecycleTimeout / time.Second)
+	recovery := fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d to recover (without TIMEOUTSECONDS the limit is the default %d seconds)",
+		config, maximum, int(defaultLifecycleTimeout/time.Second))
+	if limit >= maximum {
+		recovery = fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d again to recover (%d seconds is the longest limit)", config, maximum, maximum)
+	}
 	return enterpriseSetupLifecycleTimeout{fmt.Errorf(
 		"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). It may have left a lifecycle transaction pending with the DefenseClaw services stopped: "+
-			"run %s /status JSON=1 to check, then run Setup as LocalSystem with /ensure CONFIG=%s JSON=1, leaving TIMEOUTSECONDS out or raising it, to recover",
-		opts.Action, int(opts.LifecycleTimeout/time.Second), cause, standaloneSetupArtifactName, config,
+			"run %s /status JSON=1 to check, then run Setup as LocalSystem with %s",
+		opts.Action, limit, cause, standaloneSetupArtifactName, recovery,
 	)}
 }
 
