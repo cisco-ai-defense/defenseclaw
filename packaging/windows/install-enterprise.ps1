@@ -3387,7 +3387,7 @@ try {
         # so no child process inherits it.
         $forcedUninstallRequest = [Environment]::GetEnvironmentVariable('DEFENSECLAW_STANDALONE_FORCED_UNINSTALL', 'Process')
         [Environment]::SetEnvironmentVariable('DEFENSECLAW_STANDALONE_FORCED_UNINSTALL', $null, 'Process')
-        if ($Action -ceq 'Uninstall' -and $forcedUninstallRequest -ceq '1') {
+        if ($Action -eq 'Uninstall' -and $forcedUninstallRequest -ceq '1') {
             $arguments['Force'] = $true
         }
     }
