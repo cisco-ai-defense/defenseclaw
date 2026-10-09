@@ -127,3 +127,22 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsCodexHomeRedirectUsesPowerShellGrammar(t *testing.T) {
+	const connector = "windows-codex-home-redirect"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	command := `echo k >> $HOME\.ssh\authorized_keys`
+	args := []byte(`{"command":` + strconv.Quote(command) + `}`)
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool: "Bash", Args: args, CWD: `C:\Users\alice\project`,
+			ActiveHome:  `C:\Users\alice`,
+			DialectHint: codexWindowsShellDialect("Bash", command),
+		},
+		LegacyText: string(args), Connector: connector, EnforcementCapable: true,
+	})
+	finding := findingWithID(findings, "persistence.ssh_authorized_keys_command")
+	if finding == nil || !finding.contributesToEnforcement() {
+		t.Fatalf("Windows Codex home redirect was not enforceable: %v", FindingStrings(findings))
+	}
+}
