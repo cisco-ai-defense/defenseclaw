@@ -37,7 +37,8 @@ const windowsAgentSessionsRestartCode = "agent_sessions_restart_required"
 const windowsEnterpriseActivationFileName = "activation-state.json"
 
 type windowsEnterpriseActivationRecord struct {
-	ActivatedAt string `json:"activated_at"`
+	ActivatedAt string `json:"activated_at,omitempty"`
+	Pending     bool   `json:"pending,omitempty"`
 }
 
 // Seams for the deployment record and the running agents; tests replace them.
@@ -76,13 +77,21 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 		return
 	}
 	path := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
-	activated := readWindowsEnterpriseActivation(path)
-	// Only a run that found no deployment and started one activates it. A
-	// host upgraded from a release without the record gets none: its
-	// sessions had hooks already, and a guessed time would name them.
-	if !opts.activationStartedAt.IsZero() && !opts.installedBeforeRun && !opts.noStart && len(result.Errors) == 0 {
-		activated = opts.activationStartedAt.UTC()
-		data, err := json.Marshal(windowsEnterpriseActivationRecord{ActivatedAt: activated.Format(time.RFC3339Nano)})
+	activated, pending := readWindowsEnterpriseActivation(path)
+	// Mark a successful first --no-start install as pending. A later repair
+	// can then distinguish it from an older deployment with no record:
+	// guessing an activation time for that deployment would name sessions
+	// that already had hooks.
+	firstInstall := !opts.activationStartedAt.IsZero() && !opts.installedBeforeRun && len(result.Errors) == 0
+	activatePending := !opts.activationStartedAt.IsZero() && pending && !opts.noStart &&
+		len(result.Errors) == 0 && result.Readiness.Gateway
+	if firstInstall || activatePending {
+		record := windowsEnterpriseActivationRecord{Pending: opts.noStart}
+		if !opts.noStart {
+			activated = opts.activationStartedAt.UTC()
+			record.ActivatedAt = activated.Format(time.RFC3339Nano)
+		}
+		data, err := json.Marshal(record)
 		if err == nil {
 			err = writeFileKeepingDACL(path, append(data, '\n'), metadata)
 		}
@@ -117,20 +126,23 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	}
 }
 
-func readWindowsEnterpriseActivation(path string) time.Time {
+func readWindowsEnterpriseActivation(path string) (time.Time, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) > 4096 {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	var record windowsEnterpriseActivationRecord
 	if json.Unmarshal(data, &record) != nil {
-		return time.Time{}
+		return time.Time{}, false
+	}
+	if record.Pending && record.ActivatedAt == "" {
+		return time.Time{}, true
 	}
 	activated, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(record.ActivatedAt))
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return activated
+	return activated, false
 }
 
 // windowsServiceIdentity reports a built-in service or system account,
