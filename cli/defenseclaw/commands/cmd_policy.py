@@ -490,6 +490,7 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     """
     secure_client = asset_lists.is_secure_client(app.cfg)
     before = _restart_only_config(app.cfg) if secure_client else ()
+    levels_before = None if secure_client else _global_levels(app.cfg)
     path, restart_keys = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
     if secure_client:
@@ -502,6 +503,7 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
             "  Its guardrail levels apply to tool calls, prompts and LLM traffic on every connector "
             "without its own level (see 'defenseclaw guardrail status' and 'guardrail block-at')."
         )
+        _report_level_changes(levels_before, app.cfg, name)
     # A stopped gateway gets one note after the success lines, covering both
     # the skipped audit event and the reload on start (GAP-1718).
     audit_skipped = _log_policy_action(
@@ -515,6 +517,42 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     # the sections its gateway reads at start (issue #1092).
     needs_restart = _restart_only_config(app.cfg) != before if secure_client else bool(restart_keys)
     _reload_and_report(app, name, needs_restart=needs_restart, audit_skipped=audit_skipped)
+
+
+def _global_levels(cfg) -> dict[str, tuple[str, int]]:  # noqa: ANN001 - Config, imported lazily
+    """guardrail.block_at and alert_at: the stored value and the effective rank of the global scope."""
+    levels = policy_catalog.resolve_levels(
+        policy_catalog.global_pack(cfg).path, (cfg.guardrail.block_at, cfg.guardrail.alert_at)
+    )
+    return {
+        "block_at": (policy_catalog.level_value(cfg.guardrail.block_at), levels.block_rank),
+        "alert_at": (policy_catalog.level_value(cfg.guardrail.alert_at), levels.alert_rank),
+    }
+
+
+def _report_level_changes(before: dict[str, tuple[str, int]], cfg, name: str) -> None:  # noqa: ANN001
+    """Name each global guardrail level the activation changed, old and new.
+
+    A preset writes its levels over the ones in config.yaml, including a level
+    set with `guardrail block-at` / `alert-at`; one that now blocks or alerts on
+    fewer severities is a warning with the command that sets it back
+    (GAP-1020).
+    """
+    after = _global_levels(cfg)
+    for key, command in (("block_at", "block-at"), ("alert_at", "alert-at")):
+        (old_set, old_rank), (new_set, new_rank) = before[key], after[key]
+        if old_rank == new_rank:
+            continue
+        old, new = policy_catalog.level_name(old_rank), policy_catalog.level_name(new_rank)
+        if new_rank < old_rank:
+            click.echo(f"  guardrail.{key}: {old} -> {new}")
+            continue
+        how = "cleared" if old_set and not new_set else "lowered"
+        origin = f"guardrail.{key} {old_set} in config.yaml" if old_set else f"the rule pack's {old}"
+        ux.warn(
+            f"guardrail.{key}: {old} -> {new}: policy '{name}' {how} {origin}. "
+            f"To keep {old}: defenseclaw guardrail {command} {old}"
+        )
 
 
 def _log_policy_action(
