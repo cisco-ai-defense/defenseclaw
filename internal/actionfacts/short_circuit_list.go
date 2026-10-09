@@ -59,6 +59,17 @@ func ShortCircuitListReduction(input Input, facts Facts) (view Facts, ok bool) {
 		return Facts{}, false
 	}
 	twin, _ := analyzeWithRedirectTargets(input, twinSource)
+	if !twin.Authoritative() && containsIssue(twin.Parse.Issues, IssueDynamicWord) {
+		// A list member may be a plain pipeline. Resolve its home operands
+		// after flattening the list, so the existing complete-facts check
+		// still controls whether this projection can prove a rule.
+		home, _ := normalizeActiveHome(input.ActiveHome)
+		if trustedPOSIXHomeLiteral.MatchString(home) {
+			if resolved, ok := homeResolvedSource(twinSource, home); ok {
+				twin, _ = analyzeWithRedirectTargets(input, resolved)
+			}
+		}
+	}
 	if !twin.Authoritative() || len(twin.Parse.Issues) != 0 ||
 		twin.Parse.Dialect != facts.Parse.Dialect || len(twin.Commands) == 0 {
 		return Facts{}, false
