@@ -23,7 +23,13 @@ import pytest
 from click.testing import CliRunner
 from defenseclaw import config_writer, policy_catalog, rulepack_validation
 from defenseclaw.commands import cmd_guardrail
-from defenseclaw.config import CustomRulePack, GuardrailRulesConfig, PerConnectorGuardrailConfig, default_config
+from defenseclaw.config import (
+    CustomRulePack,
+    GuardrailProfile,
+    GuardrailRulesConfig,
+    PerConnectorGuardrailConfig,
+    default_config,
+)
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
@@ -245,6 +251,32 @@ def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
     assert json.loads(result.output)["dropped_rule_references"] == [
         "guardrail.connectors.codex.rules.disable: SEC-ENV-DUMP-REQUEST"
     ]
+
+
+def test_global_pack_switch_keeps_profile_connector_rule_from_profile_protection(env, monkeypatch):
+    app, _root, _custom, writes = env
+    rule_id = "impact.sql_schema_destroy"
+    protection = "database-destruction-protection"
+    monkeypatch.setattr(policy_catalog, "pack_rule_defaults", lambda _path: {"other.rule": True})
+    monkeypatch.setattr(
+        policy_catalog,
+        "rule_defaults_with_protections",
+        lambda _path, packs: {"other.rule": True, **({rule_id: True} if protection in packs else {})},
+    )
+    app.cfg.guardrail.profiles = {
+        "engineering": GuardrailProfile(
+            rules=GuardrailRulesConfig(protections=[protection]),
+            connectors={
+                "codex": PerConnectorGuardrailConfig(
+                    rules=GuardrailRulesConfig(severity_overrides={rule_id: "LOW"})
+                )
+            },
+        )
+    }
+    result = _run(app, ["use-pack", "permissive", "--json"])
+    assert result.exit_code == 0, result.output
+    assert not any(c.path.endswith("severity_overrides") for c in writes[-1])
+    assert json.loads(result.output)["dropped_rule_references"] == []
 
 
 def test_usage_errors(env):
