@@ -37,7 +37,8 @@ const windowsAgentSessionsRestartCode = "agent_sessions_restart_required"
 const windowsEnterpriseActivationFileName = "activation-state.json"
 
 type windowsEnterpriseActivationRecord struct {
-	ActivatedAt string `json:"activated_at"`
+	ActivatedAt string `json:"activated_at,omitempty"`
+	Pending     bool   `json:"pending,omitempty"`
 }
 
 // Seams for the deployment record and the running agents; tests replace them.
@@ -76,17 +77,25 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 		return
 	}
 	path := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
-	activated := readWindowsEnterpriseActivation(path)
-	// Only a run that found no deployment and started one activates it. A
-	// host upgraded from a release without the record gets none: its
-	// sessions had hooks already, and a guessed time would name them.
-	if !opts.activationStartedAt.IsZero() && !opts.installedBeforeRun && !opts.noStart && len(result.Errors) == 0 {
-		activated = opts.activationStartedAt.UTC()
-		data, err := json.Marshal(windowsEnterpriseActivationRecord{ActivatedAt: activated.Format(time.RFC3339Nano)})
-		if err == nil {
-			err = writeFileKeepingDACL(path, append(data, '\n'), metadata)
+	activated, pending := readWindowsEnterpriseActivation(path)
+	// A first install staged with --no-start needs an explicit marker:
+	// otherwise a later repair sees an installed deployment and cannot
+	// distinguish it from an older release whose sessions already had hooks.
+	if opts.noStart && !opts.installedBeforeRun && activated.IsZero() && !pending &&
+		!opts.activationStartedAt.IsZero() && len(result.Errors) == 0 {
+		if err := writeWindowsEnterpriseActivation(path, metadata, windowsEnterpriseActivationRecord{Pending: true}); err != nil {
+			result.AddWarning("activation_unrecorded", "could not record "+windowsEnterpriseActivationFileName+": "+err.Error())
 		}
-		if err != nil {
+	}
+	// A successful start completes either a new install or a previously
+	// staged one. A host upgraded from an older release without a marker
+	// still gets no guessed activation time.
+	if !opts.activationStartedAt.IsZero() && (!opts.installedBeforeRun || pending) &&
+		!opts.noStart && len(result.Errors) == 0 && result.Readiness.Gateway && result.Readiness.Guardian {
+		activated = opts.activationStartedAt.UTC()
+		if err := writeWindowsEnterpriseActivation(path, metadata, windowsEnterpriseActivationRecord{
+			ActivatedAt: activated.Format(time.RFC3339Nano),
+		}); err != nil {
 			result.AddWarning("activation_unrecorded", "could not record "+windowsEnterpriseActivationFileName+": "+err.Error())
 		}
 	}
@@ -117,20 +126,31 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	}
 }
 
-func readWindowsEnterpriseActivation(path string) time.Time {
+func writeWindowsEnterpriseActivation(path, metadata string, record windowsEnterpriseActivationRecord) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return writeFileKeepingDACL(path, append(data, '\n'), metadata)
+}
+
+func readWindowsEnterpriseActivation(path string) (time.Time, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) > 4096 {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	var record windowsEnterpriseActivationRecord
 	if json.Unmarshal(data, &record) != nil {
-		return time.Time{}
+		return time.Time{}, false
+	}
+	if record.Pending && record.ActivatedAt == "" {
+		return time.Time{}, true
 	}
 	activated, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(record.ActivatedAt))
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return activated
+	return activated, false
 }
 
 // windowsServiceIdentity reports a built-in service or system account,
