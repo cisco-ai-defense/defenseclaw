@@ -2289,12 +2289,20 @@ func validateWindowsUserPathProtectionACL(
 	if err != nil {
 		return err
 	}
+	required := len(expected)
+	if directory && windowsGatewayReadablePluginRoot(path) {
+		// The Amp and OpenCode plugin folder may also carry the read grant
+		// of the gateway service (GAP-0958): both of its entries or neither.
+		if optional := windowsGatewayPluginRootAppliedACEs(); len(optional) > 0 && int(dacl.AceCount) == required+len(optional) {
+			expected = append(expected, optional...)
+		}
+	}
 	if int(dacl.AceCount) != len(expected) {
 		return fmt.Errorf(
 			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d",
 			path,
 			dacl.AceCount,
-			len(expected),
+			required,
 		)
 	}
 	seen := make([]bool, len(expected))
