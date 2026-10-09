@@ -751,6 +751,9 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+if [[ -n "${PREV_VERSION}" ]] && version_lt "${PREV_VERSION}" 1.0.0; then
+    find_legacy_leftovers
+fi
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
 [[ -n "$(gateway_pid || true)" ]] && WAS_RUNNING=true
@@ -800,6 +803,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     fi
 fi
 finish_swap
+record_legacy_leftovers
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -950,6 +954,62 @@ install_uv() {
     fi
     rm -rf "${tmp}"
     return 1
+}
+
+# What a 0.8.x install left outside the data dir without a record (GAP-0908):
+# when uv was missing, the 0.8.x installer ran uv's own installer into BIN_DIR
+# (with uv's default cache and Python folders), and when Cosign was missing it
+# ran a temporary one that left ~/.sigstore. The upgrade from 0.8.x records
+# them for `defenseclaw uninstall --all --binaries`, and only on this evidence:
+#   uv, uvx: uv's install receipt names BIN_DIR and the version of the uv
+#     there, and was written at most LEGACY_WINDOW seconds before the 0.8.x
+#     venv, which that same uv version created. A uv that was there earlier,
+#     or updated since, fails this and stays the user's.
+#   uv's cache and Python: only with that uv; uninstall then applies its usual
+#     rules (no other uv on PATH; the Python folder holds only that Python).
+#   ~/.sigstore: no cosign on PATH, it holds only the public Sigstore TUF
+#     cache, and nothing in it is older than that window or newer than the
+#     venv, so no other Cosign has used it.
+readonly LEGACY_WINDOW=600
+LEGACY_UV_RECORD="" LEGACY_LEFTOVERS=""
+mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+find_legacy_leftovers() {
+    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" receipt venv_t receipt_t sigstore_t version home pyroot sigstore
+    [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
+    venv_t="$(mtime_of "${cfg}")" || return 0
+    version="$(awk -F' *= *' '$1 == "uv" {print $2}' "${cfg}")"
+    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
+    if [[ -n "${version}" && ! -e "${BIN_DIR}/defenseclaw-uv.sha256" && -f "${receipt}" && ! -L "${receipt}" ]] \
+        && receipt_t="$(mtime_of "${receipt}")" \
+        && (( venv_t >= receipt_t && venv_t - receipt_t <= LEGACY_WINDOW )) \
+        && grep -qF "\"install_prefix\":\"${BIN_DIR}\"" "${receipt}" \
+        && grep -qF "\"version\":\"${version}\"" "${receipt}" \
+        && [[ -f "${BIN_DIR}/uv" && ! -L "${BIN_DIR}/uv" && -f "${BIN_DIR}/uvx" && ! -L "${BIN_DIR}/uvx" ]] \
+        && [[ "$("${BIN_DIR}/uv" --version 2>/dev/null | awk '{print $2}')" == "${version}" ]]; then
+        LEGACY_UV_RECORD="$(sha256_of "${BIN_DIR}/uv")  uv"$'\n'"$(sha256_of "${BIN_DIR}/uvx")  uvx"
+        LEGACY_LEFTOVERS="uv-cache"
+        home="$(awk -F' *= *' '$1 == "home" {print $2}' "${cfg}")"
+        pyroot="${XDG_DATA_HOME:-${HOME}/.local/share}/uv/python/"
+        if [[ "${home}" == "${pyroot}"?* ]]; then
+            home="${home#"${pyroot}"}"
+            LEGACY_LEFTOVERS+=$'\n'"uv-python ${home%%/*}"
+        fi
+    fi
+    sigstore="${HOME}/.sigstore"
+    if [[ -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
+        && sigstore_t="$(mtime_of "${sigstore}")" && (( venv_t - sigstore_t <= LEGACY_WINDOW )) \
+        && [[ -z "$(find "${sigstore}" -mindepth 1 -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] \
+        && [[ -z "$(find "${sigstore}" -mindepth 1 -maxdepth 2 ! -path "${sigstore}/root" \
+            ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev" ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev.json" \
+            -print -quit 2>/dev/null || echo error)" ]]; then
+        LEGACY_LEFTOVERS+="${LEGACY_LEFTOVERS:+$'\n'}sigstore"
+    fi
+}
+record_legacy_leftovers() {
+    if [[ -n "${LEGACY_UV_RECORD}" && ! -e "${BIN_DIR}/defenseclaw-uv.sha256" ]]; then
+        printf '%s\n' "${LEGACY_UV_RECORD}" > "${BIN_DIR}/defenseclaw-uv.sha256" || true
+    fi
+    [[ -z "${LEGACY_LEFTOVERS}" ]] || printf '%s\n' "${LEGACY_LEFTOVERS}" > "${DEFENSECLAW_HOME}/legacy-install-leftovers" || true
 }
 
 # A failed install removes what it added for uv: the uv and uvx it

@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // maxClaudeStateBytes bounds the ~/.claude.json read; the file holds the
@@ -96,10 +97,22 @@ func windowsClaudeStateServers(home string) ([]config.MCPServerEntry, error) {
 		return nil, err
 	}
 	return config.ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
-		// Claude may open projects on another drive. The bounded stable read
-		// below rejects reparse points along the complete project path.
-		return readWindowsProfileFile(filepath.Clean(project), ".mcp.json", maxClaudeProjectMCPBytes)
+		return readWindowsClaudeProjectMCP(project)
 	})
+}
+
+// Project keys are user-controlled. Reject UNC, device, mapped and substituted
+// drives before any filesystem access to the project, since the enumerator
+// runs as LocalSystem and must never connect to a user-selected network path.
+func readWindowsClaudeProjectMCP(project string) ([]byte, error) {
+	project = filepath.Clean(project)
+	if _, err := winpath.ValidateFixedNTFSMountedPath(project); err != nil {
+		return nil, err
+	}
+	if err := rejectWindowsReparseChain(project); err != nil {
+		return nil, err
+	}
+	return readWindowsProfileFile(project, ".mcp.json", maxClaudeProjectMCPBytes)
 }
 
 // readWindowsProfileFile reads home\rel when no element below home is a

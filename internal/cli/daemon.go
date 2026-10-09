@@ -587,6 +587,23 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
 		_ = runWatchdogStop(nil, nil)
+		if hookColdStartSupported() && !secureClientHost() {
+			// The watchdog can be waiting for an independent cold-start child
+			// when it exits. Wait for that child's start lock before taking the
+			// final running snapshot and publishing the stop marker. A start
+			// that passed its first marker check can otherwise clear a marker
+			// after stop has already returned.
+			release, lockErr := acquireGatewayStartLock(config.DefaultDataPath(), gatewayStartLockWait)
+			if lockErr != nil {
+				return fmt.Errorf("wait for gateway start before stop: %w", lockErr)
+			}
+			defer release()
+			// The child may have started a fresh watchdog while finishing.
+			// With its start lock held, stop that instance before checking
+			// the gateway and writing the final marker.
+			_ = runWatchdogStop(nil, nil)
+			running, pid = d.IsRunning()
+		}
 	}
 
 	// Written before the stop so a hook refused mid-shutdown does not start

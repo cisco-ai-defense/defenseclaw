@@ -265,6 +265,71 @@ func posixShellUnsafeRune(r rune) bool {
 	return !strings.ContainsRune("/._-+=:,@%", r)
 }
 
+// editedDefenseClawHookScript reports whether a Unix hook command runs the
+// DefenseClaw hook script scriptName (claude-code-hook.sh, codex-hook.sh, ...)
+// from a path other than the one Setup writes: its first shell word is an
+// absolute path ending in /scriptName under a .defenseclaw directory, for
+// example ~/.defenseclaw/xhooks/claude-code-hook.sh after the path was edited
+// by hand. It returns the text after that word. Setup's repair claims such an
+// entry and replaces it; it used to keep it and add a second hook set, so the
+// edited entry kept running and failing (GAP-0907). Presence checks do not
+// use it: an edited entry is not a working registration.
+func editedDefenseClawHookScript(command, scriptName string) (string, bool) {
+	if !strings.HasSuffix(scriptName, "-hook.sh") || strings.Contains(scriptName, "/") {
+		return "", false
+	}
+	command = strings.TrimSpace(command)
+	quoted := strings.HasPrefix(command, "'")
+	command = posixHookCommandUnquoted(command)
+	end := strings.Index(command, "/"+scriptName)
+	if end <= 0 {
+		return "", false
+	}
+	end += len(scriptName) + 1
+	rest := command[end:]
+	if rest != "" && rest[0] != ' ' {
+		return "", false
+	}
+	word := command[:end]
+	if (!quoted && strings.ContainsAny(word, " \t")) || !path.IsAbs(word) || path.Clean(word) != word {
+		return "", false
+	}
+	for _, part := range strings.Split(path.Dir(word), "/") {
+		if strings.EqualFold(part, ".defenseclaw") {
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+// editedDefenseClawHookCommand is editedDefenseClawHookScript for a command
+// that is the script alone or the script with DefenseClaw's --event binding.
+func editedDefenseClawHookCommand(command, scriptName string) bool {
+	rest, ok := editedDefenseClawHookScript(command, scriptName)
+	return ok && (rest == "" || strings.HasPrefix(rest, " --event "))
+}
+
+// editedDefenseClawHookEntry applies editedDefenseClawHookCommand to a hook
+// entry's command fields and to the handlers of a matcher group.
+func editedDefenseClawHookEntry(raw interface{}, scriptName string) bool {
+	entry, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"command", "bash"} {
+		if command, _ := entry[key].(string); editedDefenseClawHookCommand(command, scriptName) {
+			return true
+		}
+	}
+	handlers, _ := entry["hooks"].([]interface{})
+	for _, handler := range handlers {
+		if editedDefenseClawHookEntry(handler, scriptName) {
+			return true
+		}
+	}
+	return false
+}
+
 // posixHookCommandUnquoted undoes posixHookCommandWord on the leading word of
 // a command. A command that starts with a single-quoted word comes back with
 // that word unquoted, which is the form releases before GAP-0382 wrote for a

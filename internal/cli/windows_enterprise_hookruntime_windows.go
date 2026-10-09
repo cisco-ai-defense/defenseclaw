@@ -77,12 +77,26 @@ func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy
 			removals = append(removals, "*"+sid)
 		}
 	}
+	sids = sids[:0]
+	for sid := range drift.Denied {
+		sids = append(sids, sid)
+	}
+	sort.Strings(sids)
+	for _, sid := range sids {
+		parts = append(parts, windowsPrincipalLabel(sid)+" has an explicit deny entry ("+windowsAccessMaskWords(drift.Denied[sid])+")")
+	}
 	if drift.UsersReadMissing {
 		parts = append(parts, "the "+windowsPrincipalLabel("S-1-5-32-545")+" read and execute entry is missing, so standard users cannot read the machine policy summary")
 	}
 	fix := `icacls "` + dir + `" /setowner *S-1-5-32-544 and icacls "` + dir + `" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX`
 	if len(removals) != 0 {
 		fix += " /remove:g " + strings.Join(removals, " ")
+	}
+	if len(drift.Denied) != 0 {
+		fix += " /remove:d"
+		for _, sid := range sids {
+			fix += " *" + sid
+		}
 	}
 	return dir + ": " + strings.Join(parts, "; ") +
 		". Every enrolled user's agent hook refuses the machine policy summary in it (enterprise_machine_policy_summary_untrusted) and fails closed." +

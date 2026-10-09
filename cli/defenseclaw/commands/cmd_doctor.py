@@ -7661,6 +7661,9 @@ def _windows_process_listing_powershell() -> str | None:
             [shell, "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_PROCESS_LISTING_PS],
             capture_output=True,
             text=True,
+            # PowerShell writes the console (OEM) code page; a strict decode
+            # in the ANSI one fails on some non-ASCII names (GAP-0751).
+            errors="replace",
             timeout=15.0,
             check=False,
         )

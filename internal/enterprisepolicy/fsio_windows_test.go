@@ -169,6 +169,30 @@ func requireProtected(t *testing.T, path string) {
 	}
 }
 
+func TestWindowsPublicDirDenyReadIsDrift(t *testing.T) {
+	dir := filepath.Join(windowsTestOptions(t).WindowsProgramData, "public-summary")
+	if err := createProtectedDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := applySDDL(dir, "D:P(D;;0x1;;;BU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)"); err != nil {
+		t.Fatal(err)
+	}
+	drift, err := InspectWindowsPublicDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drift.Denied[usersSIDStr] == 0 || !drift.Drifted() {
+		t.Fatalf("a Users deny-read ACE must report drift: %+v", drift)
+	}
+	if err := RepairWindowsPublicDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	drift, err = InspectWindowsPublicDir(dir)
+	if err != nil || drift.Drifted() {
+		t.Fatalf("repair must restore public read access: %+v, %v", drift, err)
+	}
+}
+
 // Missing vendor directories are created with DefenseClaw's owner and
 // protected DACL in one call; an object that is already there when a
 // missing component is created is refused, never adopted.

@@ -1533,8 +1533,19 @@ func matchesActiveSSHPrivateKey(
 }
 
 func matchesAWSCredentials(value string) bool {
-	return strings.HasSuffix(value, "/.aws/credentials") ||
-		value == ".aws/credentials"
+	if strings.HasPrefix(value, ".aws/") {
+		return matchesAWSCredentialsName(strings.TrimPrefix(value, ".aws/"))
+	}
+	index := strings.LastIndex(value, "/.aws/")
+	return index >= 0 && matchesAWSCredentialsName(value[index+len("/.aws/"):])
+}
+
+func matchesAWSCredentialsName(name string) bool {
+	if name == "credentials" {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(name, "credentials.")
+	return ok && suffix != "" && !strings.Contains(suffix, "/")
 }
 
 func matchesActiveAWSCredentials(
@@ -1542,7 +1553,8 @@ func matchesActiveAWSCredentials(
 	candidate actionfacts.PathFact,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
-	return ok && relative == ".aws/credentials"
+	return ok && strings.HasPrefix(relative, ".aws/") &&
+		matchesAWSCredentialsName(strings.TrimPrefix(relative, ".aws/"))
 }
 
 func passwordCrackerPotfileReadPrerequisite(facts actionfacts.Facts) bool {

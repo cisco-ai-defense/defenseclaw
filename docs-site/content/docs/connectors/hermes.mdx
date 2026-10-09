@@ -228,6 +228,10 @@ copies remain ordinary scanable skills.
 
 <HookEventsList connector="hermes" />
 
+Hermes has no hook that can stop a prompt, so a prompt rule doesn't block
+here: a matching prompt reaches the model. Tool-call rules still block
+([capability matrix](/docs/connectors/capability-matrix)).
+
 <Callout>
 Hermes can block only `pre_tool_call` through valid synchronous JSON, inject
 context at `pre_llm_call`, and continue its bounded verification loop at

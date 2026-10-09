@@ -189,3 +189,17 @@ func TestStandaloneGatewayConfigCheckNamesInlineSecrets(t *testing.T) {
 		t.Fatalf("inline secrets = %v", err)
 	}
 }
+
+// An unresolved service token must not bypass the JSONL path preflight.
+func TestStandaloneGatewayConfigCheckRefusesJSONLDirectoryWithMissingToken(t *testing.T) {
+	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")
+	destination := t.TempDir()
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: hec\n      kind: splunk_hec\n      endpoint: https://splunk.example.test\n" +
+		"      token_env: DC_TEST_UNSET_HEC_TOKEN\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: " + destination + "\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), destination) || !strings.Contains(err.Error(), "which is a directory") {
+		t.Fatalf("JSONL directory with unresolved service token = %v, want path refusal", err)
+	}
+}

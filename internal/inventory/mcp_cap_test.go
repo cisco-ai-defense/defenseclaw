@@ -236,3 +236,32 @@ func TestSignalFromMCPConfigPathBlankConfigIsNotParseError(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1062: AI discovery read every settings.json as a Claude settings file,
+// so a server added with `amp mcp add` (amp.mcpServers, JSONC) was missing;
+// OpenCode's mcp map was missing too, and OpenClaw/ZeptoClaw files were read
+// as bare maps that listed their top-level keys as servers.
+func TestMCPConfigNamesReadEachAgentsLayout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for rel, tc := range map[string]struct{ body, want string }{
+		".config/amp/settings.json":       {`{"amp.mcpServers": {"lma-mcp": {"command": "/usr/bin/echo"}}, "amp.dangerouslyAllowAll": false}`, "lma-mcp"},
+		".config/amp2/settings.jsonc":     {"{\n  // amp mcp add\n  \"amp.mcpServers\": {\"amp-jsonc\": {\"url\": \"https://example.test/mcp\"}},\n}", "amp-jsonc"},
+		".claude/settings.json":           {`{"mcpServers": {"claude-mcp": {"command": "x"}}, "hooks": {}}`, "claude-mcp"},
+		".config/opencode/opencode.jsonc": {"{\n  // opencode mcp add\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {\"oc-mcp\": {\"type\": \"local\", \"command\": [\"x\"]}}\n}", "oc-mcp"},
+		".openclaw/openclaw.json":         {`{"agents": {"defaults": {}}, "mcp": {"servers": {"claw-mcp": {"command": "x"}}}}`, "claw-mcp"},
+		".zeptoclaw/config.json":          {`{"providers": {}, "mcp": {"servers": [{"name": "zepto-mcp", "command": "x"}]}}`, "zepto-mcp"},
+	} {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		names, err := readMCPServerNamesWithErr(path, "")
+		if err != nil || len(names) != 1 || names[0] != tc.want {
+			t.Errorf("%s: names = %v, %v; want [%s]", rel, names, err, tc.want)
+		}
+	}
+}

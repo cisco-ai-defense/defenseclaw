@@ -1942,7 +1942,7 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
 	}
 	req := normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, registeredEvent, agentIdentityID)
-	req.Content = applyContentEnvelopeFallback(req.Content, payload, profile.ContentEnvelopeKey)
+	req.Content = applyContentEnvelopeFallback(req.Content, req.HookEventName, payload, profile.ContentEnvelope)
 	if profile.Decode == nil {
 		return req
 	}
@@ -2007,33 +2007,27 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 	return req
 }
 
-// applyContentEnvelopeFallback recovers inspectable content that a
-// connector nests one level inside a declared envelope object (hermes
-// nests prompt/result text under "extra"). It runs only after every
-// top-level content lookup in normalizeAgentHookRequest missed, and it
-// opens exactly the one sub-object the connector's hook contract
-// declares via ContentEnvelopeKey — never a recursive scan, because
-// tool inputs/results carry attacker-influenced nested JSON and any
-// broader search would let a planted decoy field shadow the real
-// content. Each enveloped event populates exactly one of the expected
-// keys (hermes: user_message on pre_llm_call, result on
-// post_tool_call, assistant_response on post_llm_call, child_summary
-// on subagent_stop), so a single shared key list — prompt-ish names
-// first — resolves the right field without per-event dispatch.
-func applyContentEnvelopeFallback(content string, payload map[string]interface{}, envelopeKey string) string {
-	if content != "" || envelopeKey == "" {
+// applyContentEnvelopeFallback reads the content of a connector that puts
+// it one level down, in the declared envelope object (Hermes: extra). It
+// runs only after every top-level content lookup in
+// normalizeAgentHookRequest missed, and it reads exactly the one field the
+// connector's hook contract declares for the event, never a recursive scan
+// or a shared key list: tool inputs and results carry attacker-influenced
+// nested JSON, and a Hermes post_llm_call carries the prompt next to the
+// model's response.
+func applyContentEnvelopeFallback(content, event string, payload map[string]interface{}, envelope connector.ContentEnvelope) string {
+	if content != "" {
 		return content
 	}
-	env := objectAt(payload, envelopeKey)
+	field := envelope.Field(event)
+	if field == "" {
+		return content
+	}
+	env := objectAt(payload, envelope.Key)
 	if env == nil {
 		return content
 	}
-	return firstString(env,
-		"user_message", "prompt", "message",
-		"result", "tool_result", "output",
-		"assistant_response", "response",
-		"child_summary",
-	)
+	return stringifyHookValue(firstValue(env, field))
 }
 
 func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentID, agentName, agentType string) {

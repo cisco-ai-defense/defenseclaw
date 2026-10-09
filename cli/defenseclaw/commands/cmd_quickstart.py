@@ -256,6 +256,10 @@ def quickstart_cmd(
     # selected the connector, including explicit --connector on macOS/Windows.
     from defenseclaw.inventory import agent_discovery
 
+    # From here on only the chosen connector's CLI runs as a probe (GAP-0901).
+    token = agent_discovery.restrict_probes([connector])
+    click.get_current_context().call_on_close(lambda: agent_discovery.end_probe_restriction(token))
+
     if not (platform_support.host_os() == "windows" and connector == "opencode"):
         # Native Windows OpenCode uses a protected exact executable selection;
         # a generic discovery pass before that selection would override it.

@@ -218,7 +218,7 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     A post-tool finding (PostToolUse, ...) cannot block the call that already
     ran, so it is not labelled observe mode on an action-mode connector
     (GAP-1303)."""
-    from defenseclaw.hook_metrics import detection_only_hook_label  # noqa: PLC0415
+    from defenseclaw.hook_metrics import would_block_hook_label  # noqa: PLC0415
 
     decision = ""
     for raw in hook_details:
@@ -231,8 +231,9 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
         observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"
         if kv.get("would_block", "").lower() == "true" or observed_block:
             # A post-tool or MessageDisplay finding cannot block, whatever
-            # the connector's mode (GAP-1303, GAP-1531).
-            decision = detection_only_hook_label(hook_event) or "would block (observe mode)"
+            # the connector's mode (GAP-1303, GAP-1531); a Hermes or Amp prompt
+            # in action mode got a notice instead (GAP-0898).
+            decision = would_block_hook_label(hook_event, kv.get("mode", ""))
         elif not decision and action:
             decision = action
     return decision

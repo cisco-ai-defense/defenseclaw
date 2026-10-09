@@ -1166,6 +1166,65 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
+def _legacy_0_8_home(home: Path, receipt_age: int) -> tuple[Path, Path]:
+    """Lay out what the 0.8.x installer left when it installed uv and ran a temporary Cosign."""
+    bin_dir, dc_home = home / ".local" / "bin", home / ".defenseclaw"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "uv").write_text("#!/bin/sh\necho 'uv 0.12.24 (x86_64-unknown-linux-gnu)'\n", encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    (bin_dir / "uvx").write_text("uvx", encoding="utf-8")
+    receipt = home / ".config" / "uv" / "uv-receipt.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        f'{{"binaries":["uv","uvx"],"install_prefix":"{bin_dir}","version":"0.12.24"}}', encoding="utf-8"
+    )
+    python = home / ".local" / "share" / "uv" / "python" / "cpython-3.12.14-linux-x86_64-gnu"
+    (dc_home / ".venv").mkdir(parents=True)
+    cfg = dc_home / ".venv" / "pyvenv.cfg"
+    cfg.write_text(f"home = {python}/bin\nuv = 0.12.24\nversion_info = 3.12.14\n", encoding="utf-8")
+    tuf = home / ".sigstore" / "root" / "tuf-repo-cdn.sigstore.dev"
+    tuf.mkdir(parents=True)
+    (tuf / "root.json").write_text("{}", encoding="utf-8")
+    venv_t = 1_700_000_000
+    for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
+        os.utime(path, (venv_t - 5, venv_t - 5))
+    os.utime(receipt, (venv_t - receipt_age, venv_t - receipt_age))
+    os.utime(cfg, (venv_t, venv_t))
+    return bin_dir, dc_home
+
+
+@pytest.mark.parametrize("receipt_age", [7, 3600])
+def test_an_upgrade_from_0_8_records_only_what_the_0_8_installer_placed(tmp_path: Path, receipt_age: int) -> None:
+    # GAP-0908: the 0.8.x installer ran uv's installer and a temporary Cosign
+    # and recorded neither, so uninstall left uv, uvx, uv's cache and
+    # ~/.sigstore. A uv installed well before that venv is the user's.
+    home = tmp_path / "home"
+    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age)
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "legacy.sh"
+    script.write_text(
+        'set -euo pipefail\nhas() { [[ "$1" != cosign ]] && command -v "$1" >/dev/null 2>&1; }\n'
+        + text[text.index("readonly LEGACY_WINDOW") : text.index("find_legacy_leftovers() {")].replace("readonly ", "")
+        + _install_sh_functions("sha256_of", "find_legacy_leftovers", "record_legacy_leftovers")
+        + f'HOME="{home}" BIN_DIR="{bin_dir}" DEFENSECLAW_HOME="{dc_home}"\nunset XDG_CONFIG_HOME XDG_DATA_HOME\n'
+        + "find_legacy_leftovers\nrecord_legacy_leftovers\n",
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    record = dc_home / "legacy-install-leftovers"
+    if receipt_age > 600:
+        assert not (bin_dir / "defenseclaw-uv.sha256").exists()
+        assert record.read_text(encoding="utf-8") == "sigstore\n"
+        return
+    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
+    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
+    assert (bin_dir / "defenseclaw-uv.sha256").read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
+    assert record.read_text(encoding="utf-8") == "uv-cache\nuv-python cpython-3.12.14-linux-x86_64-gnu\nsigstore\n"
+
+
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
 def test_a_restore_that_stopped_part_way_keeps_the_restored_data(tmp_path: Path) -> None:
     # GAP-0624: a restore that failed on a full disk kept its snapshot; the

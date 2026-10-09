@@ -52,6 +52,9 @@ func TestWindowsEnterpriseHookRuntimeAccessFailsStatusInBothDirections(t *testin
 	}{
 		{"users modify", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)", "(S-1-5-32-545) holds modify (0x"},
 		{"users read removed", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", "(S-1-5-32-545) read and execute entry is missing"},
+		// Deny list-folder only: a deny that includes READ_CONTROL also stops
+		// this test, which runs in BUILTIN\Users, from reading the DACL.
+		{"users read denied", "O:BAD:P(D;OICI;0x1;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", "(S-1-5-32-545) has an explicit deny entry"},
 		{"as DefenseClaw sets it", "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,6 +75,18 @@ func TestWindowsEnterpriseHookRuntimeAccessFailsStatusInBothDirections(t *testin
 				!strings.Contains(result.Errors[0].Message, dir) || !strings.Contains(result.Errors[0].Message, tc.want) ||
 				!strings.Contains(result.Errors[0].Message, "*S-1-5-32-545:(OI)(CI)RX") {
 				t.Fatalf("errors = %+v", result.Errors)
+			}
+			if tc.name == "users read denied" {
+				originalRepair := windowsEnterpriseRepairPublicDir
+				t.Cleanup(func() { windowsEnterpriseRepairPublicDir = originalRepair })
+				called := false
+				windowsEnterpriseRepairPublicDir = func(path string) error {
+					called = path == dir
+					return nil
+				}
+				if repairWindowsEnterpriseHookRuntimeAccess() == "" || !called {
+					t.Fatal("repair did not restore the drifted hook runtime directory")
+				}
 			}
 		})
 	}

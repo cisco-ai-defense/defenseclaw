@@ -66,14 +66,34 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 	if local.Directory != DirectoryLocal || local.Principal != "" || local.UPN != "" || local.AccountDomain != "WS01" {
 		t.Fatalf("local facts = %+v", local)
 	}
-	// GAP-0417: after a UPN sign-in the LSA names the account in UPN form;
-	// the principal is that UPN, not the UPN with the realm appended again.
+	// A sign-in name containing @ is only a hint. The directory translation
+	// must verify the UPN against the complete LSA account name.
 	upnSID := "S-1-5-21-1-2-3-1106"
 	reader.accounts[upnSID] = [2]string{"Dave@corp.example.com", "CORP"}
-	upnForm := resolveWindowsDirectoryFacts(reader, upnSID, func(string, string) string { return "" }, now)
-	if upnForm.Directory != DirectoryActiveDirectory || upnForm.UPN != "dave@corp.example.com" ||
-		upnForm.Principal != "dave@corp.example.com" {
-		t.Fatalf("UPN-form LSA account facts = %+v", upnForm)
+	upnForm := resolveWindowsDirectoryFacts(reader, upnSID, func(_ string, sam string) string {
+		if sam != `CORP\Dave@corp.example.com` {
+			t.Fatalf("translated name = %q", sam)
+		}
+		return "dave@corp.example.com"
+	}, now)
+	if upnForm.UPN != "dave@corp.example.com" || upnForm.Principal != "dave@corp.example.com" {
+		t.Fatalf("translated UPN-form LSA facts = %+v", upnForm)
+	}
+
+	literalSID := "S-1-5-21-1-2-3-1107"
+	reader.accounts[literalSID] = [2]string{"alex@corp.example.com", "CORP"}
+	literal := resolveWindowsDirectoryFacts(reader, literalSID, func(_ string, sam string) string {
+		if sam != `CORP\alex@corp.example.com` {
+			t.Fatalf("translated name = %q", sam)
+		}
+		return "real-upn@corp.example.com"
+	}, now)
+	if literal.UPN != "real-upn@corp.example.com" || literal.Principal != "real-upn@corp.example.com" {
+		t.Fatalf("literal @ account facts = %+v", literal)
+	}
+	unresolved := resolveWindowsDirectoryFacts(reader, literalSID, nil, now)
+	if unresolved.UPN != "" || unresolved.Principal != "" {
+		t.Fatalf("untranslated @ account facts = %+v", unresolved)
 	}
 }
 

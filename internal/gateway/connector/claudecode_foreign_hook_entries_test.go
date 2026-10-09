@@ -91,6 +91,52 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	}
 }
 
+// GAP-0907: after the hook script path in settings.json is edited, the
+// self-heal Setup replaces the edited handlers instead of adding a second
+// hook set next to them.
+func TestClaudeCode_SetupReplacesEditedHookPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher")
+	}
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+	opts := SetupOpts{
+		DataDir:       filepath.Join(dir, ".defenseclaw"),
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "api-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	installed := mustReadClaudeSettingsForTest(t, settingsPath)
+	edited := strings.ReplaceAll(installed, "/.defenseclaw/hooks/", "/.defenseclaw/xhooks/")
+	if edited == installed {
+		t.Fatal("fixture did not edit the hook path")
+	}
+	if err := os.WriteFile(settingsPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	repaired := mustReadClaudeSettingsForTest(t, settingsPath)
+	if strings.Contains(repaired, "/xhooks/") {
+		t.Fatalf("repair kept the edited hook entries: %s", repaired)
+	}
+	script := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+	if got, want := strings.Count(repaired, script), strings.Count(installed, script); got != want {
+		t.Fatalf("repaired settings name the hook script %d times, want %d (one hook set)", got, want)
+	}
+}
+
 func mustReadClaudeSettingsForTest(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -160,10 +206,10 @@ func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T)
 		t.Skip("Windows registers the native hook launcher")
 	}
 	dir := t.TempDir()
-	script := filepath.Join(dir, ".defenseclaw", "hooks", "claude-code-hook.sh")
+	script := filepath.Join(dir, "Alice Smith", ".defenseclaw", "hooks", "claude-code-hook.sh")
 	command, _ := claudeCodeHookInvocation(SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw")}, script)
-	if !strings.HasPrefix(command, script+" ") {
-		t.Fatalf("command %q does not start with the hook script", command)
+	if !strings.HasPrefix(command, shellSingleQuote(script)+" ") {
+		t.Fatalf("command %q does not start with the quoted hook script", command)
 	}
 	run := func() (int, string) {
 		cmd := exec.Command("/bin/sh", "-c", command)
