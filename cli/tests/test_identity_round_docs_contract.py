@@ -68,7 +68,7 @@ def test_identity_redaction_warns_about_qualified_account_name() -> None:
     text = page("observability/end-user-identity.mdx")
     assert "Every redaction profile preserves `defenseclaw.user.name`" in text
     assert "alice@corp.example.com" in text
-    assert "must not receive the directory account name" in text
+    assert "must not receive even the bare account name" in text  # the qualified form is only the principal (GAP-1082)
 
 
 def test_quickstart_contract_accepts_equivalent_wording(monkeypatch) -> None:
