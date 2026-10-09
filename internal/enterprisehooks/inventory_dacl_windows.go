@@ -619,6 +619,12 @@ func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult,
 // file's content, as Go's os.Open asks (GENERIC_READ), and nothing below.
 const inventorySelfMask = windows.FILE_GENERIC_READ
 
+// ensureInventorySelfACE grants `sid` inventorySelfMask on the folder or
+// regular file `path` alone (the profile-root .claude.json of GAP-1204).
+func ensureInventorySelfACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, inventorySelfACE)
+}
+
 func ensureInventoryACE(path string, sid *windows.SID, kind inventoryACE) (inventoryDACLResult, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
