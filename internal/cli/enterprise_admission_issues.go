@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
@@ -26,6 +27,14 @@ func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir, guar
 		}
 		result.AddWarning("asset_removal_deferred", "the "+request.TargetType+" "+request.SourcePath+
 			" is in quarantine and blocked, but its original folder stays until the guardian can remove it: "+request.Deferred)
+	}
+	// An enrolled user whose ~/.claude.json the hook enumerator could not
+	// read: the gateway refuses that user's Claude Code MCP servers
+	// (GAP-0829).
+	for _, state := range enterprisehooks.ReadClaudeStateUnreadable(enterprisehooks.ClaudeMCPSpoolDir(guardianDir)) {
+		result.AddWarning("claude_state_unreadable", "the Claude Code MCP servers of "+state.Account()+
+			" are blocked: the hook enumerator could not read "+state.Path+" ("+state.Reason+
+			"); give SYSTEM read access to the file again or repair its JSON")
 	}
 	issues, err := watcher.ReadAdmissionIssues(dataDir)
 	if err != nil {
