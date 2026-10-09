@@ -926,14 +926,32 @@ func appendDotEnvKey(path, key, value string) error {
 	return cfgtxn.WriteFileDurable(path, updated, 0o600)
 }
 
-// DotEnvWithKey returns the .env bytes existing with key=value appended, and
-// false when key is already defined there (existing is then unchanged).
+// DotEnvWithKey returns the .env bytes with a usable key. An existing
+// nonempty assignment wins; an empty assignment is replaced so the inline
+// v8 fallback remains available after migration.
 func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
-	for _, line := range strings.Split(string(existing), "\n") {
-		name, _, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export ")), "=")
-		if ok && strings.TrimSpace(name) == key {
+	lines := bytes.Split(existing, []byte("\n"))
+	for i, line := range lines {
+		entry := strings.TrimSpace(string(line))
+		if entry == "" || strings.HasPrefix(entry, "#") {
+			continue
+		}
+		name, current, ok := strings.Cut(entry, "=")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		current = strings.TrimSpace(current)
+		if current != "" && current != "\"\"" && current != "''" {
 			return existing, false
 		}
+		equals := bytes.IndexByte(line, '=')
+		updated := append([]byte(nil), line[:equals+1]...)
+		updated = append(updated, value...)
+		if bytes.HasSuffix(line, []byte("\r")) {
+			updated = append(updated, '\r')
+		}
+		lines[i] = updated
+		return bytes.Join(lines, []byte("\n")), true
 	}
 	var out bytes.Buffer
 	out.Write(existing)

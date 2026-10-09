@@ -941,6 +941,27 @@ func TestMigrateV8InMemoryReadsTheUnexpandedPolicyDir(t *testing.T) {
 	}
 }
 
+func TestMigrateV9ReplacesEmptyDotEnvVirusTotalKey(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir +
+		"\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    virustotal_api_key: vt-test-value\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("VIRUSTOTAL_API_KEY=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if env, err := os.ReadFile(envPath); err != nil || string(env) != "VIRUSTOTAL_API_KEY=vt-test-value\n" {
+		t.Errorf(".env did not retain the inline key: %q, %v", env, err)
+	}
+}
+
 // TestMigrateV9InlineKeyGoesToTheRuntimeDataDir: the inline VirusTotal key
 // goes to the .env of the data_dir the runtime uses, and that data_dir's
 // signature packs are listed: a "~/..." data_dir is under the home directory,
