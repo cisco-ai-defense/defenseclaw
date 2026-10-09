@@ -3859,7 +3859,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 
 	warnUnenforcedAssetPolicy(s.currentConfig(), skillDirs, pluginDirs,
 		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil)
-	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
+	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil {
 		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
 			"skill_dirs":  0,
 			"plugin_dirs": 0,
