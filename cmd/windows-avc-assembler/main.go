@@ -34,17 +34,28 @@ import (
 
 const (
 	// artifactName is the standard filename the outer Setup EXE is
-	// written as. Matches enterpriseSetupArtifactName in
-	// cmd/defenseclaw-enterprise-setup/main.go.
+	// written as for the AVC enterprise flavor. Matches
+	// enterpriseSetupArtifactName in
+	// cmd/defenseclaw-enterprise-setup/main.go. The standalone flavor
+	// uses artifactNameStandalone instead; both share the same
+	// cmd/defenseclaw-enterprise-setup entry point and only differ in
+	// shipped filename.
 	artifactName = "DefenseClawSetup-Enterprise-x64.exe"
+	// artifactNameStandalone is the standalone (MDM-deployable, no
+	// Secure Client dependency) build's filename. Matches the OUT_DIR
+	// path in packaging/windows/standalone/build-setup.sh.
+	artifactNameStandalone = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
 	// provenanceSuffix is appended to the artifact name for the
 	// provenance.json sidecar. Matches the assemble.sh output naming.
 	provenanceSuffix = ".provenance.json"
+	// Supported values for the -Flavor flag.
+	flavorEnterprise = "Enterprise"
+	flavorStandalone = "Standalone"
 )
 
-// requiredPayloadFiles is the pinned inventory of files AVC signs.
-// Any deviation (extra or missing file) is a hard failure — the
-// runtime's identity gate refuses drift on either side.
+// requiredPayloadFiles is the pinned inventory of files AVC signs for
+// the Enterprise flavor. Any deviation (extra or missing file) is a hard
+// failure — the runtime's identity gate refuses drift on either side.
 //
 // Kept in alphabetical order because the trailer archive sorts by name
 // and this order is the one both the writer and the runtime observe.
@@ -59,6 +70,38 @@ var requiredPayloadFiles = []string{
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
+}
+
+// requiredStandalonePayloadFiles is the pinned inventory for the
+// standalone (MDM-deployable) flavor. No Cisco Secure Client CMID
+// broker — standalone profiles use PowerShell 7 and vendor-neutral
+// paths. A change here MUST match cmd/defenseclaw-enterprise-setup/
+// main.go standalonePayloadFiles verbatim.
+var requiredStandalonePayloadFiles = []string{
+	"DefenseClawEnterprise.psm1",
+	"defenseclaw-acp.exe",
+	"defenseclaw-gateway.exe",
+	"defenseclaw-hook.exe",
+	"defenseclaw-sensor-helper.exe",
+	"defenseclaw.exe",
+	"install-enterprise.ps1",
+}
+
+// payloadFilesFor selects the pinned inventory for the given -Flavor.
+func payloadFilesFor(flavor string) []string {
+	if flavor == flavorStandalone {
+		return requiredStandalonePayloadFiles
+	}
+	return requiredPayloadFiles
+}
+
+// artifactNameFor selects the shipped Setup EXE filename for the given
+// -Flavor.
+func artifactNameFor(flavor string) string {
+	if flavor == flavorStandalone {
+		return artifactNameStandalone
+	}
+	return artifactName
 }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -83,6 +126,13 @@ type options struct {
 	// -AllowUnsigned is not set. Bare hex; colons and case are tolerated
 	// and normalized on the way in (see normalizeThumbprint).
 	ExpectedSignerSha256 string
+	// Flavor selects the payload inventory + distribution_flavor tag +
+	// shipped artifact name. "Enterprise" (default) keeps the historical
+	// AVC-signed behaviour; "Standalone" switches to the shorter
+	// Secure-Client-independent inventory used by the MDM-deployable
+	// Setup. Both share the same cmd/defenseclaw-enterprise-setup entry
+	// point.
+	Flavor string
 
 	// signingTypeParsed and expectedThumbprint are the validated
 	// interpretations of the corresponding string flags. Filled in by
@@ -168,6 +218,7 @@ func parseFlags(args []string) (options, error) {
 	fs.BoolVar(&opts.AllowUnsigned, "AllowUnsigned", false, "skip Authenticode signature assertion; stamp unsigned=true in manifest+provenance")
 	fs.StringVar(&opts.SigningType, "SigningType", "", "DEV|PROD — chain-trust policy for payload verification (required unless -AllowUnsigned)")
 	fs.StringVar(&opts.ExpectedSignerSha256, "ExpectedSignerSha256", "", "64-char SHA-256 fingerprint of the payload signer certificate (required unless -AllowUnsigned)")
+	fs.StringVar(&opts.Flavor, "Flavor", flavorEnterprise, "payload inventory + distribution tag + output filename: Enterprise (default, AVC) or Standalone (MDM-deployable, no Secure Client)")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, &usageError{msg: err.Error()}
@@ -220,6 +271,12 @@ func parseFlags(args []string) (options, error) {
 	}
 	if !versionPattern.MatchString(opts.Version) {
 		return opts, &usageError{msg: fmt.Sprintf("-Version must be semver like 0.8.6 or 0.8.6-dev (got: %q)", opts.Version)}
+	}
+	switch opts.Flavor {
+	case flavorEnterprise, flavorStandalone:
+		// ok
+	default:
+		return opts, &usageError{msg: fmt.Sprintf("-Flavor must be Enterprise or Standalone (got: %q)", opts.Flavor)}
 	}
 	if !opts.AllowUnsigned {
 		st, err := parseSigningType(opts.SigningType)
@@ -299,7 +356,7 @@ func assemble(opts options, stdout io.Writer) error {
 	// name is a hard failure — silent trimming would let a malformed
 	// kit slip past.
 	stage(1, "verify inputs")
-	if err := verifyPayloadInventory(payloadDir); err != nil {
+	if err := verifyPayloadInventory(payloadDir, payloadFilesFor(opts.Flavor)); err != nil {
 		return err
 	}
 
@@ -308,7 +365,7 @@ func assemble(opts options, stdout io.Writer) error {
 	// scope at install time (see platform_windows.go).
 	stage(2, "verify signatures")
 	if !opts.AllowUnsigned {
-		for _, name := range requiredPayloadFiles {
+		for _, name := range payloadFilesFor(opts.Flavor) {
 			if err := verifyAuthenticode(
 				filepath.Join(payloadDir, name),
 				opts.signingTypeParsed,
@@ -330,9 +387,9 @@ func assemble(opts options, stdout io.Writer) error {
 	}
 
 	// Stage 4: append trailer to a fresh copy of the prebuilt EXE.
-	// The assembled EXE lands at <Out>/DefenseClawSetup-Enterprise-x64.exe.
+	// Lands at <Out>/<artifactNameFor(Flavor)>.
 	stage(4, "append trailer")
-	assembled := filepath.Join(outDir, artifactName)
+	assembled := filepath.Join(outDir, artifactNameFor(opts.Flavor))
 	if err := appendTrailer(setupExe, assembled, entries, manifestBytes); err != nil {
 		return err
 	}
@@ -352,11 +409,11 @@ func assemble(opts options, stdout io.Writer) error {
 }
 
 // verifyPayloadInventory asserts that -PayloadDir contains EXACTLY the
-// eight pinned filenames, no more, no less. Rejects subdirectories and
-// symlinks so a mis-staged kit does not slip past.
-func verifyPayloadInventory(dir string) error {
+// pinned filenames for the requested flavor, no more, no less. Rejects
+// subdirectories and symlinks so a mis-staged kit does not slip past.
+func verifyPayloadInventory(dir string, want []string) error {
 	seen := make(map[string]struct{})
-	for _, name := range requiredPayloadFiles {
+	for _, name := range want {
 		info, err := os.Lstat(filepath.Join(dir, name))
 		if err != nil {
 			return &ioError{msg: fmt.Sprintf("payload dir missing required file: %s", name)}

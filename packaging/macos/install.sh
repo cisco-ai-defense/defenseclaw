@@ -248,7 +248,39 @@ cleanup_install_temporaries() {
     rm -f -- "${path}"
   done
 }
-trap cleanup_install_temporaries EXIT
+
+# _BOOTED_OUT_PLISTS records the plist paths of launchd jobs this run
+# unloaded during the pre-mutation quiesce. If install exits before
+# reaching the mutation boundary (binary build failure, missing --binary,
+# ensure_shared_install_parent trust refusal, config render failure, …),
+# the EXIT trap re-bootstraps each one from the plist still on disk so
+# the host does not sit with gateway + guardian + enumerator all stopped
+# until reboot. Same failure class as AIFW-34262: services quiesced,
+# install aborted mid-flight, no recovery. The list is cleared the
+# instant we enter the mutation section (line below marked "clear
+# bootout-restore"), because once a new binary has been laid down,
+# restoring an old job would mis-match the plist's binary path against
+# what is actually installed.
+_BOOTED_OUT_PLISTS=()
+restore_booted_out_jobs() {
+  local plist
+  for plist in "${_BOOTED_OUT_PLISTS[@]-}"; do
+    [[ -n "${plist}" && -f "${plist}" ]] || continue
+    # Best-effort: a supervisor that re-registered the job behind our
+    # back will cause this to fail; swallow the error so cleanup_install_
+    # temporaries still runs.
+    launchctl bootstrap system "${plist}" 2>/dev/null || true
+  done
+}
+
+install_exit_trap() {
+  local status=$?
+  if (( status != 0 )); then
+    restore_booted_out_jobs
+  fi
+  cleanup_install_temporaries
+}
+trap install_exit_trap EXIT
 
 forget_install_temporary() {
   local expected="$1" index
@@ -345,29 +377,20 @@ platform_installer_owned_path() {
   esac
 }
 
-# install_time_ancestor_advisory: permission-shaped drift on ANY ancestor
-# above a DefenseClaw-owned path is advisory during install. AVC 5.1.21.3862
-# regression: postinstall re-runs this script after preinstall has already
-# removed machine-wide state, and refusing on a drifted /opt or a shared
-# /Library/Logs/Cisco leaf permission left the host with no gateway at all.
-# We do not own /opt (or /Library/Logs/Cisco); the Go trust walk in the
-# gateway is symmetric — see managed.TrustStrictAncestorsEnv — and downgrades
-# the same verdicts at first load. Structural drift (missing element,
-# symlink, wrong type, unable to inspect) stays fatal at every element.
+# install_time_ancestor_advisory: permission-shaped drift on a
+# platform-installer-owned ancestor (/opt/cisco or /Library/Logs/Cisco and
+# their descendants) is advisory during install. AVC 5.1.21.3862 regression:
+# postinstall re-runs this script after preinstall has already removed
+# machine-wide state, and refusing on a shared /Library/Logs/Cisco leaf
+# permission left the host with no gateway at all. The Go trust walk is
+# symmetric — see managed.PlatformInstallerOwnedPath and
+# managed.TrustStrictAncestorsEnv — and only downgrades verdicts for the
+# same Cisco-owned roots. Roots above those (/opt, /Library/Logs) stay
+# fatal here so install never silently stages a service the Go walk will
+# refuse at runtime. Structural drift (missing element, symlink, wrong
+# type, unable to inspect) stays fatal at every element.
 install_time_ancestor_advisory() {
   local path="$1"
-  # Every ancestor of INSTALL_PREFIX, LOGS_DIR, or a platform-installer-owned
-  # path qualifies. Trailing slashes are stripped for the comparison so a
-  # marker value like "/opt/cisco/secureclient" matches ancestors "/opt" and
-  # "/opt/cisco" as well as "/opt/cisco/secureclient".
-  local marker
-  for marker in "${INSTALL_PREFIX:-}" "${LOGS_DIR:-}" /opt/cisco /Library/Logs/Cisco; do
-    marker="${marker%/}"
-    [[ -n "${marker}" ]] || continue
-    case "${marker}/" in
-      "${path%/}"/*) return 0 ;;
-    esac
-  done
   platform_installer_owned_path "${path}"
 }
 
@@ -791,6 +814,7 @@ for _label in "${_current_launchd_labels[@]}"; do
   if ! launchctl print "system/${_label}" >/dev/null 2>&1; then
     continue
   fi
+  _label_plist=""
   case "${_label}" in
     "${LAUNCHD_LABEL}")
       # Gateway is bootstrapped at the end of this script unless
@@ -799,8 +823,9 @@ for _label in "${_current_launchd_labels[@]}"; do
         log "preserving loaded ${_label} (--skip-launchd will skip its restart)"
         continue
       fi
+      _label_plist="${PLIST_DST}"
       ;;
-    "${GUARDIAN_LAUNCHD_LABEL}"|"${ENUMERATOR_LAUNCHD_LABEL}")
+    "${GUARDIAN_LAUNCHD_LABEL}")
       # Guardian/enumerator bootstrap sits inside the SKIP_CONNECTOR
       # block, which itself only runs when SKIP_LAUNCHD is off (the
       # SKIP_LAUNCHD short-circuit exits before it).
@@ -808,11 +833,25 @@ for _label in "${_current_launchd_labels[@]}"; do
         log "preserving loaded ${_label} (--skip-launchd/--skip-connector will skip its restart)"
         continue
       fi
+      _label_plist="${GUARDIAN_PLIST_DST}"
+      ;;
+    "${ENUMERATOR_LAUNCHD_LABEL}")
+      if [[ "${SKIP_LAUNCHD}" == "true" || "${SKIP_CONNECTOR}" == "true" ]]; then
+        log "preserving loaded ${_label} (--skip-launchd/--skip-connector will skip its restart)"
+        continue
+      fi
+      _label_plist="${ENUMERATOR_PLIST_DST}"
       ;;
   esac
   log "unloading current launchd job for reinstall: ${_label}"
-  launchd_bootout_until_gone "${_label}" \
-    || warn "launchctl bootout system/${_label} failed after retries; bootstrap below may still surface a real failure"
+  if launchd_bootout_until_gone "${_label}"; then
+    # Only record the plist for restore on EXIT once the bootout
+    # actually succeeded; a failed bootout left the job in place and
+    # does not need to be bootstrapped again.
+    [[ -n "${_label_plist}" ]] && _BOOTED_OUT_PLISTS+=("${_label_plist}")
+  else
+    warn "launchctl bootout system/${_label} failed after retries; bootstrap below may still surface a real failure"
+  fi
 done
 
 # Legacy launchd cleanup: unload pre-Cisco-path labels only on the
@@ -828,15 +867,23 @@ done
 if [[ "${_RECONCILE_REINSTALL}" == "true" && "${SKIP_LAUNCHD}" != "true" ]]; then
   for _label in "${_legacy_launchd_labels[@]}"; do
     if launchctl print "system/${_label}" >/dev/null 2>&1; then
+      _label_plist=""
+      case "${_label}" in
+        "${LEGACY_LAUNCHD_LABEL}") _label_plist="${LEGACY_PLIST_DST}" ;;
+        "${LEGACY_GUARDIAN_LAUNCHD_LABEL}") _label_plist="${LEGACY_GUARDIAN_PLIST_DST}" ;;
+      esac
       log "unloading legacy launchd job: ${_label}"
-      launchd_bootout_until_gone "${_label}" \
-        || warn "launchctl bootout system/${_label} failed after retries; legacy plist will be superseded below"
+      if launchd_bootout_until_gone "${_label}"; then
+        [[ -n "${_label_plist}" ]] && _BOOTED_OUT_PLISTS+=("${_label_plist}")
+      else
+        warn "launchctl bootout system/${_label} failed after retries; legacy plist will be superseded below"
+      fi
     fi
   done
 fi
 
 unset _current_managed_markers _legacy_managed_paths _current_launchd_labels \
-  _legacy_launchd_labels _marker _label _local_users _local_user \
+  _legacy_launchd_labels _marker _label _label_plist _local_users _local_user \
   _candidate_home _u_marker _installed_command _installed_command_path
 
 # Resolve the binary. Lookup order matches PLIST_SRC:
@@ -924,6 +971,13 @@ done
 unset _lbl_plist _lbl _plist
 
 # ---- gateway file install ----------------------------------------------
+
+# clear bootout-restore: past this point we start replacing the gateway
+# binary and other on-disk state. Re-bootstrapping an old launchd job
+# would re-exec stale binaries or race the mutation half-way through, so
+# we drop the restore list and rely on the end-of-script bootstrap calls
+# to bring the new generation up.
+_BOOTED_OUT_PLISTS=()
 
 log "installing binary -> ${GATEWAY_BIN}"
 # Ensure every ancestor of INSTALL_PREFIX exists. macOS `install -d`

@@ -81,6 +81,12 @@ func TestEnterpriseLifecycleArgumentsForStandalonePayload(t *testing.T) {
 		"--sensor-helper-binary", filepath.Join(stage, "defenseclaw-sensor-helper.exe"),
 		"--cli-binary", filepath.Join(stage, "defenseclaw.exe"),
 		"--config", `C:\staging\config.yaml`,
+		// --bootstrap-parent is unconditional post-#839 (Authenticode-
+		// aware trailer reader + protected bootstrap parent): the
+		// standalone and Secure Client lifecycles both spin up the
+		// isolated bootstrap environment, so this flag is forwarded for
+		// every action and flavor.
+		"--bootstrap-parent", filepath.Join(stage, enterpriseSetupScratchDirName),
 		"--json",
 		"--profile", "standalone",
 		"--product-version", "1.4.0",

@@ -161,12 +161,15 @@ func findFooterOffset(ra io.ReaderAt, size int64) (int64, error) {
 		if off, ok := scanFooterMagicWindow(buf); ok {
 			return certVA - int64(len(buf)) + int64(off), nil
 		}
-		// PE has a cert table but no trailer in the padding window —
-		// this file was signed without ever being assembled. Fall
-		// through to the EOF path; if the EOF check also fails to
-		// find the magic, DecodeFooter will surface ErrTrailerMissing.
+		// Signed PE without a trailer inside the signed range. Bytes
+		// after the cert table (an EOF-based offset) are outside the
+		// Authenticode-covered image and the CRC/entry hashes read from
+		// such a trailer do not bind it to the signed image, so an
+		// attacker with append-after-cert-table access could forge a
+		// consistent trailer. Reject rather than fall through to EOF.
+		return 0, ErrTrailerMissing
 	}
-	// Unsigned / non-PE / signed-without-trailer path: footer at EOF.
+	// Unsigned / non-PE path: footer at EOF.
 	return size - int64(FooterSize), nil
 }
 

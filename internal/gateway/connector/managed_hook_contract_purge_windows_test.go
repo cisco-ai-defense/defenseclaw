@@ -264,6 +264,13 @@ func TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope(t *testing.T) 
 			ManagedEnterprise: true,
 			AgentVersion:      "1.7.0",
 			HookFailMode:      "closed",
+			// Cursor's resolveHookFailMode forces "open" for observe
+			// registrations regardless of HookFailMode, so give it the
+			// matching "action" mode here — the sidecar
+			// ReconcileManagedNativeHookRuntime wrote the "closed" tag,
+			// so the contract entry must resolve to "closed" too for
+			// validateHookRuntimeStateForContract to accept the save.
+			GuardrailMode: "action",
 		},
 		NewCursorConnector(),
 		"same-build",

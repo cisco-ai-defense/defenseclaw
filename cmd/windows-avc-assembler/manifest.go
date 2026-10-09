@@ -20,12 +20,18 @@ import (
 // distributionFlavor is the flavor tag stamped into both manifest.json
 // and provenance.json. It must match the value the runtime loader
 // (loadEnterprisePayload in cmd/defenseclaw-enterprise-setup/main.go)
-// asserts against: "managed-enterprise" for AVC-signed kits, or
-// "managed-enterprise-unsigned" when the -AllowUnsigned developer path
-// is taken.
+// asserts against. Four values cover the (flavor, signed) matrix:
+//
+//	managed-enterprise           — AVC-signed enterprise
+//	managed-enterprise-unsigned  — enterprise with -AllowUnsigned
+//	standalone                   — signed standalone
+//	standalone-unsigned          — standalone with -AllowUnsigned (CI's
+//	                               hash-pinned MDM-deployable build)
 const (
-	distributionFlavorSigned   = "managed-enterprise"
-	distributionFlavorUnsigned = "managed-enterprise-unsigned"
+	distributionFlavorSigned             = "managed-enterprise"
+	distributionFlavorUnsigned           = "managed-enterprise-unsigned"
+	distributionFlavorStandaloneSigned   = "standalone"
+	distributionFlavorStandaloneUnsigned = "standalone-unsigned"
 )
 
 // manifestFile is one row in manifest.json's `files` array. Fields
@@ -56,9 +62,10 @@ type manifestDocument struct {
 // trailer's per-entry header will carry — a runtime hash mismatch is
 // impossible by construction.
 func buildManifestAndEntries(payloadDir string, opts options) ([]byte, []setuppayload.Entry, error) {
-	files := make([]manifestFile, 0, len(requiredPayloadFiles))
-	entries := make([]setuppayload.Entry, 0, len(requiredPayloadFiles))
-	for _, name := range requiredPayloadFiles {
+	want := payloadFilesFor(opts.Flavor)
+	files := make([]manifestFile, 0, len(want))
+	entries := make([]setuppayload.Entry, 0, len(want))
+	for _, name := range want {
 		contents, digest, err := readAndHash(filepath.Join(payloadDir, name))
 		if err != nil {
 			return nil, nil, &ioError{msg: fmt.Sprintf("read+hash %s: %s", name, err)}
@@ -77,7 +84,7 @@ func buildManifestAndEntries(payloadDir string, opts options) ([]byte, []setuppa
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 
 	doc := manifestDocument{
-		DistributionFlavor: flavorFor(opts.AllowUnsigned),
+		DistributionFlavor: distributionFlavorFor(opts.Flavor, opts.AllowUnsigned),
 		Files:              files,
 		SchemaVersion:      1,
 		SourceCommit:       opts.SourceCommit,
@@ -133,13 +140,28 @@ func marshalCanonical(v any) ([]byte, error) {
 	return out, nil
 }
 
-// flavorFor picks the distribution_flavor tag based on -AllowUnsigned.
-// The runtime's identity gate keys off the same rule.
+// flavorFor picks the distribution_flavor tag for the enterprise flavor
+// based on -AllowUnsigned. The runtime's identity gate keys off the
+// same rule.
 func flavorFor(allowUnsigned bool) string {
 	if allowUnsigned {
 		return distributionFlavorUnsigned
 	}
 	return distributionFlavorSigned
+}
+
+// distributionFlavorFor picks the distribution_flavor tag for the given
+// -Flavor + -AllowUnsigned combination. The runtime
+// (loadEnterprisePayload in cmd/defenseclaw-enterprise-setup/main.go)
+// has the matching gate.
+func distributionFlavorFor(flavor string, allowUnsigned bool) string {
+	if flavor == flavorStandalone {
+		if allowUnsigned {
+			return distributionFlavorStandaloneUnsigned
+		}
+		return distributionFlavorStandaloneSigned
+	}
+	return flavorFor(allowUnsigned)
 }
 
 // writeProvenance emits provenance.json alongside the assembled EXE.
@@ -149,7 +171,7 @@ func flavorFor(allowUnsigned bool) string {
 // SHA-256 after signtool has run.
 func writeProvenance(path string, opts options) error {
 	doc := map[string]any{
-		"distribution_flavor": flavorFor(opts.AllowUnsigned),
+		"distribution_flavor": distributionFlavorFor(opts.Flavor, opts.AllowUnsigned),
 		"schema_version":      1,
 		"setup_sha256":        "",
 		"setup_size":          0,

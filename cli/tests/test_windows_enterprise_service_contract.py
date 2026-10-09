@@ -1493,6 +1493,7 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
         "bootstrap",
         "bootstrap-environment",
         "uninstall-transaction",
+        "install-reconcile",
         "helper-capture",
     ),
 )
