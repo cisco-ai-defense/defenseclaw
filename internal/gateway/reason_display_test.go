@@ -220,6 +220,7 @@ func TestAgentVerdictReasonNamesBlockListEntry(t *testing.T) {
 	for _, tc := range []struct{ source, want string }{
 		{`tool "Write" is on the static block list`, "(tool Write is on the block list)"},
 		{`mcp server "github" is blocked`, "(MCP server github is on the block list)"},
+		{`mcp server "notes" is disabled because its install admission rejected it (scanner failure (fail-closed): loopback); asset_policy.mode does not apply to admission verdicts`, "(MCP server notes is disabled because its install admission rejected it (scanner failure (fail-closed)))"},
 	} {
 		display := agentDisplayReason(tc.source, redaction.SinkPolicyDefault)
 		got := agentVerdictReason("block", tc.source, display, redaction.SinkPolicyDefault)

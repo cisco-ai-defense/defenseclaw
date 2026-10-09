@@ -37,7 +37,13 @@ from tests.permissions import set_known_windows_directory_acl
 def test_unwritable_claude_settings_has_actionable_quickstart_failure() -> None:
     report = FirstRunReport(
         status="needs_attention", config_file="", data_dir="", connector="claudecode", profile="observe",
-        setup=[StepResult("Sidecar", "warn", "settings.json tombstone replacement failed")],
+        setup=[StepResult(
+            "Sidecar", "warn",
+            "Error: start daemon readiness: gateway guardrail failed during startup: "
+            "connector claudecode setup failed: claudecode settings hooks: "
+            "move compared config to tombstone: operation not permitted; "
+            "connector setup rollback incomplete: connector claudecode teardown: claudecode teardown error",
+        )],
         readiness=[StepResult("Sidecar", "warn", "not answering yet", "check it in a minute")],
     )
     _require_operational_success(report, gateway_requested=True)
