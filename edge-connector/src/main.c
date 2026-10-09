@@ -33,11 +33,11 @@ extern int  dclaw_ipc_release_lockdown(void);
 extern void dclaw_lockdown_timeout_check(void);
 #endif
 
-static volatile bool g_running = true;
+static volatile sig_atomic_t g_running = 1;
 
 static void signal_handler(int sig) {
     (void)sig;
-    g_running = false;
+    g_running = 0;
 }
 
 static const char *action_string(dclaw_action_t a) {

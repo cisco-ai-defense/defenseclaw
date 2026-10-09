@@ -349,12 +349,20 @@ def extract_rate_limits(policy: dict) -> dict:
         "actuations_per_minute": 10,
     })
     # H-8 fix: Validate all rate limits are > 0 to prevent disabling rate limiting
+    # M-14 fix: Reject float values that would truncate to 0 in uint16
     for key, value in rate_limits.items():
         if isinstance(value, (int, float)) and value <= 0:
             raise ValueError(
-                f"H-8: Rate limit '{key}' must be > 0, got {value}. "
-                f"Zero or negative rate limits would disable rate limiting on the C agent."
+                f"Rate limit '{key}' must be > 0, got {value}. "
+                f"Zero or negative rate limits would disable rate limiting."
             )
+        if isinstance(value, float) and int(value) == 0:
+            raise ValueError(
+                f"Rate limit '{key}' is {value} which truncates to 0 in uint16. "
+                f"Use an integer >= 1."
+            )
+        if isinstance(value, float):
+            rate_limits[key] = int(value)
     return rate_limits
 
 

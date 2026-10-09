@@ -438,6 +438,12 @@ int dclaw_audit_ring_init(void) {
     uint8_t  saved_hmac[16] = {0};
 
     if (audit_ring_restore_header(&saved_head, saved_hmac) == 0) {
+        /* M-5 fix: Bounds-validate restored head position */
+        if (saved_head >= DCLAW_AUDIT_PARTITION_ENTRIES) {
+            fprintf(stderr, "[DCLAW-AUDIT] WARNING: saved head=%u out of bounds (max=%u), resetting to 0\n",
+                    (unsigned)saved_head, (unsigned)DCLAW_AUDIT_PARTITION_ENTRIES);
+            saved_head = 0;
+        }
         ring_head = saved_head;
         memcpy(w->prev_hmac, saved_hmac, 16);
         fprintf(stderr, "[DCLAW-AUDIT] Restored ring head=%u from flash\n",

@@ -54,9 +54,17 @@ elseif(DCLAW_PROFILE STREQUAL "EDGE")
 endif()
 
 # P2-18 fix: Dev mode flag — controls audit key enforcement behavior.
-# ON (default): missing DCLAW_AUDIT_KEY uses dev fallback key with warning.
-# OFF (release): audit ring refuses to start without a real key.
+# ON (default for dev/test): missing DCLAW_AUDIT_KEY uses dev fallback key with warning.
+# OFF (required for production): audit ring refuses to start without a real key.
+# BLOCKER fix: Installers pass -DDCLAW_DEV_MODE=OFF. CI tests run with ON.
 option(DCLAW_DEV_MODE "Enable development mode (relaxed key requirements)" ON)
+
+# BLOCKER: Warn when building non-MINIMAL profiles with DEV_MODE=ON
+if(DCLAW_DEV_MODE AND NOT DCLAW_PROFILE STREQUAL "MINIMAL")
+    message(WARNING "⚠ DCLAW_DEV_MODE=ON for ${DCLAW_PROFILE} profile. "
+        "Production deployments MUST pass -DDCLAW_DEV_MODE=OFF. "
+        "This disables security guards: audit key, zero-key rejection, TLS, OTA Ed25519.")
+endif()
 
 # Sanitizer support (ASan + UBSan)
 option(DCLAW_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)

@@ -51,7 +51,7 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     /*
      * BLK-1 fix: HMAC-SHA256 truncated to 16 bytes, covering ALL verdict fields.
      * Input: HMAC-SHA256(device_key, session_id || request_id || action ||
-     *        severity || ttl || reason || flags || server_ts || tool_hash[0:8])
+     *        severity || ttl || reason || flags || server_ts || tool_hash[0:32])
      */
     uint8_t hmac_full[32];
     mbedtls_md_context_t ctx;
@@ -93,8 +93,8 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     };
     mbedtls_md_hmac_update(&ctx, ts_le, 4);
 
-    /* Feed: tool_hash[0:8] */
-    mbedtls_md_hmac_update(&ctx, tool_hash, 8);
+    /* Feed: tool_hash[0:32] */
+    mbedtls_md_hmac_update(&ctx, tool_hash, 32);
 
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
@@ -118,7 +118,7 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     /*
      * BLK-1 fix: HMAC-SHA256 truncated to 16 bytes, covering ALL verdict fields.
      * Input: HMAC-SHA256(device_key, session_id || request_id || action ||
-     *        severity || ttl || reason || flags || server_ts || tool_hash[0:8])
+     *        severity || ttl || reason || flags || server_ts || tool_hash[0:32])
      * Matches the mbedTLS path semantics exactly.
      */
     uint8_t hmac_full[32];
@@ -156,8 +156,8 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     msg[msg_len++] = (uint8_t)((server_ts >> 16) & 0xFF);
     msg[msg_len++] = (uint8_t)((server_ts >> 24) & 0xFF);
 
-    /* Feed: tool_hash[0:8] */
-    memcpy(msg + msg_len, tool_hash, 8);
+    /* Feed: tool_hash[0:32] */
+    memcpy(msg + msg_len, tool_hash, 32);
     msg_len += 8;
 
     dclaw_hmac_sha256(device_key, key_len, msg, msg_len, hmac_full);

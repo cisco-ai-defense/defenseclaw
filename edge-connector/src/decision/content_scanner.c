@@ -1,8 +1,9 @@
 #include "content_scanner.h"
 #include "policy_tables.h"
 #include <string.h>
+#include <stdlib.h>
 #include <ctype.h>
-#if !defined(DCLAW_NO_DNS_CHECK)
+#if defined(DCLAW_DNS_CHECK) && DCLAW_DNS_CHECK
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -604,6 +605,44 @@ static bool starts_with_digit(const char *s) {
  * Sets octets[0..3] if valid.
  */
 static bool parse_ipv4(const char *dest, uint8_t octets[4]) {
+    /* H-2 fix: Also handle single-number IPs (decimal, hex 0x, octal 0).
+     * e.g., 2130706433 = 127.0.0.1, 0x7f000001 = 127.0.0.1 */
+    if (dest[0] == '0' && (dest[1] == 'x' || dest[1] == 'X')) {
+        /* Hex: 0x7f000001 */
+        char *end;
+        unsigned long val = strtoul(dest, &end, 16);
+        if (*end == '\0' && val <= 0xFFFFFFFF) {
+            octets[0] = (uint8_t)(val >> 24);
+            octets[1] = (uint8_t)(val >> 16);
+            octets[2] = (uint8_t)(val >> 8);
+            octets[3] = (uint8_t)(val);
+            return true;
+        }
+    }
+    /* Check for pure decimal single number (no dots) */
+    {
+        const char *p = dest;
+        bool all_digits = true;
+        bool has_dot = false;
+        while (*p) {
+            if (*p == '.') { has_dot = true; break; }
+            if (!isdigit((unsigned char)*p)) { all_digits = false; break; }
+            p++;
+        }
+        if (all_digits && !has_dot && p > dest) {
+            char *end;
+            unsigned long val = strtoul(dest, &end, 10);
+            if (*end == '\0' && val <= 0xFFFFFFFF) {
+                octets[0] = (uint8_t)(val >> 24);
+                octets[1] = (uint8_t)(val >> 16);
+                octets[2] = (uint8_t)(val >> 8);
+                octets[3] = (uint8_t)(val);
+                return true;
+            }
+        }
+    }
+
+    /* Standard dotted-decimal path */
     uint16_t values[4] = {0};
     uint8_t octet_idx = 0;
     uint16_t pos = 0;
@@ -750,7 +789,7 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
      * resolved IP is not in a private range. This catches DNS rebinding where
      * evil.com resolves to 192.168.1.1. Guarded by DCLAW_NO_DNS_CHECK so
      * embedded targets without DNS resolution can disable this check. */
-#if !defined(DCLAW_NO_DNS_CHECK)
+#if defined(DCLAW_DNS_CHECK) && DCLAW_DNS_CHECK
     if (!starts_with_digit(host)) {
         struct addrinfo hints, *result;
         memset(&hints, 0, sizeof(hints));
@@ -787,7 +826,7 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
         /* Resolved to a public IP — allow */
         return DCLAW_ACTION_ALLOW;
     }
-#endif /* !DCLAW_NO_DNS_CHECK */
+#endif /* DCLAW_DNS_CHECK */
 
     /* If not starting with digit, assume it's a hostname - pass through */
     if (!starts_with_digit(host)) {

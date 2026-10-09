@@ -6,10 +6,19 @@
 
 extern dclaw_state_t *dclaw_get_state(void);
 
+/* M-4 fix: Sessions expire after 1 hour of inactivity to prevent
+ * stale risk accumulation from abandoned sessions. */
+#define SESSION_TTL_MS (3600ULL * 1000)
+
 static dclaw_session_t *find_session(uint16_t session_id) {
     dclaw_state_t *s = dclaw_get_state();
+    uint64_t now = hal_tick_ms();
     for (int i = 0; i < DCLAW_MAX_SESSIONS; i++) {
         if (s->sessions[i].session_id == session_id && s->sessions[i].started_at != 0) {
+            if (now - s->sessions[i].last_activity > SESSION_TTL_MS) {
+                memset(&s->sessions[i], 0, sizeof(dclaw_session_t));
+                return NULL;
+            }
             return &s->sessions[i];
         }
     }

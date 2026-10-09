@@ -1,6 +1,7 @@
 #include "defenseclaw.h"
 #include "platform.h"
 #include <string.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -493,7 +494,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
-        s->emergency.lockdown_timestamp = hal_tick_ms() / 1000; /* L-4: uint64_t, no truncation */
+        s->emergency.lockdown_timestamp = (uint64_t)time(NULL); /* L-4: uint64_t, no truncation */
         break;
 
     case 0x02: /* REVOKE_HASH / REVOKE_SESSIONS */
@@ -521,7 +522,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
-        s->emergency.lockdown_timestamp = hal_tick_ms() / 1000; /* L-4: uint64_t, no truncation */
+        s->emergency.lockdown_timestamp = (uint64_t)time(NULL); /* L-4: uint64_t, no truncation */
         break;
 
     case 0x05: /* RELEASE_LOCKDOWN */
@@ -761,7 +762,7 @@ void dclaw_lockdown_timeout_check(void) {
     if (s->emergency.lockdown_timestamp == 0) return;
 
     /* L-4 fix: Use uint64_t to match widened lockdown_timestamp field */
-    uint64_t now_sec = hal_tick_ms() / 1000;
+    uint64_t now_sec = (uint64_t)time(NULL);
     if (now_sec < s->emergency.lockdown_timestamp) return; /* tick wraparound guard */
 
     uint64_t elapsed = now_sec - s->emergency.lockdown_timestamp;

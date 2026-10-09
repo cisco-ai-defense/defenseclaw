@@ -357,7 +357,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 
 				// M-6 fix: Clean decommissioned entries older than 24 hours
 				// to prevent unbounded map growth from accumulated decomissions.
-				decommCutoff := time.Now().Add(-24 * time.Hour)
+				decommCutoff := time.Now().Add(-7 * 24 * time.Hour)
 				b.decommissionedMu.Lock()
 				for id, ts := range b.decommissioned {
 					if ts.Before(decommCutoff) {
