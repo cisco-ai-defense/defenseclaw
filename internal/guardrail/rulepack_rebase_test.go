@@ -62,3 +62,45 @@ func TestRebasePreservesBuiltInRuleEdits(t *testing.T) {
 		}
 	}
 }
+
+func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
+	old, err := os.ReadFile(filepath.Join("legacy08", "commands.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var custom yaml.Node
+	if err := yaml.Unmarshal(old, &custom); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range yamlRulesSequence(&custom).Content {
+		if yamlScalarField(rule, "id") == "CMD-RM-RF" {
+			setYAMLScalarField(rule, "pattern", "operator-marker", "!!str")
+			break
+		}
+	}
+	var source bytes.Buffer
+	if err := yaml.NewEncoder(&source).Encode(&custom); err != nil {
+		t.Fatal(err)
+	}
+	index, err := shippedRuleIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebased, err := rebaseRuleFile(index.defaultFiles["command"], source.Bytes(), "command", &RulePackRebase{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result RulesFileYAML
+	if err := yaml.Unmarshal(rebased, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range result.Rules {
+		if rule.ID == "CMD-RM-RF" {
+			if rule.Pattern != "operator-marker" || rule.Expression != "" {
+				t.Fatalf("edited pattern inherited unrelated expression: %+v", rule)
+			}
+			return
+		}
+	}
+	t.Fatal("rebased rule missing")
+}
