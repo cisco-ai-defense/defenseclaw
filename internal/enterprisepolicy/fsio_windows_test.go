@@ -181,7 +181,7 @@ func TestWindowsPublicDirDenyReadIsDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !drift.UsersReadMissing {
+	if drift.Denied[usersSIDStr] == 0 || !drift.Drifted() {
 		t.Fatalf("a Users deny-read ACE must report drift: %+v", drift)
 	}
 	if err := RepairWindowsPublicDir(dir); err != nil {
