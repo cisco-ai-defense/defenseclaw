@@ -41,6 +41,11 @@ class IdentityGuideExamplesTest(unittest.TestCase):
                     re.search(r"hook\s+decision and asset-policy", text), page.name
                 )
 
+    def test_group_cache_guide_states_expiry_is_an_upper_bound(self):
+        text = (DOC_ROOT / "guardrail/user-and-group-policies.mdx").read_text()
+        self.assertIn("up to\n  15 minutes from the last successful lookup", text)
+        self.assertNotIn("the first\n  request after that still uses the old facts", text)
+
     def test_hilt_setup_guide_names_prompts_and_connector_scope(self):
         text = (DOC_ROOT / "hitl.mdx").read_text()
         for prompt in ("whether to enable the", "which connectors should enforce actions", "which hook fail mode", "which scanner engine"):

@@ -262,10 +262,12 @@ What follows when the identity is missing:
   remain as SIDs. Use a group SID in the assignment when the named group may
   be beyond that limit; `profile explain` warns about unresolved names.
 - **Group changes take time.** SSSD caches the account first (90 minutes by
-  default). The gateway then caches a user's directory facts for 15 minutes
-  from the user's first request and refreshes them in the background; the first
-  request after that still uses the old facts while the refresh runs. A user
-  added to a group gets the group's profile after all three. `guardrail profile
+  default). The gateway caches each successful directory lookup for up to
+  15 minutes from the last successful lookup, then starts a background refresh
+  on a request. Incomplete or partial answers are retried sooner. A request
+  after expiry may use the previous facts while its lookup runs. A user added to a group gets the
+  group's profile after the operating system and gateway see the change.
+  `guardrail profile
   explain` asks the operating system directly, so it already shows the new
   profile. The per-user CLI's `cache:` line and warning give the age of the
   facts requests still use; managed `profile-explain` does not print that age.
