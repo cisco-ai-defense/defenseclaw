@@ -1170,6 +1170,12 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 // fingerprint contains it.
 const interruptedAdmissionMark = "|admission-interrupted"
 
+// BaselineAwaitsAdmission reports whether a target_snapshots fingerprint
+// marks a target whose admission was cut off, so it is not admitted yet.
+func BaselineAwaitsAdmission(fingerprint string) bool {
+	return strings.HasSuffix(fingerprint, interruptedAdmissionMark)
+}
+
 // markInterruptedAdmission records that the admission of a skill or plugin
 // was cut off by the watcher stopping (a config reload or a change of the
 // enrolled users' folders restarts it). Without it the next start found no

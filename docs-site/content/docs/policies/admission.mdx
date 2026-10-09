@@ -530,9 +530,15 @@ name. Two things stay out of reach of a hook:
 - a command that builds the path at run time, for example from a variable, a
   glob, or a `cd` into the skills folder followed by a relative path.
 
-Project skill folders (`<project>/.claude/skills`, `<project>/.agents/skills`)
-are not watched, so install admission never scans what they hold. The hooks
-cover them as they cover every other folder: a denied name is refused at the
+Project skill folders (`<project>/.claude/skills`, `<project>/.agents/skills`,
+`<project>/.codex/skills`) are watched once an agent session runs in the
+project: its first hook (the session start, or the first skill call) adds the
+project's existing skill folders to the install watcher, which restarts and
+admits what they hold, as at a gateway start. Until a project skill's first
+scan has finished, the hooks refuse it with "is not scanned yet ... try again
+in a minute". Up to 32 project folders are watched; on a managed computer only
+projects inside the user's home count, and explicit
+`gateway.watcher.skill.dirs` add none. The hooks also cover them as they cover every other folder: a denied name is refused at the
 Skill call, the `$name` selection and the folder read, wherever the skill
 lives. With `runtime_detection.enabled: true`, `mode: action` and a
 `default: deny` or an approved registry, the Skill call and `$name` selection

@@ -441,7 +441,7 @@ defenseclaw config unset admission.skill.actions
 
 ## Continuous protection: the install watcher
 
-Running a one-shot scan is a starting point. The real value is the **install watcher**. It runs inside the gateway, is on by default, and watches the skill folders of every configured connector:
+Running a one-shot scan is a starting point. The real value is the **install watcher**. It runs inside the gateway, is on by default, and watches the skill folders of every configured connector, and those of each project an agent session runs in from the session's first hook ([project skill folders](/docs/policies/admission#where-a-denied-skill-is-refused)):
 
 <Flow
   direction="TB"

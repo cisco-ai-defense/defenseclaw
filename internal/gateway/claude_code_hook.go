@@ -139,6 +139,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
+		// The project's skill folders are admitted before the first prompt
+		// can load one (GAP-1063).
+		a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
 			count := a.scanClaudeCodeComponents(ctx, req)
 			if count > 0 {

@@ -212,6 +212,7 @@ func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest
 }
 
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
+	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
 	if !probe.Matched {
 		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
@@ -245,6 +246,7 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 }
 
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
+	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	targetType := slashCommandAssetType(req.CommandSource)
 	trustedAssetPolicySource := claudeCodeSlashSourceTrustsAssetPolicy(req.CommandSource)
 	commandName := strings.TrimSpace(req.CommandName)
@@ -358,6 +360,7 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 }
 
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
+	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
 	if !probe.Matched {
 		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
@@ -374,6 +377,7 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
+	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
 	probe.SourcePaths = a.skillSourcePaths(ctx, "codex", req.CWD, probe)
 	return a.evaluateNativeRuntimeSkillSelection(
@@ -588,6 +592,9 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	paths := []string{probe.SourcePath}
 	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
 		paths = probe.SourcePaths
+		if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
+			return decision, true
+		}
 		// A folder of another name that the call loads (its SKILL.md
 		// declares the name) answers to that folder's runtime disable.
 		for _, path := range probe.SourcePaths {

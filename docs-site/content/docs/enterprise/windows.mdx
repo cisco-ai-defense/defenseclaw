@@ -803,9 +803,10 @@ per-user install:
   until the file can be read again.
 - A folder created after the gateway starts is picked up within about 30
   seconds. The gateway never creates a folder in a user profile.
-- Only the skill and plugin folders of the agents in each profile are
-  watched. Project folders (`<project>\.claude\skills`,
-  `<project>\.agents\skills`), inside or outside the profile, get no install
+- The skill and plugin folders of the agents in each profile are watched,
+  and the skill folders of a project inside the profile
+  (`<project>\.claude\skills`, `<project>\.agents\skills`) from the first
+  hook an agent sends from it. A project outside the profile gets no install
   admission; the agent hooks still refuse a denied skill name there (see
   [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
 - Claude Code runs a plugin installed from a local marketplace folder from

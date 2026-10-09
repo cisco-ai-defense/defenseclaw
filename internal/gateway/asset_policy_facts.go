@@ -12,7 +12,10 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"io/fs"
 	"net/http"
 	"os"
@@ -270,4 +273,63 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 		}, true
 	}
 	return config.MCPServerEntry{}, false
+}
+
+// noteProjectSkillFolders registers, for the install watcher, the existing
+// skill folders of the project a hook comes from (GAP-1063). A managed
+// caller's project counts only inside the caller's home. Secure Client keeps
+// main's watched folders (issue #1092).
+func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd string) {
+	if a == nil || !a.projectSkills.isActive() || strings.TrimSpace(cwd) == "" || isSandboxHookRequest(ctx) {
+		return
+	}
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return
+	}
+	home := hookActiveHome(ctx)
+	if home == "" || home == unresolvedCallerHome {
+		return
+	}
+	_, peer := managedHookPeerFromContext(ctx)
+	managedCaller := peer || serviceAccountGatewayFromContext(ctx)
+	for _, folder := range projectSkillFolders(connector, home, cwd) {
+		if rel, err := filepath.Rel(home, folder); managedCaller && (err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+			continue
+		}
+		a.projectSkills.add(connector, folder)
+	}
+}
+
+// projectSkillScanPending refuses a skill in a registered project skill
+// folder that install admission has not recorded yet: its first scan is
+// running or about to (the watcher restarts to watch the folder), so it is
+// not loaded unscanned (GAP-1063).
+func (a *APIServer) projectSkillScanPending(targetType, connector, surface string, paths []string) (config.AssetPolicyDecision, bool) {
+	if a == nil || a.store == nil || targetType != "skill" || !a.projectSkills.isActive() {
+		return config.AssetPolicyDecision{}, false
+	}
+	for _, path := range paths {
+		// A hidden folder is not enumerated by the rescan, so it never gets
+		// a baseline to wait for.
+		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") ||
+			!a.projectSkills.registered(filepath.Dir(path)) {
+			continue
+		}
+		if _, err := os.Lstat(path); err != nil {
+			continue
+		}
+		row, err := a.store.GetTargetSnapshot("skill", path)
+		if err == nil && !watcher.BaselineAwaitsAdmission(row.ScannerFingerprint) {
+			continue
+		}
+		name := filepath.Base(path)
+		reason := fmt.Sprintf("skill %q in %s is not scanned yet: DefenseClaw is admitting this project's skills now; try again in a minute",
+			name, filepath.Dir(path))
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			reason = fmt.Sprintf("skill %q admission check failed - failing closed: %v", name, err)
+		}
+		return runtimeAssetDisableBlockDecision("skill", name, connector, surface, reason, "project-skill-pending"), true
+	}
+	return config.AssetPolicyDecision{}, false
 }
