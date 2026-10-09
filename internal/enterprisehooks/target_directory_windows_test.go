@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -79,6 +81,61 @@ func TestEnsureWindowsTargetOwnedDirectoryTreeRejectsPreexistingNoncanonicalDire
 	}
 	if _, statErr := os.Lstat(filepath.Join(dataDir, "hooks")); !os.IsNotExist(statErr) {
 		t.Fatalf("rejected directory gained a managed child: %v", statErr)
+	}
+}
+
+// GAP-1180: the guardian records the protected executable selection of an
+// account that never ran DefenseClaw. It creates %USERPROFILE%\.defenseclaw for
+// the receipt and its lock as that account (exact owner, protected DACL), and
+// a junction planted in the folder's place is refused, never followed.
+func TestWindowsManagedSetupSelectionCreatesMissingDataDir(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	executable := filepath.Join(t.TempDir(), "hermes.exe")
+	if err := os.WriteFile(executable, []byte("guardian-selected Hermes image"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	row := func(home string) windowsGenericManagedTarget {
+		return windowsGenericManagedTarget{
+			home:    home,
+			dataDir: filepath.Join(home, ".defenseclaw"),
+			sid:     target,
+			conn:    connector.NewHermesConnector(),
+			setup:   connector.SetupOpts{AgentExecutable: executable, AgentVersion: "0.20.0"},
+		}
+	}
+	record := func(selection windowsGenericManagedTarget) (created bool, err error) {
+		err = runWindowsTestThreadImpersonatedAsSelf(func() error {
+			var err error
+			if created, err = ensureWindowsManagedSetupSelectionDataDir(selection); err != nil {
+				return err
+			}
+			return recordWindowsManagedSetupSelection(selection)
+		})
+		return created, err
+	}
+
+	fresh := row(newWindowsTargetOwnedTestHome(t, target))
+	if created, err := record(fresh); err != nil || !created {
+		t.Fatalf("selection for an account without a data dir: created=%v err=%v", created, err)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, fresh.dataDir, target)
+	if _, err := os.Lstat(filepath.Join(fresh.dataDir, "agent_selection.json")); err != nil {
+		t.Fatalf("selection receipt was not written: %v", err)
+	}
+	if created, err := record(fresh); err != nil || created {
+		t.Fatalf("second selection: created=%v err=%v, want the folder reused", created, err)
+	}
+
+	planted := row(newWindowsTargetOwnedTestHome(t, target))
+	outside := t.TempDir()
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", planted.dataDir, outside).CombinedOutput(); err != nil {
+		t.Fatalf("create junction: %v: %s", err, output)
+	}
+	if _, err := record(planted); err == nil {
+		t.Fatal("selection was recorded through a junction in place of the data dir")
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Fatalf("junction target gained %d entries (err %v)", len(entries), err)
 	}
 }
 
