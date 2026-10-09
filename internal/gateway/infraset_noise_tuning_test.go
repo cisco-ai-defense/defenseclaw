@@ -270,6 +270,11 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"windows spaced home", `powershell -Command "Add-Content -Path 'C:\Users\Alice Smith\.ssh\authorized_keys' -Value dccert-block-marker"`, `C:/Users/Alice Smith/project`, `C:/Users/Alice Smith`, true},
 		{"windows admin keys", `powershell.exe -Command "Add-Content -Path C:/ProgramData/ssh/administrators_authorized_keys -Value dccert-block-marker"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
 		{"windows admin out file", `pwsh -c "'dccert-block-marker' | Out-File -Append C:/ProgramData/ssh/administrators_authorized_keys"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows cmd quoted", `cmd /c "echo dccert-block-marker >> %USERPROFILE%\.ssh\authorized_keys"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows cmd unquoted", `cmd /c echo dccert-block-marker >> %USERPROFILE%\.ssh\authorized_keys`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows home drive", `cmd /c "echo dccert-block-marker >> %HOMEDRIVE%%HOMEPATH%\.ssh\authorized_keys"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows named OutFile", `"dccert-block-marker" | Out-File -Append -FilePath "$HOME\.ssh\authorized_keys"`, `C:/Users/alice/project`, `C:/Users/alice`, true},
+		{"windows Git Bash path", `echo dccert-block-marker >> /c/Users/alice/.ssh/authorized_keys`, `C:/Users/alice/project`, `C:/Users/alice`, true},
 		{"cat", `cat ~/.ssh/authorized_keys`, "", "", false},
 		{"count", `grep -c ssh-ed25519 ~/.ssh/authorized_keys`, "", "", false},
 		{"metadata", `ls -l ~/.ssh/authorized_keys`, "", "", false},
@@ -295,6 +300,9 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		input := actionfacts.Input{
 			Tool: tool, Args: args, CWD: cwd,
 			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
+		}
+		if test.name == "windows named OutFile" {
+			input.DialectHint = actionfacts.DialectPowerShell
 		}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: input, LegacyText: string(args), Connector: connector,

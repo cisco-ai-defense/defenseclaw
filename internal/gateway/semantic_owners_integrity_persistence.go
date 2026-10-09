@@ -1495,6 +1495,9 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
 			trustedInlineAuthorizedKeysWrite(facts) ||
 			trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
+			trustedCMDAuthorizedKeysWrite(input) ||
+			trustedNamedOutFileAuthorizedKeysWrite(input) ||
+			trustedGitBashAuthorizedKeysWrite(input) ||
 			trustedNestedAuthorizedKeysWrite(input, facts)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {

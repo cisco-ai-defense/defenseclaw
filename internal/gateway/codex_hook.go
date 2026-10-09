@@ -277,7 +277,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
-		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) {
+		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
 			actionInput.DialectHint = codexWindowsShellDialect(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
@@ -814,7 +815,8 @@ func normalizeCodexAction(action string) string {
 // POSIX reading can still enforce instead of every finding turning into
 // detection-only.
 func codexWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
-	if !strings.EqualFold(strings.TrimSpace(tool), "bash") || command == "" {
+	tool = strings.ToLower(strings.TrimSpace(tool))
+	if (tool != "bash" && tool != "exec_command" && tool != "shell_command") || command == "" {
 		return ""
 	}
 	input.DialectHint = actionfacts.DialectPowerShell

@@ -338,6 +338,7 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			}
 		})
 	}
+
 }
 
 // A rule that negates over commands or operations must decide on the facts
@@ -606,5 +607,14 @@ func TestTrustedActionCustomArgvRuleMatchesUnmodeledProgram(t *testing.T) {
 		if got := finding != nil && finding.contributesToEnforcement(); got != test.block {
 			t.Errorf("%s %q: blocks = %t, want %t; findings=%v", test.tool, test.command, got, test.block, FindingStrings(findings))
 		}
+	}
+	args := []byte(`{"command":"hostname"}`)
+	windows := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: `C:/Users/alice/project`,
+			ActiveHome: `C:/Users/alice`, DialectHint: actionfacts.DialectPowerShell},
+		Connector: connector, EnforcementCapable: true,
+	})
+	if finding := findingWithID(windows, "TEST-HOSTNAME-BLOCK"); finding == nil || !finding.contributesToEnforcement() {
+		t.Fatalf("PowerShell Bash shape lost custom argv rule: %v", FindingStrings(windows))
 	}
 }

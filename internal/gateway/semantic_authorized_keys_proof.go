@@ -26,7 +26,84 @@ var (
 	trustedPythonOpenAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bopen\s*\(\s*os\.path\.expanduser\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\s*,\s*['"][aw](?:b|\+)?['"]\s*\)\.write\s*\(`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
+	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
+	trustedOutFileAppend                 = regexp.MustCompile(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
 )
+
+func trustedCMDBody(input actionfacts.Input) (string, bool) {
+	if len(input.Command) > 64<<10 || input.Command == "" ||
+		!strings.Contains(input.ActiveHome, ":/") {
+		return "", false
+	}
+	parts := trustedCMDInvoke.FindStringSubmatch(strings.TrimSpace(input.Command))
+	if len(parts) != 2 {
+		return "", false
+	}
+	body := strings.TrimSpace(parts[1])
+	if len(body) >= 2 && body[0] == '"' && body[len(body)-1] == '"' {
+		body = body[1 : len(body)-1]
+	}
+	if body == "" || strings.ContainsAny(body, "\r\n") {
+		return "", false
+	}
+	return body, true
+}
+
+func trustedWindowsHomeOperand(operand, home, file string) bool {
+	operand = strings.TrimSpace(operand)
+	if len(operand) >= 2 && operand[0] == '"' && operand[len(operand)-1] == '"' {
+		operand = operand[1 : len(operand)-1]
+	}
+	if strings.ContainsAny(operand, "`\r\n;|&<>") {
+		return false
+	}
+	value := strings.ToLower(strings.ReplaceAll(operand, `\`, "/"))
+	for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$home", "${home}", "$env:userprofile", "${env:userprofile}", "~"} {
+		if strings.HasPrefix(value, prefix+"/") {
+			value = strings.ToLower(home) + value[len(prefix):]
+			break
+		}
+	}
+	return canonicalSemanticPath(value) == canonicalSemanticPath(home+"/.ssh/"+file)
+}
+
+func trustedCMDAuthorizedKeysWrite(input actionfacts.Input) bool {
+	body, ok := trustedCMDBody(input)
+	if !ok {
+		return false
+	}
+	index := strings.LastIndex(body, ">")
+	if index < 0 || index+1 >= len(body) {
+		return false
+	}
+	return trustedWindowsHomeOperand(body[index+1:], input.ActiveHome, "authorized_keys")
+}
+
+func trustedNamedOutFileAuthorizedKeysWrite(input actionfacts.Input) bool {
+	if input.DialectHint != actionfacts.DialectPowerShell || len(input.Command) > 64<<10 {
+		return false
+	}
+	parts := trustedOutFileAppend.FindStringSubmatch(input.Command)
+	return len(parts) == 2 && trustedWindowsHomeOperand(parts[1], input.ActiveHome, "authorized_keys")
+}
+
+func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
+	home := strings.ReplaceAll(input.ActiveHome, `\`, "/")
+	if len(home) < 3 || home[1] != ':' || home[2] != '/' ||
+		input.DialectHint != actionfacts.DialectPOSIX {
+		return false
+	}
+	gitHome := "/" + strings.ToLower(home[:1]) + home[2:]
+	operand := gitHome + "/.ssh/authorized_keys"
+	if !strings.Contains(input.Command, operand) {
+		return false
+	}
+	inner := input
+	inner.Args, inner.Argv = nil, nil
+	inner.Command = strings.ReplaceAll(input.Command, operand, home+"/.ssh/authorized_keys")
+	parsed := actionfacts.Analyze(inner).EnforcementProjection()
+	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
+}
 
 func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	if len(facts.Commands) != 1 {
