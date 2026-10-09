@@ -159,6 +159,30 @@ path and source without treating the observation as durable discovery authority.
 </Accordion>
 </Accordions>
 
+### Settings that turn the hooks off
+
+The per-user hooks live in Claude Code's own settings, so Claude Code's own
+switches apply to them:
+
+- `disableAllHooks: true` in `~/.claude/settings.json` turns every hook off.
+  The gateway raises a guardrail-degraded alert, `defenseclaw status` marks
+  Claude Code DEGRADED, `defenseclaw guardrail status` says it is not guarded
+  and `defenseclaw doctor` fails the **Claude Code hooks** row. Remove the key
+  (or set it to `false`) and restart Claude Code.
+- The same key in a project's `.claude/settings.local.json` or
+  `.claude/settings.json`, or in a file passed with `claude --settings`,
+  turns the hooks off for sessions in that project or with that file. No hook
+  runs then, so DefenseClaw records nothing for those sessions. Run
+  `defenseclaw status` or `defenseclaw doctor` in the project folder: both
+  check that folder's project settings. DefenseClaw cannot see a
+  `--settings` file.
+- A `~/.claude/settings.json` that is a symlink into a dotfiles folder works
+  when the link ends at a file in your home folder that you own. A link to
+  anywhere else is refused before any hook is written.
+
+The [enterprise standalone profile](/docs/enterprise/machine-policy) puts the
+hooks in machine policy, which these settings cannot turn off.
+
 ## Enterprise (standalone profile)
 
 In the [enterprise standalone profile](/docs/enterprise/machine-policy),
