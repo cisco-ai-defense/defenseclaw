@@ -107,7 +107,7 @@ func loadConnectorRulePack(cache *guardrail.RulePackCache, cfg *config.Config, c
 }
 
 func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s rulePackScope, scope string) (*guardrail.RulePack, error) {
-	if s.ref.Name != "" && s.dir == "" {
+	if s.ref.Name != "" && s.dir == "" && !cfg.EmbeddedRulePack(s.ref) {
 		if config.IsBuiltinRulePack(s.ref.Name) {
 			return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set", scope, s.ref.Name)
 		}
