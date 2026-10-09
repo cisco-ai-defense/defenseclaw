@@ -144,6 +144,21 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 	return paths
 }
 
+// installedSkillFolders are the folders, in the skill roots the connector
+// loads from, that hold a skill named name (a SKILL.md in the folder).
+// Secure Client keeps main's lookup (issue #1092).
+func (a *APIServer) installedSkillFolders(ctx context.Context, connector, cwd, name string) []string {
+	var folders []string
+	for _, dir := range a.skillSourcePaths(ctx, connector, cwd, skillRuntimeProbe{
+		TargetType: "skill", SkillName: name, Matched: true,
+	}) {
+		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
+			folders = append(folders, dir)
+		}
+	}
+	return folders
+}
+
 // skillFolderAccessDecision blocks a tool call that reaches into the folder
 // of a denied skill. Asked for a skill in plain words, Codex reads its
 // SKILL.md with a shell command and follows it, and no skill selection hook

@@ -274,6 +274,19 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 			Matched:            true,
 			RuntimeDisableOnly: runtimeDisableOnly,
 		}
+		if runtimeDisableOnly && !identityMalformed && identity.targetType == "skill" {
+			// A settings-origin command that is a skill folder (a user or
+			// project skill typed as /name) is held to asset_policy at
+			// that folder as the Skill tool is; it used to get the
+			// runtime-disable lookup only, so a skill on
+			// asset_policy.skill.denied ran (GAP-0968). A custom command
+			// with no skill folder of its name keeps that lookup.
+			if folders := a.installedSkillFolders(ctx, "claudecode", req.CWD, identity.name); len(folders) > 0 {
+				probe.RuntimeDisableOnly = false
+				probe.SourcePath = ""
+				probe.SourcePaths = folders
+			}
+		}
 		probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 		if decision, matched := a.evaluateNativeRuntimeSkillSelection(
 			ctx, "claudecode", req.SessionID, req.HookEventName,

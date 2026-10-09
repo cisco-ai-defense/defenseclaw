@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -417,6 +419,45 @@ func TestClaudeFilesystemSkillProvenanceMapsToRuntimeDisableSkillNamespace(t *te
 		if got := slashCommandAssetType(source); got != "" {
 			t.Fatalf("slashCommandAssetType(%q)=%q, want ambiguous/unattributed", source, got)
 		}
+	}
+}
+
+// GAP-0968: a user or project skill typed as /name arrives with a settings
+// command_source; when a skill folder of that name exists it is held to
+// asset_policy.skill.denied like the Skill tool call.
+func TestClaudeSettingsOriginSlashSkillOnDeniedListIsRefused(t *testing.T) {
+	for _, source := range []string{"userSettings", "projectSettings"} {
+		t.Run(source, func(t *testing.T) {
+			store, logger := newNativeSkillRuntimeTestStore(t)
+			project := t.TempDir()
+			skill := filepath.Join(project, ".claude", "skills", "dcmain-marker")
+			if err := os.MkdirAll(skill, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: dcmain-marker\n---\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.Mode = "action"
+			cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "dcmain-marker"}}
+			api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+			payload, err := json.Marshal(map[string]interface{}{
+				"hook_event_name": "UserPromptExpansion",
+				"session_id":      "settings-skill-" + strings.ToLower(source),
+				"prompt":          "/dcmain-marker",
+				"expansion_type":  "slash_command",
+				"command_name":    "dcmain-marker",
+				"command_source":  source,
+				"cwd":             project,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response := invokeNativeSkillHook(t, api, "claudecode", string(payload)); response.Action != "block" {
+				t.Fatalf("action=%q reason=%q, want the denied skill refused", response.Action, response.Reason)
+			}
+		})
 	}
 }
 
