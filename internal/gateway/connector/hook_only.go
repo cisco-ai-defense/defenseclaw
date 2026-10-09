@@ -537,8 +537,8 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		profile.Decode = devinProfileDecode
 	}
 	// NOTE: hermes needs no Decode override. Its nested `extra` content
-	// is recovered by the generic decoder's ContentEnvelopeKey fallback
-	// (declared on the hermes hook contract), and its wire replies are
+	// is read by the generic decoder from the ContentEnvelope its hook
+	// contract declares, and its wire replies are
 	// shaped by the hermes case in hookOnlyProfileRespond.
 	return ApplyHookContract(profile, opts)
 }

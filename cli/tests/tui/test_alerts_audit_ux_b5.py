@@ -55,6 +55,18 @@ def _row(row_id: str, payload: dict[str, object], *, action: str = "scan-finding
     )
 
 
+def test_hermes_prompt_finding_in_action_mode_is_not_observe_mode() -> None:
+    """GAP-0898: a Hermes pre_llm_call cannot be blocked; action mode sends a notice."""
+    row = "connector=hermes action=allow raw_action=block mode={} would_block=true"
+    notice = "agent told not to carry out the prompt (prompts cannot be blocked)"
+    for decide in (cmd_alerts._hook_decision, alerts_panel._hook_decision_from_rows):  # noqa: SLF001
+        assert decide([row.format("action")], "hermes:pre_llm_call") == notice
+        assert decide([row.format("observe")], "hermes:pre_llm_call") == "would block (observe mode)"
+        assert decide([row.format("action")], "hermes:post_tool_call") == (
+            "detected after the tool ran (cannot block)"
+        )
+
+
 def test_message_display_finding_cannot_block_in_cli_and_tui() -> None:
     """GAP-1531: MessageDisplay runs async; its finding is never "observe mode"."""
     observed = ["connector=claudecode action=allow raw_action=block mode=action would_block=true"]
