@@ -772,9 +772,25 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
     }
     collection = f"{BETA}/deviceManagement/deviceHealthScripts"
     group = group_by_name(graph, args.group) if args.group else None
+
+    def reject_exclusion(assignments: list[dict]) -> None:
+        for assignment in assignments:
+            target = assignment.get("target") or {}
+            if target.get("groupId") == group["id"] and target.get("@odata.type") != GROUP_TARGET:
+                raise SystemExit(
+                    f"error: group {args.group!r} is an exclusion target for {args.name!r}; "
+                    "remove the exclusion assignment in Intune first, then run remediation again"
+                )
+
+    if group:
+        scripts = graph.get_all(f"{collection}?$filter={odata_eq('displayName', args.name)}&$select=id")
+        if len(scripts) == 1:
+            assignments = graph.get_all(f"{collection}/{scripts[0]['id']}/assignments")
+            reject_exclusion(assignments)
     script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package", create_body)
     if group:
         existing = graph.get_all(f"{collection}/{script_id}/assignments") if script_id else []
+        reject_exclusion(existing)
         kept = [a for a in existing if a.get("target", {}).get("groupId") != group["id"]]
         matching = [a for a in existing if a.get("target", {}).get("groupId") == group["id"]]
         if len(matching) > 1:

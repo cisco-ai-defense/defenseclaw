@@ -1510,6 +1510,27 @@ def test_intune_expired_apple_push_certificate_fails_readiness(monkeypatch: pyte
     assert certificate["status"] == intune.FAIL
 
 
+def test_intune_remediation_refuses_exclusion_before_package_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{"target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget",
+                                    "groupId": "group-1"}}]
+            return [{"id": "script-1"}]
+
+        def request(self, *_args):
+            raise AssertionError("exclusion must be refused before any tenant write")
+
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
+    with pytest.raises(SystemExit, match="group 'team' is an exclusion target.*remove the exclusion assignment"):
+        intune.cmd_remediation(Graph(), args)
+
+
 def test_intune_remediation_rerun_uploads_changed_default_scripts(monkeypatch: pytest.MonkeyPatch) -> None:
     intune = _load(INTUNE)
     writes = []
