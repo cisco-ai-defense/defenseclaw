@@ -261,6 +261,10 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
+		var dialectHint actionfacts.Dialect
+		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) {
+			dialectHint = codexWindowsShellDialect(toolName, codexExactMapString(req.ToolInput, "command"))
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
@@ -269,6 +273,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 				ActiveHome:               hookActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
 				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
+				DialectHint:              dialectHint,
 			},
 			LegacyText:                string(toolArgs),
 			Connector:                 "codex",
@@ -754,6 +759,21 @@ func reasonOrDefault(reason string) string {
 
 func normalizeCodexAction(action string) string {
 	return normalizedGuardrailAction(action)
+}
+
+// codexWindowsShellDialect is the grammar of a Codex shell call on native
+// Windows. Codex names its shell tool Bash everywhere, but on Windows it runs
+// the command in PowerShell, so a PowerShell command such as
+// `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
+// and ran with no finding (GAP-0912). A command whose grammar reads as
+// PowerShell is parsed as PowerShell; any other keeps the Bash tool's POSIX
+// reading, which both shells share for the commands it models.
+func codexWindowsShellDialect(tool, command string) actionfacts.Dialect {
+	if !strings.EqualFold(strings.TrimSpace(tool), "bash") || command == "" ||
+		actionfacts.InferredRawCommandDialect(command) != actionfacts.DialectPowerShell {
+		return ""
+	}
+	return actionfacts.DialectPowerShell
 }
 
 func codexToolName(req codexHookRequest) string {
