@@ -983,6 +983,20 @@ func windowsSystemCmdExe() string {
 	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\cmd.exe`
 }
 
+// powershellDecodedCommand is the script of a -EncodedCommand argument
+// (powershellEncodedCommand), or false.
+func powershellDecodedCommand(encoded string) (string, bool) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil || len(raw)%2 != 0 {
+		return "", false
+	}
+	wide := make([]uint16, len(raw)/2)
+	for i := range wide {
+		wide[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+	return string(utf16.Decode(wide)), true
+}
+
 func powershellEncodedCommand(script string) string {
 	wide := utf16.Encode([]rune(script))
 	buf := make([]byte, len(wide)*2)

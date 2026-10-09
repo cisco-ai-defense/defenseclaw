@@ -4,6 +4,7 @@
 package connector
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -108,6 +109,77 @@ func testWindowsCodexMachineOptions() WindowsCodexMachineRequirementsOptions {
 		HookBinary:       `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
 		OwnershipPath:    `C:\ProgramData\DefenseClaw\state\install\codex-requirements-ownership.json`,
 		ManagedStatePath: `C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.state`,
+	}
+}
+
+// GAP-1025: an upgrade from 1.0.0 added the current DefenseClaw group next
+// to the 1.0.0 one (its Start-Process command) in every event, so every
+// Codex hook ran twice. Reconcile replaces DefenseClaw's own groups of any
+// release by their marker and keeps the administrator's.
+func TestReconcileWindowsCodexRequirementsReplacesTheOneZeroHookSet(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	opts.HookContractID = KnownHookContracts("codex")[0].ContractID
+	// The 1.0.0 (d48efaa18) form of the bound managed command.
+	oneZero := func(event string) string {
+		quoted := []string{}
+		for _, argument := range []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", opts.HookContractID} {
+			quoted = append(quoted, powershellQuoteLiteral(argument))
+		}
+		script := strings.Join([]string{
+			"$ErrorActionPreference='Stop'",
+			"$env:NoDefaultCurrentDirectoryInExePath='1'",
+			"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(opts.HookBinary) +
+				" -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru",
+			"exit $hookProcess.ExitCode",
+		}, "; ")
+		return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+	}
+	old := windowsCodexMachineLayout(opts)
+	old.owned = nil
+	old.handler = func(group codexHookGroup) map[string]interface{} {
+		return windowsCodexMachineHandler(oneZero(group.eventType), group.timeout)
+	}
+	admin := map[string]interface{}{"matcher": "admin", "hooks": []interface{}{
+		map[string]interface{}{"type": "command", "command": "audit.exe", "timeout": int64(5)},
+	}}
+	cfg := map[string]interface{}{
+		"administrator_key": "preserve",
+		"hooks":             map[string]interface{}{"SessionStart": []interface{}{admin}},
+	}
+	if err := old.reconcile(cfg); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := toml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, changed, err := reconcileWindowsCodexRequirements(upgraded, opts)
+	if err != nil || !changed {
+		t.Fatalf("reconcile of the 1.0.0 form: changed=%v err=%v", changed, err)
+	}
+	got, err := parseWindowsCodexRequirements(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := got["hooks"].(map[string]interface{})
+	commands := 0
+	for _, expected := range codexHookGroups {
+		groups, _ := hooks[expected.eventType].([]interface{})
+		want := 1
+		if expected.eventType == "SessionStart" {
+			want = 2 // the administrator's group stays
+		}
+		if len(groups) != want {
+			t.Fatalf("hooks.%s has %d groups, want %d", expected.eventType, len(groups), want)
+		}
+		for _, group := range groups {
+			if windowsCodexOwnedHookGroup(group, opts.HookBinary) {
+				commands++
+			}
+		}
+	}
+	if commands != len(codexHookGroups) || got["administrator_key"] != "preserve" {
+		t.Fatalf("DefenseClaw commands = %d, want %d; administrator key = %v", commands, len(codexHookGroups), got["administrator_key"])
 	}
 }
 
