@@ -913,7 +913,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
 				moved := w.movedByAdmission(evt)
-				if _, statErr := os.Lstat(evt.Path); statErr == nil && !res.Interrupted && !moved {
+				if res.Interrupted {
+					w.markInterruptedAdmission(evt, currentSnap, fingerprint)
+				} else if _, statErr := os.Lstat(evt.Path); statErr == nil && !moved {
 					// The admission scan is the baseline scan, so the next
 					// start skips the unchanged target (GAP-2507).
 					w.persistSnapshot(evt, currentSnap, res.ScanID, w.admissionFingerprint(res, fingerprint))
@@ -931,6 +933,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
 		return rescanSkipped
+	}
+
+	if strings.HasSuffix(baseline.ScannerFingerprint, interruptedAdmissionMark) && !w.secureClientActive() {
+		return w.readmitInterrupted(ctx, evt, currentSnap, fingerprint)
 	}
 
 	// A rejection decided while take_action was off left the target in
@@ -1104,6 +1110,42 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 	w.notifyAdmission(res)
 	moved := w.movedByAdmission(evt)
 	if res.Interrupted || res.ScanID == "" || moved {
+		return rescanScanned
+	}
+	if _, err := os.Lstat(evt.Path); err == nil {
+		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
+	}
+	return rescanScanned
+}
+
+// interruptedAdmissionMark ends the scanner fingerprint of a baseline that
+// records an admission the watcher's own stop cut off. No scanner
+// fingerprint contains it.
+const interruptedAdmissionMark = "|admission-interrupted"
+
+// markInterruptedAdmission records that the admission of a skill or plugin
+// was cut off by the watcher stopping (a config reload or a change of the
+// enrolled users' folders restarts it). Without it the next start found no
+// baseline under a root it had not baselined yet, recorded a baseline scan
+// with verdict warn, and a CRITICAL skill stayed loaded (GAP-0980). The mark
+// makes the next cycle run install admission instead.
+func (w *InstallWatcher) markInterruptedAdmission(evt InstallEvent, snap *TargetSnapshot, fingerprint string) {
+	if snap == nil || w.store == nil || w.secureClientActive() || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return
+	}
+	if _, err := os.Lstat(evt.Path); err != nil {
+		return
+	}
+	w.persistSnapshot(evt, snap, "", strings.TrimSuffix(fingerprint, interruptedAdmissionMark)+interruptedAdmissionMark)
+}
+
+// readmitInterrupted runs the install admission an interrupted one owed. The
+// mark stays until an admission decides; a decided target gets its baseline.
+func (w *InstallWatcher) readmitInterrupted(ctx context.Context, evt InstallEvent, snap *TargetSnapshot, fingerprint string) rescanOutcome {
+	fmt.Fprintf(os.Stderr, "[rescan] %s %s: its admission scan was cut off; running install admission\n", evt.Type, evt.Name)
+	res := w.runAdmission(ctx, evt)
+	w.notifyAdmission(res)
+	if res.Interrupted || res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt) {
 		return rescanScanned
 	}
 	if _, err := os.Lstat(evt.Path); err == nil {

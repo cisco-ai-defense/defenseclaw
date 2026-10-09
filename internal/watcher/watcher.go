@@ -1104,6 +1104,9 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 				w.state.set(evt, AdmissionScanning)
 				snap := w.admissionSnapshot(evt)
 				result := w.runAdmission(ctx, evt)
+				if result.Interrupted {
+					w.markInterruptedAdmission(evt, snap, w.scannerFingerprint(evt))
+				}
 				w.recordAdmissionBaseline(evt, snap, result)
 				w.state.clear(evt.Path)
 				w.notifyAdmission(result)
