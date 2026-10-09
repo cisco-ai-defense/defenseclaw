@@ -6,9 +6,13 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
+# The fake gh is a POSIX shell script; on Windows bash is the WSL launcher.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_release_lookup_failure_fails_upgrade_lane(tmp_path: Path) -> None:
     gh = tmp_path / "gh"
     gh.write_text("#!/bin/sh\nexit 1\n")

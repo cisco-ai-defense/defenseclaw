@@ -1234,6 +1234,9 @@ case "$2" in secret) cat >/dev/null; echo secret-busy >&2; exit {secret_rc} ;; e
 echo '{{"ok":true}}'
 """, encoding="utf-8")
     gateway.chmod(0o755)
+    # dc_main repairs a package whose required binaries are missing or empty.
+    for sibling in ("defenseclaw-hook", "defenseclaw-sensor-helper"):
+        (tmp_path / sibling).write_text("#!/bin/sh\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text("x: 1\n", encoding="utf-8")
     (tmp_path / "key").write_text("value\n", encoding="utf-8")
     group = "macos" if os_dir == "macos" else "linux"
