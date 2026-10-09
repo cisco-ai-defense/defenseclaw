@@ -3340,6 +3340,12 @@ $failureMessage = $null
 $failureEvidence = $null
 $exitCode = 0
 try {
+    if ($DeferredConfig) {
+        throw (
+            '-DeferredConfig is temporarily unavailable: secure target ' +
+            'runtime preparation requires authenticated targets.yaml during Install'
+        )
+    }
     if ($DeferredConfig -and $Action -ne 'Install') {
         throw '-DeferredConfig is valid only with Install'
     }

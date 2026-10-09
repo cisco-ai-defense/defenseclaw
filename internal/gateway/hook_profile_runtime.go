@@ -178,5 +178,6 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		SourceReason:         resp.SourceReason,
 		SuppressNotification: resp.SuppressNotification,
 		aiDefenseEnforced:    resp.aiDefenseEnforced,
+		laneVerdict:          resp.laneVerdict,
 	}
 }

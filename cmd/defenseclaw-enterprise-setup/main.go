@@ -689,7 +689,7 @@ func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
 	actions := enterpriseSetupActions(standalone)
 	sort.Strings(actions)
 	fmt.Fprintf(output, "%s --action <%s> [options]\n", enterpriseSetupArtifactName, strings.Join(actions, "|"))
-	fmt.Fprintln(output, "Install requires --config <config.yaml> and --manifest <targets.yaml>.")
+	fmt.Fprintln(output, "Install takes --config <config.yaml> and --manifest <targets.yaml> together; with neither, it stages a disabled deployment that a later Repair with both files activates.")
 	if standalone {
 		fmt.Fprintln(output, "Ensure (standalone Setup) converges the host: install, upgrade, repair, or no-op.")
 	}

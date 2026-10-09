@@ -171,10 +171,11 @@ const aiDiscoveryResultPartial = "partial"
 // the day's bundle is not: the cloud would hold an incomplete copy and the real
 // bundle would stay suppressed for another interval.
 func aiDiscoveryReportComplete(report *inventory.AIDiscoveryReport) bool {
-	if report == nil {
+	if report == nil || strings.TrimSpace(report.Summary.ScanID) == "" {
 		return false
 	}
-	return !strings.EqualFold(strings.TrimSpace(report.Summary.Result), aiDiscoveryResultPartial)
+	result := strings.TrimSpace(report.Summary.Result)
+	return result != "" && !strings.EqualFold(result, aiDiscoveryResultPartial)
 }
 
 func emitEndpointInventory(
@@ -654,7 +655,9 @@ func makeEndpointInventoryEmitter(
 		var report *inventory.AIDiscoveryReport
 		if snapshotFn != nil {
 			snap := snapshotFn()
-			report = &snap
+			if strings.TrimSpace(snap.Summary.ScanID) != "" {
+				report = &snap
+			}
 		}
 		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report, gate)
 	}

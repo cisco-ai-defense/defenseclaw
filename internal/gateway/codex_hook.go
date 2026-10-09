@@ -146,6 +146,12 @@ type codexHookResponse struct {
 	SourceReason         string `json:"-"`
 	SuppressNotification bool   `json:"-"`
 	aiDefenseEnforced    bool
+	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
+	// (Cisco AI Defense, LLM judge) took part in the verdict.
+	// liftUnblockedDestinations refuses to lift a response flagged this
+	// way, so destination rules alone cannot convert a lane block into
+	// an allow. Never serialized on the wire.
+	laneVerdict bool
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -370,6 +376,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.laneVerdict = verdict.laneVerdict
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	return resp
