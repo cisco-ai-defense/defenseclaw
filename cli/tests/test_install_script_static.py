@@ -1529,7 +1529,14 @@ def test_installed_version_is_the_gateway_on_path_not_a_stale_release_venv(tmp_p
     assert body.index('"defenseclaw-gateway.exe"') < body.index("dist-info")
 
 
-def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "repo,base",
+    [
+        ("", "https://github.com/cisco-ai-defense/defenseclaw"),
+        ("https://mirror.example/defenseclaw/", "https://mirror.example/defenseclaw"),
+    ],
+)
+def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path, repo: str, base: str) -> None:
     releases = tmp_path / "releases"
     for version in ("1.0.0", "1.0.1"):
         target = releases / version
@@ -1548,7 +1555,7 @@ def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path) -> 
         'previous=""\n'
         'for arg in "$@"; do\n'
         '  [ "$previous" = "-o" ] && output="$arg"\n'
-        '  case "$arg" in https://github.com/*) url="$arg";; esac\n'
+        '  case "$arg" in https://*) url="$arg";; esac\n'
         '  previous="$arg"\n'
         'done\n'
         'echo "$url" >> "$CURL_LOG"\n'
@@ -1571,10 +1578,11 @@ def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path) -> 
         PATH=f"{tools}:{os.environ.get('PATH', '/usr/bin:/bin')}",
         FAKE_RELEASES=str(releases),
         CURL_LOG=str(curl_log),
+        DEFENSECLAW_REPO=repo,
     )
 
     assert result.returncode == 0, result.stderr
     assert "would upgrade to DefenseClaw 1.0.0" in result.stdout
     urls = curl_log.read_text(encoding="utf-8").splitlines()
     assert all("/releases/latest" not in url for url in urls)
-    assert any("/releases/download/1.0.0/install.sh" in url for url in urls)
+    assert f"{base}/releases/download/1.0.0/install.sh" in urls
