@@ -5942,6 +5942,7 @@ def _configure_hilt_interactive(
     gc,
     *,
     action_connectors: list[str] | None = None,
+    target_connector: str | None = None,
     flag_enabled: bool | None = None,
     flag_min_severity: str | None = None,
 ) -> None:
@@ -5967,19 +5968,26 @@ def _configure_hilt_interactive(
         connector = gc.connector or "openclaw"
     ux.subhead(_hilt_support_note(connector))
     ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
+    hilt = gc.hilt
+    if target_connector and target_connector in (getattr(gc, "connectors", None) or {}):
+        override = gc.connectors[target_connector]
+        if override.hilt is None:
+            current = gc.effective_hilt(target_connector)
+            override.hilt = HILTConfig(enabled=current.enabled, min_severity=current.min_severity)
+        hilt = override.hilt
     enabled = click.confirm(
         "  Human approval for risky actions?",
-        default=gc.hilt.enabled if flag_enabled is None else flag_enabled,
+        default=hilt.enabled if flag_enabled is None else flag_enabled,
     )
-    gc.hilt.enabled = enabled
+    hilt.enabled = enabled
     if not enabled:
-        gc.hilt.min_severity = gc.hilt.min_severity or "HIGH"
+        hilt.min_severity = hilt.min_severity or "HIGH"
         return
 
-    default_min = (flag_min_severity or gc.hilt.min_severity or "HIGH").upper()
+    default_min = (flag_min_severity or hilt.min_severity or "HIGH").upper()
     if default_min not in _HILT_MIN_SEVERITIES:
         default_min = "HIGH"
-    gc.hilt.min_severity = click.prompt(
+    hilt.min_severity = click.prompt(
         "  Approval minimum severity",
         type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False),
         default=default_min,
@@ -13812,6 +13820,8 @@ def _interactive_guardrail_setup(
     # to the singular mode for the bootstrap/single-connector path.
     if is_multi:
         hilt_action_connectors = [c for c in active_connectors if (gc.effective_mode(c) or "").strip() == "action"]
+        if agent_name:
+            hilt_action_connectors = [c for c in hilt_action_connectors if c == agent_name]
         hilt_applicable = bool(hilt_action_connectors)
     else:
         hilt_action_connectors = None
@@ -13820,6 +13830,7 @@ def _interactive_guardrail_setup(
         _configure_hilt_interactive(
             gc,
             action_connectors=hilt_action_connectors,
+            target_connector=agent_name,
             flag_enabled=human_approval,
             flag_min_severity=hilt_min_severity,
         )

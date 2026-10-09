@@ -41,6 +41,12 @@ class IdentityGuideExamplesTest(unittest.TestCase):
                     re.search(r"hook\s+decision and asset-policy", text), page.name
                 )
 
+    def test_hilt_setup_guide_names_prompts_and_connector_scope(self):
+        text = (DOC_ROOT / "hitl.mdx").read_text()
+        for prompt in ("whether to enable the", "which connectors should enforce actions", "which hook fail mode", "which scanner engine"):
+            self.assertIn(prompt, text)
+        self.assertIn("Codex keeps its own approval setting", text)
+
 
 if __name__ == "__main__":
     unittest.main()
