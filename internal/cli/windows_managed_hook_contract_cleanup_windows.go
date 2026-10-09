@@ -192,6 +192,12 @@ func captureWindowsManagedHookContractCleanupReceipt(
 		return receipt, errors.New("managed hook contract cleanup scope is invalid")
 	}
 	for _, target := range identity.Targets {
+		switch target.Connector {
+		case "claudecode", "codex", "cursor":
+		default:
+			// Per-user plugin connectors publish no managed hook contract lock.
+			continue
+		}
 		var claim connector.WindowsManagedHookContractCleanupClaim
 		err := enterprisehooks.RunWithWindowsAdministratorOwnerRestorePrivilege(func() error {
 			var captureErr error
@@ -463,11 +469,23 @@ func validateWindowsManagedHookContractCleanupReceiptBinding(
 	); err != nil {
 		return err
 	}
+	// Receipts carry claims only for the contract-lock connectors
+	// (claudecode, codex, cursor). Per-user plugin connectors publish no
+	// managed hook contract lock and are skipped during capture, so the
+	// receipt count is bounded by the filtered target set, not every
+	// target in the teardown journal.
+	contractLockTargets := make([]windowsManagedHooksTeardownTarget, 0, len(identity.Targets))
+	for _, target := range identity.Targets {
+		switch target.Connector {
+		case "claudecode", "codex", "cursor":
+			contractLockTargets = append(contractLockTargets, target)
+		}
+	}
 	if receipt.ManifestFingerprint != identity.ManifestFingerprint ||
-		len(receipt.Claims) != len(identity.Targets) {
+		len(receipt.Claims) != len(contractLockTargets) {
 		return errors.New("managed hook contract cleanup receipt does not match the teardown manifest")
 	}
-	for index, target := range identity.Targets {
+	for index, target := range contractLockTargets {
 		claim := receipt.Claims[index]
 		if claim.Connector != target.Connector || claim.SID != target.SID ||
 			!sameWindowsEnterprisePathCLI(claim.DataDir, target.DataDir) {

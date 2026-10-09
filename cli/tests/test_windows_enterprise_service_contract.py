@@ -37,6 +37,13 @@ BOOTSTRAP_ENVIRONMENT_SMOKE = (
     / "enterprise-bootstrap-environment-smoke.ps1"
 )
 UNINSTALL_TRANSACTION_SMOKE = ROOT / "packaging" / "windows" / "tests" / "enterprise-uninstall-transaction-smoke.ps1"
+INSTALL_RECONCILE_SMOKE = (
+    ROOT
+    / "packaging"
+    / "windows"
+    / "tests"
+    / "enterprise-install-reconcile-smoke.ps1"
+)
 SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     ROOT
     / "packaging"
@@ -1457,6 +1464,14 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
                 "uninstall_cases",
                 "purge_cases",
                 "shared_directory_cases",
+            ),
+        ),
+        (
+            INSTALL_RECONCILE_SMOKE,
+            (
+                "reconcileInstall",
+                "Test-DefenseClawMetadataInstalled",
+                "tombstone",
             ),
         ),
         (
