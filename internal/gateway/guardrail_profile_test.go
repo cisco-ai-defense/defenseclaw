@@ -1740,3 +1740,31 @@ rules:
 			badKey, goodKey, set.missing[badKey] != nil, set.rules[goodKey] != nil)
 	}
 }
+
+// A numeric Windows group name is still a name: only its resolved SID may
+// select the assignment, even if another domain has a group with that name.
+func TestWindowsNumericGroupNameMatchesResolvedSID(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "tooling", Match: config.ProfileMatch{Groups: []string{"1234"}}},
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "strict", assignments: assignments,
+		profiles: map[string]config.DerivedGuardrailProfile{"strict": {}, "tooling": {}},
+		groupSIDs: newProfileGroupSIDs(assignments, func(name string) (string, error) {
+			if name != "1234" {
+				t.Fatalf("lookup name = %q, want 1234", name)
+			}
+			return "S-1-5-21-860-1-2-1234", nil
+		}, time.Second),
+	}
+	other := &profileSubject{UserID: "S-1-5-21-860-1-2-1001", IDKind: useridentity.KindWindowsSID,
+		Groups: []string{`OTHER\1234`, "S-1-5-21-999-1-2-1234"}}
+	if got := set.match(other, profileSubjectVerified, "codex", ""); got.Name != "strict" {
+		t.Fatalf("other domain's numeric group selected %+v, want strict default", got)
+	}
+	intended := &profileSubject{UserID: other.UserID, IDKind: other.IDKind,
+		Groups: []string{"S-1-5-21-860-1-2-1234"}}
+	if got := set.match(intended, profileSubjectVerified, "codex", ""); got.Name != "tooling" || got.Match != profileMatchGroup {
+		t.Fatalf("resolved numeric group selected %+v, want tooling group assignment", got)
+	}
+}

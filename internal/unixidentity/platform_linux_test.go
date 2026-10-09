@@ -537,3 +537,38 @@ func TestSSSDAccountKeepsGroupFromAnotherNSSService(t *testing.T) {
 		t.Fatalf("without LDAP membership, groups = %q, %v", facts.Groups, err)
 	}
 }
+
+// A failed domain-qualified initgroups lookup can fall back to an ambiguous
+// short name. A local group must list this account before it can rescue a
+// SID-less gid from that result.
+func TestSSSDFallbackRequiresLocalGroupMembership(t *testing.T) {
+	origGroup, origNSS := localGroupPath, nsswitchPath
+	t.Cleanup(func() { localGroupPath, nsswitchPath = origGroup, origNSS })
+	dir := t.TempDir()
+	localGroupPath, nsswitchPath = filepath.Join(dir, "group"), filepath.Join(dir, "nsswitch.conf")
+	if err := os.WriteFile(localGroupPath, []byte("strict:x:7001:bob\nshared:x:7002:alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nsswitchPath, []byte("initgroups: files sss\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := newFakeNSS(&fakeRun{results: map[string]commandResult{
+		"initgroups corp.example.com\\alice": {exitCode: getentExitNotFound},
+		"initgroups alice":                   {stdout: []byte("alice 5000 7001 7002\n")},
+	}})
+	account := Account{Name: "alice", GID: 5000}
+	ids, qualified, err := r.accountGroupIDs(account, "corp.example.com")
+	if err != nil || qualified {
+		t.Fatalf("fallback groups = %v, qualified %t, err %v", ids, qualified, err)
+	}
+	startFakeSSSD(t, nil)
+	sssd, err := dialSSSDNSS(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sssd.Close()
+	kept, err := r.sssdGroupsOfDomain(sssd, ids, account, "S-1-5-21-1-2-3")
+	if err != nil || !reflect.DeepEqual(kept, []int{5000, 7002}) {
+		t.Fatalf("verified gids = %v, err %v; want only primary and listed membership", kept, err)
+	}
+}
