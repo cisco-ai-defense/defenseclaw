@@ -322,6 +322,7 @@ def usage(
         if host_os() == "windows":
             # No sandbox can exist here: say so, as `defenseclaw sandbox`
             # does, instead of an empty table (GAP-0386).
+            from defenseclaw import ux
             from defenseclaw.commands.cmd_sandbox import UNSUPPORTED_EXIT_CODE, UNSUPPORTED_PLATFORM_MESSAGE
 
             ux.echo(f"✗ --sandbox: {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
