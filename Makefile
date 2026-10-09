@@ -9,7 +9,9 @@ VERSION     := 1.0.0
 GIT_COMMIT  := $(or $(shell git rev-parse --short HEAD 2>/dev/null),unknown)
 BUILD_DATE  := $(or $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null),unknown)
 BUILD_INFO_LDFLAGS := -X main.commit=$(GIT_COMMIT) -X main.date=$(BUILD_DATE)
-GOFLAGS     := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
+# Not named GOFLAGS: make exports a variable that is also set in the environment, and go
+# then reads this -ldflags value as its own GOFLAGS setting and refuses to build.
+GO_BUILD_FLAGS := -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
@@ -491,8 +493,8 @@ proto-check: proto
 		internal/guardrail/semanticpb/facts.pb.go
 
 gateway: _checkout-write-preflight sync-openclaw-extension
-	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
-	go build $(GOFLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
+	go build $(GO_BUILD_FLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	go build $(GO_BUILD_FLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(ACP_GUARD)$(EXE) -component acp-guard -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
@@ -576,24 +578,29 @@ sync-openclaw-extension: _checkout-write-preflight
 extensions: plugin sync-openclaw-extension
 	@echo "  • OpenClaw extension is built and embedded — rebuild the gateway with 'make gateway'"
 
+# The resource stamper runs on the build host. Make exports the command-line
+# GOOS/GOARCH to the recipe, so a plain go run would compile it for the target
+# and fail with exec format error on a Linux or macOS host.
+HOST_GO_RUN := env -u GOOS -u GOARCH go run
+
 gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	@if [ "$(GOOS)" = "windows" ] && [ "$(GOARCH)" != "amd64" ]; then \
 		echo "native Windows release resources currently certify only GOARCH=amd64" >&2; exit 1; \
 	fi
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,) ./cmd/defenseclaw-acp
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GO_BUILD_FLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GO_BUILD_FLAGS) -o $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,) ./cmd/defenseclaw-acp
 	@if [ "$(GOOS)" = "windows" ]; then \
-		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+		$(HOST_GO_RUN) ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(BINARY)-$(GOOS)-$(GOARCH) -component gateway -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
-		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+		$(HOST_GO_RUN) ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(ACP_GUARD)-$(GOOS)-$(GOARCH).exe -component acp-guard -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
 			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
 			-o $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe ./cmd/defenseclaw-hook; \
-		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+		$(HOST_GO_RUN) ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(HOOK_LAUNCHER)-$(GOOS)-$(GOARCH).exe -component hook -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 	fi
