@@ -293,7 +293,7 @@ class ValidateConfigTests(unittest.TestCase):
             with patch.object(
                 cmd_config,
                 "inspect_v8_config",
-                return_value=SimpleNamespace(valid=True),
+                return_value=SimpleNamespace(valid=True, warnings=()),
             ):
                 res = cmd_config.validate_config()
             # The canonical Go validator owns any advisory diagnostics. The
