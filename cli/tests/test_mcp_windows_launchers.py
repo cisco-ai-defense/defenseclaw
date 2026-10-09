@@ -259,6 +259,26 @@ def test_uvx_resolves_to_trusted_exe_and_keeps_literal_arguments(
     assert plan.launcher == "uvx"
 
 
+def test_uvx_does_not_see_the_embeddable_scanner_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0915: the managed scanner runtime is an embeddable CPython first on
+    # PATH; uvx built the server on it and the server crashed before initialize.
+    runtime = tmp_path / "runtime" / "python"
+    _touch(runtime / "python313._pth")
+    monkeypatch.setattr(mcp.sys, "executable", _touch(runtime / "python.exe"))
+    uvx = _touch(tmp_path / "uv" / "uvx.exe")
+    path = os.fspath(runtime) + ";" + os.fspath(Path(uvx).parent)
+    monkeypatch.setattr(mcp, "_safe_subprocess_env", lambda _operator: {"PATH": path})
+    _which_map(monkeypatch, {"uvx": uvx, "uvx.exe": uvx})
+    _trusted(monkeypatch, {uvx})
+
+    plan = mcp._windows_stdio_launch_plan(MCPServerEntry(name="fixture", command="uvx", args=["mcp-server-time"]))
+
+    assert plan.env["PATH"] == os.fspath(Path(uvx).parent)
+
+
 def test_missing_uvx_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
     _which_map(monkeypatch, {"uvx": None, "uvx.exe": None})
     with pytest.raises(mcp.MCPStdioLaunchError, match="not found as native 'uvx.exe'"):

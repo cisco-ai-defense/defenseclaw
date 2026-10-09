@@ -762,9 +762,47 @@ def _validate_windows_npx_arguments(npx_path: str, args: list[str]) -> None:
             )
 
 
+def _embeddable_interpreter_dir() -> str:
+    """Folder of this interpreter when it is an embeddable CPython, else "".
+
+    An embeddable CPython has a ``python*._pth`` file beside it; the managed
+    Windows scanner runtime is one.
+    """
+    folder = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ""
+    try:
+        names = os.listdir(folder) if folder else []
+    except OSError:
+        return ""
+    if any(name.lower().startswith("python") and name.lower().endswith("._pth") for name in names):
+        return folder
+    return ""
+
+
+def _without_scanner_interpreter_on_path(env: dict[str, str]) -> dict[str, str]:
+    """Drop an embeddable scanner interpreter from a launcher's PATH (GAP-0915).
+
+    The managed Windows scanner runtime runs an embeddable CPython and puts
+    its folder first on PATH. uvx took that interpreter for the server's
+    environment, which an embeddable CPython cannot host: the server crashed
+    (0xC0000005) before initialize, printed nothing, and every uvx server was
+    blocked as not scanned. Without it uvx uses a Python installed for all
+    users, or its own.
+    """
+    folder = _embeddable_interpreter_dir()
+    path = env.get("PATH", "")
+    if not folder or not path:
+        return env
+    own = ntpath.normcase(ntpath.normpath(folder))
+    kept = [
+        item for item in path.split(";")
+        if item.strip() and ntpath.normcase(ntpath.normpath(item.strip().strip('"'))) != own
+    ]
+    return {**env, "PATH": ";".join(kept)}
+
+
 def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
     """Resolve a Windows stdio definition to a trusted, injection-safe argv."""
-    env = _safe_subprocess_env(entry.env)
+    env = _without_scanner_interpreter_on_path(_safe_subprocess_env(entry.env))
     args = list(entry.args or [])
     command = (entry.command or "").strip()
     lowered = _bare_stdio_launcher(command)
