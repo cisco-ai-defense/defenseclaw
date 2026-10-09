@@ -11,8 +11,11 @@ import (
 // trustedWindowsHomeLiteral is a Windows drive ActiveHome, as
 // normalizeActiveHome spells it, that reads as the same path when written
 // into a PowerShell or cmd word after quoting: no quoting, variable, escape or
-// glob characters.
-var trustedWindowsHomeLiteral = regexp.MustCompile(`^[A-Za-z]:/[A-Za-z0-9._+ /-]*$`)
+// glob characters. Account names may hold any Unicode letter, mark or digit
+// (C:/Users/Zoë); none of those quote or expand in PowerShell or cmd. An
+// ASCII-only class left $HOME and ~ partial under such a home while the
+// literal spelling was judged (GAP-1205).
+var trustedWindowsHomeLiteral = regexp.MustCompile(`^[A-Za-z]:/[\p{L}\p{M}\p{N}._+ /-]*$`)
 
 // windowsShellHomeAnchors are the spellings of the caller's home a PowerShell
 // or cmd word may start with, lower-cased. PowerShell's $HOME is a constant

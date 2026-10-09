@@ -1048,7 +1048,7 @@ func protectedSecurityPath(
 	candidate actionfacts.PathFact,
 ) bool {
 	if matchesActiveSudoers(facts, candidate) ||
-		matchesActiveAuthorizedKeys(facts, candidate) ||
+		matchesAuthorizedKeys(facts, candidate) ||
 		matchesActiveAgentConfig(facts, candidate) ||
 		matchesActiveDefenseClawState(facts, candidate) ||
 		privateSecurityMaterial(facts, candidate) {
@@ -1088,7 +1088,7 @@ func privateSecurityMaterial(
 		"/var/run/secrets/azure/tokens/azure-identity-token":
 		return true
 	}
-	return matchesActiveAuthorizedKeys(facts, candidate) ||
+	return matchesAuthorizedKeys(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
 		matchesActiveAWSCredentials(facts, candidate) ||
 		matchesActiveKubeConfig(facts, candidate) ||

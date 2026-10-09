@@ -505,7 +505,7 @@ func trustedPowerShellOutFileAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
 		if candidate.CommandID == command.ID &&
 			candidate.Access == actionfacts.PathAccessWrite &&
-			matchesActiveAuthorizedKeys(facts, candidate) {
+			matchesAuthorizedKeys(facts, candidate) {
 			return true
 		}
 	}

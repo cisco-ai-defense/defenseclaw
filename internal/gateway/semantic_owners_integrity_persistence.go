@@ -1549,7 +1549,7 @@ func sshAuthorizedKeysPrerequisite(
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok ||
-			!matchesActiveAuthorizedKeys(facts, candidate) ||
+			!matchesAuthorizedKeys(facts, candidate) ||
 			!integrityCommandMutatesPath(command, candidate) {
 			continue
 		}
@@ -1585,7 +1585,7 @@ func sshAuthorizedKeysSafeNegative(
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok ||
-			!matchesActiveAuthorizedKeys(facts, candidate) ||
+			!matchesAuthorizedKeys(facts, candidate) ||
 			!integrityCommandMutatesPath(command, candidate) {
 			continue
 		}
@@ -1602,7 +1602,7 @@ func sshAuthorizedKeysSafeNegative(
 	}
 	return integrityMutationSafeNegative(
 		matchesSSHDirectoryCandidate,
-		matchesActiveAuthorizedKeys,
+		matchesAuthorizedKeys,
 		matchesSafeSSHDirectoryCandidate,
 	)(facts)
 }
@@ -2150,11 +2150,23 @@ func matchesSSHDirectoryCandidate(value string) bool {
 		)
 }
 
-func matchesActiveAuthorizedKeys(
+// matchesAuthorizedKeys reports an account SSH authorized_keys file: the
+// active user file, another account file under a home root (/root,
+// /home/<user>, /Users/<user>, C:/Users/<user>), or the Windows
+// administrators_authorized_keys. A key added to another account file grants
+// SSH access to that account just the same, and matching only the active home
+// let `sudo tee -a /root/.ssh/authorized_keys` and a literal
+// C:\Users\<other> path through with no finding at all (GAP-1252).
+func matchesAuthorizedKeys(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok {
+		if resolved := canonicalSemanticPath(semanticPathValue(candidate)); isAbsoluteSemanticPath(resolved) {
+			relative, ok = liveHomeRelative(resolved)
+		}
+	}
 	if ok &&
 		(relative == ".ssh/authorized_keys" ||
 			relative == ".ssh/authorized_keys2") {
