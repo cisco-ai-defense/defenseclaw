@@ -169,9 +169,9 @@ foreach ($preexistingRight in @('', 'SeBatchLogonRight')) {
     if (@($fixture::Apply($sid, $null, $false)).Count -ne 0) { throw 'test LSA entry cleanup failed' }
 }
 
-# Verify the production registry/account binding using a disabled disposable
-# service. Its dummy image is never executed. Wrong-account validation must
-# fail before any rights are granted, then the exact virtual account succeeds.
+# Verify identity binding and the actual production SCM startup wrapper with
+# a disposable, runnable service. Every allow/deny mutation below is confined
+# to its new random SID; existing services and ALL SERVICES are untouched.
 $serviceName = 'DefenseClawCertGateway_' + ([Guid]::NewGuid().ToString('N')).Substring(0, 10)
 $sid = & $module {
     param($name)
@@ -179,15 +179,54 @@ $sid = & $module {
     Get-DefenseClawDeterministicServiceSID -ServiceName $name
 } $serviceName
 if (@($fixture::Apply($sid, $null, $false)).Count -ne 0) { throw 'random fixture SID already has rights' }
+$tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+$fixtureLeaf = 'DefenseClawServiceLogon_' + [Guid]::NewGuid().ToString('N')
+$fixtureRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($tempRoot, $fixtureLeaf))
+if (-not [string]::Equals(
+        [IO.Path]::GetDirectoryName($fixtureRoot), $tempRoot,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'service fixture directory is outside its expected temporary parent'
+}
+if (Test-Path -LiteralPath $fixtureRoot) { throw 'random fixture directory already exists' }
+$fixtureDirectoryCreated = $false
 $created = $false
 try {
+    [void](New-Item -ItemType Directory -Path $fixtureRoot -ErrorAction Stop)
+    $fixtureDirectoryCreated = $true
+    $sourcePath = Join-Path $fixtureRoot 'Fixture.cs'
+    $imagePath = Join-Path $fixtureRoot 'Fixture.exe'
+    @'
+using System.ServiceProcess;
+public sealed class ServiceLogonFixture : ServiceBase
+{
+    private ServiceLogonFixture(string name)
+    {
+        ServiceName = name;
+        CanStop = true;
+        AutoLog = false;
+    }
+    public static void Main(string[] args)
+    {
+        ServiceBase.Run(new ServiceLogonFixture(args[0]));
+    }
+    protected override void OnStart(string[] args) { }
+    protected override void OnStop() { }
+}
+'@ | Set-Content -LiteralPath $sourcePath -Encoding ASCII
+    # Build a .NET Framework service with the trusted in-box compiler so the
+    # same fixture can be hosted by both Windows PowerShell and PowerShell 7.
+    $compiler = & $module {
+        [IO.Path]::Combine($script:WindowsDirectory, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+    }
+    & $compiler /nologo /target:exe "/out:$imagePath" /reference:System.ServiceProcess.dll $sourcePath
+    if ($LASTEXITCODE -ne 0) { throw "service fixture compilation failed: $LASTEXITCODE" }
+    $image = '"{0}" {1}' -f $imagePath, $serviceName
     & $module {
-        param($name)
-        $image = '"{0}"' -f ([IO.Path]::Combine($script:WindowsDirectory, 'System32', 'cmd.exe'))
+        param($name, $image)
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'create', $name, 'binPath=', $image, 'start=', 'disabled', 'obj=', 'LocalSystem'
         ))
-    } $serviceName
+    } $serviceName $image
     $created = $true
     $wrongAccountRejected = $false
     try {
@@ -208,6 +247,12 @@ try {
             'config', $name, 'obj=', "NT SERVICE\$name"
         ))
     } $serviceName
+    & $module {
+        param($path, $serviceSID)
+        [void](Invoke-DefenseClawNative -File $script:IcaclsExe -Arguments @(
+            $path, '/grant', "*${serviceSID}:(OI)(CI)(RX)"
+        ))
+    } $fixtureRoot $sid
     $beforeGrant = @($fixture::Apply($sid, $null, $false))
     $receipt = & $module {
         param($name)
@@ -224,14 +269,126 @@ try {
     if ((Get-Service -Name $serviceName -ErrorAction Stop).Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
         throw 'disabled fixture service unexpectedly started'
     }
-}
-finally {
-    if ($created) {
+
+    # An explicit deny is deterministic even on hosts that authorize all
+    # virtual services through a group grant. Provisioning must preserve the
+    # deny, and the exact production startup catch must retain the native error.
+    [void]$fixture::Apply($sid, 'SeDenyServiceLogonRight', $false)
+    $deniedReceipt = & $module {
+        param($name)
+        Set-DefenseClawGatewayServiceLogonRight -GatewayServiceName $name
+    } $serviceName
+    if ($deniedReceipt.sid -cne $sid -or $deniedReceipt.outcome -cne 'already_granted') {
+        throw 'repeated provisioning did not preserve the existing direct allow'
+    }
+    $deniedRights = @($fixture::Apply($sid, $null, $false) | Sort-Object)
+    $expectedDeniedRights = @(@($expectedRights) + @('SeDenyServiceLogonRight') | Sort-Object -Unique)
+    if (($deniedRights -join ',') -cne ($expectedDeniedRights -join ',')) {
+        throw 'production provisioning changed the fixture deny or other existing rights'
+    }
+    & $module {
+        param($name)
+        Set-DefenseClawServiceStartMode -Name $name -StartMode 3
+    } $serviceName
+    $failure = $null
+    try {
         & $module {
-            param($name)
-            [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('delete', $name))
-        } $serviceName
-        [void]$fixture::Apply($sid, $null, $true)
+            param($name, $serviceSID)
+            Start-DefenseClawService -Name $name -GatewayServiceSID $serviceSID
+        } $serviceName $sid
+    }
+    catch { $failure = $_.Exception }
+    if ($null -eq $failure) { throw 'fixture with denied service logon unexpectedly started' }
+    $nativeCode = & $module {
+        param($exception)
+        Get-DefenseClawWin32ErrorCode -Exception $exception
+    } $failure
+    if ($nativeCode -notin @(1069, 1385)) {
+        throw "startup wrapper lost the native service logon failure: $failure"
+    }
+    foreach ($fragment in @($serviceName, "NT SERVICE\$serviceName", $sid, [string]$nativeCode,
+            'could not log on', 'SeServiceLogonRight', 'deny', 'GPO/MDM')) {
+        if ($failure.Message.IndexOf($fragment, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            throw "production startup diagnostic omitted $fragment"
+        }
+    }
+    if ($failure -isnot [InvalidOperationException] -or $null -eq $failure.InnerException -or
+        $null -eq $failure.InnerException.InnerException) {
+        throw 'production startup diagnostic flattened the original SCM exception chain'
+    }
+    $originalCode = & $module {
+        param($exception)
+        Get-DefenseClawWin32ErrorCode -Exception $exception
+    } $failure.InnerException
+    if ($originalCode -ne $nativeCode -or
+        -not $failure.Message.Contains($failure.InnerException.Message)) {
+        throw 'production startup diagnostic did not preserve the original startup exception'
+    }
+    if ((Get-Service -Name $serviceName -ErrorAction Stop).Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+        throw 'denied fixture service did not remain stopped'
+    }
+
+    # Remove only this fixture SID's entry, then reprovision while disabled.
+    # An existing host group grant can mask a causal missing-allow failure;
+    # this positive leg verifies direct provisioning and real SCM startup.
+    [void]$fixture::Apply($sid, $null, $true)
+    & $module {
+        param($name)
+        Set-DefenseClawServiceStartMode -Name $name -StartMode 4
+    } $serviceName
+    $allowedReceipt = & $module {
+        param($name)
+        Set-DefenseClawGatewayServiceLogonRight -GatewayServiceName $name
+    } $serviceName
+    $allowedRights = @($fixture::Apply($sid, $null, $false))
+    if ($allowedReceipt.sid -cne $sid -or $allowedReceipt.outcome -cne 'added' -or
+        $allowedRights.Count -ne 1 -or $allowedRights[0] -cne 'SeServiceLogonRight') {
+        throw 'disabled fixture was not provisioned with the exact direct service logon allow'
+    }
+    & $module {
+        param($name, $serviceSID)
+        Set-DefenseClawServiceStartMode -Name $name -StartMode 3
+        Start-DefenseClawService -Name $name -GatewayServiceSID $serviceSID
+    } $serviceName $sid
+    if ((Get-Service -Name $serviceName -ErrorAction Stop).Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+        throw 'fixture with provisioned service logon allow did not reach Running'
     }
 }
+finally {
+    try {
+        if ($created) {
+            try {
+                & $module {
+                    param($name)
+                    Stop-DefenseClawService -Name $name
+                } $serviceName
+            }
+            finally {
+                & $module {
+                    param($name)
+                    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('delete', $name))
+                } $serviceName
+            }
+        }
+    }
+    finally {
+        try {
+            if ($created) { [void]$fixture::Apply($sid, $null, $true) }
+        }
+        finally {
+            if ($fixtureDirectoryCreated) {
+                $resolvedFixture = [IO.Path]::GetFullPath((Get-Item -LiteralPath $fixtureRoot -Force).FullName)
+                if (-not [string]::Equals($resolvedFixture, $fixtureRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                    -not [string]::Equals([IO.Path]::GetDirectoryName($resolvedFixture), $tempRoot,
+                        [StringComparison]::OrdinalIgnoreCase) -or
+                    -not [string]::Equals([IO.Path]::GetFileName($resolvedFixture), $fixtureLeaf,
+                        [StringComparison]::Ordinal)) {
+                    throw 'refusing cleanup of a service fixture outside its exact temporary directory'
+                }
+                Remove-Item -LiteralPath $resolvedFixture -Recurse -Force -ErrorAction Stop
+            }
+        }
+    }
+}
+if (@($fixture::Apply($sid, $null, $false)).Count -ne 0) { throw 'service fixture LSA entry cleanup failed' }
 Write-Output 'enterprise-service-logon-native-smoke OK'

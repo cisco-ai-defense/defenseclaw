@@ -126,6 +126,8 @@ external MSI wrapper.
 If CyberArk or another control denies LSA policy access, setup records a warning
 and still attempts normal service startup because a group assignment may
 already authorize the account. Startup and application readiness must succeed.
+JSON lifecycle output preserves policy advisories in its `warnings` array
+without mixing console warning text into the JSON document.
 No-start/deferred provisioning cannot prove that the service can log on until
 activation is attempted. Read-only status and verification do not grant rights.
 

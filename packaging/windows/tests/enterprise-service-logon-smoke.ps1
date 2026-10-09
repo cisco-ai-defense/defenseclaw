@@ -364,4 +364,193 @@ foreach ($definition in $functionDefinitions) {
     Assert-LogonTest ($grantCalls.Count -eq 0) "$($definition.Name) must not change service-logon policy"
 }
 
+# Exercise the ConsoleHost boundary as well as the in-process warning record.
+# The CLI forwards child stdout verbatim, and Setup combines stdout/stderr;
+# warnings must therefore be captured by the production installer before
+# rendering. Extract its actual call, catch, warning merge, and output ASTs.
+$installerPath = [IO.Path]::Combine($PSScriptRoot, '..', 'install-enterprise.ps1')
+$installerTokens = $null
+$installerErrors = $null
+$installerAst = [Management.Automation.Language.Parser]::ParseFile(
+    $installerPath, [ref]$installerTokens, [ref]$installerErrors
+)
+Assert-LogonTest (@($installerErrors).Count -eq 0) 'installer has parser errors'
+$installerIfs = @($installerAst.FindAll(
+    { param($node) $node -is [Management.Automation.Language.IfStatementAst] },
+    $true
+))
+$invocation = @($installerIfs | Where-Object {
+    $_.Clauses[0].Item1.Extent.Text -ceq '$Json' -and
+        $_.Extent.Text.Contains('DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle')
+})
+$warningMerge = @($installerIfs | Where-Object {
+    $_.Clauses[0].Item1.Extent.Text -ceq '$Json' -and
+        $_.Extent.Text.Contains('foreach ($warning in @($lifecycleWarnings))')
+})
+$cleanupWarning = @($installerIfs | Where-Object {
+    $_.Clauses[0].Item1.Extent.Text -ceq '$Json' -and
+        $_.Extent.Text.Contains('$jsonWarnings += $cleanupDetail')
+})
+$outputBoundary = @($installerAst.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses[0].Item1.Extent.Text -ceq '-not [string]::IsNullOrWhiteSpace($failureMessage)'
+})
+$exitBoundary = @($installerAst.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses[0].Item1.Extent.Text -ceq '$exitCode -ne 0'
+})
+foreach ($fragment in @($invocation, $warningMerge, $cleanupWarning, $outputBoundary, $exitBoundary)) {
+    Assert-LogonTest ($fragment.Count -eq 1) 'expected one exact installer JSON boundary fragment'
+}
+$mainTry = @($installerAst.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.TryStatementAst] -and
+        $_.Extent.Text.Contains('DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle')
+})
+Assert-LogonTest ($mainTry.Count -eq 1 -and $mainTry[0].CatchClauses.Count -eq 1) 'installer catch boundary changed'
+$initialization = @()
+foreach ($variable in @('$result', '$failureMessage', '$exitCode', '$lifecycleWarnings', '$jsonWarnings')) {
+    $assignments = @($installerAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $_.Left.Extent.Text -ceq $variable
+    })
+    Assert-LogonTest ($assignments.Count -eq 1) "installer initialization changed for $variable"
+    $initialization += $assignments[0].Extent.Text
+}
+$fixtureModule = @'
+param([string]$Case)
+$script:JSONProbeCase = $Case
+Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @"
+using System.ComponentModel;
+public static class DefenseClawJSONPolicyDeniedStub {
+    public static bool EnsureServiceLogonRight(string sid) {
+        throw new Win32Exception(5, "isolated policy access denial");
+    }
+}
+"@ -ErrorAction Stop
+function Get-DefenseClawGatewayLogonIdentity {
+    param([string]$GatewayServiceName)
+    [pscustomobject]@{
+        account = "NT SERVICE\$GatewayServiceName"
+        sid = 'S-1-5-80-11111-22222-33333-44444-55555'
+    }
+}
+function Initialize-DefenseClawNativeSecurity { return [DefenseClawJSONPolicyDeniedStub] }
+__PRODUCTION_HELPERS__
+function Invoke-DefenseClawEnterpriseLifecycle {
+    [CmdletBinding()]
+    param()
+    Microsoft.PowerShell.Utility\Write-Warning 'unrelated lifecycle advisory'
+    $grant = Set-DefenseClawGatewayServiceLogonRight -GatewayServiceName DefenseClawGatewayJSONSmoke
+    if ($script:JSONProbeCase -ceq 'failure') { throw 'isolated activation failure' }
+    [pscustomobject]@{
+        schema_version = 1
+        ok = $true
+        action = 'install'
+        warnings = @('existing result advisory')
+        gateway_service_state = $null
+        guardian_service_state = $null
+        gateway_ready = $null
+        guardian_ready = $null
+    }
+}
+Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle
+'@
+$exactHelpers = @(
+    (Get-ProductionFunction -Name 'Get-DefenseClawWin32ErrorCode').Extent.Text,
+    (Get-ProductionFunction -Name 'Set-DefenseClawGatewayServiceLogonRight').Extent.Text
+) -join "`n"
+$fixtureModule = $fixtureModule.Replace('__PRODUCTION_HELPERS__', $exactHelpers)
+$probeSource = @(
+    '[CmdletBinding()] param([switch]$Json, [string]$ProbeCase)',
+    "Set-StrictMode -Version Latest; `$ErrorActionPreference = 'Stop'",
+    '$fixtureModule = New-Module -Name DefenseClawEnterprise -ArgumentList $ProbeCase -ScriptBlock {',
+    $fixtureModule,
+    '}; Import-Module $fixtureModule -Force',
+    ($initialization -join "`n"),
+    '$arguments = @{}; $Action = ''Install''',
+    'try {',
+    $invocation[0].Extent.Text,
+    '} catch {',
+    $mainTry[0].CatchClauses[0].Body.Extent.Text.Trim().TrimStart('{').TrimEnd('}'),
+    '}',
+    'if ($ProbeCase -ceq ''cleanup'') { $cleanupDetail = ''isolated bootstrap cleanup advisory'';',
+    $cleanupWarning[0].Extent.Text,
+    '}',
+    $warningMerge[0].Extent.Text,
+    $outputBoundary[0].Extent.Text,
+    $exitBoundary[0].Extent.Text
+) -join "`n"
+$outputTempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+$outputLeaf = 'DefenseClaw-LogonJSON-' + [Guid]::NewGuid().ToString('N')
+$expectedOutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($outputTempParent, $outputLeaf))
+$outputRoot = $expectedOutputRoot
+[void][IO.Directory]::CreateDirectory($outputRoot)
+try {
+    $probePath = [IO.Path]::Combine($outputRoot, 'logon-json-host-probe.ps1')
+    [IO.File]::WriteAllText($probePath, $probeSource, [Text.UTF8Encoding]::new($false))
+    $enginePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    foreach ($case in @('success', 'failure', 'cleanup', 'text')) {
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $enginePath
+        $start.Arguments = (
+            '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+            $probePath + '" -ProbeCase ' + $case
+        )
+        if ($case -cne 'text') { $start.Arguments += ' -Json' }
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $child = [Diagnostics.Process]::new()
+        $child.StartInfo = $start
+        try {
+            Assert-LogonTest ($child.Start()) "$case`: JSON host probe failed to start"
+            $stdoutTask = $child.StandardOutput.ReadToEndAsync()
+            $stderrTask = $child.StandardError.ReadToEndAsync()
+            if (-not $child.WaitForExit(60000)) {
+                $child.Kill()
+                throw "enterprise-service-logon-smoke: $case JSON host exceeded its bounded timeout"
+            }
+            $child.WaitForExit()
+            $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
+            $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+            $expectedExit = if ($case -ceq 'failure') { 1 } else { 0 }
+            Assert-LogonTest ($child.ExitCode -eq $expectedExit) "$case`: unexpected exit $($child.ExitCode), stdout=$stdout stderr=$stderr"
+        }
+        finally { $child.Dispose() }
+        if ($case -ceq 'text') {
+            Assert-LogonTest ($stdout.Contains('WARNING:') -and $stdout.Contains('SeServiceLogonRight')) 'non-JSON policy warning is no longer visible'
+            continue
+        }
+        # Match Setup's combined-output boundary too. Any host-rendered warning
+        # on either channel makes this complete JSON parse fail.
+        $report = Microsoft.PowerShell.Utility\ConvertFrom-Json -InputObject ($stdout + $stderr) -ErrorAction Stop
+        $warnings = @($report.warnings)
+        Assert-LogonTest (@($warnings | Where-Object { $_ -match 'SeServiceLogonRight.*DefenseClawGatewayJSONSmoke' }).Count -eq 1) "$case`: policy advisory was not preserved exactly once"
+        Assert-LogonTest (@($warnings | Where-Object { $_ -ceq 'unrelated lifecycle advisory' }).Count -eq 1) "$case`: unrelated warning was lost"
+        if ($case -ceq 'failure') {
+            Assert-LogonTest (-not $report.ok -and $report.error -ceq 'isolated activation failure') 'failure JSON lost its causal error'
+            Assert-LogonTest ($warnings.Count -eq 2) 'failure JSON warning count is incorrect'
+        }
+        else {
+            Assert-LogonTest ($report.ok -and @($warnings | Where-Object { $_ -ceq 'existing result advisory' }).Count -eq 1) "$case`: existing structured warning was lost"
+            $expectedWarnings = if ($case -ceq 'cleanup') { 4 } else { 3 }
+            Assert-LogonTest ($warnings.Count -eq $expectedWarnings) "$case`: unexpected warning count"
+            if ($case -ceq 'cleanup') {
+                Assert-LogonTest ($warnings -contains 'isolated bootstrap cleanup advisory') 'cleanup warning was not preserved in JSON'
+            }
+        }
+    }
+}
+finally {
+    $cleanupRoot = [IO.Path]::GetFullPath($outputRoot)
+    if (-not [string]::Equals($cleanupRoot, $expectedOutputRoot, [StringComparison]::Ordinal) -or
+        -not [string]::Equals([IO.Path]::GetDirectoryName($cleanupRoot), $outputTempParent, [StringComparison]::Ordinal) -or
+        [IO.Path]::GetFileName($cleanupRoot) -cne $outputLeaf -or
+        $outputLeaf -cnotmatch '^DefenseClaw-LogonJSON-[a-f0-9]{32}$') {
+        throw 'enterprise-service-logon-smoke: refusing cleanup outside the exact temporary fixture root'
+    }
+    if ([IO.Directory]::Exists($cleanupRoot)) { [IO.Directory]::Delete($cleanupRoot, $true) }
+}
+
 'enterprise-service-logon-smoke OK'
