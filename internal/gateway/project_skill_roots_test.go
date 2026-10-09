@@ -32,6 +32,11 @@ func TestProjectSkillIsHeldUntilItsFirstAdmission(t *testing.T) {
 	}
 	roots := &projectSkillRoots{}
 	roots.start(true)
+	for i := 0; i < 32; i++ {
+		if !roots.add("claude-code", filepath.Join(home, "older-projects", string(rune('a'+i)), ".claude", "skills")) {
+			t.Fatalf("could not register earlier project root %d", i)
+		}
+	}
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	api := &APIServer{store: store, logger: logger, scannerCfg: cfg, projectSkills: roots}
 	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1004, Home: home})

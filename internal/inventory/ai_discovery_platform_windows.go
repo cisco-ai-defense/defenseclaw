@@ -121,19 +121,16 @@ func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 		if fi, err := os.Stat(expanded); err != nil || !fi.IsDir() {
 			continue
 		}
-		name, domain, accountExists := windowsProfileAccount(sid, expanded)
-		if !accountExists && standalone {
+		owner, ok := windowsDiscoveryProfileOwner(sid, expanded, standalone)
+		if !ok {
 			continue
-		}
-		if !accountExists {
-			name = filepath.Base(expanded)
 		}
 		lower := strings.ToLower(expanded)
 		if _, ok := seen[lower]; ok {
 			continue
 		}
 		seen[lower] = struct{}{}
-		out = append(out, discoveryHomeOwner{Home: expanded, UserID: sid, UserName: name, Domain: domain})
+		out = append(out, owner)
 	}
 	return out
 }
@@ -153,23 +150,45 @@ func platformDiscoveryAccountName(sid, _ string) string {
 	return strings.TrimSpace(account)
 }
 
-// windowsProfileAccount is the account name and domain of sid, or the
-// profile folder's name and no domain when the account cannot be looked up.
-func windowsProfileAccount(sid, home string) (string, string, bool) {
+// windowsProfileAccountLookup is replaceable so a transient directory lookup
+// failure can be tested without changing the machine account database.
+var windowsProfileAccountLookup = func(sid *windows.SID) (string, string, error) {
+	account, domain, _, err := sid.LookupAccount("")
+	return account, domain, err
+}
+
+// windowsProfileAccount returns a resolved account name and domain. An
+// unresolved account must not enter standalone discovery under a guessed name:
+// a qualified exclusion could miss it and a different domain could match it.
+func windowsProfileAccount(sid string) (string, string, bool) {
 	parsed, err := windows.StringToSid(sid)
 	if err != nil {
 		return "", "", false
 	}
 	// The bare account name, as agent identities and hook records spell it.
-	account, domain, _, err := parsed.LookupAccount("")
+	account, domain, err := windowsProfileAccountLookup(parsed)
 	if errors.Is(err, windows.ERROR_NONE_MAPPED) || errors.Is(err, windows.ERROR_NO_SUCH_USER) {
 		return "", "", false
 	}
 	if err == nil && strings.TrimSpace(account) != "" {
 		return account, strings.TrimSpace(domain), true
 	}
-	// A temporary directory-service failure is not proof of deletion.
-	return filepath.Base(home), "", true
+	// Secure Client still uses the profile folder fallback in the caller.
+	// Standalone discovery skips this profile until its account resolves.
+	return "", "", false
+}
+
+// windowsDiscoveryProfileOwner keeps the legacy folder-name fallback for
+// Secure Client, while standalone discovery requires a resolved account.
+func windowsDiscoveryProfileOwner(sid, home string, standalone bool) (discoveryHomeOwner, bool) {
+	name, domain, accountExists := windowsProfileAccount(sid)
+	if !accountExists && standalone {
+		return discoveryHomeOwner{}, false
+	}
+	if !accountExists {
+		name = filepath.Base(home)
+	}
+	return discoveryHomeOwner{Home: home, UserID: sid, UserName: name, Domain: domain}, true
 }
 
 // normalizeProfileImagePath trims and cleans a raw ProfileImagePath

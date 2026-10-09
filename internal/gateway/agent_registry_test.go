@@ -39,6 +39,27 @@ func TestAgentRegistry_NewSidecarIsUnique(t *testing.T) {
 	}
 }
 
+// TestAgentRegistry_UnidentifiedSessionsIsolatedAcrossGateways ensures that
+// a session seen before its hook identity cannot collide with the same
+// session key on another per-user gateway.
+func TestAgentRegistry_UnidentifiedSessionsIsolatedAcrossGateways(t *testing.T) {
+	first := NewAgentRegistry("", "")
+	second := NewAgentRegistry("", "")
+	const session = "shared-session"
+
+	a := first.AgentInstanceForSession(session)
+	b := second.AgentInstanceForSession(session)
+	if !strings.HasPrefix(a, "ais-") || !strings.HasPrefix(b, "ais-") {
+		t.Fatalf("unidentified sessions must retain ais- IDs: first=%q second=%q", a, b)
+	}
+	if a == b {
+		t.Fatalf("independent gateways merged session %q as %q", session, a)
+	}
+	if again := first.AgentInstanceForSession(session); again != a {
+		t.Fatalf("session changed within one gateway: first=%q again=%q", a, again)
+	}
+}
+
 // TestAgentRegistry_SessionInstanceCached verifies that the same
 // session id produces the same agent_instance_id on repeated
 // lookups — this is the load-bearing contract for per-session

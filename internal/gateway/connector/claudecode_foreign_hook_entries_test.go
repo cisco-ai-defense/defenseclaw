@@ -283,3 +283,28 @@ func TestClaudeCodeWindowsLauncherGuardFailsClosedAndReadsAsExecForm(t *testing.
 		t.Fatalf("a launcher path cmd.exe would expand kept the guard: %q", plain)
 	}
 }
+
+func TestClaudeCodeSettingsNullRefusedUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = path
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+	if err := os.WriteFile(path, []byte("null"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:       filepath.Join(dir, "self"),
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	err := NewClaudeCodeConnector().Setup(context.Background(), opts)
+	if !errors.Is(err, ErrSetupRefusedUnchanged) || !strings.Contains(err.Error(), path) {
+		t.Fatalf("Setup error = %v, want unchanged refusal naming settings file", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "null" {
+		t.Fatalf("settings changed: %q, %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(opts.DataDir, "hooks")); !os.IsNotExist(err) {
+		t.Fatalf("hooks written before refusal: %v", err)
+	}
+}

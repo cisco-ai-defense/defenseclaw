@@ -373,3 +373,27 @@ func TestRepairRemovesMacOSACLReadEntriesOnPrivatePaths(t *testing.T) {
 	}
 	requireOK(t, h.run(Options{Action: ActionStatus}))
 }
+
+// A deny-read ACL on a published policy file leaves its mode and owner intact
+// but prevents the affected user from loading the managed hook.
+func TestRepairRemovesMacOSACLDenyReadOnPublishedPolicyFile(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+	dropIn := "/Library/Application Support/ClaudeCode/managed-settings.d/" + enterprisepolicy.DefenseClawDropInName
+	rooted := h.env.P(dropIn)
+	h.runner.acls = map[string][]string{rooted: {"user:developer deny read"}}
+
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		requireError(t, result, codeVerify)
+		if got := messagesOf(result.Errors, codeVerify); !strings.Contains(got, dropIn) || !strings.Contains(got, "deny") {
+			t.Errorf("%s did not report the unreadable policy file: %s", action, got)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if entries := h.runner.acls[rooted]; entries != nil {
+		t.Fatalf("repair kept the deny-read ACL: %v", entries)
+	}
+	writeFreshLedger(t, h)
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+}
