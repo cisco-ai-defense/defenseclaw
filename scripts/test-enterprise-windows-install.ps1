@@ -398,7 +398,11 @@ try {
     & icacls.exe $stage /setowner '*S-1-5-32-544' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $stage" }
     $sourceConfigVersion = if ($UpgradeFrom -and $PreviousVersion -match '^v?0\.') { 8 } else { 9 }
-    $rulePackLine = if ($sourceConfigVersion -eq 8) { '  rule_pack_dir: ""' } else { '  rule_pack: default' }
+    # A standalone Windows host without a policy_dir keeps the embedded rule
+    # packs only while the config names none: rule_pack: default would select
+    # the default pack of a policy_dir this host does not have, and the Setup
+    # refuses it ("policy_dir is not set").
+    $rulePackLines = if ($sourceConfigVersion -eq 8) { @('  rule_pack_dir: ""') } else { @() }
     $configText = @(
         "config_version: $sourceConfigVersion"
         'deployment_mode: managed_enterprise'
@@ -410,7 +414,7 @@ try {
         'guardrail:'
         '  enabled: true'
         '  mode: observe'
-        $rulePackLine
+        $rulePackLines
         '  connectors:'
         '    claudecode:'
         '      enabled: true'
