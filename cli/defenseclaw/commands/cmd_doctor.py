@@ -5501,6 +5501,17 @@ def _windows_native_hook_check(
 _CLAUDECODE_HOOKS_FIX = "re-register the hooks: defenseclaw setup claude-code --yes, then restart Claude Code"
 
 
+def _agent_hook_switch_problem(cfg, connector: str) -> str:
+    """The agent setting that keeps the registered hooks from running, or "" (GAP-1066, GAP-1094, GAP-1102)."""
+    try:
+        from defenseclaw.hook_integrity import agent_hook_switch_problems
+
+        problems = agent_hook_switch_problems(cfg, connector, workspace_dir=_workspace_dir(cfg) or None)
+    except Exception:  # noqa: BLE001 - the other hook rows still report what they can read.
+        return ""
+    return problems[0] if problems else ""
+
+
 def _check_claudecode_hooks(
     cfg,
     r: _DoctorResult,
@@ -5575,7 +5586,16 @@ def _check_claudecode_hooks(
                 cmd = h.get("command", "") if isinstance(h, dict) else ""
                 if "defenseclaw" in cmd or "claude-code-hook" in cmd:
                     dc_hooks += 1
-    if dc_hooks > 0:
+    switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
+    if switched_off:
+        _emit(
+            "fail",
+            "Claude Code hooks",
+            f"{dc_hooks} DefenseClaw hook(s) registered, but {switched_off}",
+            r=r,
+            remediation=getattr(switched_off, "repair", "") or _CLAUDECODE_HOOKS_FIX,
+        )
+    elif dc_hooks > 0:
         _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
         _check_generated_hook_freshness(
             cfg,
@@ -5618,6 +5638,7 @@ def _check_codex_hooks(
     search_path: str | None = None,
     pathext: str | None = None,
 ) -> None:
+    switched_off = _agent_hook_switch_problem(cfg, "codex")
     if (platform_name or os.name) == "nt":
         _check_windows_native_hooks(
             cfg,
@@ -5629,6 +5650,8 @@ def _check_codex_hooks(
             search_path=search_path,
             pathext=pathext,
         )
+        if switched_off:
+            _emit("fail", "Codex hook settings", switched_off, r=r, remediation=switched_off.repair)
         return
     hook_dir = os.path.join(cfg.data_dir, "hooks")
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
@@ -5642,6 +5665,8 @@ def _check_codex_hooks(
             r=r,
             remediation="re-register the hooks: defenseclaw setup codex --yes",
         )
+    elif os.path.isfile(hook_script) and switched_off:
+        _emit("fail", "Codex hooks", switched_off, r=r, remediation=switched_off.repair)
     elif os.path.isfile(hook_script):
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
@@ -16345,12 +16370,18 @@ def _fix_hook_script_modes(
 
 
 def _drifted_hook_connectors(cfg) -> list[str]:
-    from defenseclaw.hook_integrity import hook_runtime_problems
+    from defenseclaw.hook_integrity import agent_hook_switch_problems, hook_runtime_problems
 
+    # Codex hook entries left without a command keep Codex from starting; the
+    # restart re-runs the gateway's Codex setup, which removes them (GAP-1102).
     return [
         connector
         for connector in _doctor_active_connectors(cfg)
         if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        or (
+            connector == "codex"
+            and any("without a command" in problem for problem in agent_hook_switch_problems(cfg, connector))
+        )
     ]
 
 

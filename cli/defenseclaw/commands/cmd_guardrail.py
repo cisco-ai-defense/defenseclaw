@@ -834,7 +834,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         enabled_val = ux._style(enabled_txt, fg="green" if all_enabled else "yellow")
         ux.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
 
-    from defenseclaw.hook_integrity import setup_command, unrunnable_hook_problem
+    from defenseclaw.hook_integrity import repair_command, unrunnable_hook_problem
 
     rows: list[dict[str, tuple[str, str]]] = []
     any_disabled = False
@@ -906,7 +906,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 # error, so "closed" in the table would be a false promise.
                 posture_rows.append(
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
-                    f"to a hook the agent cannot run; repair with {setup_command(name)}"
+                    f"to a hook the agent does not run; repair: {repair_command(name, unrunnable)}"
                 )
             elif (cmode or "") == "action" and cfm == "open" and normalize_connector(name) not in (
                 _UPSTREAM_FAIL_OPEN_CONNECTORS
