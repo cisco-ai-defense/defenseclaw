@@ -155,11 +155,9 @@ on Windows), and this reads it; each install shows only its own window.
 // export reads it.
 func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	if auditExportDB != "" {
-		// A database named by path needs no configuration: the other
-		// install after a rollback may have written one this build does not
-		// load (GAP-0126). A managed deployment's administrator reads the
-		// managed store through the checks below, never a path of their
-		// choosing.
+		// A database named by path needs no configuration and is opened
+		// read-only below. Administrators can inspect a retained copy after
+		// managed decommission without touching the active deployment.
 		if auditExportManagedHost() {
 			if !auditExportCallerIsAdministrator() {
 				return withExitCode(&managedViewRefusal{
@@ -167,11 +165,13 @@ func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 					message: windowsManagedStandardUserViewAnswer("the audit log", "audit export -o <file>"),
 				}, enterprisestatus.WindowsExitAccessDenied)
 			}
-			return errors.New("audit export --db is not available on a managed deployment; run it without --db to export the managed audit log")
+			return nil
 		}
 		_, _, deploymentErr := managedStandaloneAdminDeployment()
 		if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) || deploymentErr == nil {
-			return errors.New("audit export --db is not available on a managed deployment; run it without --db to export the managed audit log")
+			if _, admin := managedStandaloneAdminCaller(nil); !admin && managedHostCallerUID() != 0 {
+				return errors.New("audit export --db on a managed deployment requires root or the gateway service account")
+			}
 		}
 		return nil
 	}

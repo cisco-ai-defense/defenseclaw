@@ -682,6 +682,11 @@ sessions started before the deployment was activated, with the
    unregisters the `DefenseClaw` event log. The systemd journal, the
    Windows Application event log and `%WINDIR%\Logs\DefenseClaw` (where the
    uninstall run itself is logged) are not removed. See [Logs and events](/docs/enterprise/operations#logs-and-events).
+   To review a retained audit database after purge, keep its `audit.db` and
+   companion `audit.db-wal` and `audit.db-shm` files together, then run
+   `defenseclaw-gateway audit export --db <copied-audit.db>` as root on Linux
+   or from an elevated Administrator prompt on Windows. The export opens the
+   copy read-only and does not need the former deployment's config.
 3. **Uninstall with purge**, as shown in [Uninstall](#uninstall).
 4. **Confirm that nothing remains:**
 

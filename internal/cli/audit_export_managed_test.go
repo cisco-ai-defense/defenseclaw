@@ -126,12 +126,12 @@ func TestAuditExportDBFlagAndManagedBoundary(t *testing.T) {
 		t.Fatalf("managed standard account with --db = %v, want elevation refusal", err)
 	}
 	auditExportCallerIsAdministrator = func() bool { return true }
-	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "not available on a managed deployment") {
-		t.Fatalf("managed administrator with --db = %v, want managed refusal", err)
+	if err := auditExportPersistentPreRunE(nil, nil); err != nil {
+		t.Fatalf("managed administrator with --db = %v, want read-only copy access", err)
 	}
 	auditExportManagedHost = func() bool { return false }
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
-	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "not available on a managed deployment") {
-		t.Fatalf("managed unix mode with --db = %v, want managed refusal", err)
+	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "requires root") {
+		t.Fatalf("managed unix mode without administrator = %v, want administrator refusal", err)
 	}
 }
