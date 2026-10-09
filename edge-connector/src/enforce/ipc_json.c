@@ -162,6 +162,29 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                     if (clen > DCLAW_CONTENT_MAX - 1) clen = DCLAW_CONTENT_MAX - 1;
                     memcpy(out->content_buf, content_start, clen);
                     out->content_buf[clen] = '\0';
+
+                    /* M-11 fix: Unescape JSON string escapes in the content buffer.
+                     * Without this, escaped quotes (\") and backslashes (\\) are
+                     * passed through literally, causing content inspection to miss
+                     * patterns that span escape boundaries. */
+                    {
+                        char *r = out->content_buf;
+                        char *w = out->content_buf;
+                        while (*r != '\0') {
+                            if (r[0] == '\\' && r[1] == '"') {
+                                *w++ = '"';
+                                r += 2;
+                            } else if (r[0] == '\\' && r[1] == '\\') {
+                                *w++ = '\\';
+                                r += 2;
+                            } else {
+                                *w++ = *r++;
+                            }
+                        }
+                        *w = '\0';
+                        clen = (uint16_t)(w - out->content_buf);
+                    }
+
                     out->content = out->content_buf;
                     out->content_len = clen;
                     p = scan + 1;

@@ -253,8 +253,12 @@ int hal_init(void) {
             struct stat st;
             if (stat(dir, &st) != 0) {
                 if (mkdir_p(dir, 0700) != 0) {
-                    fprintf(stderr, "[DCLAW] WARN: cannot create %s (%s); "
-                            "falling back to /tmp/ for flash storage\n",
+                    /* M-12 fix: /tmp is world-readable and other processes can
+                     * tamper with the flash file. Log a WARNING so operators
+                     * notice the fallback in production. */
+                    fprintf(stderr, "[DCLAW] WARNING: cannot create %s (%s); "
+                            "falling back to /tmp/ for flash storage — "
+                            "/tmp is insecure, fix directory permissions for production use\n",
                             dir, strerror(errno));
                     flash_path = "/tmp/defenseclaw-flash.bin";
                 }
@@ -262,8 +266,10 @@ int hal_init(void) {
         }
     }
 
-    /* Open or create flash backing file */
-    flash_fd = open(flash_path, O_RDWR | O_CREAT, 0640);
+    /* Open or create flash backing file.
+     * M-12 fix: Use 0600 (owner-only) instead of 0640 to prevent group-readable
+     * access, especially important when falling back to /tmp. */
+    flash_fd = open(flash_path, O_RDWR | O_CREAT, 0600);
     if (flash_fd < 0) return -1;
 
     /* Ensure file is at least FLASH_TOTAL_SIZE */

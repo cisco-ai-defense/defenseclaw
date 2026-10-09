@@ -99,6 +99,26 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
 #else /* Built-in HMAC-SHA256 verification — no external library required */
 
 /*
+ * H-4 fix: In production builds (DCLAW_DEV_MODE=OFF), refuse to fall back to
+ * HMAC-SHA256 for OTA verification. Ed25519 is required for non-repudiation.
+ * The HMAC fallback is only acceptable in development/testing builds.
+ */
+#if !DCLAW_DEV_MODE
+
+#pragma message "Ed25519 unavailable in production build — OTA blobs will be REJECTED."
+
+static bool verify_ed25519(const uint8_t *message, size_t msg_len,
+                           const uint8_t *signature,
+                           const uint8_t *pubkey) {
+    (void)message; (void)msg_len; (void)signature; (void)pubkey;
+    fprintf(stderr, "[DCLAW] ERROR: OTA signature verification requires Ed25519. "
+            "Build with DCLAW_HAS_MBEDTLS=1.\n");
+    return false;
+}
+
+#else /* DCLAW_DEV_MODE is ON — allow HMAC-SHA256 fallback for development */
+
+/*
  * NOTE: This path uses HMAC-SHA256 for integrity verification instead of Ed25519.
  * It is cryptographically sound for integrity checking with a pre-shared key, but
  * does NOT provide non-repudiation (asymmetric signatures).
@@ -128,6 +148,8 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
     return diff == 0;
 }
 
+#endif /* DCLAW_DEV_MODE */
+
 #endif /* DCLAW_HAS_MBEDTLS */
 
 /*
@@ -136,6 +158,12 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
  *
  * When DCLAW_HAS_MBEDTLS=1 this is the Ed25519 public key.
  * When DCLAW_HAS_MBEDTLS=0 this is the HMAC-SHA256 pre-shared key.
+ *
+ * M-9 NOTE: Currently a single fleet-wide OTA key is used for all devices.
+ * Phase 2 will introduce per-device or per-fleet key rotation via the fleet
+ * manager's key distribution protocol. Until then, key compromise affects
+ * the entire fleet. Operators should rotate DCLAW_OTA_KEY periodically and
+ * redeploy via `defenseclaw setup edge-connector install`.
  */
 static uint8_t ota_ca_key[ED25519_PUBKEY_LEN];
 static bool    ota_ca_key_loaded = false;
@@ -443,7 +471,15 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         }
 
         /* REQ-31: Jump attack detection — reject delta > 100 (M-7: reduced
-         * from 1000 to shrink the window for sequence gap attacks) */
+         * from 1000 to shrink the window for sequence gap attacks).
+         *
+         * M-10 tradeoff: A threshold of 100 means up to 100 emergency messages
+         * can be missed during a network outage before the device refuses to
+         * accept new emergencies (requiring a re-bootstrap). This is a balance
+         * between security (smaller window = harder to exploit) and resilience
+         * (larger window = tolerates longer disconnects). At 1 msg/min, 100
+         * covers ~1.5 hours of downtime. Reduce further only if fleet
+         * reconnect times are consistently under 30 minutes. */
         if (seq - s->emergency.last_seen_seq > 100) {
             return -3;
         }
@@ -457,7 +493,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
-        s->emergency.lockdown_timestamp = (uint32_t)(hal_tick_ms() / 1000);
+        s->emergency.lockdown_timestamp = hal_tick_ms() / 1000; /* L-4: uint64_t, no truncation */
         break;
 
     case 0x02: /* REVOKE_HASH / REVOKE_SESSIONS */
@@ -485,7 +521,7 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
         /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
-        s->emergency.lockdown_timestamp = (uint32_t)(hal_tick_ms() / 1000);
+        s->emergency.lockdown_timestamp = hal_tick_ms() / 1000; /* L-4: uint64_t, no truncation */
         break;
 
     case 0x05: /* RELEASE_LOCKDOWN */
@@ -724,14 +760,15 @@ void dclaw_lockdown_timeout_check(void) {
     if (!s->emergency.block_all_active) return;
     if (s->emergency.lockdown_timestamp == 0) return;
 
-    uint32_t now_sec = (uint32_t)(hal_tick_ms() / 1000);
+    /* L-4 fix: Use uint64_t to match widened lockdown_timestamp field */
+    uint64_t now_sec = hal_tick_ms() / 1000;
     if (now_sec < s->emergency.lockdown_timestamp) return; /* tick wraparound guard */
 
-    uint32_t elapsed = now_sec - s->emergency.lockdown_timestamp;
+    uint64_t elapsed = now_sec - s->emergency.lockdown_timestamp;
     if (elapsed >= DCLAW_LOCKDOWN_TIMEOUT_SEC) {
-        fprintf(stderr, "[DCLAW] WARNING: Lockdown auto-cleared after 24 hours (elapsed=%u sec). "
+        fprintf(stderr, "[DCLAW] WARNING: Lockdown auto-cleared after 24 hours (elapsed=%llu sec). "
                 "Normal policy evaluation resumed. Investigate the original lockdown cause.\n",
-                elapsed);
+                (unsigned long long)elapsed);
         s->emergency.block_all_active = false;
         s->emergency.lockdown_timestamp = 0;
         dclaw_cache_flush_all();
@@ -760,19 +797,19 @@ int dclaw_ipc_release_lockdown(void) {
 /* === P1-09 fix: Persist emergency state to flash === */
 
 /*
- * Emergency state is stored in the first 12 bytes of the config partition
+ * Emergency state is stored in the first 16 bytes of the config partition
  * (HAL_FLASH_CONFIG_OFFSET). Layout:
- *   [0..1]  magic marker (0xDC, 0xE9) — "DC Emergency 9"
- *   [2]     block_all_active (0x00 or 0x01)
- *   [3]     reserved (0x00)
- *   [4..7]  last_seen_seq  (big-endian uint32)
- *   [8..11] lockdown_timestamp (big-endian uint32, CRT-5)
+ *   [0..1]   magic marker (0xDC, 0xE9) — "DC Emergency 9"
+ *   [2]      block_all_active (0x00 or 0x01)
+ *   [3]      reserved (0x00)
+ *   [4..7]   last_seen_seq  (big-endian uint32)
+ *   [8..15]  lockdown_timestamp (big-endian uint64, L-4: widened from uint32)
  *
  * The 2-byte magic ensures we don't misinterpret stale/uninitialized flash
  * (which reads as all-zeros or all-0xFF) as a valid emergency state.
  */
 #define EMERGENCY_FLASH_OFFSET  HAL_FLASH_CONFIG_OFFSET
-#define EMERGENCY_FLASH_SIZE    12
+#define EMERGENCY_FLASH_SIZE    16  /* L-4: was 12, now 16 for uint64 lockdown_timestamp */
 #define EMERGENCY_MAGIC_0       0xDC
 #define EMERGENCY_MAGIC_1       0xE9
 
@@ -788,11 +825,15 @@ void dclaw_emergency_persist(void) {
     buf[5] = (uint8_t)(s->emergency.last_seen_seq >> 16);
     buf[6] = (uint8_t)(s->emergency.last_seen_seq >> 8);
     buf[7] = (uint8_t)(s->emergency.last_seen_seq);
-    /* CRT-5: Persist lockdown timestamp */
-    buf[8]  = (uint8_t)(s->emergency.lockdown_timestamp >> 24);
-    buf[9]  = (uint8_t)(s->emergency.lockdown_timestamp >> 16);
-    buf[10] = (uint8_t)(s->emergency.lockdown_timestamp >> 8);
-    buf[11] = (uint8_t)(s->emergency.lockdown_timestamp);
+    /* L-4 fix: Persist lockdown timestamp as uint64 (big-endian) */
+    buf[8]  = (uint8_t)(s->emergency.lockdown_timestamp >> 56);
+    buf[9]  = (uint8_t)(s->emergency.lockdown_timestamp >> 48);
+    buf[10] = (uint8_t)(s->emergency.lockdown_timestamp >> 40);
+    buf[11] = (uint8_t)(s->emergency.lockdown_timestamp >> 32);
+    buf[12] = (uint8_t)(s->emergency.lockdown_timestamp >> 24);
+    buf[13] = (uint8_t)(s->emergency.lockdown_timestamp >> 16);
+    buf[14] = (uint8_t)(s->emergency.lockdown_timestamp >> 8);
+    buf[15] = (uint8_t)(s->emergency.lockdown_timestamp);
 
     if (hal_flash_write(EMERGENCY_FLASH_OFFSET, buf, EMERGENCY_FLASH_SIZE) != 0) {
         fprintf(stderr, "[DCLAW] WARNING: Failed to persist emergency state to flash.\n");
@@ -815,9 +856,11 @@ void dclaw_emergency_load_from_flash(void) {
     s->emergency.block_all_active = (buf[2] == 0x01);
     s->emergency.last_seen_seq = ((uint32_t)buf[4] << 24) | ((uint32_t)buf[5] << 16) |
                                  ((uint32_t)buf[6] << 8) | (uint32_t)buf[7];
-    /* CRT-5: Restore lockdown timestamp */
-    s->emergency.lockdown_timestamp = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
-                                      ((uint32_t)buf[10] << 8) | (uint32_t)buf[11];
+    /* L-4 fix: Restore lockdown timestamp as uint64 (big-endian) */
+    s->emergency.lockdown_timestamp = ((uint64_t)buf[8] << 56) | ((uint64_t)buf[9] << 48) |
+                                      ((uint64_t)buf[10] << 40) | ((uint64_t)buf[11] << 32) |
+                                      ((uint64_t)buf[12] << 24) | ((uint64_t)buf[13] << 16) |
+                                      ((uint64_t)buf[14] << 8) | (uint64_t)buf[15];
     s->emergency.initialized = true;
 
     if (s->emergency.block_all_active) {

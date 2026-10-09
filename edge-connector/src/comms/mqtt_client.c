@@ -564,6 +564,15 @@ static int build_topic(char *buf, size_t buf_size, const char *suffix) {
  */
 static void mqtt_route_publish(const char *topic, const uint8_t *payload,
                                size_t payload_len) {
+    /* M-4 fix: Verify the topic starts with "defenseclaw/" prefix using strncmp
+     * (not strstr) to prevent a malicious broker from injecting messages on
+     * topics that merely contain the substring elsewhere. */
+    if (strncmp(topic, "defenseclaw/", 12) != 0) {
+        fprintf(stderr, "[DCLAW-MQTT] WARNING: rejected message on unexpected topic prefix: %.64s\n",
+                topic);
+        return;
+    }
+
     /* Check for verdict/resp suffix */
     const char *suffix = strstr(topic, "verdict/resp");
     if (suffix) {
@@ -749,6 +758,22 @@ int dclaw_mqtt_connect(void) {
                 "or use mqtt:// for development only.\n");
         mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
+    }
+#endif
+
+    /* DCLAW_REQUIRE_TLS guard: In production builds, if the operator has set
+     * DCLAW_REQUIRE_TLS=1 (or "true"), refuse to connect over plaintext mqtt://.
+     * This lets operators enforce TLS without code changes. */
+#if !DCLAW_DEV_MODE
+    if (!is_tls) {
+        const char *require_tls = getenv("DCLAW_REQUIRE_TLS");
+        if (require_tls &&
+            (strcmp(require_tls, "1") == 0 || strcmp(require_tls, "true") == 0)) {
+            fprintf(stderr, "[DCLAW-MQTT] ERROR: DCLAW_REQUIRE_TLS is set but broker URL "
+                    "uses plaintext mqtt://. Use mqtts:// or unset DCLAW_REQUIRE_TLS.\n");
+            mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
+            return -1;
+        }
     }
 #endif
 

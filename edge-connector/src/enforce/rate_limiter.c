@@ -13,9 +13,12 @@ static void refill_tokens(dclaw_rate_limiter_t *rl) {
     uint64_t new_tokens = (rl->refill_rate * elapsed_sec) / 60;
 
     if (new_tokens > 0) {
-        rl->tokens = (rl->tokens + (uint16_t)new_tokens > rl->bucket_size)
+        /* L-5 fix: Use uint32_t for intermediate sum to avoid uint16 overflow
+         * when elapsed time is large (e.g., long stall before next call). */
+        uint32_t sum = (uint32_t)rl->tokens + (uint32_t)new_tokens;
+        rl->tokens = (sum > rl->bucket_size)
                      ? rl->bucket_size
-                     : rl->tokens + (uint16_t)new_tokens;
+                     : (uint16_t)sum;
         rl->last_refill_tick = now;
     }
 }

@@ -1,3 +1,4 @@
+# TODO: Add unit tests (L-10)
 """HTTP middleware that gates tool calls through the Edge Connector.
 
 Intercepts POST requests to tool-execution endpoints and evaluates them

@@ -35,7 +35,7 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 
 	// M-11: Limit concurrent connections and WAL size for resource-constrained
 	// environments (edge devices, single-writer pattern).
-	db.SetMaxOpenConns(2)
+	db.SetMaxOpenConns(4) // L-7: increased from 2 to 4 for better concurrent read throughput
 	if _, err := db.Exec("PRAGMA journal_size_limit=8388608"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set WAL size limit: %w", err)

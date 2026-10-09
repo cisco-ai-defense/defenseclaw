@@ -96,7 +96,7 @@ func NewTCPClient(addr, clientID string) *TCPClient {
 		addr:     stripMQTTScheme(addr),
 		clientID: clientID,
 		subs:     make(map[string]func(Message)),
-		pubackCh: make(chan uint16, 4), // NEW-1 fix: buffered channel for PUBACK delivery
+		pubackCh: make(chan uint16, 16), // NEW-1 fix: buffered channel for PUBACK delivery (L-6: widened from 4 to 16)
 	}
 }
 
@@ -112,6 +112,15 @@ func (c *TCPClient) Connect(ctx context.Context) error {
 	// P0-5 fix: Reject TLS schemes instead of silently downgrading to plaintext.
 	if isTLSScheme(c.addr) {
 		return fmt.Errorf("%w: broker address %q uses TLS scheme", errTLSNotSupported, c.addr)
+	}
+
+	// DCLAW_REQUIRE_TLS guard: If the operator has set DCLAW_REQUIRE_TLS=true
+	// (or "1"), refuse to connect unless the address uses mqtts:// or ssl://.
+	// This lets operators enforce TLS without code changes.
+	if requireTLS := os.Getenv("DCLAW_REQUIRE_TLS"); requireTLS == "true" || requireTLS == "1" {
+		if !isTLSScheme(c.addr) {
+			return fmt.Errorf("DCLAW_REQUIRE_TLS is set but broker address %q does not use mqtts:// or ssl://. Use a TLS scheme or unset DCLAW_REQUIRE_TLS", c.addr)
+		}
 	}
 
 	// Strip URI scheme prefixes — net.Dial expects bare host:port.

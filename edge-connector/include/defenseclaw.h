@@ -247,7 +247,8 @@ typedef struct {
     bool     replay_requested;
     bool     initialized;
     bool     block_all_active;  /* P1-6: global BLOCK_ALL / LOCKDOWN flag */
-    uint32_t lockdown_timestamp; /* CRT-5: Unix epoch when lockdown was activated (0 = not set) */
+    uint64_t lockdown_timestamp; /* CRT-5: Unix epoch when lockdown was activated (0 = not set)
+                                 * L-4 fix: widened from uint32_t to uint64_t to avoid 49.7-day wrap */
 } dclaw_emergency_state_t;
 
 /* === Runtime Policy Tables === */

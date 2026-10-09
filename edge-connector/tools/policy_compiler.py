@@ -830,6 +830,14 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
             "Provide --signing-key with a valid Ed25519 key."
         )
 
+    # M-14 fix: Emit a startup warning when falling through to the dev stub
+    # signature path without DCLAW_PRODUCTION or a signing key configured.
+    # This makes it obvious in CI/CD logs that the policy blob is unsigned.
+    print("WARNING: No signing key provided and DCLAW_PRODUCTION is not set. "
+          "Using dev stub signature — the resulting policy.bin is NOT "
+          "cryptographically signed and will be rejected by production devices.",
+          file=sys.stderr)
+
     # Dev stub: 64 bytes = 0xED marker + SHA-256(blob) (32 bytes) + zero padding (31 bytes).
     # The Go policy service (policy.go) detects this stub by checking:
     #   blob[-64] == 0xED and blob[-63:-31] == SHA-256(unsigned)[:32]

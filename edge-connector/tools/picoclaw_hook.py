@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# TODO: Add unit tests (L-10)
 """Edge Connector hook for PicoClaw.
 
 Bridges PicoClaw's JSON-RPC hook protocol (stdin/stdout) to the Edge

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,10 +132,19 @@ func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
 }
 
 // isProductionMode returns true when the env var DCLAW_PRODUCTION is set to
-// "true" or "1". Used by CRT-3 to refuse zero-key fallbacks.
+// "true" or "1", OR when DCLAW_DEV_MODE is "OFF", "0", or "false".
+// H-1 fix: DCLAW_PRODUCTION defaults to true when DCLAW_DEV_MODE=OFF so that
+// operators only need to set one knob. Used by CRT-3 to refuse zero-key fallbacks.
 func isProductionMode() bool {
 	v := os.Getenv("DCLAW_PRODUCTION")
-	return v == "true" || v == "1"
+	if v == "true" || v == "1" {
+		return true
+	}
+	devMode := strings.ToLower(os.Getenv("DCLAW_DEV_MODE"))
+	if devMode == "off" || devMode == "0" || devMode == "false" {
+		return true
+	}
+	return false
 }
 
 func (p *envDeviceKeyProvider) KeyForDevice(_ uint64) []byte {
@@ -164,7 +174,9 @@ type Bridge struct {
 
 	// NEW-5 fix: decommissioned tracks device IDs that have been decommissioned.
 	// MQTT messages from these devices are explicitly rejected with a log message.
-	decommissioned   map[uint64]struct{}
+	// M-6 fix: Entries now carry a timestamp so the cleanup goroutine can evict
+	// stale decommission records after 24 hours to prevent unbounded map growth.
+	decommissioned   map[uint64]time.Time
 	decommissionedMu sync.RWMutex
 
 	// Metrics hooks (set externally to avoid circular imports)
@@ -231,7 +243,7 @@ func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache)
 		keyProvider:          newEnvDeviceKeyProvider(),
 		logger:               log.Default(),
 		stopped:              make(chan struct{}),
-		decommissioned:       make(map[uint64]struct{}),
+		decommissioned:       make(map[uint64]time.Time),
 		heartbeatMinInterval: time.Second, // H-3: 1 heartbeat/sec default
 		lastHeartbeat:        make(map[uint64]time.Time),
 		verdictRateMap:       make(map[uint64]*verdictRateEntry),
@@ -242,11 +254,12 @@ func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache)
 // Zero disables rate limiting (useful for tests).
 func (b *Bridge) SetHeartbeatRateLimit(d time.Duration) { b.heartbeatMinInterval = d }
 
-// MarkDecommissioned adds a device ID to the decommissioned set.
+// MarkDecommissioned adds a device ID to the decommissioned set with a timestamp.
 // NEW-5 fix: MQTT messages from decommissioned devices are rejected.
+// M-6 fix: Records the decommission time for cleanup after 24 hours.
 func (b *Bridge) MarkDecommissioned(fullDeviceID uint64) {
 	b.decommissionedMu.Lock()
-	b.decommissioned[fullDeviceID] = struct{}{}
+	b.decommissioned[fullDeviceID] = time.Now()
 	b.decommissionedMu.Unlock()
 }
 
@@ -341,6 +354,17 @@ func (b *Bridge) Start(ctx context.Context) error {
 					}
 				}
 				b.verdictRateMu.Unlock()
+
+				// M-6 fix: Clean decommissioned entries older than 24 hours
+				// to prevent unbounded map growth from accumulated decomissions.
+				decommCutoff := time.Now().Add(-24 * time.Hour)
+				b.decommissionedMu.Lock()
+				for id, ts := range b.decommissioned {
+					if ts.Before(decommCutoff) {
+						delete(b.decommissioned, id)
+					}
+				}
+				b.decommissionedMu.Unlock()
 			}
 		}
 	}()
@@ -645,6 +669,16 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		}
 	}
 
+	// M-7 fix: Validate payload length is at least 32 bytes (minimum CBOR + HMAC)
+	// before attempting to split payload/HMAC. Variable-length CBOR payloads
+	// shorter than this cannot contain a valid verdict request.
+	if len(msg.Payload) < 32 {
+		b.logger.Printf("[mqtt-bridge] verdict request from device %d too short (%d bytes, need >= 32)",
+			parts.DeviceID, len(msg.Payload))
+		b.incErrors()
+		return
+	}
+
 	vr, err := DecodeVerdictRequest(msg.Payload)
 	if err != nil {
 		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)
@@ -690,6 +724,11 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 					b.incErrors()
 					return
 				}
+			} else {
+				// M-8 fix: Log when processing verdict requests from unkeyed devices.
+				// CRT-1 rate limiting is already applied above, but the absence of a
+				// per-device key means HMAC cannot authenticate the sender.
+				b.logger.Printf("[mqtt-bridge] WARNING: processing verdict request from unkeyed device %d (no per-device key provisioned)", parts.DeviceID)
 			}
 		}
 	}
@@ -891,8 +930,8 @@ func computeVerdictHMACFull(deviceKey []byte, sessionID string,
 	binary.LittleEndian.PutUint32(tsBuf[:], serverTS)
 	mac.Write(tsBuf[:])
 
-	// tool_hash[0:8]
-	mac.Write(toolHash[:8])
+	// L-1 fix: Use full 32-byte tool_hash (was truncated to 8 bytes)
+	mac.Write(toolHash[:])
 
 	full := mac.Sum(nil)
 	var tag [16]byte

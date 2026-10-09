@@ -44,17 +44,12 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
-import hmac as _hmac_mod
+import hmac as _hmac_mod  # L-9 fix: removed 5 duplicate imports
 import json
-import hmac as _hmac_mod
 import logging
-import hmac as _hmac_mod
 import os
-import hmac as _hmac_mod
 import signal
-import hmac as _hmac_mod
 import sys
-import hmac as _hmac_mod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -419,15 +414,13 @@ class MCPProxy:
     async def _forward(self, msg: Dict) -> Dict:
         """Forward a message to the upstream and return its response.
 
-        TODO(M-13): Validate the upstream response before returning it to the
-        client.  Currently the response is forwarded as-is, which means a
-        compromised or buggy upstream MCP server could inject arbitrary
-        JSON-RPC fields (e.g., fake tool results, manipulated resource data).
-        Add schema validation or at minimum verify the response has the
-        expected JSON-RPC structure and matching id.
+        M-2 fix: Validate that the upstream response is valid JSON-RPC 2.0
+        (has ``jsonrpc``, ``id``, and either ``result`` or ``error``).
+        Reject malformed responses to prevent a compromised or buggy upstream
+        MCP server from injecting arbitrary fields.
         """
         try:
-            return await self._upstream.send(msg)
+            resp = await self._upstream.send(msg)
         except Exception as exc:
             logger.error("Upstream error: %s", exc)
             return _make_error(
@@ -435,6 +428,38 @@ class MCPProxy:
                 code=-32603,
                 message=f"Upstream unavailable: {exc}",
             )
+
+        # M-2: Validate upstream response is well-formed JSON-RPC 2.0
+        if not isinstance(resp, dict):
+            logger.warning("Upstream returned non-dict response: %s", type(resp).__name__)
+            return _make_error(
+                msg.get("id"),
+                code=-32603,
+                message="Upstream returned malformed response (not a JSON object)",
+            )
+        if resp.get("jsonrpc") != "2.0":
+            logger.warning("Upstream response missing or invalid 'jsonrpc' field: %s", resp.get("jsonrpc"))
+            return _make_error(
+                msg.get("id"),
+                code=-32603,
+                message="Upstream returned malformed response (missing jsonrpc: 2.0)",
+            )
+        if "id" not in resp:
+            logger.warning("Upstream response missing 'id' field")
+            return _make_error(
+                msg.get("id"),
+                code=-32603,
+                message="Upstream returned malformed response (missing id)",
+            )
+        if "result" not in resp and "error" not in resp:
+            logger.warning("Upstream response has neither 'result' nor 'error'")
+            return _make_error(
+                msg.get("id"),
+                code=-32603,
+                message="Upstream returned malformed response (missing result/error)",
+            )
+
+        return resp
 
 
 # ---------------------------------------------------------------------------

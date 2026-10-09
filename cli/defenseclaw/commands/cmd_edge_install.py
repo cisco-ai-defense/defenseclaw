@@ -332,18 +332,23 @@ def _register_device_via_api(
         "device_id": int(device_id),
     })
 
-    # Include -w to capture the HTTP status code separately
+    # M-13 fix: Use subprocess.PIPE to pass the Authorization header via stdin
+    # instead of embedding the bearer token in command-line arguments, which
+    # are visible in `ps` output and /proc/*/cmdline on Linux.
     curl_cmd = [
         "curl", "-s", "-o", "-", "-w", "\n%{http_code}",
         "-X", "POST", url,
         "-H", "Content-Type: application/json",
         "-H", "X-DefenseClaw-Client: true",
     ]
+    stdin_data = None
     if api_token:
-        curl_cmd += ["-H", f"Authorization: Bearer {api_token}"]
+        curl_cmd += ["-H", "@-"]
+        stdin_data = f"Authorization: Bearer {api_token}"
     curl_cmd += ["-d", body]
 
-    result = subprocess.run(curl_cmd, capture_output=True, text=True)
+    result = subprocess.run(curl_cmd, capture_output=True, text=True,
+                            input=stdin_data)
     if result.returncode != 0:
         ux.warn(f"Device registration API call failed (exit {result.returncode}). "
                 "Register the device manually via: defenseclaw edge-connector register")
@@ -369,9 +374,12 @@ def _register_device_via_api(
         # Attempt to re-fetch the device record to check if a key is available
         get_url = f"{api_base}/devices/{device_id}"
         get_cmd = ["curl", "-s", get_url, "-H", "X-DefenseClaw-Client: true"]
+        get_stdin = None
         if api_token:
-            get_cmd += ["-H", f"Authorization: Bearer {api_token}"]
-        get_result = subprocess.run(get_cmd, capture_output=True, text=True)
+            get_cmd += ["-H", "@-"]
+            get_stdin = f"Authorization: Bearer {api_token}"
+        get_result = subprocess.run(get_cmd, capture_output=True, text=True,
+                                    input=get_stdin)
         if get_result.returncode == 0:
             try:
                 existing = _json.loads(get_result.stdout)

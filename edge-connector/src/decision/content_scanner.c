@@ -2,6 +2,12 @@
 #include "policy_tables.h"
 #include <string.h>
 #include <ctype.h>
+#if !defined(DCLAW_NO_DNS_CHECK)
+#include <netdb.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
 
 /* === Helper Functions === */
 
@@ -739,6 +745,49 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
         strncmp(host, "fe80:", 5) == 0 || strncmp(host, "fe80%", 5) == 0) {
         return DCLAW_ACTION_BLOCK;
     }
+
+    /* H-2 fix: DNS rebinding check — resolve the hostname and verify the
+     * resolved IP is not in a private range. This catches DNS rebinding where
+     * evil.com resolves to 192.168.1.1. Guarded by DCLAW_NO_DNS_CHECK so
+     * embedded targets without DNS resolution can disable this check. */
+#if !defined(DCLAW_NO_DNS_CHECK)
+    if (!starts_with_digit(host)) {
+        struct addrinfo hints, *result;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        int dns_rc = getaddrinfo(host, NULL, &hints, &result);
+        if (dns_rc != 0) {
+            /* DNS resolution failed — block to be safe */
+            return DCLAW_ACTION_BLOCK;
+        }
+
+        /* Check if the resolved address is in a private/loopback range */
+        struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
+        uint32_t ip = ntohl(addr->sin_addr.s_addr);
+        freeaddrinfo(result);
+
+        uint8_t o0 = (ip >> 24) & 0xFF;
+        uint8_t o1 = (ip >> 16) & 0xFF;
+
+        /* Loopback: 127.x.x.x */
+        if (o0 == 127) return DCLAW_ACTION_BLOCK;
+        /* 0.0.0.0/8 */
+        if (o0 == 0) return DCLAW_ACTION_BLOCK;
+        /* 10.x.x.x */
+        if (o0 == 10) return DCLAW_ACTION_BLOCK;
+        /* 172.16.0.0 - 172.31.255.255 */
+        if (o0 == 172 && o1 >= 16 && o1 <= 31) return DCLAW_ACTION_BLOCK;
+        /* 192.168.x.x */
+        if (o0 == 192 && o1 == 168) return DCLAW_ACTION_BLOCK;
+        /* Link-local: 169.254.x.x */
+        if (o0 == 169 && o1 == 254) return DCLAW_ACTION_BLOCK;
+
+        /* Resolved to a public IP — allow */
+        return DCLAW_ACTION_ALLOW;
+    }
+#endif /* !DCLAW_NO_DNS_CHECK */
 
     /* If not starting with digit, assume it's a hostname - pass through */
     if (!starts_with_digit(host)) {

@@ -5,6 +5,7 @@
 #include "sha256.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #if DCLAW_MQTT_ENABLED
 extern int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
@@ -16,6 +17,11 @@ extern bool dclaw_mqtt_is_connected(void);
 
 static dclaw_state_t g_state;
 static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
+
+/* H-3 fix: When DCLAW_STRICT_MODE=1, ALL capabilities are treated as sync_block
+ * (not speculative). NET_FETCH and SEND_MSG will also require cloud approval
+ * before proceeding. Checked once in dclaw_init() and stored here. */
+static bool g_strict_mode = false;
 
 /* External module functions */
 extern dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash);
@@ -116,6 +122,17 @@ int dclaw_init(const dclaw_device_info_t *info) {
      * audit key is loaded (dclaw_audit_key_provisioned triggers key init)
      * so that HMAC validation during old-format migration works. */
     dclaw_audit_ring_init();
+
+    /* H-3 fix: Check for DCLAW_STRICT_MODE once at init. When set to "1",
+     * all capabilities are treated as sync_block — speculative execution is
+     * disabled and every tool call requires cloud approval before proceeding. */
+    {
+        const char *strict = getenv("DCLAW_STRICT_MODE");
+        if (strict && strcmp(strict, "1") == 0) {
+            g_strict_mode = true;
+            fprintf(stderr, "[DCLAW] Strict mode enabled — all capabilities require sync cloud approval.\n");
+        }
+    }
 
     return 0;
 }
@@ -250,8 +267,9 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
      * bypass rate limiting and correlation checks. (Comment 18 fix) */
     uint8_t trusted_cap_flags = dclaw_policy_lookup_capability(req->tool_name);
 
-    /* Use a mutable copy with the trusted capability flags */
-    dclaw_tool_request_t trusted_req;
+    /* L-3 fix: Use static buffer to avoid ~700-byte stack allocation per
+     * evaluation. Safe for single-threaded embedded (no concurrent callers). */
+    static dclaw_tool_request_t trusted_req;
     memcpy(&trusted_req, req, sizeof(dclaw_tool_request_t));
     trusted_req.cap_flags = trusted_cap_flags;
     /* CRT-1 fix: Apply SYSTEM scope override on the mutable copy (not via
@@ -363,7 +381,9 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         }
 
 #if DCLAW_SPECULATIVE_EXECUTION
-        if (!is_sync_block_required(req->cap_flags)) {
+        /* H-3 fix: When strict mode is active, skip speculative execution
+         * entirely — all capabilities require sync cloud approval. */
+        if (!g_strict_mode && !is_sync_block_required(req->cap_flags)) {
             /* Speculative mode: allow the agent to proceed, cloud will respond async.
              * If send failed, still return ALLOW — the request is logged for audit. */
             dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
@@ -396,7 +416,8 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
 #else
     /* MQTT not enabled — no cloud path available */
 #if DCLAW_SPECULATIVE_EXECUTION
-    if (!is_sync_block_required(req->cap_flags)) {
+    /* H-3 fix: When strict mode is active, skip speculative execution. */
+    if (!g_strict_mode && !is_sync_block_required(req->cap_flags)) {
         dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
                           target_hash, req->session_id);
         g_state.eval_escalated_count++;

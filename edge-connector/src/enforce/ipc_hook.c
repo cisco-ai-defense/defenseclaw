@@ -2,6 +2,7 @@
 #include "platform.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 extern dclaw_state_t *dclaw_get_state(void);
 
@@ -25,14 +26,20 @@ int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer) {
     uint32_t uid, gid;
     int32_t pid;
 
-    /* P1 fix: If hal_get_peer_cred is not available on this platform
-     * (returns -1, e.g., macOS without LOCAL_PEERCRED), skip the check
-     * with a warning rather than rejecting the connection outright.
-     * This allows development on non-Linux platforms. */
+    /* M-3 fix: If hal_get_peer_cred is not available on this platform
+     * (returns -1, e.g., macOS without LOCAL_PEERCRED), only allow the
+     * connection in dev mode (DCLAW_DEV_MODE=ON). In production mode,
+     * refuse the connection to prevent unauthenticated IPC access. */
     if (hal_get_peer_cred(client_fd, &uid, &gid, &pid) != 0) {
-        fprintf(stderr, "[DCLAW] WARN: peer credential check unavailable on this "
-                "platform; allowing connection without UID/GID verification\n");
-        return 0;
+        const char *dev_mode = getenv("DCLAW_DEV_MODE");
+        if (dev_mode && (strcmp(dev_mode, "ON") == 0 || strcmp(dev_mode, "1") == 0)) {
+            fprintf(stderr, "[DCLAW] WARN: peer credential check unavailable on this "
+                    "platform; allowing connection (DCLAW_DEV_MODE=ON)\n");
+            return 0;
+        }
+        fprintf(stderr, "[DCLAW] ERROR: peer credential check unavailable on this "
+                "platform and DCLAW_DEV_MODE is not ON — rejecting IPC connection\n");
+        return -1;
     }
 
     if (uid != peer->expected_uid) {

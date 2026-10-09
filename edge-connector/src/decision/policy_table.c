@@ -73,7 +73,7 @@ static const dclaw_tool_cap_entry_t tool_cap_map[] = {
     /* Sensor-class adapter tools → SENSOR_READ */
     { "get_state",        DCLAW_CAP_SENSOR_READ },
     { "battery_status",   DCLAW_CAP_SENSOR_READ },
-    { "read_sensor",      DCLAW_CAP_SENSOR_READ },
+    /* L-2 fix: removed duplicate "read_sensor" (already in Sensor block above) */
     { "get_temperature",  DCLAW_CAP_SENSOR_READ },
     { "check_status",     DCLAW_CAP_SENSOR_READ },
     { "list_devices",     DCLAW_CAP_SENSOR_READ },

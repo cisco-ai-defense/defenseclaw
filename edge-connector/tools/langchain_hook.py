@@ -1,3 +1,4 @@
+# TODO: Add unit tests (L-10)
 """LangChain/LangGraph Edge Connector middleware.
 
 Wraps LangChain tools with DefenseClaw policy enforcement so every tool

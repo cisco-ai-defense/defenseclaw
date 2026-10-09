@@ -280,11 +280,14 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
 	fm.mu.Lock()
-	defer fm.mu.Unlock()
+	// H-6 fix: Lock is released manually before store persistence (see below).
+	// Do NOT use defer fm.mu.Unlock() here — the lock is released explicitly
+	// before the SaveDevice call to narrow the critical section.
 
 	dev, exists := fm.devices[fullID]
 	if !exists {
 		if !fm.AutoRegister {
+			fm.mu.Unlock()
 			return
 		}
 		// Auto-register the unknown device using heartbeat fields.
@@ -346,6 +349,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		// Exact same uptime with no reboot — replay. Drop it.
 		log.Printf("[fleet] replay detected for device %d: uptime %d == last %d, dropping",
 			deviceID, hb.UptimeSec, dev.LastUptime)
+		fm.mu.Unlock()
 		return
 	}
 	dev.LastUptime = hb.UptimeSec
@@ -456,10 +460,21 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	binary.BigEndian.PutUint64(hmacBytes, hb.AuditHeadHMAC)
 	dev.LastAuditHMAC = hmacBytes
 
-	// Persist updated state. For lockdown transitions, retry once on failure
-	// to ensure the security-critical status survives gateway restart (H-2 fix).
+	// H-6 fix: Narrow global lock scope — copy the device data needed for
+	// persistence, release the lock, THEN persist. This allows other heartbeats
+	// to proceed while SQLite writes (which can be slow).
+	var devCopyForStore *Device
 	if fm.store != nil {
-		if err := fm.store.SaveDevice(dev); err != nil {
+		cp := *dev
+		devCopyForStore = &cp
+	}
+	fm.mu.Unlock()
+
+	// Persist updated state outside the lock. For lockdown transitions, retry
+	// once on failure to ensure the security-critical status survives gateway
+	// restart (H-2 fix).
+	if devCopyForStore != nil {
+		if err := fm.store.SaveDevice(devCopyForStore); err != nil {
 			log.Printf("[fleet] store error: %v", err)
 			if fm.onStoreError != nil {
 				fm.onStoreError()
@@ -467,11 +482,11 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			// H-2 fix: Retry once for security-critical status transitions.
 			// If lockdown is lost due to store failure, a compromised device
 			// escapes lockdown after gateway restart.
-			if dev.Status == StatusLockdown || dev.Status == StatusDegraded {
+			if devCopyForStore.Status == StatusLockdown || devCopyForStore.Status == StatusDegraded {
 				time.Sleep(50 * time.Millisecond)
-				if retryErr := fm.store.SaveDevice(dev); retryErr != nil {
+				if retryErr := fm.store.SaveDevice(devCopyForStore); retryErr != nil {
 					log.Printf("[fleet] CRITICAL: failed to persist %s status for device %d after retry: %v",
-						dev.Status, dev.DeviceID, retryErr)
+						devCopyForStore.Status, devCopyForStore.DeviceID, retryErr)
 				}
 			}
 		}
