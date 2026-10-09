@@ -51,6 +51,9 @@ type DestinationHealthSnapshot struct {
 	Generation   uint64
 	PlanDigest   string
 	Destinations []DestinationHealth
+	// LocalWriteLossJournal reports whether failed local writes are kept in
+	// the loss journal or in memory only (GAP-1129).
+	LocalWriteLossJournal LocalWriteLossJournalHealth
 }
 
 // DestinationHealthSnapshot acquires one graph lease, joins the complete
@@ -230,6 +233,7 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 
 	return DestinationHealthSnapshot{
 		Generation: graph.Generation(), PlanDigest: graph.Digest(), Destinations: rows,
+		LocalWriteLossJournal: runtime.localWriteLosses.health(),
 	}, nil
 }
 

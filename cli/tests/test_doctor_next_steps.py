@@ -524,6 +524,11 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
     }
     assert "disk holding the audit database is full" in cmd_doctor._telemetry_error_reason(details)
     assert cmd_doctor._telemetry_error_reason({"event_history_failure": ""}) == ""
+    # GAP-1129: a loss journal the gateway cannot write is named too.
+    journal = {"local_write_loss_journal": "failing", "local_write_loss_journal_failed_writes": 2}
+    assert "audit loss journal" in cmd_doctor._telemetry_error_reason({**details, **journal})
+    reason, next_step, _ = cmd_doctor._audit_write_failure({"telemetry": {"state": "error", "details": journal}})
+    assert "audit loss journal" in reason and "data directory" in next_step
 
     from types import SimpleNamespace
 

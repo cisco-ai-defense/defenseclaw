@@ -406,6 +406,16 @@ many records the local history is missing, so the gap in an audit export is
 not silent. Those records are not written to the local history afterwards;
 read them from the destinations that received them.
 
+The count also survives a gateway crash or restart before writes resume. The
+gateway keeps it in `local-write-losses.journal` in its data directory, a
+64 KiB file it reserves in advance so a full disk cannot stop the count. The
+file holds counts, times and SQLite failure classes, never record content.
+After the restart, the first stored `sqlite.write_failed` record reports the
+earlier losses with their journal generation, and later restarts do not
+report them again. If the gateway cannot write the journal, the missing
+records are counted in memory only: `defenseclaw status` and
+`defenseclaw doctor` report it until the journal can be written again.
+
 Seven days is also the default when `retention_days` is omitted. The gateway
 runs the graph-aware SQLite reaper after startup readiness and every six hours;
 CLI-only writes are reaped the next time the gateway starts. Existing v8

@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/google/uuid"
@@ -22,15 +24,23 @@ const (
 	localWriteGapV8Subsystem = "local-sqlite"
 )
 
-// recordLocalWriteGapV8 runs when local history writes resume after a
-// failure (disk full, read-only store). The optional destinations already
-// received the records that local history lacks; one content-free
-// sqlite.write_failed record says how many, so the gap in the audit export is
-// not silent (GAP-1100). Secure Client keeps main's records (#1092).
+// recordLocalWriteGapV8 runs when the gateway starts and when local history
+// writes resume after a failure (disk full, read-only store). The optional
+// destinations already received the records that local history lacks; one
+// content-free sqlite.write_failed record says how many, so the gap in the
+// audit export is not silent (GAP-1100). The count includes records an
+// earlier gateway process lost before it crashed or stopped, which the loss
+// journal in the data directory kept (GAP-1129). The losses are marked
+// reported only once that record is stored in the local history, so a later
+// restart does not report them again. Secure Client keeps main records (#1092).
 func (s *Sidecar) recordLocalWriteGapV8() {
 	if s == nil || ManagedEnterpriseActive() {
 		return
 	}
+	// One report at a time: the start-up call and a write recovery must not
+	// both report the same losses.
+	s.localWriteGapV8Mu.Lock()
+	defer s.localWriteGapV8Mu.Unlock()
 	s.observabilityV8Mu.Lock()
 	owner, _ := s.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
 	emitter := s.observabilityV8
@@ -38,20 +48,53 @@ func (s *Sidecar) recordLocalWriteGapV8() {
 	if owner == nil || owner.runtime == nil || emitter == nil {
 		return
 	}
-	lost := owner.runtime.TakeLocalWriteLosses()
-	if lost == 0 {
+	losses := owner.runtime.PendingLocalWriteLosses()
+	if losses.Records == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := emitLocalWriteGapV8(ctx, emitter, lost, time.Now().UTC()); err != nil {
-		owner.runtime.ReturnLocalWriteLosses(lost)
+	outcome, err := emitLocalWriteGapV8(ctx, emitter, losses, time.Now().UTC())
+	if err == nil && outcome.LocalPersisted() {
+		owner.runtime.ConsumeLocalWriteLosses(losses)
 	}
 }
 
-func emitLocalWriteGapV8(ctx context.Context, emitter sidecarRuntimeEmitter, lost uint64, observedAt time.Time) error {
-	if ctx == nil || emitter == nil || lost == 0 {
-		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
+// describeLocalWriteGapV8 is the record summary, for example "3 log records
+// could not be stored in the local history while its SQLite writes failed
+// (full 2, io 1; first 2026-10-09T10:00:00Z, last 2026-10-09T10:05:00Z; loss
+// journal generation 0f3c...); the destinations that received them still
+// have them". It names counts, reasons and times only.
+func describeLocalWriteGapV8(losses observabilityruntime.LocalWriteLosses) string {
+	noun := "records"
+	if losses.Records == 1 {
+		noun = "record"
+	}
+	var first, last time.Time
+	reasons := make([]string, 0, len(losses.Reasons))
+	for _, reason := range losses.Reasons {
+		reasons = append(reasons, fmt.Sprintf("%s %d", reason.Reason, reason.Records))
+		if first.IsZero() || reason.First.Before(first) {
+			first = reason.First
+		}
+		if reason.Last.After(last) {
+			last = reason.Last
+		}
+	}
+	return fmt.Sprintf("%d log %s could not be stored in the local history while its SQLite writes failed "+
+		"(%s; first %s, last %s; loss journal generation %s); the destinations that received them still have them",
+		losses.Records, noun, strings.Join(reasons, ", "),
+		first.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339), losses.Generation)
+}
+
+func emitLocalWriteGapV8(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	losses observabilityruntime.LocalWriteLosses,
+	observedAt time.Time,
+) (pipeline.LocalLogOutcome, error) {
+	if ctx == nil || emitter == nil || losses.Records == 0 {
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
 	}
 	producerKey := observability.ProducerKey(gatewaylog.EventError)
 	metadata, err := router.NewClassifiedLogMetadata(
@@ -68,15 +111,10 @@ func emitLocalWriteGapV8(ctx context.Context, emitter sidecarRuntimeEmitter, los
 		observability.ProducerKey(localWriteGapV8Action),
 	)
 	if err != nil {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	noun := "records"
-	if lost == 1 {
-		noun = "record"
-	}
-	summary := fmt.Sprintf("%d log %s could not be stored in the local history while its SQLite writes failed; "+
-		"the destinations that received them still have them", lost, noun)
-	_, err = emitter.Emit(ctx, metadata, func(
+	summary := describeLocalWriteGapV8(losses)
+	return emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -105,5 +143,4 @@ func emitLocalWriteGapV8(ctx context.Context, emitter sidecarRuntimeEmitter, los
 			MandatorySqliteFailure:        true,
 		})
 	})
-	return err
 }

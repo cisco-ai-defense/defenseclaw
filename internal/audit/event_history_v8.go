@@ -1226,6 +1226,14 @@ func validEventHistorySQLiteDiagnostic(class EventHistorySQLiteClass, primary ui
 	}
 }
 
+// ClassifyEventHistoryWriteFailure is the coarse SQLite class of a failed
+// event-history write, the class gateway health reports, so the local-write
+// loss journal can count each lost record under its reason (GAP-1129).
+func ClassifyEventHistoryWriteFailure(err error) EventHistorySQLiteClass {
+	class, _ := classifyEventHistorySQLiteFailure(err)
+	return class
+}
+
 func classifyEventHistorySQLiteFailure(err error) (EventHistorySQLiteClass, uint8) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		primary := sqlitePrimaryCode(err)
