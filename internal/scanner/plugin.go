@@ -52,6 +52,11 @@ func NewPluginScanner(binaryPath string) *PluginScanner {
 	if runtimeBinary := resolveScannerRuntime(binaryPath, "defenseclaw", "defenseclaw.exe"); usesScannerRuntime(runtimeBinary) {
 		return &PluginScanner{BinaryPath: runtimeBinary}
 	}
+	// A rejected managed runtime must not resolve a second executable from
+	// a packaged sibling or PATH.
+	if scannerRuntimePreflight(binaryPath, "defenseclaw", "defenseclaw.exe") != nil {
+		return &PluginScanner{BinaryPath: binaryPath}
+	}
 	binaryPath = resolveDefaultPluginScanner(binaryPath)
 	return &PluginScanner{BinaryPath: binaryPath}
 }
@@ -95,6 +100,9 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	var scanErr error
 	var result *ScanResult
 
+	if err := scannerRuntimePreflight(s.BinaryPath, "defenseclaw", "defenseclaw.exe"); err != nil {
+		return nil, err
+	}
 	binaryPath, args := s.pluginScanCommand(target)
 	cmd := processutil.CommandContext(ctx, binaryPath, args...)
 	cmd.Env = append(os.Environ(), ScanRecordedByCallerEnv+"=1")

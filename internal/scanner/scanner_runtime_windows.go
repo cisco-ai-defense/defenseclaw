@@ -46,7 +46,15 @@ func installedScannerRuntime() (string, error) {
 		return "", errNoScannerRuntime
 	}
 	if _, err := os.Lstat(root); err != nil {
-		return "", errNoScannerRuntime
+		// A standalone managed service requires this runtime even when its
+		// whole folder has been removed. Per-user and Secure Client installs
+		// keep their existing scanner command resolution.
+		standalone := managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+			managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv))
+		if os.IsNotExist(err) && !standalone {
+			return "", errNoScannerRuntime
+		}
+		return "", fmt.Errorf("scanner runtime folder %s is unavailable: %w", root, err)
 	}
 	path := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 	info, err := os.Lstat(path)
@@ -103,6 +111,10 @@ func admittedScannerRuntime(root, path string, info os.FileInfo) error {
 // scanner path in config stays authoritative, and every other install
 // (per-user, Secure Client) has no scanner runtime and keeps binary.
 func resolveScannerRuntime(binary string, defaults ...string) string {
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		!managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		return binary
+	}
 	for _, name := range defaults {
 		if strings.EqualFold(strings.TrimSpace(binary), name) {
 			if path := scannerRuntimePath(); path != "" {
@@ -112,4 +124,35 @@ func resolveScannerRuntime(binary string, defaults ...string) string {
 		}
 	}
 	return binary
+}
+
+// scannerRuntimePreflight refuses an unusable managed runtime before a default
+// command can be resolved through PATH. Recheck an already-resolved installed
+// runtime too: its admission can change after scanner construction.
+func scannerRuntimePreflight(binary string, defaults ...string) error {
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		!managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		return nil
+	}
+	candidate := strings.TrimSpace(binary)
+	managedBinary := false
+	for _, name := range defaults {
+		if strings.EqualFold(candidate, name) {
+			managedBinary = true
+			break
+		}
+	}
+	if root, err := managed.StandaloneWindowsScannerRuntimeDir(); err == nil {
+		installed := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+		if strings.EqualFold(filepath.Clean(candidate), installed) {
+			managedBinary = true
+		}
+	}
+	if !managedBinary {
+		return nil
+	}
+	if problem := scannerRuntimeProblem(); problem != nil {
+		return fmt.Errorf("scanner: the managed scanner runtime cannot be run (%v); run the DefenseClaw Setup with /repair", problem)
+	}
+	return nil
 }

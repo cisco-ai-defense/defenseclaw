@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -33,6 +34,43 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// A configured judge that reports LLM_ANALYSIS_FAILED makes this API scan
+// incomplete, even when the static scanner process exits successfully.
+func TestHandleSkillScanRejectsJudgeFailure(t *testing.T) {
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("---\nname: test\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "scanner.go")
+	program := `package main
+import "fmt"
+func main() { fmt.Print("{\"findings\":[{\"rule_id\":\"LLM_ANALYSIS_FAILED\",\"severity\":\"INFO\",\"description\":\"judge unavailable\"}]}") }
+`
+	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "skill-scanner")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	if output, err := exec.Command("go", "build", "-o", binary, source).CombinedOutput(); err != nil {
+		t.Fatalf("build scanner fixture: %v\n%s", err, output)
+	}
+	cfg := &config.Config{}
+	cfg.Scanners.SkillScanner.Binary = binary
+	cfg.Scanners.SkillScanner.UseLLM = true
+	cfg.LLM.Model = "bedrock/test-judge"
+	body, err := json.Marshal(skillScanRequest{Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	(&APIServer{scannerCfg: cfg}).handleSkillScan(w, httptest.NewRequest(http.MethodPost, "/v1/skill/scan", bytes.NewReader(body)))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "judge did not run") {
+		t.Fatalf("response = %d %q, want incomplete-scan error", w.Code, w.Body.String())
+	}
+}
 
 func TestHandleSkillScanRejectsBundledSystemSkillBeforeScanner(t *testing.T) {
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
