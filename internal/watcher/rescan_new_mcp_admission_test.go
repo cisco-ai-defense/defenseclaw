@@ -22,7 +22,8 @@ import (
 // GAP-0132: on a managed gateway (an MCP server source is bound), a server
 // that appears after the first rescan gets install admission, so
 // admission.mcp.scan_on_install: false admits it without a scan, as `mcp
-// set` does per user. Servers present at start only get baselines.
+// set` does per user. A server present at start that scan_on_install
+// false admits only gets a baseline.
 func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 	t.Setenv("PATH", "")
 	cfg, store, logger, _ := setupTestEnv(t)
@@ -54,6 +55,27 @@ func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 	w.runRescanCycle(context.Background())
 	if len(admitted) != 1 {
 		t.Fatalf("the next cycle admitted the server again: %#v", admitted)
+	}
+}
+
+// GAP-1096: an MCP server already configured when the gateway starts is
+// admitted in the first cycle, so its HIGH verdict blocks and disables it;
+// it used to get a baseline scan whose rejected verdict nothing acted on.
+func TestRescanFirstCycleAdmitsMCPServerPresentAtStart(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	servers := []config.MCPServerEntry{{Name: "usm-time", Command: "uvx", Args: []string{"mcp-server-time"}, Connector: "claudecode"}}
+	var admitted []AdmissionResult
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &countingScanner{name: "mcp-scanner", findings: []scanner.Finding{{
+			ID: "f1", RuleID: "MCP-001", Severity: scanner.SeverityHigh, Title: "lab marker",
+		}}}
+	}
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+	w.runRescanCycle(context.Background())
+	if len(admitted) != 1 || admitted[0].Event.Name != "usm-time" || admitted[0].Verdict != VerdictRejected {
+		t.Fatalf("first cycle admitted %+v, want usm-time rejected", admitted)
 	}
 }
 

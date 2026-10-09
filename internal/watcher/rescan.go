@@ -895,9 +895,14 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if evt.Type == InstallMCP && w.admitNewMCP && w.startupRescanDone {
+			if evt.Type == InstallMCP && w.admitNewMCP && (w.startupRescanDone || !w.secureClientActive()) {
 				// A server added to an enrolled user's agent after the
 				// watcher started: admit it as `mcp set` would (GAP-0132).
+				// One that was there at start is admitted too, so its
+				// verdict blocks and disables it as the docs say; it used
+				// to get a baseline scan only, a rejected verdict nothing
+				// acted on (GAP-1096). Secure Client keeps main's baseline
+				// (issue #1092).
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s is new; running install admission\n", evt.Name)
 				res := w.runAdmission(ctx, evt)
 				w.notifyAdmission(res)
