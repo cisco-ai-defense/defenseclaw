@@ -66,8 +66,11 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	if err := os.WriteFile(agent, []byte("agent-v2"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
+	if err = ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
 		t.Fatal("changed agent executable was accepted")
+	}
+	if !strings.Contains(err.Error(), "ACP agent executable digest") {
+		t.Fatalf("agent drift message lost its executable subject: %v", err)
 	}
 	if err := os.WriteFile(agent, []byte("agent-v1"), 0o700); err != nil {
 		t.Fatal(err)
@@ -75,7 +78,13 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	if err := os.WriteFile(clientConfig, []byte(`{"agent_servers":{"foreign":{}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
+	if err = ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
 		t.Fatal("changed client configuration was accepted")
+	}
+	if !strings.Contains(err.Error(), "ACP client configuration file digest") {
+		t.Fatalf("client configuration drift message does not name the settings file: %v", err)
+	}
+	if strings.Contains(err.Error(), "executable") {
+		t.Fatalf("client configuration drift message calls a settings file an executable: %v", err)
 	}
 }
