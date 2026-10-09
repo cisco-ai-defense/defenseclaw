@@ -158,6 +158,39 @@ t_codex_no_home_metadata_uses_system_or_empty() {
   fi
 }
 
+t_codex_from_chatgpt_bundle_metadata() {
+  # Current ChatGPT.app releases moved the embedded CLI below
+  # Resources/codex-cli/ and publish its version in codex-package.json.
+  # Exercise the metadata reader against a staged bundle so CI does not
+  # depend on a host application install.
+  local root; root="$(mktest_tmp)/ChatGPT.app"
+  local metadata="${root}/Contents/Resources/codex-cli/codex-package.json"
+  mkdir -p "$(dirname -- "${metadata}")"
+  printf '%s\n' \
+    '{"layoutVersion":1,"version":"0.159.2","target":"aarch64-apple-darwin","variant":"codex"}' \
+    > "${metadata}"
+
+  local got
+  got="$(_codex_chatgpt_bundle_metadata_version "${root}")"
+  assert_eq "${got}" "0.159.2" "codex version from current ChatGPT.app bundle metadata"
+}
+
+t_codex_chatgpt_bundle_metadata_rejects_invalid_version() {
+  local root; root="$(mktest_tmp)/ChatGPT.app"
+  local metadata="${root}/Contents/Resources/codex-cli/codex-package.json"
+  local log; log="$(mktest_tmp)/errors.log"
+  mkdir -p "$(dirname -- "${metadata}")"
+  printf '%s\n' '{"version":"not-a-version"}' > "${metadata}"
+  : > "${log}"
+
+  local got
+  got="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+    _codex_chatgpt_bundle_metadata_version "${root}")"
+  assert_eq "${got}" "" "invalid ChatGPT.app Codex metadata version rejected"
+  assert_contains "$(cat "${log}")" "invalid-version" \
+    "invalid ChatGPT.app Codex metadata version recorded"
+}
+
 t_codex_chatgpt_app_bundled_wins_over_npm() {
   # Regression guard for the sathishr scenario: a customer with a stale
   # `npm i -g @openai/codex@0.104.0` (predating our MinAgentVersion
@@ -173,8 +206,11 @@ t_codex_chatgpt_app_bundled_wins_over_npm() {
   # Runs only when /Applications/ChatGPT.app is present so CI /
   # non-desktop-app boxes still pass. On a box with ChatGPT.app
   # missing this returns "skip".
-  local chatgpt_codex="/Applications/ChatGPT.app/Contents/Resources/codex"
-  if [[ ! -x "${chatgpt_codex}" ]]; then
+  if [[ ! -f /Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+     && [[ ! -x /Applications/ChatGPT.app/Contents/MacOS/codex ]]; then
     if [[ "${VERBOSE:-false}" == "true" ]]; then printf '  skip (ChatGPT.app not installed)\n'; fi
     return 0
   fi
@@ -210,7 +246,10 @@ t_codex_from_user_npm_metadata() {
   # dir) — those correctly win over stale npm installs on real customer
   # boxes, but would defeat this test's fixture. The ChatGPT.app-wins
   # case is covered by t_codex_chatgpt_app_bundled_wins_over_npm above.
-  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+  if [[ -f /Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
      || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
      || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
      || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
@@ -543,7 +582,10 @@ t_discover_agent_version_records_error_for_corrupt_codex_npm() {
   # version and never touch our corrupt fixture. The unit-level
   # coverage on _probe_json_version already proves the log-append
   # semantics; this is the end-to-end guard for the codex npm branch.
-  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+  if [[ -f /Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
      || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
      || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
      || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
@@ -579,6 +621,8 @@ run_case "claudecode via Claude Desktop embedded bundle" t_claudecode_via_claude
 run_case "claudecode Claude Desktop picks highest bundled" t_claudecode_desktop_embedded_picks_highest_version
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
+run_case "codex via current ChatGPT.app bundle metadata" t_codex_from_chatgpt_bundle_metadata
+run_case "codex rejects invalid ChatGPT.app bundle version" t_codex_chatgpt_bundle_metadata_rejects_invalid_version
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
 run_case "unknown connector returns empty"   t_unknown_connector

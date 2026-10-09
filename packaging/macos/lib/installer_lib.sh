@@ -663,6 +663,29 @@ _claude_desktop_embedded_version_from_home() {
   [[ -n "${best}" ]] && echo "${best}"
 }
 
+# _codex_chatgpt_bundle_metadata_version APP_ROOT -> echoes version or "".
+#
+# Current ChatGPT.app releases package Codex under Resources/codex-cli/ and
+# publish the bundled CLI version in codex-package.json. Prefer that fixed,
+# signed-bundle metadata over executing the embedded CLI: the hook enumerator
+# runs as root, and version discovery must not introduce a privileged code
+# execution surface. APP_ROOT is an explicit argument so tests can stage a
+# hermetic bundle without overriding the production /Applications path.
+_codex_chatgpt_bundle_metadata_version() {
+  local app_root="$1"
+  local metadata="${app_root}/Contents/Resources/codex-cli/codex-package.json"
+  [[ -f "${metadata}" ]] || return 0
+
+  local version
+  version="$(_probe_json_version "${metadata}" codex)"
+  [[ -n "${version}" ]] || return 0
+  if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+    _record_discovery_error codex "${metadata}" "invalid-version"
+    return 0
+  fi
+  printf '%s\n' "${version}"
+}
+
 discover_agent_version() {
   local connector="$1"
   local home="$2"
@@ -696,7 +719,7 @@ discover_agent_version() {
       # version that fails our MinAgentVersion contract gate.
       #
       # Order:
-      #   1. ChatGPT.app bundled binary       (Codex 0.145.0+ current)
+      #   1. ChatGPT.app bundled metadata/binary (Codex 0.145.0+ current)
       #   2. Homebrew Caskroom                (versioned dir name)
       #   3. npm module package.json         (user-global then system)
       #   4. `command -v codex` last resort   (arbitrary PATH install)
@@ -709,11 +732,16 @@ discover_agent_version() {
       # hook guardian's connector.Setup call.
       local vraw
 
-      # 1. ChatGPT.app bundled codex — /Applications/ChatGPT.app/
-      # Contents/Resources/codex is the current stable location; the
-      # older MacOS/ path is kept as a fallback for pre-2026 builds.
+      # 1. ChatGPT.app bundled Codex. Current releases use
+      # Contents/Resources/codex-cli/{codex-package.json,bin/codex}; retain
+      # the older Resources/codex and MacOS/codex paths as fallbacks.
+      vraw="$(_codex_chatgpt_bundle_metadata_version /Applications/ChatGPT.app)"
+      if [[ -n "${vraw}" ]]; then echo "${vraw}"; return; fi
+
       local chatgpt_codex
       for chatgpt_codex in \
+        /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex \
+        /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex \
         /Applications/ChatGPT.app/Contents/Resources/codex \
         /Applications/ChatGPT.app/Contents/MacOS/codex; do
         [[ -x "${chatgpt_codex}" ]] || continue
