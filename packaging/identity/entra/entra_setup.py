@@ -171,14 +171,14 @@ class Graph:
             next_path = page.get("@odata.nextLink")
         return items
 
-    def wait_for_named_object(self, path: str) -> list:
+    def wait_for_named_object(self, path: str, headers: dict[str, str] | None = None) -> list:
         """Before creating by name, allow a previous run's Graph index to catch up."""
         for _ in range(21):
-            found = self.get_all(path)
+            found = self.get_all(path, headers)
             if found:
                 return found
             time.sleep(3)
-        return self.get_all(path)
+        return self.get_all(path, headers)
 
     def get_after_create(self, path: str):
         """Read an object just created: Graph answers 404 for a few seconds."""
@@ -242,9 +242,12 @@ def find_group(graph: Graph, name: str, *, wait: bool = False) -> dict | None:
     query = f"/v1.0/groups?$filter={odata_eq('displayName', name)}&$select={select}"
     found = graph.get_all(query)
     if not found and wait:
-        found = graph.wait_for_named_object(query)
+        found = graph.wait_for_named_object(query, {"ConsistencyLevel": "eventual"})
     if len(found) > 1:
-        raise GraphError(409, "AmbiguousName", f"{len(found)} groups are named {name!r}; use a unique name")
+        ids = ", ".join(str(item.get("id", "<missing id>")) for item in found)
+        raise GraphError(
+            409, "AmbiguousName", f"{len(found)} groups are named {name!r} (object ids: {ids}); use a unique name"
+        )
     if found and found[0].get("securityEnabled") is not True:
         raise GraphError(400, "NotSecurityGroup", f"group {name!r} is not a security group; use a security group")
     return found[0] if found else None
@@ -664,7 +667,8 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
 
     # Resolve every planned group before the first tenant write. A later
     # non-security or ambiguous name must not leave earlier groups created.
-    existing_groups = {spec["name"]: find_group(graph, spec["name"]) for spec in plan.get("groups", [])}
+    existing_groups = {spec["name"]: find_group(graph, spec["name"], wait=apply)
+                       for spec in plan.get("groups", [])}
     for spec in plan.get("groups", []):
         name = spec["name"]
         group = existing_groups[name]

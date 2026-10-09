@@ -268,7 +268,7 @@ def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) 
     assert writes == []
 
 
-def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> None:
+def test_entra_apply_creates_missing_group_after_wait(tmp_path: Path) -> None:
     entra = _load(ENTRA)
     plan = tmp_path / "tenant.json"
     plan.write_text('{"domain":"example.test","groups":[{"name":"new-team"}]}', encoding="ascii")
@@ -279,8 +279,9 @@ def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> No
             return ([{"verifiedDomains": [{"name": "example.test"}]}]
                     if "/organization?" in path else [])
 
-        def wait_for_named_object(self, _path):
-            raise AssertionError("missing group must be created without polling")
+        def wait_for_named_object(self, _path, headers):
+            assert headers == {"ConsistencyLevel": "eventual"}
+            return []
 
         def request(self, method, path, _body):
             calls.append((method, path))
@@ -292,6 +293,37 @@ def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> No
     args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
     assert entra.cmd_apply(Graph(), args) == 0
     assert calls == [("POST", "/v1.0/groups")]
+
+
+def test_entra_apply_rerun_finds_group_after_index_lag(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","groups":[{"name":"new-team"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, path):
+            return ([{"verifiedDomains": [{"name": "example.test"}]}]
+                    if "/organization?" in path else [])
+
+        def wait_for_named_object(self, _path, headers):
+            assert headers == {"ConsistencyLevel": "eventual"}
+            return [{"id": "first-group-id", "displayName": "new-team", "securityEnabled": True}]
+
+        def request(self, method, path, _body):
+            calls.append((method, path))
+            raise AssertionError("a second group must not be created")
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    assert entra.cmd_apply(Graph(), args) == 0
+    assert calls == []
+
+    class Twins:
+        def get_all(self, _path):
+            return [{"id": "first-group-id"}, {"id": "second-group-id"}]
+
+    with pytest.raises(entra.GraphError, match="first-group-id, second-group-id"):
+        entra.find_group(Twins(), "new-team")
 
 
 def test_entra_apply_checks_all_groups_before_creating_any(tmp_path: Path) -> None:
@@ -307,6 +339,9 @@ def test_entra_apply_checks_all_groups_before_creating_any(tmp_path: Path) -> No
                 return [{"verifiedDomains": [{"name": "example.test"}]}]
             if "existing-mail-group" in path:
                 return [{"id": "mail-id", "securityEnabled": False}]
+            return []
+
+        def wait_for_named_object(self, _path, _headers):
             return []
 
         def request(self, method, path, body):

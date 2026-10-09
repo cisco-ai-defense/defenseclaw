@@ -182,14 +182,14 @@ class Graph:
             next_path = page.get("@odata.nextLink")
         return items
 
-    def wait_for_named_object(self, path: str) -> list:
+    def wait_for_named_object(self, path: str, headers: dict[str, str] | None = None) -> list:
         """Before creating by name, allow a previous run's Graph index to catch up."""
         for _ in range(21):
-            found = self.get_all(path)
+            found = self.get_all(path, headers)
             if found:
                 return found
             time.sleep(3)
-        return self.get_all(path)
+        return self.get_all(path, headers)
 
     def get_after_create(self, path: str):
         """Read an object just created: Graph answers 404 for a few seconds."""
