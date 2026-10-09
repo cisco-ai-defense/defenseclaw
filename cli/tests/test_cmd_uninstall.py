@@ -359,10 +359,11 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             for target in targets:
                 Path(target).write_text("owned", encoding="utf-8")
             managed_venv = profile / ".defenseclaw" / ".venv"
-            # install.ps1 writes the shim in the OEM code page cmd.exe reads.
+            # The shim reader takes UTF-8 and the OEM and ANSI code pages
+            # (GAP-0751); the Unicode-profile test covers the code pages.
             Path(targets[0]).write_text(
                 f'@echo off\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\n',
-                encoding=cmd_uninstall._windows_oem_encoding(),
+                encoding="utf-8",
             )
             unrelated = root / "defenseclaw.exe"
             unrelated.write_text("foreign", encoding="utf-8")
