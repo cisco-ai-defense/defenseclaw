@@ -513,7 +513,9 @@ no install watcher for skills and plugins, so there a `default: deny` or
 ### Where a denied skill is refused
 
 An agent hook refuses a denied skill when the agent selects it: Claude Code's
-Skill tool and slash commands, and Codex's `$name` selection. Codex has no hook
+Skill tool and slash commands, and Codex's `$name` selection. A denied name
+also matches the copy a Claude Code plugin bundles (`<plugin>:<name>` at the
+Skill tool and `/<plugin>:<name>`). Codex has no hook
 on its own skill loading, so asked for a skill in plain words it reads the
 skill's `SKILL.md` with a shell command and follows it. The Claude Code and
 Codex hooks therefore also refuse any tool call that reaches into the folder of

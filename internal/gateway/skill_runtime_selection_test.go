@@ -461,6 +461,37 @@ func TestClaudeSettingsOriginSlashSkillOnDeniedListIsRefused(t *testing.T) {
 	}
 }
 
+// GAP-1104: "skill block <name>" stops the same-named skill a plugin
+// bundles, both at the Skill tool call and at /<plugin>:<skill>.
+func TestDeniedSkillNameRefusesPluginBundledCopy(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Mode = "action"
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "usm-kitok-notes", Reason: "bundled"}}
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	if decision, matched := api.claudeCodeSkillAssetDecision(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Skill",
+		ToolInput: map[string]interface{}{"skill": "usm-kit-ok:usm-kitok-notes"},
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("Skill tool = %+v, matched=%v; want the denied bundled skill refused", decision, matched)
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"hook_event_name": "UserPromptExpansion",
+		"session_id":      "plugin-bundled-skill",
+		"prompt":          "/usm-kit-ok:usm-kitok-notes",
+		"expansion_type":  "slash_command",
+		"command_name":    "usm-kit-ok:usm-kitok-notes",
+		"command_source":  "plugin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := invokeNativeSkillHook(t, api, "claudecode", string(payload)); response.Action != "block" {
+		t.Fatalf("slash command action=%q reason=%q, want refused", response.Action, response.Reason)
+	}
+}
+
 func TestClaudeSettingsOriginCustomCommandDoesNotEnterFullSkillPolicy(t *testing.T) {
 	for _, source := range []string{
 		"policySettings", "userSettings", "projectSettings", "bundled",

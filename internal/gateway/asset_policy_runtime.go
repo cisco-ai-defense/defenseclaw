@@ -207,6 +207,9 @@ func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claude
 		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
+	if skill := pluginBundledSkillName(a.liveConfig(), probe.SkillName); skill != "" {
+		probe.DeclaredNames = append(probe.DeclaredNames, skill)
+	}
 	probe.SourcePaths = a.skillSourcePaths(ctx, "claudecode", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
@@ -247,12 +250,21 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		(promptPresent && !promptOK) ||
 		(commandOK && promptOK && !commandIdentity.sameAsset(promptIdentity)))
 
-	identities := make([]claudeCodeSlashIdentity, 0, 2)
+	identities := make([]claudeCodeSlashIdentity, 0, 3)
 	if commandOK {
 		identities = append(identities, commandIdentity)
 	}
 	if promptOK && (!commandOK || !commandIdentity.sameAsset(promptIdentity)) {
 		identities = append(identities, promptIdentity)
+	}
+	if targetType == "plugin" && commandOK && !identityMalformed {
+		// /plugin:skill runs a skill the plugin bundles: a skill on
+		// asset_policy.skill.denied is refused there too (GAP-1104).
+		if skill := pluginBundledSkillName(a.liveConfig(), commandName); skill != "" {
+			if bundled, ok := claudeCodeSlashAssetIdentity("skill", skill); ok {
+				identities = append(identities, bundled)
+			}
+		}
 	}
 
 	// Only literal skill/plugin provenance with a non-conflicting identity
@@ -1093,6 +1105,22 @@ func cursorMCPProbeFromPayload(payload map[string]interface{}, toolName string) 
 		Surface:    "hook",
 		Matched:    true,
 	}
+}
+
+// pluginBundledSkillName is the skill part of a plugin-qualified name
+// (usm-kit:notes, as Claude Code names a skill or command a plugin bundles),
+// or "". A denied skill name matches it, so "skill block notes" stops the
+// plugin's copy as well as a standalone one (GAP-1104). Secure Client keeps
+// main's name match (issue #1092).
+func pluginBundledSkillName(cfg *config.Config, name string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	plugin, skill, namespaced := strings.Cut(strings.TrimPrefix(strings.TrimSpace(name), "/"), ":")
+	if !namespaced || !validNativeSkillSelectionName(plugin) || !validNativeSkillSelectionName(skill) {
+		return ""
+	}
+	return skill
 }
 
 func slashCommandAssetType(commandSource string) string {
