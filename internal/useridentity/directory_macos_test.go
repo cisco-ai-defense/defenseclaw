@@ -58,7 +58,7 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 		{"network AD account on a bound Mac", MacOSDirectoryInputs{DSCL: networkAccount, DSConfigAD: dsconfigadBound, AppSSO: noPlatformSSO},
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "bob@corp.example.com", "CORP.EXAMPLE.COM", ""},
-		// Without dsconfigad only the original node can name the directory and the domain.
+		// A mobile account original node identifies AD without dsconfigad.
 		{"mobile AD account on a Mac without dsconfigad", MacOSDirectoryInputs{DSCL: mobileAccount, AppSSO: noPlatformSSO},
 			DirectoryActiveDirectory, SourceMacOSOpenDirectory, "alice@corp.example.com", "CORP.EXAMPLE.COM", "corp.example.com"},
 		// The account's own node names its domain; the Mac's bound (parent) domain must not replace it.
@@ -107,5 +107,20 @@ func TestParseMacOSDirectoryFacts(t *testing.T) {
 		if got.Domain != tt.domain || got.AccountDomain != tt.accountDomain {
 			t.Fatalf("%s: domain %q account domain %q; want %q %q", tt.name, got.Domain, got.AccountDomain, tt.domain, tt.accountDomain)
 		}
+	}
+}
+
+// A network AD account may lack OriginalNodeName. Its own NetLogon
+// authority still identifies the account when dsconfigad is unavailable.
+func TestParseMacOSNetworkADWithoutDSConfigAD(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	got := ParseMacOSDirectoryFacts(MacOSDirectoryInputs{
+		DSCL: "AuthenticationAuthority: ;Kerberosv5;;alice@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM; ;NetLogon;alice;CORP\n" +
+			"No such key: OriginalNodeName\n",
+	}, now)
+	if got.Directory != DirectoryActiveDirectory || got.Domain != "corp.example.com" ||
+		got.AccountDomain != "CORP" || got.Principal != "alice@corp.example.com" ||
+		got.Assurance != AssuranceVerified {
+		t.Fatalf("network AD facts = %+v", got)
 	}
 }
