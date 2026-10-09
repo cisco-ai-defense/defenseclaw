@@ -48,7 +48,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	// recorded deployment below, so detection sees it installed.
 	statusBusy := false
 	busyMessage := ""
-	if env.applyTriggerRunning(ctx) {
+	if env.waitForApplyTrigger(ctx) {
 		// The apply trigger is applying a changed config.yaml, secret or
 		// policy file: until it commits, the files differ from the record and
 		// the gateway may not read the new file yet. status and verify said
@@ -231,6 +231,26 @@ func (e *Env) applyTriggerRunning(ctx context.Context) bool {
 		return status.State == "running"
 	}
 	return strings.HasPrefix(status.State, "activating")
+}
+
+// waitForApplyTrigger waits up to LockTimeout for a running apply trigger to
+// finish, the way status and verify wait for the lifecycle lock, and reports
+// whether it is still running. A no-op apply launchd started a few seconds
+// after an ensure --config made detect.sh --require-healthy print busy on a
+// healthy host when verify did not wait for it.
+func (e *Env) waitForApplyTrigger(ctx context.Context) bool {
+	deadline := e.Now().Add(e.LockTimeout)
+	for e.applyTriggerRunning(ctx) {
+		if !e.Now().Before(deadline) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return true
+		case <-time.After(e.PollInterval):
+		}
+	}
+	return false
 }
 
 // applyingConfigChange is the lifecycle_busy message of a status or verify

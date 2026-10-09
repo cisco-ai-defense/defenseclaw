@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func writeChangedConfig(t *testing.T, h *testHost, from, to string) string {
@@ -214,4 +215,15 @@ func TestStatusAndVerifyWhileTheApplyTriggerRunsAreBusyNotFailed(t *testing.T) {
 			t.Fatalf("%s during an apply: %+v", action, r.Errors)
 		}
 	}
+	// An apply that ends within the lock wait is waited for, not reported
+	// busy: a no-op apply right after an ensure --config made detect.sh
+	// --require-healthy print busy on a healthy macOS host.
+	writeFreshLedger(t, h)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		h.services.mu.Lock()
+		delete(h.services.activating, unitApplyService)
+		h.services.mu.Unlock()
+	}()
+	requireOK(t, h.run(Options{Action: ActionVerify}))
 }
