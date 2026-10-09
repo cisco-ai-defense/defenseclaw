@@ -1556,7 +1556,9 @@ def test_intune_remediation_rerun_uploads_changed_default_scripts(monkeypatch: p
                         "remediationScriptContent": intune.b64(scripts["Remediate-Fix.ps1"])})]
 
 
-def test_intune_remediation_reenables_detection_only_assignment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_intune_remediation_does_not_repeat_tenant_detection_only_assignment(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     intune = _load(INTUNE)
     monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
     writes = []
@@ -1583,9 +1585,41 @@ def test_intune_remediation_reenables_detection_only_assignment(monkeypatch: pyt
 
     args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
     assert intune.cmd_remediation(Graph(), args) == 0
-    assert len(writes) == 1
+    assert writes == []
+    assert "unchanged (detection only: the tenant stored runRemediationScript=false" in capsys.readouterr().out
+
+
+def test_intune_remediation_reads_back_tenant_state_after_assign(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    intune = _load(INTUNE)
+    monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
+    writes = []
+    schedule = {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
+                "interval": 1, "time": "02:00:00", "useUtc": False}
+    stored = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
+              "runRemediationScript": False, "runSchedule": schedule}
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [stored] if writes else []
+            return [{"id": "script-1"}]
+
+        def get(self, _path):
+            return {"detectionScriptContent": intune.b64(b"script"),
+                    "remediationScriptContent": intune.b64(b"script")}
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {}
+
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
+    assert intune.cmd_remediation(Graph(), args) == 0
     assert writes[0][2]["deviceHealthScriptAssignments"][0]["runRemediationScript"] is True
-    assert writes[0][2]["deviceHealthScriptAssignments"][0]["runSchedule"] == old["runSchedule"]
+    assert "assigned 'DefenseClaw Enterprise health' to group team (detection only:" in capsys.readouterr().out
 
 
 def test_intune_remove_assignment_preserves_exclusion() -> None:

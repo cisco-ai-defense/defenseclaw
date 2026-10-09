@@ -140,7 +140,12 @@ python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ./d
 | --- | --- |
 | `assign-app` | Adds an assignment of an app you uploaded, by its exact display name, to a group. Intent `required` by default; `available` and `uninstall` are options. Changing an existing intent deletes and recreates that assignment; preview names both steps. |
 | `remove-assignment` | Removes an app's assignment to a group. Before an uninstall rollout, remove every Required assignment of the install, upgrade and config apps. |
-| `remediation` | Creates or updates a Remediations package from `Remediate-Detect.ps1` and `Remediate-Fix.ps1`, run as SYSTEM, and assigns it on a daily schedule. It keeps assignments that exist. |
+| `remediation` | Creates or updates a Remediations package from `Remediate-Detect.ps1` and `Remediate-Fix.ps1`, run as SYSTEM, and assigns it on a daily schedule. It keeps assignments that exist. It refuses a group that is an exclusion target. |
+If the helper reports `detection only: the tenant stored runRemediationScript=false`,
+open the package assignment in the Intune admin center and enable remediation
+there. The helper reads back the stored value and reports the same state as
+unchanged on a rerun. In some tenants Graph stores `false` even when the
+request sends `true`; check the portal before relying on automatic repair.
 Microsoft Graph can take about a minute to list a new group. The helper waits
 before creating a missing name and retries a member add after creation. If a
 request fails, rerun it; ambiguous duplicate group names require an admin to

@@ -809,8 +809,15 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             "runRemediationScript": True,
             "runSchedule": schedule,
         }
-        if matching and all(matching[0].get(key) == value for key, value in wanted.items()):
-            print(f"{args.name} assignment to {args.group}: unchanged")
+        same_schedule = matching and all(matching[0].get(key) == value for key, value in wanted.items()
+                                         if key != "runRemediationScript")
+        if same_schedule and matching[0].get("runRemediationScript") in (True, False):
+            detail = (
+                " (detection only: the tenant stored runRemediationScript=false; enable remediation "
+                "for this assignment in the Intune admin center)"
+                if matching[0]["runRemediationScript"] is False else ""
+            )
+            print(f"{args.name} assignment to {args.group}: unchanged{detail}")
         elif not args.apply or script_id is None:
             print(f"[plan] would assign {args.name!r} to group {args.group} with remediation enabled")
         else:
@@ -818,7 +825,29 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             graph.request(
                 "POST", f"{collection}/{script_id}/assign", {"deviceHealthScriptAssignments": keep + [wanted]}
             )
-            print(f"assigned {args.name!r} to group {args.group} with remediation enabled")
+            stored = None
+            for _ in range(5):
+                current = graph.get_all(f"{collection}/{script_id}/assignments")
+                stored = next(
+                    (item for item in current if (item.get("target") or {}).get("groupId") == group["id"]), None
+                )
+                if stored and stored.get("runSchedule") == schedule:
+                    break
+                time.sleep(2)
+            if stored is None or stored.get("runSchedule") != schedule:
+                raise SystemExit(
+                    f"error: Intune did not return the assignment for {args.group!r}; check it in the admin center"
+                )
+            if stored.get("runRemediationScript") is False:
+                print(f"assigned {args.name!r} to group {args.group} (detection only: the tenant stored "
+                      "runRemediationScript=false; enable remediation for this assignment in the Intune admin center)")
+            elif stored.get("runRemediationScript") is True:
+                print(f"assigned {args.name!r} to group {args.group} with remediation enabled")
+            else:
+                raise SystemExit(
+                    f"error: Intune did not return runRemediationScript for {args.group!r}; "
+                    "check it in the admin center"
+                )
     if not args.apply:
         print("Nothing was changed. Run again with --apply to make these changes.")
     return 0
