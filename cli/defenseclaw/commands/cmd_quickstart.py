@@ -39,8 +39,10 @@ from defenseclaw import ux
     "--mode",
     type=click.Choice(["observe", "action"], case_sensitive=False),
     default=None,
-    show_default="observe",
-    help="Protection profile. observe logs findings; action blocks.",
+    help=(
+        "Protection profile. observe logs findings; action blocks. "
+        "Omit it to keep the connector's current mode (observe on a new install)."
+    ),
 )
 @click.option(
     "--scanner",
@@ -250,7 +252,12 @@ def quickstart_cmd(
             f"{platform_support.host_os()}: {support.reason}"
         )
 
-    profile = mode or "observe"
+    # A repeat quickstart keeps the configured mode, and with it the fail mode
+    # action implies, instead of silently dropping to observe (GAP-0979).
+    kept_mode = "" if mode else _configured_quickstart_mode(cfg_mod, connector)
+    profile = mode or kept_mode or "observe"
+    if kept_mode and not json_summary:
+        ux.echo(f"  Keeping {_connector_label(connector)} in {kept_mode} mode (pass --mode to change it).")
 
     # First-run doctor and Inventory must see the same fresh host scan that
     # selected the connector, including explicit --connector on macOS/Windows.
@@ -409,6 +416,19 @@ def _connector_label(name: str) -> str:
 
 def _connector_labels(names) -> str:
     return ", ".join(_connector_label(n) for n in names)
+
+
+def _configured_quickstart_mode(cfg_mod, connector: str) -> str:
+    """The mode *connector* already runs in, or "" when quickstart has not set it up yet."""
+    from defenseclaw import connector_paths, policy_catalog
+
+    wanted = connector_paths.normalize(connector)
+    if wanted not in {connector_paths.normalize(c) for c in _configured_quickstart_connectors(cfg_mod)}:
+        return ""
+    try:
+        return policy_catalog.mode_label(cfg_mod.load().guardrail.effective_mode(wanted))
+    except Exception:  # noqa: BLE001 - an unreadable config falls back to the new-install default.
+        return ""
 
 
 def _configured_quickstart_connectors(cfg_mod) -> list[str]:
