@@ -116,6 +116,36 @@ func TestAgentIdentityDoesNotCrossAUIDReassignment(t *testing.T) {
 	if got := inventoryAgentIdentityID("claudecode", "2301", "o3y"); got != reused.ID {
 		t.Fatalf("inventory record of the uid's account names %q, want %q", got, reused.ID)
 	}
+
+	// GAP-1222: the account is deleted, leaving uid 2301 to no account, and
+	// its name is re-hired under uid 2302. The new account gets identities of
+	// its own; once the guardian keeps no identity record for uid 2301 the
+	// old identity is retired, both listed under the name. A gateway without
+	// a guardian retires none.
+	names := map[string]string{"2302": "o3x"}
+	userScopedIdentityName = func(id string) string { return names[id] }
+	agentIdentityAccountName = userScopedIdentityName
+	rehiredPeer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 2302, Name: "o3x", Home: home})
+	rehired := resolveHookAgentIdentity(rehiredPeer, agentHookRequest{ConnectorName: "claudecode"})
+	if rehired.ID == "" || rehired.ID == removed.ID {
+		t.Fatalf("re-hired account's agent identity = %q, deleted account's %q; want a new one", rehired.ID, removed.ID)
+	}
+	list := func() []agentIdentityRow {
+		rows := mergeAgentIdentityRows([]inventory.AgentIdentityRecord{record(removed, "o3x"), record(rehired, "o3x")},
+			nil, nil, inventory.AgentIdentityFilter{})
+		nameAgentIdentityRows(rows)
+		return rows
+	}
+	restoreSpool := currentIdentitySpoolDir()
+	t.Cleanup(func() { setIdentitySpoolDir(restoreSpool) })
+	for _, spool := range []string{"", t.TempDir()} {
+		setIdentitySpoolDir(spool)
+		for _, row := range list() {
+			if want := spool != "" && row.AgentID == removed.ID; row.Retired != want || row.UserName != "o3x" {
+				t.Fatalf("guardian spool %q: listed %+v; want only the deleted account's identity retired, both as o3x", spool, row)
+			}
+		}
+	}
 }
 
 // The agent identity comes from verified facts only: forged identity headers

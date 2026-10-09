@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -436,9 +438,10 @@ type agentIdentityRow struct {
 	inventory.AgentIdentityRecord
 	InstallHint string `json:"install_hint,omitempty"`
 	// Retired marks the identity of an account that no longer holds its
-	// uid: the account was removed and the uid handed to another account,
-	// or renamed. The row keeps the name it was recorded with, and the
-	// uid's account now has agent identities of its own (GAP-0947).
+	// uid or SID: the account was renamed, or removed and the uid handed to
+	// another account, which has agent identities of its own (GAP-0947),
+	// or removed and its uid or SID left to no account on a managed host
+	// (GAP-1222). The row keeps the name it was recorded with.
 	Retired bool `json:"retired,omitempty"`
 }
 
@@ -645,21 +648,39 @@ func mergeAgentIdentityRows(
 // or SID now, the way a new hook call would record it, so a row an older
 // build stored with another spelling (a bare SSSD name, DOMAIN\user) reads
 // like the rest (GAP-0103). A row whose account no longer resolves keeps its
-// name, and so does a row of an account whose uid another account holds now,
-// which is marked retired instead of being listed under that account
-// (GAP-0947).
+// name, and is retired when the account was removed (GAP-1222); so does a row
+// of an account whose uid another account holds now, which is retired instead
+// of being listed under that account (GAP-0947).
 func nameAgentIdentityRows(rows []agentIdentityRow) {
 	name := hostAccountNamer()
 	for i := range rows {
 		holder := name(rows[i].UserID)
 		switch {
 		case holder == "":
+			rows[i].Retired = agentIdentityAccountRemoved(rows[i].UserID)
 		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder):
 			rows[i].Retired = true
 		default:
 			rows[i].UserName = holder
 		}
 	}
+}
+
+// agentIdentityAccountRemoved reports whether the account of id, a uid or
+// SID no account holds now, was removed: the guardian of the managed host
+// keeps no identity record for it. The guardian drops an account's record
+// once the account has left the enrollment, a directory account's only after
+// a pass in which the directory answered (GAP-1113, GAP-1103), and keeps the
+// records of enrolled accounts while the directory is away, so an outage
+// retires no one. A gateway without a guardian retires none: a per-user
+// gateway lists its own account.
+func agentIdentityAccountRemoved(id string) bool {
+	dir := currentIdentitySpoolDir()
+	if dir == "" || useridentity.KindForID(id) == "" {
+		return false
+	}
+	_, err := enterprisehooks.ReadIdentitySpoolRecord(dir, id, validateManagedGuardianAuthorization)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // agentIdentityHeldByAnother reports whether rec was derived for another
