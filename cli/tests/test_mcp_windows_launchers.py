@@ -899,7 +899,15 @@ def test_error_boundaries_are_distinct_and_stderr_safe(
     assert expected in message
     assert "Connection closed" not in message
     assert "do-not-disclose-this-marker" not in message
-    assert "printed above and not stored" in message
+    assert "last stderr lines are printed above" in message
+
+
+def test_early_exit_names_the_launcher_exit_code() -> None:
+    # GAP-0915: a uvx server that crashed before initialize printed nothing,
+    # and the error said only that the launcher exited.
+    plan = mcp._StdioLaunchPlan("resolved", (), {}, "uvx")
+    message = str(mcp._classify_windows_stdio_error(ConnectionError("Connection closed"), plan, [], 0, 7, -1073741819))
+    assert "'uvx' exited with code 0xC0000005 before completing" in message
 
 
 def test_windows_scan_preserves_cancellation() -> None:
