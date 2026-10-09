@@ -495,7 +495,7 @@ func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
-	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, dataDir, target); err != nil {
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, filepath.Join(dataDir, "hooks"), target); err != nil {
 		t.Fatal(err)
 	}
 	manifest := windowsManagedRuntimeTestManifest(home, target)
