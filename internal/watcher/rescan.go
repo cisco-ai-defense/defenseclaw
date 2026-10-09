@@ -152,6 +152,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	// target, so compute them at most once per kind per cycle.
 	fpCache := make(map[string]string)
 	denyListsChanged := w.denyListsChanged()
+	allowListsChanged := w.allowListsChanged()
 
 	var (
 		countMu          sync.Mutex
@@ -178,6 +179,15 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			// that appears after the change would be, without waiting for
 			// its content to change (GAP-0627).
 			fmt.Fprintf(os.Stderr, "[rescan] %s %s is on the denied list; running install admission\n", evt.Type, evt.Name)
+			w.notifyAdmission(w.runAdmission(ctx, evt))
+			count(evt, rescanScanned)
+			continue
+		}
+		if allowListsChanged && (evt.Type == InstallSkill || evt.Type == InstallPlugin) &&
+			!w.deniedByAssetList(evt) && !w.isManagedArtifact(evt.Path) {
+			// A removed allow can turn an unchanged HIGH asset into a
+			// rejection. Reapply admission; content gating alone cannot see it.
+			fmt.Fprintf(os.Stderr, "[rescan] %s %s allow rules changed; running install admission\n", evt.Type, evt.Name)
 			w.notifyAdmission(w.runAdmission(ctx, evt))
 			count(evt, rescanScanned)
 			continue
@@ -232,6 +242,23 @@ func (w *InstallWatcher) denyListsChanged() bool {
 	}
 	changed := string(raw) != w.lastDenyLists
 	w.lastDenyLists = string(raw)
+	return changed
+}
+
+// allowListsChanged reports a changed allow list after this watcher's first
+// cycle. Rechecking admission lets removals revoke an earlier allow without
+// waiting for an asset's content or scanner settings to change.
+func (w *InstallWatcher) allowListsChanged() bool {
+	cfg := w.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	raw, err := json.Marshal([][]config.AssetPolicyRule{cfg.AssetPolicy.Skill.Allowed, cfg.AssetPolicy.Plugin.Allowed})
+	if err != nil {
+		return false
+	}
+	changed := w.lastAllowLists != "" && string(raw) != w.lastAllowLists
+	w.lastAllowLists = string(raw)
 	return changed
 }
 

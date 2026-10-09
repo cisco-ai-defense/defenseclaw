@@ -143,6 +143,9 @@ type InstallWatcher struct {
 	// lastDenyLists is the denied skill and plugin lists the previous rescan
 	// cycle applied to installed assets (rescan goroutine only).
 	lastDenyLists string
+	// lastAllowLists tracks changes that can revoke admission of unchanged
+	// skills and plugins (rescan goroutine only).
+	lastAllowLists string
 	// startupAdmitRoots are the skill and plugin roots that already held
 	// baselines when the startup rescan began (rescan goroutine only).
 	startupAdmitRoots map[InstallType][]string

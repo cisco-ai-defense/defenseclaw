@@ -2173,9 +2173,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	nextGen.Config = appliedCfg
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
-	if assetDenyListsChanged(oldCfg, appliedCfg) {
-		// Installed skills and plugins a new denied entry names are refused
-		// now, not when their content next changes (GAP-0627).
+	if assetAdmissionListsChanged(oldCfg, appliedCfg) {
+		// Installed skills and plugins affected by a list change are
+		// readmitted now, without waiting for content drift.
 		if w := s.installWatcher.Load(); w != nil {
 			w.RequestRescan()
 		}
@@ -2353,15 +2353,17 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	return nil
 }
 
-// assetDenyListsChanged reports a reload that changes
-// asset_policy.skill.denied or plugin.denied outside Secure Client, whose
-// watcher keeps the cycle of main (issue #1092).
-func assetDenyListsChanged(oldCfg, newCfg *config.Config) bool {
+// assetAdmissionListsChanged reports a reload that changes skill or plugin
+// allow/deny lists outside Secure Client, whose watcher keeps main's cycle
+// (issue #1092).
+func assetAdmissionListsChanged(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
 		return false
 	}
 	return !reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Denied, newCfg.AssetPolicy.Skill.Denied) ||
-		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied)
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Allowed, newCfg.AssetPolicy.Skill.Allowed) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Allowed, newCfg.AssetPolicy.Plugin.Allowed)
 }
 
 // inspectorNeedsRebuild reports whether any field on

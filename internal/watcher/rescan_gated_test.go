@@ -410,3 +410,48 @@ func TestRescanCycleRefusesInstalledSkillAddedToDeniedList(t *testing.T) {
 		t.Fatalf("denied skill still installed: %v", err)
 	}
 }
+
+// GAP-0993: removing an allow rule must readmit an unchanged plugin so its
+// existing HIGH finding can block and quarantine it.
+func TestRescanCycleReadmitsPluginAfterAllowRemoval(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Watch.RescanContentGated = true
+	cfg.Gateway.Watcher.Plugin.TakeAction = true
+	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
+	if err := os.WriteFile(ocPath, []byte(`{"mcp":{"servers":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.ConfigFile = ocPath
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	pluginPath := filepath.Join(pluginDir, "reviewed")
+	if err := os.MkdirAll(pluginPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginPath, "index.js"), []byte("// reviewed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AssetPolicy.Plugin.Allowed = []config.AssetPolicyRule{{Name: "reviewed"}}
+	high := &countingScanner{name: "plugin-scanner", findings: []scanner.Finding{{
+		ID: "f1", RuleID: "PLUGIN-001", Severity: scanner.SeverityHigh, Title: "dynamic code",
+	}}}
+	var verdicts []AdmissionResult
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, func(r AdmissionResult) {
+		verdicts = append(verdicts, r)
+	})
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return high }
+	ctx := context.Background()
+	w.runRescanCycle(ctx)
+	evt := InstallEvent{Type: InstallPlugin, Name: "reviewed", Path: pluginPath}
+	if res := w.runAdmission(ctx, evt); res.Verdict != VerdictAllowed {
+		t.Fatalf("initial allow verdict = %+v", res)
+	}
+	cfg.AssetPolicy.Plugin.Allowed = nil
+	w.runRescanCycle(ctx)
+	if len(verdicts) != 1 || verdicts[0].Verdict != VerdictRejected {
+		t.Fatalf("after allow removal = %+v, want rejected", verdicts)
+	}
+	if _, err := os.Lstat(pluginPath); !os.IsNotExist(err) {
+		t.Fatalf("plugin still installed after allow removal: %v", err)
+	}
+}
