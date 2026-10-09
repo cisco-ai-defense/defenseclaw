@@ -1128,12 +1128,15 @@ Get-Content $Result
 
 `LastTaskResult` is Setup's exit code. For `/uninstall`, replace
 `/ensure CONFIG=$Stage\config.yaml` with `/uninstall`. The loop prints
-Setup's progress from the log as it runs. After the services are back,
+what Setup writes to standard error as it runs, the diagnostics of a run
+that fails. After the services are back,
 Setup prepares the scanner runtime: it unpacks a new one and checks every
 file of an installed one. That takes from seconds to a few minutes, longer on
 a disk that has not been read since the computer was cloned, and at most 15
-minutes. Setup prints `[scanners]` lines meanwhile, with the time elapsed and
-the bound.
+minutes. Setup reports `[scanners]` lines meanwhile, with the time elapsed and
+the bound: on standard output without `JSON=1`, and in the run's lifecycle log
+entry (`diagnostics`) with `JSON=1`. A successful run writes nothing to
+standard error, which an MDM such as Intune reads as a failed script.
 At the bound it stops the prepare and Setup fails (`1603`) with a
 `scanner_runtime_unavailable` error that says `timed out after 15m0s` and
 names `/repair`: DefenseClaw is installed and its services run, but every

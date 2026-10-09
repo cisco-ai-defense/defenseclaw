@@ -217,6 +217,22 @@ func TestWindowsScannerRuntimeTimeoutIsNamed(t *testing.T) {
 	}
 }
 
+// GAP-1069: scanner runtime progress never reaches stderr, which Intune
+// reads as a failed platform script: a person gets it on stdout, and a JSON
+// run keeps each line for the lifecycle log.
+func TestWindowsScannerProgressStaysOffStderr(t *testing.T) {
+	if windowsScannerProgress != io.Writer(os.Stdout) {
+		t.Fatalf("scanner progress goes to %T, want standard output", windowsScannerProgress)
+	}
+	opts := &windowsEnterpriseLifecycleOptions{jsonOutput: true}
+	sink := &windowsScannerDiagnostics{opts: opts}
+	fmt.Fprintf(sink, "[scanners] preparing the scanner runtime\n[scanners] prepare is still")
+	fmt.Fprintf(sink, " running\n")
+	if len(opts.diagnostics) != 2 || opts.diagnostics[1] != "[scanners] prepare is still running" {
+		t.Fatalf("diagnostics = %q, want both progress lines", opts.diagnostics)
+	}
+}
+
 // A timed-out prepare must end the Python worker that inherited its streams.
 func TestWindowsScannerRuntimeTimeoutStopsWorker(t *testing.T) {
 	switch os.Getenv("DC_PREPARE_CANCEL_ROLE") {
