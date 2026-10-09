@@ -410,21 +410,21 @@ func verifyWindowsCodexUserRuntime(
 ) error {
 	paths := windowsCodexRuntimePaths(target.dataDir)
 	if err := verifyWindowsUserRuntime(paths, target.sid); err != nil {
-		return err
+		return windowsUserRuntimeMissingRepair(err)
 	}
 	if err := connector.ValidateManagedNativeHookRuntime(
 		target.dataDir,
 		target.setup.APIAddr,
 		"codex",
 	); err != nil {
-		return fmt.Errorf("enterprise hooks: Codex managed runtime is invalid: %w", err)
+		return windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: Codex managed runtime is invalid: %w", err))
 	}
 	tokenPath, err := connector.HookTokenFilePath(
 		filepath.Join(target.dataDir, "hooks"),
 		"codex",
 	)
 	if err != nil {
-		return err
+		return windowsUserRuntimeMissingRepair(err)
 	}
 	tokenBody, err := connector.ReadManagedHookRuntimeFile(
 		tokenPath,
@@ -432,13 +432,13 @@ func verifyWindowsCodexUserRuntime(
 		windowsEnterpriseTokenMaxBytes,
 	)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: read Codex connector-scoped token: %w", err)
+		return windowsUserRuntimeMissingRepair(fmt.Errorf("enterprise hooks: read Codex connector-scoped token: %w", err))
 	}
 	if subtle.ConstantTimeCompare(
 		[]byte(strings.TrimSpace(string(tokenBody))),
 		[]byte(target.setup.HookAPIToken),
 	) != 1 {
-		return errors.New("enterprise hooks: Codex connector-scoped token does not match the protected service token")
+		return windowsUserRuntimeRepairRequired(errors.New("enterprise hooks: Codex connector-scoped token does not match the protected service token"))
 	}
 	lock, err := connector.LoadHookContractLockEntryForMode(
 		target.dataDir,
@@ -446,10 +446,9 @@ func verifyWindowsCodexUserRuntime(
 		true,
 	)
 	if err != nil {
-		return fmt.Errorf(
-			"enterprise hooks: load Codex managed hook contract: %w",
-			err,
-		)
+		return windowsUserRuntimeMissingRepair(fmt.Errorf(
+			"enterprise hooks: load Codex managed hook contract: %w", err,
+		))
 	}
 	if lock.Connector != "codex" ||
 		len(lock.Locations.HookConfigPaths) != 1 ||

@@ -194,9 +194,6 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
-	if err := validateWindowsUserPathPrefix(home, dataDir, targetSID, false); err != nil {
-		return InstallResult{}, err
-	}
 	hookExecutable, err := windowsEnterpriseHookExecutable()
 	if err != nil {
 		return InstallResult{}, err

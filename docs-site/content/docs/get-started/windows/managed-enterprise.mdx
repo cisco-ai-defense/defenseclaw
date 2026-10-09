@@ -135,6 +135,43 @@ user-footprint `uninstall` directly from an elevated user shell on Windows.
 Those mutations belong to the LocalSystem guardian so it can impersonate the
 exact target SID safely. See [Reconcile and verify Windows targets](/docs/setup/enterprise-deployment#reconcile-and-verify-windows-targets).
 
+### Signed-out targets and pending repair
+
+A target with `deferred: true` can wait for sign-in when its exact active user
+token is unavailable. For previously enrolled targets awaiting repair, the
+guardian also checks that Windows reports no active, connected, or disconnected
+session for that SID. Pending has two meanings:
+
+| Pending target | Guardian evidence and behavior |
+| --- | --- |
+| Never enrolled | There is no prior protected enrollment. User runtime creation waits for sign-in. |
+| Repair pending | Prior protected enrollment for the same SID, connector, and profile is retained while a known user runtime repair waits for sign-in. |
+
+`success_count` counts targets verified in the current reconcile;
+`pending_count` counts targets waiting. The protected target ledger can contain
+more entries than `success_count` because it retains prior enrollment evidence
+for repair-pending targets. This retained evidence does not mean the pending
+runtime passed current verification. Machine policy, trust, profile identity,
+and unclassified verification failures remain errors; they cannot become
+repair pending just because the user is signed out.
+
+After sign-in, the guardian retries through its existing watcher and periodic
+reconcile. An administrator can request a retry with
+`enterprise windows reconcile`. Repair still requires the exact active user
+token; this behavior does not add offline writes to user profiles.
+
+Automatically enumerated targets default to deferred enrollment. Existing
+`deferred: false` values are preserved. To allow a specific existing target to
+wait, an administrator must change that target's approved manifest input to
+`deferred: true` and apply it through the Windows lifecycle. Otherwise, sign in
+as the target user before retrying the installation or repair.
+
+The guardian records keep their v1 JSON format. Older binaries can read the
+format but reject a repair-pending ledger whose retained enrollment count
+exceeds the current success count. A downgrade therefore requires restoring
+the prior guardian state, authorization, and activation records together with
+the prior binaries; replacing only the binaries is insufficient.
+
 ## Upgrade, automatic rollback, and removal
 
 Upgrade is transactional. A validation or staging failure leaves the previous

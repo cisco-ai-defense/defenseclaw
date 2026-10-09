@@ -396,9 +396,9 @@ func verifyWindowsManagedRuntimeGenerationPlatform(
 			return err
 		}
 		if !windowsManagedRuntimeBundleMatchesDesired(bundle, desired) {
-			return errors.New(
+			return windowsUserRuntimeRepairRequired(errors.New(
 				"enterprise hooks: immutable managed runtime generation does not match the verified connector contract",
-			)
+			))
 		}
 		_, second, _, err := readWindowsManagedRuntimeSelector(desired.Connector, false)
 		if err != nil {

@@ -353,7 +353,7 @@ func TestEnterpriseHookVerifyOrRepairTargetSignalsRepairAwaitingSignIn(t *testin
 		enterpriseHookReconcileSessionAvailable = previousSession
 	})
 	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
-		return enterprisehooks.InstallResult{}, errors.New("hook contract drift")
+		return enterprisehooks.InstallResult{}, &enterprisehooks.WindowsUserRuntimeRepairRequiredError{Cause: errors.New("hook contract drift")}
 	}
 	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) {
 		return false, nil
@@ -1759,5 +1759,171 @@ func TestEnterpriseHooksClaudeEffectivePolicyVerified(t *testing.T) {
 				t.Fatalf("enterpriseHooksClaudeEffectivePolicyVerified() = %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRepairAwaitingSignInPreservesOnlyRepairableVerifierErrors(t *testing.T) {
+	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
+	previousSession, previousAnySession := enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileAnySession
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier = previousVerifier
+		enterpriseHookReconcileInstaller = previousInstaller
+		enterpriseHookReconcileSessionAvailable = previousSession
+		enterpriseHookReconcileAnySession = previousAnySession
+	})
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	enterpriseHookReconcileAnySession = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	enterpriseHookReconcileInstaller = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		t.Fatal("repair without user token")
+		return enterprisehooks.InstallResult{}, nil
+	}
+	for _, repairable := range []bool{false, true} {
+		cause := errors.New("original verification cause")
+		var failure error = cause
+		if repairable {
+			failure = &enterprisehooks.WindowsUserRuntimeRepairRequiredError{Cause: cause}
+		}
+		enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+			return enterprisehooks.InstallResult{}, failure
+		}
+		target := enterprisehooks.ManifestTarget{Connector: "codex", Deferred: true}
+		_, _, err := enterpriseHookVerifyOrRepairTarget(context.Background(), target, enterprisehooks.InstallOptions{}, true)
+		if !errors.Is(err, cause) {
+			t.Fatalf("lost original verification cause: %v", err)
+		}
+		pending, pendingErr := enterpriseHookDeferredPendingAfterSessionError(target, true, err)
+		if pending != repairable || (repairable && pendingErr != nil) || (!repairable && !errors.Is(pendingErr, cause)) {
+			t.Fatalf("repairable=%t pending=%t err=%v", repairable, pending, pendingErr)
+		}
+	}
+}
+
+func TestRepairPendingHistoryPassesStatusAndFullVerification(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "offline")
+	active := enterpriseHookReconcileRow{Connector: "codex", SID: "S-1-5-21-1-2-3-1001", UserHome: home + "-active", OK: true}
+	history := enterpriseHookReconcileRow{Connector: "codex", SID: "S-1-5-21-1-2-3-1002", UserHome: home, OK: true}
+	pending := history
+	pending.OK = false
+	pending.Pending = true
+	fresh := time.Now().UTC().Format(time.RFC3339Nano)
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	digest := strings.Repeat("a", 64)
+	state := enterpriseHookGuardianState{Version: 1, UpdatedAt: fresh, Manifest: manifest, OK: true, TargetCount: 2, SuccessCount: 1, PendingCount: 1, Results: []enterpriseHookReconcileRow{active, pending}}
+	authorization := enterpriseHookGuardianAuthorization{Version: 1, UpdatedAt: fresh, OK: true, TargetCount: 2, SuccessCount: 1, PendingCount: 1, ProtectedTargets: []enterpriseHookReconcileRow{active, history}}
+	activation := enterpriseHookGuardianActivation{Version: 1, UpdatedAt: fresh, Manifest: manifest, ManifestSHA256: digest, ReconcileID: strings.Repeat("b", 32), OK: true, TargetCount: 2, SuccessCount: 1, PendingCount: 1, ProtectedTargets: authorization.ProtectedTargets}
+	if issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, manifest, digest); len(issues) != 0 {
+		t.Fatal(issues)
+	}
+	run := enterpriseHookVerifyRun{Rows: state.Results, Pending: 1}
+	if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); len(issues) != 0 {
+		t.Fatal(issues)
+	}
+	activation.ProtectedTargets = append([]enterpriseHookReconcileRow(nil), authorization.ProtectedTargets...)
+	activation.ProtectedTargets[1].UserHome = home + "-rebound"
+	if issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, manifest, digest); len(issues) == 0 {
+		t.Fatal("activation history rebound to another profile was accepted")
+	}
+	if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); len(issues) == 0 {
+		t.Fatal("full verification accepted activation history rebound to another profile")
+	}
+	activation.ProtectedTargets = activation.ProtectedTargets[:1]
+	if issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, manifest, digest); len(issues) == 0 {
+		t.Fatal("mismatched repair history accepted")
+	}
+}
+
+func TestRepairPendingCustomerStateRoundTripAndLaterRepair(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("temporary-directory persistence uses Unix ownership; native Windows lifecycle has separate coverage")
+	}
+	originalConfig := cfg
+	cfg = nil
+	t.Cleanup(func() { cfg = originalConfig })
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnership })
+	dataDir, authorizationDir := t.TempDir(), t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	var enrolled []enterpriseHookReconcileRow
+	for _, user := range []struct{ name, sid string }{
+		{"active", "S-1-5-21-1-2-3-1001"},
+		{"signed-out", "S-1-5-21-1-2-3-53342"},
+	} {
+		for _, name := range []string{"claudecode", "codex", "cursor"} {
+			enrolled = append(enrolled, enterpriseHookReconcileRow{
+				User: user.name, SID: user.sid, UserHome: filepath.Join(dataDir, user.name), Connector: name, OK: true,
+				Result: &enterprisehooks.InstallResult{Connector: name, HookContractID: "previous-contract"},
+			})
+		}
+	}
+	if err := writeEnterpriseHookGuardianState(dataDir, manifest, testEnterpriseHookManifestSHA256, enrolled, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	current := append([]enterpriseHookReconcileRow(nil), enrolled...)
+	for i := 3; i < len(current); i++ {
+		current[i].OK, current[i].Pending, current[i].Result = false, true, nil
+	}
+	check := func(wantSuccesses, wantPending int) enterpriseHookGuardianAuthorization {
+		t.Helper()
+		state, exists, err := loadEnterpriseHookGuardianState(dataDir)
+		if err != nil || !exists {
+			t.Fatalf("load state: exists=%t err=%v", exists, err)
+		}
+		authorization, exists, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+		if err != nil || !exists {
+			t.Fatalf("load authorization: exists=%t err=%v", exists, err)
+		}
+		activation, exists, err := loadEnterpriseHookGuardianActivation(dataDir)
+		if err != nil || !exists {
+			t.Fatalf("load activation: exists=%t err=%v", exists, err)
+		}
+		for label, counts := range map[string][4]int{
+			"state":         {state.TargetCount, state.SuccessCount, state.PendingCount, state.FailureCount},
+			"authorization": {authorization.TargetCount, authorization.SuccessCount, authorization.PendingCount, authorization.FailureCount},
+			"activation":    {activation.TargetCount, activation.SuccessCount, activation.PendingCount, activation.FailureCount},
+		} {
+			if counts != [4]int{6, wantSuccesses, wantPending, 0} {
+				t.Fatalf("%s counts = %v", label, counts)
+			}
+		}
+		if len(authorization.ProtectedTargets) != 6 || len(activation.ProtectedTargets) != 6 {
+			t.Fatal("repair-pending publication lost prior enrollment evidence")
+		}
+		if issues := compareEnterpriseHookGuardianRecords(state, authorization, activation, manifest, testEnterpriseHookManifestSHA256); len(issues) != 0 {
+			t.Fatalf("status rejected published records: %v", issues)
+		}
+		if issues := enterpriseHookVerifyDispositionIssues(enterpriseHookVerifyRun{Rows: current, Pending: wantPending}, authorization, activation); len(issues) != 0 {
+			t.Fatalf("verification rejected published records: %v", issues)
+		}
+		return authorization
+	}
+	if err := writeEnterpriseHookGuardianState(dataDir, manifest, testEnterpriseHookManifestSHA256, current, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	check(3, 3)
+	for i := 3; i < len(current); i++ {
+		current[i].OK, current[i].Pending = true, false
+		current[i].Result = &enterprisehooks.InstallResult{Connector: current[i].Connector, HookContractID: "repaired-contract"}
+	}
+	if err := writeEnterpriseHookGuardianState(dataDir, manifest, testEnterpriseHookManifestSHA256, current, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	authorization := check(6, 0)
+	for _, row := range authorization.ProtectedTargets {
+		if row.User == "signed-out" && (row.Result == nil || row.Result.HookContractID != "repaired-contract") {
+			t.Fatal("successful repair retained stale recovery evidence")
+		}
+	}
+}
+
+func TestRepairPendingRetentionDoesNotFollowSIDToAnotherProfile(t *testing.T) {
+	prior := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1001", Connector: "codex", UserHome: filepath.Join(t.TempDir(), "old"), OK: true}
+	pending := prior
+	pending.OK, pending.Pending = false, true
+	pending.UserHome = filepath.Join(t.TempDir(), "new")
+	if retained := mergeProtectedEnterpriseHookTargets([]enterpriseHookReconcileRow{prior}, []enterpriseHookReconcileRow{pending}); len(retained) != 0 {
+		t.Fatalf("retained authorization for changed profile: %+v", retained)
 	}
 }
