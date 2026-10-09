@@ -644,11 +644,28 @@ class OverviewPanelModel:
                 self.connector_guardrail_profiles[connector.strip().lower()] = result
         else:
             self.guardrail_profile = result
+            # The unscoped gateway response also names connector assignments.
+            # Keep only connector-wide entries: an agent assignment must not
+            # change the posture shown for every call on that connector.
+            self.connector_guardrail_profiles = {
+                str(item["connector"]).strip().lower(): {
+                    "profile": item["profile"],
+                    "effective": {"mode": item.get("mode", "")},
+                }
+                for item in (result or {}).get("overrides", [])
+                if isinstance(item, dict)
+                and item.get("connector")
+                and not item.get("agent")
+                and item.get("profile")
+            }
 
     def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
         """(name, effective settings) of the profile that decides for you."""
 
-        result = (self.connector_guardrail_profiles.get(connector.strip().lower()) if connector else self.guardrail_profile) or {}
+        result = (
+            self.connector_guardrail_profiles.get(connector.strip().lower(), self.guardrail_profile)
+            if connector else self.guardrail_profile
+        ) or {}
         name = str(result.get("profile") or "")
         if not name or result.get("error"):
             return None
@@ -1608,6 +1625,26 @@ class OverviewPanelModel:
         if self.cfg is None:
             return ""
         base = (self.cfg.guardrail_mode or "").strip()
+        roster = [name.strip().lower() for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
+        if not roster and self.active_connector_name():
+            roster = [self.active_connector_name()]
+        if not connector and len(roster) == 1:
+            connector = roster[0]
+        if not connector and len(roster) > 1 and self.guardrail_profile:
+            resolved = [self._applied_profile(name) for name in roster]
+            if all(resolved):
+                labels = [
+                    (profile[0], str(profile[1].get("mode") or base).strip())
+                    for profile in resolved if profile is not None
+                ]
+                if len(set(labels)) == 1:
+                    return f"{labels[0][1]}, profile {labels[0][0]}"
+                counts: dict[str, int] = {}
+                for _, mode in labels:
+                    counts[mode] = counts.get(mode, 0) + 1
+                primary = base if base in counts else max(counts, key=counts.__getitem__)
+                others = [f"{counts[mode]} {mode}" for mode in sorted(counts) if mode != primary]
+                return ", ".join([primary, *others]) if others else primary
         # A matching profile replaces guardrail.* for you: "observe" while
         # every decision was the profile's action read wrong (GAP-0050).
         if applied := self._applied_profile(connector):
@@ -1634,7 +1671,8 @@ class OverviewPanelModel:
             parts.append(mode)
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
-        applied = self._applied_profile()
+        roster = [name for name, _ in self.cfg.connector_modes if name and not self.cfg.connector_is_disabled(name)]
+        applied = self._applied_profile(roster[0] if len(roster) == 1 else "")
         pack_dir = str(applied[1].get("rule_pack_dir") or "") if applied else self.cfg.guardrail_rule_pack_dir
         pack = _rule_pack_label(pack_dir)
         if pack:

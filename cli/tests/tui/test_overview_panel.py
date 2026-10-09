@@ -1327,7 +1327,35 @@ def test_overview_uses_selected_connectors_resolved_profile_mode(monkeypatch) ->
 
     assert asked == [("alice", ""), ("alice", "codex")]
     assert model.guardrail_mode_label("codex") == "action, profile strict"
-    assert model.guardrail_mode_label() == "observe, profile base"
+    assert model.guardrail_mode_label() == "action, profile strict"
+
+
+def test_overview_applies_connector_profile_overrides_to_single_and_all_views() -> None:
+    response = {
+        "profile": "base",
+        "effective": {"mode": "observe"},
+        "overrides": [
+            {"connector": "codex", "agent": "", "profile": "strict", "mode": "action"},
+            {"connector": "claudecode", "agent": "agt-example", "profile": "strict", "mode": "action"},
+        ],
+    }
+    single = OverviewPanelModel(
+        OverviewConfig(guardrail_mode="observe", connector_modes=(("codex", "observe"),)), version="test"
+    )
+    single.set_guardrail_profile(response)
+    assert single.guardrail_mode_label() == "action, profile strict"
+
+    multi = OverviewPanelModel(
+        OverviewConfig(
+            guardrail_mode="observe",
+            connector_modes=(("codex", "observe"), ("claudecode", "observe")),
+        ),
+        version="test",
+    )
+    multi.set_guardrail_profile(response)
+    assert multi.guardrail_mode_label("codex") == "action, profile strict"
+    assert multi.guardrail_mode_label("claudecode") == "observe, profile base"
+    assert multi.guardrail_mode_label() == "observe, 1 action"
 
 
 def test_overview_and_audit_say_loading_until_the_first_read() -> None:
