@@ -188,10 +188,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
 				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 			},
-			LegacyText:         string(toolArgs),
-			Connector:          "claudecode",
-			EnforcementCapable: true,
-			record:             toolChainRecorderFromContext(ctx),
+			LegacyText:                    string(toolArgs),
+			Connector:                     "claudecode",
+			EnforcementCapable:            true,
+			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

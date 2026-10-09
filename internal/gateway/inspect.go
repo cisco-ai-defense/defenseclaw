@@ -1189,6 +1189,25 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	} else {
 		ruleFindings = scanAllRulesForConnectorFor(ctx, req.Connector, content, "message")
 	}
+	// Prompts and tool results can contain invisible separators or letters
+	// that resemble Latin script. Keep this extra view confined to trust rules.
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+		if folded := trustPatternText(content); folded != content {
+			generation := snapshotRulePackGenerationFor(ctx, req.Connector)
+			seen := make(map[string]bool, len(ruleFindings))
+			for _, finding := range ruleFindings {
+				seen[finding.RuleID] = true
+			}
+			for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+				contentScope: req.contentScope, onlyCategory: "trust-exploit",
+			}) {
+				if !seen[finding.RuleID] {
+					ruleFindings = append(ruleFindings, finding)
+					seen[finding.RuleID] = true
+				}
+			}
+		}
+	}
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {

@@ -1314,6 +1314,27 @@ func TestToolJudgeSessionPromptProvidesBoundedIntentAndStartsNewChain(t *testing
 	if len(bounded) > maxToolJudgeUserIntentBytes+maxToolJudgeArgumentBytes+1024 {
 		t.Fatalf("bounded sample is unexpectedly large: %d bytes", len(bounded))
 	}
+	// Codex uses a typed hook evaluator, so its prompt must explicitly seed
+	// the same context key the later tool call uses.
+	codexJudge := &LLMJudge{}
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	api := &APIServer{scannerCfg: cfg}
+	api.SetHookJudge(codexJudge)
+	codexCtx := ContextWithSessionID(t.Context(), "codex-managed-session")
+	api.evaluateCodexHook(codexCtx, codexHookRequest{
+		HookEventName: "UserPromptSubmit", SessionID: "codex-managed-session",
+		Prompt: "Create an ordinary project note",
+	})
+	codexSample := codexJudge.toolJudgeContextSample(codexCtx, "exec_command", `{"command":"echo note > notes.txt"}`)
+	if !strings.Contains(codexSample, "Create an ordinary project note") {
+		t.Fatalf("Codex tool judge omitted session intent: %q", codexSample)
+	}
+	other := codexJudge.toolJudgeContextSample(ContextWithSessionID(t.Context(), "another-session"), "exec_command", `{"command":"echo note > notes.txt"}`)
+	if strings.Contains(other, "Create an ordinary project note") {
+		t.Fatal("Codex tool judge used intent from another session")
+	}
 }
 
 func TestRunToolJudgeUsesBoundedSameSessionContext(t *testing.T) {

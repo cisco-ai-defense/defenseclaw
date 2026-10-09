@@ -126,9 +126,9 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		suppressFallback: authoritativeSemanticSafeNegative,
 		// Download-and-execute is a strong risk signal, but a known installer
 		// has the same observable shape. Keep the generic POSIX compatibility
-		// rule detection-only. Native PowerShell download-and-execute retains
+		// rule alert-only. Native PowerShell download-and-execute retains
 		// its distinct CMD-WIN-IWR-IEX proof and enforcement contract.
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"CMD-PIPE-WGET": {
 		prerequisite:     wgetDownloadExecPrerequisite,

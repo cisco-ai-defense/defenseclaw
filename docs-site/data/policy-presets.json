@@ -570,7 +570,7 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "false",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
                   "pattern": "a^",
                   "title": "curl piped to shell",
                   "severity": "HIGH",
@@ -703,7 +703,7 @@
                 },
                 {
                   "id": "CMD-CHMOD-WORLD",
-                  "expression": "false",
+                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
                   "pattern": "a^",
                   "title": "chmod world-writable",
                   "severity": "HIGH",
@@ -2836,7 +2836,7 @@
                 },
                 {
                   "id": "PATH-SSH-KEY",
-                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
+                  "expression": "f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
                   "pattern": "(?im)(?:^|[;&|]\\s*)\\s*(?:cat|base64|head|tail|less|more|sed|awk|grep|rg|strings|xxd|hexdump|read)\\b[^;\\n]*(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])",
                   "title": "SSH private key file path",
                   "severity": "CRITICAL",
@@ -6759,7 +6759,7 @@
                 },
                 {
                   "id": "PATH-SSH-KEY",
-                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
+                  "expression": "f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
                   "pattern": "(?im)(?:(?:^|[;&|]\\s*)\\s*(?:cat|base64|head|tail|less|more|sed|awk|grep|rg|strings|xxd|hexdump|read|open|show|paste|print|display)\\b[^;\\n]*(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])|(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])[^;\\n]{0,120}\\b(?:cat|base64|read|open|show|paste|print|display)\\b)",
                   "title": "SSH private key file path",
                   "severity": "CRITICAL",
@@ -8136,7 +8136,7 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "false",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
                   "pattern": "a^",
                   "title": "curl piped to shell",
                   "severity": "HIGH",
@@ -8269,7 +8269,7 @@
                 },
                 {
                   "id": "CMD-CHMOD-WORLD",
-                  "expression": "false",
+                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
                   "pattern": "a^",
                   "title": "chmod world-writable",
                   "severity": "HIGH",
@@ -10406,7 +10406,7 @@
                 },
                 {
                   "id": "PATH-SSH-KEY",
-                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
+                  "expression": "f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
                   "pattern": "(?im)(?:^|[;&|]\\s*)\\s*(?:cat|base64|head|tail|less|more|sed|awk|grep|rg|strings|xxd|hexdump|read)\\b[^;\\n]*(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])",
                   "title": "SSH private key file path",
                   "severity": "CRITICAL",

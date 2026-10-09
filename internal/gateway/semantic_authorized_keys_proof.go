@@ -6,6 +6,8 @@ package gateway
 import (
 	"bytes"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -20,9 +22,132 @@ import (
 // action and its fallback handling unchanged.
 
 var (
-	trustedPathlibAuthorizedKeysWrite = regexp.MustCompile(`^import pathlib; p = pathlib\.Path\.home\(\) / "\.ssh" / "authorized_keys"; p\.write_text\(p\.read_text\(\) \+ "[^"\\]*(?:\\n)?"\)$`)
-	trustedPerlAuthorizedKeysWrite    = regexp.MustCompile(`^open\(F, ">>", "\$ENV\{HOME\}/\.ssh/authorized_keys"\); print F "[^"\\]*(?:\\n)?"; close\(F\)$`)
+	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
+	trustedPythonOpenAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bopen\s*\(\s*os\.path\.expanduser\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\s*,\s*['"][aw](?:b|\+)?['"]\s*\)\.write\s*\(`)
+	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
+	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
+	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
+	trustedOutFileAppend                 = regexp.MustCompile(`(?is)^\s*(?:"[^"\r\n]*"|'[^'\r\n]*')\s*\|\s*out-file\s+-append\s+-filepath\s+(.+?)\s*$`)
 )
+
+func trustedCMDBody(input actionfacts.Input) (string, bool) {
+	if len(input.Command) > 64<<10 || input.Command == "" ||
+		!strings.Contains(input.ActiveHome, ":/") {
+		return "", false
+	}
+	parts := trustedCMDInvoke.FindStringSubmatch(strings.TrimSpace(input.Command))
+	if len(parts) != 2 {
+		return "", false
+	}
+	body := strings.TrimSpace(parts[1])
+	if len(body) >= 2 && body[0] == '"' && body[len(body)-1] == '"' {
+		body = body[1 : len(body)-1]
+	}
+	if body == "" || strings.ContainsAny(body, "\r\n") {
+		return "", false
+	}
+	return body, true
+}
+
+func trustedWindowsHomeOperand(operand, home, file string) bool {
+	operand = strings.TrimSpace(operand)
+	if len(operand) >= 2 && operand[0] == '"' && operand[len(operand)-1] == '"' {
+		operand = operand[1 : len(operand)-1]
+	}
+	if strings.ContainsAny(operand, "`\r\n;|&<>") {
+		return false
+	}
+	value := strings.ToLower(strings.ReplaceAll(operand, `\`, "/"))
+	for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$home", "${home}", "$env:userprofile", "${env:userprofile}", "~"} {
+		if strings.HasPrefix(value, prefix+"/") {
+			value = strings.ToLower(home) + value[len(prefix):]
+			break
+		}
+	}
+	return canonicalSemanticPath(value) == canonicalSemanticPath(home+"/.ssh/"+file)
+}
+
+func trustedCMDAuthorizedKeysWrite(input actionfacts.Input) bool {
+	body, ok := trustedCMDBody(input)
+	if !ok {
+		return false
+	}
+	index := strings.LastIndex(body, ">")
+	if index < 0 || index+1 >= len(body) {
+		return false
+	}
+	return trustedWindowsHomeOperand(body[index+1:], input.ActiveHome, "authorized_keys")
+}
+
+func trustedCMDPrivateKeyRead(input actionfacts.Input) bool {
+	body, ok := trustedCMDBody(input)
+	if !ok || !strings.HasPrefix(strings.ToLower(body), "type ") {
+		return false
+	}
+	operand := strings.TrimSpace(body[len("type "):])
+	for _, key := range []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
+		if trustedWindowsHomeOperand(operand, input.ActiveHome, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendTrustedCMDPrivateKeyReadFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	input actionfacts.Input,
+) []RuleFinding {
+	if !trustedCMDPrivateKeyRead(input) {
+		return findings
+	}
+	for _, finding := range findings {
+		if finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY" {
+			return findings
+		}
+	}
+	_, rule, ok := trustedActionCatalogRule(generation, "PATH-SSH-KEY")
+	if !ok {
+		return findings
+	}
+	enforcement := findingEnforcementDetectionOnly
+	if request.EnforcementCapable {
+		enforcement = findingEnforcementAllowed
+	}
+	return append(findings, adjustConfidence(input.Tool, RuleFinding{
+		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
+		Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
+		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+		enforcement: enforcement,
+	}))
+}
+
+func trustedNamedOutFileAuthorizedKeysWrite(input actionfacts.Input) bool {
+	if input.DialectHint != actionfacts.DialectPowerShell || len(input.Command) > 64<<10 {
+		return false
+	}
+	parts := trustedOutFileAppend.FindStringSubmatch(input.Command)
+	return len(parts) == 2 && trustedWindowsHomeOperand(parts[1], input.ActiveHome, "authorized_keys")
+}
+
+func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
+	home := strings.ReplaceAll(input.ActiveHome, `\`, "/")
+	if len(home) < 3 || home[1] != ':' || home[2] != '/' ||
+		input.DialectHint != actionfacts.DialectPOSIX {
+		return false
+	}
+	gitHome := "/" + strings.ToLower(home[:1]) + home[2:]
+	operand := gitHome + "/.ssh/authorized_keys"
+	if !strings.Contains(input.Command, operand) {
+		return false
+	}
+	inner := input
+	inner.Args, inner.Argv = nil, nil
+	inner.Command = strings.ReplaceAll(input.Command, operand, home+"/.ssh/authorized_keys")
+	parsed := actionfacts.Analyze(inner).EnforcementProjection()
+	return parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed)
+}
 
 func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	if len(facts.Commands) != 1 {
@@ -37,7 +162,9 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	switch command.Program {
 	case "python3":
 		return command.Argv[1] == "-c" &&
-			trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) &&
+			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
+				trustedPythonOpenAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
+				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2])) &&
 			facts.ActiveHome != ""
 	case "perl":
 		return command.Argv[1] == "-e" &&
@@ -46,6 +173,119 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	default:
 		return false
 	}
+}
+
+// A redirection truncates its target before the command runs. In particular,
+// a shell no-op (or a redirect without a command) still changes the file.
+func trustedNoOpAuthorizedKeysRedirect(input actionfacts.Input) bool {
+	if input.Command == "" || len(input.Command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	if stmt.Background || stmt.Negated || stmt.Redirs[0].Op != syntax.RdrOut {
+		return false
+	}
+	if stmt.Cmd != nil {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) != 1 ||
+			len(call.Args[0].Parts) != 1 {
+			return false
+		}
+		literal, ok := call.Args[0].Parts[0].(*syntax.Lit)
+		if !ok || literal.Value != ":" {
+			return false
+		}
+	}
+	return trustedAuthorizedKeysRedirectTarget(input, stmt.Redirs[0].Word)
+}
+
+func trustedHereStringAuthorizedKeysWrite(input actionfacts.Input) bool {
+	if input.Command == "" || len(input.Command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 2 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Negated || len(call.Assigns) != 0 ||
+		len(call.Args) != 1 || len(call.Args[0].Parts) != 1 {
+		return false
+	}
+	program, ok := call.Args[0].Parts[0].(*syntax.Lit)
+	if !ok || program.Value != "cat" {
+		return false
+	}
+	var output *syntax.Word
+	for _, redirect := range stmt.Redirs {
+		if redirect.Op == syntax.RdrOut || redirect.Op == syntax.AppOut {
+			output = redirect.Word
+		} else if redirect.Op != syntax.WordHdoc {
+			return false
+		}
+	}
+	return trustedAuthorizedKeysRedirectTarget(input, output)
+}
+
+func trustedDDOutputAuthorizedKeysWrite(input actionfacts.Input) bool {
+	if input.Command == "" || len(input.Command) > 64<<10 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return false
+	}
+	var output string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) < 2 ||
+			len(call.Args[0].Parts) != 1 {
+			return true
+		}
+		program, ok := call.Args[0].Parts[0].(*syntax.Lit)
+		if !ok || program.Value != "dd" {
+			return true
+		}
+		for _, word := range call.Args[1:] {
+			start, end := int(word.Pos().Offset()), int(word.End().Offset())
+			if start < 0 || end > len(input.Command) || end-start <= 3 {
+				continue
+			}
+			if candidate := input.Command[start:end]; strings.HasPrefix(candidate, "of=") {
+				output = candidate[3:]
+				return false
+			}
+		}
+		return false
+	})
+	return output != "" && trustedAuthorizedKeysRedirectText(input, output)
+}
+
+func trustedAuthorizedKeysRedirectTarget(input actionfacts.Input, target *syntax.Word) bool {
+	if target == nil {
+		return false
+	}
+	start, end := int(target.Pos().Offset()), int(target.End().Offset())
+	if start < 0 || end <= start || end > len(input.Command) {
+		return false
+	}
+	return trustedAuthorizedKeysRedirectText(input, input.Command[start:end])
+}
+
+func trustedAuthorizedKeysRedirectText(input actionfacts.Input, target string) bool {
+	inner := input
+	inner.Args, inner.Argv = nil, nil
+	inner.Command = "true > " + target
+	inner.DialectHint = actionfacts.DialectPOSIX
+	parsed := actionfacts.Analyze(inner)
+	enforcement := parsed.EnforcementProjection()
+	return enforcement.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcement) ||
+		homeResolvedTwinProves(inner, parsed, sshAuthorizedKeysCommandPrerequisite)
 }
 
 func trustedFindExecAuthorizedKeysWrite(input actionfacts.Input) bool {
@@ -165,6 +405,54 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	parsed := actionfacts.Analyze(inner)
 	enforcement := parsed.EnforcementProjection()
 	return enforcement.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcement)
+}
+
+func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if request.SkipLocalFilesystemResolution || facts.ActiveHome == "" ||
+		!filepath.IsAbs(facts.ActiveHome) || !filepath.IsAbs(facts.CWD) {
+		return false
+	}
+	if cwd, err := os.Stat(facts.CWD); err != nil || !cwd.IsDir() {
+		return false
+	}
+	active := canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh", "authorized_keys"))
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite &&
+			candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || !integrityCommandMutatesPath(command, candidate) ||
+			!(integrityExplicitCommandMutator(command, candidate) ||
+				integrityStructuredFileMutator(facts, command)) {
+			continue
+		}
+		target := candidate.Resolved
+		// A POSIX shell running on Windows can leave a relative path
+		// unresolved because ActionFacts does not reinterpret the Windows CWD
+		// as a POSIX root. The owned, literal redirect still names a local
+		// file relative to that CWD.
+		if target == "" && command.Dialect == actionfacts.DialectPOSIX &&
+			candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+			candidate.Normalized != "" && !isAbsoluteSemanticPath(candidate.Normalized) &&
+			!strings.ContainsAny(candidate.Value, "*?[]$`\\") &&
+			!strings.HasPrefix(candidate.Value, "~") &&
+			integrityCommandOwnsStaticRedirect(command, candidate) {
+			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
+		}
+		if !filepath.IsAbs(target) {
+			continue
+		}
+		info, err := os.Lstat(target)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(target)
+		if err == nil && canonicalSemanticPath(resolved) == active {
+			return true
+		}
+	}
+	return false
 }
 
 func trustedBase64ShellAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {

@@ -50,7 +50,7 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 		return Facts{}, false
 	}
 	home := strings.TrimRight(original.ActiveHome, "/")
-	if !posixShellHome(home) || strings.ContainsAny(home, "'\x00\r\n") {
+	if !posixShellHome(home) || strings.ContainsAny(home, "\x00\r\n") {
 		return Facts{}, false
 	}
 	source := capture.source
@@ -123,7 +123,7 @@ func homeResolvedSource(source, home string) (string, bool) {
 			start, end := int(typed.Pos().Offset()), int(typed.End().Offset())
 			path := home + suffix
 			if start < 0 || end <= start || end > len(source) ||
-				strings.ContainsAny(path, "'\x00\r\n") {
+				strings.ContainsAny(path, "\x00\r\n") {
 				declined = true
 				return false
 			}
@@ -144,7 +144,7 @@ func homeResolvedSource(source, home string) (string, bool) {
 		}
 		out.WriteString(source[last:word.start])
 		rest.WriteString(source[last:word.start])
-		out.WriteString("'" + word.path + "'")
+		out.WriteString("'" + strings.ReplaceAll(word.path, "'", `'\''`) + "'")
 		last = word.end
 	}
 	out.WriteString(source[last:])
