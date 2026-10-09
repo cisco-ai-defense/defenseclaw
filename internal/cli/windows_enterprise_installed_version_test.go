@@ -311,9 +311,9 @@ func TestWindowsEnterpriseEnsureRefusesAConnectorlessConfigForAProtectedDeployme
 	}
 }
 
-// A direct upgrade must refuse a config that would remove every connector
-// from a protected standalone deployment, before invoking the installer.
-func TestWindowsEnterpriseDirectUpgradeRefusesConnectorlessConfig(t *testing.T) {
+// Direct upgrade and repair must refuse a config that would remove every
+// connector from a protected standalone deployment, before invoking Setup.
+func TestWindowsEnterpriseDirectLifecycleRefusesConnectorlessConfig(t *testing.T) {
 	originalStaged, originalInstalled := windowsEnterpriseStagedConnectors, windowsEnterpriseEnrolledConnectors
 	originalRunner, originalObserver := windowsEnterpriseStandaloneRunner, windowsEnterpriseStandaloneObserver
 	t.Cleanup(func() {
@@ -332,21 +332,26 @@ func TestWindowsEnterpriseDirectUpgradeRefusesConnectorlessConfig(t *testing.T) 
 	opts := &windowsEnterpriseLifecycleOptions{
 		profile: "standalone", resolvedProfile: "standalone", configPath: "staged.yaml", jsonOutput: true,
 	}
-	command := &cobra.Command{}
-	var stdout bytes.Buffer
-	command.SetOut(&stdout)
-	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "upgrade", opts, "installer.ps1", nil)
-	if called {
-		t.Fatal("installer ran with connectorless config")
-	}
-	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) && commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
-		t.Fatalf("upgrade refusal = %v", err)
-	}
-	var result enterprisestatus.Result
-	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
-		t.Fatalf("decode refusal: %v", decodeErr)
-	}
-	if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
-		t.Fatalf("upgrade result errors = %v", result.Errors)
+	for _, action := range []string{"upgrade", "repair"} {
+		t.Run(action, func(t *testing.T) {
+			called = false
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			err := runWindowsEnterpriseStandaloneAction(context.Background(), command, action, opts, "installer.ps1", nil)
+			if called {
+				t.Fatal("installer ran with connectorless config")
+			}
+			if !errors.Is(err, errWindowsEnterpriseInvalidArguments) && commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs {
+				t.Fatalf("%s refusal = %v", action, err)
+			}
+			var result enterprisestatus.Result
+			if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+				t.Fatalf("decode refusal: %v", decodeErr)
+			}
+			if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+				t.Fatalf("%s result errors = %v", action, result.Errors)
+			}
+		})
 	}
 }

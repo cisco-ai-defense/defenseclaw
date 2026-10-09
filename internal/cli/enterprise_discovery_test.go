@@ -444,10 +444,10 @@ func TestWindowsEnterpriseDiscoveryKeepsSameNameAccountsApart(t *testing.T) {
 	}
 }
 
-// A qualified account selection still includes runtime findings whose user
-// field carries only the bare account name.
-func TestWindowsEnterpriseDiscoveryQualifiedUserIncludesRuntimeFinding(t *testing.T) {
-	const sid = "S-1-5-21-1-2-3-3997"
+// A qualified account selection must not attribute a bare runtime finding
+// to one of two accounts with the same name (GAP-1250).
+func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(t *testing.T) {
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
 	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
 	t.Cleanup(func() {
 		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
@@ -455,18 +455,20 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserIncludesRuntimeFinding(t *testin
 	cfg = nil
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
-			{Name: "Claude Code", Category: "supported_connector", UserName: "alice", UserID: sid},
+			{Name: "Claude Code", Category: "supported_connector", UserName: "alice", UserID: domainSID},
+			{Name: "Codex", Category: "supported_connector", UserName: "alice", UserID: localSID},
 		}}, "127.0.0.1:18970", nil
 	}
 	enterpriseDiscoveryAccountIDs = func(user string) []string {
 		if user == `DCLAB\alice` {
-			return []string{sid}
+			return []string{domainSID}
 		}
 		return nil
 	}
 	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
 		{PID: 41, User: "alice", Process: "node"},
-		{PID: 42, User: "bob", Process: "python3"},
+		{PID: 42, User: `DCLAB\alice`, Process: "python3"},
+		{PID: 43, User: `LOCAL\alice`, Process: "codex"},
 	}}, nil)
 
 	var out bytes.Buffer
@@ -477,8 +479,8 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserIncludesRuntimeFinding(t *testin
 	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Accounts) != 1 || report.Runtime == nil || len(report.Runtime.Findings) != 1 ||
-		report.Runtime.Findings[0].User != "alice" {
+	if len(report.Accounts) != 1 || report.Accounts[0].SID != domainSID ||
+		report.Runtime == nil || len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != 42 {
 		t.Fatalf("qualified account runtime findings: %s", out.String())
 	}
 }
