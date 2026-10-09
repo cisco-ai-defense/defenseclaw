@@ -384,6 +384,51 @@ echo installed-ok
             assert not log.exists(), (shell, "the package manager ran before the version check", log.read_text())
 
 
+
+# GAP-0890: an interrupted rpm upgrade can leave two versions installed, and
+# `rpm -q --qf` then prints both run together. The same-version repair never
+# matched, so rpm -U ran without --replacepkgs and failed "already installed".
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_wrapper_repairs_an_rpm_left_with_two_installed_versions(tmp_path: Path) -> None:
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(
+        _shell_function(text, name)
+        for name in ("dc_busy_output", "dc_require_product_version", "dc_package_release_version", "dc_install_package")
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    rpm = bin_dir / "rpm"
+    rpm.write_text(
+        """#!/bin/sh
+case "$1" in
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo 1.0.4101-1 ;; esac ;;
+    -q) [ "$2" = --qf ] && printf '1.0.3602-1\\n1.0.4101-1\\n'; exit 0 ;;
+    -U) case " $* " in *" --replacepkgs "*) echo "rpm -U --replacepkgs" >>"$DC_TEST_LOG" ;; *) echo "package is already installed" >&2; exit 1 ;; esac ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    rpm.chmod(0o755)
+    log = tmp_path / "install.log"
+    script = f"""
+DC_SCRIPT_OS=linux DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
+DC_LINUX_PACKAGE=defenseclaw-enterprise DC_PRODUCT_VERSION=''
+DC_STAGE='{tmp_path}' DC_STAGED_SOURCE='{tmp_path / "defenseclaw-enterprise.rpm"}'
+dc_fail_result() {{ echo "FAIL $2: $3"; exit "$1"; }}
+dc_log() {{ :; }}
+dc_extract_payload() {{ :; }}
+dc_binaries_damaged() {{ return 0; }}
+dc_package_step() {{ echo "step $1 -> $2"; }}
+{functions}
+dc_install_package
+echo installed-ok
+"""
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_LOG": str(log)}
+    result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0 and "installed-ok" in result.stdout, (result.stdout, result.stderr)
+    assert "step 1.0.4101 -> 1.0.4101" in result.stdout, result.stdout
+    assert log.read_text(encoding="utf-8").strip() == "rpm -U --replacepkgs"
+
 # GAP-0752: on a CIS host (/tmp and /var/tmp noexec) the payload's gateway
 # could not run from the wrapper's /var/tmp staging folder, and the result was
 # mdm_lifecycle_no_result with the shell's "Permission denied". The wrapper
