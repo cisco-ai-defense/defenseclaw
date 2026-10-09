@@ -913,7 +913,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		}
 	}
 
-	if watched == 0 {
+	if watched == 0 && !w.admitNewMCP {
 		return fmt.Errorf("watcher: no directories to watch — check claw.mode and claw.home_dir")
 	}
 

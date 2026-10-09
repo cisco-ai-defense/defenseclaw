@@ -312,3 +312,54 @@ func TestProjectMCPServerIsScannedFromItsProject(t *testing.T) {
 		t.Fatalf("scanner %+v, want the scan run in %s for claudecode", ms, project)
 	}
 }
+
+// An enrolled account can have MCP servers before it has any skill or plugin
+// directory. The watcher must start, baseline the existing server, and admit
+// another server when the enrolled list changes.
+func TestMCPOnlyWatcherRunsAndAdmitsAddedServer(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Watch.RescanEnabled = true
+	off := false
+	cfg.Admission.MCP.ScanOnInstall = &off
+	servers := []config.MCPServerEntry{{Name: "existing", URL: "https://existing.example.test/mcp", Connector: "codex"}}
+	var mu sync.Mutex
+	admitted := make(chan AdmissionResult, 1)
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted <- r })
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]config.MCPServerEntry(nil), servers...), nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	runErr := make(chan error, 1)
+	go func() { runErr <- w.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	existing := MCPEventPath(servers[0])
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := store.GetTargetSnapshot(string(InstallMCP), existing); err == nil {
+			break
+		}
+		select {
+		case err := <-runErr:
+			t.Fatalf("MCP-only watcher stopped before startup scan: %v", err)
+		case <-deadline:
+			t.Fatal("existing MCP server did not receive a startup baseline")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	mu.Lock()
+	servers = append(servers, config.MCPServerEntry{Name: "added", URL: "https://added.example.test/mcp", Connector: "codex"})
+	mu.Unlock()
+	w.DiscoverAddedMCPServers()
+	select {
+	case result := <-admitted:
+		if result.Event.Name != "added" || result.Verdict != VerdictAllowed {
+			t.Fatalf("MCP admission = %+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("added MCP server received no install admission")
+	}
+}
