@@ -267,7 +267,7 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
 	}
 	ownHome := t.TempDir()
-	accounts := map[string]unixidentity.Account{"bob": {Name: "bob", UID: 1002, GID: 20, Home: "/home/bob"}}
+	accounts := map[string]unixidentity.Account{"bob": {Name: "bob", UID: 41002, GID: 20, Home: "/home/bob"}}
 	if os.Getuid() > 0 {
 		accounts["dana"] = unixidentity.Account{Name: "dana", UID: os.Getuid(), GID: os.Getgid(), Home: ownHome}
 	}
@@ -275,27 +275,27 @@ func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {
 	uid := func(value int) *int { return &value }
 	missingHome := filepath.Join(ownHome, "gone")
 	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
-		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "codex"},
-		{User: "alice", UserHome: "/home/alice", UID: uid(1001), GID: uid(1001), Connector: "devin", DataDir: "/home/alice/.dc"},
-		{User: "carol", UserHome: "/home/pending", UID: uid(1003), GID: uid(1003), Connector: "codex"},
+		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "codex"},
+		{User: "alice", UserHome: "/home/alice", UID: uid(41001), GID: uid(41001), Connector: "devin", DataDir: "/home/alice/.dc"},
+		{User: "carol", UserHome: "/home/pending", UID: uid(41003), GID: uid(41003), Connector: "codex"},
 		{User: "legacy", UserHome: "/home/legacy", Connector: "codex"},
 		{User: "bob", Connector: "claudecode", AgentVersion: "2.1.0"},
 		{UserHome: ownHome, Connector: "claudecode"},
 		{UserHome: missingHome, Connector: "claudecode"},
 	}}
 	jobs, pending, failed := enterpriseHookRemoveJobs(resolveEnterpriseHookRemoveRows(manifest))
-	if len(jobs[1001].Request.Targets) != 2 {
+	if len(jobs[41001].Request.Targets) != 2 {
 		t.Fatalf("jobs %+v", jobs)
 	}
-	for _, target := range jobs[1001].Request.Targets {
+	for _, target := range jobs[41001].Request.Targets {
 		if target.Mode != enterpriseHookWorkerModeRemove || target.Options.UserHome != "/home/alice" {
 			t.Fatalf("target %+v", target)
 		}
 	}
-	if jobs[1001].Request.Targets[1].Options.DataDir != "/home/alice/.dc" || jobs[1001].Request.Targets[0].Options.DataDir != "/home/alice/.defenseclaw" {
-		t.Fatalf("data dirs %+v", jobs[1001].Request.Targets)
+	if jobs[41001].Request.Targets[1].Options.DataDir != "/home/alice/.dc" || jobs[41001].Request.Targets[0].Options.DataDir != "/home/alice/.defenseclaw" {
+		t.Fatalf("data dirs %+v", jobs[41001].Request.Targets)
 	}
-	if bob := jobs[1002]; bob == nil || bob.Account != (enterpriseHookWorkerAccount{UID: 1002, GID: 20, User: "bob", Home: "/home/bob"}) ||
+	if bob := jobs[41002]; bob == nil || bob.Account != (enterpriseHookWorkerAccount{UID: 41002, GID: 20, User: "bob", Home: "/home/bob"}) ||
 		len(bob.Request.Targets) != 1 || bob.Request.Targets[0].Options.ConnectorName != "claudecode" {
 		t.Fatalf("the user-only row did not resolve to bob's account: %+v", bob)
 	}
