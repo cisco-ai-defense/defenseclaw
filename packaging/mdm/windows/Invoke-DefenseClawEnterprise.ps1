@@ -452,20 +452,14 @@ function Test-WrapperAdminOnlyAncestors {
 
 function Get-WrapperUntrustedInputFix {
     # Names the accounts that own or can change an input the admin-only check
-    # refused, and the icacls commands that leave its folder, and the files in
-    # it, to SYSTEM and Administrators (GAP-0953). The arguments are quoted so
-    # the commands run in PowerShell. A new folder under C:\ on a Windows
-    # client edition holds Authenticated Users as its own entries, which
-    # /inheritance:r keeps, so each account is removed by name.
+    # refused. The source folder may hold unrelated application data, so the
+    # wrapper never recommends changing its ACLs (GAP-1175).
     param([Parameter(Mandatory = $true)][string]$Path)
-    $folder = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($Path))
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     $sids = [System.Collections.Generic.List[string]]::new()
-    $commands = [System.Collections.Generic.List[string]]::new()
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($script:DefenseClawAdminSids -notcontains $owner) {
         $sids.Add($owner)
-        $commands.Add("icacls `"$folder`" /setowner `"*S-1-5-32-544`" /T /C")
     }
     # The rights Test-DefenseClawAdminOnlyItem refuses.
     $dangerous = [int64](0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
@@ -476,10 +470,6 @@ function Get-WrapperUntrustedInputFix {
         if ($script:DefenseClawAdminSids -contains $sid -or $sids.Contains($sid)) { continue }
         if (([int64]$rule.FileSystemRights -band $dangerous) -ne 0) { $sids.Add($sid) }
     }
-    $commands.Add("icacls `"$folder`" /inheritance:r /grant:r `"*S-1-5-18:(OI)(CI)F`" `"*S-1-5-32-544:(OI)(CI)F`"")
-    if ($sids.Count -gt 0) {
-        $commands.Add("icacls `"$folder`" /remove:g " + (($sids | ForEach-Object { "`"*$_`"" }) -join ' ') + ' /T /C')
-    }
     $accounts = foreach ($sid in $sids) {
         try {
             ([System.Security.Principal.SecurityIdentifier]::new($sid)).Translate([System.Security.Principal.NTAccount]).Value
@@ -487,7 +477,7 @@ function Get-WrapperUntrustedInputFix {
             $sid
         }
     }
-    return [pscustomobject]@{ Accounts = @($accounts); Commands = @($commands) }
+    return [pscustomobject]@{ Accounts = @($accounts) }
 }
 
 function Copy-WrapperInput {
@@ -508,8 +498,8 @@ function Copy-WrapperInput {
         $fix = try { Get-WrapperUntrustedInputFix -Path $Source } catch { $null }
         if ($null -ne $fix) {
             if ($fix.Accounts.Count -gt 0) { $message += ' (' + ($fix.Accounts -join ', ') + ' can change it)' }
-            $message += '. Nothing was changed. Restrict its folder from an elevated PowerShell, then run the wrapper again: ' + ($fix.Commands -join '; ')
         }
+        $message += '. Nothing was changed. Stage a trusted copy in a new administrator-only folder dedicated to DefenseClaw, then run the wrapper again with that path'
         Exit-Wrapper $script:ExitFailure 'mdm_untrusted_input' $message
     }
     if ($RequireAdminOnly -and -not (Test-WrapperAdminOnlyAncestors -Path $Source)) {
