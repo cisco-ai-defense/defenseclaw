@@ -993,13 +993,24 @@ func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
 	}
 	const readExecute = 0x1200a9
 	var users uint32
+	deniedRead := false
 	if dacl != nil {
 		for i := uint16(0); i < dacl.AceCount; i++ {
 			var ace *windows.ACCESS_ALLOWED_ACE
 			if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
 				return drift, fmt.Errorf("inspect %s: %w", dir, err)
 			}
-			if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+				continue
+			}
+			if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+				// An applicable deny can defeat the Users allow entry (including
+				// for a user who belongs to another denied group).
+				const genericReadExecute = windows.GENERIC_ALL | windows.GENERIC_READ | windows.GENERIC_EXECUTE
+				deniedRead = deniedRead || uint32(ace.Mask)&(readExecute|genericReadExecute) != 0
+				continue
+			}
+			if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 				continue
 			}
 			sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
@@ -1017,7 +1028,7 @@ func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
 	if users&^readExecute != 0 {
 		drift.Extra[usersSIDStr] = users
 	}
-	drift.UsersReadMissing = users&readExecute != readExecute
+	drift.UsersReadMissing = users&readExecute != readExecute || deniedRead
 	return drift, nil
 }
 
