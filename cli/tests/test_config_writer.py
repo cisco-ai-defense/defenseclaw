@@ -368,6 +368,21 @@ def test_failed_generation_record_restores_the_previous_config(tmp_path, monkeyp
     assert not verified
 
 
+def test_writer_rejects_hand_edit_during_validation(tmp_path, monkeypatch):
+    path = _config(tmp_path, "guardrail:\n  mode: observe\n")
+    hand_edit = open(path, "rb").read() + b"# operator edit\n"
+
+    def edit_during_validation(_path, _candidate):
+        with open(path, "wb") as stream:
+            stream.write(hand_edit)
+
+    monkeypatch.setattr(config_writer, "validate_candidate", edit_during_validation)
+    with pytest.raises(config_writer.ConfigConflictError):
+        config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "edit", path=path)
+    assert open(path, "rb").read() == hand_edit
+    assert not os.path.exists(config_writer.generation_path(path))
+
+
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
     from defenseclaw import config as config_module
 
@@ -381,6 +396,25 @@ def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
 
     assert result.generation == 1 and result.changed == ["guardrail.mode"]
     assert "mode: action # keep" in open(path, encoding="utf-8").read()
+
+
+def test_stale_registry_sources_save_preserves_concurrent_addition(tmp_path, monkeypatch):
+    from defenseclaw import config as config_module
+    from defenseclaw.config import RegistrySource
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path)
+    first = config_module.load(data_dir=str(tmp_path))
+    second = config_module.load(data_dir=str(tmp_path))
+    first.registries.sources.append(RegistrySource(id="source-a", kind="clawhub", content="skill"))
+    second.registries.sources.append(RegistrySource(id="source-b", kind="clawhub", content="skill"))
+
+    first.save()
+    with pytest.raises(config_writer.ConfigConflictError, match="registries.sources"):
+        second.save()
+    sources = yaml.safe_load(open(path, encoding="utf-8"))["registries"]["sources"]
+    assert [source["id"] for source in sources] == ["source-a"]
 
 
 def test_verified_noop_rejects_a_concurrent_registry_policy_change(tmp_path, monkeypatch):

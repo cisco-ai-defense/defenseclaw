@@ -86,7 +86,7 @@ const (
 
 var (
 	// ErrConflict means config.yaml changed after the caller read it.
-	ErrConflict = errors.New("configwrite: config.yaml changed since it was read")
+	ErrConflict = cfgtxn.ErrConflict
 	// ErrLockBusy means another writer held the lock past the timeout.
 	ErrLockBusy = cfgtxn.ErrLockBusy
 	// ErrManaged means the host is managed and the actor may not write.
@@ -299,7 +299,7 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	state, err := txn.Commit(candidate, mode, opt.Actor, opt.Reason)
+	state, err := txn.Commit(current, candidate, exists, mode, opt.Actor, opt.Reason)
 	if err != nil {
 		return Result{}, err
 	}

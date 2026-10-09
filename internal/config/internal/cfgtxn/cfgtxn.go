@@ -48,6 +48,9 @@ const (
 // ErrLockBusy means another writer held the lock past the timeout.
 var ErrLockBusy = errors.New("configwrite: another DefenseClaw process is changing config.yaml")
 
+// ErrConflict means the file changed after the transaction read it.
+var ErrConflict = errors.New("configwrite: config.yaml changed since it was read")
+
 // GenerationState is config.generation.json.
 type GenerationState struct {
 	// Generation is monotonic; a writer that finds the file missing or
@@ -196,7 +199,7 @@ func (t *Txn) Read() (raw []byte, mode os.FileMode, exists bool, err error) {
 // full disk before the generation file), the previous bytes are put back so
 // the error means nothing changed; if that restore fails too, the error says
 // config.yaml holds the new bytes.
-func (t *Txn) Commit(candidate []byte, mode os.FileMode, actor, reason string) (GenerationState, error) {
+func (t *Txn) Commit(expected, candidate []byte, expectedExists bool, mode os.FileMode, actor, reason string) (GenerationState, error) {
 	if t == nil || t.lock == nil {
 		return GenerationState{}, errors.New("configwrite: commit without the writer lock")
 	}
@@ -205,6 +208,9 @@ func (t *Txn) Commit(candidate []byte, mode os.FileMode, actor, reason string) (
 		return GenerationState{}, fmt.Errorf("configwrite: read previous config %s: %w", t.path, readErr)
 	}
 	existed := readErr == nil
+	if existed != expectedExists || !bytes.Equal(previous, expected) {
+		return GenerationState{}, ErrConflict
+	}
 	if err := WriteFileDurable(t.path, candidate, mode); err != nil {
 		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
 	}

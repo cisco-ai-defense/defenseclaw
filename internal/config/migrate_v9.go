@@ -734,7 +734,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		return written, err
 	}
 	written = append(written, recordPath)
-	if _, err := txn.Commit(migrated, mode, m.record.Actor, "config_version 9 migration"); err != nil {
+	if _, err := txn.Commit(current, migrated, exists, mode, m.record.Actor, "config_version 9 migration"); err != nil {
 		return written, err
 	}
 	written = append(written, m.configPath)

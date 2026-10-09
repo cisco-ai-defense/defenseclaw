@@ -369,6 +369,11 @@ def _transact(
             verify(target)
         return WriteResult(_current_generation(target), digest, [], [])
     validate_candidate(target, candidate)
+    # A hand edit does not take config.yaml.lock. Recheck the exact source
+    # bytes after validation before installing the candidate.
+    latest, _, latest_exists = _read_current(target)
+    if latest_exists != exists or latest != current:
+        raise ConfigConflictError("config.yaml changed since it was read")
     try:
         _write_durable(target, candidate, mode)
         state = record_generation(target, hashlib.sha256(candidate).hexdigest(), actor, reason)
