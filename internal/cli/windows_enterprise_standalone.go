@@ -514,6 +514,9 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 	result.CoverageComplete = report.Installed && report.GuardianReady && !report.TransactionPending
 	result.SecurityComplete = report.SecurityComplete
+	if report.Installed && result.Action == "status" {
+		result.Destinations = readWindowsEnterpriseStandaloneDestinations()
+	}
 	if report.Installed {
 		enrollment, err := readWindowsEnterpriseStandaloneEnrollment()
 		if err == nil {
@@ -1423,6 +1426,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
 	}
+	enterprisestatus.WriteDestinations(output, result.Destinations)
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
 	}
@@ -1657,6 +1661,27 @@ func windowsEnterpriseFootprintUserCreated(path string) bool {
 
 // readWindowsEnterpriseStandaloneEnrollment summarizes the installed
 // guardian manifest when this token can read it.
+// readWindowsEnterpriseStandaloneDestinations lists, for status, the
+// observability destinations the installed config.yaml compiles to with each
+// one's effective redaction profiles. `defenseclaw observability plan` is a
+// per-user command managed Windows does not offer (GAP-1105). A config that
+// does not compile leaves the list out.
+func readWindowsEnterpriseStandaloneDestinations() []enterprisestatus.Destination {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, 8<<20)
+	if err != nil {
+		return nil
+	}
+	summaries, err := config.SummarizeObservabilityV8Destinations(layout.ConfigPath, raw, layout.DataDir)
+	if err != nil {
+		return nil
+	}
+	return enterprisestatus.DestinationsFromSummaries(summaries)
+}
+
 func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, error) {
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {

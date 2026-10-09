@@ -1208,6 +1208,16 @@ func (component *V8ProviderComponent) DeliveryHealthSnapshots() []delivery.Healt
 	return result
 }
 
+// DeliverySources returns the provider's non-owning delivery health sources.
+// Unlike DeliveryHealthSnapshots it keeps answering after Close, so the
+// runtime can count what a shutdown left unsent (GAP-1096).
+func (component *V8ProviderComponent) DeliverySources() []delivery.SnapshotSource {
+	if component == nil || component.provider == nil || component.provider.v8 == nil {
+		return nil
+	}
+	return append([]delivery.SnapshotSource(nil), component.provider.v8.healthSources...)
+}
+
 func (component *V8ProviderComponent) Activate() {
 	if component == nil || component.provider == nil || component.closed.Load() {
 		return

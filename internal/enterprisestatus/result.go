@@ -118,6 +118,20 @@ type Message struct {
 	Message string `json:"message"`
 }
 
+// Destination is one observability destination the installed config.yaml
+// compiles to, as status reports it (GAP-1105).
+type Destination struct {
+	Name    string   `json:"name"`
+	Kind    string   `json:"kind"`
+	Enabled bool     `json:"enabled"`
+	Preset  string   `json:"preset,omitempty"`
+	Signals []string `json:"signals"`
+	// RedactionProfiles are the distinct effective profiles of the
+	// destination's send routes; empty for a destination that sends only
+	// metrics.
+	RedactionProfiles []string `json:"redaction_profiles"`
+}
+
 // Result is the lifecycle result document.
 type Result struct {
 	SchemaVersion      int                           `json:"schema_version"`
@@ -147,8 +161,12 @@ type Result struct {
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
-	LogPath        string       `json:"log_path,omitempty"`
-	ExitCode       int          `json:"exit_code"`
+	// Destinations lists, for status, the observability destinations of the
+	// installed config.yaml with their effective redaction profiles, from the
+	// compiler `defenseclaw observability plan` uses (GAP-1105).
+	Destinations []Destination `json:"destinations,omitempty"`
+	LogPath      string        `json:"log_path,omitempty"`
+	ExitCode     int           `json:"exit_code"`
 	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
 	// shape for an unelevated macOS lifecycle command.
 	PreserveNotRootDeploymentState bool `json:"-"`
@@ -224,6 +242,7 @@ const notRootCode = "not_root"
 // as "not installed" (GAP-0279).
 var deploymentStateFields = []string{
 	"installed", "installed_version", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment",
+	"destinations",
 }
 
 func (r Result) refusedNotRoot() bool {
