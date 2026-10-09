@@ -181,9 +181,7 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		input.Managed = config.StandaloneManagedSource(raw)
 	}
 	if policyDir != "" {
-		policyDir = expandMigrationInputPath(policyDir)
-		input.PolicyDir = policyDir
-		input.DataJSONPath = filepath.Join(policyDir, "rego", "data.json")
+		input.PolicyDir, input.DataJSONPath = config.V8PolicyDataJSON(policyDir)
 	}
 	input.AuditDBPath = expandMigrationInputPath(auditDB)
 	// The migrated document is validated the way the gateway loads it, with
@@ -197,7 +195,7 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 }
 
 // expandMigrationInputPath uses the same ~/ expansion as the gateway's
-// in-memory v8 migration for policy_dir and audit.db paths.
+// in-memory v8 migration for the audit.db path.
 func expandMigrationInputPath(path string) string {
 	if strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {

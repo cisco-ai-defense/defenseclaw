@@ -338,6 +338,36 @@ func NeedsMigrationV9(raw []byte) bool {
 	return decodeSourceYAML(raw, &doc) == nil && doc.ConfigVersion == ObservabilityV8ConfigVersion
 }
 
+// V8PolicyDataJSON resolves a config_version 8 policy_dir (as config.yaml
+// spells it) to the folder config_version 9 names and the data.json the
+// migration reads. 0.8.x did not expand a "~/" policy_dir: `policy activate`
+// wrote <cwd>/~/<rest>/rego/data.json and its gateway read the same relative
+// path, both from the home directory when run from a shell. When that literal
+// folder holds a data.json at least as new as the expanded folder's, it is
+// the one 0.8.x last activated and enforced, so it is the one migrated
+// (GAP-1031).
+func V8PolicyDataJSON(policyDir string) (dir, dataJSON string) {
+	raw := strings.TrimSpace(policyDir)
+	dir = expandPath(raw)
+	dataJSON = filepath.Join(dir, "rego", "data.json")
+	if dir == raw {
+		return dir, dataJSON
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return dir, dataJSON
+	}
+	literal := filepath.Join(home, raw, "rego", "data.json")
+	written, err := os.Stat(literal)
+	if err != nil || !written.Mode().IsRegular() {
+		return dir, dataJSON
+	}
+	if expanded, err := os.Stat(dataJSON); err == nil && expanded.ModTime().After(written.ModTime()) {
+		return dir, dataJSON
+	}
+	return dir, literal
+}
+
 // MigrateV8InMemory is the gateway's read-only load of a config_version 8
 // file (spec 2.0): it returns the config_version 9 bytes the migration would
 // write, so the data.json admission and thresholds, the *_actions keys and,
@@ -359,14 +389,15 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 		return raw, nil
 	}
 	dataDir := migrationDataDir(configFile, root)
-	policyDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "policy_dir"))))
+	policyDir, dataJSON := V8PolicyDataJSON(yamlScalarValue(v8YAMLMapValue(root, "policy_dir")))
 	if policyDir == "" {
 		policyDir = filepath.Join(dataDir, "policies")
+		dataJSON = filepath.Join(policyDir, "rego", "data.json")
 	}
 	managedHost := StandaloneManagedSource(raw)
 	in := MigrateV9Input{
 		ConfigPath: configFile, Source: raw, PolicyDir: policyDir, DataDir: dataDir,
-		DataJSONPath: filepath.Join(policyDir, "rego", "data.json"),
+		DataJSONPath: dataJSON,
 		Managed:      managedHost, InMemory: true, RulePackDigest: rulePackDigest,
 	}
 	if !managedHost {
@@ -527,6 +558,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	m.migratePolicyDir(root)
 	if err := m.migrateRulePacks(root); err != nil {
 		return nil, false, err
 	}
@@ -573,6 +605,24 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: encode the migrated config: %w", err)
 	}
 	return out.Bytes(), false, nil
+}
+
+// migratePolicyDir writes a "~/" policy_dir as the folder it names: the 1.0
+// gateway reads policy_dir as written, so "~/team-policies" named no folder and
+// it refused every policy reload ("read rego directory", GAP-1033). It also
+// records where the migrated data.json came from when 0.8.x wrote it under the
+// unexpanded path (V8PolicyDataJSON).
+func (m *v9Migrator) migratePolicyDir(root *yaml.Node) {
+	raw := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "policy_dir")))
+	dir := expandPath(raw)
+	if dir == raw {
+		return
+	}
+	v9Set(root, v9Scalar(dir), "policy_dir")
+	m.moved("config", "policy_dir", "policy_dir", dir)
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && filepath.Clean(dj) != filepath.Join(dir, "rego", "data.json") {
+		m.note("0.8.x did not expand policy_dir %s and kept its policy data in %s; that data.json was migrated", raw, dj)
+	}
 }
 
 // migrateTelemetryAliases retires the telemetry attribute alias switch. Since

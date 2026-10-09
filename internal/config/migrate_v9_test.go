@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -892,6 +893,50 @@ func TestMigrateV8InMemory(t *testing.T) {
 		"admission.skill.first_party_allow_list"}) || result.Record.Conflicts[1].Kept != "config:admission.skill.actions.low:block" ||
 		result.Record.Conflicts[1].Lost != "data.json:actions.LOW:warn" {
 		t.Errorf("conflicts = %+v", result.Record.Conflicts)
+	}
+}
+
+// TestMigrateV8InMemoryReadsTheUnexpandedPolicyDir: 0.8.x wrote the policy
+// data of a "~/team-policies" policy_dir under <home>/~/team-policies, so the
+// strict levels it activated there carry forward, and the v9 file names the
+// expanded folder the 1.0 gateway can read (GAP-1031).
+func TestMigrateV8InMemoryReadsTheUnexpandedPolicyDir(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for folder, rank := range map[string]string{"team-policies": "4", filepath.Join("~", "team-policies"): "2"} {
+		dataJSON := filepath.Join(home, folder, "rego", "data.json")
+		if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": `+rank+`}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(home, "team-policies", "rego", "data.json"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("config_version: 8\ndata_dir: " + filepath.Join(home, ".defenseclaw") +
+		"\npolicy_dir: ~/team-policies\nobservability: {}\n")
+	migrated, err := MigrateV8InMemory(filepath.Join(home, ".defenseclaw", "config.yaml"), source, nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory: %v", err)
+	}
+	var got struct {
+		PolicyDir string `yaml:"policy_dir"`
+		Guardrail struct {
+			BlockAt string `yaml:"block_at"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(migrated, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Guardrail.BlockAt != "MEDIUM" || got.PolicyDir != filepath.Join(home, "team-policies") {
+		t.Fatalf("block_at %q, policy_dir %q; want MEDIUM from the unexpanded folder and the expanded folder:\n%s",
+			got.Guardrail.BlockAt, got.PolicyDir, migrated)
 	}
 }
 
