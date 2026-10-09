@@ -1173,6 +1173,24 @@ def test_overview_body_renders_scanner_override_summary() -> None:
     assert "secrets: HIGH file=block" in body
 
 
+def test_overview_scanners_card_renders_admission_overrides() -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(
+        OverviewConfig(
+            data_dir="/tmp/dc", claw_mode="codex",
+            scanner_overrides=(("mcp", "HIGH", "install", "block"),),
+        ), version="test"
+    )
+    app = DefenseClawTUI(overview_model=overview)
+    capture = io.StringIO()
+    console = Console(file=capture, width=80, height=100, force_terminal=False)
+    console.print(app._overview_renderable())  # noqa: SLF001 - inspect the live card renderer.
+    assert "overrides" in capture.getvalue()
+    assert "mcp: HIGH" in capture.getvalue()
+    assert "install=block" in capture.getvalue()
+
+
 def test_overview_findings_and_connector_alerts_match_the_alerts_view() -> None:
     """GAP-2088/2089: one count per alert, the same numbers as the Alerts panel."""
 
