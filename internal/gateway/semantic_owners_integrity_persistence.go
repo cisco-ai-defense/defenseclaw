@@ -695,7 +695,9 @@ func integrityCommandMutatesPath(
 			actionfacts.OperationMove,
 			actionfacts.OperationConfigChange,
 		) || (strings.EqualFold(command.Program, "curl") ||
-			strings.EqualFold(command.Program, "curl.exe")) &&
+			strings.EqualFold(command.Program, "curl.exe") ||
+			strings.EqualFold(command.Program, "wget") ||
+			strings.EqualFold(command.Program, "wget.exe")) &&
 			hasAnyOperation(command, actionfacts.OperationFetch, actionfacts.OperationUpload)
 	case actionfacts.PathAccessAppend:
 		return hasAnyOperation(
@@ -1622,7 +1624,7 @@ func integrityExplicitCommandMutator(
 		return false
 	}
 	switch strings.ToLower(command.Program) {
-	case "tee", "truncate", "rm", "unlink", "cp", "mv", "install", "sed", "curl", "copy",
+	case "tee", "truncate", "rm", "unlink", "cp", "mv", "install", "sed", "curl", "wget", "copy",
 		"move", "set-content", "sc", "add-content", "ac", "out-file",
 		"remove-item", "ri", "copy-item", "cpi", "move-item", "mi":
 		return true

