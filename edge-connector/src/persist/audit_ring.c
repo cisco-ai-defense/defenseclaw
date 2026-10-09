@@ -172,8 +172,8 @@ static const uint8_t *get_audit_key(void) {
 
 /*
  * Audit HMAC computation (chained integrity).
- * When DCLAW_HAS_MBEDTLS=1: HMAC-SHA256 via mbedtls_md, truncated to 4 bytes.
- * Otherwise: built-in HMAC-SHA256 (no external library), truncated to 4 bytes.
+ * When DCLAW_HAS_MBEDTLS=1: HMAC-SHA256 via mbedtls_md, truncated to 16 bytes.
+ * Otherwise: built-in HMAC-SHA256 (no external library), truncated to 16 bytes.
  */
 /*
  * Build the HMAC input covering ALL decision fields of the audit entry,

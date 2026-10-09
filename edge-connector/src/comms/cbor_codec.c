@@ -172,11 +172,10 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     }
     buf[pos++] = active;
 
-    /* audit_head_hmac (8 bytes) — last entry's 4-byte hmac + prev_hmac[4] */
+    /* audit_head_hmac (8 bytes) — first 8 bytes of last entry's 16-byte HMAC */
     memset(buf + pos, 0, 8);
     if (s->audit_writer.count > 0) {
-        memcpy(buf + pos, s->audit_writer.buffer[s->audit_writer.count - 1].hmac, 4);
-        memcpy(buf + pos + 4, s->audit_writer.prev_hmac, 4);
+        memcpy(buf + pos, s->audit_writer.buffer[s->audit_writer.count - 1].hmac, 8);
     }
     pos += 8;
 
@@ -306,7 +305,7 @@ int dclaw_cbor_decode_verdict_response_enriched(const uint8_t *buf, size_t len,
                                                 uint32_t *server_ts, uint8_t *hmac_tag,
                                                 uint8_t *category, char *evidence,
                                                 size_t evidence_size) {
-    /* First decode the standard 16-byte response */
+    /* First decode the standard 28-byte response */
     if (dclaw_cbor_decode_verdict_response(buf, len, request_id, action, severity,
                                            ttl, reason, flags, server_ts, hmac_tag) != 0) {
         return -1;
@@ -318,8 +317,8 @@ int dclaw_cbor_decode_verdict_response_enriched(const uint8_t *buf, size_t len,
         evidence[0] = '\0';
     }
 
-    if (len > 16) {
-        size_t pos = 16;
+    if (len > 28) {
+        size_t pos = 28;
 
         /* category: uint8 */
         if (pos < len) {

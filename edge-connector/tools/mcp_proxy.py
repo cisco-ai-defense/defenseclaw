@@ -44,11 +44,17 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import hmac as _hmac_mod
 import json
+import hmac as _hmac_mod
 import logging
+import hmac as _hmac_mod
 import os
+import hmac as _hmac_mod
 import signal
+import hmac as _hmac_mod
 import sys
+import hmac as _hmac_mod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -493,7 +499,7 @@ async def _run_http(proxy: MCPProxy, port: int) -> None:
     async def _auth_middleware(request: web.Request, handler):
         if proxy_token and request.path != "/health":
             auth = request.headers.get("Authorization", "")
-            if not auth.startswith("Bearer ") or auth[7:] != proxy_token:
+            if not auth.startswith("Bearer ") or not _hmac_mod.compare_digest(auth[7:], proxy_token):
                 return web.json_response(
                     {"error": "unauthorized"}, status=401,
                 )

@@ -45,6 +45,11 @@ type TCPClient struct {
 	packetID     uint16
 	reconnecting bool // NEW-4: true while a reconnect attempt is in progress
 
+	// NF-5 fix: Write mutex to prevent concurrent MQTT frame corruption.
+	// readLoop is the sole reader, but multiple goroutines (Publish, pingLoop,
+	// handleIncomingPublish PUBACK) can write concurrently.
+	writeMu sync.Mutex
+
 	// NEW-1 fix: Channel-based PUBACK delivery to eliminate the concurrent
 	// read race between waitForPUBACK and readLoop. The readLoop is the
 	// sole reader of the connection; when it sees a PUBACK packet it sends
@@ -176,7 +181,6 @@ func (c *TCPClient) Subscribe(ctx context.Context, topicFilter string, qos byte,
 		c.packetID = 1 // M-5: MQTT spec requires packet ID 1-65535
 	}
 	pid := c.packetID
-	conn := c.conn
 	c.mu.Unlock()
 
 	c.subsMu.Lock()
@@ -184,7 +188,7 @@ func (c *TCPClient) Subscribe(ctx context.Context, topicFilter string, qos byte,
 	c.subsMu.Unlock()
 
 	pkt := buildSubscribePacket(pid, topicFilter, qos)
-	if err := writeAll(conn, pkt); err != nil {
+	if err := c.lockedWriteAll(pkt); err != nil {
 		return fmt.Errorf("send SUBSCRIBE: %w", err)
 	}
 
@@ -209,11 +213,10 @@ func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload
 		c.packetID = 1 // M-5: MQTT spec requires packet ID 1-65535
 	}
 	pid := c.packetID
-	conn := c.conn
 	c.mu.Unlock()
 
 	pkt := buildPublishPacket(topic, qos, pid, payload)
-	if err := writeAll(conn, pkt); err != nil {
+	if err := c.lockedWriteAll(pkt); err != nil {
 		return fmt.Errorf("send PUBLISH to %s: %w", topic, err)
 	}
 
@@ -221,7 +224,7 @@ func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload
 	// This is critical for emergency commands and policy OTAs where fire-and-forget
 	// could silently lose messages.
 	if qos >= 1 {
-		if err := c.waitForPUBACK(conn, pid, 5*time.Second); err != nil {
+		if err := c.waitForPUBACK(nil, pid, 5*time.Second); err != nil {
 			return fmt.Errorf("PUBACK for packet %d on %s: %w", pid, topic, err)
 		}
 	}
@@ -396,13 +399,8 @@ func (c *TCPClient) handleIncomingPublish(flags byte, body []byte) {
 	// H-1: Send PUBACK for incoming QoS 1 messages.
 	if qos >= 1 {
 		puback := []byte{0x40, 0x02, byte(packetID >> 8), byte(packetID)}
-		c.mu.Lock()
-		conn := c.conn
-		c.mu.Unlock()
-		if conn != nil {
-			if err := writeAll(conn, puback); err != nil {
-				log.Printf("[mqtt] failed to send PUBACK for packet %d: %v", packetID, err)
-			}
+		if err := c.lockedWriteAll(puback); err != nil {
+			log.Printf("[mqtt] failed to send PUBACK for packet %d: %v", packetID, err)
 		}
 	}
 
@@ -446,7 +444,7 @@ func (c *TCPClient) pingLoop(ctx context.Context, interval time.Duration) {
 			if conn == nil || closed {
 				return
 			}
-			_ = writeAll(conn, []byte{mqttPktPingReq, 0x00})
+			_ = c.lockedWriteAll([]byte{mqttPktPingReq, 0x00})
 		}
 	}
 }
@@ -754,6 +752,20 @@ func writeAll(conn net.Conn, data []byte) error {
 		data = data[n:]
 	}
 	return nil
+}
+
+// lockedWriteAll wraps writeAll with the client's write mutex to prevent
+// concurrent MQTT frame corruption (NF-5 fix).
+func (c *TCPClient) lockedWriteAll(data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return writeAll(conn, data)
 }
 
 // mqttTopicMatch performs MQTT-style topic matching with + and # wildcards.
