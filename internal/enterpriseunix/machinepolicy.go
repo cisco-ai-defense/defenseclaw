@@ -312,6 +312,15 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 			l.noteChange("rewrote DefenseClaw's %s machine policy entries", state.Connector)
 		}
 	}
+	// A connector the config no longer publishes loses its hooks, and with
+	// them DefenseClaw inspection; the result says so, because a removal by
+	// mistake otherwise shows only as an agent that runs uninspected
+	// (GAP-1019).
+	for _, state := range result.Retired {
+		if state.Changed {
+			l.noteChange("removed DefenseClaw's %[1]s machine policy entries: the config no longer publishes %[1]s, so DefenseClaw does not inspect it on this computer until it is back in guardrail.connectors", state.Connector)
+		}
+	}
 	covered := coveredMachinePolicy(p.intended, result)
 	if sameStrings(covered, p.machinePolicy) {
 		return nil

@@ -231,7 +231,10 @@ it. OpenCode itself can still start without it: see
 - **Removal of policy it no longer publishes.** When you remove a
   connector's name from both `guardrail.connectors` and
   `enterprise.machine_policy.connectors`, or set its `ownership` to
-  `"off"`, the next `ensure` removes DefenseClaw's entries for it.
+  `"off"`, the next `ensure` removes DefenseClaw's entries for it, and
+  its result says so: DefenseClaw no longer inspects that agent on the
+  computer. A DefenseClaw drop-in whose hook paths you edited counts as
+  DefenseClaw's, so it is removed too rather than kept as your content.
   On Linux and macOS, `guardrail.connectors.claudecode.enabled: false`
   also removes Claude Code machine policy and hooks. For other connectors,
   check the machine-policy ownership map (see
