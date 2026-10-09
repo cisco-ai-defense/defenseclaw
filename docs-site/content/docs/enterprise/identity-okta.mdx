@@ -398,9 +398,16 @@ With this setup, read a record with `defenseclaw audit export` as in the
   and blocks. New SSH password sign-ins fail while Okta is unreachable because
   the kit sets `cache_credentials = false`; they can prompt repeatedly without
   authenticating. With no cached entry, the lookup fails and requests get the
-  default profile with `default_lookup_failed`. In a live outage test SSSD took
-  about two minutes after connectivity returned to report Online; group profiles
-  applied about 40 seconds later without a gateway restart.
+  default profile with `default_lookup_failed`. SSSD retries an offline domain
+  at an interval that grows with the outage (`offline_timeout`, 60 seconds,
+  doubling with each failed retry up to `offline_timeout_max`), so after Okta is
+  back it can take up to that interval to report Online: in live outage tests
+  about two minutes after a short outage, and 6 minutes 12 seconds after a
+  13-minute one. Group profiles applied 40 to 51 seconds after SSSD reported
+  Online, without a gateway restart. To bring the host back sooner, run
+  `sudo systemctl restart sssd` once Okta answers: after a 10-minute outage SSSD
+  was still offline 90 seconds after connectivity returned, and reported Online
+  2 seconds after the restart (`sssctl domain-status okta -o`).
 - **The Okta login as the UPN** (standalone enterprise only). The Okta LDAP
   Interface has no `userPrincipalName`; its `uid` is the Okta login. Run
   `install-sssd-okta.sh` with `--map-upn`, which adds `ldap_user_principal = uid` to
