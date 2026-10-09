@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"reflect"
 	"strings"
 )
@@ -229,6 +231,16 @@ func kiroUniversalHookEntry(event, matcher, hookScript string) map[string]interf
 // every other entry in place.
 func reconcileKiroUniversalHooks(list []interface{}, hookScript string) []interface{} {
 	kept := removeKiroOwnedUniversalHooks(list, hookScript)
+	edited := path.Base(filepath.ToSlash(hookScript))
+	unedited := kept[:0]
+	for _, item := range kept {
+		// An entry whose DefenseClaw script path was edited is replaced too
+		// (GAP-0907).
+		if !editedDefenseClawHookEntry(item, edited) {
+			unedited = append(unedited, item)
+		}
+	}
+	kept = unedited
 	for _, spec := range kiroV2HookSpecs {
 		kept = append(kept, kiroUniversalHookEntry(spec.event, spec.matcher, hookScript))
 	}
@@ -506,8 +518,11 @@ func kiroV2AgentAllowsSeed(cfg map[string]interface{}) bool {
 func reconcileKiroV2Hooks(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	kept := make([]interface{}, 0, len(list)+1)
+	edited := path.Base(filepath.ToSlash(hookScript))
 	for _, item := range list {
-		if kiroV2EntryOwned(item, hookScript) {
+		// An entry whose DefenseClaw script path was edited is replaced too
+		// (GAP-0907).
+		if kiroV2EntryOwned(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
 			continue
 		}
 		kept = append(kept, item)

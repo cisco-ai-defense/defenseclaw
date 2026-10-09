@@ -2946,7 +2946,9 @@ func mergeOwnedCodexHooks(
 		if isOwnedCodexHookHandler(rawHook, hooksDir) {
 			return true
 		}
-		return isInferredManaged(rawHook)
+		// A DefenseClaw handler whose script path was edited is replaced in
+		// place, not kept next to a second hook set (GAP-0907).
+		return isInferredManaged(rawHook) || editedDefenseClawHookEntry(rawHook, "codex-hook.sh")
 	}
 	if _, err := removeCodexHookStateMatching(hooks, configPath, isManaged); err != nil {
 		return fmt.Errorf("inspect existing DefenseClaw Codex hook trust: %w", err)

@@ -651,6 +651,41 @@ func (s *Sidecar) currentConfig() *config.Config {
 	return s.cfg
 }
 
+// liveGuardrailMode returns name's guardrail mode, "action" or "observe",
+// from the configuration generation in force. The Guardrail status block
+// reads it at every publication, so it agrees with the Connector Mode
+// section after a hot guardrail.mode change (GAP-0905).
+func (s *Sidecar) liveGuardrailMode(name string) string {
+	if strings.EqualFold(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(name)), "action") {
+		return "action"
+	}
+	return "observe"
+}
+
+// guardrailHealthRefreshInterval is how often a direct-upstream guardrail
+// checks the live mode its status block describes.
+var guardrailHealthRefreshInterval = 5 * time.Second
+
+// republishGuardrailOnModeChange calls publish whenever key, the live mode a
+// direct-upstream Guardrail status block describes, changes after a hot
+// reload. It returns when ctx ends (GAP-0905).
+func (s *Sidecar) republishGuardrailOnModeChange(ctx context.Context, key func() string, publish func()) {
+	last := key()
+	ticker := time.NewTicker(guardrailHealthRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if current := key(); current != last {
+				last = current
+				publish()
+			}
+		}
+	}
+}
+
 func (s *Sidecar) sharedJudge() *LLMJudge {
 	if s == nil {
 		return nil
@@ -4558,24 +4593,30 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// goroutine alive until shutdown, mirroring the existing
 	// !cfg.Guardrail.Enabled path in proxy.go (lines 313-318).
 	if !proxyShouldBindForConnector(conn, &s.currentConfig().Guardrail) {
-		policyMode := strings.ToLower(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name())))
-		if policyMode != "action" {
-			policyMode = "observe"
-		}
-		enforcementEnabled := policyMode == "action"
-		summary := "observability-only (no proxy binding)"
-		surface := "agent_lifecycle_hooks"
-		if enforcementEnabled {
-			summary = "hook enforcement (no proxy binding)"
-		}
-		if conn.Name() == "omnigent" {
-			surface = "omnigent_policy_api"
+		// The mode, enforcement and summary come from the live configuration
+		// generation at every publication, so the Guardrail status block
+		// follows a hot guardrail.mode change like the Connector Mode section
+		// does instead of keeping the boot-time mode (GAP-0905).
+		modeDetails := func() (policyMode string, enforcementEnabled bool, summary, surface string) {
+			policyMode = s.liveGuardrailMode(conn.Name())
+			enforcementEnabled = policyMode == "action"
+			summary = "observability-only (no proxy binding)"
+			surface = "agent_lifecycle_hooks"
 			if enforcementEnabled {
-				summary = "policy enforcement (no proxy binding)"
+				summary = "hook enforcement (no proxy binding)"
 			}
+			if conn.Name() == "omnigent" {
+				surface = "omnigent_policy_api"
+				if enforcementEnabled {
+					summary = "policy enforcement (no proxy binding)"
+				}
+			}
+			return policyMode, enforcementEnabled, summary, surface
 		}
+		policyMode, enforcementEnabled, _, _ := modeDetails()
 		if guardianManagedLifecycle {
 			publishHealth := func() {
+				policyMode, enforcementEnabled, summary, surface := modeDetails()
 				covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, []string{conn.Name()})
 				if s.currentConfig().StandaloneEnterprise() {
 					covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
@@ -4606,7 +4647,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			}
 			publishHealth()
 			fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — awaiting enterprise hook guardian verification\n", conn.Name(), policyMode, enforcementEnabled)
-			ticker := time.NewTicker(5 * time.Second)
+			ticker := time.NewTicker(guardrailHealthRefreshInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -4617,20 +4658,24 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 				}
 			}
 		}
-		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
-			"summary":             summary,
-			"connector":           conn.Name(),
-			"mode":                policyMode,
-			"data_path":           "direct-to-upstream",
-			"policy_mode":         policyMode,
-			"enforcement_enabled": enforcementEnabled,
-			"enforcement_surface": surface,
-			"proxy_port":          "closed",
-			"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
-			"lifecycle_manager":   lifecycleManagerForConnector(s.currentConfig(), conn),
-		})
+		publishHealth := func() {
+			policyMode, enforcementEnabled, summary, surface := modeDetails()
+			s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
+				"summary":             summary,
+				"connector":           conn.Name(),
+				"mode":                policyMode,
+				"data_path":           "direct-to-upstream",
+				"policy_mode":         policyMode,
+				"enforcement_enabled": enforcementEnabled,
+				"enforcement_surface": surface,
+				"proxy_port":          "closed",
+				"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
+				"lifecycle_manager":   lifecycleManagerForConnector(s.currentConfig(), conn),
+			})
+		}
+		publishHealth()
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — proxy port intentionally not bound\n", conn.Name(), policyMode, enforcementEnabled)
-		<-ctx.Done()
+		s.republishGuardrailOnModeChange(ctx, func() string { return s.liveGuardrailMode(conn.Name()) }, publishHealth)
 		return nil
 	}
 	return proxy.Run(ctx)
@@ -5015,33 +5060,43 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	if primary, ok := registry.Get(succeeded[0]); ok {
 		s.health.SetConnector(primary.Name(), primary.ToolInspectionMode(), primary.SubprocessPolicy())
 	}
-	connectorModes := make(map[string]string, len(succeeded))
-	anyEnforcement := false
-	for _, name := range succeeded {
-		mode := strings.ToLower(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(name)))
-		if mode != "action" {
-			mode = "observe"
+	notStarted := connectorsNotStarted(conns, succeeded)
+	// Modes come from the live configuration generation at every
+	// publication so a hot guardrail.mode change reaches status (GAP-0905).
+	liveModes := func() (map[string]string, bool) {
+		connectorModes := make(map[string]string, len(succeeded))
+		anyEnforcement := false
+		for _, name := range succeeded {
+			mode := s.liveGuardrailMode(name)
+			connectorModes[name] = mode
+			anyEnforcement = anyEnforcement || mode == "action"
 		}
-		connectorModes[name] = mode
-		anyEnforcement = anyEnforcement || mode == "action"
+		return connectorModes, anyEnforcement
 	}
-	guardrailDetails := map[string]interface{}{
-		"summary":             fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
-		"connectors":          succeeded,
-		"connector_modes":     connectorModes,
-		"enforcement_enabled": anyEnforcement,
-		"proxy_port":          "closed",
-		"hint":                "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
+	publishHealth := func() {
+		connectorModes, anyEnforcement := liveModes()
+		guardrailDetails := map[string]interface{}{
+			"summary":             fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
+			"connectors":          succeeded,
+			"connector_modes":     connectorModes,
+			"enforcement_enabled": anyEnforcement,
+			"proxy_port":          "closed",
+			"hint":                "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
+		}
+		// A configured connector whose setup failed is not enforced until the
+		// next start; status says so instead of only leaving it out (GAP-1714).
+		if len(notStarted) > 0 {
+			guardrailDetails["connectors_not_started"] = notStarted
+		}
+		s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	}
-	// A configured connector whose setup failed is not enforced until the
-	// next start; status says so instead of only leaving it out (GAP-1714).
-	if notStarted := connectorsNotStarted(conns, succeeded); len(notStarted) > 0 {
-		guardrailDetails["connectors_not_started"] = notStarted
-	}
-	s.health.SetGuardrail(StateRunning, "", guardrailDetails)
+	publishHealth()
+	_, anyEnforcement := liveModes()
 	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector direct-upstream mode: %d active connector(s): %s; enforcement=%t — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "), anyEnforcement)
-
-	<-ctx.Done()
+	s.republishGuardrailOnModeChange(ctx, func() string {
+		connectorModes, _ := liveModes()
+		return fmt.Sprint(connectorModes)
+	}, publishHealth)
 	return nil
 }
 
@@ -5143,18 +5198,20 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	if primary, ok := registry.Get(succeeded[0]); ok {
 		s.health.SetConnector(primary.Name(), primary.ToolInspectionMode(), primary.SubprocessPolicy())
 	}
-	hookEnforcement := false
-	for _, name := range succeeded {
-		if strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(name), "action") {
-			hookEnforcement = true
-			break
-		}
-	}
-	summary := fmt.Sprintf("managed enterprise hook telemetry (%d guardian-managed)", len(succeeded))
-	if hookEnforcement {
-		summary = fmt.Sprintf("managed enterprise hook enforcement (%d guardian-managed)", len(succeeded))
-	}
 	publishHealth := func() {
+		// Read the mode from the live configuration generation at every
+		// publication so a hot guardrail.mode change reaches status (GAP-0905).
+		hookEnforcement := false
+		for _, name := range succeeded {
+			if s.liveGuardrailMode(name) == "action" {
+				hookEnforcement = true
+				break
+			}
+		}
+		summary := fmt.Sprintf("managed enterprise hook telemetry (%d guardian-managed)", len(succeeded))
+		if hookEnforcement {
+			summary = fmt.Sprintf("managed enterprise hook enforcement (%d guardian-managed)", len(succeeded))
+		}
 		covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, succeeded)
 		if s.currentConfig().StandaloneEnterprise() {
 			covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
@@ -5196,7 +5253,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	publishHealth()
 	fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise multi-connector hook mode: %d connector(s): %s — proxy port closed; enterprise hook guardian owns hook files\n", len(succeeded), strings.Join(succeeded, ", "))
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(guardrailHealthRefreshInterval)
 	defer ticker.Stop()
 	for {
 		select {
