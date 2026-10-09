@@ -344,7 +344,8 @@ such as the profile root that `scan_roots: ["~"]` names, are skipped
 without failing the scan. Only enrolled profiles are read: the profile of an
 account that `enterprise.enrollment.exclude_users` names is not, the
 processes in its sessions are left out, and the components it reported
-before are reported `removed` once; the enumerator also takes away the read
+before are reported `removed` once, at the first scan after the change is
+applied, without a gateway restart; the enumerator also takes away the read
 access an earlier install granted it. `ai_discovery.home_dirs` adds folders
 to the enrolled profiles and never replaces them, and a folder inside an
 excluded profile is not read.

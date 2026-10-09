@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2226,7 +2227,21 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		return false
 	}
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
-		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode)
+		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode) ||
+		!slices.Equal(discoveryExcludeUsers(oldCfg), discoveryExcludeUsers(newCfg))
+}
+
+// discoveryExcludeUsers is the enterprise.enrollment.exclude_users list the
+// standalone profile's AI Discovery scan leaves out. The scan reads it when
+// it starts, so a hot apply that changes it rebuilds the scan: an excluded
+// account otherwise kept the components the gateway could still see (a
+// Copilot CLI package folder it may list) and sent their removal only after
+// a restart (GAP-1024).
+func discoveryExcludeUsers(cfg *config.Config) []string {
+	if !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	return cfg.Enterprise.Enrollment.ExcludeUsers
 }
 
 func notifierChanged(oldCfg, newCfg *config.Config) bool {
