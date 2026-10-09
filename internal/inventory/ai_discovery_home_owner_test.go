@@ -299,3 +299,33 @@ func TestServiceContextSkillRowsNameSkillsOnly(t *testing.T) {
 		t.Fatalf("Codex skill entries = %q, want imagegen", got)
 	}
 }
+
+// An excluded domain account with no session SID must not become an
+// enrolled local account just because the two share a short name.
+func TestExcludedBrokeredAccountDoesNotBecomeLocalOwner(t *testing.T) {
+	root := t.TempDir()
+	local := discoveryHomeOwner{Home: filepath.Join(root, "local"), UserID: "S-1-5-21-1001", UserName: "alice", Domain: "HOST"}
+	domain := discoveryHomeOwner{Home: filepath.Join(root, "domain"), UserID: "S-1-5-21-2001", UserName: "alice", Domain: "AD"}
+	opts := AIDiscoveryOptions{ExcludeUsers: []string{`AD\alice`}}
+	opts.applyPlatformHomeOwners([]discoveryHomeOwner{local, domain})
+	svc := &ContinuousDiscoveryService{opts: opts}
+	clear := SetProcessAccountLookup(func() map[int]ProcessAccount {
+		return map[int]ProcessAccount{
+			42: {Name: "codex.exe", User: `AD\alice`},
+			43: {Name: "codex.exe", User: `HOST\alice`},
+		}
+	})
+	defer clear()
+	procs := []processInfo{
+		{PID: 42, Comm: "codex.exe", Connector: "codex", Windows: true},
+		{PID: 43, Comm: "codex.exe", Connector: "codex", Windows: true},
+	}
+	svc.attributeProcessOwners(procs)
+	if procs[0].OwnerID != "" || procs[1].OwnerID != local.UserID {
+		t.Fatalf("brokered owners = %+v, want only the local account attributed", procs)
+	}
+	procs = svc.withoutExcludedAccounts(procs)
+	if len(procs) != 1 || procs[0].PID != 43 {
+		t.Fatalf("filtered processes = %+v, want only the local account", procs)
+	}
+}

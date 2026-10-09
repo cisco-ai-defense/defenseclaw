@@ -16270,33 +16270,78 @@ def _fix_hook_script_modes(
     assume_yes: bool,
     plan_only: bool = False,
 ) -> tuple[str, str]:
-    """Restore mode 0700 on generated hook scripts that lost it (GAP-0101).
-
-    A connector whose scripts no longer match the digests setup sealed is
-    left alone: the Hook runtime files row sends it to setup instead of
-    making an edited script runnable.
-    """
-    from defenseclaw.hook_integrity import hook_runtime_problems, non_executable_hook_scripts
+    """Restore execute mode only after checking each script's sealed digest."""
+    from defenseclaw.fail_mode import _MAX_DIGEST_FILE
+    from defenseclaw.hook_integrity import _locked_hook_scripts, non_executable_hook_scripts
 
     targets = [
-        script
+        (script, digests.get(script.name, ""))
         for connector in _doctor_active_connectors(cfg)
-        if not any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        for scripts, digests in [_locked_hook_scripts(cfg, connector)]
         for script in non_executable_hook_scripts(cfg, connector)
+        if script in scripts
     ]
     if not targets:
         return ("skip", "the generated hook scripts are executable")
-    names = ", ".join(str(script) for script in targets)
+    names = ", ".join(str(script) for script, _ in targets)
     if plan_only:
-        return ("plan", f"restore mode 0700 on {names}")
-    if not assume_yes and not click.confirm(f"    Restore mode 0700 on {names}?", default=True):
+        return ("plan", f"verify sealed digests, then restore mode 0700 on {names}")
+    if not assume_yes and not click.confirm(f"    Verify and restore mode 0700 on {names}?", default=True):
         return ("skip", "declined by user")
-    try:
-        for script in targets:
-            os.chmod(script, 0o700)
-    except OSError as exc:
-        return ("fail", f"could not restore the hook script mode: {exc}")
-    return ("pass", f"restored mode 0700 on {names}")
+    for script, expected in targets:
+        try:
+            before = script.lstat()
+            if not stat.S_ISREG(before.st_mode) or not expected:
+                return ("fail", f"could not verify sealed hook script {script}; run setup to render it again")
+            mode = stat.S_IMODE(before.st_mode)
+            # A mode-000 script cannot be read by its owner. Grant read only,
+            # keeping it non-executable until its sealed digest is verified.
+            read_added = not mode & stat.S_IRUSR
+            descriptor = None
+            opened = None
+            verified = False
+            try:
+                if read_added:
+                    os.chmod(script, mode | stat.S_IRUSR, follow_symlinks=False)
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(script, flags)
+                opened = os.fstat(descriptor)
+                if (
+                    stat.S_ISREG(opened.st_mode)
+                    and opened.st_size <= _MAX_DIGEST_FILE
+                    and os.path.samestat(before, opened)
+                ):
+                    digest = hashlib.sha256()
+                    while chunk := os.read(descriptor, 1024 * 1024):
+                        digest.update(chunk)
+                    after = os.fstat(descriptor)
+                    stable = (
+                        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                        == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                        == (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                    )
+                    verified = stable and "sha256:" + digest.hexdigest() == expected
+                    if verified:
+                        # fchmod applies to the verified inode even if its path
+                        # is replaced after the read.
+                        os.fchmod(descriptor, 0o700)
+            finally:
+                try:
+                    if read_added and not verified:
+                        if descriptor is not None and opened is not None and os.path.samestat(before, opened):
+                            os.fchmod(descriptor, mode)
+                        elif descriptor is None:
+                            current = script.lstat()
+                            if os.path.samestat(before, current):
+                                os.chmod(script, mode, follow_symlinks=False)
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+            if not verified:
+                return ("fail", f"hook script {script} differs from its sealed digest; run setup to render it again")
+        except OSError as exc:
+            return ("fail", f"could not verify or restore hook script {script}: {exc}")
+    return ("pass", f"verified sealed digests and restored mode 0700 on {names}")
 
 
 def _drifted_hook_connectors(cfg) -> list[str]:

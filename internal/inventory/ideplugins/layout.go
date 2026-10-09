@@ -77,13 +77,20 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 	var out []WindowsGrant
 	tree := func(rel string) { out = append(out, WindowsGrant{Path: rel, Tree: true}) }
 	self := func(rel string) { out = append(out, WindowsGrant{Path: rel}) }
+	// A live VS Code database may keep disabled-extension changes in its WAL.
+	// Grant each existing sidecar as a file, without exposing sibling storage.
+	stateDB := func(rel string) {
+		self(rel)
+		self(rel + "-wal")
+		self(rel + "-shm")
+	}
 	for _, product := range vscodeProducts {
 		for _, dot := range product.dotDirs {
 			tree(dot + `\extensions`)
 		}
 		user := `AppData\Roaming\` + product.dataName + `\User`
 		self(user + `\globalStorage`)
-		self(user + `\globalStorage\state.vscdb`)
+		stateDB(user + `\globalStorage\state.vscdb`)
 		profiles := user + `\profiles`
 		self(profiles)
 		for _, profile := range windowsSubdirs(home, profiles, vscodeMaxProfiles) {
@@ -92,7 +99,7 @@ func WindowsHomeGrants(home string) []WindowsGrant {
 			}
 			base := profiles + `\` + profile
 			self(base + `\extensions.json`)
-			self(base + `\globalStorage\state.vscdb`)
+			stateDB(base + `\globalStorage\state.vscdb`)
 		}
 		for _, server := range product.servers {
 			self(server)

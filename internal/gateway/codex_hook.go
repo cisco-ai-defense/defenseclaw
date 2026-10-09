@@ -804,12 +804,10 @@ func normalizeCodexAction(action string) string {
 // Windows. Codex names its shell tool Bash everywhere, but on Windows it runs
 // the command in PowerShell, so a PowerShell command such as
 // `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
-// and ran with no finding (GAP-0912). A command whose grammar reads as
-// PowerShell is parsed as PowerShell; any other keeps the Bash tool's POSIX
-// reading, which both shells share for the commands it models.
+// and ran with no finding (GAP-0912). The host shell, rather than the
+// connector's tool label or a grammar guess, determines how the command runs.
 func codexWindowsShellDialect(tool, command string) actionfacts.Dialect {
-	if !strings.EqualFold(strings.TrimSpace(tool), "bash") || command == "" ||
-		actionfacts.InferredRawCommandDialect(command) != actionfacts.DialectPowerShell {
+	if !strings.EqualFold(strings.TrimSpace(tool), "bash") || command == "" {
 		return ""
 	}
 	return actionfacts.DialectPowerShell

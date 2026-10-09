@@ -80,16 +80,39 @@ func (s *ContinuousDiscoveryService) refreshHomeOwnerNames() {
 
 // homeOwnerForAccount returns the one profile owner whose account is user.
 func (s *ContinuousDiscoveryService) homeOwnerForAccount(user string) (discoveryHomeOwner, bool) {
-	user = strings.TrimSpace(user[strings.LastIndex(user, `\`)+1:])
 	var found discoveryHomeOwner
 	matches := 0
 	for _, owner := range s.opts.homeOwners {
-		if user != "" && owner.Home != "" && strings.EqualFold(strings.TrimSpace(owner.UserName), user) {
+		if owner.Home != "" && processAccountMatchesOwner(user, owner, s.opts.SecureClient) {
 			found = owner
 			matches++
 		}
 	}
+	// A short brokered name cannot distinguish an excluded domain account
+	// from an enrolled local account with the same name.
+	if !s.opts.SecureClient {
+		for _, owner := range s.opts.excludedOwners {
+			if processAccountMatchesOwner(user, owner, false) {
+				matches++
+			}
+		}
+	}
 	return found, matches == 1
+}
+
+func processAccountMatchesOwner(user string, owner discoveryHomeOwner, secureClient bool) bool {
+	user = strings.TrimSpace(user)
+	domain := ""
+	if i := strings.LastIndex(user, `\`); i >= 0 {
+		domain, user = user[:i], user[i+1:]
+	}
+	if user == "" || !strings.EqualFold(strings.TrimSpace(owner.UserName), user) {
+		return false
+	}
+	// An owner record without a domain predates domain capture: match it by
+	// name, as before, so a qualified process account still attributes.
+	ownerDomain := strings.TrimSpace(owner.Domain)
+	return secureClient || domain == "" || ownerDomain == "" || strings.EqualFold(ownerDomain, domain)
 }
 
 // discoveryHomeOwner names the account that owns one profile root of a

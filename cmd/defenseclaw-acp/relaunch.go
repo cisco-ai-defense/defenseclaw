@@ -91,7 +91,11 @@ func (in *editorInput) Read(p []byte) (int, error) {
 	}
 	in.mu.Lock()
 	if len(in.pending) > 0 {
-		n := copy(p, in.pending)
+		available := in.pending
+		if end := bytes.IndexByte(available, '\n'); end >= 0 {
+			available = available[:end+1]
+		}
+		n := copy(p, available)
 		in.pending = in.pending[n:]
 		in.mu.Unlock()
 		return n, nil
@@ -113,7 +117,11 @@ func (in *editorInput) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		default:
 		}
-		n := copy(p, chunk)
+		available := chunk
+		if end := bytes.IndexByte(available, '\n'); end >= 0 {
+			available = available[:end+1]
+		}
+		n := copy(p, available)
 		in.pending = append(in.pending, chunk[n:]...)
 		return n, nil
 	}

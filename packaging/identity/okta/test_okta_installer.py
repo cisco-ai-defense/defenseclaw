@@ -23,3 +23,26 @@ install_conf {rendered}
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert result.returncode == 3
     assert existing.read_text() == content
+
+
+def test_local_allow_group_is_rejected_before_sshd_changes(tmp_path):
+    source = (KIT / "install-sssd-okta.sh").read_text().rsplit('main "$@"', 1)[0]
+    script = source + """
+fetch_password() { PASSWORD=stub; }
+check_host() { :; }
+render() { :; }
+config_check() { :; }
+bind_test() { :; }
+authselect_profile_check() { :; }
+install_conf() { :; }
+pam_step() { :; }
+sshd_step() { echo "unexpected sshd step"; }
+restart_sssd() { :; }
+main --org example --bind-login bind@example.com --allow-group root --dry-run
+"""
+    test_script = tmp_path / "installer.sh"
+    test_script.write_text(script)
+    result = subprocess.run(["bash", str(test_script)], capture_output=True, text=True)
+    assert result.returncode == 3
+    assert "local group" in result.stderr
+    assert "unexpected sshd step" not in result.stdout
