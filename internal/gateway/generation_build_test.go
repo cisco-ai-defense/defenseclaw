@@ -56,6 +56,20 @@ func TestBuildGenerationComposesRulesPreparesOPAAndPinsCustomPacks(t *testing.T)
 		t.Fatalf("generation OPA = %v, components = %v", plain.OPA, plain.Components)
 	}
 
+	// With no policy_dir (a Windows standalone install) the default pack is
+	// the embedded one, as the implicit default is there; the other built-in
+	// names still need policy_dir.
+	embedded := &config.Config{}
+	embedded.Guardrail.RulePack = "default"
+	if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), embedded, "global"); err != nil {
+		t.Fatalf("rule_pack default with no policy_dir: %v", err)
+	}
+	embedded.Guardrail.RulePack = "strict"
+	if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), embedded, "global"); err == nil ||
+		!strings.Contains(err.Error(), "policy_dir is not set") {
+		t.Fatalf("rule_pack strict with no policy_dir = %v, want policy_dir is not set", err)
+	}
+
 	cfg.Guardrail.Rules = config.GuardrailRulesConfig{
 		Protections: []string{"database-destruction-protection"},
 		Disable:     []string{"SEC-AWS-KEY"},

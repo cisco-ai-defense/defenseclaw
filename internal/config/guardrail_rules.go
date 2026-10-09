@@ -134,6 +134,21 @@ func (c *Config) ResolveRulePackDir(ref RulePackRef) string {
 	return ""
 }
 
+// EmbeddedRulePack reports whether ref selects the rule packs embedded in
+// the gateway: the built-in default pack with no policy_dir. A Windows
+// standalone install has none (standalonePolicyDirDefault: its Setup ships no
+// policy folder), and there the implicit default pack and an empty v8
+// rule_pack_dir are the embedded packs too. The documented v9 spelling
+// "rule_pack: default" was refused there with "policy_dir is not set", and
+// Setup /ensure exited 1639.
+func (c *Config) EmbeddedRulePack(ref RulePackRef) bool {
+	if c == nil || ref.Name != "default" || strings.TrimSpace(c.PolicyDir) != "" {
+		return false
+	}
+	_, custom := c.Guardrail.CustomPacks[ref.Name]
+	return !custom
+}
+
 // vendorRulePackDir is the shipped built-in pack name of the Linux or macOS
 // standalone layout this config is read from, "" elsewhere.
 func (c *Config) vendorRulePackDir(name string) string {
