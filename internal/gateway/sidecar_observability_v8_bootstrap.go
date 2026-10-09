@@ -1191,6 +1191,11 @@ func (observer sidecarV8EventHistoryObserver) ReportEventHistoryHealth(
 		return
 	}
 	observer.s.health.observeObservabilityV8EventHistory(transition)
+	if transition.Code == audit.EventHistoryHealthWriteFailed && transition.State == audit.EventHistoryHealthRecovered {
+		// Writes resumed: report the records local history lacks (GAP-1100).
+		// Off this callback, which the writer's health queue delivers.
+		go observer.s.recordLocalWriteGapV8()
+	}
 }
 
 func newSidecarObservabilityV8BootstrapError(

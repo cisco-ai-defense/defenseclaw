@@ -99,6 +99,12 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			// was initialized and activated for this generation.
 			row.State = delivery.HealthHealthy
 			row.Reason = string(delivery.HealthReasonActivated)
+			// A failed SQLite append counts as dropped here, so a record the
+			// optional destinations received but local history lacks is not
+			// silent (GAP-1100). Secure Client keeps main's zero row (#1092).
+			if !runtime.secureClient {
+				row.Counters = local.writes.snapshot()
+			}
 		}
 		byName[destination.Name] = len(rows)
 		rows = append(rows, row)

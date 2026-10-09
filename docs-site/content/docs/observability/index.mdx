@@ -393,6 +393,14 @@ observability:
 (`~/.defenseclaw` for a per-user install). `defenseclaw doctor` reports an
 outside path as a custody failure; move the database under that directory.
 
+If a write to the local history fails, for example because the disk is full,
+the record still goes to the optional destinations and gateway health counts
+it as `dropped` on the `local-sqlite` destination. When writes resume, the
+gateway stores one `sqlite.write_failed` platform-health record that says how
+many records the local history is missing, so the gap in an audit export is
+not silent. Those records are not written to the local history afterwards;
+read them from the destinations that received them.
+
 Seven days is also the default when `retention_days` is omitted. The gateway
 runs the graph-aware SQLite reaper after startup readiness and every six hours;
 CLI-only writes are reaped the next time the gateway starts. Existing v8

@@ -21,6 +21,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -122,6 +123,25 @@ type Runtime struct {
 	shutdownLosses        []ShutdownLoss
 	shutdownLossesCounted bool
 	carried               carriedShutdownLosses
+	localWriteLost        *atomic.Uint64
+}
+
+// TakeLocalWriteLosses returns, and clears, how many log records failed their
+// mandatory SQLite append since the last call, so the gateway can store one
+// sqlite.write_failed record for them once writes resume (GAP-1100).
+func (runtime *Runtime) TakeLocalWriteLosses() uint64 {
+	if runtime == nil || runtime.localWriteLost == nil {
+		return 0
+	}
+	return runtime.localWriteLost.Swap(0)
+}
+
+// ReturnLocalWriteLosses gives back a count TakeLocalWriteLosses returned
+// when its sqlite.write_failed record could not be stored.
+func (runtime *Runtime) ReturnLocalWriteLosses(records uint64) {
+	if runtime != nil && runtime.localWriteLost != nil && records != 0 {
+		runtime.localWriteLost.Add(records)
+	}
 }
 
 // EmitContext is the exact immutable graph snapshot pinned for one Emit call.
@@ -224,11 +244,13 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 		graphOptions = *options.GraphOptions
 		graphOptions.Reporter = options.Reporter
 	}
+	lostWrites := &atomic.Uint64{}
 	factory := &localLogFactory{
 		store: options.Store, storePath: storePath,
 		engine: options.Engine, signer: options.Signer,
 		recordBuilder:  options.RecordBuilder,
 		healthReporter: options.EventHistoryHealthReporter,
+		lostWrites:     lostWrites,
 	}
 	destinationObserver := newSafeDeliveryObserver(options.DestinationObserver)
 	dispatchFactory := &destinationDispatchFactory{
@@ -275,6 +297,7 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
 		destinationObserver: destinationObserver, secureClient: options.SecureClient,
+		localWriteLost: lostWrites,
 	}, nil
 }
 
