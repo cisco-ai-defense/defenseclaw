@@ -140,8 +140,39 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 		case !errors.Is(err, fs.ErrNotExist) && len(claimed) == 0:
 			paths = append(paths, dir)
 		}
+		paths = append(paths, foldersDeclaringSkill(root, name)...)
 	}
 	return paths
+}
+
+// maxDeclaredNameScan bounds the skill folders of one root whose SKILL.md
+// a name-only call reads to find the folders that declare that name.
+const maxDeclaredNameScan = 256
+
+// foldersDeclaringSkill lists the folders in root, other than root/name,
+// whose SKILL.md declares name. Codex selects a skill ($name, or by plain
+// words) by the name its SKILL.md declares, while admission blocks and
+// disables it under its folder name, so a skill whose quarantine failed in
+// a folder of another name still ran (GAP-1101).
+func foldersDeclaringSkill(root, name string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var folders []string
+	for i, entry := range entries {
+		if i >= maxDeclaredNameScan {
+			break
+		}
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || config.SameAssetName(entry.Name(), name) {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		if config.SameAssetName(assetfacts.DeclaredSkillName(dir), name) {
+			folders = append(folders, dir)
+		}
+	}
+	return folders
 }
 
 // installedSkillFolders are the folders, in the skill roots the connector
@@ -168,11 +199,24 @@ func (a *APIServer) skillFolderAccessDecision(
 	ctx context.Context, connector, hookEvent, cwd, toolName string, toolInput map[string]interface{},
 ) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
-	if cfg == nil || cfg.SecureClientIntegration() || len(cfg.AssetPolicy.Skill.Denied) == 0 || !runtimeAssetCanEnforce(hookEvent) {
+	if cfg == nil || cfg.SecureClientIntegration() || !runtimeAssetCanEnforce(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	facts := claimedAssetFactsFromContext(ctx)
 	for _, ref := range assetfacts.SkillFolderRefs(toolInput, hookActiveHome(ctx), cwd) {
+		// A skill admission blocked and disabled (one whose quarantine
+		// failed stays in its folder) is refused when a tool reaches into
+		// its folder, as a denied one is (GAP-1101).
+		if decision, disabled := a.runtimeAssetDisableDecision("skill", ref.Name, connector, "skill_folder"); disabled {
+			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+				TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
+				SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+			})
+			return decision, true
+		}
+		if len(cfg.AssetPolicy.Skill.Denied) == 0 {
+			continue
+		}
 		declared := facts.DeclaredFor(ref.Name)
 		if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
 			declared = append(declared, name)

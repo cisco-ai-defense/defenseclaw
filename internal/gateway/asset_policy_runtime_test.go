@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
 
 func enableSkillRuntimeDetection(cfg *config.Config) {
@@ -1008,6 +1009,38 @@ func TestCodexCollidingMCPNamesFailClosed(t *testing.T) {
 		HookEventName: "PreToolUse", ToolName: "mcp__acme_notes__sensitive", CWD: home,
 	}); matched {
 		t.Fatalf("colliding MCP names with no rule refused: %+v", decision)
+	}
+}
+
+// GAP-1101: a skill admission blocked and disabled under its folder name
+// (usm-crit2) is refused when Codex selects it by the name its SKILL.md
+// declares (usm-crit) and when a tool reads its folder.
+func TestCodexDisabledSkillRefusedByDeclaredNameAndFolderRead(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	home := t.TempDir()
+	folder := filepath.Join(home, ".agents", "skills", "usm-crit2")
+	if err := os.MkdirAll(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "SKILL.md"), []byte("---\nname: usm-crit\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := enforce.NewPolicyEngine(store).Disable("skill", "usm-crit2", "quarantine failed"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1003, Home: home})
+	if decision, matched := api.codexPromptSkillAssetDecision(ctx, codexHookRequest{
+		HookEventName: "UserPromptSubmit", SessionID: "s-1101", Prompt: "$usm-crit Run it.", CWD: home,
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("$usm-crit = %+v, matched=%v; want the disabled folder refused", decision, matched)
+	}
+	if decision, matched := api.codexSkillAssetDecision(ctx, codexHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Bash", CWD: home,
+		ToolInput: map[string]interface{}{"command": "cat " + folder + "/SKILL.md"},
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("folder read = %+v, matched=%v; want refused", decision, matched)
 	}
 }
 

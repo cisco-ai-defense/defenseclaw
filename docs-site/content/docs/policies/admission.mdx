@@ -518,7 +518,10 @@ on its own skill loading, so asked for a skill in plain words it reads the
 skill's `SKILL.md` with a shell command and follows it. The Claude Code and
 Codex hooks therefore also refuse any tool call that reaches into the folder of
 a denied skill: a `.../skills/<name>/...` path in a command, a file path or a
-working folder. Two things stay out of reach of a hook:
+working folder. A skill that install admission blocked and disabled (one whose
+quarantine failed stays in its folder) is refused the same ways, also when
+Codex selects it by the name its `SKILL.md` declares rather than its folder
+name. Two things stay out of reach of a hook:
 
 - the skill's name and description, which Codex lists to the model from its
   own skill index before any hook runs;
