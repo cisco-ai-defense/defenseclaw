@@ -180,6 +180,53 @@ func TestOTLPInboundGeneratedConnectorLogImportsThroughSQLite(t *testing.T) {
 	}
 }
 
+// A conversation ID is sender supplied. A shared gateway must not attach
+// another user's hook snapshot to a native OTLP record with no caller identity.
+func TestOTLPInboundDoesNotJoinForeignHookIdentity(t *testing.T) {
+	fixture := newOTLPV8MetricFixture(t)
+	const session = "shared-conversation"
+	const foreignAgent = "agent-alice"
+	meta := llmEventMeta{
+		Source: "codex", SessionID: session, AgentID: foreignAgent,
+		RootAgentID: foreignAgent, UserID: "1001",
+		AgentIdentityID: "agt-0000000000000a11",
+	}
+	key := hookSessionStateKey(meta)
+	api := &APIServer{
+		hookSessionStates:     map[string]hookSessionState{key: {meta: meta}},
+		hookSessionStateOrder: []string{key},
+	}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.codex.user_prompt.v1.log.model.request")
+	if !ok {
+		t.Fatal("Codex user-prompt match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	now := time.Now().UTC()
+	leaf.logRecord.TimeUnixNano = uint64(now.UnixNano())
+	leaf.logRecord.Attributes = append(leaf.logRecord.Attributes,
+		otlpClassifierStringAttribute("conversation.id", session))
+	message := &collectorlogspb.ExportLogsServiceRequest{ResourceLogs: []*logspb.ResourceLogs{{
+		Resource:  &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{leaf.logRecord}}},
+	}}}
+	ctx := withServiceAccountGateway(t.Context())
+	accounting, err := api.importDecodedOTLPRequestV8(ctx, message, otelSignalLogs, source, now)
+	if err != nil || !accounting.valid() || accounting.imported != 1 {
+		t.Fatalf("Codex import accounting=%+v err=%v", accounting, err)
+	}
+	record := inboundStoredProjectedRecord(t, fixture.path, source, "model.request")
+	body, ok := record["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("body=%#v", record["body"])
+	}
+	if body["gen_ai.agent.id"] == foreignAgent || body["defenseclaw.agent.root.id"] == foreignAgent {
+		t.Fatalf("foreign hook identity joined native record: agent=%v root=%v",
+			body["gen_ai.agent.id"], body["defenseclaw.agent.root.id"])
+	}
+}
+
 func TestOTLPInboundConnectorPromptPreservesDeclaredLifecycleCorrelation(t *testing.T) {
 	previousInstance := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("otlp-inbound-log-lifecycle-test")
