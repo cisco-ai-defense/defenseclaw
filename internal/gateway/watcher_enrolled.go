@@ -65,6 +65,22 @@ type enrolledWatchSet struct {
 	live *enrolledMCPServers
 	// owners names the account of each enrolled home (GAP-0575).
 	owners []watcher.AssetOwner
+	// denied holds, lowercased, the watched folders the gateway could not
+	// stat. They stay watched, but are in dirsKey, so the poll restarts the
+	// watcher once the enumerator grants access, and readable leaves them
+	// out, so that watcher admits what they hold (GAP-0913).
+	denied map[string]bool
+}
+
+// readable returns dirs without the folders the gateway could not stat.
+func (e enrolledWatchSet) readable(dirs []string) []string {
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		if !e.denied[strings.ToLower(dir)] {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // enrolledMCPServers is the MCP server list a running watcher reads.
@@ -95,6 +111,9 @@ func (e enrolledWatchSet) dirsKey() string {
 	}
 	for _, dir := range e.pluginDirs {
 		parts = append(parts, "p:"+strings.ToLower(dir))
+	}
+	for dir := range e.denied {
+		parts = append(parts, "d:"+dir)
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "\n")
@@ -142,7 +161,7 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 }
 
 func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry, wcfg config.GatewayWatcherConfig, serviceHome string, stat func(string) (os.FileInfo, error)) enrolledWatchSet {
-	set := enrolledWatchSet{roots: map[string]string{}, live: &enrolledMCPServers{}}
+	set := enrolledWatchSet{roots: map[string]string{}, live: &enrolledMCPServers{}, denied: map[string]bool{}}
 	defer func() { set.live.set(set.mcp) }()
 	if cfg == nil || reg == nil || strings.TrimSpace(serviceHome) == "" {
 		return set
@@ -207,6 +226,7 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 				}
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[watcher] cannot stat enrolled directory %s: %v\n", userDir, err)
+					set.denied[key] = true
 				}
 				seen[key] = true
 				*out = append(*out, userDir)

@@ -123,6 +123,11 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	if !has(rechecked.skillDirs, aliceSkills) {
 		t.Fatalf("stat error dropped enrolled watcher root: %v", rechecked.skillDirs)
 	}
+	// GAP-0913: once the enumerator grants access the set changes, so the
+	// watcher restarts and admits the folder as new.
+	if rechecked.dirsKey() == set.dirsKey() || has(rechecked.readable(rechecked.skillDirs), aliceSkills) {
+		t.Fatal("a folder that turned readable left the watch set unchanged")
+	}
 	// Amp also lists ~/.claude/skills; Claude Code owns its layout.
 	if set.roots[aliceSkills] != "claudecode" || set.roots[bobSkills] != "codex" {
 		t.Fatalf("root connectors = %v", set.roots)
