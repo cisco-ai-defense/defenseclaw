@@ -1431,9 +1431,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		l.revokeDeletedAccounts(ctx)
 	}
 	if env.GOOS == "linux" {
-		// The module labels the hook socket; restorecon then relabels the
-		// socket already in place (GAP-0772).
-		l.ensureSELinuxModule(ctx)
+		// The module labels the hook socket and the gateway binary;
+		// restorecon then relabels the files already in place (GAP-0772).
+		// A listening socket keeps the label systemd created it with, the
+		// domain the gateway ran in then: the hook socket is replaced so
+		// confined users reach the gateway's new domain (GAP-1143).
+		if l.ensureSELinuxModule(ctx) {
+			restartSockets[unitHookSocket] = true
+		}
 		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir), env.P(env.Layout.HookSocketDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
 			r.AddWarning("selinux_relabel", err.Error())
 		}

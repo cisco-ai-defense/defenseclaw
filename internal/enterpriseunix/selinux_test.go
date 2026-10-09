@@ -13,8 +13,12 @@
 package enterpriseunix
 
 import (
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	selinuxpolicy "github.com/defenseclaw/defenseclaw/packaging/selinux"
 )
 
 // GAP-0772: SELinux-confined users (user_u, staff_u) could not stat the
@@ -41,5 +45,30 @@ func TestSELinuxHostLoadsTheHookSocketModule(t *testing.T) {
 	// The fake semodule stores nothing, so the policy store lacks the module.
 	if r := h.run(Options{Action: ActionStatus}); !hasWarning(r, codeSELinuxModuleMissing) {
 		t.Fatalf("status must name the missing SELinux module: %+v", r.Warnings)
+	}
+
+	// GAP-1143: the module let confined users connect to every
+	// unconfined_service_t socket. It now labels the gateway binary, from
+	// which systemd starts the gateway, and gives its listening sockets, a
+	// domain of its own; user domains may connect only to that domain.
+	module := string(selinuxpolicy.Module())
+	gateway := filepath.Join(h.env.Layout.BinDir, binGateway)
+	if !strings.Contains(module, `(filecon "`+gateway+`" file (system_u object_r `+selinuxpolicy.GatewayExecType+` `) ||
+		!strings.Contains(module, "(typetransition init_t "+selinuxpolicy.GatewayExecType+" process defenseclaw_gateway_t)") {
+		t.Fatalf("the module must start %s in the gateway domain:\n%s", gateway, module)
+	}
+	for _, grant := range regexp.MustCompile(`\(allow userdomain (\S+) \(unix_stream_socket \(connectto\)\)\)`).FindAllStringSubmatch(module, -1) {
+		if grant[1] != "defenseclaw_gateway_t" {
+			t.Fatalf("user domains may connect only to the gateway domain, not %s", grant[1])
+		}
+	}
+	// An upgrade that loads a changed module replaces the hook socket: its
+	// label is the domain the gateway ran in when systemd created it.
+	writeHostFile(t, h, "/var/lib/selinux/targeted/active/modules/400/defenseclaw/cil", "x")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, selinuxModuleStamp), strings.Repeat("0", 64)+"\n")
+	before := len(h.services.calls)
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")}))
+	if calls := socketCalls(h, before); strings.Join(calls, ",") != "restart "+unitHookSocket {
+		t.Fatalf("loading a changed module must replace the hook socket, and only it: %v", calls)
 	}
 }

@@ -10,7 +10,7 @@
 
 // Package selinuxpolicy embeds the DefenseClaw SELinux policy module that
 // the Linux lifecycle loads on SELinux hosts, so SELinux-confined users can
-// reach the hook socket.
+// reach the hook socket and no other service.
 package selinuxpolicy
 
 import _ "embed"
@@ -20,6 +20,10 @@ const ModuleName = "defenseclaw"
 
 // HookSocketType is the SELinux type the module gives the hook socket.
 const HookSocketType = "defenseclaw_hook_sock_t"
+
+// GatewayExecType is the SELinux type the module gives the gateway binary,
+// from which systemd starts the gateway in its own domain.
+const GatewayExecType = "defenseclaw_gateway_exec_t"
 
 //go:embed defenseclaw.cil
 var module []byte

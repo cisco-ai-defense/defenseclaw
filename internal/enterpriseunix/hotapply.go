@@ -86,6 +86,11 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	if err != nil || len(configwrite.ManagedRestartRequired(changed)) > 0 {
 		return false
 	}
+	// Loading the SELinux module replaces the hook socket, which a gateway
+	// that keeps running would no longer listen on.
+	if env.selinuxModuleStale() {
+		return false
+	}
 	gateway, ok := gatewayUnitOf(env.Services.Units())
 	if !ok || !env.Services.Active(ctx, gateway) {
 		return false

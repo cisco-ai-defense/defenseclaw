@@ -2,19 +2,25 @@
 ; SPDX-License-Identifier: Apache-2.0
 ;
 ; defenseclaw: lets SELinux-confined users (user_u, staff_u and the other
-; confined logins) reach the DefenseClaw hook socket. The Linux lifecycle
-; loads it with `semodule -i` on hosts where SELinux is enabled and removes
-; it on uninstall.
+; confined logins) reach the DefenseClaw hook socket, and nothing else. The
+; Linux lifecycle loads it with `semodule -i` on hosts where SELinux is
+; enabled, relabels the install root and the hook socket, and removes it on
+; uninstall.
 ;
 ; Without it a confined user's hook cannot even stat
 ; /run/defenseclaw-hook/hook.sock (var_run_t, denied and hidden by a
 ; dontaudit rule), so every hook that user runs is refused.
 ;
-; The socket gets its own type, which every user domain may stat and write;
-; the services run as unconfined_service_t, which a user domain must be
-; allowed to connect to. The gateway authorizes each caller by uid after it
-; connects.
+; connectto is checked against the label of the listening socket, which
+; systemd (socket activation) gives the domain the service will run in. The
+; gateway used to run as unconfined_service_t, so the grant reached every
+; unconfined service on the host. The gateway binary now has its own type,
+; systemd starts it in its own domain, defenseclaw_gateway_t, with exactly
+; the attributes unconfined_service_t has (no privilege changes), and user
+; domains may connect only to sockets of that domain. The gateway still
+; authorizes each caller by uid after it connects.
 
+; The hook socket file: every user domain may stat and write it.
 (type defenseclaw_hook_sock_t)
 (roletype object_r defenseclaw_hook_sock_t)
 (typeattributeset file_type (defenseclaw_hook_sock_t))
@@ -24,5 +30,93 @@
 ; /run is labelled through its /var/run equivalent.
 (filecon "/var/run/defenseclaw-hook/hook\.sock" socket (system_u object_r defenseclaw_hook_sock_t ((s0) (s0))))
 
+; The gateway binary: an ordinary program file, like the bin_t it had, that
+; also enters the gateway domain.
+(type defenseclaw_gateway_exec_t)
+(roletype object_r defenseclaw_gateway_exec_t)
+(typeattributeset file_type (defenseclaw_gateway_exec_t))
+(typeattributeset exec_type (defenseclaw_gateway_exec_t))
+(typeattributeset entry_type (defenseclaw_gateway_exec_t))
+(typeattributeset base_file_type (defenseclaw_gateway_exec_t))
+(typeattributeset base_ro_file_type (defenseclaw_gateway_exec_t))
+(typeattributeset non_auth_file_type (defenseclaw_gateway_exec_t))
+(typeattributeset non_security_file_type (defenseclaw_gateway_exec_t))
+
+(filecon "/opt/defenseclaw/bin/defenseclaw-gateway" file (system_u object_r defenseclaw_gateway_exec_t ((s0) (s0))))
+
+; The gateway domain: the attributes of unconfined_service_t, so the
+; services that run the binary keep the privileges they had.
+(type defenseclaw_gateway_t)
+(roletype system_r defenseclaw_gateway_t)
+(typeattributeset domain (defenseclaw_gateway_t))
+(typeattributeset unconfined_domain_type (defenseclaw_gateway_t))
+(typeattributeset can_change_object_identity (defenseclaw_gateway_t))
+(typeattributeset can_load_kernmodule (defenseclaw_gateway_t))
+(typeattributeset can_load_policy (defenseclaw_gateway_t))
+(typeattributeset can_setbool (defenseclaw_gateway_t))
+(typeattributeset can_setenforce (defenseclaw_gateway_t))
+(typeattributeset can_setsecparam (defenseclaw_gateway_t))
+(typeattributeset corenet_unconfined_type (defenseclaw_gateway_t))
+(typeattributeset corenet_unlabeled_type (defenseclaw_gateway_t))
+(typeattributeset devices_unconfined_type (defenseclaw_gateway_t))
+(typeattributeset files_unconfined_type (defenseclaw_gateway_t))
+(typeattributeset filesystem_unconfined_type (defenseclaw_gateway_t))
+(typeattributeset kern_unconfined (defenseclaw_gateway_t))
+(typeattributeset named_filetrans_domain (defenseclaw_gateway_t))
+(typeattributeset process_uncond_exempt (defenseclaw_gateway_t))
+(typeattributeset selinux_unconfined_type (defenseclaw_gateway_t))
+(typeattributeset storage_unconfined_type (defenseclaw_gateway_t))
+(typeattributeset can_read_shadow_passwords (defenseclaw_gateway_t))
+(typeattributeset can_write_shadow_passwords (defenseclaw_gateway_t))
+(typeattributeset can_relabelto_shadow_passwords (defenseclaw_gateway_t))
+(typeattributeset can_relabelto_binary_policy (defenseclaw_gateway_t))
+(typeattributeset userdom_filetrans_type (defenseclaw_gateway_t))
+; Attributes of policy modules an administrator can disable.
+(optional defenseclaw_gateway_dbus (typeattributeset dbusd_unconfined (defenseclaw_gateway_t)))
+(optional defenseclaw_gateway_sepgsql (typeattributeset sepgsql_unconfined_type (defenseclaw_gateway_t)))
+(optional defenseclaw_gateway_xserver
+	(typeattributeset x_domain (defenseclaw_gateway_t))
+	(typeattributeset xserver_unconfined_type (defenseclaw_gateway_t)))
+
+; The rules the policy writes for unconfined_service_t by name rather than
+; through one of those attributes.
+(allow defenseclaw_gateway_t self (capability (audit_control audit_write chown dac_override dac_read_search fowner fsetid ipc_lock ipc_owner kill lease linux_immutable mknod net_admin net_bind_service net_broadcast net_raw setfcap setgid setpcap setuid sys_admin sys_boot sys_chroot sys_nice sys_pacct sys_ptrace sys_rawio sys_resource sys_time sys_tty_config)))
+(allow defenseclaw_gateway_t self (capability2 (audit_read block_suspend epolwakeup syslog wake_alarm)))
+; Permissions older policies (RHEL 8) may not define; the block is skipped there.
+(optional defenseclaw_gateway_newer_caps (allow defenseclaw_gateway_t self (capability2 (bpf checkpoint_restore perfmon))))
+(allow defenseclaw_gateway_t self (dir (add_name remove_name write)))
+(allow defenseclaw_gateway_t self (fifo_file (create link relabelfrom relabelto rename setattr unlink)))
+(allow defenseclaw_gateway_t self (process (dyntransition transition)))
+(allow defenseclaw_gateway_t self (association (polmatch sendto setcontext)))
+(allow defenseclaw_gateway_t self (passwd (chfn chsh crontab passwd rootok)))
+(allow defenseclaw_gateway_t self (nscd (admin getgrp gethost getnetgrp getpwd getserv getstat shmemgrp shmemhost shmemnetgrp shmempwd shmemserv)))
+(allow defenseclaw_gateway_t boolean_type (dir (getattr ioctl lock open read search)))
+(allow defenseclaw_gateway_t boolean_type (file (append write)))
+(optional defenseclaw_gateway_booleans
+	(booleanif mmap_low_allowed (true (allow defenseclaw_gateway_t self (memprotect (mmap_zero)))))
+	(booleanif selinuxuser_execheap (true (allow defenseclaw_gateway_t self (process (execheap)))))
+	(booleanif selinuxuser_execstack (true (allow defenseclaw_gateway_t self (process (execstack)))))
+	(booleanif deny_execmem (false (allow defenseclaw_gateway_t self (process (execmem))))))
+(optional defenseclaw_gateway_nscd (allow defenseclaw_gateway_t nscd_t (nscd (admin getgrp gethost getnetgrp getpwd getserv getstat shmemgrp shmemhost shmemnetgrp shmempwd shmemserv))))
+(optional defenseclaw_gateway_ipsec (allow defenseclaw_gateway_t ipsec_spd_t (association (setcontext))))
+(optional defenseclaw_gateway_dbus_bus
+	(allow defenseclaw_gateway_t system_dbusd_t (dbus (acquire_svc)))
+	(allow system_dbusd_t defenseclaw_gateway_t (unix_stream_socket (read write))))
+
+; systemd starts the gateway from its binary in the gateway domain, as it
+; starts a bin_t program in unconfined_service_t, NoNewPrivileges included.
+(typetransition init_t defenseclaw_gateway_exec_t process defenseclaw_gateway_t)
+(allow init_t defenseclaw_gateway_t (process (transition siginh)))
+(allow init_t defenseclaw_gateway_t (process2 (nnp_transition nosuid_transition)))
+(allow defenseclaw_gateway_t defenseclaw_gateway_exec_t (file (entrypoint)))
+(allow init_t defenseclaw_gateway_t (fifo_file (append getattr ioctl lock open write)))
+; Socket activation: systemd creates the gateway's listening sockets with the
+; gateway's label.
+(allow init_t defenseclaw_gateway_t (unix_stream_socket (accept append bind connect create getattr getopt ioctl listen lock read setattr setopt shutdown write)))
+(allow init_t defenseclaw_gateway_t (unix_dgram_socket (append bind connect create getattr getopt ioctl lock read setattr setopt shutdown write)))
+(allow init_t defenseclaw_gateway_t (tcp_socket (accept append bind connect create getattr getopt ioctl listen lock read setattr setopt shutdown write)))
+(allow init_t defenseclaw_gateway_t (udp_socket (append bind connect create getattr getopt ioctl lock read setattr setopt shutdown write)))
+
+; Confined users reach the hook socket, and only the gateway's sockets.
 (allow userdomain defenseclaw_hook_sock_t (sock_file (getattr write)))
-(allow userdomain unconfined_service_t (unix_stream_socket (connectto)))
+(allow userdomain defenseclaw_gateway_t (unix_stream_socket (connectto)))
