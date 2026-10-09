@@ -49,7 +49,6 @@ func TestSemanticExecutionPipelineExpressionsCompile(t *testing.T) {
 
 func TestDualUseExecutionAndSecretReadOwnersAreDetectionOnly(t *testing.T) {
 	for _, ruleID := range []string{
-		"CMD-PIPE-CURL",
 		"CMD-PIPE-WGET",
 		"CMD-PIPE-BASE64",
 		"secrets.cloud_secret_manager_read",
@@ -60,6 +59,12 @@ func TestDualUseExecutionAndSecretReadOwnersAreDetectionOnly(t *testing.T) {
 		if contract := exactFallbackContracts[ruleID]; !contract.detectionOnly {
 			t.Fatalf("%s fallback contract must remain detection-only", ruleID)
 		}
+	}
+	if owner := semanticOwners["CMD-PIPE-CURL"]; !owner.alertOnly || owner.detectionOnly {
+		t.Fatal("CMD-PIPE-CURL semantic owner must alert without blocking")
+	}
+	if contract := exactFallbackContracts["CMD-PIPE-CURL"]; !contract.alertOnly || contract.detectionOnly {
+		t.Fatal("CMD-PIPE-CURL fallback contract must alert without blocking")
 	}
 }
 
