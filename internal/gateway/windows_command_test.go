@@ -14,7 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -188,10 +188,6 @@ func TestWindowsCommandRulesAreInvariantAcrossRulePackCategories(t *testing.T) {
 	assertWindowsRule(t, findings, "CMD-WIN-RMDIR-SQ")
 }
 
-// windowsDriveHome is a home the PowerShell and cmd home rewrite accepts
-// (actionfacts.trustedWindowsHomeLiteral).
-var windowsDriveHome = regexp.MustCompile(`^[A-Za-z]:/[A-Za-z0-9._+/-]*$`)
-
 func TestWindowsCommandHookParityObserveAndAction(t *testing.T) {
 	t.Parallel()
 	commands := []struct {
@@ -225,11 +221,11 @@ func TestWindowsCommandHookParityObserveAndAction(t *testing.T) {
 		{`type %WINDIR%\System32\config\SYSTEM`, false},
 	}
 	// A proven local read of a credential path alerts without blocking
-	// (GAP-1516); reads through an environment variable stay unproven, except
-	// $env:USERPROFILE, which names the trusted home when the gateway's own
-	// home is a Windows drive path, as on a Windows host (GAP-0912).
+	// (GAP-1516); reads through an environment variable stay unproven. On a
+	// Windows host $env:USERPROFILE is rewritten to the caller's home (GAP-0912),
+	// so the kube config read is proven there and alerts.
 	credentialRead := map[int]bool{16: true, 18: true, 22: true}
-	if windowsDriveHome.MatchString(filepath.ToSlash(trustedSameHostHome())) {
+	if runtime.GOOS == "windows" {
 		credentialRead[17] = true
 	}
 	for _, mode := range []string{"observe", "action"} {

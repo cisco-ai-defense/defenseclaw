@@ -130,7 +130,11 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		sid, inDomain string
 	)
 	if !isLocal {
-		if data, readErr := readSmallFile(nsswitchPath, 1<<20); readErr == nil {
+		data, readErr := readSmallFile(nsswitchPath, 1<<20)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: read NSS configuration: %w", readErr)
+		}
+		if readErr == nil {
 			for _, service := range ParseNSSwitchServices(string(data), "passwd") {
 				known, ok := directoryServices[service]
 				if !ok {
@@ -195,7 +199,7 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 	if includeGroups {
 		ids, qualified, err := r.accountGroupIDs(account, inDomain)
 		if err == nil && sssd != nil && !qualified {
-			ids, err = sssdGroupsOfDomain(sssd, ids, account.GID, sidDomain(sid))
+			ids, err = r.sssdGroupsOfDomain(sssd, ids, account, sidDomain(sid))
 		}
 		if err != nil {
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
@@ -463,37 +467,92 @@ func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, 
 }
 
 // sssdGroupsOfDomain limits groups from an ambiguous, unqualified
-// initgroups lookup to the SSSD account domain, the domain of its SID
-// (domainSID, "" for an account without one): groups SSSD holds a SID
-// for in that domain, and, for an account without a SID, the groups SSSD
-// holds no SID for. initgroups looks
-// the account up by name, and two SSSD domains may hold the same short name,
-// so it may list the other account's groups (GAP-0563). A successful
-// domain-qualified lookup is authoritative and skips this filter, allowing
-// trusted-domain groups of the confirmed account. A group of the
-// host's /etc/group counts for every account, and the primary group, which
-// comes with the uid's own entry, always counts. A group SSSD could not
-// answer for fails the lookup.
-func sssdGroupsOfDomain(sssd *sssdNSS, ids []int, primary int, domainSID string) ([]int, error) {
+// initgroups lookup to the SSSD account domain, the domain of its SID.
+// A successful domain-qualified lookup is authoritative and skips this
+// filter. The primary group always counts. An SSSD group counts when its SID
+// belongs to the account's domain, or when neither account nor group has a
+// SID. A SID-less group of a SID-bearing account counts only if /etc/group
+// holds it or another configured NSS initgroups service confirms that
+// account's membership. This keeps LDAP-supplied groups without accepting
+// a group of another SSSD account with the same short name.
+func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Account, domainSID string) ([]int, error) {
 	local, err := localGroupIDs()
 	if err != nil {
 		return nil, err
 	}
-	kept := make([]int, 0, len(ids))
+	sids := make(map[int]string, len(ids))
+	needOther := false
 	for _, id := range ids {
-		if id == primary {
-			kept = append(kept, id)
+		if id == account.GID {
 			continue
 		}
 		sid, err := sssd.sidByGID(id)
 		if err != nil {
 			return nil, fmt.Errorf("SSSD SID of gid %d: %w", id, err)
 		}
-		if (sid != "" && domainSID != "" && sidDomain(sid) == domainSID) || (sid == "" && (domainSID == "" || local[id])) {
+		sids[id] = sid
+		if sid == "" && domainSID != "" && !local[id] {
+			needOther = true
+		}
+	}
+	var other map[int]bool
+	if needOther {
+		other, err = r.otherNSSGroupMemberships(account.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	kept := make([]int, 0, len(ids))
+	for _, id := range ids {
+		sid := sids[id]
+		if id == account.GID ||
+			(sid != "" && domainSID != "" && sidDomain(sid) == domainSID) ||
+			(sid == "" && (domainSID == "" || local[id] || other[id])) {
 			kept = append(kept, id)
 		}
 	}
 	return kept, nil
+}
+
+// otherNSSGroupMemberships asks each configured non-SSSD initgroups service
+// for this account's groups. Looking up a group by gid alone would prove only
+// that the group exists, not that the account belongs to it.
+func (r *NSSResolver) otherNSSGroupMemberships(name string) (map[int]bool, error) {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil // glibc defaults to files
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unixidentity: read NSS configuration: %w", err)
+	}
+	services := ParseNSSwitchServices(string(data), "initgroups")
+	if len(services) == 0 {
+		services = ParseNSSwitchServices(string(data), "group")
+	}
+	groups := map[int]bool{}
+	for _, service := range services {
+		if service == "sss" || service == "files" || !validServiceName(service) {
+			continue
+		}
+		result, err := r.runner(r.context(), r.path, []string{"-s", service, "initgroups", name})
+		if err != nil {
+			return nil, fmt.Errorf("unixidentity: %s initgroups of %s: %w", service, name, err)
+		}
+		if result.exitCode == getentExitNotFound {
+			continue
+		}
+		if result.exitCode != getentExitOK {
+			return nil, fmt.Errorf("unixidentity: getent -s %s initgroups %s exited %d", service, name, result.exitCode)
+		}
+		ids, err := ParseInitgroups(string(result.stdout), name)
+		if err != nil {
+			return nil, fmt.Errorf("unixidentity: %s initgroups of %s: %w", service, name, err)
+		}
+		for _, id := range ids {
+			groups[id] = true
+		}
+	}
+	return groups, nil
 }
 
 // localGroupIDs reads the gids /etc/group holds. A missing file holds none.
