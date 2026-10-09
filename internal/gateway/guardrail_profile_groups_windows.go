@@ -49,6 +49,25 @@ var profileGroupExists = func(_ context.Context, name string) (bool, error) {
 		kind == windows.SidTypeWellKnownGroup, nil
 }
 
+func init() { profileGroupSIDLookup = lsaProfileGroupSID }
+
+// lsaProfileGroupSID resolves an assignment group name (DOMAIN\name or a bare
+// name) to the SID of that group (LookupAccountName). A name the LSA maps to
+// no group, or to an account that is not a group, is errProfileGroupUnknown.
+func lsaProfileGroupSID(name string) (string, error) {
+	sid, _, kind, err := windows.LookupSID("", name)
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		return "", errProfileGroupUnknown
+	}
+	if err != nil {
+		return "", err
+	}
+	if kind != windows.SidTypeGroup && kind != windows.SidTypeAlias && kind != windows.SidTypeWellKnownGroup {
+		return "", errProfileGroupUnknown
+	}
+	return sid.String(), nil
+}
+
 // profileGroupQualifiedName has nothing to offer on Windows, where an
 // assignment names a group as DOMAIN\\name or by its SID.
 var profileGroupQualifiedName = func(context.Context, string) string { return "" }

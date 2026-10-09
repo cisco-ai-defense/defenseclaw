@@ -50,7 +50,7 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 		return Facts{}, false
 	}
 	home := strings.TrimRight(original.ActiveHome, "/")
-	if !strings.HasPrefix(home, "/") || strings.ContainsAny(home, "'\x00\r\n") {
+	if !posixShellHome(home) || strings.ContainsAny(home, "'\x00\r\n") {
 		return Facts{}, false
 	}
 	source := capture.source
@@ -75,6 +75,20 @@ func HomeResolvedTwin(input Input) (twin Facts, ok bool) {
 		return Facts{}, false
 	}
 	return twin, true
+}
+
+// posixShellHome reports whether home, a normalized ActiveHome without a
+// trailing slash, can be written for $HOME in a POSIX command: an absolute
+// POSIX path, or a Windows drive path such as C:/Users/alice. The agents that
+// run POSIX-shaped commands on Windows (Claude Code's Git Bash, Codex's
+// PowerShell) read that spelling as the same directory, and without it a
+// Windows home made every ~/ and $HOME/ write partial with no finding
+// (GAP-0912).
+func posixShellHome(home string) bool {
+	if strings.HasPrefix(home, "/") {
+		return true
+	}
+	return len(home) > 3 && isASCIILetter(home[0]) && home[1] == ':' && home[2] == '/'
 }
 
 // homeResolvedSource returns source with every home-anchored literal word

@@ -479,6 +479,22 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return readMCPFromClaudeSettings(path)
 }
 
+// ReadMCPFromJSONCPaths reads the MCP servers found at each key chain of
+// paths in a JSON or JSONC file (union). AI discovery uses it for the agent
+// files whose servers are not a top-level mcpServers map: Amp's
+// amp.mcpServers and OpenClaw's and ZeptoClaw's mcp.servers (GAP-1062).
+func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(jsonc.Strip(data), &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, paths...)
+}
+
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
 // Codex `~/.codex/config.toml` reader for callers that need to
 // enumerate mcp_servers entries out of a TOML file.
@@ -1818,6 +1834,19 @@ func ReadMCPServersAMPUnderHome(home string) ([]MCPServerEntry, error) {
 		ampUserSettingsPaths(home, "", true),
 		ampUserSettingsPaths(home, "", false),
 	)
+}
+
+// ReadMCPFromAmpSettings reads the MCP servers of one Amp settings file
+// (settings.json, settings.jsonc or managed-settings.json). Amp keeps them
+// under the flat key amp.mcpServers, where `amp mcp add` writes them; AI
+// Discovery read these files with the Claude Code reader, which looks for a
+// top-level mcpServers, and so listed none of them (GAP-1062).
+func ReadMCPFromAmpSettings(path string) ([]MCPServerEntry, error) {
+	doc, err := readJSONObjectJSONC(path)
+	if err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, []string{"amp.mcpServers"})
 }
 
 func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSettingsPaths []string) ([]MCPServerEntry, error) {

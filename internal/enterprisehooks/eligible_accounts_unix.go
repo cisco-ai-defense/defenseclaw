@@ -209,6 +209,31 @@ func loadUnixEligibleAccountsFile(path string) (unixEligibleAccountsFile, error)
 // unixCreatedDirsLimit bounds the folders one account's record entry lists.
 const unixCreatedDirsLimit = 64
 
+// ManifestEnrolledAccounts keeps the accounts a target of manifest enrolls:
+// the target of the account uid or, for a target that names no uid, of its
+// user name. Under manifest enrollment the enumerator is idle, so the
+// eligible-accounts record is what its last auto pass published: an account
+// the administrator has since left out of the manifest stayed eligible, and
+// the guardian kept scanning its home and publishing its identity record
+// (GAP-0761).
+func ManifestEnrolledAccounts(accounts []UnixEligibleAccount, manifest Manifest) []UnixEligibleAccount {
+	uids, users := map[int]bool{}, map[string]bool{}
+	for _, target := range manifest.Targets {
+		if target.UID != nil {
+			uids[*target.UID] = true
+		} else if user := strings.TrimSpace(target.User); user != "" {
+			users[user] = true
+		}
+	}
+	out := make([]UnixEligibleAccount, 0, len(accounts))
+	for _, account := range accounts {
+		if uids[account.UID] || users[strings.TrimSpace(account.User)] {
+			out = append(out, account)
+		}
+	}
+	return out
+}
+
 // UnixCreatedDirsBelow keeps the absolute folders strictly below home, cleaned,
 // without duplicates.
 func UnixCreatedDirsBelow(home string, dirs []string) []string {

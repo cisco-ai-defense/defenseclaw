@@ -101,6 +101,9 @@ type discoveryHomeOwner struct {
 	Home     string
 	UserID   string // the account's SID
 	UserName string
+	// Domain is the account's domain (the computer's name for a local
+	// account), for enterprise.enrollment entries written DOMAIN\name.
+	Domain string
 }
 
 // homeOwnerForPath returns the owner of the profile root that holds path.

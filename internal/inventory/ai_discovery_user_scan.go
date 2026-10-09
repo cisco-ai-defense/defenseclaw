@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Per-user scans (standalone enterprise profile, Linux and macOS).
@@ -75,6 +76,11 @@ type UserScanOptions struct {
 	MaxFileBytes            int64    `json:"max_file_bytes,omitempty"`
 	StoreRawLocalPaths      bool     `json:"store_raw_local_paths,omitempty"`
 	IDEInventory            string   `json:"ide_inventory,omitempty"`
+	// IncludeUserEmail is ai_discovery.include_user_email: the scan reads
+	// the user's own Claude Code and Codex account address. The gateway's
+	// service account cannot read a home on Linux or macOS, so the per-user
+	// scan is the only reader that can (GAP-0961).
+	IncludeUserEmail bool `json:"include_user_email,omitempty"`
 }
 
 // UserScanOptionsFromConfig keeps the privacy settings of ai_discovery and
@@ -91,6 +97,7 @@ func UserScanOptionsFromConfig(cfg *config.Config) UserScanOptions {
 		MaxFileBytes:            int64(ad.MaxFileBytes),
 		StoreRawLocalPaths:      ad.StoreRawLocalPaths,
 		IDEInventory:            ad.EffectiveIDEInventory(),
+		IncludeUserEmail:        ad.IncludeUserEmail,
 	}
 }
 
@@ -226,10 +233,11 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 			// leave this process only when the administrator keeps them.
 			StoreRawLocalPaths: true,
 			// Never written: this service has no state store.
-			DataDir:      filepath.Join(home, ".defenseclaw"),
-			HomeDir:      home,
-			HomeDirs:     []string{home},
-			IDEInventory: opts.IDEInventory,
+			DataDir:          filepath.Join(home, ".defenseclaw"),
+			HomeDir:          home,
+			HomeDirs:         []string{home},
+			IDEInventory:     opts.IDEInventory,
+			IncludeUserEmail: opts.IncludeUserEmail,
 		}),
 		catalog:       catalog,
 		userHomeScan:  true,
@@ -271,6 +279,9 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 		stats.Errors++
 		stats.DetectorErrors["user_scan"] = "signal limit reached"
 	}
+	// Every signal kept here lies in this home, which belongs to the
+	// account the scan runs as.
+	svc.stampConnectorEmails(out, func(AISignal) string { return home })
 	if ctx.Err() != nil {
 		stats.Errors++
 		stats.DetectorErrors["user_scan"] = "scan time limit reached"
@@ -289,6 +300,7 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 		Errors:            stats.Errors,
 		DetectorErrors:    stats.DetectorErrors,
 		DetectorDurations: stats.DetectorDurations,
+		DetectorNotes:     svc.emailNotes,
 	}
 	if stats.Errors > 0 {
 		summary.Result = "partial"
@@ -355,8 +367,9 @@ func evidenceWithoutRawPaths(evidence []AIEvidence) []AIEvidence {
 
 // SanitizeUserScanReport validates a report the scanned user can influence
 // and prepares it for the spool: the account it belongs to is the spool
-// record's, never the report's.
-func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, keepRawPaths bool) error {
+// record's, never the report's. keepEmail is ai_discovery.include_user_email:
+// without it no address reaches the spool.
+func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, keepRawPaths, keepEmail bool) error {
 	if report == nil {
 		return errors.New("missing report")
 	}
@@ -369,6 +382,9 @@ func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, ke
 		sig := &report.Signals[i]
 		sig.Source = AISourceUserScan
 		sig.UserID, sig.UserName = "", ""
+		if !keepEmail {
+			sig.UserEmail = ""
+		}
 		if !keepRawPaths {
 			sig.Evidence = evidenceWithoutRawPaths(sig.Evidence)
 		}
@@ -397,6 +413,14 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 			return errors.New("detector errors must be short printable text")
 		}
 	}
+	if len(report.Summary.DetectorNotes) > maxUserScanField {
+		return errors.New("too many detector notes")
+	}
+	for name, detail := range report.Summary.DetectorNotes {
+		if !userScanText(name, maxUserScanField) || !userScanText(detail, 1024) {
+			return errors.New("detector notes must be short printable text")
+		}
+	}
 	known := make(map[string]bool, len(catalog))
 	for _, sig := range catalog {
 		known[sig.ID] = true
@@ -407,6 +431,9 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 		}
 		if !isSHA256Hash(sig.Fingerprint) {
 			return errors.New("signal fingerprint must be a sha256 digest")
+		}
+		if sig.UserEmail != "" && (!useridentity.ValidEmail(sig.UserEmail) || emailConnector(sig.SupportedConnector) == "") {
+			return errors.New("a signal address must be a valid address of a Claude Code or Codex signal")
 		}
 		fields := []string{sig.Name, sig.Vendor, sig.Product, sig.Detector, sig.Version, sig.SupportedConnector, sig.State, sig.CoverageReason}
 		if sig.Runtime != nil {
@@ -507,11 +534,16 @@ func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal,
 		if record.Report.Summary.Result != "ok" {
 			errs["user_scan:"+record.User] = "partial scan: " + userScanDetectorNames(record.Report.Summary.DetectorErrors)
 		}
+		// The guardian names the account as NSS does (dcad-alice@dclab.test
+		// on an SSSD host with fully qualified names). Records name it bare,
+		// as the hook, model and tool records of the same uid do; the
+		// qualified form is the principal (GAP-0447).
+		user := useridentity.BareAccountName(record.User)
 		for _, sig := range record.Report.Signals {
-			out = append(out, s.attributeUserScanSignal(sig, uid, record.User))
+			out = append(out, s.attributeUserScanSignal(sig, uid, user))
 		}
 		if ide != nil && record.Report.IDEInventory != nil {
-			userIDE := attributeUserScanIDE(record.Report.IDEInventory, userScanNamespace(uid), uid, record.User)
+			userIDE := attributeUserScanIDE(record.Report.IDEInventory, userScanNamespace(uid), uid, user)
 			userIDE.Scope = ide.Scope
 			userIDE.applyScope()
 			ide = mergeIDEInventory(ide, userIDE)
@@ -609,6 +641,10 @@ func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, 
 	sig.SignalID = stableSignalID(sig.Fingerprint)
 	sig.Source = AISourceUserScan
 	sig.UserID, sig.UserName = uid, user
+	if !s.opts.IncludeUserEmail || s.opts.SecureClient {
+		// A record written before the option was turned off.
+		sig.UserEmail = ""
+	}
 	sig.ModelAPISourceHash = ""
 	if sig.Runtime != nil {
 		runtimeInfo := *sig.Runtime

@@ -13,11 +13,13 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -37,10 +39,13 @@ const (
 )
 
 // WriteWindowsIdentitySpool replaces dir's records with one per user in the
-// group cache. setOwnership applies the guardian authorization protection
-// (SYSTEM and Administrators, read for the gateway service) to the directory
-// and to each new file before it is renamed into place.
-func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, setOwnership func(string) error, logf func(string, ...any)) error {
+// group cache. emails holds each account's connector addresses by upper-case
+// SID (WindowsConnectorEmails), nil when ai_discovery.include_user_email is
+// off. setOwnership applies the guardian authorization protection (SYSTEM
+// and Administrators, read for the gateway service) to the directory and to
+// each new file before it is renamed into place.
+func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, emails map[string]map[string]string,
+	setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" || cache == nil {
 		return nil
 	}
@@ -84,7 +89,8 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, s
 		if facts.ResolvedAt.IsZero() {
 			facts.ResolvedAt = now
 		}
-		record := IdentitySpoolRecord{Key: key, User: windowsIdentitySpoolUser(key), UpdatedAt: now, Facts: facts}
+		record := IdentitySpoolRecord{Key: key, User: windowsIdentitySpoolUser(key), UpdatedAt: now, Facts: facts,
+			ConnectorEmails: emails[key]}
 		switch {
 		case facts.UPN != "" && facts.Source == useridentity.SourceWindowsIdentityStore:
 			record.UPNSource = UPNSourceIdentityStore
@@ -118,3 +124,49 @@ func windowsIdentitySpoolUser(sid string) string {
 	}
 	return ""
 }
+
+// windowsConnectorEmailWarned keeps an unreadable connector file from being
+// reported at every enumerator cycle.
+var windowsConnectorEmailWarned sync.Map
+
+// WindowsConnectorEmails reads, as SYSTEM, the Claude Code and Codex account
+// address of each enrolled profile in manifest (ai_discovery.include_user_email),
+// keyed by upper-case SID. Each is read from the profile owner's own file and
+// only through ordinary folders: a file reached through a link or junction,
+// one that cannot be read, or one that is not a regular file gives no address
+// and a named warning, logged once per account, connector and reason.
+func WindowsConnectorEmails(manifest Manifest, logf func(string, ...any)) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	seen := map[string]bool{}
+	for _, target := range manifest.Targets {
+		if target.Enabled != nil && !*target.Enabled {
+			continue
+		}
+		key := strings.ToUpper(strings.TrimSpace(target.SID))
+		home := filepath.Clean(strings.TrimSpace(target.UserHome))
+		if !validIdentitySpoolKey(key) || home == "." || seen[key] {
+			continue
+		}
+		seen[key] = true
+		for _, connector := range []string{"claudecode", "codex"} {
+			email, err := windowsProfileConnectorEmail(connector, home)
+			if err == nil {
+				if out[key] == nil {
+					out[key] = map[string]string{}
+				}
+				out[key][connector] = email
+				continue
+			}
+			if !errors.Is(err, useridentity.ErrEmailFileUnreadable) || logf == nil {
+				continue
+			}
+			if _, warned := windowsConnectorEmailWarned.LoadOrStore(key+"\x00"+connector+"\x00"+err.Error(), true); !warned {
+				logf("[hook-enumerator] WARN include_user_email: no %s address for %s: %v", connector, key, err)
+			}
+		}
+	}
+	return out
+}
+
+// windowsProfileConnectorEmail reads one address; tests replace it.
+var windowsProfileConnectorEmail = useridentity.ProfileEmailForConnector

@@ -6,7 +6,6 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -18,7 +17,7 @@ import (
 
 // configureEnterpriseACPTargetLookup does nothing on Windows: accounts
 // resolve through the local security authority.
-func configureEnterpriseACPTargetLookup(context.Context) {}
+func configureEnterpriseACPTargetLookup() {}
 
 // enterpriseACPUnknownAccount reports an account name the local security
 // authority does not know.

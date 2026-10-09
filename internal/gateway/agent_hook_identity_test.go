@@ -138,6 +138,21 @@ func TestHermesTerminalOutputTakesTheSessionOfItsTask(t *testing.T) {
 	if other.SessionID != "" {
 		t.Fatalf("another identity took session %q", other.SessionID)
 	}
+	// Hermes 0.21.5 names no task either: the output takes the session of the
+	// last pre_tool_call of its agent identity, never of another one.
+	bare := func(identity string) agentHookRequest {
+		return hook(identity, map[string]interface{}{"hook_event_name": "transform_terminal_output", "extra": map[string]interface{}{"command": "ls"}})
+	}
+	live := bare("agt-1")
+	tasks.fill(&live)
+	if live.SessionID != "20261008_1" {
+		t.Fatalf("a terminal output without a task got session %q, want the session of the last tool call", live.SessionID)
+	}
+	stranger := bare("agt-2")
+	tasks.fill(&stranger)
+	if stranger.SessionID != "" {
+		t.Fatalf("another identity took session %q", stranger.SessionID)
+	}
 }
 
 func TestHermesTaskSessionSkipsOversizeTaskID(t *testing.T) {

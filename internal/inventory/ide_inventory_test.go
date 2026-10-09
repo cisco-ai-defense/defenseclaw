@@ -141,7 +141,7 @@ func TestUserScanBoundsOddIDEFolderNames(t *testing.T) {
 	mustWrite(t, filepath.Join(appData, "Code", "User", "profiles", strings.Repeat("p", 250), "extensions.json"),
 		`[{"identifier":{"id":"github.copilot"},"version":"1.0.0","relativeLocation":"github.copilot-1.0.0"}]`)
 	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), UserScanOptions{}, nil)
-	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+	if err := SanitizeUserScanReport(&report, nil, false, false); err != nil {
 		t.Fatalf("SanitizeUserScanReport: %v", err)
 	}
 	if ide := report.IDEInventory; ide == nil || len(ide.Installations) != 2 || len(ide.Plugins) != 2 || ide.Partial {

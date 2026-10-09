@@ -49,7 +49,9 @@ var enterpriseHookIdentitySpoolState struct {
 	failed      bool
 }
 
-func enterpriseHookIdentityAccounts(run enterpriseHookReconcileRun, stderr io.Writer) ([]enterprisehooks.IdentitySpoolAccount, []string) {
+// enterpriseHookIdentitySpoolAccounts lists the accounts a pass resolves
+// identity facts for, and the keys that tell whether they changed.
+func enterpriseHookIdentitySpoolAccounts(stderr io.Writer, run enterpriseHookReconcileRun) ([]enterprisehooks.IdentitySpoolAccount, []string) {
 	accounts := []enterprisehooks.IdentitySpoolAccount{}
 	keys := []string{}
 	seen := map[int]bool{}
@@ -79,6 +81,9 @@ func enterpriseHookIdentityAccounts(run enterpriseHookReconcileRun, stderr io.Wr
 		if err != nil {
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: eligible accounts: %v\n", err)
 		}
+		if enterpriseHookManifestEnrollment() {
+			extra = enterprisehooks.ManifestEnrolledAccounts(extra, enterprisehooks.Manifest{Targets: run.Targets})
+		}
 		for _, account := range extra {
 			if account.UID <= 0 || seen[account.UID] {
 				continue
@@ -99,7 +104,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	if dir == "" {
 		return
 	}
-	accounts, keys := enterpriseHookIdentityAccounts(run, stderr)
+	accounts, keys := enterpriseHookIdentitySpoolAccounts(stderr, run)
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")
 	now := time.Now()

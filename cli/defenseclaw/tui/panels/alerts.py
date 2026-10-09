@@ -32,6 +32,7 @@ from defenseclaw.hook_metrics import (
     connector_hook_decision,
     detection_only_hook_label,
     parse_detail_tokens,
+    would_block_hook_label,
 )
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.audit import (
@@ -1841,7 +1842,7 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
         observed_block = action == "allow" and raw_action == "block"
         if tokens.get("would_block", "").strip().lower() == "true" or observed_block:
             # The same label as "defenseclaw alerts" (GAP-1560).
-            decision = detection_only_hook_label(hook_target) or "would block (observe mode)"
+            decision = would_block_hook_label(hook_target, mode)
         elif not decision and action:
             decision = "allowed" if action == "allow" else action
     return decision

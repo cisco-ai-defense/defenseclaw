@@ -329,7 +329,16 @@ changes stay. Use `--all` and `--binaries` to remove everything. On macOS and
 Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
 `defenseclaw-acp` and the scanner launchers (`skill-scanner`,
 `skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
-`mcp-scanner-api` and `litellm`) from `~/.local/bin`.
+`mcp-scanner-api` and `litellm`) from `~/.local/bin`, and the `uv` and `uvx`
+an installer added there while they are unchanged; with `--all`, what that uv
+downloaded goes too. The 0.8.x installer kept no record of
+the uv, the uv cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, so
+the upgrade from 0.8.x records them only when the evidence shows that
+installer put them there: uv's install receipt names `~/.local/bin` and the
+uv version there, and was written at most ten minutes before the 0.8.x
+install, and `~/.sigstore` holds only the public Sigstore cache, unused since,
+with no `cosign` on your `PATH`. A `uv`, uv cache or `~/.sigstore` of your
+own stays.
 
 Uninstall also removes DefenseClaw's OpenShell sandboxes and images. When
 Docker or OpenShell is gone or broken, add `--skip-sandbox-teardown` to leave

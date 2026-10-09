@@ -1140,14 +1140,16 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	for i := range report.Signals {
 		report.Signals[i].UserName = "mallory"
 	}
-	if err := SanitizeUserScanReport(&report, catalog, false); err != nil {
+	if err := SanitizeUserScanReport(&report, catalog, false, false); err != nil {
 		t.Fatalf("SanitizeUserScanReport: %v", err)
 	}
 	if report.IDEInventory == nil || len(report.IDEInventory.Plugins) != 1 || report.IDEInventory.Plugins[0].UserName != "" {
 		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
 	}
 	spool := filepath.Join(tmp, "spool")
-	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
+	// The guardian names an SSSD account as NSS does; its records carry the
+	// bare name, as its hook records do (GAP-0447).
+	for uid, user := range map[int]string{1001: "alice@corp.example.com", 1002: "bob"} {
 		userReport := report
 		if uid == 1002 {
 			userReport.IDEInventory = nil
@@ -1214,7 +1216,7 @@ func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
 	spool := t.TempDir()
 	now := time.Now().UTC()
 	report := ScanUserHome(context.Background(), t.TempDir(), "alice", 1001, UserScanOptions{}, nil)
-	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+	if err := SanitizeUserScanReport(&report, nil, false, false); err != nil {
 		t.Fatal(err)
 	}
 	report.Summary.FilesScanned = 7

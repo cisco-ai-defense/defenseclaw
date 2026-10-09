@@ -23,8 +23,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
+	"strings"
 
 	acpcatalog "github.com/defenseclaw/defenseclaw/internal/acp"
 )
@@ -513,6 +515,32 @@ type HookCapabilityProvider interface {
 	HookCapabilities(opts SetupOpts) HookCapability
 }
 
+// ContentEnvelope is the one nested payload object a connector puts hook
+// content in, with the field inside it that holds each event's content.
+type ContentEnvelope struct {
+	// Key is the payload key of the nested object, "" for none.
+	Key string
+	// Fields maps a hook event name, as the agent sends it, to the one
+	// field inside Key that holds the event's content.
+	Fields map[string]string
+}
+
+// Field returns the envelope field holding event's content, "" when the
+// envelope declares none for it.
+func (e ContentEnvelope) Field(event string) string {
+	if e.Key == "" {
+		return ""
+	}
+	return e.Fields[strings.TrimSpace(event)]
+}
+
+func (e ContentEnvelope) clone() ContentEnvelope {
+	if e.Key == "" {
+		return ContentEnvelope{}
+	}
+	return ContentEnvelope{Key: e.Key, Fields: maps.Clone(e.Fields)}
+}
+
 // HookProfile is the declarative description a connector returns to
 // the unified hook collector. handleAgentHook is the sole entry point
 // for every connector hook route; connector-specific differences live
@@ -575,18 +603,16 @@ type HookProfile struct {
 	// events. A zero value means the experimental stateful path is disabled.
 	ToolCallLifecycle ToolCallLifecycleContract
 
-	// ContentEnvelopeKey names the single nested payload object this
-	// connector hides inspectable content in (hermes nests prompt /
-	// result text under "extra"). When set, the generic decoder —
-	// after every top-level content lookup misses — opens exactly
-	// this one declared sub-object and re-runs the expected
-	// content-key search inside it. Empty for flat-payload
-	// connectors, which therefore never take that path. Deliberately
-	// a single declared key, not a recursive scan: tool inputs /
-	// results carry attacker-influenced nested JSON, so the only
-	// sub-object ever opened is the one declared in the audited
-	// contract.
-	ContentEnvelopeKey string
+	// ContentEnvelope names the one nested payload object this connector
+	// puts inspectable content in (Hermes: the prompt, tool result and
+	// model response under "extra"). When every top-level content lookup
+	// misses, the generic decoder reads exactly the one field the
+	// envelope declares for the event, never a recursive scan or a
+	// shared key list: tool inputs and results carry attacker-influenced
+	// nested JSON, and one Hermes event carries several text fields
+	// (post_llm_call has both user_message and assistant_response). Zero
+	// for flat-payload connectors, which never take that path.
+	ContentEnvelope ContentEnvelope
 
 	// DecodeToolArgs extracts the exact structured tool-argument value from
 	// the original request body when a connector nests it outside the shared

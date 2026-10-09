@@ -305,6 +305,44 @@ def test_all_binaries_removes_the_installer_uv_cache_and_python(per_user_install
 
 
 @posix_only
+@pytest.mark.parametrize("recorded", [True, False])
+def test_all_binaries_after_an_upgrade_from_0_8_removes_only_recorded_leftovers(
+    per_user_install, recorded: bool
+) -> None:
+    # GAP-0908: a 0.8.x install upgraded to 1.0 (uv's cache now in
+    # data_dir/.uv) left the 0.8.x installer's uv, uvx, uv's receipt,
+    # ~/.cache/uv and ~/.sigstore. Only what the upgrade recorded goes;
+    # without its record they are the user's and stay.
+    home, data_dir, bin_dir = per_user_install.home, per_user_install.data_dir, per_user_install.bin_dir
+    (data_dir / ".uv" / "cache").mkdir(parents=True)
+    cache = home / ".cache" / "uv"
+    (cache / "archive-v0" / "a1" / "defenseclaw-0.8.10.dist-info").mkdir(parents=True)
+    receipt = home / ".config" / "uv" / "uv-receipt.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"install_prefix": str(bin_dir), "version": "0.12.24"}), encoding="utf-8")
+    tuf = home / ".sigstore" / "root" / "tuf-repo-cdn.sigstore.dev"
+    tuf.mkdir(parents=True)
+    (tuf / "root.json").write_text("{}", encoding="utf-8")
+    for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+    if recorded:
+        (data_dir / "legacy-install-leftovers").write_text("uv-cache\nsigstore\n", encoding="utf-8")
+    else:
+        (bin_dir / "defenseclaw-uv.sha256").unlink()
+    env = {"PATH": str(bin_dir), "XDG_CACHE_HOME": "", "XDG_CONFIG_HOME": ""}
+    with patch.dict(os.environ, env), patch.object(cmd_uninstall, "_clean_uv_cache_entries"):
+        os.environ.pop("UV_CACHE_DIR", None)
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    left = [name for name in ("uv", "uvx") if (bin_dir / name).exists()]
+    assert left == ([] if recorded else ["uv", "uvx"])
+    assert cache.exists() is not recorded
+    assert receipt.exists() is not recorded
+    assert (home / ".sigstore").exists() is not recorded
+
+
+@posix_only
 def test_uv_python_with_other_pythons_stays(per_user_install) -> None:
     python_root = per_user_install.home / ".local" / "share" / "uv" / "python"
     base = python_root / "cpython-3.12.0"
@@ -390,6 +428,47 @@ def test_remove_created_dirs_keeps_folders_with_content(tmp_path: Path) -> None:
     assert not (home / ".copilot").exists()
     assert used.is_dir()
     assert json.loads(record.read_text(encoding="utf-8"))["dirs"] == sorted([str(used), "/etc/elsewhere"])
+
+
+@posix_only
+def test_probes_run_only_the_set_up_connectors_and_uninstall_removes_their_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0901: init --connector X ran every agent CLI, whose --version wrote
+    # ~/.codex, ~/.cache/amp, ... into the home; uninstall left them.
+    from defenseclaw.inventory import agent_discovery as ad
+
+    home = tmp_path.resolve()
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir()
+    for var in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    creates = {"codex": home / ".codex" / "tmp" / "arg0", "amp": home / ".cache" / "amp" / "logs"}
+    probed: list[str] = []
+
+    def probe(name, _path, _args, **_kwargs):
+        probed.append(name)
+        if name in creates:
+            creates[name].mkdir(parents=True, exist_ok=True)
+        return f"{name} 1.0", ""
+
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (f"/opt/bin/{name}",))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    token = ad.restrict_probes(["codex", "amp"])
+    try:
+        disc = ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+    finally:
+        ad.end_probe_restriction(token)
+    assert sorted(probed) == ["amp", "codex"]
+    assert disc.agents["copilot"].error == ad.VERSION_NOT_PROBED and disc.agents["copilot"].installed
+
+    (creates["amp"] / "session.log").write_text("used since", encoding="utf-8")
+    cmd_uninstall._remove_probe_created_state(str(data_dir))
+
+    assert not (home / ".codex").exists()
+    assert (creates["amp"] / "session.log").is_file()
+    assert not (data_dir / ad.PROBE_STATE_RECORD).exists()
 
 
 def test_reset_keeps_the_installer_uv() -> None:

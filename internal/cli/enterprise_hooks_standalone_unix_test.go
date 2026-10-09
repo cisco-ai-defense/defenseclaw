@@ -1513,6 +1513,25 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 	if len(rows) != 1 || rows[0].UID != 1001 {
 		t.Fatalf("manifest mode scanned stale eligible accounts: %+v", rows)
 	}
+	// Nor does it publish their identity records (GAP-0761): the record the
+	// last auto pass left still names bob, whom the manifest no longer
+	// enrolls; carol is enrolled by name and has no row yet.
+	previousIdentity := enterpriseHookLoadIdentityAccounts
+	t.Cleanup(func() { enterpriseHookLoadIdentityAccounts = previousIdentity })
+	enterpriseHookLoadIdentityAccounts = func(string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		return []enterprisehooks.UnixEligibleAccount{
+			{User: "alice", UID: 1001}, {User: "bob@corp.example", UID: 94401104}, {User: "carol", UID: 1003},
+		}, nil
+	}
+	alice := 1001
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
+		Manifest: "/etc/defenseclaw/hooks/manifest.json",
+		Targets:  []enterprisehooks.ManifestTarget{{User: "alice", UID: &alice, Connector: "opencode"}, {User: "carol", Connector: "opencode"}},
+		Rows:     []enterpriseHookReconcileRow{{User: "alice", UserHome: "/home/alice", Connector: "opencode", OK: true, UID: 1001}},
+	})
+	if len(accounts) != 2 || accounts[0].UID != 1001 || accounts[1].UID != 1003 {
+		t.Fatalf("manifest mode published identity records for %+v, want alice and carol only", accounts)
+	}
 }
 
 // GAP-0775: in the enumerator 3-cycle window a leaver, whose account no
@@ -1554,9 +1573,9 @@ func TestIdentitySpoolNamesHomeOnlyTarget(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"alice": {Name: "alice", UID: 4242, GID: 4242, Home: "/Users/alice"},
 	}})
-	accounts, _ := enterpriseHookIdentityAccounts(enterpriseHookReconcileRun{
+	accounts, _ := enterpriseHookIdentitySpoolAccounts(io.Discard, enterpriseHookReconcileRun{
 		Rows: []enterpriseHookReconcileRow{{UID: 4242, UserHome: "/Users/alice", Connector: "codex", OK: true}},
-	}, io.Discard)
+	})
 	if len(accounts) != 1 || accounts[0].UID != 4242 || accounts[0].User != "alice" {
 		t.Fatalf("identity spool accounts = %+v; want alice for uid 4242", accounts)
 	}

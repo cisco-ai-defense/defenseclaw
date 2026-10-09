@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1368,5 +1369,79 @@ func TestVerifiedUIDAssignmentSurvivesDirectoryFailure(t *testing.T) {
 	subject := &profileSubject{UserID: "1001", LookupFailed: true}
 	if got := set.matchUncached(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchUser {
 		t.Fatalf("verified UID selected %+v; want strict user assignment", got)
+	}
+}
+
+// GAP-0860: stalled SID-to-name lookups left the caller groups bare SIDs, so
+// a standalone Windows assignment that names the group missed. Assignment
+// group names resolve to SIDs once per profile set and match the SIDs of the
+// caller; names whose lookup stalls select nobody, are reported, and hold up
+// neither the set nor the other names.
+func TestWindowsGroupAssignmentsMatchOnResolvedSIDs(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var devsLookups atomic.Int32
+	lookup := func(name string) (string, error) {
+		switch strings.ToLower(name) {
+		case `corp\gap0860-devs`:
+			if devsLookups.Add(1) == 1 {
+				return "", errors.New("the domain controller is busy")
+			}
+			return "S-1-5-21-860-1-2-1105", nil
+		case `corp\gap0860-gone`:
+			return "", errProfileGroupUnknown
+		}
+		<-release // LookupAccountName stalls on a silent domain controller
+		return "", errors.New("released")
+	}
+	var stalled []string
+	for i := range 12 {
+		stalled = append(stalled, fmt.Sprintf(`CORP\gap0860-stalled-%d`, i))
+	}
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: stalled}},
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\gap0860-gone`}}},
+		{Profile: "tooling", Match: config.ProfileMatch{Groups: []string{`CORP\gap0860-devs`}}},
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "default", assignments: assignments, matches: newProfileMatchCache(),
+		profiles: map[string]config.DerivedGuardrailProfile{"default": {}, "strict": {}, "tooling": {}},
+	}
+	started := time.Now()
+	set.groupSIDs = newProfileGroupSIDs(assignments, lookup, 100*time.Millisecond)
+	if waited := time.Since(started); waited > 2*time.Second {
+		t.Fatalf("building the set waited %s for stalled lookups", waited)
+	}
+	// The name lookups of the caller groups stalled too: only SIDs.
+	subject := &profileSubject{UserID: "S-1-5-21-860-1-2-1001", IDKind: useridentity.KindWindowsSID,
+		Groups: []string{"S-1-5-21-860-1-2-513", "S-1-5-21-860-1-2-1105"}}
+	if got := set.match(subject, profileSubjectVerified, "codex", ""); got.Name != "default" {
+		t.Fatalf("a group whose name has no SID yet matched: %+v", got)
+	}
+	warnings := strings.Join(set.groupSIDs.warnings(assignments), "\n")
+	if !strings.Contains(warnings, `CORP\\gap0860-stalled-11`) || !strings.Contains(warnings, "the domain controller is busy") ||
+		strings.Contains(warnings, "gap0860-gone") {
+		t.Fatalf("warnings do not name the unresolved groups:\n%s", warnings)
+	}
+	// The retry is due: the next request starts it, a later one matches on the
+	// SID, never on a name, and the memoised default does not shadow it.
+	for _, entry := range set.groupSIDs.entries {
+		entry.nextTry = time.Time{}
+	}
+	set.match(subject, profileSubjectVerified, "codex", "")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := set.match(subject, profileSubjectVerified, "codex", "")
+		if got.Name == "tooling" && got.Match == profileMatchGroup && got.MatchedGroup == `CORP\gap0860-devs` {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the resolved group never matched: %+v", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	named := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind, Groups: []string{`CORP\gap0860-devs`}}
+	if got := set.match(named, profileSubjectVerified, "codex", ""); got.Name != "default" {
+		t.Fatalf("a group name without its SID matched: %+v", got)
 	}
 }

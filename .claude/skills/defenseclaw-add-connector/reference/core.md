@@ -103,7 +103,7 @@ Add `builtinHookContracts["<id>"]` (`hook_contract.go`) with at least one `HookC
 - `Events`: the vendor's exact spelling.
 - `AIDSurfaces`: declarative only. `HookProfileAIDSurfaceEnabled` has no runtime caller.
 - `Capabilities`: `HookCapability{CanBlock, CanAskNative, AskEvents, BlockEvents, SupportsFailClosed, Scope}`. `ApplyHookContract` **replaces** the profile's capability with this value, keeping only `ConfigPath` and `Scope`, so BlockEvents and AskEvents belong here.
-- `SupportsTraceparent`, `NativeOTLP`, `ToolCallLifecycle`, optional `ContentEnvelopeKey`, and `Notes` (cite the vendor docs and versions). No contract sets `ContentEnvelopeKey` today, Hermes included (`TestContentEnvelopeKeyDeclarations` pins every contract to empty), so setting one means changing that test.
+- `SupportsTraceparent`, `NativeOTLP`, `ToolCallLifecycle`, optional `ContentEnvelope`, and `Notes` (cite the vendor docs and versions). Only Hermes sets `ContentEnvelope` (`extra`, one field per event; `TestContentEnvelopeDeclarations` pins it), so setting one for another connector means changing that test.
 
 **Resolution** happens in `resolveHookContractForOS`:
 

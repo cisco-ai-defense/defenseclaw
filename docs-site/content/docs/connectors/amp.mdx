@@ -226,6 +226,10 @@ part of this connector's support claim.
 
 <HookEventsList connector="amp" />
 
+Amp has no hook that can stop a prompt, so a prompt rule doesn't block
+here: a matching prompt reaches the model. Tool-call rules still block
+([capability matrix](/docs/connectors/capability-matrix)).
+
 ## In an OpenShell sandbox
 
 <Callout type="warn" title="Amp cannot run in a sandbox yet">

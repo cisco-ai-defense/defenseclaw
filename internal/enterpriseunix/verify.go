@@ -670,6 +670,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
 	l.describeDeletedEnrolledAccounts()
+	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
 	if record != nil {
 		l.describePerUserGateways(ctx)
