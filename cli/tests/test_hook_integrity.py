@@ -98,6 +98,30 @@ def test_non_executable_script_fails_doctor_and_fix_restores_it(tmp_path, monkey
     assert hook_runtime_problems(cfg, "codex") == []
 
 
+def test_mode_repair_does_not_execute_unreadable_tampered_script(tmp_path, monkeypatch):
+    from defenseclaw import hook_integrity
+    from defenseclaw.commands import cmd_doctor
+
+    cfg, script = _install(tmp_path)
+    script.write_text(script.read_text() + "# modified\n")
+    script.chmod(0o000)
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    original_access = hook_integrity.os.access
+    monkeypatch.setattr(
+        hook_integrity.os,
+        "access",
+        lambda path, mode: False if str(path) == str(script) and not script.stat().st_mode & 0o400
+        else original_access(path, mode),
+    )
+
+    try:
+        assert "cannot be read" in hook_runtime_problems(cfg, "codex")[0]
+        assert cmd_doctor._fix_hook_script_modes(cfg, assume_yes=True)[0] == "fail"
+        assert script.stat().st_mode & 0o777 == 0
+    finally:
+        script.chmod(0o700)
+
+
 def test_missing_scoped_token_is_reported_even_with_gateway_token_env(tmp_path, monkeypatch):
     # GAP-1138: doctor loads DEFENSECLAW_GATEWAY_TOKEN from .env, but the
     # connector-scoped hook clears it, so the missing file still breaks hooks.
