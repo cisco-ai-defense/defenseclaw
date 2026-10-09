@@ -11,9 +11,12 @@
 package connector
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -39,6 +42,49 @@ func TestWriteManagedFileBackup_DirIs0o700(t *testing.T) {
 
 	dir := filepath.Join(tmp, "connector_backups", "claudecode")
 	testenv.AssertPrivateDirectory(t, dir)
+}
+
+func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	oldRoot := filepath.Join(home, ".codex")
+	newRoot := filepath.Join(home, "dotfiles", "codex")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	t.Setenv("CODEX_HOME", oldRoot)
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", newRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", newRoot)
+	if notes := PinConnectorConfigRootsToSetup(dataDir); len(notes) != 0 {
+		t.Fatalf("explicit setup was pinned to the old root: %q", notes)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []struct {
+		path     string
+		wantHook bool
+	}{{oldRoot, false}, {newRoot, true}} {
+		raw, err := os.ReadFile(filepath.Join(root.path, "config.toml"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if got := bytes.Contains(raw, []byte("codex-hook")); got != root.wantHook {
+			t.Fatalf("%s hook presence = %t, want %t", root.path, got, root.wantHook)
+		}
+	}
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", "")
+	t.Setenv("CODEX_HOME", oldRoot)
+	if notes := PinConnectorConfigRootsToSetup(dataDir); len(notes) != 1 || !strings.Contains(notes[0], "To move them") {
+		t.Fatalf("gateway root note = %q", notes)
+	}
+	if got := codexHomeDir(); got != newRoot {
+		t.Fatalf("gateway root = %q, want %q", got, newRoot)
+	}
 }
 
 func TestEnsureManagedBackupDirRestricted_TightensExistingDir(t *testing.T) {

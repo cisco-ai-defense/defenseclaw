@@ -10119,6 +10119,9 @@ def _apply_hook_connector_setup(
     if restart:
         click.echo()
         click.echo("  Restarting gateway to wire connector runtime and telemetry...")
+        previous_codex_setup = os.environ.get("DEFENSECLAW_EXPLICIT_CODEX_SETUP")
+        if connector == "codex":
+            os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = os.path.abspath(connector_paths.codex_home())
         try:
             _restart_services(
                 cfg.data_dir,
@@ -10130,6 +10133,12 @@ def _apply_hook_connector_setup(
             )
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
             _rollback_failed_connector_application(app, setup_snapshot, exc)
+        finally:
+            if connector == "codex":
+                if previous_codex_setup is None:
+                    os.environ.pop("DEFENSECLAW_EXPLICIT_CODEX_SETUP", None)
+                else:
+                    os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] = previous_codex_setup
         if connector == "hermes":
             ux.echo("  ✓ Hermes on-disk hook registration staged")
             if _hermes_hosts_idle():
