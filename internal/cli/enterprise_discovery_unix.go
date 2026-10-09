@@ -42,3 +42,6 @@ func platformDiscoveryAccountIDs(user string) []string {
 	}
 	return []string{strconv.Itoa(account.UID)}
 }
+
+// platformDiscoveryAccountName names Windows accounts only.
+func platformDiscoveryAccountName(string) string { return "" }

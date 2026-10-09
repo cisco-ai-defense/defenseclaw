@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -91,4 +92,18 @@ func platformDiscoveryAccountIDs(user string) []string {
 		return nil
 	}
 	return []string{sid}
+}
+
+// platformDiscoveryAccountName is DOMAIN\name of sid as the LSA names it
+// (COMPUTER\name for a local account), or "".
+func platformDiscoveryAccountName(sid string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || strings.TrimSpace(account) == "" || strings.TrimSpace(domain) == "" {
+		return ""
+	}
+	return strings.TrimSpace(domain) + `\` + strings.TrimSpace(account)
 }

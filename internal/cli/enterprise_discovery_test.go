@@ -392,6 +392,58 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	}
 }
 
+// GAP-1091: a domain account and a local account of one name are two
+// entries, each under its own SID and named DOMAIN\name or COMPUTER\name;
+// a qualified --user lists only the account it names, the bare name both.
+func TestWindowsEnterpriseDiscoveryKeepsSameNameAccountsApart(t *testing.T) {
+	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
+	previous, previousIDs, previousName := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, enterpriseDiscoveryAccountName
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, enterpriseDiscoveryAccountName = previous, previousIDs, previousName
+	})
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: []inventory.AISignal{
+			{Name: "Claude Code", Category: "supported_connector", UserName: "dcad-o4wd", UserID: domainSID},
+			{Name: "Continue", Category: "editor_extension", UserName: "dcad-o4wd", UserID: localSID},
+			{Name: "GitHub Copilot", Category: "editor_extension", UserName: "dcad-o4wd", UserID: localSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\dcad-o4wd`: {domainSID}, `DCFC-WIN2-RS2\dcad-o4wd`: {localSID}, `.\dcad-o4wd`: {localSID}}[user]
+	}
+	enterpriseDiscoveryAccountName = func(sid string) string {
+		return map[string]string{domainSID: `DCLAB\dcad-o4wd`, localSID: `DCFC-WIN2-RS2\dcad-o4wd`}[sid]
+	}
+	var summary bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&summary, "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`DCLAB\dcad-o4wd (SID ` + domainSID + `): scanned`, `DCFC-WIN2-RS2\dcad-o4wd (SID ` + localSID + `): scanned`} {
+		if !strings.Contains(summary.String(), want) {
+			t.Fatalf("summary lacks %q:\n%s", want, summary.String())
+		}
+	}
+	for user, want := range map[string]string{`DCFC-WIN2-RS2\dcad-o4wd`: localSID, `.\dcad-o4wd`: localSID, `DCLAB\dcad-o4wd`: domainSID} {
+		var one bytes.Buffer
+		var report enterpriseDiscoveryReport
+		if err := writeWindowsEnterpriseDiscovery(&one, user, true); err != nil || json.Unmarshal(one.Bytes(), &report) != nil ||
+			len(report.Accounts) != 1 || report.Accounts[0].SID != want {
+			t.Fatalf("--json --user %s = %v:\n%s", user, err, one.String())
+		}
+		for _, signal := range report.Accounts[0].Signals {
+			if signal.UserID != want {
+				t.Fatalf("--user %s lists a signal of %s", user, signal.UserID)
+			}
+		}
+	}
+	var both bytes.Buffer
+	var report enterpriseDiscoveryReport
+	if err := writeWindowsEnterpriseDiscovery(&both, "dcad-o4wd", true); err != nil || json.Unmarshal(both.Bytes(), &report) != nil || len(report.Accounts) != 2 {
+		t.Fatalf("--json --user <bare name> = %v:\n%s", err, both.String())
+	}
+}
+
 // A Secure Client computer keeps the enterprise groups and the discovery
 // --user match it had before the identity views (GAP-0138, issue #1092).
 func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
