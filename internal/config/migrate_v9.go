@@ -2249,12 +2249,7 @@ func (m *v9Migrator) migrateSkillScanner(skill *yaml.Node) error {
 	default:
 		raw, err := os.ReadFile(policy)
 		if err != nil {
-			v9Set(skill, v9Scalar("quiet"), "policy")
-			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
-				To: prefix + "policy", Kept: "quiet", Lost: policy,
-				Reason: "the policy file could not be read, so it could not be pinned by digest",
-			})
-			break
+			return fmt.Errorf("config: read custom skill-scanner policy %q: %w", policy, err)
 		}
 		v9Set(skill, v9Scalar("custom"), "policy")
 		ref := v9Mapping("path", v9Scalar(policy), "digest", v9Scalar("sha256:"+cfgtxn.SHA256Hex(raw)))
