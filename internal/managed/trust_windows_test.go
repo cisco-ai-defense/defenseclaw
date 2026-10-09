@@ -14,7 +14,9 @@ package managed
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -405,6 +407,83 @@ func TestWalkWindowsRulePackTreeChecksEveryFileInThePack(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("checked %q, want %s among them", checked, want)
+		}
+	}
+}
+
+// GAP-0953: the fix Setup prints for a refused config runs as printed in
+// PowerShell and leaves the folder and the config to SYSTEM and
+// Administrators. A new folder under C:\ on a Windows client edition holds
+// Authenticated Users Modify as its own entry, which /inheritance:r keeps;
+// the old fix failed to parse in PowerShell, kept that entry and, with /T,
+// left the config with an empty DACL.
+func TestDescribeUntrustedSourceFixRunsInPowerShell(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the fixed folder is readable only by SYSTEM and Administrators")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is not available")
+	}
+	root := t.TempDir()
+	folder := filepath.Join(root, "Staging")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	daclOf := func(path string) *windows.ACL {
+		t.Helper()
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil || dacl == nil {
+			t.Fatalf("DACL of %s: %v", path, err)
+		}
+		return dacl
+	}
+	clientEdition, err := windows.SecurityDescriptorFromString(
+		"D:P(A;OICI;0x1301bf;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, _, err := clientEdition.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(folder, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, own, nil); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(folder, "config.yaml")
+	if err := os.WriteFile(config, []byte("deployment_mode: managed_enterprise\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused := rejectUntrustedWindowsWriteACEs(config, daclOf(config))
+	text, ok := DescribeUntrustedSource("config", config, refused)
+	if !ok {
+		t.Fatalf("refusal %v is not described", refused)
+	}
+	_, commands, _ := strings.Cut(text, "From an elevated prompt run ")
+	commands, _, _ = strings.Cut(commands, ", and run it again")
+	for i, command := range strings.Split(commands, ", then ") {
+		script := filepath.Join(root, fmt.Sprintf("fix%d.ps1", i))
+		body := "$ErrorActionPreference = 'Stop'\r\n" + command + "\r\nexit $LASTEXITCODE\r\n"
+		if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script).CombinedOutput()
+		if err != nil {
+			t.Fatalf("printed fix %q failed in PowerShell: %v\n%s", command, err, out)
+		}
+	}
+	for _, path := range []string{folder, config} {
+		dacl := daclOf(path)
+		if dacl.AceCount == 0 {
+			t.Fatalf("the printed fix left %s with an empty DACL", path)
+		}
+		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
+			t.Fatalf("after the printed fix: %v", err)
 		}
 	}
 }
