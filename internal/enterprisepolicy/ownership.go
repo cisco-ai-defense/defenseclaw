@@ -51,6 +51,10 @@ type ownershipRecord struct {
 	// OwnedKeys names the values DefenseClaw added to a shared policy
 	// store it does not own whole (the VS Code device policies).
 	OwnedKeys []string `json:"owned_keys,omitempty"`
+	// RestoredAt is when DefenseClaw last wrote the file back after
+	// another writer changed or removed it (Linux and macOS). An agent
+	// session open through that change can keep what it loaded then.
+	RestoredAt string `json:"restored_at,omitempty"`
 }
 
 var recordNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -226,6 +230,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	if err != nil {
 		return false, err
 	}
+	outside := false
 	switch {
 	case record == nil || record.Path != path:
 		record = &ownershipRecord{Connector: connector, Path: path}
@@ -233,6 +238,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 			return false, err
 		}
 	case !exists || sha256Hex(current) != record.PostimageSHA256:
+		outside = record.PostimageSHA256 != ""
 		if record.PostimageSHA256 != "" && exists && !ownedWasPresent {
 			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
 		}
@@ -256,6 +262,9 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
 		if err != nil {
 			return false, err
+		}
+		if outside && opts.goos() != "windows" {
+			record.RestoredAt = opts.now().UTC().Format(time.RFC3339)
 		}
 	}
 	// A directory above the file that users cannot list or pass (an

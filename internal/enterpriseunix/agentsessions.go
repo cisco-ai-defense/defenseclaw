@@ -24,6 +24,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
 // codeAgentSessionsRestart names agent sessions that started before the
@@ -42,11 +44,36 @@ var agentCLINames = map[string]bool{
 }
 
 // agentsReadingHooksLive pick up DefenseClaw's hooks without a restart: a
-// Codex session open before the install was inspected at once (its managed
-// requirements are read per turn), so naming it, or the Codex app-server
-// daemon an old auto-update left behind, asked users to restart sessions
-// that were already inspected (GAP-0936).
+// Codex session open before the install is inspected at once when its
+// app-server reads the managed requirements per turn, so naming it asked
+// users to restart sessions that were already inspected (GAP-0936). The
+// Codex background server (the app-server daemon) is the exception: one
+// started before the install keeps the requirements it read then, so the
+// sessions it serves ran tool calls with no decision, and a new Codex
+// session refuses it ("Cannot use the shared background server") until it
+// is restarted (GAP-0988, GAP-0983). It and the Codex sessions of its user
+// are named.
 var agentsReadingHooksLive = map[string]bool{"codex": true}
+
+// codexBackgroundServer reports the Codex app-server daemon process (not
+// its "app-server daemon" supervisor or an IDE stdio server).
+func codexBackgroundServer(argv []string) bool {
+	if len(argv) < 2 || filepath.Base(argv[0]) != "codex" || argv[1] != "app-server" {
+		return false
+	}
+	if len(argv) > 2 && !strings.HasPrefix(argv[2], "-") {
+		return false
+	}
+	if strings.Contains(argv[0], "/app-server-daemon/") {
+		return true
+	}
+	for _, argument := range argv[2:] {
+		if argument == "--listen" || strings.HasPrefix(argument, "--listen=") {
+			return true
+		}
+	}
+	return false
+}
 
 // scriptHosts run an agent CLI given as their first argument.
 var scriptHosts = map[string]bool{"node": true, "nodejs": true, "bun": true, "deno": true, "python": true, "python3": true}
@@ -94,6 +121,8 @@ type agentSession struct {
 	UID     int
 	Agent   string
 	Started time.Time
+	// CodexServer marks the Codex background server.
+	CodexServer bool
 }
 
 // agentSessionsStartedBefore lists the agent CLI processes of accounts
@@ -106,9 +135,16 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 	case "darwin":
 		all = e.darwinAgentSessions(ctx)
 	}
+	oldServer := map[int]bool{}
+	for _, session := range all {
+		if session.CodexServer && session.Started.Before(since) {
+			oldServer[session.UID] = true
+		}
+	}
 	var out []agentSession
 	for _, session := range all {
-		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) || agentsReadingHooksLive[session.Agent] {
+		if session.UID == 0 || session.UID == serviceUID || !session.Started.Before(since) ||
+			(agentsReadingHooksLive[session.Agent] && !session.CodexServer && !oldServer[session.UID]) {
 			continue
 		}
 		out = append(out, session)
@@ -144,7 +180,8 @@ func (e *Env) linuxAgentSessions() []agentSession {
 		if err != nil {
 			continue
 		}
-		agent := agentCLIOf(strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00"))
+		argv := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+		agent := agentCLIOf(argv)
 		if agent == "" {
 			continue
 		}
@@ -173,7 +210,7 @@ func (e *Env) linuxAgentSessions() []agentSession {
 			continue
 		}
 		started := time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)
-		out = append(out, agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started})
+		out = append(out, agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started, CodexServer: codexBackgroundServer(argv)})
 	}
 	return out
 }
@@ -198,7 +235,7 @@ func (e *Env) darwinAgentSessions(ctx context.Context) []agentSession {
 			continue
 		}
 		if agent := agentCLIOf(fields[3:]); agent != "" {
-			out = append(out, agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed)})
+			out = append(out, agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), CodexServer: codexBackgroundServer(fields[3:])})
 		}
 	}
 	return out
@@ -230,7 +267,9 @@ func parseElapsed(text string) (time.Duration, bool) {
 }
 
 // describeAgentSessionsBeforeActivation warns, per account, about agent
-// sessions that started before this deployment was activated.
+// sessions that started before this deployment was activated, and about
+// Claude Code sessions that were open while the DefenseClaw drop-in was
+// changed or removed before DefenseClaw put it back.
 func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, record *Deployment) {
 	if record == nil || record.NoStart {
 		return
@@ -243,9 +282,37 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	if err != nil {
 		return
 	}
+	l.warnAgentSessions(l.env.agentSessionsStartedBefore(ctx, activated, record.ServiceUID), func(sessions string) string {
+		return fmt.Sprintf("runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them", sessions, activationTime)
+	})
+	restored := l.env.claudeDropInRestoredAt()
+	if !restored.After(activated) {
+		return
+	}
+	var held []agentSession
+	for _, session := range l.env.agentSessionsStartedBefore(ctx, restored, record.ServiceUID) {
+		if session.Agent == "claude" && !session.Started.Before(activated) {
+			held = append(held, session)
+		}
+	}
+	l.warnAgentSessions(held, func(sessions string) string {
+		return fmt.Sprintf("runs %s, open while the DefenseClaw Claude Code drop-in was changed or removed; DefenseClaw put it back at %s, but Claude Code keeps the hooks a session loaded, so these sessions can still run a broken hook command without DefenseClaw until they are restarted: ask that user to restart them", sessions, restored.UTC().Format(time.RFC3339))
+	})
+}
+
+// warnAgentSessions adds one agent_sessions_restart_required warning per
+// account; reason words the sessions listed. A Codex background server adds
+// how to restart it.
+func (l *lifecycle) warnAgentSessions(sessions []agentSession, reason func(sessions string) string) {
 	byUID := map[int][]string{}
-	for _, session := range l.env.agentSessionsStartedBefore(ctx, activated, record.ServiceUID) {
-		byUID[session.UID] = append(byUID[session.UID], fmt.Sprintf("%s (pid %d)", session.Agent, session.PID))
+	server := map[int]bool{}
+	for _, session := range sessions {
+		label := fmt.Sprintf("%s (pid %d)", session.Agent, session.PID)
+		if session.CodexServer {
+			label = fmt.Sprintf("the Codex background server (pid %d)", session.PID)
+			server[session.UID] = true
+		}
+		byUID[session.UID] = append(byUID[session.UID], label)
 	}
 	uids := make([]int, 0, len(byUID))
 	for uid := range byUID {
@@ -257,8 +324,24 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 		if account, err := user.LookupId(strconv.Itoa(uid)); err == nil {
 			who = account.Username
 		}
-		l.result.AddWarning(codeAgentSessionsRestart, fmt.Sprintf(
-			"user %s runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them",
-			who, strings.Join(byUID[uid], ", "), activationTime))
+		message := "user " + who + " " + reason(strings.Join(byUID[uid], ", "))
+		if server[uid] {
+			message += ". The Codex background server keeps the requirements it read when it started, and a new Codex session refuses it (Cannot use the shared background server) until it is restarted: have that user run `codex app-server daemon restart` (or start Codex with `codex --no-daemon`)"
+		}
+		l.result.AddWarning(codeAgentSessionsRestart, message)
 	}
+}
+
+// claudeDropInRestoredAt is when DefenseClaw last put back its Claude Code
+// drop-in after another writer changed or removed it, or the zero time.
+func (e *Env) claudeDropInRestoredAt() time.Time {
+	manager, ok := e.MachinePolicy.(*policyManager)
+	if !ok {
+		return time.Time{}
+	}
+	opts, err := manager.options(nil)
+	if err != nil {
+		return time.Time{}
+	}
+	return enterprisepolicy.ClaudeDropInRestoredAt(opts)
 }
