@@ -243,6 +243,54 @@ func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 	return plan, nil
 }
 
+// RebaseLoadedRulePack applies the 0.8.x rebase to a validated loaded pack
+// without changing its source directory. The caller must check the source
+// pack's digest pin before using the returned pack.
+func RebaseLoadedRulePack(dir string, source *RulePack) (*RulePack, error) {
+	plan, err := PlanRulePackRebase(dir)
+	if err != nil {
+		return nil, err
+	}
+	if plan == nil {
+		return source, nil
+	}
+	currentDigest, err := RulePackDigest(dir)
+	if err != nil {
+		return nil, err
+	}
+	if currentDigest != source.FilesDigest() {
+		return nil, fmt.Errorf("source rule pack changed while rebasing in memory")
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	rebased := *source
+	rebased.RuleFiles = append([]*RulesFileYAML(nil), source.RuleFiles...)
+	for i, original := range source.RuleFiles {
+		rel, err := filepath.Rel(absDir, original.SourcePath)
+		if err != nil {
+			return nil, err
+		}
+		rel = filepath.ToSlash(rel)
+		data, ok := plan.Files[rel]
+		if !ok {
+			return nil, fmt.Errorf("rebased rule pack is missing %s", rel)
+		}
+		var parsed RulesFileYAML
+		if err := decodeStrictYAML(data, rel, &parsed); err != nil {
+			return nil, err
+		}
+		parsed.SourcePath = original.SourcePath
+		rebased.RuleFiles[i] = &parsed
+	}
+	rebased.filesDigest = plan.Digest
+	if err := rebased.Validate(); err != nil {
+		return nil, err
+	}
+	return &rebased, nil
+}
+
 // readRulePackTree reads every regular file under dir, within the loader's limits.
 func readRulePackTree(dir string) (map[string][]byte, error) {
 	files := map[string][]byte{}

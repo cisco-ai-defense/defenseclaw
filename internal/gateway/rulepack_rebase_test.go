@@ -102,4 +102,31 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 		summary.StaleRuleCount != 0 || summary.AlertOnlyRuleCount != 1 {
 		t.Fatalf("the rebased pack: summary %+v; want the marker and rm -rf / blocked, 0 stale and 1 alert-only rule", summary)
 	}
+
+	// A gateway reload of the un-migrated v8 source must enforce the same
+	// rebased rules without changing the operator's 0.8.x pack or config.
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + configDir +
+		"\nguardrail:\n  rule_pack_dir: " + old + "\nobservability: {}\n")
+	if err := os.WriteFile(configPath, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeConfig, err := loadRuntimeConfigCandidate(configPath, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimePack, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cloneConfig(runtimeConfig), "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blocks(runtimePack, marker) || runtimePack.FilesDigest() != plan.Digest {
+		t.Fatalf("read-only v8 load kept the original pack: digest %s", runtimePack.FilesDigest())
+	}
+	if current, err := os.ReadFile(filepath.Join(old, "rules", "commands.yaml")); err != nil || string(current) != commands {
+		t.Fatalf("the v8 rule pack changed: %v", err)
+	}
+	if current, err := os.ReadFile(configPath); err != nil || string(current) != string(source) {
+		t.Fatalf("the v8 config changed: %v", err)
+	}
 }

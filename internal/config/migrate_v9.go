@@ -369,13 +369,15 @@ func V8PolicyDataJSON(policyDir string) (dir, dataJSON string) {
 }
 
 // MigrateV8InMemory is the gateway's read-only load of a config_version 8
-// file (spec 2.0): it returns the config_version 9 bytes the migration would
-// write, so the data.json admission and thresholds, the *_actions keys and,
+// file (spec 2.0): it returns config_version 9 bytes with the migrated
+// admission and thresholds, the *_actions keys and,
 // on a per-user install, the operator rows of audit.db keep applying until
 // the file is migrated. Nothing is written. raw comes back unchanged for a
 // config_version 9 file and on a Secure Client host, whose path does not
 // change; on a migration error it comes back unchanged with the error, and
-// the caller refuses the file (InMemoryMigrationError).
+// the caller refuses the file (InMemoryMigrationError). A custom 0.8.x rule
+// pack keeps its original path and pin here; the runtime rebases the loaded
+// pack in memory after verifying that pin.
 func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) ([]byte, error) {
 	if !NeedsMigrationV9(raw) {
 		return raw, nil

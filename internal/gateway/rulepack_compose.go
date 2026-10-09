@@ -141,6 +141,17 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 				scope, s.ref.Name, got, s.ref.Name)
 		}
 	}
+	// A read-only v8 load pins the original custom pack, then runs the same
+	// rebase as a committed migration in this generation. Keep the disk pin
+	// check above: an edited source pack still refuses the load.
+	if cfg.RuntimeV8RulePackRebase && s.ref.Name != "" {
+		if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; custom {
+			base, err = guardrail.RebaseLoadedRulePack(s.dir, base)
+			if err != nil {
+				return nil, fmt.Errorf("%s rule pack %q: rebase the 0.8.x pack in memory: %w", scope, s.dir, err)
+			}
+		}
+	}
 	notePackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
 	if len(s.layers) == 0 {
 		return base, nil

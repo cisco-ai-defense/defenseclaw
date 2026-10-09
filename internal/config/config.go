@@ -290,6 +290,9 @@ type Config struct {
 	// replacement (see internal/legacyconnector). The gateway logs them once
 	// per boot and finishes the host-side cleanup. Never serialized.
 	LegacyConnectorNotices []string `mapstructure:"-" yaml:"-"`
+	// RuntimeV8RulePackRebase applies the 0.8.x custom-pack rebase only to
+	// this read-only v8 runtime snapshot. The source pack remains on disk.
+	RuntimeV8RulePackRebase bool `mapstructure:"-" yaml:"-" json:"-"`
 
 	// LLM is the top-level unified LLM configuration. Every LLM-using
 	// component (guardrail, judge, mcp scanner, skill scanner, plugin
