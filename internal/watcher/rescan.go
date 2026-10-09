@@ -417,7 +417,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				for _, skill := range synced {
 					targets = append(targets, InstallEvent{
 						Type:      InstallSkill,
-						Name:      filepath.Base(skill),
+						Name:      w.assetEventName(skill),
 						Path:      skill,
 						Timestamp: time.Now().UTC(),
 					})
@@ -1632,7 +1632,7 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 	case InstallMCP:
 		return w.snapshotMCPServer(evt)
 	default:
-		path := addressablePath(evt.Path)
+		path := w.addressableAssetPath(evt.Path)
 		if w.admitsLinkedAsset(evt.Path) {
 			var err error
 			path, err = w.linkedAssetScanTarget(evt)
@@ -1712,7 +1712,7 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) (string, error) {
 		if w.admitsLinkedAsset(evt.Path) {
 			return w.linkedAssetScanTarget(evt)
 		}
-		return addressablePath(evt.Path), nil
+		return w.addressableAssetPath(evt.Path), nil
 	}
 	entry, err := w.lookupMCPServer(evt)
 	if err != nil {

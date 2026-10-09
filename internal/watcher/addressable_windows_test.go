@@ -40,22 +40,56 @@ func TestTrailingDotSkillFolderIsAdmitted(t *testing.T) {
 	}
 }
 
-// A trailing-dot asset must be moved using its addressable Windows path.
-func TestTrailingDotSkillCanBeQuarantined(t *testing.T) {
-	cfg, store, logger, skillDir := setupTestEnv(t)
-	path := filepath.Join(skillDir, "review.")
-	if err := os.Mkdir(addressablePath(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(addressablePath(path), "SKILL.md"), []byte("# review\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
-	evt := InstallEvent{Type: InstallSkill, Name: "review.", Path: path, Timestamp: time.Now()}
-	if err := w.quarantineAssetWith(context.Background(), evt, false, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(addressablePath(path)); !os.IsNotExist(err) {
-		t.Fatalf("source remains: %v", err)
+// A trailing-dot or trailing-space asset keeps its exact name through
+// quarantine and restore, even beside the normalized name.
+func TestTrailingWindowsNameCanBeQuarantinedAndRestored(t *testing.T) {
+	for _, name := range []string{"review.", "review "} {
+		t.Run(name, func(t *testing.T) {
+			cfg, store, logger, skillDir := setupTestEnv(t)
+			normal := filepath.Join(skillDir, "review")
+			if err := os.Mkdir(normal, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(skillDir, "review") + name[len("review"):]
+			if err := os.Mkdir(addressableStandalonePath(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(addressableStandalonePath(path), "SKILL.md"), []byte("# exact\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+			if !w.isDirectChildDir(path) || w.classifyEvent(path).Name != name {
+				t.Fatal("watcher lost the exact asset name")
+			}
+			evt := InstallEvent{Type: InstallSkill, Name: name, Path: path, Connector: "claudecode", Timestamp: time.Now()}
+			if err := w.quarantineAssetWith(context.Background(), evt, false, "test"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(addressableStandalonePath(path)); !os.IsNotExist(err) {
+				t.Fatalf("source remains: %v", err)
+			}
+			exact := filepath.Join(cfg.QuarantineDir, "skills", "claudecode", "review") + name[len("review"):]
+			if _, err := os.Lstat(addressableStandalonePath(exact)); err != nil {
+				t.Fatalf("exact quarantine name missing: %v", err)
+			}
+			normalized := filepath.Join(cfg.QuarantineDir, "skills", "claudecode", "review")
+			if _, err := os.Lstat(normalized); !os.IsNotExist(err) {
+				t.Fatalf("quarantine used normalized name: %v", err)
+			}
+			records, err := store.ListQuarantineRecordsForConnectorExact(context.Background(), "skill", name, "claudecode")
+			if err != nil || len(records) != 1 || records[0].TargetName != name ||
+				records[0].QuarantinePath != addressableStandalonePath(exact) {
+				t.Fatalf("quarantine provenance lost the exact name: records=%v err=%v", records, err)
+			}
+			if err := w.RestoreQuarantined(context.Background(), "skill", name, "claudecode", ""); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(addressableStandalonePath(path)); err != nil {
+				t.Fatalf("exact source was not restored: %v", err)
+			}
+			if _, err := os.Lstat(normal); err != nil {
+				t.Fatalf("normalized sibling changed: %v", err)
+			}
+		})
 	}
 }
