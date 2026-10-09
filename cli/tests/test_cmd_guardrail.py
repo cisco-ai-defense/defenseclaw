@@ -858,6 +858,16 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertIn("Claude Code (claudecode)", result.output)
         self.assertIn("Codex (codex)", result.output)
 
+    def test_global_enable_waits_for_enabled_peers_when_one_stays_disabled(self):
+        app = make_multi_ctx({"codex": None, "claudecode": None, "cursor": False}, enabled=False)
+        app.cfg.guardrail.model = "gpt-4o"
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart:
+            result = CliRunner().invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(restart.call_args.kwargs["wait_for_connector_ready"])
+        self.assertEqual(set(restart.call_args.kwargs["connectors"]), {"codex", "claudecode"})
+        self.assertIn("cursor", result.output)
+
     def test_status_roster_shows_disabled_state(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": False, "claudecode": None})

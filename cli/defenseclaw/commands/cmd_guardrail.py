@@ -1273,12 +1273,12 @@ def enable_cmd(
             app.cfg.data_dir,
             app.cfg.gateway.host,
             app.cfg.gateway.port,
-            connector=connector,
-            connectors=_actives,
+            connector=_set_up[0] if _set_up and connector in _kept_off else connector,
+            # Readiness covers the enabled roster only. A connector kept off
+            # must neither suppress checks for its peers nor become a wait target.
+            connectors=_set_up if _set_up else _actives,
             **({"summary_exclude": frozenset(_kept_off)} if _kept_off else {}),
-            # With every active connector being set up, report "setup
-            # complete" only once the gateway admitted them (GAP-0069).
-            wait_for_connector_ready=bool(_set_up) and not _kept_off,
+            wait_for_connector_ready=bool(_set_up),
         )
         if len(_set_up) > 1:
             ux.ok(
