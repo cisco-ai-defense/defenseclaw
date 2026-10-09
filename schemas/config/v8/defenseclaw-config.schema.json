@@ -4978,6 +4978,60 @@
               "$ref": "#/$defs/boundedString"
             }
           }
+        },
+        "tetragon": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Linux standalone only: use the Tetragon this host already runs. consume reads its events in the root sensor helper; observe also loads DefenseClaw's built-in kernel controls in monitor mode; enforce lets them deny once enforce_ack matches. macOS and Windows ignore it.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "off",
+                "consume",
+                "observe",
+                "enforce"
+              ]
+            },
+            "burn_in": {
+              "description": "Covered agent time each enrolled user needs before its uid is enforced: 0, or whole hours from 24h to 2160h. Default 168h.",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(0|[0-9]{1,4}h)$"
+                },
+                {
+                  "type": "integer",
+                  "const": 0
+                }
+              ]
+            },
+            "enforce_ack": {
+              "description": "The kernel_policy digests you approved for mode enforce: one digest, or a list of at most 4 while a ring upgrade runs two builds. Each is sha256: and 12 lowercase hex digits, as `enterprise linux tetragon verify --ready-for enforce` prints it.",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(|sha256:[0-9a-f]{12})$"
+                },
+                {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{12}$"
+                  }
+                }
+              ]
+            },
+            "customer_events": {
+              "description": "The kprobe and LSM events of your own Tetragon policies: agent (default) forwards those under an AI agent, attributed to the agent, the user and the hook decision; off only counts them. DefenseClaw never changes your policies.",
+              "type": "string",
+              "enum": [
+                "agent",
+                "off"
+              ]
+            }
+          }
         }
       }
     },

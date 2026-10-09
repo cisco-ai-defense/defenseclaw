@@ -20,7 +20,12 @@
 #   jamf            always exit 0; print <result>...</result> with the same
 #                   values. For Jamf Pro extension attributes.
 #
-# Usage: detect.sh [--min-version X.Y.Z] [--require-healthy] [--format exit|value|jamf]
+# --require-tetragon MODE (Linux only; consume, observe or enforce) also
+# requires `enterprise linux tetragon verify --ready-for MODE` to pass; a host
+# that is not ready reports "tetragon-not-ready:<first failing check>".
+#
+# Usage: detect.sh [--min-version X.Y.Z] [--require-healthy]
+#                  [--require-tetragon consume|observe|enforce] [--format exit|value|jamf]
 
 set -eu
 
@@ -29,6 +34,7 @@ DC_SCRIPT_OS=linux # linux | darwin - the only line that differs between the cop
 # ---- MDM settings (flags override) -------------------------------------------
 DC_MIN_VERSION=""       # detect only this version or newer
 DC_REQUIRE_HEALTHY=0    # 1: also require `verify` to pass
+DC_REQUIRE_TETRAGON=""  # consume | observe | enforce: also require Tetragon readiness (Linux)
 DC_FORMAT="exit"        # exit | value | jamf
 # ---- end of settings ---------------------------------------------------------
 
@@ -167,16 +173,50 @@ dc_report() { # <detected 0|1> <value> <reason>
     exit 1
 }
 
+# dc_first_failing_check <tetragon verify --json document>: the id of its
+# first failing check.
+dc_first_failing_check() {
+    printf '%s' "$1" | tr -d '\n' | awk '
+        BEGIN { RS = "\001" }
+        {
+            s = $0; id = ""
+            while (match(s, /"(id|status)"[ \t]*:[ \t]*"[^"]*"/)) {
+                n = split(substr(s, RSTART, RLENGTH), part, "\"")
+                s = substr(s, RSTART + RLENGTH)
+                if (part[2] == "id") id = part[4]
+                else if (part[4] == "fail" && id != "") { print id; exit }
+            }
+        }'
+}
+
+# dc_require_tetragon <gateway> <mode>: report the host not ready unless
+# `tetragon verify --ready-for <mode>` passes.
+dc_require_tetragon() {
+    readiness=$("$1" enterprise linux tetragon verify --ready-for "$2" --json 2>/dev/null </dev/null || true)
+    dc_json_true "$readiness" ready && return 0
+    check=$(dc_first_failing_check "$readiness")
+    dc_report 0 "tetragon-not-ready:${check:-unknown}" "not ready for Tetragon mode $2 (${check:-no readiness report}); run: sudo $1 enterprise linux tetragon verify --ready-for $2"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --min-version) DC_MIN_VERSION=${2:-}; shift 2 ;;
         --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
+        --require-tetragon) DC_REQUIRE_TETRAGON=${2:-}; shift 2 ;;
         --format) DC_FORMAT=${2:-}; shift 2 ;;
-        -h | --help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) printf 'defenseclaw detect: unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 case "$DC_FORMAT" in exit | value | jamf) ;; *) printf 'defenseclaw detect: --format must be exit, value or jamf\n' >&2; exit 2 ;; esac
+case "$DC_REQUIRE_TETRAGON" in
+    "" | consume | observe | enforce) ;;
+    *) printf 'defenseclaw detect: --require-tetragon must be consume, observe or enforce\n' >&2; exit 2 ;;
+esac
+if [ -n "$DC_REQUIRE_TETRAGON" ] && [ "$DC_SCRIPT_OS" != linux ]; then
+    printf 'defenseclaw detect: --require-tetragon is Linux only (Tetragon runs on Linux)\n' >&2
+    exit 2
+fi
 
 [ "$(dc_platform)" = "$DC_SCRIPT_OS" ] || dc_report 0 not-installed "this copy of detect.sh is for $DC_SCRIPT_OS"
 [ "$(id -u)" = 0 ] || dc_report 0 not-installed "run as root"
@@ -200,4 +240,5 @@ if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
     verify=$("$gateway" enterprise "$group" verify --json 2>/dev/null </dev/null || true)
     dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
 fi
+[ -z "$DC_REQUIRE_TETRAGON" ] || dc_require_tetragon "$gateway" "$DC_REQUIRE_TETRAGON"
 dc_report 1 "$version" ""

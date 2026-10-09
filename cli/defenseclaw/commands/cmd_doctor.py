@@ -1263,6 +1263,125 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
         )
 
 
+_SANDBOX_KERNEL_FEED_LABEL = "Sandbox kernel feed"
+_SANDBOX_KERNEL_FEED_CHECK_ID = "doctor.sandbox.kernel-feed"
+
+
+def _check_sandbox_kernel_feed(
+    cfg,
+    r: _DoctorResult,
+    *,
+    unit_path: str | None = None,
+    os_name: str | None = None,
+    binary: str | None = None,
+    run=subprocess.run,
+) -> None:
+    """The Sandbox kernel feed row: Linux, only when the root feed service is installed.
+
+    The feed is a root service an administrator installs with
+    ``sudo defenseclaw-gateway sandbox kernel-feed install``; this user's
+    upgrade cannot update it, so the row names the command when the feed runs
+    an older release or another protocol. It runs
+    ``defenseclaw-gateway sandbox kernel-feed status --json``, which reads the
+    unit, asks the installed helper its version and opens the feed's socket
+    only to read its header.
+    """
+    from defenseclaw.commands.cmd_uninstall import _SANDBOX_FEED_UNIT
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    openshell = getattr(cfg, "openshell", None)
+    if (os_name or host_os()) != "linux" or getattr(openshell, "enabled", False) is not True:
+        return
+    if not os.path.exists(unit_path or _SANDBOX_FEED_UNIT):
+        return
+    binary = binary or resolve_gateway_binary()
+    if not binary:
+        return  # The Sandbox section already reports the missing gateway.
+
+    def emit(tag: str, detail: str, reason_code: str = "", remediation: str = "") -> None:
+        _emit(
+            tag,
+            _SANDBOX_KERNEL_FEED_LABEL,
+            detail,
+            r=r,
+            check_id=_SANDBOX_KERNEL_FEED_CHECK_ID,
+            reason_code=reason_code,
+            remediation=remediation,
+        )
+
+    try:
+        proc = run(
+            [binary, "sandbox", "kernel-feed", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        report = json.loads(proc.stdout or "")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        report = None
+    if not isinstance(report, dict):
+        emit(
+            "warn",
+            "installed, but `sandbox kernel-feed status` gave no report",
+            "kernel-feed-status-unavailable",
+            "run `defenseclaw sandbox kernel-feed status` for the details",
+        )
+        return
+    install = str(report.get("install_command") or "").strip()
+    build = str(report.get("build") or report.get("version") or "unknown").strip()
+    if report.get("update_needed"):
+        emit(
+            "warn",
+            f"the feed runs {build}, protocol {report.get('protocol') or 'unknown'}; "
+            f"this gateway is {report.get('gateway_version') or 'dev'}, protocol {report.get('gateway_protocol')}",
+            "kernel-feed-update",
+            f"update it with `{install or 'sudo defenseclaw-gateway sandbox kernel-feed install'}`",
+        )
+        return
+    reason = str(report.get("reason") or "").strip()
+    if report.get("reachable"):
+        tetragon = str(report.get("tetragon") or "unknown").strip()
+        if report.get("tetragon_reason"):
+            tetragon += f" ({report.get('tetragon_reason')})"
+        detail = f"build {build}, protocol {report.get('protocol')}; its Tetragon stream is {tetragon}"
+        if str(report.get("tetragon") or "").strip() != "connected":
+            # The feed answers but has nothing to send: sandbox ps falls back to
+            # the sample, so the row says so too (GAP-0086).
+            emit(
+                "warn",
+                detail,
+                "kernel-feed-tetragon-unavailable",
+                "ask the administrator to check Tetragon (`sudo systemctl status tetragon`); "
+                "the feed reconnects by itself, and sandbox process trees use the 5-second sample until then",
+            )
+            return
+        emit("pass", detail)
+        return
+    if reason == "kernel_feed_not_permitted":
+        emit(
+            "skip",
+            "installed; this account cannot read it (members of the docker group can), "
+            "so sandbox process trees use the 5-second sample",
+            "kernel-feed-not-permitted",
+        )
+        return
+    active = str(report.get("active") or "unknown").strip()
+    # A stopped feed gets the command that starts it (GAP-0091).
+    next_step = (
+        "run `sudo systemctl status defenseclaw-sandbox-feed.service`"
+        if active == "active"
+        else "start it with `sudo systemctl restart defenseclaw-sandbox-feed.service`"
+    )
+    emit(
+        "warn",
+        f"installed ({active}), but not answering: {reason or 'unknown'}",
+        "kernel-feed-unavailable",
+        f"{next_step}; sandbox process trees use the 5-second sample until it answers",
+    )
+
+
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError, inspect_v8_config
@@ -2987,6 +3106,80 @@ def _guardrail_health_mode(details: dict) -> str:
     if mode == "action" and surface and details.get("enforcement_enabled") is True:
         return f"mode={mode}, {surface}"
     return f"mode={mode}"
+
+
+_TETRAGON_INFO_PATH = "/var/run/tetragon/tetragon-info.json"
+_KERNEL_SENSOR_LABEL = "Kernel sensor (Tetragon)"
+_KERNEL_SENSOR_CHECK_ID = "doctor.runtime.tetragon"
+
+#: The restart every Tetragon change needs, with what it costs: a restart
+#: drops the policies added with ``tetra`` (``tetragon.tp.d`` policies reload).
+_TETRAGON_RESTART = (
+    "`sudo systemctl restart tetragon` (this drops policies added with tetra; tetragon.tp.d policies reload)"
+)
+
+
+def _read_tetragon_info(path: str) -> dict | None:
+    """Tetragon's world-readable discovery file: None when absent, {} when unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _check_kernel_sensor(
+    r: _DoctorResult,
+    *,
+    info_path: str = _TETRAGON_INFO_PATH,
+    os_name: str | None = None,
+) -> None:
+    """The Kernel sensor (Tetragon) row of a per-user install: Linux, only where Tetragon runs.
+
+    A per-user install never connects to Tetragon (its socket is root-only and
+    grants kernel policy control), so the row says so, and warns when Tetragon
+    serves its API on TCP, which any local account can use. It reads only
+    Tetragon's world-readable info file: it never opens the socket and runs no
+    binary. The managed sensor helper's Tetragon state is shown by the Go
+    commands (``enterprise linux discovery``, ``enterprise linux tetragon
+    status``, ``defenseclaw-gateway status``): the enterprise packages ship no
+    Python CLI in this release.
+    """
+    from defenseclaw.platform_support import host_os
+
+    if (os_name or host_os()) != "linux":
+        return
+    info = _read_tetragon_info(info_path)
+    if info is None:
+        return
+    address = str(info.get("server_address") or "").strip()
+    if address and not address.startswith("unix://"):
+        _emit(
+            "warn",
+            _KERNEL_SENSOR_LABEL,
+            f"Tetragon serves its API on {address}: any local account can load kernel policies; "
+            "set server-address to a unix socket",
+            r=r,
+            check_id=_KERNEL_SENSOR_CHECK_ID,
+            reason_code="tetragon-tcp-api",
+            remediation=(
+                "Run `echo unix:///var/run/tetragon/tetragon.sock | sudo tee "
+                f"/etc/tetragon/tetragon.conf.d/server-address`, then {_TETRAGON_RESTART}"
+            ),
+        )
+        return
+    _emit(
+        "skip",
+        _KERNEL_SENSOR_LABEL,
+        "Tetragon detected. Per-user DefenseClaw does not use it: its socket is root-only and grants "
+        "kernel policy control. The enterprise package's sensor helper can.",
+        r=r,
+        check_id=_KERNEL_SENSOR_CHECK_ID,
+        reason_code="tetragon-not-used-per-user",
+    )
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
@@ -10970,6 +11163,7 @@ def doctor(
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
     _check_openclaw_transport_advisory(cfg, r)
+    _check_kernel_sensor(r)
     if not json_out:
         _doctor_subsection("Credentials")
     r.set_section("credentials")
@@ -10994,6 +11188,7 @@ def doctor(
         _doctor_subsection("Sandbox")
     r.set_section("sandbox")
     _check_sandbox(cfg, r)
+    _check_sandbox_kernel_feed(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
     # The registry at internal/envvars/registry.json is the single

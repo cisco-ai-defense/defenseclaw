@@ -8,6 +8,7 @@
     "---Standalone profile---",
     "windows",
     "linux",
+    "tetragon",
     "macos",
     "mdm",
     "configuration",

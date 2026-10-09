@@ -239,6 +239,11 @@ Watch these on every ring:
   A host with another digest has not applied the change, or runs another
   config.
 
+On Linux computers that run Tetragon, the kernel controls follow the same
+rings: `observe` on the pilot, then `enforce` ring by ring once users finish
+their burn-in. Approve the controls once per release and enforce per user per
+computer; see [Tetragon on a Linux fleet](/docs/enterprise/tetragon#step-4-approve-and-enforce-ring-by-ring).
+
 Two Windows cases keep `security_complete` at `false` on a healthy install:
 
 - Windows requires at least one of Codex, Claude Code, or Cursor to be turned

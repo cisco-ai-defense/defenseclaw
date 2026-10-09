@@ -443,7 +443,8 @@ dev-pycli: pycli
 # Protobuf regeneration
 # ---------------------------------------------------------------------------
 # `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
-# Client) contract and the private semantic guardrail facts.
+# Client) contract, the private semantic guardrail facts and the vendored
+# Tetragon API (third_party/tetragon).
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
@@ -454,6 +455,16 @@ PROTO_TOOLS_DIR := $(CURDIR)/.tools
 PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
 PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
+# The Tetragon gRPC API (cilium/tetragon api/v1.7.1, Apache-2.0), vendored
+# unmodified under third_party/tetragon for the Linux sensor helper. The
+# upstream go_package is remapped so no github.com/cilium/tetragon module is
+# imported; see third_party/tetragon/README.md for the provenance checks.
+TETRAGON_PROTO_PKG := github.com/defenseclaw/defenseclaw/third_party/tetragon/api/v1/tetragon
+TETRAGON_PROTOS := tetragon/bpf.proto tetragon/capabilities.proto tetragon/events.proto \
+	tetragon/sensors.proto tetragon/tetragon.proto
+TETRAGON_PROTO_M := $(foreach p,$(TETRAGON_PROTOS),M$(p)=$(TETRAGON_PROTO_PKG))
+TETRAGON_PROTO_STUBS := $(addprefix third_party/tetragon/api/v1/,$(TETRAGON_PROTOS:.proto=.pb.go)) \
+	third_party/tetragon/api/v1/tetragon/sensors_grpc.pb.go
 
 proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
@@ -469,17 +480,23 @@ proto: proto-tools
 	@cd internal/guardrail/semanticpb && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
 		--go_out=. --go_opt=paths=source_relative \
 		facts.proto
+	@cd third_party/tetragon/api/v1 && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative $(addprefix --go_opt=,$(TETRAGON_PROTO_M)) \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative $(addprefix --go-grpc_opt=,$(TETRAGON_PROTO_M)) \
+		$(TETRAGON_PROTOS)
 	@echo "Regenerated committed Go protobuf stubs"
 
 proto-check: proto
 	@git ls-files --error-unmatch -- \
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
-		internal/guardrail/semanticpb/facts.pb.go >/dev/null
+		internal/guardrail/semanticpb/facts.pb.go \
+		$(TETRAGON_PROTO_STUBS) >/dev/null
 	@git diff --exit-code -- \
 		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
-		internal/guardrail/semanticpb/facts.pb.go
+		internal/guardrail/semanticpb/facts.pb.go \
+		$(TETRAGON_PROTO_STUBS)
 
 gateway: _checkout-write-preflight sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw

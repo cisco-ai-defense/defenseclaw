@@ -1502,7 +1502,7 @@
       "id": 32,
       "type": "timeseries",
       "title": "Process starts",
-      "description": "Processes that joined a sandbox's process tree, by how they were seen (sample = the 5 s /proc sample, ocsf = OpenShell's launch record). Empty unless the sandbox's process tree is on; it is off in every built-in pack. Sampling misses processes that start and end between two samples.",
+      "description": "Processes that joined a sandbox's process tree, by how they were seen (sample = the 5 s /proc sample, ocsf = OpenShell's launch record, tetragon = an exec Tetragon reported through the sandbox kernel feed on a Linux docker host). Empty unless the sandbox's process tree is on; it is off in every built-in pack. Without the kernel feed, sampling misses processes that start and end between two samples.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"

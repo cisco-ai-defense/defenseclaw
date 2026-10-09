@@ -217,6 +217,11 @@ and Python 3.10-3.13 from python.org.
   </Folder>
 </Files>
 
+On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper`. Only the
+opt-in [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon) uses
+it, and `defenseclaw uninstall --binaries` removes it with the rest. macOS
+installs do not keep it.
+
 `config.yaml`, `config.generation.json` (the record of the last config write),
 `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`,
 and the hook scripts by setting up an agent. Only `config.yaml` is policy: the

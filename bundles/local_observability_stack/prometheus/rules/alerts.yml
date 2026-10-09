@@ -440,3 +440,91 @@ groups:
             and reason is regressing. Common causes: permission errors on
             `/proc` walks, malformed package manifests, or a workspace
             root that has grown beyond `ai_discovery.max_files_per_scan`.
+
+  - name: defenseclaw.kernel
+    rules:
+      # DefenseClaw's kernel controls on managed Linux hosts that run
+      # Tetragon, and the host's own Tetragon policies' events from AI
+      # agents. defenseclaw_kernel_events_total counts what the gateway
+      # recorded; defenseclaw_kernel_state is one series per host (value 1,
+      # the previous state's series set to 0 when it changes).
+      - alert: DefenseClawKernelDenials
+        expr: sum by (host_name) (increase(defenseclaw_kernel_events_total{owner="defenseclaw", outcome="blocked"}[10m])) > 0
+        for: 0m
+        labels:
+          severity: info
+          surface: kernel
+        annotations:
+          summary: "DefenseClaw's kernel controls denied an agent's access on {{ $labels.host_name }}"
+          description: |
+            A kernel control returned EPERM to an enrolled agent's process:
+            a read of an SSH private key or a write to a shell startup or
+            autostart file. The agent was told in its next post-tool hook
+            answer. Open AI Discovery Runtime Planes -> "Kernel denials by
+            control and connector", or Blocked Events -> "Kernel denials by
+            control, connector, user and process".
+
+      - alert: DefenseClawKernelAckStale
+        expr: max by (host_name) (defenseclaw_kernel_state{approval="stale"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+          surface: kernel
+        annotations:
+          summary: "enforce_ack does not approve this build's kernel controls on {{ $labels.host_name }}"
+          description: |
+            The host runs mode enforce, but enforce_ack lists no digest of the
+            control set this build ships (a release changed a control), so
+            every user there is in monitor. Review
+            `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status`
+            on the host and approve the new digest in the admin config, or
+            list both digests while the ring upgrades. Open AI Discovery
+            Runtime Planes -> "Hosts with a stale approval" and "Kernel
+            controls per host (last 10 minutes)".
+
+      - alert: DefenseClawKernelPausedLong
+        expr: max by (host_name) (defenseclaw_kernel_state{paused="true"}) > 0
+        for: 8h
+        labels:
+          severity: info
+          surface: kernel
+        annotations:
+          summary: "Kernel enforcement paused for over 8h on {{ $labels.host_name }}"
+          description: |
+            The host-wide break-glass pause has held for eight hours: every
+            user on the host is in monitor. Resume it with
+            `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon resume`
+            once the incident is over. Open AI Discovery Runtime Planes ->
+            "Paused hosts".
+
+      - alert: DefenseClawTetragonFallback
+        expr: max by (host_name) (defenseclaw_kernel_state{backend="native", tetragon_installed="true", helper_mode!="off"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+          surface: kernel
+        annotations:
+          summary: "Tetragon is installed but Plane C runs on the native backend on {{ $labels.host_name }}"
+          description: |
+            The sensor helper cannot use the host's Tetragon (not running, an
+            unsupported version, a TCP or untrusted API endpoint), so Plane C
+            fell back to cn_proc and fanotify and no kernel control is
+            enforced there. Run
+            `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status`
+            on the host for the reason. Open AI Discovery Runtime Planes ->
+            "Hosts on fallback" and "Plane C source — which backend, and what
+            it lost".
+
+      - alert: DefenseClawCustomerPolicyBlocksAgents
+        expr: sum by (host_name) (increase(defenseclaw_kernel_events_total{owner="customer", outcome="blocked"}[10m])) > 0
+        for: 0m
+        labels:
+          severity: info
+          surface: kernel
+        annotations:
+          summary: "Your Tetragon policies blocked an AI agent's process on {{ $labels.host_name }}"
+          description: |
+            One of the organization's own Tetragon policies denied a call of a
+            process below an AI agent. DefenseClaw reads those policies'
+            events and never changes the policies. Open AI Discovery Runtime
+            Planes -> "Your Tetragon policies: events from AI agents".

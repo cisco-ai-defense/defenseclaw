@@ -353,6 +353,40 @@ with a redacted placeholder, or replace an unparseable URL with a safe placehold
 These transformations apply only to logs, telemetry, and audit projections; they
 do not rewrite an upstream request.
 
+## Process command lines
+
+A process's command line is content. Before it leaves the process that read it,
+DefenseClaw removes the secrets from it, and the destination's profile then
+applies to the result as it does to every other content field. One
+implementation does this for the sandbox process tree, for the managed Linux
+sensor helper (every command line it reads from Tetragon or from the `cn_proc`
+fallback) and for the sandbox kernel feed. Running it again over a line that
+was already redacted changes nothing.
+
+It replaces the value, and keeps the flag or key, in these shapes:
+
+- an argument that names a secret and carries it (`--token=...`,
+  `api_key=...`, `--password value`), where the name contains `token`,
+  `secret`, `password`, `api key`, `auth`, `credential` or `private key`;
+- a header: the value after `Authorization:` (the scheme word, such as
+  `Bearer` or `Basic`, stays) or after a header whose name is one of those, whether it is a
+  separate argument, joined by `=` (`--header=X-Api-Key: ...`) or quoted;
+- the password of `user:password` after `curl -u`, `--user` and
+  `--proxy-user`, and a MySQL client's attached `-pPASSWORD`;
+- the password in a URL (`scheme://user:password@host`);
+- a bare argument shaped like a key: 32 or more letters, digits and key
+  punctuation, with both letters and digits, and no slash;
+- the words of a script or `eval` argument, checked the same way, including a
+  script nested in another one and quoted values that contain spaces.
+
+A Codex notify program keeps only its program words: its last argument is the
+agent turn's JSON, the user's prompt and the agent's reply, and it is replaced
+by `[argv withheld: agent turn payload]`.
+
+Redaction placeholders look like `<redacted len=23 prefix="d" sha=5f84a2a8>`.
+Text next to a placeholder in the same word goes through the same rules, so a
+placeholder-shaped string cannot carry a secret past them.
+
 ## Multiple destinations
 
 Redaction is resolved independently for each matching destination. It never mutates

@@ -144,6 +144,9 @@ type lifecycle struct {
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
+	// kernelRemoved are the Tetragon policies an uninstall removed, for its
+	// summary.
+	kernelRemoved []string
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1129,6 +1132,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
+		l.noteTetragonRestart(ctx, p, changed)
 	} else {
 		for _, unit := range units {
 			if unit.Activate {
@@ -1547,10 +1551,13 @@ const keptSnapshotAdvice = "the previous deployment could not be fully restored;
 // the transaction enabled are disabled again, everything is stopped, the
 // snapshot is restored and what was running and enabled before is started
 // and enabled again. With restoreFirst the files are put back before any
-// service is touched (linking and renaming are safe while the services
-// run), and a restore that fails returns without stopping or starting
-// anything. restored is false when any file could not be put back; the
-// snapshot must then be kept for a retry.
+// other service is touched (linking and renaming are safe while the
+// services run), and a restore that fails returns without stopping or
+// starting anything else. Only a sensor helper that recorded Tetragon
+// policies stops first, so its policies are retired with the binary that
+// loaded them and never under it; it starts again when the restore fails.
+// restored is false when any file could not be put back; the snapshot must
+// then be kept for a retry.
 func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeStart func()) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
@@ -1570,8 +1577,31 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 			}
 		}
 	}
+	// The Tetragon policies the transaction's helper loaded go with that
+	// helper, before the snapshot puts the previous one back (once), and
+	// never while it runs: a running helper reads their disappearance as an
+	// operator's deletion and does not load them again until the intent
+	// changes.
+	retired := false
+	retire := func() {
+		if !retired {
+			retired = true
+			l.retireRolledBackKernelPolicies(ctx)
+		}
+	}
 	if restoreFirst {
+		// Only the helper stops before the files go back. When they cannot,
+		// it starts again and manages its own policies as before.
+		helper, stopped, safe := l.stopHelperHoldingKernelPolicies(ctx)
+		if safe {
+			retire()
+		}
 		if err := env.restoreFiles(snap); err != nil {
+			if stopped {
+				if startErr := env.Services.Start(ctx, helper); startErr != nil {
+					err = errors.Join(err, startErr)
+				}
+			}
 			return false, errors.Join(append(disableErrs, err)...)
 		}
 	}
@@ -1590,6 +1620,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 		_ = env.Services.Stop(ctx, unit)
 	}
+	// The helper is stopped now; the restored helper loads its own policies
+	// again if it manages any.
+	retire()
 	restoreErr := env.restore(snap)
 	if beforeStart != nil {
 		beforeStart()
@@ -1685,10 +1718,10 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 		}
 		return true
 	}
-	// The files go back before any service is touched: a restore that
-	// still fails (the disk is still full) then leaves the running services
-	// alone instead of stopping and restarting the gateway on every apply
-	// trigger, MDM ensure or package postinstall until it succeeds.
+	// The files go back before any other service is touched: a restore
+	// that still fails (the disk is still full) then leaves the running
+	// services alone instead of stopping and restarting the gateway on every
+	// apply trigger, MDM ensure or package postinstall until it succeeds.
 	restored, err := l.rollback(ctx, snap, pending, true, nil)
 	switch {
 	case !restored:
@@ -1882,7 +1915,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			stopUnit(unit)
 		}
 	}
+	// The sensor helper is stopped. The Tetragon policies it loaded outlive
+	// it and would keep enforcing with frozen anchors: remove them with the
+	// binary that loaded them, before any binary or state goes.
+	l.kernelRemoved = l.retireKernelPolicies(ctx)
 	if perUserLeft {
+		if len(l.kernelRemoved) > 0 {
+			r.Changes = append(r.Changes, kernelPolicyChange(l.kernelRemoved))
+		}
 		disableKeptDefinitions()
 		// Some users' agents still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
@@ -2013,6 +2053,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				errs = append(errs, err)
 			}
 		}
+		// The sensor helper's Tetragon state (burn-in, pause, the record of
+		// loaded policies), unless it still names policies that may be
+		// loaded: a helper installed later retires them from that record.
+		if err := env.removeSensorState(); err != nil {
+			errs = append(errs, err)
+		}
 		if !packageManaged {
 			if err := os.RemoveAll(env.P(env.Layout.InstallRoot)); err != nil {
 				errs = append(errs, err)
@@ -2066,6 +2112,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
 	}
 	lines := []string{removed}
+	if len(l.kernelRemoved) > 0 {
+		lines = append(lines, kernelPolicyChange(l.kernelRemoved))
+	}
 	if l.perUserRemoved > 0 {
 		lines = append(lines, fmt.Sprintf("removed %d DefenseClaw per-user hook registrations from the enrolled accounts", l.perUserRemoved))
 	}

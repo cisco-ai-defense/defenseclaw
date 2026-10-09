@@ -318,6 +318,41 @@
     ]
   },
   {
+    "path": "sandbox kernel-feed",
+    "use": "kernel-feed",
+    "short": "Feed Tetragon's exec records into your docker sandboxes' process trees (Linux, a root service)",
+    "long": "The sandbox kernel feed is a small root service for a Linux host whose administrator runs\nTetragon: it reads Tetragon's exec and exit records of the processes in OpenShell docker sandboxes\nand streams each sandbox's to its owner's DefenseClaw gateway, which adds them to the sandbox's\nprocess tree (sandbox run --process-tree): processes that live for milliseconds are recorded too.\nIt only reads Tetragon (never a policy call), serves members of the docker group, and gives each\nof them only their own sandboxes' records; docker-group members can already see every container,\nso that filter is a courtesy, not a boundary: one of them can also add process records, real or made up,\nto another account's sandbox tree. Without it the tree is the 5 s sample, as before."
+  },
+  {
+    "path": "sandbox kernel-feed install",
+    "use": "install",
+    "short": "Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon)",
+    "long": "Copies the defenseclaw-sensor-helper of this install to /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper,\nchecks that this host's Tetragon serves a root-owned unix socket (never a TCP address) and that Docker\nanswers, then writes and starts defenseclaw-sandbox-feed.service. Run it again after an upgrade to update\nthe feed. Refused on a managed host, where sandboxes are not supported."
+  },
+  {
+    "path": "sandbox kernel-feed status",
+    "use": "status",
+    "short": "Show whether the sandbox kernel feed is installed, running and matches this gateway",
+    "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
+    "path": "sandbox kernel-feed uninstall",
+    "use": "uninstall",
+    "short": "Stop and remove the sandbox kernel feed service (as root)"
+  },
+  {
     "path": "sandbox list",
     "use": "list",
     "short": "List sandboxes",

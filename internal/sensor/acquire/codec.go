@@ -117,6 +117,37 @@ type wireEvent struct {
 	Detail         string `json:"detail,omitempty"`
 	User           string `json:"user,omitempty"`
 	AtUnixNano     int64  `json:"at_unix_ns,omitempty"`
+	// The Tetragon fields. Every one is omitempty, so a gateway that
+	// predates them ignores them and a helper that predates them simply
+	// never sends them; protocolVersion is unchanged.
+	Exe          string `json:"exe,omitempty"`
+	UID          *int   `json:"uid,omitempty"`
+	AUID         *int   `json:"auid,omitempty"`
+	ExecID       string `json:"exec_id,omitempty"`
+	ParentExecID string `json:"parent_exec_id,omitempty"`
+	StartNS      int64  `json:"start_ns,omitempty"`
+	ContainerID  string `json:"container_id,omitempty"`
+	Source       string `json:"source,omitempty"`
+	Policy       string `json:"policy,omitempty"`
+	Outcome      string `json:"outcome,omitempty"`
+	Control      string `json:"control,omitempty"`
+	Remote       string `json:"remote,omitempty"`
+	Self         bool   `json:"self,omitempty"`
+	Hook         string `json:"hook,omitempty"`
+	HookTools    int    `json:"hook_tools,omitempty"`
+	// The fields of an event of a Tetragon policy (plane.Event), omitempty
+	// like the ones above. An event of the host's own policies travels in an
+	// eventStreamFrame's policy_event member, which a gateway that predates
+	// it skips.
+	PolicyOwner    string   `json:"policy_owner,omitempty"`
+	KernelHookType string   `json:"kernel_hook_type,omitempty"`
+	KernelFunction string   `json:"kernel_function,omitempty"`
+	KernelAction   string   `json:"kernel_action,omitempty"`
+	PolicyMode     string   `json:"policy_mode,omitempty"`
+	PolicyTags     []string `json:"policy_tags,omitempty"`
+	PolicyMessage  string   `json:"policy_message,omitempty"`
+	Target         string   `json:"target,omitempty"`
+	Count          int      `json:"count,omitempty"`
 }
 
 func encodeEvent(event plane.Event) wireEvent {
@@ -125,6 +156,14 @@ func encodeEvent(event plane.Event) wireEvent {
 		ResponsiblePID: event.ResponsiblePID, Name: event.Name,
 		Cmdline: event.Cmdline, Path: event.Path, Detail: event.Detail,
 		User: event.User,
+		Exe:  event.Exe, UID: copyInt(event.UID), AUID: copyInt(event.AUID),
+		ExecID: event.ExecID, ParentExecID: event.ParentExecID, StartNS: event.StartNS,
+		ContainerID: event.ContainerID, Source: string(event.Source),
+		Policy: event.Policy, Outcome: string(event.Outcome), Control: event.Control, Remote: event.Remote,
+		Self: event.Self, Hook: string(event.Hook), HookTools: event.HookTools,
+		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
+		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
+		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 	}
 	if !event.At.IsZero() {
 		out.AtUnixNano = event.At.UnixNano()
@@ -138,6 +177,14 @@ func decodeEvent(event wireEvent) plane.Event {
 		ResponsiblePID: event.ResponsiblePID, Name: event.Name,
 		Cmdline: event.Cmdline, Path: event.Path, Detail: event.Detail,
 		User: event.User,
+		Exe:  event.Exe, UID: copyInt(event.UID), AUID: copyInt(event.AUID),
+		ExecID: event.ExecID, ParentExecID: event.ParentExecID, StartNS: event.StartNS,
+		ContainerID: event.ContainerID, Source: plane.EventSource(event.Source),
+		Policy: event.Policy, Outcome: plane.KernelOutcome(event.Outcome), Control: event.Control, Remote: event.Remote,
+		Self: event.Self, Hook: plane.HookMark(event.Hook), HookTools: event.HookTools,
+		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
+		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
+		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 	}
 	if event.AtUnixNano != 0 {
 		out.At = time.Unix(0, event.AtUnixNano)
@@ -145,11 +192,49 @@ func decodeEvent(event wireEvent) plane.Event {
 	return out
 }
 
+// copyInt keeps a decoded event from aliasing the value it was built from.
+func copyInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+// copyStrings is copyInt for a list.
+func copyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
 type wireCoverage struct {
-	Mechanism    string   `json:"mechanism,omitempty"`
-	Kinds        []string `json:"kinds,omitempty"`
-	MissingKinds []string `json:"missing_kinds,omitempty"`
-	Limitations  []string `json:"limitations,omitempty"`
+	Mechanism    string       `json:"mechanism,omitempty"`
+	Kinds        []string     `json:"kinds,omitempty"`
+	MissingKinds []string     `json:"missing_kinds,omitempty"`
+	Limitations  []string     `json:"limitations,omitempty"`
+	Backend      *wireBackend `json:"backend,omitempty"`
+}
+
+// wireBackend is plane.Backend on the wire (omitempty, like the Tetragon
+// event fields).
+type wireBackend struct {
+	Kind           string              `json:"kind"`
+	Version        string              `json:"version,omitempty"`
+	Mode           string              `json:"mode,omitempty"`
+	Socket         string              `json:"socket,omitempty"`
+	EventsLost     int64               `json:"events_lost,omitempty"`
+	LossKnown      bool                `json:"loss_known,omitempty"`
+	FallbackReason string              `json:"fallback_reason,omitempty"`
+	Policies       []wireBackendPolicy `json:"policies,omitempty"`
+}
+
+type wireBackendPolicy struct {
+	Name  string `json:"name"`
+	Mode  string `json:"mode,omitempty"`
+	State string `json:"state,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 func encodeCoverage(coverage plane.Coverage) wireCoverage {
@@ -159,6 +244,16 @@ func encodeCoverage(coverage plane.Coverage) wireCoverage {
 	}
 	for _, kind := range coverage.MissingKinds {
 		out.MissingKinds = append(out.MissingKinds, string(kind))
+	}
+	if backend := coverage.Backend; backend != nil {
+		wire := &wireBackend{
+			Kind: backend.Kind, Version: backend.Version, Mode: backend.Mode, Socket: backend.Socket,
+			EventsLost: backend.EventsLost, LossKnown: backend.LossKnown, FallbackReason: backend.FallbackReason,
+		}
+		for _, policy := range backend.Policies {
+			wire.Policies = append(wire.Policies, wireBackendPolicy(policy))
+		}
+		out.Backend = wire
 	}
 	return out
 }
@@ -170,6 +265,16 @@ func decodeCoverage(coverage wireCoverage) plane.Coverage {
 	}
 	for _, kind := range coverage.MissingKinds {
 		out.MissingKinds = append(out.MissingKinds, plane.Kind(kind))
+	}
+	if wire := coverage.Backend; wire != nil {
+		backend := &plane.Backend{
+			Kind: wire.Kind, Version: wire.Version, Mode: wire.Mode, Socket: wire.Socket,
+			EventsLost: wire.EventsLost, LossKnown: wire.LossKnown, FallbackReason: wire.FallbackReason,
+		}
+		for _, policy := range wire.Policies {
+			backend.Policies = append(backend.Policies, plane.BackendPolicy(policy))
+		}
+		out.Backend = backend
 	}
 	return out
 }

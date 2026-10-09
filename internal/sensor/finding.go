@@ -31,9 +31,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
 // Finding is one scored runtime observation about one process.
@@ -59,6 +62,149 @@ type Finding struct {
 	Correlation correlate.Result
 	FirstSeen   time.Time
 	LastSeen    time.Time
+
+	// The fields below are set on host-plane findings only.
+
+	// Exe is the agent root's resolved executable path, when the backend
+	// reported one.
+	Exe string
+	// UID and AUID are the agent root's kernel uid and audit login uid; nil
+	// is "not observed". A record's user.id is the uid, never the login uid.
+	UID  *int
+	AUID *int
+	// Connector is the CLI connector the agent root is ("claudecode"), ""
+	// for a root recognised only by heuristics or hosted in an IDE.
+	Connector string
+	// NotEnforcedReason is why no kernel control can ever anchor this root:
+	// tactics.RootIDEHosted or tactics.RootHeuristic. It is "" for a CLI
+	// connector, whose enforcing scope the sensor helper decides from
+	// enrollment; the attribution itself is the same either way.
+	NotEnforcedReason string
+	// Activities is the per-tactic detail of the session, in chain order.
+	Activities []RuntimeActivity
+}
+
+// RuntimeActivity is what the host plane knows about one tactic of an agent
+// session beyond its score: which backend saw it, which process identity did
+// it, what a DefenseClaw kernel control did about it, and whether a managed
+// hook decision covered the tool call it came from.
+type RuntimeActivity struct {
+	Tactic tactics.Tactic
+	// Source is the backend of the latest observation (tetragon, cn_proc,
+	// fanotify, ...); "" when the backend does not say.
+	Source plane.EventSource
+	// UID, AUID and User are the observed process's, from its latest
+	// observation.
+	UID  *int
+	AUID *int
+	User string
+	// Outcome is the strongest kernel outcome seen for the tactic (blocked,
+	// then would_block, then observed); "" when no DefenseClaw kernel policy
+	// reported it. Control is the control of that outcome.
+	Outcome plane.KernelOutcome
+	Control string
+	// Hook is the hook join of the tool call the activity came from. nil
+	// when it does not apply: not a managed host, the agent root acting
+	// itself, or a tool call that started before the gateway was watching.
+	Hook *HookJoin
+}
+
+// Hook-join confidences.
+const (
+	// HookJoinExact is a tool call whose shell command hashed equal to the
+	// command of a managed hook decision for the same agent.
+	HookJoinExact = "exact"
+	// HookJoinTemporal is a tool call matched to a decision of the same agent
+	// by time only.
+	HookJoinTemporal = "temporal"
+)
+
+// HookJoin labels a tool call with the managed hook decision that covered
+// it. The join only labels; it never blocks.
+type HookJoin struct {
+	// Seen is false when no hook decision matched: agent activity without a
+	// hook decision (Claude's ! mode, a nohup job, an MCP server).
+	Seen bool
+	// Confidence is HookJoinExact or HookJoinTemporal when Seen.
+	Confidence string
+	// Connector, SessionID and ToolInvocationID are the joined decision's.
+	Connector        string
+	SessionID        string
+	ToolInvocationID string
+	// Action is the joined decision's verdict (allow, or alert for one that
+	// let the tool run with a finding) and RuleIDs its first rule ids (at
+	// most MaxHookRuleIDs), so a record can say the hook allowed a tool call
+	// (rule X alerted) that a kernel policy then denied.
+	Action  string
+	RuleIDs []string
+}
+
+// MaxHookRuleIDs bounds the rule ids a hook join carries.
+const MaxHookRuleIDs = 3
+
+// Kernel control rule ids: the guardrail rules each built-in kernel control
+// enforces at the kernel, so a kernel denial joins the hook record of the
+// same intent.
+var kernelControlRules = map[string]string{
+	"kernel.ssh_private_key_read": "PATH-SSH-KEY",
+	"kernel.persistence_write":    "persistence.shell_profile_write",
+}
+
+// KernelControlRuleID is the guardrail rule id of a kernel control, or "".
+func KernelControlRuleID(control string) string { return kernelControlRules[control] }
+
+// KernelEvent is one access a DefenseClaw kernel control decided: denied
+// (blocked) or, with its policy in monitor mode, counted (would_block).
+// Container processes are never in a control's scope and never appear.
+type KernelEvent struct {
+	At      time.Time
+	Outcome plane.KernelOutcome
+	Control string
+	// RuleID is KernelControlRuleID(Control).
+	RuleID string
+	// Policy is the Tetragon policy name.
+	Policy string
+	Kind   plane.Kind
+	// Path is the file the process opened.
+	Path    string
+	PID     int
+	ExecID  string
+	Process string
+	Exe     string
+	UID     *int
+	AUID    *int
+	User    string
+	// AgentName, RootPID and Connector are the gateway's attribution of the
+	// process; empty when its lineage reaches no agent the gateway knows
+	// (the helper's anchors decide the kernel's scope, not this).
+	AgentName string
+	RootPID   int
+	Connector string
+	Hook      *HookJoin
+}
+
+// KernelState is what the managed Linux sensor helper last said about its
+// kernel policies (the kernel_status op).
+type KernelState struct {
+	// Status is the helper's last answer.
+	Status acquire.KernelStatus
+	// FetchedAt is when Status was read.
+	FetchedAt time.Time
+	// Reachable is false when the latest read failed. Status is then the
+	// last good answer, kept so a stopped helper still shows what it left
+	// loaded; UnreachableSince says since when.
+	Reachable        bool
+	UnreachableSince time.Time
+	// Error is the latest read's failure, content-free.
+	Error string
+	// WouldBlockLastHour and BlockedLastHour are the would-block hits and
+	// denials of DefenseClaw's kernel controls in the hour before FetchedAt,
+	// for every user on the host: the growth of the helper's
+	// would_block_total and blocked_total across the reads of that hour (a
+	// total that went down, a restarted helper, counts from zero). In the
+	// gateway's first hour they cover only the time since it started.
+	WouldBlockLastHour int64
+	BlockedLastHour    int64
 }
 
 // ProviderReach is one attributed egress peer.
@@ -106,6 +252,12 @@ type PlaneHealth struct {
 	Reason    string
 	// ObservedAt is when the plane last produced anything.
 	ObservedAt time.Time
+	// Backend is Plane C's process backend on the managed Linux sensor
+	// helper (Tetragon, or the native one and why); nil everywhere else.
+	Backend *plane.Backend
+	// ContainerEvents is how many Plane C events this cycle came from
+	// container processes: counted, and never joined to a host session.
+	ContainerEvents int64
 }
 
 // Snapshot is the current state of the runtime planes, as served to the API,
@@ -126,6 +278,10 @@ type Snapshot struct {
 	// difference between a quiet host and a blind sensor.
 	ConnectionsObserved     int
 	ConnectionsUnattributed int
+	// KernelConnectsDropped counts the kernel connects (Tetragon, observe
+	// and enforce) since the previous poll that did not fit the per-poll
+	// bound; the ones that did are scored as connections of their process.
+	KernelConnectsDropped int64
 	// HostPlaneObservations is how many kernel observations the host plane
 	// classified into a tactic, and HostPlaneGated how many it discarded for
 	// having no AI agent above them.
@@ -137,6 +293,32 @@ type Snapshot struct {
 	// quiet host.
 	HostPlaneObservations int64
 	HostPlaneGated        int64
+	// HostPlaneContainerEvents is how many host-plane events came from
+	// container processes since the plane started. They are routed to this
+	// count and never join a host agent session.
+	HostPlaneContainerEvents int64
+	// HostPlaneHookUnexpected is how many processes started under a
+	// verified DefenseClaw hook that are not the hook's own tools
+	// (hook_subtree_unexpected). They are forwarded and scored like any
+	// other process; this only counts them.
+	HostPlaneHookUnexpected int64
+	// KernelEvents are the kernel control outcomes since the previous poll,
+	// at most maxKernelEventsPerPoll; KernelEventsDropped counts the rest.
+	KernelEvents        []KernelEvent
+	KernelEventsDropped int64
+	// CustomerKernelEvents are the attributed events of the host's own
+	// Tetragon policies since the previous poll, at most
+	// maxCustomerRecordsPerPoll; CustomerKernelEventsDropped counts the rest.
+	// They are records of their own: never a finding, never scored.
+	CustomerKernelEvents        []CustomerKernelEvent
+	CustomerKernelEventsDropped int64
+	// RecentCustomerKernelEvents are the latest attributed ones (at most
+	// maxCustomerRecent, oldest first), as Service.Snapshot reads them for
+	// the runtime API; empty in a poll's own result.
+	RecentCustomerKernelEvents []CustomerKernelEvent
+	// Kernel is the sensor helper's kernel-policy state; nil when the
+	// acquirer is not a helper that reports one.
+	Kernel *KernelState
 	// Degraded is true when any plane the platform supports is not running.
 	Degraded bool
 	// DegradedReasons lists why, one entry per affected plane.

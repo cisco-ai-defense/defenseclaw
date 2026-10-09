@@ -898,7 +898,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway start` | Start the sidecar as a background daemon. |
 | `defenseclaw-gateway stop` | Stop the running sidecar. |
 | `defenseclaw-gateway restart` | Restart the sidecar. |
-| `defenseclaw-gateway status [--json]` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. `--json` prints one JSON document (`running`, `endpoint`, the `/health` snapshot as `health`, or `error` and `hint`); it exits `1` when the gateway does not answer. |
+| `defenseclaw-gateway status [--json]` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. `--json` prints one JSON document (`running`, `endpoint`, the `/health` snapshot as `health`, or `error` and `hint`); it exits `1` when the gateway does not answer. On a managed Linux computer whose sensor helper reports a Plane C backend, the Subsystems list ends with one line: `Kernel sensor: Tetragon v1.7.1 (consume)`, with `; kernel controls: enforcing 2 of 3 users` after it when DefenseClaw's controls are loaded, or `cn_proc and fanotify (Tetragon not used: <reason>)` on the fallback. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon#step-1-turn-on-plane-c-and-consume). |
 | `defenseclaw-gateway watchdog [start\|stop\|status]` | Health-watchdog daemon that notifies when the gateway is down. |
 | `defenseclaw-gateway policy reload` | Ask the running daemon to reload its OPA policies without bouncing it. |
 | `defenseclaw-gateway policy validate\|test [--rego-dir DIR]` | Compile-check the Rego modules and the admission policy compiled from `config.yaml`, or run the Rego unit tests without a separate `opa` binary. |
@@ -1258,6 +1258,7 @@ see also [Sandbox](/docs/sandboxes/guide).
 | `defenseclaw sandbox image build\|list\|prune\|rm` | Build, list, prune, and remove the harness images. |
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
+| `defenseclaw sandbox kernel-feed install\|status\|uninstall` | Linux: install (as root), check or remove the opt-in sandbox kernel feed, a root service that adds Tetragon's exec and exit records to your docker sandboxes' process trees. Run as yourself, `install` prints the `sudo` command. See [sandbox kernel-feed](/docs/reference/sandbox-cli#sandbox-kernel-feed). |
 
 ## Enterprise
 
@@ -1291,6 +1292,10 @@ Every mutating action is a transaction that rolls back on failure. See
 | `profile-explain` | Show which guardrail profile a user, connector or agent gets, and why, with every configured profile's digest. Read-only; prints JSON. `--user U` (account name, uid, SID or principal), `--connector C`, `--agent agt-...`. See [User- and group-based policies](/docs/guardrail/user-and-group-policies#deliver-it-to-managed-hosts) |
 | `agent-identities` | List the agent identities (`agt-...`) the gateway has seen, with their sessions. Read-only; prints JSON. `--user U`, `--connector C` |
 | `ide-plugins` | List the IDE extensions and plugins of the last AI Discovery scan, per user. Read-only; prints JSON. `--user U`, `--ide IDE`, `--ai-only`, `--cursor C` (the previous page's `next_cursor`). See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory) |
+| `tetragon status` | **Linux.** Report the kernel sensor and the DefenseClaw policies in it: Tetragon's version and socket check, the effective mode, the `kernel_policy` digest to put in `enforce_ack`, each policy's state, per-user burn-in and hits, agents observed but not enforced, your own Tetragon policies and their events, any pause or operator override, and orphaned names, then a `Next:` line. Reads the sensor helper's state files; root only. `--user` limits it to one account. `--json` follows a pinned schema. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon) |
+| `tetragon verify` | **Linux.** Check that this computer is ready for a Tetragon mode, one line per check with the command that fixes a failure. Without `--ready-for` it checks the configured mode. For `enforce` it also prints each user's burn-in progress and estimate, the details of every hit, and the `enforce_ack` block to approve. Exit `0` when no check fails, `1` when one fails (warnings never fail it), `2` for bad arguments. Never changes anything and never connects to Tetragon; root only. `--json` follows a pinned schema |
+| `tetragon pause` | **Linux.** Move DefenseClaw's kernel controls to monitor mode until the pause ends. Survives restarts of the helper and of Tetragon. `--for <duration>` (default `4h`, at most `7d`), `--until-reboot`, `--reason <text>`. A runtime action, so it works on a managed computer |
+| `tetragon resume` | **Linux.** End a pause; the next helper pass applies the configured intent |
 | `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
 | `uninstall` | Stop and remove the deployment and every account's hooks. Each account keeps `~/.defenseclaw`. `--purge` removes everything, every enrolled account's data and binaries included |
 
@@ -1303,13 +1308,16 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--product-version <v>` | install, upgrade, repair, ensure | Refuse unless the payload is exactly this version |
 | `--allow-downgrade` | install, upgrade, repair, ensure | Allow a payload older than the installed release (a deliberate rollback). Without it the lifecycle refuses with `downgrade_refused` |
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
-| `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
+| `--reason <text>` | ensure, tetragon pause | Why `ensure` runs, or why kernel enforcement is paused. Recorded in the result |
+| `--for <duration>` | tetragon pause | How long the pause lasts. Default `4h`, at most `7d` |
+| `--until-reboot` | tetragon pause | Keep the pause in `/run`, so a reboot ends it. Not with `--for` |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
 | `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, its per-user binaries and launcher links in `~/.local/bin`, and the DefenseClaw entries in its uv cache (`~/.cache/uv`), after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall already removes the config, credentials, state, logs and the service account |
 | `--keep-state` | uninstall | Keep the config, credentials, state, logs and the service account, so a reinstall resumes with them. Not with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
 | `--remove-service-account` | uninstall | Deprecated: uninstall deletes the gateway service account by default. Accepted with a `deprecated_option` warning; removed in the next minor release |
-| `--user <u>` | discovery, profile-explain, agent-identities, ide-plugins | Limit the view to one account (name, uid or SID) |
+| `--ready-for <mode>` | tetragon verify | The mode to check readiness for: `consume`, `observe` or `enforce` |
+| `--user <u>` | discovery, profile-explain, agent-identities, ide-plugins, tetragon status | Limit the view to one account (name, uid or SID) |
 | `--connector <c>`, `--agent <id>` | profile-explain (`--connector` also agent-identities) | The connector, or the `agt-` agent identity, to resolve or list |
 | `--ide <ide>`, `--ai-only`, `--cursor <c>` | ide-plugins | Limit to one IDE product or family, to AI plugins, or continue from the previous page |
 | `--json` | all | Print the lifecycle result as JSON |
@@ -1322,6 +1330,28 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-pac
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --purge --json
 ```
+
+The sensor helper has two maintenance options for Tetragon, run as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup
+sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup --check
+```
+
+`--tetragon-cleanup` deletes the Tetragon policies the helper recorded loading
+(only names that match `defenseclaw-<family>-<8 hex>` and are in its own
+state file) and empties that record. It exits `1`, and removes nothing, while
+a helper in `observe` or `enforce` runs (stop it first:
+`systemctl stop defenseclaw-sensor-helper`), and `3` when Tetragon does not
+answer. `--check` only reports whether this helper supports the cleanup, with
+exit `0`. `uninstall`, a rollback and the package's pre-removal script run it
+for you.
+
+On an open-source Linux install the same binary is the sandbox kernel feed:
+`defenseclaw-sensor-helper --sandbox-feed` serves it (its systemd unit runs
+that), `--sandbox-feed --check` checks Tetragon and Docker and exits `0` or
+`1`, and `--sandbox-feed --uninstall` removes the service and the root copy.
+Use `defenseclaw sandbox kernel-feed` rather than these.
 
 ### Lifecycle on Windows
 

@@ -1,0 +1,43 @@
+# DefenseClaw kernel controls for Tetragon (managed Linux only).
+#
+# Embedded in defenseclaw-sensor-helper and rendered per enrolled home into the
+# defenseclaw-controls TracingPolicy. Never installed as a policy file and never
+# seeded into a per-user policy directory. Paths are relative to each enrolled
+# home: "files" match one exact name, "dirs" (trailing slash) everything below.
+#
+# Any change here changes the kernel_policy digest, so a host enforcing the old
+# set drops to monitor mode until the administrator approves the new digest in
+# enterprise.tetragon.enforce_ack.
+version: 1
+controls:
+  # Agent descendants may not open the user's SSH private keys. Public keys
+  # (.pub, -cert.pub) never match. ssh, ssh-keygen (git commit signing) and
+  # ssh-add need the key and never print it, so they are exempt.
+  - id: kernel.ssh_private_key_read
+    rule_id: PATH-SSH-KEY
+    access: open
+    files:
+      - .ssh/id_rsa
+      - .ssh/id_ed25519
+      - .ssh/id_ecdsa
+      - .ssh/id_dsa
+    exempt_binaries:
+      - /usr/bin/ssh
+      - /usr/bin/ssh-keygen
+      - /usr/bin/ssh-add
+  # Agent descendants may not open the user's shell startup files or user
+  # autostart units for writing (O_TRUNC included: the open is refused before
+  # the file is truncated). Reads stay allowed: agents source the shell rc
+  # files on every command. Replacing a file by rename or unlink is not an
+  # open and is not covered by this control.
+  - id: kernel.persistence_write
+    rule_id: persistence.shell_profile_write
+    access: write
+    files:
+      - .bashrc
+      - .bash_profile
+      - .profile
+      - .zshrc
+    dirs:
+      - .config/systemd/user/
+      - .config/autostart/

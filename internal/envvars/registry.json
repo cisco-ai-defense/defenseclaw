@@ -4276,7 +4276,7 @@
     {
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
       "category": "runtime_path",
-      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on and the gateway dials. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. Managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
+      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on outside managed deployments. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. A gateway brokers through the helper only on a managed host, and managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
       "default": "unset (managed_enterprise: Windows Secure Client uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock and Windows standalone uses <TrustedProgramFiles>\\Cisco\\DefenseClaw\\ipc\\sensor-helper.sock; Linux uses /run/defenseclaw-sensor/sensor-helper.sock; macOS standalone uses /var/run/defenseclaw-sensor/sensor-helper.sock; macOS Secure Client keeps /var/run/defenseclaw/sensor-helper.sock. Other modes use <data_dir>/ipc/sensor-helper.sock)",
       "accepted_values": [
         "any-absolute-path",
@@ -4313,6 +4313,164 @@
         }
       ],
       "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_BURN_IN",
+      "category": "discovery",
+      "purpose": "Covered agent time each enrolled user needs, with no would-block hit, before the managed Linux sensor helper lets DefenseClaw's kernel controls deny for that user's agents. Rendered by the enterprise lifecycle from enterprise.tetragon.burn_in into the helper's systemd drop-in 30-defenseclaw-tetragon.conf; read only by defenseclaw-sensor-helper --managed-enterprise. Never set it by hand: ensure rewrites the drop-in from config.yaml.",
+      "default": "unset (168h)",
+      "accepted_values": [
+        "0",
+        "whole hours from 24h to 2160h",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders it from enterprise.tetragon.burn_in (the only writer)"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler; a malformed value falls back to 168h"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only, so only root or the lifecycle can set it. A malformed value falls back to the default 168h, never to a shorter burn-in. 0 skips the burn-in and enterprise status warns kernel_burn_in_skipped for as long as enforcement runs."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_CUSTOMER_EVENTS",
+      "category": "discovery",
+      "purpose": "What the managed Linux sensor helper does with the kprobe and LSM events of the customer's own Tetragon policies (enterprise.tetragon.customer_events): agent forwards those that fall under an AI agent's process lineage, attributed to the agent, the user and the hook decision; off only counts them. The helper never manages, changes or deletes a customer policy in either case. Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf only when it is off; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (agent)",
+      "accepted_values": [
+        "agent",
+        "off",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/tetragon_cli.go",
+          "description": "The lifecycle renders it from enterprise.tetragon.customer_events, only when it is off (the only writer)"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the sensor helper's customer-policy forwarding; a malformed value is off (count only)"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only. It decides only whether typed, redacted records of the customer's own policy events leave the helper; counts and the policy summary stay either way, and no setting lets the helper load, configure or delete a customer policy."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_ACK",
+      "category": "discovery",
+      "purpose": "The kernel_policy digests the administrator approved (enterprise.tetragon.enforce_ack), as a comma-separated list: one digest, or up to 4 while a ring upgrade runs two builds. With mode enforce, the managed Linux sensor helper lets its kernel controls deny only while the list contains the digest of the control set it ships. Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (no approval: enforce runs in monitor mode)",
+      "accepted_values": [
+        "comma-separated list of 1 to 4 digests, each sha256: and 12 lowercase hex digits",
+        "empty",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders it from enterprise.tetragon.enforce_ack (the only writer)"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler; a malformed value is no approval"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only. It approves control-set digests, never a scope: a build with a changed control set reports a new digest and every user drops to monitor mode (kernel_enforce_ack_stale) until the list includes it."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_CONNECTORS",
+      "category": "discovery",
+      "purpose": "Comma-separated enrolled connectors whose effective guardrail mode is action. In enforce mode only their agents can be anchored for a kernel deny; the others stay observe-only (guardrail_observe). Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf when the effective mode is enforce; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (no connector can be anchored for a deny)",
+      "accepted_values": [
+        "comma-separated connector names",
+        "empty",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders it from the enrolled connectors' effective guardrail mode (the only writer)"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only. It can only narrow the enforcing scope: anchors still come from enrolled connectors in the guardian manifest resolved to their real install files."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_MACHINE_POLICY_CONNECTORS",
+      "category": "discovery",
+      "purpose": "Comma-separated enrolled command-line connectors whose DefenseClaw hooks reach every eligible account through vendor machine policy (Claude Code, Codex, Cursor, Copilot CLI and OpenCode on Linux) and that have no per-user rows in targets.yaml because enterprise.enrollment.unenrolled_users is not deny. For its kernel controls, the managed Linux sensor helper enrolls each of them for every account of the enumerator's root-only eligible-accounts.json (next to targets.yaml) that targets.yaml has no row for. Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf in observe and enforce when it names a connector; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (only targets.yaml rows are enrolled)",
+      "accepted_values": [
+        "comma-separated connector names",
+        "empty",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/tetragon_cli.go",
+          "description": "The lifecycle renders it from the enrolled machine-policy connectors and enterprise.enrollment (the only writer)"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it; the helper adds a machine-policy row per eligible account for each connector"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only, and the accounts come only from the enumerator's root-owned eligible-accounts record, checked like targets.yaml. A row only anchors an installed command-line agent below that account, and a targets.yaml row for the same user and connector, enabled or not, always wins."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_TETRAGON_MODE",
+      "category": "discovery",
+      "purpose": "How the managed Linux sensor helper uses the host's Tetragon (enterprise.tetragon.mode, with the Plane C cap applied): off (cn_proc and fanotify only), consume (read Tetragon's process events), observe (also load DefenseClaw's kernel controls in monitor mode) or enforce (let them deny once enforce_ack matches). Rendered by the enterprise lifecycle into the helper's systemd drop-in 30-defenseclaw-tetragon.conf only when enterprise.tetragon differs from the default; read only by defenseclaw-sensor-helper --managed-enterprise.",
+      "default": "unset (consume)",
+      "accepted_values": [
+        "off",
+        "consume",
+        "observe",
+        "enforce",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/render.go",
+          "description": "The lifecycle renders the effective mode from enterprise.tetragon (the only writer)"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/types.go",
+          "description": "IntentFromLookup reads it for the kernel-policy reconciler; a malformed value falls back to consume"
+        }
+      ],
+      "since": "1.1.0",
+      "security_note": "Read from the root-owned drop-in only; the helper never reads config.yaml, so a root process with kernel-policy power acts only on what ensure accepted. A malformed value falls back to consume (read only)."
     },
     {
       "name": "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER",
@@ -5528,6 +5686,10 @@
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
           "description": "setup trusted-paths CLI and inline trust prompt persistence"
+        },
+        {
+          "location": "cmd/defenseclaw-sensor-helper/tetragon_linux.go",
+          "description": "Managed Linux sensor helper: administrator install prefixes for resolving enrolled agent installs (kernel-control anchors). Read from the helper's own systemd environment, which the lifecycle renders from enrollment.agent_prefixes (40-defenseclaw-agent-prefixes.conf), not through the managed-mode policy"
         }
       ],
       "since": "0.5.0",
@@ -5654,7 +5816,7 @@
     {
       "name": "DEFENSECLAW_UPDATE_GOLDEN",
       "category": "test_fixture",
-      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, and the bounded chain catalog, instead of comparing against them.",
+      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, the bounded chain catalog and the kernel-control digest pin, instead of comparing against them.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -5667,6 +5829,10 @@
         {
           "location": "internal/gateway/connector/hook_render_golden_test.go",
           "description": "Rewrites the host hook byte manifest"
+        },
+        {
+          "location": "policies/kernel/kernel_test.go",
+          "description": "Rewrites policies/kernel/testdata/digest.golden, the pinned kernel-control digest"
         },
         {
           "location": "internal/gateway/connector/sandbox_artifacts_test.go",
@@ -5683,6 +5849,10 @@
         {
           "location": "internal/guardrail/tool_chain_catalog_json_test.go",
           "description": "Rewrites policies/guardrail/tool-chains.json from the chain catalog"
+        },
+        {
+          "location": "internal/sensor/kernelpolicy/world_test.go",
+          "description": "Rewrites the kernel-policy TracingPolicy goldens"
         }
       ],
       "since": "0.9.0"

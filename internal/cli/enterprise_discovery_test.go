@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
@@ -153,6 +154,100 @@ func TestEnterpriseDiscoveryShowsRuntimePlanes(t *testing.T) {
 	if err := writeEnterpriseDiscovery(&down, filepath.Join(t.TempDir(), "missing"), "", false); err != nil ||
 		!strings.Contains(down.String(), "Runtime discovery: not read: the gateway at 127.0.0.1:18970 did not answer") {
 		t.Fatalf("gateway down = %v:\n%s", err, down.String())
+	}
+}
+
+// On managed Linux, agent actions name their kernel backend: the host's
+// Tetragon, or the native fallback and why, and the kernel floor.
+func TestEnterpriseDiscoveryShowsTheKernelBackend(t *testing.T) {
+	var view enterpriseRuntimeView
+	if err := json.Unmarshal([]byte(`{"enabled":true,"planes":[
+		{"plane":"c","name":"agent actions","available":true,"running":true,"mechanism":"tetragon",
+		 "backend":{"kind":"tetragon","version":"v1.7.1","mode":"enforce","events_lost":0,"loss_known":true,
+		  "kernel_floor":{"mode":"enforce","enforced_users":2,"enrolled_users":3,"burn_in_users":1,"paused_until":"2026-10-07T14:05:00Z",
+		   "approval":"approved","next_ready_hours":216},
+		  "customer_policies":[{"name":"10-file-sensitive","mode":"enforce","state":"enabled","seen":40,"forwarded":12,"attributed":12},
+		   {"name":"20-net-connect","mode":"monitor","state":"enabled","seen":3}],
+		  "customer_events":{"seen":43,"forwarded":15,"dropped":0,"container":1,"attributed":12,"gated":3}}},
+		{"plane":"b","name":"shadow egress","available":true,"running":true,"mechanism":"proc"}]}`), &view); err != nil {
+		t.Fatal(err)
+	}
+	stubEnterpriseDiscoveryRuntime(t, &view, nil)
+	var out bytes.Buffer
+	if err := writeEnterpriseDiscovery(&out, filepath.Join(t.TempDir(), "missing"), "", false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"agent actions: running via tetragon\n    kernel sensor: Tetragon v1.7.1, enforce, 0 events lost\n" +
+			"    kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days; paused until 2026-10-07T14:05:00Z\n" +
+			"    your Tetragon policies: 2 loaded (1 enforcing); 12 agent events forwarded (DefenseClaw never changes them)\n",
+		"shadow egress: running via proc\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+	var asJSON bytes.Buffer
+	if err := writeEnterpriseDiscovery(&asJSON, filepath.Join(t.TempDir(), "missing"), "", true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(asJSON.String(), `"backend": {`) || strings.Count(asJSON.String(), `"backend"`) != 1 {
+		t.Fatalf("--json carries the backend only where the gateway reports one:\n%s", asJSON.String())
+	}
+
+	for backend, want := range map[string]string{
+		`{"kind":"native","fallback_reason":"tetragon_tcp_api: localhost:54321"}`:                                                           "kernel sensor: cn_proc and fanotify (Tetragon not used: its API listens on TCP instead of a local socket)",
+		`{"kind":"native","fallback_reason":"something_new: the stream ended"}`:                                                             "kernel sensor: cn_proc and fanotify (Tetragon not used: the stream ended)",
+		`{"kind":"tetragon","version":"1.7.1","mode":"consume","events_lost":4,"loss_known":false}`:                                         "kernel sensor: Tetragon v1.7.1, consume, events lost unknown",
+		`{"kind":"tetragon","mode":"observe"}`:                                                                                              "kernel sensor: Tetragon, observe, events lost unknown",
+		`{"kind":"tetragon","mode":"observe","events_lost":3}`:                                                                              "kernel sensor: Tetragon, observe, 3 events lost",
+		`{"kind":"native","kernel_floor":{"mode":"observe","enrolled_users":2}}`:                                                            "kernel controls: monitoring 2 users, not enforcing",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enrolled_users":1,"approval":"missing"}}`:                                       "kernel controls: monitoring 1 user; enforce is not approved yet",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enrolled_users":3,"approval":"stale"}}`:                                         "kernel controls: monitoring 3 users; the approval is for another build",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":2,"burn_in_users":1,"next_ready_hours":20}}`: "kernel controls: enforcing 1 of 2 users; 1 in burn-in, next ready ~20 hours",
+		`{"kind":"native","kernel_floor":{"mode":"enforce","enforced_users":1,"enrolled_users":1}}`:                                         "kernel controls: enforcing 1 of 1 user",
+		`{"kind":"native","customer_events":{"forwarded":1,"attributed":1}}`:                                                                "your Tetragon policies: 0 loaded (0 enforcing); 1 agent event forwarded (DefenseClaw never changes them)",
+		// Events below no agent (a cron job) are not agent events, and only
+		// the budget is "over the budget" (customer_events off drops them too).
+		`{"kind":"native","customer_events":{"forwarded":5000,"attributed":0,"gated":5000,"dropped":9,"capped":4}}`: "your Tetragon policies: 0 loaded (0 enforcing); 0 agent events forwarded, 4 over the budget (DefenseClaw never changes them)",
+		`{"kind":"native","customer_events":{"dropped":5000,"capped":0}}`:                                           "your Tetragon policies: 0 loaded (0 enforcing); 0 agent events forwarded (DefenseClaw never changes them)",
+	} {
+		var b enterpriseRuntimeBackend
+		if err := json.Unmarshal([]byte(backend), &b); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(b.lines(), "\n"); got != want {
+			t.Fatalf("%s: %q, want %q", backend, got, want)
+		}
+	}
+	if lines := (*enterpriseRuntimeBackend)(nil).lines(); lines != nil {
+		t.Fatalf("no backend: %v", lines)
+	}
+}
+
+// defenseclaw-gateway status prints one Kernel sensor line under Subsystems
+// when /health carries the Plane C backend, and nothing otherwise.
+func TestGatewayStatusShowsTheKernelSensor(t *testing.T) {
+	var snap gateway.HealthSnapshot
+	if err := json.Unmarshal([]byte(`{"ai_runtime":{"state":"running","details":{"planes":{"c":{"backend":
+		{"kind":"tetragon","version":"1.7.1","mode":"observe","kernel_floor":{"mode":"observe","enrolled_users":3}}}}}}}`), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := kernelSensorStatusLine(&snap), "Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing"; got != want {
+		t.Fatalf("line %q, want %q", got, want)
+	}
+	if out := captureStdout(t, func() { printSubsystems(&snap) }); !strings.Contains(out, "Kernel sensor: Tetragon v1.7.1 (observe); kernel controls: monitoring 3 users, not enforcing") {
+		t.Fatalf("subsystems:\n%s", out)
+	}
+	var native gateway.HealthSnapshot
+	_ = json.Unmarshal([]byte(`{"ai_runtime":{"details":{"planes":{"c":{"backend":{"kind":"native","fallback_reason":"tetragon_tcp_api: localhost:54321"}}}}}}`), &native)
+	if got := kernelSensorStatusLine(&native); got != "cn_proc and fanotify (Tetragon not used: its API listens on TCP instead of a local socket)" {
+		t.Fatalf("native line %q", got)
+	}
+	var plain gateway.HealthSnapshot
+	_ = json.Unmarshal([]byte(`{"ai_runtime":{"details":{"planes":{"c":{"running":true}}}}}`), &plain)
+	if out := captureStdout(t, func() { printSubsystems(&plain) }); strings.Contains(out, "Kernel sensor") || kernelSensorStatusLine(&plain) != "" {
+		t.Fatalf("a gateway without a backend prints a kernel line:\n%s", out)
 	}
 }
 

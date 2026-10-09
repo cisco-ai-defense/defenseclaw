@@ -373,6 +373,69 @@ defenseclaw sandbox run claude --copy --name fix-tests
 defenseclaw sandbox run codex --copy --name docs
 ```
 
+## Kernel feed (Tetragon)
+
+When your administrator runs [Tetragon](https://tetragon.io) on this
+computer, the opt-in sandbox kernel feed adds every process the kernel starts
+in your docker sandboxes to their process trees, including the many that live
+for milliseconds, which the 5-second sample never sees. Without it nothing
+changes.
+
+```bash
+defenseclaw sandbox kernel-feed status
+defenseclaw sandbox kernel-feed install
+```
+
+Run as yourself, `install` prints the exact `sudo` command for this install.
+The commands are in the [sandbox CLI reference](/docs/reference/sandbox-cli#sandbox-kernel-feed).
+
+With the feed installed and the process tree on, `sandbox ps --tree` says
+where its records come from and how many it holds:
+
+![defenseclaw sandbox ps with --tree on a Claude Code sandbox: the sandbox's init process, a login shell, the DefenseClaw supervisor and Claude Code, then the line source: kernel (Tetragon, through the sandbox kernel feed) with 112 execs and exits recorded so far and 103 of them with their pid in the sandbox](/images/segmentation/terminal-sandbox-ps-tree-kernel.png)
+
+And `kernel-feed status` shows that the feed answers and its Tetragon stream is
+connected:
+
+![defenseclaw-gateway sandbox kernel-feed status: installed and active, the root copy of the helper at the gateway's version, the feed answers with the same build and protocol 1 and its Tetragon stream is connected, and the gateway reads protocol 1 and 0](/images/segmentation/terminal-sandbox-kernel-feed-status.png)
+
+| Topic | Detail |
+| --- | --- |
+| Requirements | Docker sandboxes; Tetragon 1.6 or 1.7 serving its API on `unix:///var/run/tetragon/tetragon.sock` (its TCP default `localhost:54321` is refused) with a root-owned `tetragon-info.json`; systemd; you in the `docker` group |
+| What it reads | Only the exec and exit of container processes. Tetragon drops ancestors, environment variables, capabilities, namespaces, credentials and pod data before it sends them. Command lines are redacted in the root process (secret flags and values, key-shaped words, URL passwords), and a Codex notify program's turn payload is withheld |
+| Who sees what | Members of the `docker` group, each only their own sandboxes' records (the image's owner label). Members of the `docker` group can already see every container and run commands in it, so this is a courtesy between users, not a security boundary: one of them can also add process records, real or made up, to another account's sandbox tree and audit records (a container labelled as that sandbox is enough). Give the group only to accounts that trust each other ([One OpenShell gateway per machine](#one-openshell-gateway-per-machine)) |
+| What it does not do | No Tetragon policy, no enforcement, no file or network events. macOS MicroVM sandboxes and the Linux vm driver are not covered: their guest kernel is not the host's |
+| Turn it on per sandbox | The process tree must be on (`sandbox run --process-tree`, or a pack's `observe.process_tree: true`). `sandbox ps` then says `source: kernel`, and a process whose in-sandbox pid was not captured is listed among the ended ones with its `host_pid` |
+| DefenseClaw's own hook calls | Each Claude Code hook call runs DefenseClaw's hook script, which starts about a dozen short system tools (`jq`, `curl`, `id`, `sed` and others). The feed shows a call as one row, the script, with `[hook tools: N]` after its command line (`hook` and `hook_tools` in `sandbox ps --json`, one `sandbox.process_tree` record per call; when Claude runs several hooks at once, each counts its own tools, except a tool whose parent ended before the feed could read it, which counts with the newest of them), so the calls do not push your own processes out of the ended list. While the feed streams, a process only the 5-second sample sees is recorded one sample later, so a sample that lands in a call adds none of the call's processes. Only a call of the installed hook script by a Claude Code that the sandbox itself started is folded, and only its known tools: any other child of the script is shown and flagged `hook_subtree_unexpected`, and a call that runs over 30 seconds is shown in full. Calls are also shown in full in a sandbox that was already running when the feed connected to Tetragon (after a feed install, update or restart, or a Tetragon restart; `sandbox ps` counts them, `unfolded_hook_calls` in `--json`, and prints the fix: stop and start the sandbox), and, after Tetragon reports lost or throttled events, until the feed's next connection |
+| Audit records | Every process of the tree is one `sandbox.process_tree` start record and one exit record, at most 10 a second per sandbox (a burst of 200). Past that the tree still holds every process, but its records are not sent: the gateway log says once a minute how many, and `sandbox ps` warns with the count (`records_not_sent` in `--json`). A build or a test run in a sandbox passes 10 a second easily |
+| Files | `/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper` (the root copy), `/etc/systemd/system/defenseclaw-sandbox-feed.service`, the socket `/run/defenseclaw-sandbox-feed/feed.sock` (`root:docker 0660`); its log is `journalctl -u defenseclaw-sandbox-feed` |
+| Versions | The feed's protocol is versioned. Your gateway reads its own protocol and the previous one; otherwise it uses the 5-second sample and `sandbox ps`, `kernel-feed status`, `defenseclaw doctor` (**Sandbox kernel feed**) and the gateway log print the `sudo ... sandbox kernel-feed install` command. `defenseclaw upgrade` prints it too when the feed runs another release |
+| After a reboot | The feed starts by itself, after Tetragon and Docker, and reads Tetragon within seconds. Your DefenseClaw gateway does not start with the computer ([Startup behavior](/docs/get-started/install#startup-behavior)): until the next hook call or `defenseclaw-gateway start` starts it, `sandbox list` says so, a sandboxed agent's hook calls are refused with a message that names the stopped gateway, and `sandbox ps` has no `source: kernel`. Once the gateway runs, `source: kernel` returns |
+| Uninstall | `defenseclaw uninstall` leaves the root service in place and prints `sudo <gateway> sandbox kernel-feed uninstall`. After `--binaries`, use `sudo /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper --sandbox-feed --uninstall` |
+
+| Reason | Means |
+| --- | --- |
+| `kernel_feed_not_installed` | No feed on this computer |
+| `kernel_feed_not_permitted` | You are not in the `docker` group, or your gateway started before you joined it |
+| `kernel_feed_untrusted` | The socket or its directory is not root's, or is writable by others, or root does not serve it |
+| `kernel_feed_unavailable` | The feed is installed but stopped, or runs and does not answer. For a stopped feed, `kernel-feed status`, `sandbox ps` and `defenseclaw doctor` print the command that starts it, `sudo systemctl restart defenseclaw-sandbox-feed.service`. For one that runs and does not answer, `kernel-feed status` and `doctor` print `sudo systemctl status defenseclaw-sandbox-feed.service`, which says why; `sandbox ps` cannot tell the two apart and prints the restart command, which fixes both |
+| `kernel_feed_version_skew` | The feed speaks another protocol: run the `install` command it prints |
+| `kernel_feed_unsupported` | Not Linux |
+
+When the feed answers but its Tetragon stream is not connected (Tetragon is
+stopped, or its socket is gone), `kernel-feed status` says
+`its Tetragon stream is unavailable (tetragon_unavailable)`, `sandbox ps`
+warns and uses the 5-second sample, and `defenseclaw doctor` warns on the
+**Sandbox kernel feed** row. Ask the administrator to check Tetragon
+(`sudo systemctl status tetragon`). The feed reconnects by itself when
+Tetragon is back.
+
+```text
+$ defenseclaw doctor | grep -A1 "Sandbox kernel feed"
+  [WARN] Sandbox kernel feed  -  build 1.0.45, protocol 1; its Tetragon stream is unavailable (tetragon_unavailable)
+      -> Next step: ask the administrator to check Tetragon ('sudo systemctl status tetragon'); the feed reconnects by itself, and sandbox process trees use the 5-second sample until then
+```
+
 ## One OpenShell gateway per machine
 
 OpenShell's packaged gateway listens on the fixed port `127.0.0.1:17670`

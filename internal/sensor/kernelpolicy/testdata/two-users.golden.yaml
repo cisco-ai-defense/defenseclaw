@@ -1,0 +1,389 @@
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:08b71155b713
+# Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defenseclaw-observe-45a62214
+spec:
+  lsmhooks:
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+      selectors:
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.aws/config
+                - /home/alice/.aws/credentials
+                - /home/alice/.config/gcloud/application_default_credentials.json
+                - /home/alice/.config/gcloud/credentials.db
+                - /home/alice/.docker/config.json
+                - /home/alice/.git-credentials
+                - /home/alice/.gnupg/secring.gpg
+                - /home/alice/.kube/config
+                - /home/alice/.netrc
+                - /home/alice/.npmrc
+                - /home/alice/.pypirc
+                - /home/alice/.ssh/id_dsa
+                - /home/alice/.ssh/id_ecdsa
+                - /home/alice/.ssh/id_ed25519
+                - /home/alice/.ssh/id_rsa
+                - /home/bob/.aws/config
+                - /home/bob/.aws/credentials
+                - /home/bob/.config/gcloud/application_default_credentials.json
+                - /home/bob/.config/gcloud/credentials.db
+                - /home/bob/.docker/config.json
+                - /home/bob/.git-credentials
+                - /home/bob/.gnupg/secring.gpg
+                - /home/bob/.kube/config
+                - /home/bob/.netrc
+                - /home/bob/.npmrc
+                - /home/bob/.pypirc
+                - /home/bob/.ssh/id_dsa
+                - /home/bob/.ssh/id_ecdsa
+                - /home/bob/.ssh/id_ed25519
+                - /home/bob/.ssh/id_rsa
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.claude/settings.json
+                - /home/alice/.claude/settings.local.json
+                - /home/alice/.codex/config.toml
+                - /home/alice/.cursor/mcp.json
+                - /home/bob/.claude/settings.json
+                - /home/bob/.claude/settings.local.json
+                - /home/bob/.codex/config.toml
+                - /home/bob/.cursor/mcp.json
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /etc/shadow
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.bash_profile
+                - /home/alice/.bashrc
+                - /home/alice/.profile
+                - /home/alice/.zshrc
+                - /home/bob/.bash_profile
+                - /home/bob/.bashrc
+                - /home/bob/.profile
+                - /home/bob/.zshrc
+            - args: [1]
+              operator: Mask
+              values:
+                - "2"
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+      selectors:
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Prefix
+              values:
+                - /home/alice/.gnupg/private-keys-v1.d/
+                - /home/bob/.gnupg/private-keys-v1.d/
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Prefix
+              values:
+                - /home/alice/.claude/hooks/
+                - /home/alice/.claude/skills/
+                - /home/alice/.codex/skills/
+                - /home/alice/.cursor/rules/
+                - /home/bob/.claude/hooks/
+                - /home/bob/.claude/skills/
+                - /home/bob/.codex/skills/
+                - /home/bob/.cursor/rules/
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Prefix
+              values:
+                - /etc/sudoers.d/
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Prefix
+              values:
+                - /home/alice/.config/autostart/
+                - /home/alice/.config/systemd/user/
+                - /home/bob/.config/autostart/
+                - /home/bob/.config/systemd/user/
+            - args: [1]
+              operator: Mask
+              values:
+                - "2"
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+---
+# defenseclaw-derived: tetragon-policy family=connect kernel_policy=sha256:08b71155b713
+# Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defenseclaw-connect-ca62819b
+spec:
+  kprobes:
+    - call: tcp_connect
+      syscall: false
+      args:
+        - index: 0
+          type: sock
+      selectors:
+        - matchArgs:
+            - args: [0]
+              operator: NotDAddr
+              values:
+                - 127.0.0.0/8
+                - ::1
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+---
+# defenseclaw-derived: tetragon-policy family=controls kernel_policy=sha256:08b71155b713
+# Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defenseclaw-controls-30f58aee
+spec:
+  options:
+    - name: policy-mode
+      value: monitor
+  lsmhooks:
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+        - index: 0
+          type: uint32
+          resolve: f_cred.uid.val
+          label: opener_uid
+      selectors:
+        - matchBinaries:
+            - operator: In
+              values:
+                - /usr/bin/ssh
+                - /usr/bin/ssh-add
+                - /usr/bin/ssh-keygen
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.ssh/id_dsa
+                - /home/alice/.ssh/id_ecdsa
+                - /home/alice/.ssh/id_ed25519
+                - /home/alice/.ssh/id_rsa
+                - /home/bob/.ssh/id_dsa
+                - /home/bob/.ssh/id_ecdsa
+                - /home/bob/.ssh/id_ed25519
+                - /home/bob/.ssh/id_rsa
+          matchActions:
+            - action: NoPost
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.ssh/id_dsa
+                - /home/alice/.ssh/id_ecdsa
+                - /home/alice/.ssh/id_ed25519
+                - /home/alice/.ssh/id_rsa
+                - /home/bob/.ssh/id_dsa
+                - /home/bob/.ssh/id_ecdsa
+                - /home/bob/.ssh/id_ed25519
+                - /home/bob/.ssh/id_rsa
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Equal
+              values:
+                - /home/alice/.bash_profile
+                - /home/alice/.bashrc
+                - /home/alice/.profile
+                - /home/alice/.zshrc
+                - /home/bob/.bash_profile
+                - /home/bob/.bashrc
+                - /home/bob/.profile
+                - /home/bob/.zshrc
+            - args: [1]
+              operator: Mask
+              values:
+                - "2"
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+        - index: 0
+          type: uint32
+          resolve: f_cred.uid.val
+          label: opener_uid
+      selectors:
+        - matchPIDs:
+            - operator: In
+              followForks: true
+              isNamespacePID: false
+              values:
+                - 4001
+                - 4002
+                - 5001
+          matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - args: [0]
+              operator: Prefix
+              values:
+                - /home/alice/.config/autostart/
+                - /home/alice/.config/systemd/user/
+                - /home/bob/.config/autostart/
+                - /home/bob/.config/systemd/user/
+            - args: [1]
+              operator: Mask
+              values:
+                - "2"
+            - args: [2]
+              operator: InMap
+              values:
+                - "1001"
+                - "1002"
+          matchActions:
+            - action: Override
+              argError: -1
+            - action: Post

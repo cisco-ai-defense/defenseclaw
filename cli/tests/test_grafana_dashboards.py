@@ -238,6 +238,56 @@ def test_local_dashboards_and_rules_use_active_v8_event_sources() -> None:
     assert "severity: critical" in managed_aid_alert
 
 
+def test_kernel_tables_keep_their_no_data_sentence_out_of_empty_cells() -> None:
+    # GAP-0025: a table's fieldConfig.defaults.noValue is also what Grafana
+    # prints in an empty cell, so a kernel event with no hook join showed "No
+    # agent events in range" in its Hook join column. Each kernel table keeps
+    # the sentence for an empty table and gives empty text cells a short
+    # placeholder; the hook join reads "none".
+    seen = 0
+    for name in ("defenseclaw-ai-runtime.json", "defenseclaw-blocked-events.json"):
+        def walk(panels: list) -> None:
+            nonlocal seen
+            for panel in panels:
+                walk(panel.get("panels", []))
+                field_config = panel.get("fieldConfig", {})
+                exprs = " ".join(target.get("expr", "") for target in panel.get("targets", []))
+                if panel.get("type") != "table" or "kernel" not in (exprs + panel.get("title", "")).lower():
+                    continue
+                if not field_config.get("defaults", {}).get("noValue"):
+                    continue
+                seen += 1
+                overrides = field_config.get("overrides", [])
+                strings = [o for o in overrides if o.get("matcher") == {"id": "byType", "options": "string"}]
+                assert strings and strings[0]["properties"] == [{"id": "noValue", "value": "-"}], panel["title"]
+                if "hook_join" in exprs:
+                    hook = [o for o in overrides if o.get("matcher") == {"id": "byName", "options": "Hook join"}]
+                    assert hook and hook[0]["properties"] == [{"id": "noValue", "value": "none"}], panel["title"]
+        walk(_dashboard(name).get("panels", []))
+    assert seen >= 5
+
+
+def test_kernel_fleet_panels_show_each_hosts_current_state() -> None:
+    # GAP-0048: the fleet table listed a host once per backend and pause value
+    # it had in 10 minutes, and the stats counted states a host had left. The
+    # table keeps each host's latest record only (the newest record time wins
+    # per host), and the stats read the defenseclaw_kernel_state gauge, whose
+    # series a host leaves drop to 0.
+    board = _dashboard("defenseclaw-ai-runtime.json")
+    panels = [*board["panels"], *(child for row in board["panels"] for child in row.get("panels", []))]
+    by_title = {panel.get("title"): panel for panel in panels}
+    table = by_title["Kernel controls per host (last 10 minutes)"]
+    for target in table["targets"]:
+        expr = target["expr"]
+        assert " and on (host_name, " in expr and "topk by (host_name) (1, " in expr, target["refId"]
+        assert "{{ __timestamp__ | unixEpoch }}" in expr and "unwrap ts" in expr, target["refId"]
+    for title in ("Hosts reporting kernel controls", "Hosts with a stale approval", "Hosts on fallback", "Paused hosts"):
+        panel = by_title[title]
+        assert panel["datasource"]["type"] == "prometheus", title
+        expr = panel["targets"][0]["expr"]
+        assert expr.startswith("count(max by (host_name) (defenseclaw_kernel_state{") and expr.endswith("> 0) or vector(0)"), title
+
+
 def test_security_dashboard_exposes_generated_ai_defense_metrics() -> None:
     dashboard = _dashboard("defenseclaw-security.json")
     attempts = _panel(dashboard, "AI Defense attempts / min")
@@ -1041,13 +1091,16 @@ def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
         assert panel["fieldConfig"]["defaults"]["displayName"] == "${__field.labels." + label + "}", panel["title"]
 
 
-def test_merged_loki_tables_name_their_value_columns() -> None:
-    # GAP-0178: a Loki instant query has no table format, so a table that
-    # merges several shows each value column as "Value #<refId>" until
-    # organize renames it by that name. The Sandboxes Destinations table
-    # renamed "ALLOWED" (the Prometheus tables' renameByRegex before the
-    # merge), so its headers read Value #ALLOWED and its unit, colour and
-    # sort settings matched nothing.
+def test_merged_tables_name_their_value_columns() -> None:
+    # GAP-0178: a table that merges several queries shows each value column
+    # as "Value #<refId>" until organize renames it by that name. The
+    # Sandboxes Destinations table renamed "ALLOWED", so its headers read
+    # Value #ALLOWED and its unit, colour and sort settings matched nothing.
+    # GAP-0066: the Prometheus tables Per-connector traffic and Per-connector
+    # verdict summary ran renameByRegex before the merge, where the
+    # "Value #<refId>" names do not exist yet, so their headers read
+    # Value #INGEST, Value #TOTAL and so on. organize also orders by the names
+    # it is given, not by the names it renames to.
     checked = 0
     for path in sorted(DASHBOARD_DIR.glob("*.json")):
         board = json.loads(path.read_text(encoding="utf-8"))
@@ -1055,14 +1108,35 @@ def test_merged_loki_tables_name_their_value_columns() -> None:
         for panel in panels:
             steps = panel.get("transformations", [])
             targets = panel.get("targets", [])
-            if panel.get("type") != "table" or not any(step["id"] == "merge" for step in steps):
+            ids = [step["id"] for step in steps]
+            if panel.get("type") != "table" or "merge" not in ids or len(targets) < 2:
                 continue
-            if not targets or any((target.get("datasource") or {}).get("type") != "loki" for target in targets):
-                continue
-            renames = next(step for step in steps if step["id"] == "organize")["options"]["renameByName"]
+            assert "renameByRegex" not in ids[: ids.index("merge")], (path.name, panel["title"], ids)
+            options = next(step for step in steps if step["id"] == "organize")["options"]
+            renames = options["renameByName"]
             for target in targets:
                 assert f"Value #{target['refId']}" in renames, (path.name, panel["title"], target["refId"])
+            assert not set(options.get("indexByName", {})) & (set(renames.values()) - set(renames)), (path.name, panel["title"])
             checked += 1
+    assert checked >= 6
+
+
+def test_rename_by_regex_steps_use_grafanas_option_names() -> None:
+    # GAP-0057: five tables (kernel policies, the customer-policy hook join,
+    # kernel denials, per-connector traffic and verdicts) set renameByRegex's
+    # pattern as "regexp". Grafana reads "regex", so the step renamed nothing,
+    # the value column kept "Value #<refId>" and organize's rename of the bare
+    # refId matched nothing.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        panels = [*board.get("panels", []), *(child for row in board.get("panels", []) for child in row.get("panels", []))]
+        for panel in panels:
+            for step in panel.get("transformations", []):
+                if step["id"] != "renameByRegex":
+                    continue
+                assert set(step["options"]) == {"regex", "renamePattern"}, (path.name, panel["title"], step["options"])
+                checked += 1
     assert checked
 
 

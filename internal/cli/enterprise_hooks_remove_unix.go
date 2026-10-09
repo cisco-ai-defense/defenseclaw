@@ -144,7 +144,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
-		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)...)
+		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, accounts, cleanupFailed)...)
 	}
 	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
@@ -419,7 +419,8 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 // accounts in skip, whose pending cleanup failed and whose backups a retry
 // still needs. It returns every enrolled account it did not add a purge for,
 // as "user: reason", so the report names each account whose data stays.
-func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) []string {
+func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest,
+	accounts []enterprisehooks.UnixEligibleAccount, skip map[int]bool) []string {
 	dataDirs := map[int][]string{}
 	notPurged := map[string]string{}
 	for _, target := range manifest.Targets {
@@ -449,6 +450,22 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifes
 		if !slices.Contains(dataDirs[*target.UID], dataDir) {
 			dataDirs[*target.UID] = append(dataDirs[*target.UID], dataDir)
 		}
+	}
+	// An eligible account with no manifest row is enrolled through vendor
+	// machine policy (Claude Code, Codex, Cursor, Copilot CLI, OpenCode): its
+	// managed hooks write ~/.defenseclaw (session facts), and the uninstall
+	// names it among the per-user data a purge deletes (GAP-0040). Its job
+	// exists when its home is available (the leftover removals above).
+	for _, account := range accounts {
+		job := jobs[account.UID]
+		if account.UID <= 0 || job == nil || len(dataDirs[account.UID]) > 0 {
+			continue
+		}
+		if skip[account.UID] {
+			notPurged[job.Account.User] = "its pending hook cleanup failed; the state stays for a retry"
+			continue
+		}
+		dataDirs[account.UID] = []string{filepath.Join(job.Account.Home, ".defenseclaw")}
 	}
 	index := 0
 	for _, job := range jobs {

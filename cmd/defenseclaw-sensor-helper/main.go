@@ -42,18 +42,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 )
 
@@ -65,10 +68,35 @@ var (
 )
 
 func main() {
+	// The sandbox kernel feed (Linux, sandboxfeed_linux.go) is a mode of its
+	// own that shares none of the broker's flags.
+	if code, ok := sandboxFeedMode(os.Args[1:]); ok {
+		os.Exit(code)
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "defenseclaw-sensor-helper:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitError carries a one-shot's own exit status. --tetragon-cleanup exits 3
+// when Tetragon did not answer, which the lifecycle reports differently from
+// a cleanup that failed (1).
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+// exitCode is the exit status for err: an exitError's own, otherwise 1.
+func exitCode(err error) int {
+	var coded *exitError
+	if errors.As(err, &coded) && coded.code > 0 {
+		return coded.code
+	}
+	return 1
 }
 
 func run() error {
@@ -89,12 +117,25 @@ func run() error {
 			"gateway account: permit its uid and give the socket its group (unless --allow-uid/--socket-gid are set)")
 		homesFromManifest = flag.String("home-dirs-from-manifest", "",
 			"protected guardian manifest whose enabled users' homes Plane C watches; restarts when it changes")
-		showVersion = flag.Bool("version", false, "print the helper's version and commit, then exit")
+		showVersion     = flag.Bool("version", false, "print the helper's version and commit, then exit")
+		tetragonCleanup = flag.Bool("tetragon-cleanup", false,
+			"remove the Tetragon policies this helper recorded loading, then exit (uninstall, purge, rollback, downgrade)")
+		cleanupCheck = flag.Bool("check", false,
+			"with --tetragon-cleanup: only report that this helper supports it (exit 0) and change nothing")
 	)
 	flag.Parse()
 	if *showVersion {
 		_, err := fmt.Fprintln(os.Stdout, versionString())
 		return err
+	}
+	if *cleanupCheck && !*tetragonCleanup {
+		return errors.New("--check needs --tetragon-cleanup")
+	}
+	if *tetragonCleanup {
+		// A one-shot for the lifecycle and the package scripts: no socket,
+		// no service log, output on stdout.
+		return runTetragonCleanup(*cleanupCheck, os.Stdout,
+			slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	}
 
 	// The log destination comes from the protected service environment, not
@@ -167,6 +208,14 @@ func runHelper(
 		ctx = watchManifest(ctx, homesFromManifest, manifestDigest, 30*time.Second, logger)
 	}
 
+	// Tetragon (managed Linux only): the lifecycle's drop-in names the
+	// intent; the reconciler starts once and resumes from its persisted
+	// state when the manifest watcher restarts the helper.
+	var tetragonConfig *acquire.TetragonConfig
+	if managedEnterprise && runtime.GOOS == "linux" {
+		tetragonConfig = startKernelPolicy(ctx, logger, homes, homesFromManifest)
+	}
+
 	// Under the Windows SCM there is no console and no signal: the service
 	// control manager expects the process to report Running within seconds
 	// and to stop when told. runUnderServiceManager takes over the
@@ -175,7 +224,7 @@ func runHelper(
 	// killed with error 1053 -- a helper that can never start, on the one
 	// platform whose gateway most needs it.
 	return runUnderServiceManager(ctx, func(ctx context.Context) error {
-		return serve(ctx, path, uids, socketGID, homes, logger)
+		return serve(ctx, path, uids, socketGID, homes, tetragonConfig, logger)
 	})
 }
 
@@ -205,6 +254,7 @@ func serve(
 	uids []int,
 	socketGID int,
 	homeDirs []string,
+	tetragonConfig *acquire.TetragonConfig,
 	logger *slog.Logger,
 ) error {
 
@@ -233,6 +283,7 @@ func serve(
 		HomeDirs:    homeDirs,
 		AllowedUIDs: uids,
 		Logger:      logger,
+		Tetragon:    tetragonConfig,
 	})
 
 	logger.Info("sensor helper listening",
@@ -269,4 +320,34 @@ func parseUIDs(value string) ([]int, error) {
 		out = append(out, uid)
 	}
 	return out, nil
+}
+
+// helperBinDir is the managed install's binary directory, where the native
+// hook and DefenseClaw's own executables live.
+func helperBinDir() string {
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		return "/opt/defenseclaw/bin"
+	}
+	return layout.BinDir
+}
+
+// runTetragonCleanup is --tetragon-cleanup [--check]. Outside Linux there is
+// no Tetragon and nothing to remove. --check exits 0 only on a build that
+// can clean up, which is how an rpm %preun tells a Tetragon-aware helper
+// from an older one.
+func runTetragonCleanup(check bool, out io.Writer, logger *slog.Logger) error {
+	if runtime.GOOS != "linux" {
+		_, err := fmt.Fprintln(out, "tetragon cleanup: not applicable on "+runtime.GOOS)
+		return err
+	}
+	if check {
+		_, err := fmt.Fprintln(out, "tetragon cleanup: supported")
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return cleanupKernelPolicy(ctx, out, logger)
 }

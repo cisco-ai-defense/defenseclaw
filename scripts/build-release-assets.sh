@@ -66,6 +66,12 @@ for target in "${TARGETS[@]}"; do
         -o "${stage}/defenseclaw-gateway${exe}" ./cmd/defenseclaw
     GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \
         -o "${stage}/defenseclaw-acp${exe}" ./cmd/defenseclaw-acp
+    if [[ "${goos}" != windows ]]; then
+        # The sandbox kernel feed (Linux); the release archive carries it on
+        # every POSIX target, as .goreleaser.yaml's default archive does.
+        GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \
+            -o "${stage}/defenseclaw-sensor-helper" ./cmd/defenseclaw-sensor-helper
+    fi
     if [[ "${goos}" == windows ]]; then
         GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags} -H=windowsgui" \
             -o "${stage}/defenseclaw-hook.exe" ./cmd/defenseclaw-hook

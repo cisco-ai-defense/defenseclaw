@@ -763,6 +763,209 @@
         "mode": "markdown",
         "content": "### Start with the decision, not the IDs\n\n1. Read **Recent blocked events** for the rule and plain-language reason.\n2. Filter by **Rule**, **Connector**, or **Hook surface**; use **Similar block signatures** to spot recurrence.\n3. Expand a row only for advanced correlation: **evaluation ID** joins scanner findings from one evaluation, **operation ID** groups one agent operation, and **trace ID** opens a distributed trace when one was emitted.\n\nA decision can match up to eight rules. “Similar” means the same telemetry signature, not semantic similarity. Missing prompt/tool content was either not reported or removed by destination redaction."
       }
+    },
+    {
+      "type": "row",
+      "title": "Kernel denials (Linux)",
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Kernel denials",
+      "description": "Accesses a DefenseClaw kernel control refused with EPERM on a managed Linux host (enforcement.block.applied, initiator kernel): a read of an SSH private key or a write to a shell startup or autostart file by an enrolled agent's process. The hook panels above never see these: the kernel decided after the hook allowed the tool call.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 55,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\")[$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No kernel denials",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Blocked by your Tetragon policies",
+      "description": "Calls of an AI agent's processes the organization's own Tetragon policies denied (log.ai.runtime.kernel_event, outcome blocked). DefenseClaw reads those policies' events and never changes the policies.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 55,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(sum_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.kernel_event\" | body_defenseclaw_ai_runtime_kernel_outcome=\"blocked\" | unwrap body_defenseclaw_ai_runtime_kernel_count | __error__=\"\")[$__range])) or vector(0)",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No blocks",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Kernel denials by control, connector, user and process",
+      "description": "Who hit DefenseClaw's kernel controls: the control, the connector of the agent, the kernel uid and the process. The file is in each record's kernel.target, relative to the user's home, and leaves the host only where the destination's redaction profile allows content.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 55,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (control, connector, user, process) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\", user=\"{{.body_user_id}}\", process=\"{{.body_defenseclaw_ai_runtime_process}}\")[$__range]))",
+          "refId": "DENIALS",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "Value #(\\w+)",
+            "renamePattern": "$1"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "control": "Control",
+              "connector": "Connector",
+              "user": "User (uid)",
+              "process": "Process",
+              "DENIALS": "Denials"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No kernel denials in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "string"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Denials",
+            "desc": true
+          }
+        ]
+      }
     }
   ],
   "refresh": "30s",

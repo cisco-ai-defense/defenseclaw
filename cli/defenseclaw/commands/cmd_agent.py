@@ -2533,6 +2533,7 @@ def _probe_linux_capability(name: str) -> bool | None:
 # ask for, because an incomplete map is better than a stale copy of a header.
 _LINUX_CAPABILITY_BITS = {
     "CAP_DAC_READ_SEARCH": 2,
+    "CAP_NET_ADMIN": 12,
     "CAP_NET_RAW": 13,
     "CAP_SYS_ADMIN": 21,
 }
@@ -2668,12 +2669,14 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         },
         {
             "plane": "agent actions (C), process events",
-            "needs": "nothing",
+            "needs": "CAP_NET_ADMIN",
+            "probe": "cap_net_admin",
             "why": (
-                "the cn_proc netlink connector is readable unprivileged on most "
-                "kernels; a sandbox that blocks AF_NETLINK is the exception"
+                "the cn_proc netlink connector refuses a subscriber without it "
+                "(the bind fails with EPERM), so Plane C sees no exec or exit "
+                "events, including the short-lived processes the /proc poll misses"
             ),
-            "how": None,
+            "how": "run the gateway as root, or grant CAP_NET_ADMIN",
         },
         {
             "plane": "agent actions (C), file events",
@@ -2684,6 +2687,17 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
                 "argv instead of observed, which sees the command but not the read"
             ),
             "how": "run the gateway as root, or grant CAP_SYS_ADMIN",
+        },
+        {
+            "plane": "agent actions (C), Tetragon",
+            "needs": "nothing",
+            "info": True,
+            "why": (
+                "per-user installs do not connect to Tetragon: its socket is root-only "
+                "and grants kernel policy control. The enterprise sensor helper uses it "
+                "on managed Linux hosts"
+            ),
+            "how": None,
         },
     ],
     "windows": [
@@ -2757,6 +2771,8 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
         return bool(granted and _probe_root())
     if probe == "cap_dac":
         return _probe_linux_capability("CAP_DAC_READ_SEARCH")
+    if probe == "cap_net_admin":
+        return _probe_linux_capability("CAP_NET_ADMIN")
     if probe == "cap_net_raw":
         return _probe_linux_capability("CAP_NET_RAW")
     if probe == "cap_sys_admin":
@@ -2780,7 +2796,7 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
 # TCC does not let any process grant to itself or to another, at any
 # privilege level. The command opens the exact settings pane instead and
 # waits for the operator, which is the whole of what is achievable.
-_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep"
+_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_admin,cap_net_raw,cap_sys_admin+ep"
 
 _WINDOWS_AUDIT_SUBCATEGORIES = (
     "Process Creation",
@@ -2951,6 +2967,12 @@ def runtime_permissions(
         # shadowing it left the loop's last dict bound to the name, so the
         # command believed --grant had been passed on every invocation.
         state = entry["granted"]
+        if entry.get("info"):
+            # Nothing to grant and nothing missing: a fact about this
+            # platform an operator would otherwise go looking for.
+            ux.subhead(f"[info] {entry['plane']}", indent="  ")
+            ux.subhead(str(entry["why"]), indent="    ")
+            continue
         if entry.get("off"):
             ux.subhead(f"[off] {entry['plane']}", indent="  ")
             ux.subhead(

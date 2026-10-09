@@ -287,6 +287,27 @@ When a change fails to build, the previous generation keeps running and the
 object gains `last_reload_error` with the reason; `defenseclaw doctor` reports
 that as a failed Policy row. The next change that builds clears it.
 
+On a managed Linux computer whose sensor helper has DefenseClaw policies in
+Tetragon (`observe` or `enforce`, or policies still loaded after a mode
+change), `policy` also carries a `kernel` object. It is absent in every other
+state, so a reader treats a missing `kernel` as "nothing loaded". `enterprise
+linux status` compares its `kernel_policy` with `components.kernel_policy`
+(`kernel_policy_not_applied`).
+
+| Key | Meaning |
+| --- | --- |
+| `available`, `reason` | Whether the helper runs the kernel-policy reconciler; when it does not, the reason |
+| `mode`, `intent_mode` | The `enterprise.tetragon` mode the helper runs, and the mode the drop-in asks for before any cap |
+| `kernel_policy` | The digest of the kernel controls this build ships, the value `enforce_ack` approves |
+| `approval` | `not_needed`, `missing`, `stale` or `approved` |
+| `applied` | `true` when the helper's last pass left Tetragon with the policies the config calls for |
+| `helper_reachable`, `fetched_at`, `updated_at` | Whether the gateway could read the helper, and when it did and when the helper last wrote its state |
+| `mode_by_uid_count` | Enrolled users by the mode the helper holds them in (`enforce`, `monitor`, ...) |
+| `paused_until` | When an active pause ends |
+| `overrides` | Policy families an operator moved to monitor mode or deleted with `tetra` |
+| `orphaned` | DefenseClaw policy names still loaded with nothing reconciling them |
+| `warnings` | The reason codes in force, for example `kernel_enforce_ack_stale`; see [Kernel sensor warnings](/docs/enterprise/troubleshooting#kernel-sensor-warnings) |
+
 ### Connector hooks
 
 Built-in connectors that implement the hook endpoint contract register the
@@ -514,6 +535,41 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | `POST` | `/api/v1/ai-usage/confidence/policy/validate` | Dry-run validation of a candidate policy file. |
 | `GET` | `/api/v1/ai-usage/runtime` | Latest runtime-discovery snapshot: each runtime plane (what it can see and why) and scored findings. Returns `enabled: false` with empty lists when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime status` and `findings`. |
 | `POST` | `/api/v1/ai-usage/runtime/scan` | Poll the runtime planes now and return the new snapshot. Answers `503` when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime scan`. |
+
+#### Plane C backend on managed Linux
+
+On a managed Linux computer the Plane C entry of the snapshot carries a
+`backend` object. The same object is in `/health` under
+`ai_runtime.details.planes.c.backend`. `defenseclaw-gateway status` and
+`enterprise linux discovery` read it; the `defenseclaw` command line and TUI do
+not, because the managed packages ship neither in this release. Other computers
+omit it.
+
+```json title="GET /health, ai_runtime.details.planes.c.backend (trimmed, values illustrative)"
+{
+  "kind": "tetragon",
+  "version": "v1.7.1",
+  "mode": "consume",
+  "socket": "/var/run/tetragon/tetragon.sock",
+  "events_lost": 0,
+  "loss_known": true,
+  "customer_events": {"seen": 322, "forwarded": 308, "dropped": 0, "container": 11, "capped": 0, "attributed": 1, "gated": 307},
+  "customer_policies": [
+    {"name": "file-sensitive", "mode": "monitor_only", "state": "enabled",
+     "seen": 212, "forwarded": 212, "dropped": 0, "container": 0, "capped": 0, "attributed": 0, "gated": 212}
+  ]
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `kind` | `tetragon`, or `native` for `cn_proc` and `fanotify` |
+| `version`, `mode`, `socket` | Tetragon's version, the effective `enterprise.tetragon` mode the helper runs, and the socket it reads |
+| `events_lost`, `loss_known` | What Tetragon reports losing. `loss_known: false` means its counters could not be read: show the loss as unknown, not as zero |
+| `fallback_reason` | When `kind` is `native` although Tetragon is wanted: a reason code, a colon and the detail, for example `tetragon_tcp_api` |
+| `policies` | DefenseClaw's own policies in Tetragon: `name`, `mode`, `state` and `error` |
+| `kernel_floor` | The kernel controls, when the helper runs `observe` or `enforce`: `mode`, `enrolled_users`, `enforced_users`, `burn_in_users`, `approval`, `paused_until`, `paused_by`, `blocked_1h`, `would_block_1h` (for every user on the computer in the last hour) and `next_ready_hours` (calendar time until the user closest to the end of burn-in is ready). The key keeps its name; the surfaces say "kernel controls" |
+| `customer_policies`, `customer_events` | Your own Tetragon policies, with the counts of their events: `seen`, `forwarded`, `dropped`, `container` and `capped` come from the helper, `attributed` (recorded below an AI agent) and `gated` (counted only) from the gateway. DefenseClaw reads these events and never changes the policies |
 
 ### Identity, profiles and IDE inventory
 

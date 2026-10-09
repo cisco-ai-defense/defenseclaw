@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -31,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
+	kernelcontrols "github.com/defenseclaw/defenseclaw/policies/kernel"
 )
 
 // The effective policy digest (spec section 5) is
@@ -69,11 +71,51 @@ func configDigest(cfg *config.Config) (string, error) {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
+	dropTetragonDefaults(doc)
 	canonical, err := json.Marshal(canonicalConfigValue("", doc, dataDirOf(cfg)))
 	if err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
 	return sha256Digest(canonical), nil
+}
+
+// dropTetragonDefaults removes the enterprise.tetragon values equal to their
+// built-in defaults (mode consume, burn_in 168h, an empty enforce_ack,
+// customer_events agent) from the marshalled config, and the block (and an
+// enterprise block it leaves empty) once nothing is left: an absent block and
+// one that spells out the defaults are the same intent and digest the same.
+// An enforce_ack list of two or more digests is never a default; a one-item
+// list marshals as its string.
+func dropTetragonDefaults(doc any) {
+	root, _ := doc.(map[string]any)
+	enterprise, _ := root["enterprise"].(map[string]any)
+	tetragon, _ := enterprise["tetragon"].(map[string]any)
+	if tetragon == nil {
+		return
+	}
+	text := func(key string) string {
+		value, _ := tetragon[key].(string)
+		return value
+	}
+	written := config.EnterpriseTetragonConfig{Mode: text("mode"), BurnIn: text("burn_in"),
+		EnforceAck: config.TetragonEnforceAcks{text("enforce_ack")}, CustomerEvents: text("customer_events")}
+	effective, defaults := written.Effective(), config.EnterpriseTetragonConfig{}.Effective()
+	for key, isDefault := range map[string]bool{
+		"mode":            effective.Mode == defaults.Mode,
+		"burn_in":         effective.BurnIn == defaults.BurnIn,
+		"enforce_ack":     len(effective.EnforceAck) == 0,
+		"customer_events": effective.CustomerEvents == defaults.CustomerEvents,
+	} {
+		if _, isText := tetragon[key].(string); isDefault && isText {
+			delete(tetragon, key)
+		}
+	}
+	if len(tetragon) == 0 {
+		delete(enterprise, "tetragon")
+	}
+	if len(enterprise) == 0 {
+		delete(root, "enterprise")
+	}
 }
 
 func canonicalConfigValue(path string, value any, dataDir string) any {
@@ -175,7 +217,26 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	if digest := builtinPolicyDigest(); digest != "" {
 		out["builtin"] = digest
 	}
+	if digest := kernelPolicyComponent(cfg, runtime.GOOS); digest != "" {
+		out["kernel_policy"] = digest
+	}
 	return out
+}
+
+// kernelPolicyComponent is the kernel_policy component (spec 12.2): the
+// digest of the kernel control set compiled into this binary, present only
+// where the sensor helper loads it, a Linux standalone deployment whose
+// effective enterprise.tetragon mode is observe or enforce. It is the short
+// form ("sha256:" and 12 hex) that the helper reports in kernel_status and
+// that enforce_ack approves, so doctor, enterprise status and the kernel
+// denial records compare the same value. A new build with another control
+// set therefore moves the effective digest.
+func kernelPolicyComponent(cfg *config.Config, goos string) string {
+	switch mode, _ := cfg.TetragonMode(goos); mode {
+	case config.TetragonModeObserve, config.TetragonModeEnforce:
+		return kernelcontrols.Digest()
+	}
+	return ""
 }
 
 // assetRefDigest is a reference's pinned digest, else the file's.

@@ -179,7 +179,7 @@ LOKI_BUILTIN_FIELDS = {
     "defenseclaw_sandbox_name",
     # OTLP resource attributes: Loki indexes deployment.environment as a stream
     # label and keeps host.name as structured metadata (the Sandboxes board's
-    # Environment and Host boxes).
+    # Environment and Host boxes), so a host filter works before or after `| json`.
     "deployment_environment",
     "host_name",
     "level",

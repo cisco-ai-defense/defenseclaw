@@ -912,7 +912,7 @@ defenseclaw agent discovery runtime findings
 | --- | --- | --- |
 | **A** — inference heartbeat | Sustained CPU in a scriptable runtime, and resident memory large enough to hold model weights | `/proc` on Linux, `ps` on macOS, Toolhelp32 + `GetProcessTimes` on Windows |
 | **B** — shadow egress | **Per-process** socket attribution to a provider, and the DNS answers that name the peer | `/proc/net` + `/proc/<pid>/fd`, `lsof`, `GetExtendedTcpTable` |
-| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`), `cn_proc` + `fanotify`, the Windows Security event log |
+| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`); `cn_proc` + `fanotify`, or Tetragon on a managed Linux computer that runs it; the Windows Security event log |
 
 Plane A only raises a heartbeat inside a scriptable runtime or a known model
 server. A compiled application burning CPU is a compiled application burning
@@ -942,14 +942,19 @@ which parts it has rather than implying it has all of them.
 | Platform | Source | Needs | Delivers | Does not |
 | --- | --- | --- | --- | --- |
 | macOS | Endpoint Security via `eslogger` | root **and** Full Disk Access | all six kinds: exec with argv, exit, file read/write on watched paths, and account/privilege events recognised from the exec argument vector | — |
-| Linux | `cn_proc` netlink | nothing | exec, exit, uid/gid changes | — |
+| Linux | `cn_proc` netlink | `CAP_NET_ADMIN` | exec, exit, uid/gid changes. The name and arguments are read from `/proc` after the event, so a short-lived process can lose them | The executable's path from the start of the process, container identity |
 | Linux | `fanotify` | `CAP_SYS_ADMIN` | file read/write on watched roots | — |
+| Linux, managed enterprise | Tetragon, read by the root sensor helper | Nothing at the gateway. Tetragon's API is root-only, so a per-user install never connects to it | Exec and exit with the binary, arguments, user and parent recorded in the kernel at the exec; the container a process belongs to. In `observe` and `enforce` modes also file opens of credential, persistence and agent-config paths, and connects per binary | Windows and macOS: Tetragon has no agent for either |
 | Windows | Security event log (`wevtapi`) | elevated token **and** Advanced Audit Policy | process creation and exit, account creation, group changes, privilege assignment | file events, which need a SACL per audited object |
 
-The Linux halves start independently. An unprivileged host gets `cn_proc` with
-the file half honestly reported absent, which beats losing the plane to one
-missing capability — and the snapshot reports it as *partially covered* rather
-than complete.
+The Linux halves start independently. A host that has `CAP_NET_ADMIN` but not
+`CAP_SYS_ADMIN` gets `cn_proc` with the file half honestly reported absent,
+which beats losing the plane to one missing capability — and the snapshot
+reports it as *partially covered* rather than complete. A host with neither
+capability gets neither half, and the snapshot names the capability that is
+missing. On a managed Linux computer the root sensor helper holds the
+capabilities, and uses Tetragon when the computer runs it; see
+[Plane C on managed Linux](#plane-c-on-managed-linux-tetragon).
 
 Windows has two prerequisites that fail differently and are therefore reported
 differently: Advanced Audit Policy for the events at all, and the separate
@@ -993,7 +998,8 @@ defenseclaw agent discovery runtime permissions --grant
 
 Every command is printed before anything runs, and the confirmation is not
 skippable without `--yes`. `--revert` undoes exactly what `--grant` applied.
-On Linux that is one `setcap` on the gateway binary; on Windows it is the
+On Linux that is one `setcap` on the gateway binary (it includes
+`cap_net_admin` for `cn_proc`); on Windows it is the
 three audit subcategories plus the command-line policy, which needs an
 already-elevated prompt. Nothing grants more than the requirement it names —
 notably there is no blanket SACL on Windows, because auditing every object on
@@ -1020,7 +1026,7 @@ wrong answer about a machine you are not on.
 | **A** inference heartbeat | nothing | nothing | nothing for own processes; elevation for all |
 | **B** egress attribution | root | root or `CAP_DAC_READ_SEARCH` | elevated token |
 | **B** DNS naming | root, for `/dev/bpf` | `CAP_NET_RAW` | elevated token |
-| **C** process + identity events | root **and** Full Disk Access | nothing | elevated **and** Advanced Audit Policy |
+| **C** process + identity events | root **and** Full Disk Access | `CAP_NET_ADMIN` (`cn_proc`) | elevated **and** Advanced Audit Policy |
 | **C** file events | included above | `CAP_SYS_ADMIN` (fanotify) | a SACL per audited object |
 | **C** command lines | included above | included above | the separate command-line audit policy |
 
@@ -1041,10 +1047,12 @@ on; `ProcessCreationIncludeCmdLine_Enabled` turns on the argument vectors
 inside them. With only the first, lineage works and nearly every tactic
 silently does not.
 
-**Linux Plane C has two independent halves.** `cn_proc` needs nothing, so
-process events work unprivileged; `fanotify` needs `CAP_SYS_ADMIN`. The plane
-starts on whichever half it can and reports the other absent, rather than
-failing whole.
+**Linux Plane C has two independent halves.** `cn_proc` needs
+`CAP_NET_ADMIN`: subscribing to the kernel's process connector is a
+privileged netlink operation, so an unprivileged account gets no process
+events from it. `fanotify` needs `CAP_SYS_ADMIN`. The plane starts on
+whichever half it can and reports the other absent, rather than failing
+whole. `defenseclaw agent discovery runtime permissions --grant` applies both.
 </Callout>
 
 **Managed enterprise install — the installer arranges these**
@@ -1094,17 +1102,17 @@ root process into a general-purpose file reader.
 
 | Setting | Value |
 | --- | --- |
-| `ai_discovery.runtime.acquisition` | `auto` (default), `direct`, or `helper` |
 | Transport | `AF_UNIX` socket, mode `0660`, owned by the gateway's group |
 | Peer check (Linux, macOS) | kernel-supplied uid via `SO_PEERCRED` / `LOCAL_PEERCRED`, which the peer cannot forge |
 | Peer check (Windows) | the socket DACL, refused in-kernel at open |
 | Helper network access | none — the unit allows `AF_UNIX`, `AF_NETLINK` and `AF_PACKET` only |
 
-`auto` brokers only where the gateway was de-privileged *and* a helper is
-therefore installed. It reads directly on a managed macOS host, because that
-gateway is already root and a broker would add a failure mode for nothing, and
-on an unmanaged workstation, where there is no helper to ask and the honest
-answer is to read what it can and report the shortfall.
+The gateway brokers through the helper only where it was de-privileged *and* a
+helper is therefore installed. It reads directly on a managed macOS host,
+because that gateway is already root and a broker would add a failure mode for
+nothing, and on an unmanaged workstation, where there is no helper to ask and
+the honest answer is to read what it can and report the shortfall. The choice
+is automatic; there is no setting for it.
 
 With the helper running, that same sandboxed Linux gateway reports
 `degraded: false` and detects a full credential-access → identity-creation →
@@ -1142,6 +1150,73 @@ root-owned, the gateway cannot open it, and the helper would otherwise come up
 reporting success while brokering nothing. The listener verifies the ownership
 took and refuses to start rather than allow that.
 </Callout>
+
+### Plane C on managed Linux: Tetragon
+
+If a managed Linux computer already runs [Tetragon](https://tetragon.io), the
+sensor helper reads its events over Tetragon's root-owned Unix socket and uses
+them as Plane C's process source. That is the default mode (`consume`), but
+it works only when Plane C is on: set `ai_discovery.runtime.enabled` and
+`ai_discovery.runtime.enable_host_plane` to `true`, because Plane C is opt-in
+(with it off, the Tetragon mode is `off`). The benefit is accuracy: Tetragon records a
+process's binary, arguments, user and parent in the kernel at the exec, where
+`cn_proc` reads `/proc` afterwards and loses fast processes, and it marks
+processes that belong to a container so they are never scored as a host
+agent. If Tetragon is absent, stopped, listening on TCP or an unsupported
+version, the same stream falls back to `cn_proc` and `fanotify` and says why.
+
+Two further modes, `observe` and `enforce`, add DefenseClaw's own policies
+to that Tetragon. `observe` records file opens of credential, persistence and
+agent-configuration paths and connects per binary. `enforce` lets two fixed
+controls deny, only after an administrator approves them. Hooks and
+OpenShell keep their roles; see
+[Agent segmentation, visibility and enforcement](/docs/segmentation). The
+setup, the readiness check and the pause runbook are on
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon),
+and the settings are under
+[`enterprise.tetragon`](/docs/enterprise/configuration#tetragon-linux).
+
+If you run Tetragon policies of your own on kprobe or LSM hooks, the helper
+also reports their events when they hit an AI agent (`customer_events`, on by
+default in `consume`, `observe` and `enforce`). Each record names the policy,
+the action, the outcome (`observed`, `would_block` or `blocked`) and the
+target, and carries the agent, the user and the hook decision it belongs to.
+Events from outside an agent's process tree are counted per policy and not
+exported. DefenseClaw never changes, loads or deletes your policies, and these
+events are not scored as findings.
+
+A per-user (open-source) install never connects to Tetragon: its socket is
+root-only and grants control of kernel policy. `defenseclaw doctor` and
+`runtime permissions` say so when Tetragon is present, and `doctor` warns when
+Tetragon serves its API on a TCP port.
+
+Only a managed Linux gateway reports a Tetragon backend, and the managed Linux
+packages ship no `defenseclaw` command line or TUI in this release (the
+per-user installer refuses to run on a managed computer). So the TUI Runtime
+panel, `agent discovery runtime status` and `defenseclaw doctor` have no
+managed Tetragon lines. The administrator's surfaces are the Go commands
+(`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`,
+`enterprise linux tetragon verify`, `tetragon status` and
+`defenseclaw-gateway status`), the telemetry and the agent's own answers.
+
+When the Plane C entry carries a backend, `enterprise linux discovery` adds
+lines for it under agent actions:
+
+```text
+kernel sensor: Tetragon v1.7.1, enforce, 0 events lost
+kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days
+your Tetragon policies: 4 loaded (1 enforcing); 12 agent events forwarded (DefenseClaw never changes them)
+```
+
+The second line appears only when DefenseClaw's kernel controls are loaded
+(`observe` or `enforce`), and the third only when Tetragon has policies of
+yours. "next ready" is calendar time at the user's rate of agent use so far,
+shown once the burn-in window is a day old. During a pause the second line
+ends with `; paused until <time>`. The third line counts the events of your
+policies that the gateway recorded below an AI agent since it started, and
+"over the budget" only the ones the helper did not forward because they went
+over the volume limit. `--json` includes the backend. When the number of lost events
+is not known, the line says so instead of showing zero.
 
 ### Naming a peer: DNS capture
 
@@ -1293,15 +1368,17 @@ inventory disagreed.
 
 ### Where the data lands
 
-Three log families under the existing `ai.discovery` bucket, so
+Five log families under the existing `ai.discovery` bucket, so
 presence and behaviour share one bucket, one destination policy, and one set of
 dashboards:
 
 | Event | Carries |
 | --- | --- |
 | `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
-| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
-| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
+| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage. Records now name the user and agent identity, the event source (`tetragon`, `cn_proc`, `fanotify`, ...) and, on managed Linux, whether a hook decision matched (`hook_seen`) |
+| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero. Plane C also reports its backend (`tetragon` or `native`), the mechanism, lost events and container events. On managed Linux with Tetragon it adds the fleet fields: the Tetragon version, the helper mode, whether `enforce_ack` approves this build, the users enrolled, enforced and in burn-in, whether enforcement is paused, and the would-block, blocked and customer-event counts for the cycle |
+| `ai.runtime.kernel_policy` | One record per change of the Linux kernel controls (a policy loaded, a mode changed, a pause, a user ready or back in burn-in), and one every 6 hours per user in burn-in with the covered and needed hours (`uid_progress`). Never one per event. Managed Linux with Tetragon only |
+| `ai.runtime.kernel_event` | One record per attributed event of your own Tetragon policies (kprobe and LSM) below an AI agent, after repeats are folded: the policy, hook type, function, action, mode, outcome, target and tags, with the agent, the user and the hook join. Managed Linux with Tetragon only; `customer_events: off` stops them |
 
 A degraded cycle is reported with outcome `partial` rather than `completed`.
 
@@ -1318,7 +1395,11 @@ visible — press `p` to expand each plane's reason — and coverage sits in the
 header beside the finding count, because a reader who sees only the count
 cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
 renders a kill chain as a sequence rather than a set, and always states the
-inventory verdict including `unobserved`.
+inventory verdict including `unobserved`. Neither shows Tetragon: only a
+managed Linux gateway reports it, the managed Linux packages ship no TUI in
+this release (see
+[Plane C on managed Linux](#plane-c-on-managed-linux-tetragon)), and the macOS
+app manages only the Mac's own gateway.
 
 ## Use it alongside Registry
 

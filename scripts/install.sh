@@ -79,7 +79,12 @@ readonly OPENCLAW_VERSION="2026.3.24"
 readonly CALLER_PATH="${PATH}"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
-readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
+# defenseclaw-sensor-helper is kept on Linux only: it is what `sudo
+# defenseclaw-gateway sandbox kernel-feed install` copies into a root service.
+readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp defenseclaw-sensor-helper"
+# The sandbox kernel feed's unit and its root copy of the helper.
+readonly SANDBOX_FEED_UNIT="/etc/systemd/system/defenseclaw-sandbox-feed.service"
+readonly SANDBOX_FEED_HELPER="/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # Data-dir entries that are install machinery, not user data.
@@ -682,6 +687,8 @@ ok "Assets match checksums.txt"
 
 tar -xzf "${STAGING}/${ARCHIVE}" -C "${STAGING}/bin" || die "Could not unpack ${ARCHIVE}"
 [[ -f "${STAGING}/bin/defenseclaw-gateway" ]] || die "${ARCHIVE} has no defenseclaw-gateway"
+# The sensor helper serves only the Linux sandbox kernel feed.
+[[ "${OS}" == linux ]] || rm -f "${STAGING}/bin/defenseclaw-sensor-helper"
 for binary in ${MANAGED_BINARIES}; do
     [[ -f "${STAGING}/bin/${binary}" ]] || continue
     chmod 755 "${STAGING}/bin/${binary}"
@@ -854,6 +861,14 @@ if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
     fi
     if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
+    fi
+fi
+# The sandbox kernel feed is a root copy of the helper that an upgrade as this
+# user cannot replace: say how to bring it to this release.
+if [[ "${OS}" == linux && -f "${SANDBOX_FEED_UNIT}" && -x "${BIN_DIR}/defenseclaw-sensor-helper" ]]; then
+    FEED_VERSION="$("${SANDBOX_FEED_HELPER}" --version 2>/dev/null | sed -n 's/.* version \([^ ]*\).*/\1/p')"
+    if [[ "${FEED_VERSION}" != "${VERSION}" ]]; then
+        warn "The sandbox kernel feed runs ${FEED_VERSION:-an unknown version}, not ${VERSION}; update it with: sudo ${BIN_DIR}/defenseclaw-gateway sandbox kernel-feed install"
     fi
 fi
 if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \

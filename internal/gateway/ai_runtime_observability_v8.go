@@ -27,11 +27,15 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
@@ -52,6 +56,20 @@ const runtimeSignalsByteBudget = 2048
 // producer and this subsystem never had one.
 type aiRuntimeV8Adapter struct {
 	runtime sidecarRuntimeEmitter
+	// kernelCursor remembers which helper state changes were already
+	// reported; nil means the process-wide cursor. An adapter is built per
+	// poll, so the cursor cannot live here.
+	kernelCursor *kernelChangeCursor
+	// directories memoizes the directory attribution of a user for the
+	// snapshot being emitted (EmitSnapshot resets it; an adapter emits one
+	// snapshot at a time).
+	directories   map[string]*llmEventIdentity
+	directoriesMu sync.Mutex
+	// kernelDeltas remembers the helper's counters for the per-cycle
+	// growth on plane_health, and kernelState the kernel state gauge's last
+	// label set; nil means the process-wide cursors.
+	kernelDeltas *kernelDeltaCursor
+	kernelState  *kernelStateCursor
 }
 
 func newAIRuntimeV8Adapter(emitter sidecarRuntimeEmitter) *aiRuntimeV8Adapter {
@@ -72,8 +90,13 @@ func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot se
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	var firstErr error
+	adapter.directoriesMu.Lock()
+	adapter.directories = nil
+	adapter.directoriesMu.Unlock()
+	// Once per cycle: the growth of the helper's counters is per cycle.
+	fleet := adapter.kernelFleetOf(snapshot, time.Now())
 	for _, health := range snapshot.Planes {
-		if err := adapter.emitPlaneHealth(ctx, snapshot, health); err != nil && firstErr == nil {
+		if err := adapter.emitPlaneHealth(ctx, snapshot, health, fleet); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -106,25 +129,71 @@ func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot se
 			}
 		}
 	}
+	// Kernel floor: denials of DefenseClaw's controls and the helper's
+	// state changes. Both are empty off managed Linux.
+	if err := adapter.emitKernelBlocks(ctx, snapshot); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := adapter.emitKernelPolicyChanges(ctx, snapshot); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	// The host's own Tetragon policies' events below an AI agent, and the
+	// kernel metrics.
+	if err := adapter.emitCustomerKernelEvents(ctx, snapshot); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := adapter.emitKernelMetrics(ctx, snapshot, fleet); err != nil && firstErr == nil {
+		firstErr = err
+	}
 	return firstErr
 }
 
-// planeHealthReason is what a plane-health record says happened.
-//
-// A running plane names its mechanism; a stopped or blind one names its
-// reason. One of the two is always present, so a reader never has to go to
-// the source to find out what happened.
-//
-// Exported to the test rather than restated there: a test that re-implements
-// this rule asserts against itself and keeps passing when the rule changes.
-func planeHealthReason(health sensor.PlaneHealth) string {
-	if health.Reason != "" {
-		return health.Reason
+// runtimePlaneBackend is the process backend Plane C ran on; absent off the
+// managed Linux helper and for the other planes.
+func runtimePlaneBackend(health sensor.PlaneHealth) observability.Optional[string] {
+	if health.Plane != platform.PlaneC || health.Backend == nil {
+		return observability.Absent[string]()
 	}
-	if health.Running {
-		return health.Mechanism
+	return runtimeEnum(health.Backend.Kind, runtimePlaneBackends)
+}
+
+// runtimePlaneEventsLost is the backend's loss count; present with the
+// backend, zero included.
+func runtimePlaneEventsLost(health sensor.PlaneHealth) observability.Optional[int64] {
+	if health.Plane != platform.PlaneC || health.Backend == nil {
+		return observability.Absent[int64]()
 	}
-	return ""
+	return observability.Present(runtimeCount(health.Backend.EventsLost, math.MaxInt64))
+}
+
+// runtimePlaneLossKnown says whether the backend's own loss counters were
+// readable; a false is "unknown", not "none".
+func runtimePlaneLossKnown(health sensor.PlaneHealth) observability.Optional[bool] {
+	if health.Plane != platform.PlaneC || health.Backend == nil {
+		return observability.Absent[bool]()
+	}
+	return observability.Present(health.Backend.LossKnown)
+}
+
+// runtimePlaneContainerEvents is how many events this cycle were routed to
+// the container bucket. It is reported with the managed Linux backend (zero
+// included, so a quiet count is distinguishable from no reading) and on any
+// plane C cycle that routed some.
+func runtimePlaneContainerEvents(health sensor.PlaneHealth) observability.Optional[int64] {
+	if health.Plane != platform.PlaneC || (health.Backend == nil && health.ContainerEvents <= 0) {
+		return observability.Absent[int64]()
+	}
+	return observability.Present(runtimeCount(health.ContainerEvents, runtimeContainerMax))
+}
+
+// runtimeCorrelationID keeps a joined hook decision's id when it fits the
+// correlation envelope.
+func runtimeCorrelationID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 256 || !utf8.ValidString(value) {
+		return ""
+	}
+	return value
 }
 
 func runtimeOutcome(snapshot sensor.Snapshot) observability.Outcome {
@@ -161,7 +230,7 @@ func (adapter *aiRuntimeV8Adapter) metadata(
 }
 
 func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
-	ctx context.Context, snapshot sensor.Snapshot, health sensor.PlaneHealth,
+	ctx context.Context, snapshot sensor.Snapshot, health sensor.PlaneHealth, fleet kernelFleet,
 ) error {
 	metadata, err := adapter.metadata("ai.runtime.plane_health", "INFO")
 	if err != nil {
@@ -177,7 +246,7 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		return builder.BuildLogAIRuntimePlaneHealth(observability.LogAIRuntimePlaneHealthInput{
+		input := observability.LogAIRuntimePlaneHealthInput{
 			Envelope:                                aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime"),
 			Severity:                                observability.Present(observability.SeverityInfo),
 			LogLevel:                                observability.Present(observability.LogLevelInfo),
@@ -191,8 +260,33 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 			DefenseClawAIRuntimePlane:                   string(health.Plane),
 			DefenseClawAIRuntimePlaneAvailable:          health.Available,
 			DefenseClawAIRuntimePlaneRunning:            health.Running,
-			DefenseClawAIRuntimePlaneReason:             aiDiscoveryV8OptionalText(planeHealthReason(health)),
-		})
+			// A running plane names its mechanism on every cycle, and a
+			// stopped, blind or partial one its reason, so a reader never has
+			// to go to the source to find out what a plane is doing.
+			DefenseClawAIRuntimePlaneReason:     aiDiscoveryV8OptionalText(health.Reason),
+			DefenseClawAIRuntimePlaneMechanism:  runtimeBoundedText(health.Mechanism, runtimeMechanismMaxBytes),
+			DefenseClawAIRuntimePlaneBackend:    runtimePlaneBackend(health),
+			DefenseClawAIRuntimeEventsLost:      runtimePlaneEventsLost(health),
+			DefenseClawAIRuntimeLossKnown:       runtimePlaneLossKnown(health),
+			DefenseClawAIRuntimeContainerEvents: runtimePlaneContainerEvents(health),
+		}
+		if health.Plane == platform.PlaneC && fleet.present {
+			// The fleet fields: the latest plane c record of each host is the
+			// fleet table's row.
+			input.DefenseClawAIRuntimeKernelHelperMode = fleet.helperMode
+			input.DefenseClawAIRuntimeKernelApproval = fleet.approval
+			input.DefenseClawPolicyVersion = fleet.policy
+			input.DefenseClawAIRuntimeKernelUsersEnrolled = fleet.enrolled
+			input.DefenseClawAIRuntimeKernelUsersEnforced = fleet.enforced
+			input.DefenseClawAIRuntimeKernelUsersBurnIn = fleet.burnIn
+			input.DefenseClawAIRuntimeKernelPaused = fleet.paused
+			input.DefenseClawAIRuntimeTetragonVersion = fleet.version
+			input.DefenseClawAIRuntimeTetragonInstalled = fleet.installed
+			input.DefenseClawAIRuntimeKernelWouldBlockDelta = fleet.wouldBlockDelta
+			input.DefenseClawAIRuntimeKernelBlockedDelta = fleet.blockedDelta
+			input.DefenseClawAIRuntimeKernelCustomerEventsDelta = fleet.customerDelta
+		}
+		return builder.BuildLogAIRuntimePlaneHealth(input)
 	})
 	return err
 }
@@ -214,7 +308,9 @@ func (adapter *aiRuntimeV8Adapter) emitFinding(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		return builder.BuildLogAIRuntimeFinding(observability.LogAIRuntimeFindingInput{
+		fields := adapter.identityFields(runtimeFindingIdentity(finding, snapshot.Kernel))
+		source, kernelOutcome, kernelControl := findingKernelFacts(finding)
+		input := observability.LogAIRuntimeFindingInput{
 			Envelope:                                aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime"),
 			Severity:                                observability.Present(runtimeSeverity(string(finding.Severity))),
 			LogLevel:                                observability.Present(observability.LogLevelInfo),
@@ -240,7 +336,18 @@ func (adapter *aiRuntimeV8Adapter) emitFinding(
 			DefenseClawAIRuntimeCmdline:   aiDiscoveryV8OptionalText(finding.Cmdline),
 			DefenseClawAIRuntimeSignals:   aiDiscoveryV8OptionalStrings(renderRuntimeSignals(finding)),
 			DefenseClawAIRuntimeProviders: aiDiscoveryV8OptionalStrings(renderRuntimeProviders(finding)),
-		})
+
+			UserID:                            fields.UserID,
+			DefenseClawUserIDKind:             fields.IDKind,
+			DefenseClawUserName:               fields.UserName,
+			DefenseClawUserLoginID:            fields.LoginID,
+			DefenseClawAgentIdentityID:        fields.AgentIdentityID,
+			DefenseClawAIRuntimeEventSource:   runtimeEnum(string(source), runtimeEventSources),
+			DefenseClawAIRuntimeKernelOutcome: runtimeEnum(string(kernelOutcome), runtimeKernelOutcomes),
+			DefenseClawAIRuntimeKernelControl: runtimeEnum(kernelControl, kernelControls),
+		}
+		fields.Directory.applyTo(&input)
+		return builder.BuildLogAIRuntimeFinding(input)
 	})
 	return err
 }
@@ -273,18 +380,47 @@ func (adapter *aiRuntimeV8Adapter) emitActivity(
 			// emitting a record that implies an unattributed tactic.
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
-		return builder.BuildLogAIRuntimeActivity(observability.LogAIRuntimeActivityInput{
-			Envelope:                       aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime"),
-			Severity:                       observability.Present(runtimeSeverity(string(finding.Severity))),
-			LogLevel:                       observability.Present(observability.LogLevelInfo),
-			Outcome:                        observability.OutcomeCompleted,
-			DefenseClawAIRuntimeFindingID:  finding.FindingID,
-			DefenseClawAIRuntimeTactic:     string(tactic),
-			DefenseClawAIRuntimeTechnique:  tactic.Technique(),
-			DefenseClawAIRuntimeChainStage: int64(stage),
-			DefenseClawAIRuntimeAgent:      agent,
-			DefenseClawAIRuntimeProcess:    aiDiscoveryV8OptionalText(finding.Process),
-		})
+		// The process that did this tactic: its own uid when the backend
+		// reported it, else the agent root's. The agent identity is the
+		// root's (the install the activity belongs to).
+		findingIdentity := runtimeFindingIdentity(finding, snapshot.Kernel)
+		detail, _ := findingActivity(finding, tactic)
+		identity := runtimeActivityIdentity(finding, detail)
+		identity.AgentIdentityID = findingIdentity.AgentIdentityID
+		fields := adapter.identityFields(identity)
+		envelope := aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime")
+		input := observability.LogAIRuntimeActivityInput{
+			Envelope:                          envelope,
+			Severity:                          observability.Present(runtimeSeverity(string(finding.Severity))),
+			LogLevel:                          observability.Present(observability.LogLevelInfo),
+			Outcome:                           observability.OutcomeCompleted,
+			UserID:                            fields.UserID,
+			DefenseClawUserIDKind:             fields.IDKind,
+			DefenseClawUserName:               fields.UserName,
+			DefenseClawUserLoginID:            fields.LoginID,
+			DefenseClawAgentIdentityID:        fields.AgentIdentityID,
+			DefenseClawAIRuntimeEventSource:   runtimeEnum(string(detail.Source), runtimeEventSources),
+			DefenseClawAIRuntimeKernelOutcome: runtimeEnum(string(detail.Outcome), runtimeKernelOutcomes),
+			DefenseClawAIRuntimeKernelControl: runtimeEnum(detail.Control, kernelControls),
+			DefenseClawAIRuntimeFindingID:     finding.FindingID,
+			DefenseClawAIRuntimeTactic:        string(tactic),
+			DefenseClawAIRuntimeTechnique:     tactic.Technique(),
+			DefenseClawAIRuntimeChainStage:    int64(stage),
+			DefenseClawAIRuntimeAgent:         agent,
+			DefenseClawAIRuntimeProcess:       aiDiscoveryV8OptionalText(finding.Process),
+		}
+		if detail.Hook != nil {
+			// Managed hosts only. The join labels the activity and never
+			// blocks it: hook_seen=false is activity no decision covered.
+			input.DefenseClawAIRuntimeHookSeen = observability.Present(detail.Hook.Seen)
+			if detail.Hook.Seen {
+				input.DefenseClawAIRuntimeHookJoin = runtimeEnum(detail.Hook.Confidence, runtimeHookJoins)
+				input.Envelope.Correlation.SessionID = runtimeCorrelationID(detail.Hook.SessionID)
+				input.Envelope.Correlation.ToolInvocationID = runtimeCorrelationID(detail.Hook.ToolInvocationID)
+			}
+		}
+		fields.Directory.applyTo(&input)
+		return builder.BuildLogAIRuntimeActivity(input)
 	})
 	return err
 }

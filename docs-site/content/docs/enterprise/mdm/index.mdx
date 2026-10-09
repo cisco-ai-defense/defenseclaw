@@ -450,7 +450,7 @@ output (`DefenseClaw Enterprise <version>`) and nothing on standard error; "not
 detected" is exit `1` with the reason on standard error. It reads the marker
 through the 64-bit registry view, so it works in 32-bit Windows PowerShell.
 
-`detect.sh [--min-version X.Y.Z] [--require-healthy] [--format exit|value|jamf]`
+`detect.sh [--min-version X.Y.Z] [--require-healthy] [--require-tetragon MODE] [--format exit|value|jamf]`
 asks the installed, root-owned gateway for its status instead of trusting
 files, so run it as root. The formats are:
 
@@ -459,6 +459,12 @@ files, so run it as root. The formats are:
 | `exit` (default) | `0` when detected, `1` otherwise | `DefenseClaw Enterprise <version>` on standard output, or the reason on standard error |
 | `value` | Always `0` | The installed version, or `not-installed`, `outdated` (with `--min-version`) or `unhealthy` (with `--require-healthy`). For inventory attributes. |
 | `jamf` | Always `0` | The same values inside `<result>...</result>`, for Jamf Pro extension attributes |
+
+`--require-tetragon consume|observe|enforce` (Linux only) also runs
+`enterprise linux tetragon verify --ready-for MODE --json` and counts a failing
+check as not compliant. In the `value` and `jamf` formats the output is
+`tetragon-not-ready:<first failing check>`. The macOS copy refuses the flag
+with "Linux only". See [Tetragon on a Linux fleet](/docs/enterprise/tetragon#check-the-fleet).
 
 In every format, an unknown argument or a bad `--format` exits `2` and
 prints nothing on standard output.

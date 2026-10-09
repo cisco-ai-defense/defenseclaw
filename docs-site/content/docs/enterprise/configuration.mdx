@@ -284,6 +284,35 @@ Under `enterprise.machine_policy.windows_wsl`. See [Agent sessions in WSL](/docs
 | `editor_settings` | `repair`, `report`, `allow`. Default: `repair` | **Windows.** What the guardian does with `chatgpt.runCodexInWindowsSubsystemForLinux: true` in enrolled users' VS Code, VS Code Insiders and Cursor settings: reset it to `false`, only report it, or ignore it. |
 | `claude_desktop_key` | `merge`, `create`. Default: `merge` | **Windows.** `merge` adds `disableWslSessions` only where `HKLM\SOFTWARE\Policies\Claude` already holds machine policy. `create` also writes it to an empty key, which makes Claude Desktop ignore every account's HKCU policy and local third-party configuration. |
 
+### Tetragon (Linux)
+
+Under `enterprise.tetragon`. See
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
+The block applies to the standalone profile on Linux. Windows and macOS
+accept it and ignore it (macOS `status` reports `tetragon_not_applicable`),
+and the Secure Client profile refuses a config that carries it.
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `mode` | `off`, `consume`, `observe`, `enforce`. Default: `consume` | **Linux.** `off` keeps `cn_proc` and `fanotify`. `consume` reads the Tetragon the computer already runs as Plane C's process source. `observe` also loads DefenseClaw's read-only policies and the two kernel controls in monitor mode. `enforce` lets the controls deny, once `enforce_ack` matches. With Plane C off (`ai_discovery.runtime.enable_host_plane`), the effective mode is `off` |
+| `burn_in` | `0`, or whole hours from `24h` to `2160h`. Default: `168h` | **Linux.** Covered agent time each enrolled user must accumulate, with no would-block hit, before that user is enforced. `0` skips the wait and status warns `kernel_burn_in_skipped`. It counts hours of agent use, not calendar time: `168h` is about five to six working weeks for a full-time agent user, so a pilot ring uses a shorter value such as `40h` |
+| `enforce_ack` | One `sha256:` and 12 lowercase hex digits, a list of up to 4 of them, or empty. Default: empty | **Linux.** The `kernel_policy` digest you approved, as `enterprise linux tetragon verify --ready-for enforce` prints it. Push a list of the old and the new digest while a ring upgrades, so a release that changes a control does not drop users to monitor mode. A one-item list equals the string. Only `mode: enforce` reads it; with another mode it is kept and ignored. Without a matching value the controls stay in monitor mode |
+| `customer_events` | `agent`, `off`. Default: `agent` | **Linux.** Report the events of your own Tetragon policies (kprobe and LSM) when they hit an AI agent, tagged with the policy name and tied to the agent, the user and the hook decision. `off` forwards nothing and keeps the counts. DefenseClaw never manages, changes or deletes your policies. Works in `consume`, `observe` and `enforce` |
+
+An absent block and `mode: consume` with the default `burn_in` are the same
+policy and produce the same effective digest. There are no socket, path,
+filter or per-control keys: the helper finds Tetragon from
+`/var/run/tetragon/tetragon-info.json`, and the controls ship in the binary.
+A condition that stops enforcement, such as a stale ack, never rejects the
+config; it keeps the controls in monitor mode and status says why.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  profile: standalone
+  tetragon:
+    mode: observe
+```
+
 ### Trust, coexistence and network
 
 | Key | Values and default | What it does |

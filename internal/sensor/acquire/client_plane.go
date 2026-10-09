@@ -36,9 +36,10 @@ import (
 // helperPlaneSource is Plane C delivered over the broker.
 //
 // It holds one long-lived connection: the helper writes a coverage frame,
-// then events until either side goes away. Reconnection is deliberately not
-// automatic -- a dropped privileged stream is a coverage change the operator
-// should see reported, not one this layer papers over.
+// then events until either side goes away. It never reconnects itself: when
+// the stream ends the host plane opens a new source (hostPlane.reattach),
+// logs the loss and reports Plane C down until the new stream is up, so the
+// coverage change is reported, not papered over.
 type helperPlaneSource struct {
 	helper *Helper
 	buffer *plane.Buffer
@@ -87,7 +88,10 @@ func (s *helperPlaneSource) Start(ctx context.Context) error {
 	return nil
 }
 
-// drain reads event frames until the stream ends.
+// drain reads event frames until the stream ends. A coverage-only frame
+// replaces the coverage the helper stated: its backend changed mid-stream
+// (Tetragon fell back to cn_proc, or came back), and the stream itself goes
+// on.
 func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 	defer s.buffer.Close()
 	for {
@@ -106,10 +110,23 @@ func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var frame eventStreamFrame
-		if err := json.Unmarshal(response.Body, &frame); err != nil || frame.Event == nil {
+		if err := json.Unmarshal(response.Body, &frame); err != nil {
 			continue
 		}
-		s.buffer.Push(decodeEvent(*frame.Event))
+		switch {
+		case frame.Event != nil:
+			s.buffer.Push(decodeEvent(*frame.Event))
+		case frame.PolicyEvent != nil:
+			// The member names the owner; the event cannot claim another.
+			event := decodeEvent(*frame.PolicyEvent)
+			event.PolicyOwner, event.Kind = plane.PolicyOwnerCustomer, plane.KindPolicyEvent
+			s.buffer.Push(event)
+		case frame.Coverage != nil:
+			coverage := decodeCoverage(*frame.Coverage)
+			s.mu.Lock()
+			s.coverage = coverage
+			s.mu.Unlock()
+		}
 	}
 }
 
